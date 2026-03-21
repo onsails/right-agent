@@ -25,8 +25,8 @@
 
 ### Agent Workspace
 
-- [ ] **WORK-01**: Agent directory structure follows OpenClaw conventions: SOUL.md, USER.md, IDENTITY.md, MEMORY.md, AGENTS.md, TOOLS.md, BOOTSTRAP.md, HEARTBEAT.md
-- [ ] **WORK-02**: Each agent can have optional `agent.yaml` for restart policy, backoff seconds, max restarts, and custom start prompt
+- [x] **WORK-01**: Agent directory structure follows OpenClaw conventions: SOUL.md, USER.md, IDENTITY.md, MEMORY.md, AGENTS.md, TOOLS.md, BOOTSTRAP.md, HEARTBEAT.md
+- [x] **WORK-02**: Each agent can have optional `agent.yaml` for restart policy, backoff seconds, max restarts, and custom start prompt
 - [ ] **WORK-03**: Each agent can have `.mcp.json` for per-agent MCP server configuration
 - [ ] **WORK-04**: Each agent must contain a `policy.yaml` file — passed directly to OpenShell, not parsed by RightClaw
 - [ ] **WORK-05**: Agent directory with IDENTITY.md is auto-detected as a valid agent by `rightclaw up`
@@ -70,8 +70,8 @@
 
 ### Project Setup
 
-- [ ] **PROJ-01**: Rust project with edition 2024, devenv configuration for Rust toolchain
-- [ ] **PROJ-02**: CI-ready project structure with tests
+- [x] **PROJ-01**: Rust project with edition 2024, devenv configuration for Rust toolchain
+- [x] **PROJ-02**: CI-ready project structure with tests
 
 ## v2 Requirements
 
@@ -117,8 +117,8 @@
 | SAND-03 | Phase 2 | Pending |
 | SAND-04 | Phase 3 | Pending |
 | SAND-05 | Phase 3 | Pending |
-| WORK-01 | Phase 1 | Pending |
-| WORK-02 | Phase 1 | Pending |
+| WORK-01 | Phase 1 | Complete |
+| WORK-02 | Phase 1 | Complete |
 | WORK-03 | Phase 1 | Pending |
 | WORK-04 | Phase 1 | Pending |
 | WORK-05 | Phase 1 | Pending |
@@ -144,8 +144,8 @@
 | CHAN-01 | Phase 3 | Pending |
 | CHAN-02 | Phase 3 | Pending |
 | CHAN-03 | Phase 3 | Pending |
-| PROJ-01 | Phase 1 | Pending |
-| PROJ-02 | Phase 1 | Pending |
+| PROJ-01 | Phase 1 | Complete |
+| PROJ-02 | Phase 1 | Complete |
 
 **Coverage:**
 - v1 requirements: 41 total

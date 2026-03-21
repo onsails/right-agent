@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md — Cargo workspace scaffold, devenv, CLI skeleton, core types (AgentDef, AgentConfig, errors, home resolution)
+- [x] 01-01-PLAN.md — Cargo workspace scaffold, devenv, CLI skeleton, core types (AgentDef, AgentConfig, errors, home resolution)
 - [ ] 01-02-PLAN.md — Agent discovery logic, init command with embedded templates, list command, integration tests
 
 ### Phase 2: CLI Runtime and Sandboxing
