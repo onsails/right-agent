@@ -107,6 +107,7 @@ Job'ы живут в сессии. Auto-expire через 3 дня. Макс 50 
 # crons/deploy-check.yaml
 schedule: "*/5 * * * *"
 lock_ttl: 10m
+max_turns: 5
 prompt: "Check CI status for all open PRs, post comment if broken"
 ```
 
@@ -119,6 +120,7 @@ prompt: "Gather open PRs, failing tests, pending reviews. Post summary to Slack.
 
 - `schedule` — стандартное 5-field cron expression (то, что CronCreate принимает). Для простых интервалов — cron-синтаксис: `*/5 * * * *` (каждые 5 мин), `0 */2 * * *` (каждые 2 часа).
 - `lock_ttl` — максимальное время жизни lock'а (default: 30m). После этого lock считается stale.
+- `max_turns` — опционально, ограничивает количество tool-use turns в сессии крона (передаётся как `--max-turns` в Claude CLI). Полезно для коротких проверок, чтобы агент не уходил в бесконечный цикл. Default: без ограничения.
 
 ### Concurrency Control
 
