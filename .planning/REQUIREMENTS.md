@@ -1,7 +1,7 @@
 # Requirements: RightClaw
 
 **Defined:** 2026-03-21
-**Core Value:** Run multiple autonomous Claude Code agents safely — each sandboxed by OpenShell policies, orchestrated by a single CLI command.
+**Core Value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by OpenShell policies, orchestrated by a single CLI command.
 
 ## v1 Requirements
 
@@ -20,23 +20,23 @@
 - [ ] **SAND-01**: Each agent launches inside an OpenShell sandbox with its own YAML policy
 - [ ] **SAND-02**: Shell wrapper per agent reads policy from agent directory and invokes `openshell sandbox create --policy <path> -- claude`
 - [ ] **SAND-03**: `rightclaw down` explicitly destroys OpenShell sandboxes (signals don't cross container boundaries)
-- [ ] **SAND-04**: Default policy uses `hard_requirement` for Landlock (no silent degradation on older kernels)
-- [ ] **SAND-05**: Policies support filesystem (read-only/read-write paths), network (per-host/port/method), and process (run-as user/group) restrictions
+- [ ] **SAND-04**: Shipped default policies use `hard_requirement` for Landlock (no silent degradation on older kernels)
+- [ ] **SAND-05**: Shipped default policies cover filesystem, network, and process restrictions — OpenShell validates the YAML, not RightClaw
 
 ### Agent Workspace
 
 - [ ] **WORK-01**: Agent directory structure follows OpenClaw conventions: SOUL.md, USER.md, IDENTITY.md, MEMORY.md, AGENTS.md, TOOLS.md, BOOTSTRAP.md, HEARTBEAT.md
 - [ ] **WORK-02**: Each agent can have optional `agent.yaml` for restart policy, backoff seconds, max restarts, and custom start prompt
 - [ ] **WORK-03**: Each agent can have `.mcp.json` for per-agent MCP server configuration
-- [ ] **WORK-04**: Each agent has a `policies/` directory or inline policy YAML for OpenShell configuration
+- [ ] **WORK-04**: Each agent must contain a `policy.yaml` file — passed directly to OpenShell, not parsed by RightClaw
 - [ ] **WORK-05**: Agent directory with IDENTITY.md is auto-detected as a valid agent by `rightclaw up`
 
 ### Default Agent
 
 - [ ] **DFLT-01**: RightClaw ships a default "Right" agent in `agents/right/`
-- [ ] **DFLT-02**: "Right" agent has BOOTSTRAP.md that runs on first conversation — asks user's name, vibe, personality, emoji
+- [ ] **DFLT-02**: "Right" agent has BOOTSTRAP.md that runs on first conversation -- asks user's name, vibe, personality, emoji
 - [ ] **DFLT-03**: BOOTSTRAP.md onboarding writes IDENTITY.md, USER.md, SOUL.md on completion, then self-deletes
-- [ ] **DFLT-04**: "Right" agent is general-purpose — no domain-specific skills, suitable as a starting template
+- [ ] **DFLT-04**: "Right" agent is general-purpose -- no domain-specific skills, suitable as a starting template
 
 ### Installation
 
@@ -47,18 +47,18 @@
 ### Skill Management
 
 - [ ] **SKLM-01**: `/clawhub` Claude Code skill can search ClawHub registry by name or description via HTTP API
-- [ ] **SKLM-02**: `/clawhub` skill can install a skill by slug — downloads to agent's `skills/` directory
-- [ ] **SKLM-03**: `/clawhub` skill can uninstall a skill by name — removes from `skills/` directory
+- [ ] **SKLM-02**: `/clawhub` skill can install a skill by slug -- downloads to agent's `skills/` directory
+- [ ] **SKLM-03**: `/clawhub` skill can uninstall a skill by name -- removes from `skills/` directory
 - [ ] **SKLM-04**: `/clawhub` skill can list installed skills for the current agent
 - [ ] **SKLM-05**: Policy gate audits skill permissions (from SKILL.md frontmatter `metadata.openclaw.requires`) before activation
-- [ ] **SKLM-06**: Skills use standard ClawHub SKILL.md format with YAML frontmatter — drop-in compatible
+- [ ] **SKLM-06**: Skills use standard ClawHub SKILL.md format with YAML frontmatter -- drop-in compatible
 
 ### Scheduled Tasks
 
 - [ ] **CRON-01**: CronSync Claude Code skill reads `crons/*.yaml` specs as desired state
 - [ ] **CRON-02**: CronSync reconciles desired state against live cron jobs (CronList) via state.json mapping
 - [ ] **CRON-03**: CronSync creates missing jobs (CronCreate), deletes orphaned jobs (CronDelete), recreates changed jobs
-- [ ] **CRON-04**: Lock-file concurrency control prevents duplicate cron runs — heartbeat-based with configurable TTL
+- [ ] **CRON-04**: Lock-file concurrency control prevents duplicate cron runs -- heartbeat-based with configurable TTL
 - [ ] **CRON-05**: All timestamps in lock files use UTC ISO 8601 format (suffix `Z`)
 - [ ] **CRON-06**: Cron YAML specs support `schedule` (5-field cron), `lock_ttl`, `max_turns`, and `prompt` fields
 
@@ -89,12 +89,12 @@
 
 | Feature | Reason |
 |---------|--------|
-| Discord, Slack, WhatsApp channels | Telegram only for v1 — other channels deferred |
-| Web UI / dashboard | Anti-feature — process-compose TUI covers 95% of needs |
+| Discord, Slack, WhatsApp channels | Telegram only for v1 -- other channels deferred |
+| Web UI / dashboard | Anti-feature -- process-compose TUI covers 95% of needs |
 | Session management / persistence | Claude Code handles its own sessions |
 | Model management / multi-provider | Claude Code-specific, users configure model settings directly |
-| Agent-to-agent communication | Phase 2+ if ever — agents are autonomous |
-| Built-in secrets management | Use system-level secrets (env vars, vault) — agents inherit from shell wrapper |
+| Agent-to-agent communication | Phase 2+ if ever -- agents are autonomous |
+| Built-in secrets management | Use system-level secrets (env vars, vault) -- agents inherit from shell wrapper |
 | Plugin system | Skills (ClawHub-compatible) are the single extensibility mechanism |
 | Workflow engine | Claude Code sessions handle task execution |
 | Central orchestrator / master agent | Contradicts autonomous agent philosophy |
@@ -105,53 +105,53 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CLI-01 | — | Pending |
-| CLI-02 | — | Pending |
-| CLI-03 | — | Pending |
-| CLI-04 | — | Pending |
-| CLI-05 | — | Pending |
-| CLI-06 | — | Pending |
-| CLI-07 | — | Pending |
-| SAND-01 | — | Pending |
-| SAND-02 | — | Pending |
-| SAND-03 | — | Pending |
-| SAND-04 | — | Pending |
-| SAND-05 | — | Pending |
-| WORK-01 | — | Pending |
-| WORK-02 | — | Pending |
-| WORK-03 | — | Pending |
-| WORK-04 | — | Pending |
-| WORK-05 | — | Pending |
-| DFLT-01 | — | Pending |
-| DFLT-02 | — | Pending |
-| DFLT-03 | — | Pending |
-| DFLT-04 | — | Pending |
-| INST-01 | — | Pending |
-| INST-02 | — | Pending |
-| INST-03 | — | Pending |
-| SKLM-01 | — | Pending |
-| SKLM-02 | — | Pending |
-| SKLM-03 | — | Pending |
-| SKLM-04 | — | Pending |
-| SKLM-05 | — | Pending |
-| SKLM-06 | — | Pending |
-| CRON-01 | — | Pending |
-| CRON-02 | — | Pending |
-| CRON-03 | — | Pending |
-| CRON-04 | — | Pending |
-| CRON-05 | — | Pending |
-| CRON-06 | — | Pending |
-| CHAN-01 | — | Pending |
-| CHAN-02 | — | Pending |
-| CHAN-03 | — | Pending |
-| PROJ-01 | — | Pending |
-| PROJ-02 | — | Pending |
+| CLI-01 | Phase 2 | Pending |
+| CLI-02 | Phase 2 | Pending |
+| CLI-03 | Phase 2 | Pending |
+| CLI-04 | Phase 2 | Pending |
+| CLI-05 | Phase 2 | Pending |
+| CLI-06 | Phase 2 | Pending |
+| CLI-07 | Phase 2 | Pending |
+| SAND-01 | Phase 2 | Pending |
+| SAND-02 | Phase 2 | Pending |
+| SAND-03 | Phase 2 | Pending |
+| SAND-04 | Phase 3 | Pending |
+| SAND-05 | Phase 3 | Pending |
+| WORK-01 | Phase 1 | Pending |
+| WORK-02 | Phase 1 | Pending |
+| WORK-03 | Phase 1 | Pending |
+| WORK-04 | Phase 1 | Pending |
+| WORK-05 | Phase 1 | Pending |
+| DFLT-01 | Phase 3 | Pending |
+| DFLT-02 | Phase 3 | Pending |
+| DFLT-03 | Phase 3 | Pending |
+| DFLT-04 | Phase 3 | Pending |
+| INST-01 | Phase 3 | Pending |
+| INST-02 | Phase 3 | Pending |
+| INST-03 | Phase 3 | Pending |
+| SKLM-01 | Phase 4 | Pending |
+| SKLM-02 | Phase 4 | Pending |
+| SKLM-03 | Phase 4 | Pending |
+| SKLM-04 | Phase 4 | Pending |
+| SKLM-05 | Phase 4 | Pending |
+| SKLM-06 | Phase 4 | Pending |
+| CRON-01 | Phase 4 | Pending |
+| CRON-02 | Phase 4 | Pending |
+| CRON-03 | Phase 4 | Pending |
+| CRON-04 | Phase 4 | Pending |
+| CRON-05 | Phase 4 | Pending |
+| CRON-06 | Phase 4 | Pending |
+| CHAN-01 | Phase 3 | Pending |
+| CHAN-02 | Phase 3 | Pending |
+| CHAN-03 | Phase 3 | Pending |
+| PROJ-01 | Phase 1 | Pending |
+| PROJ-02 | Phase 1 | Pending |
 
 **Coverage:**
 - v1 requirements: 41 total
-- Mapped to phases: 0
-- Unmapped: 41
+- Mapped to phases: 41
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-21*
-*Last updated: 2026-03-21 after initial definition*
+*Last updated: 2026-03-21 after roadmap creation*
