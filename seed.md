@@ -235,10 +235,10 @@ rightclaw up ~/my-project
 # Только конкретные агенты
 rightclaw up ~/my-project --agents watchdog,reviewer
 
-# В фоне (без TUI)
+# В фоне (TUI сервер запущен, но терминал свободен)
 rightclaw up ~/my-project -d
 
-# Подключиться к TUI запущенных агентов
+# Подключиться к TUI запущенных агентов (из любого терминала)
 rightclaw attach
 
 # Статус
@@ -286,8 +286,11 @@ processes:
       backoff_seconds: 10
 ```
 
-3. Запускает `process-compose up -f /tmp/rightclaw/<hash>/process-compose.yaml`
-4. TUI process-compose показывает все агенты, логи, статусы
+3. Запускает process-compose:
+   - `rightclaw up` → `process-compose up -f <yaml>` (TUI сразу)
+   - `rightclaw up -d` → `process-compose up -f <yaml> --detached-with-tui` (фон, TUI-сервер жив)
+4. `rightclaw attach` → `process-compose attach` (подключение к TUI из любого терминала)
+5. TUI показывает все агенты: статус, логи, uptime, restart count. `Ctrl+R` рестарт, `F9` стоп
 
 ### Конфигурация агентов
 
