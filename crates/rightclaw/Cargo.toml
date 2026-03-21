@@ -11,3 +11,6 @@ miette = { workspace = true }
 walkdir = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.27"

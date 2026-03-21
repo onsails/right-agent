@@ -1,0 +1,7 @@
+# OpenShell sandbox policy for the Right agent
+# See: https://docs.nvidia.com/openshell/latest/
+# This file is passed directly to OpenShell -- RightClaw does not parse it.
+#
+# TODO: Replace with actual OpenShell policy when policy schema is finalized.
+# For now, this is a placeholder that satisfies the policy.yaml requirement.
+version: "1"
