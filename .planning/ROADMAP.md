@@ -28,11 +28,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Given an `agents/` directory with valid agent subdirectories, RightClaw discovers all agents and parses their `agent.yaml` and `.mcp.json` configs
   3. Agent directories following OpenClaw conventions (IDENTITY.md, SOUL.md, etc.) are recognized as valid agents
   4. Each agent directory requires a `policy.yaml` file — existence is validated, content is passed to OpenShell as-is
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md — Cargo workspace scaffold, devenv, CLI skeleton, core types (AgentDef, AgentConfig, errors, home resolution)
+- [ ] 01-02-PLAN.md — Agent discovery logic, init command with embedded templates, list command, integration tests
 
 ### Phase 2: CLI Runtime and Sandboxing
 **Goal**: Users can launch, monitor, and stop sandboxed agents with a single CLI command
