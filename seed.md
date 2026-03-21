@@ -7,7 +7,7 @@ A sandboxed agent runtime for Claude Code — master session orchestrates, subag
 
 RightClaw — это pre-configured agent runtime поверх Claude Code и NVIDIA OpenShell. Мастер-сессия Claude Code запускается внутри OpenShell sandbox и выступает оркестратором: принимает задачи, планирует выполнение, делегирует работу специализированным субагентам. Каждый субагент работает со своим набором skills, tools и отдельной OpenShell policy — ровно те права, которые нужны для конкретной задачи, и ни байтом больше.
 
-General-purpose по охвату (от рисёрча и коммуникаций до автоматизации рабочих процессов), но с сильным техническим ядром. Scheduled tasks (/loop, /schedule) запускают цепочки автономно. ClawHub skills подключаются через policy gate с автоматическим аудитом.
+General-purpose по охвату (от рисёрча и коммуникаций до автоматизации рабочих процессов), но с сильным техническим ядром. CronMaster (один `/loop 1m`, читает YAML-задачи из `crons/`) запускает цепочки автономно. ClawHub skills подключаются через policy gate с автоматическим аудитом.
 
 В отличие от OpenClaw (широкий доступ к системе, проблемы с безопасностью, CVE, юридические претензии от Anthropic), RightClaw делает ставку на правильный подход: использует только официальные механизмы Claude Code (skills, subagents, hooks, /loop, /schedule, MCP) и запускает всё в изолированном окружении с декларативными YAML-политиками OpenShell.
 
@@ -37,11 +37,11 @@ General-purpose по охвату (от рисёрча и коммуникаци
 │  │  Orchestrator: принимает задачи, планирует,            │  │
 │  │  делегирует субагентам, агрегирует результаты          │  │
 │  │                                                        │  │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐             │  │
-│  │  │ /loop    │  │/schedule │  │ ClawHub  │             │  │
-│  │  │ (cron)   │  │(Desktop) │  │ (import) │             │  │
-│  │  └────┬─────┘  └────┬─────┘  └────┬─────┘             │  │
-│  │       └──────────────┼─────────────┘                   │  │
+│  │  ┌──────────────────────┐  ┌──────────┐               │  │
+│  │  │ CronMaster           │  │ ClawHub  │               │  │
+│  │  │ /loop 1m → crons/*.y │  │ (import) │               │  │
+│  │  └──────────┬───────────┘  └────┬─────┘               │  │
+│  │             └───────────────────┘                      │  │
 │  │                      ▼                                 │  │
 │  │              Task Delegation                           │  │
 │  └──────────┬───────────┼───────────┬─────────────────────┘  │
@@ -67,6 +67,74 @@ General-purpose по охвату (от рисёрча и коммуникаци
 │  │      filesystem │ network │ process │ inference        │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
+```
+
+## Scheduled Tasks — CronMaster
+
+Все запланированные задачи управляются одним процессом — CronMaster. Это skill, который запускается через `/loop 1m` и работает как минималистичный cron-демон внутри Claude Code.
+
+### Как работает
+
+1. CronMaster запускается один раз: `/loop 1m /cronmaster`
+2. Каждую минуту он:
+   - Читает все файлы из `crons/` (YAML)
+   - Читает `crons/state.json` (last_run для каждой задачи)
+   - Для каждой задачи проверяет: пора запускать?
+   - Если пора — спавнит subagent с промптом из задачи
+   - Обновляет `state.json`
+
+### Формат задачи
+
+Одно поле `schedule` — принимает и интервалы, и cron-выражения:
+
+```yaml
+# crons/deploy-check.yaml
+schedule: 5m
+prompt: "Check CI status for all open PRs, post comment if broken"
+agent: watchdog
+```
+
+```yaml
+# crons/morning-briefing.yaml
+schedule: "0 9 * * 1-5"
+prompt: "Gather open PRs, failing tests, pending reviews. Post summary to Slack."
+agent: ops
+```
+
+`schedule` — единственное поле для расписания. CronMaster сам определяет формат:
+- Содержит единицу времени (`5m`, `1h`, `30s`) → интервал, сравнивает с `last_run`
+- Иначе → cron-выражение, проверяет матч с текущим временем
+
+### State
+
+```json
+// crons/state.json
+{
+  "deploy-check": {
+    "last_run": "2026-03-21T10:05:00Z",
+    "last_status": "ok"
+  },
+  "morning-briefing": {
+    "last_run": "2026-03-21T09:00:00Z",
+    "last_status": "ok"
+  }
+}
+```
+
+### Почему один `/loop`, а не по одному на задачу
+
+- `/loop 5m /deploy-check` + `/loop "0 9 * * 1-5" /morning-briefing` + ... = N параллельных loop-процессов, каждый держит контекст
+- `/loop 1m /cronmaster` = один процесс, читает YAML, спавнит subagent'ов по необходимости
+- Добавить задачу = создать YAML-файл. Удалить = удалить файл. Без перезапуска loop'ов.
+
+### Структура
+
+```
+crons/
+├── deploy-check.yaml
+├── morning-briefing.yaml
+├── dependency-audit.yaml
+└── state.json
 ```
 
 ## Skill Packs (v1 — MVP)
