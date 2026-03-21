@@ -27,9 +27,9 @@
 
 - [x] **WORK-01**: Agent directory structure follows OpenClaw conventions: SOUL.md, USER.md, IDENTITY.md, MEMORY.md, AGENTS.md, TOOLS.md, BOOTSTRAP.md, HEARTBEAT.md
 - [x] **WORK-02**: Each agent can have optional `agent.yaml` for restart policy, backoff seconds, max restarts, and custom start prompt
-- [ ] **WORK-03**: Each agent can have `.mcp.json` for per-agent MCP server configuration
-- [ ] **WORK-04**: Each agent must contain a `policy.yaml` file — passed directly to OpenShell, not parsed by RightClaw
-- [ ] **WORK-05**: Agent directory with IDENTITY.md is auto-detected as a valid agent by `rightclaw up`
+- [x] **WORK-03**: Each agent can have `.mcp.json` for per-agent MCP server configuration
+- [x] **WORK-04**: Each agent must contain a `policy.yaml` file — passed directly to OpenShell, not parsed by RightClaw
+- [x] **WORK-05**: Agent directory with IDENTITY.md is auto-detected as a valid agent by `rightclaw up`
 
 ### Default Agent
 
@@ -119,9 +119,9 @@
 | SAND-05 | Phase 3 | Pending |
 | WORK-01 | Phase 1 | Complete |
 | WORK-02 | Phase 1 | Complete |
-| WORK-03 | Phase 1 | Pending |
-| WORK-04 | Phase 1 | Pending |
-| WORK-05 | Phase 1 | Pending |
+| WORK-03 | Phase 1 | Complete |
+| WORK-04 | Phase 1 | Complete |
+| WORK-05 | Phase 1 | Complete |
 | DFLT-01 | Phase 3 | Pending |
 | DFLT-02 | Phase 3 | Pending |
 | DFLT-03 | Phase 3 | Pending |

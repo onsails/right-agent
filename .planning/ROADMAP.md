@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] 01-01-PLAN.md — Cargo workspace scaffold, devenv, CLI skeleton, core types (AgentDef, AgentConfig, errors, home resolution)
-- [ ] 01-02-PLAN.md — Agent discovery logic, init command with embedded templates, list command, integration tests
+- [x] 01-02-PLAN.md — Agent discovery logic, init command with embedded templates, list command, integration tests
 
 ### Phase 2: CLI Runtime and Sandboxing
 **Goal**: Users can launch, monitor, and stop sandboxed agents with a single CLI command

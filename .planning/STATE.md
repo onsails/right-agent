@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-03-21T23:10:33.146Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-03-21T23:16:12.514Z"
 progress:
   total_phases: 4
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State
@@ -47,6 +47,7 @@ Plan: 2 of 2
 
 *Updated after each plan completion*
 | Phase 01 P01 | 4min | 2 tasks | 13 files |
+| Phase 01 P02 | 5min | 2 tasks | 12 files |
 
 ## Accumulated Context
 
@@ -61,6 +62,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Added clap env feature for RIGHTCLAW_HOME env var support
 - [Phase 01]: resolve_home takes env_home as parameter (not std::env), per CLAUDE.rust.md
 - [Phase 01]: AgentConfig uses deny_unknown_fields for strict YAML validation
+- [Phase 01]: Tests extracted to separate _tests.rs files using #[path] attribute for separation of concerns
+- [Phase 01]: Embedded templates via include_str! from templates/ directory at repo root
 
 ### Pending Todos
 
@@ -73,6 +76,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-21T23:10:33.144Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-03-21T23:16:12.512Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
