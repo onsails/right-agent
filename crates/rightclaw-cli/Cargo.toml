@@ -1,0 +1,19 @@
+[package]
+name = "rightclaw-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rightclaw"
+path = "src/main.rs"
+
+[dependencies]
+rightclaw = { path = "../rightclaw" }
+clap = { workspace = true }
+miette = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2.2"
+predicates = "3.1"
+tempfile = "3.27"

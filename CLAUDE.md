@@ -1,3 +1,7 @@
+@CLAUDE.rust.md
+
+This is a Rust project. Follow conventions in CLAUDE.rust.md.
+
 <!-- GSD:project-start source:PROJECT.md -->
 ## Project
 

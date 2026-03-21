@@ -1,0 +1,13 @@
+[package]
+name = "rightclaw"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+walkdir = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
