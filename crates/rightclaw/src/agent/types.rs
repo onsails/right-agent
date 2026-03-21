@@ -21,7 +21,7 @@ fn default_backoff_seconds() -> u32 {
 }
 
 /// Parsed `agent.yaml` configuration for a single agent.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -65,4 +65,73 @@ pub struct AgentDef {
     pub bootstrap_path: Option<PathBuf>,
     /// Path to HEARTBEAT.md if present.
     pub heartbeat_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_config_deserializes_full_yaml() {
+        let yaml = r#"
+restart: always
+max_restarts: 10
+backoff_seconds: 30
+start_prompt: "You are a helpful agent"
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.restart, RestartPolicy::Always);
+        assert_eq!(config.max_restarts, 10);
+        assert_eq!(config.backoff_seconds, 30);
+        assert_eq!(
+            config.start_prompt.as_deref(),
+            Some("You are a helpful agent")
+        );
+    }
+
+    #[test]
+    fn agent_config_deserializes_minimal_yaml_with_defaults() {
+        let yaml = "{}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.restart, RestartPolicy::OnFailure);
+        assert_eq!(config.max_restarts, 3);
+        assert_eq!(config.backoff_seconds, 5);
+        assert_eq!(config.start_prompt, None);
+    }
+
+    #[test]
+    fn agent_config_rejects_unknown_fields() {
+        let yaml = r#"
+restart: never
+unknown_field: "should fail"
+"#;
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "expected 'unknown field' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn restart_policy_deserializes_never() {
+        let yaml = r#"restart: never"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.restart, RestartPolicy::Never);
+    }
+
+    #[test]
+    fn restart_policy_deserializes_on_failure() {
+        let yaml = r#"restart: on_failure"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.restart, RestartPolicy::OnFailure);
+    }
+
+    #[test]
+    fn restart_policy_deserializes_always() {
+        let yaml = r#"restart: always"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.restart, RestartPolicy::Always);
+    }
 }
