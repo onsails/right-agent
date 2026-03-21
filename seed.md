@@ -1,15 +1,15 @@
 # RightClaw
 
 **Tagline**
-A sandboxed agent runtime for Claude Code — master session orchestrates, subagents execute, OpenShell enforces.
+A multi-agent runtime for Claude Code — independent agents, own identities, OpenShell enforces.
 
 ## What It Is
 
-RightClaw — это pre-configured agent runtime поверх Claude Code и NVIDIA OpenShell. Мастер-сессия Claude Code запускается внутри OpenShell sandbox и выступает оркестратором: принимает задачи, планирует выполнение, делегирует работу специализированным субагентам. Каждый субагент работает со своим набором skills, tools и отдельной OpenShell policy — ровно те права, которые нужны для конкретной задачи, и ни байтом больше.
+RightClaw — это multi-agent runtime поверх Claude Code и NVIDIA OpenShell. Каждый агент — это **отдельная Claude Code сессия** со своим identity (IDENTITY.md), памятью (MEMORY.md), набором skills, tools, MCP-серверов и OpenShell policy. Агенты работают независимо друг от друга — нет мастер-сессии, нет оркестратора. Каждый агент автономен и отвечает за свою зону.
 
 General-purpose по охвату (от рисёрча и коммуникаций до автоматизации рабочих процессов), но с сильным техническим ядром. CronSync (`/loop 5m`, reconciles YAML-спеки из `crons/` с живыми cron job'ами) запускает цепочки автономно. ClawHub skills подключаются через policy gate с автоматическим аудитом.
 
-В отличие от OpenClaw (широкий доступ к системе, проблемы с безопасностью, CVE, юридические претензии от Anthropic), RightClaw делает ставку на правильный подход: использует только официальные механизмы Claude Code (skills, subagents, hooks, /loop, /schedule, MCP) и запускает всё в изолированном окружении с декларативными YAML-политиками OpenShell.
+В отличие от OpenClaw (широкий доступ к системе, проблемы с безопасностью, CVE, юридические претензии от Anthropic), RightClaw делает ставку на правильный подход: использует только официальные механизмы Claude Code (skills, hooks, /loop, /schedule, MCP) и запускает всё в изолированном окружении с декларативными YAML-политиками OpenShell.
 
 ## Кому это нужно
 
@@ -27,51 +27,48 @@ General-purpose по охвату (от рисёрча и коммуникаци
 
 ## Архитектура (высокий уровень)
 
+Каждый агент — независимая Claude Code сессия. Нет центрального оркестратора. Агенты запускаются параллельно через `start.sh`, каждый в своём sandbox.
+
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                      NVIDIA OpenShell                        │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │            Master Session (Claude Code)                │  │
-│  │                                                        │  │
-│  │  Orchestrator: принимает задачи, планирует,            │  │
-│  │  делегирует субагентам, агрегирует результаты          │  │
-│  │                                                        │  │
-│  │  ┌──────────────────────┐  ┌──────────┐               │  │
-│  │  │ CronSync             │  │ ClawHub  │               │  │
-│  │  │ /loop 5m → crons/*.y │  │ (import) │               │  │
-│  │  └──────────┬───────────┘  └────┬─────┘               │  │
-│  │             └───────────────────┘                      │  │
-│  │                      ▼                                 │  │
-│  │              Task Delegation                           │  │
-│  └──────────┬───────────┼───────────┬─────────────────────┘  │
-│             │           │           │                        │
-│             ▼           ▼           ▼                        │
-│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐         │
-│  │  Subagent A  │ │  Subagent B  │ │  Subagent C  │  ...    │
-│  │  (reviewer)  │ │  (scout)     │ │  (ops)       │         │
-│  │              │ │              │ │              │         │
-│  │ skills: [...] │ │ skills: [...] │ │ skills: [...] │         │
-│  │ tools:  [...] │ │ tools:  [...] │ │ tools:  [...] │         │
-│  │ MCP:   [gh]  │ │ MCP:   []    │ │ MCP: [slack] │         │
-│  │              │ │              │ │              │         │
-│  │ ┌──────────┐ │ │ ┌──────────┐ │ │ ┌──────────┐ │         │
-│  │ │ policy:  │ │ │ │ policy:  │ │ │ │ policy:  │ │         │
-│  │ │ net: gh  │ │ │ │ fs: r/o  │ │ │ │ net: *   │ │         │
-│  │ │ fs: r/o  │ │ │ │ net: off │ │ │ │ fs: r/w  │ │         │
-│  │ └──────────┘ │ │ └──────────┘ │ │ └──────────┘ │         │
-│  └──────────────┘ └──────────────┘ └──────────────┘         │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │              OpenShell Policy Engine                   │  │
-│  │      filesystem │ network │ process │ inference        │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                        NVIDIA OpenShell                          │
+│                                                                  │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐     │
+│  │  Agent: watch  │  │  Agent: review │  │  Agent: ops    │ ... │
+│  │  (CC session)  │  │  (CC session)  │  │  (CC session)  │     │
+│  │                │  │                │  │                │     │
+│  │ IDENTITY.md    │  │ IDENTITY.md    │  │ IDENTITY.md    │     │
+│  │ MEMORY.md      │  │ MEMORY.md      │  │ MEMORY.md      │     │
+│  │ skills: [...]  │  │ skills: [...]  │  │ skills: [...]  │     │
+│  │ tools:  [...]  │  │ tools:  [...]  │  │ tools:  [...]  │     │
+│  │ MCP:   [gh]    │  │ MCP:   [gh]    │  │ MCP: [slack]   │     │
+│  │ crons: [...]   │  │ crons: [...]   │  │ crons: [...]   │     │
+│  │                │  │                │  │                │     │
+│  │ ┌────────────┐ │  │ ┌────────────┐ │  │ ┌────────────┐ │     │
+│  │ │  policy:   │ │  │ │  policy:   │ │  │ │  policy:   │ │     │
+│  │ │  net: gh   │ │  │ │  fs: r/o   │ │  │ │  net: *    │ │     │
+│  │ │  fs: r/o   │ │  │ │  net: gh   │ │  │ │  fs: r/w   │ │     │
+│  │ └────────────┘ │  │ └────────────┘ │  │ └────────────┘ │     │
+│  └────────────────┘  └────────────────┘  └────────────────┘     │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │                OpenShell Policy Engine                     │  │
+│  │        filesystem │ network │ process │ inference          │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+### Память агентов
+
+Каждый агент имеет свой `MEMORY.md` — файл, в который агент записывает важную информацию между сессиями. Claude Code нативно читает и пишет в этот файл.
+
+**Фаза 1 (MVP):** per-agent `MEMORY.md`, без shared memory между агентами.
+
+**Фаза 2:** shared memory через MCP memory server (SQLite или knowledge graph). Все агенты подключаются к одному серверу, пишут tagged записи (`source: reviewer`, `source: watchdog`), читают всё что релевантно.
 
 ## Scheduled Tasks — CronSync
 
-CronSync — reconciliation skill. Синхронизирует желаемое состояние (YAML-спеки в `crons/`) с фактическим (живые cron job'ы в сессии Claude Code).
+CronSync — reconciliation skill. Каждый агент запускает свой CronSync, который синхронизирует желаемое состояние (YAML-спеки в `agents/<name>/crons/`) с фактическим (живые cron job'ы в сессии этого агента).
 
 ### Примитивы Claude Code
 
@@ -174,57 +171,75 @@ Lock-файл:
 
 ### Структура
 
+Каждый агент имеет свою директорию `crons/`:
+
 ```
-crons/
+agents/watchdog/crons/
 ├── deploy-check.yaml
-├── morning-briefing.yaml
-├── dependency-audit.yaml
+├── ci-status.yaml
 ├── state.json              # gitignore — session-specific
 └── .locks/                 # gitignore — runtime lock files
     ├── deploy-check.json
-    └── morning-briefing.json
+    └── ci-status.json
+
+agents/ops/crons/
+├── morning-briefing.yaml
+├── dependency-audit.yaml
+├── state.json
+└── .locks/
+    └── ...
 ```
 
-## Skill Packs (v1 — MVP)
+## Agents (v1 — MVP)
 
-### 1. rightclaw/watchdog — Мониторинг и алерты
-* Scheduled task: проверяет состояние деплоя / CI / сервисов по расписанию
-* Subagent: анализирует логи, формулирует actionable summary
+Каждый agent — отдельная Claude Code сессия со своим identity, памятью и набором skills/tools. Агент запускается через `start.sh <agent-name> <workspace>`.
+
+### 1. watchdog — Мониторинг и алерты
+* Автономная сессия с scheduled tasks: проверяет деплой / CI / сервисы
+* Анализирует логи, формулирует actionable summary
 * OpenShell policy: доступ только к определённым API endpoints (GitHub Actions, Vercel, etc.)
+* MCP: GitHub, Slack (для алертов)
 
-### 2. rightclaw/reviewer — Автономное код-ревью
-* Триггерится по /loop или schedule на новые PR
-* Subagent с ограниченными tools (read-only доступ к файлам, git log)
-* Skill: code-review conventions, checklist, severity levels
+### 2. reviewer — Автономное код-ревью
+* Триггерится по cron на новые PR
+* Read-only доступ к файлам, git log
+* Skills: code-review conventions, checklist, severity levels
 * Результат: комментарий в PR через MCP GitHub connector
 
-### 3. rightclaw/scout — Разведка и due diligence
-* Skill pack для быстрого анализа репозиториев: архитектура, зависимости, лицензии, code quality
-* Subagent: генерирует структурированный отчёт
+### 3. scout — Разведка и due diligence
+* Быстрый анализ репозиториев: архитектура, зависимости, лицензии, code quality
+* Генерирует структурированный отчёт
 * Policy: read-only доступ к целевому репо, запрет на запись и внешние сетевые вызовы
 
-### 4. rightclaw/ops — Рутинные операции
-* Morning briefing: scheduled task, который собирает статус проектов, непрочитанные PR, failing tests
+### 4. ops — Рутинные операции
+* Morning briefing: scheduled task, собирает статус проектов, непрочитанные PR, failing tests
 * Changelog generator: hook на git push, автоматический draft release notes
 * Dependency auditor: периодическая проверка уязвимостей
+* MCP: GitHub, Slack, Linear
 
-### 5. rightclaw/forge — Scaffolding новых проектов
-* Skill: генерация проекта по PRD (Rust, TypeScript, Zola)
-* Subagent: создаёт структуру, конфиги, CI/CD pipeline
+### 5. forge — Scaffolding новых проектов
+* Генерация проекта по PRD (Rust, TypeScript, Zola)
+* Создаёт структуру, конфиги, CI/CD pipeline
 * Включает шаблон OpenShell policy для нового проекта
 
 ## Запуск
 
 ```bash
-./start.sh ~/my-project
+# Запуск конкретного агента
+./start.sh watchdog ~/my-project
+
+# Запуск всех агентов
+./start.sh all ~/my-project
 ```
 
-`start.sh` запускает Claude Code с:
-- `--append-system-prompt-file identity/IDENTITY.md` — RightClaw identity, не dev CLAUDE.md репы
+`start.sh` для каждого агента запускает отдельную Claude Code сессию с:
+- `--append-system-prompt-file agents/<agent>/IDENTITY.md` — identity конкретного агента
 - `--dangerously-skip-permissions` — для автономной работы (TODO: заменить на granular permissions)
 - `-p <workspace>` — рабочая директория пользователя
 
-Репозиторий rightclaw имеет свой CLAUDE.md для разработки самого rightclaw. `start.sh` запускает Claude в режиме продукта — он читает `identity/IDENTITY.md` вместо dev-инструкций.
+Каждый агент при старте читает свой `MEMORY.md` для восстановления контекста из прошлых сессий.
+
+Репозиторий rightclaw имеет свой CLAUDE.md для разработки самого rightclaw. `start.sh` запускает агентов в режиме продукта — они читают свои identity-файлы вместо dev-инструкций.
 
 TODO: обернуть в `openshell sandbox create --policy ...` когда OpenShell будет доступен.
 
@@ -232,13 +247,33 @@ TODO: обернуть в `openshell sandbox create --policy ...` когда Ope
 
 ```
 rightclaw/
-├── start.sh                # точка входа — запуск RightClaw
-├── identity/
-│   └── IDENTITY.md         # system prompt для продукта
-├── skills/
-│   └── clawhub/
-│       └── SKILL.md        # /clawhub — менеджер скиллов
-├── crons/                  # спеки scheduled tasks
+├── start.sh                # точка входа — запуск агентов
+├── agents/                 # определения агентов
+│   ├── watchdog/
+│   │   ├── IDENTITY.md     # identity агента (system prompt)
+│   │   ├── MEMORY.md       # персистентная память агента
+│   │   ├── skills/         # skills этого агента
+│   │   ├── crons/          # scheduled tasks этого агента
+│   │   └── .mcp.json       # MCP-серверы этого агента
+│   ├── reviewer/
+│   │   ├── IDENTITY.md
+│   │   ├── MEMORY.md
+│   │   ├── skills/
+│   │   ├── crons/
+│   │   └── .mcp.json
+│   ├── scout/
+│   │   └── ...
+│   ├── ops/
+│   │   └── ...
+│   └── forge/
+│       └── ...
+├── shared/                 # общие ресурсы для всех агентов
+│   └── skills/
+│       └── clawhub/
+│           └── SKILL.md    # /clawhub — менеджер скиллов
+├── policies/               # OpenShell policies
+│   ├── watchdog.yaml
+│   ├── reviewer.yaml
 │   └── ...
 ├── CLAUDE.md               # dev-инструкции (для разработки самого rightclaw)
 └── seed.md                 # этот документ
@@ -246,28 +281,37 @@ rightclaw/
 
 ## Что поставляется
 
-Каждый skill pack — это директория, которая копируется в `.claude/skills/` или `~/.claude/skills/`:
+Каждый agent — самодостаточная директория с identity, памятью, skills, crons и MCP-конфигом. Агенты также могут публиковаться как skill packs в ClawHub:
 
 ```
 rightclaw/
 ├── README.md
-├── watchdog/
-│   ├── SKILL.md              # основной skill с YAML frontmatter
-│   ├── agents/               # subagent definitions
-│   │   └── log-analyzer.md
-│   ├── hooks/                # lifecycle hooks
-│   ├── policies/             # OpenShell YAML policies
-│   │   └── watchdog.yaml
-│   └── scheduled/            # scheduled task templates
-│       └── deploy-check.md
-├── reviewer/
-│   └── ...
-├── scout/
-│   └── ...
-├── ops/
-│   └── ...
-└── forge/
-    └── ...
+├── agents/
+│   ├── watchdog/
+│   │   ├── IDENTITY.md         # кто этот агент, как себя ведёт
+│   │   ├── MEMORY.md           # персистентная память
+│   │   ├── skills/             # skills этого агента
+│   │   │   └── log-analyzer/
+│   │   │       └── SKILL.md
+│   │   ├── crons/              # scheduled tasks
+│   │   │   └── deploy-check.yaml
+│   │   ├── hooks/              # lifecycle hooks
+│   │   └── .mcp.json           # MCP-серверы
+│   ├── reviewer/
+│   │   └── ...
+│   ├── scout/
+│   │   └── ...
+│   ├── ops/
+│   │   └── ...
+│   └── forge/
+│       └── ...
+├── policies/                   # OpenShell YAML policies
+│   ├── watchdog.yaml
+│   └── reviewer.yaml
+└── shared/
+    └── skills/                 # skills, доступные всем агентам
+        └── clawhub/
+            └── SKILL.md
 ```
 
 ## Установка (целевой UX)
@@ -335,6 +379,7 @@ metadata:
 | Безопасность | Широкий доступ по умолчанию | Declarative YAML policies, principle of least privilege |
 | Экосистема | Plugins (risk of malicious skills) | ClawHub-compatible + policy gate для сторонних skills |
 | Отношения с Anthropic | Cease & desist, ребрендинги | Полный compliance, использует только официальные механизмы |
+| Архитектура | Monolithic agent | Multi-agent (каждый агент — своя CC сессия) |
 | Фокус | General-purpose personal AI agent | General-purpose, но с сильным техническим ядром |
 
 ## Название
