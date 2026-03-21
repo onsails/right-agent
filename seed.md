@@ -7,7 +7,7 @@ A sandboxed agent runtime for Claude Code — master session orchestrates, subag
 
 RightClaw — это pre-configured agent runtime поверх Claude Code и NVIDIA OpenShell. Мастер-сессия Claude Code запускается внутри OpenShell sandbox и выступает оркестратором: принимает задачи, планирует выполнение, делегирует работу специализированным субагентам. Каждый субагент работает со своим набором skills, tools и отдельной OpenShell policy — ровно те права, которые нужны для конкретной задачи, и ни байтом больше.
 
-General-purpose по охвату (от рисёрча и коммуникаций до автоматизации рабочих процессов), но с сильным техническим ядром. CronMaster (один `/loop 1m`, читает YAML-задачи из `crons/`) запускает цепочки автономно. ClawHub skills подключаются через policy gate с автоматическим аудитом.
+General-purpose по охвату (от рисёрча и коммуникаций до автоматизации рабочих процессов), но с сильным техническим ядром. CronSync (`/loop 5m`, reconciles YAML-спеки из `crons/` с живыми cron job'ами) запускает цепочки автономно. ClawHub skills подключаются через policy gate с автоматическим аудитом.
 
 В отличие от OpenClaw (широкий доступ к системе, проблемы с безопасностью, CVE, юридические претензии от Anthropic), RightClaw делает ставку на правильный подход: использует только официальные механизмы Claude Code (skills, subagents, hooks, /loop, /schedule, MCP) и запускает всё в изолированном окружении с декларативными YAML-политиками OpenShell.
 
@@ -38,8 +38,8 @@ General-purpose по охвату (от рисёрча и коммуникаци
 │  │  делегирует субагентам, агрегирует результаты          │  │
 │  │                                                        │  │
 │  │  ┌──────────────────────┐  ┌──────────┐               │  │
-│  │  │ CronMaster           │  │ ClawHub  │               │  │
-│  │  │ /loop 1m → crons/*.y │  │ (import) │               │  │
+│  │  │ CronSync             │  │ ClawHub  │               │  │
+│  │  │ /loop 5m → crons/*.y │  │ (import) │               │  │
 │  │  └──────────┬───────────┘  └────┬─────┘               │  │
 │  │             └───────────────────┘                      │  │
 │  │                      ▼                                 │  │
@@ -69,41 +69,57 @@ General-purpose по охвату (от рисёрча и коммуникаци
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## Scheduled Tasks — CronMaster
+## Scheduled Tasks — CronSync
 
-Все запланированные задачи управляются одним процессом — CronMaster. Это skill, который запускается через `/loop 1m` и работает как минималистичный cron-демон внутри Claude Code.
+CronSync — reconciliation skill. Синхронизирует желаемое состояние (YAML-спеки в `crons/`) с фактическим (живые cron job'ы в сессии Claude Code).
 
-### Как работает
+### Примитивы Claude Code
 
-1. CronMaster запускается один раз: `/loop 1m /cronmaster`
-2. Каждую минуту он:
-   - Читает все файлы из `crons/` (YAML)
-   - Читает `crons/state.json` (last_run для каждой задачи)
-   - Для каждой задачи проверяет: пора запускать?
-   - Если пора — спавнит subagent с промптом из задачи
-   - Обновляет `state.json`
+Claude Code предоставляет три tool'а для cron job'ов:
 
-### Формат задачи
+- **CronCreate** — создаёт job (5-field cron expression + prompt). Возвращает job ID.
+- **CronList** — список активных job'ов с ID, расписанием, промптом.
+- **CronDelete** — удаляет job по ID.
 
-Одно поле `schedule` — принимает и интервалы, и cron-выражения:
+CronUpdate нет. Для изменения расписания или промпта — delete + create.
+
+Job'ы живут в сессии. Auto-expire через 3 дня. Макс 50 на сессию.
+
+### Как работает CronSync
+
+Запускается вручную или по `/loop`:
+
+```
+/loop 5m /cronsync
+```
+
+Каждый тик:
+
+1. Читает `crons/*.yaml` → **desired state**
+2. Вызывает `CronList` → **actual state**
+3. Сопоставляет через `crons/state.json` (маппинг имя файла ↔ job ID)
+4. Reconcile:
+   - Спека есть, job'а нет → `CronCreate`, записать ID в state
+   - Job есть, спеки нет → `CronDelete`, удалить из state
+   - Спека изменилась (schedule или prompt) → `CronDelete` + `CronCreate`, обновить ID в state
+   - Совпадает → skip
+
+### Формат спеки
 
 ```yaml
 # crons/deploy-check.yaml
-schedule: 5m
+schedule: "*/5 * * * *"
 prompt: "Check CI status for all open PRs, post comment if broken"
-agent: watchdog
 ```
 
 ```yaml
 # crons/morning-briefing.yaml
 schedule: "0 9 * * 1-5"
 prompt: "Gather open PRs, failing tests, pending reviews. Post summary to Slack."
-agent: ops
 ```
 
-`schedule` — единственное поле для расписания. CronMaster сам определяет формат:
-- Содержит единицу времени (`5m`, `1h`, `30s`) → интервал, сравнивает с `last_run`
-- Иначе → cron-выражение, проверяет матч с текущим временем
+`schedule` — стандартное 5-field cron expression (то, что CronCreate принимает).
+Для простых интервалов — cron-синтаксис: `*/5 * * * *` (каждые 5 мин), `0 */2 * * *` (каждые 2 часа).
 
 ### State
 
@@ -111,21 +127,26 @@ agent: ops
 // crons/state.json
 {
   "deploy-check": {
-    "last_run": "2026-03-21T10:05:00Z",
-    "last_status": "ok"
+    "job_id": "4e9fed67",
+    "schedule": "*/5 * * * *",
+    "prompt_hash": "a1b2c3d4"
   },
   "morning-briefing": {
-    "last_run": "2026-03-21T09:00:00Z",
-    "last_status": "ok"
+    "job_id": "06c25e84",
+    "schedule": "0 9 * * 1-5",
+    "prompt_hash": "e5f6g7h8"
   }
 }
 ```
 
-### Почему один `/loop`, а не по одному на задачу
+`prompt_hash` — для детекта изменений в промпте без хранения полного текста.
 
-- `/loop 5m /deploy-check` + `/loop "0 9 * * 1-5" /morning-briefing` + ... = N параллельных loop-процессов, каждый держит контекст
-- `/loop 1m /cronmaster` = один процесс, читает YAML, спавнит subagent'ов по необходимости
-- Добавить задачу = создать YAML-файл. Удалить = удалить файл. Без перезапуска loop'ов.
+### Зачем CronSync, а не ручные `/loop`
+
+- Декларативно: добавить задачу = создать YAML. Удалить = удалить файл. Изменить расписание = отредактировать YAML. CronSync подхватит на следующем тике.
+- Версионируемо: `crons/` в git, PR-ревью на изменения расписаний.
+- Идемпотентно: CronSync можно запускать сколько угодно раз — если всё синхронизировано, ничего не делает.
+- Восстановление: после рестарта сессии все job'ы пропадают. CronSync пересоздаёт их из спек.
 
 ### Структура
 
@@ -134,7 +155,7 @@ crons/
 ├── deploy-check.yaml
 ├── morning-briefing.yaml
 ├── dependency-audit.yaml
-└── state.json
+└── state.json              # gitignore — session-specific
 ```
 
 ## Skill Packs (v1 — MVP)
