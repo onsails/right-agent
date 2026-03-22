@@ -80,11 +80,11 @@ Plans:
   3. Skills use standard ClawHub SKILL.md format with YAML frontmatter -- drop-in compatible with existing ecosystem
   4. CronSync skill reads `crons/*.yaml` specs and reconciles against live cron jobs -- creates missing, deletes orphaned, recreates changed
   5. Lock-file concurrency control with heartbeat-based TTL prevents duplicate cron runs; all timestamps use UTC ISO 8601 (suffix Z)
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: TBD
-- [ ] 04-02: TBD
+- [ ] 04-01-PLAN.md — ClawHub and CronSync SKILL.md authoring (search/install/remove/list with policy gate, reconciliation with lock files)
+- [ ] 04-02-PLAN.md — System prompt codegen and shell wrapper update for CronSync auto-bootstrap
 
 ## Progress
 
