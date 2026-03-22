@@ -15,6 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 1: Foundation and Agent Discovery** - Rust project scaffold, core types, agent directory parsing
 - [ ] **Phase 2: CLI Runtime and Sandboxing** - Code generation, process-compose lifecycle, OpenShell sandbox enforcement
 - [ ] **Phase 3: Default Agent and Installation** - "Right" agent with onboarding, default policies, Telegram channels, install script, doctor command
+- [ ] **Phase 3.1: Claude Code Settings & Plugin Configuration** - INSERTED — Template .claude/settings.json per agent, enabledPlugins for Telegram, eliminate manual /plugin install step
 - [ ] **Phase 4: Skills and Automation** - ClawHub skill management with policy gate, CronSync with lock-file concurrency
 
 ## Phase Details
@@ -70,6 +71,20 @@ Plans:
 - [x] 03-03-PLAN.md — Doctor module (run_doctor) and init.rs extension (telegram_token, BOOTSTRAP.md, policy variant)
 - [x] 03-04-PLAN.md — Wire Doctor + Init to CLI, shell wrapper --channels flag, integration tests
 
+### Phase 3.1: Claude Code Settings & Plugin Configuration
+**Goal**: Agents launch with correct Claude Code settings and plugins pre-configured — no manual /plugin install step
+**Depends on**: Phase 3
+**INSERTED**: Discovered during manual testing — Telegram plugin requires .claude/settings.json with enabledPlugins, not just a bot token
+**Requirements**: CHAN-01, CHAN-02 (strengthening — settings.json makes channel config actually work without manual steps)
+**Success Criteria** (what must be TRUE):
+  1. `rightclaw init` generates `.claude/settings.json` in the agent directory with `enabledPlugins` for Telegram (when token provided)
+  2. Agent launches with Telegram plugin auto-enabled — no manual `/plugin install` step needed
+  3. Settings.json template is extensible for future plugins (marketplace support)
+**Plans**: TBD
+
+Plans:
+- [ ] 03.1-01: TBD
+
 ### Phase 4: Skills and Automation
 **Goal**: Agents can safely install ClawHub skills and run scheduled tasks autonomously
 **Depends on**: Phase 3
@@ -89,11 +104,12 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4
+Phases execute in numeric order: 1 -> 2 -> 3 -> 3.1 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation and Agent Discovery | 0/2 | Not started | - |
-| 2. CLI Runtime and Sandboxing | 0/3 | Not started | - |
-| 3. Default Agent and Installation | 0/4 | Not started | - |
-| 4. Skills and Automation | 0/2 | Not started | - |
+| 1. Foundation and Agent Discovery | 2/2 | Complete | 2026-03-21 |
+| 2. CLI Runtime and Sandboxing | 3/3 | Complete | 2026-03-22 |
+| 3. Default Agent and Installation | 4/4 | Complete | 2026-03-22 |
+| 3.1. CC Settings & Plugin Config | 0/1 | Not started | - |
+| 4. Skills and Automation | 2/2 | Complete | 2026-03-22 |
