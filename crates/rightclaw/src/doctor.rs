@@ -65,20 +65,35 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
 }
 
 /// Check if a binary is available in PATH.
+///
+/// Tries the primary name first, then any alternatives (e.g. `claude-bun` for `claude`).
 fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
-    match which::which(name) {
-        Ok(path) => DoctorCheck {
-            name: name.to_string(),
-            status: CheckStatus::Pass,
-            detail: path.display().to_string(),
-            fix: None,
-        },
-        Err(_) => DoctorCheck {
-            name: name.to_string(),
-            status: CheckStatus::Fail,
-            detail: "not found in PATH".to_string(),
-            fix: fix_hint.map(|s| s.to_string()),
-        },
+    let alternatives = match name {
+        "claude" => &["claude", "claude-bun"][..],
+        _ => std::slice::from_ref(&name),
+    };
+
+    for alt in alternatives {
+        if let Ok(path) = which::which(alt) {
+            let detail = if *alt != name {
+                format!("{} (as {})", path.display(), alt)
+            } else {
+                path.display().to_string()
+            };
+            return DoctorCheck {
+                name: name.to_string(),
+                status: CheckStatus::Pass,
+                detail,
+                fix: None,
+            };
+        }
+    }
+
+    DoctorCheck {
+        name: name.to_string(),
+        status: CheckStatus::Fail,
+        detail: "not found in PATH".to_string(),
+        fix: fix_hint.map(|s| s.to_string()),
     }
 }
 

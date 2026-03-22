@@ -1,7 +1,17 @@
+/// Find a binary by trying multiple names in order.
+fn find_binary(names: &[&str]) -> Result<std::path::PathBuf, which::Error> {
+    for name in names {
+        if let Ok(path) = which::which(name) {
+            return Ok(path);
+        }
+    }
+    which::which(names[0]) // return error for the primary name
+}
+
 /// Verify that required external tools are available in PATH.
 ///
-/// Checks for `process-compose` and `claude`. When `no_sandbox` is false,
-/// also checks for `openshell`.
+/// Checks for `process-compose` and `claude` (or `claude-bun`).
+/// When `no_sandbox` is false, also checks for `openshell`.
 pub fn verify_dependencies(no_sandbox: bool) -> miette::Result<()> {
     which::which("process-compose").map_err(|_| {
         miette::miette!(
@@ -10,10 +20,10 @@ pub fn verify_dependencies(no_sandbox: bool) -> miette::Result<()> {
         )
     })?;
 
-    which::which("claude").map_err(|_| {
+    find_binary(&["claude", "claude-bun"]).map_err(|_| {
         miette::miette!(
             help = "Install Claude Code CLI: https://docs.anthropic.com/en/docs/claude-code",
-            "claude not found in PATH"
+            "claude not found in PATH (tried: claude, claude-bun)"
         )
     })?;
 
