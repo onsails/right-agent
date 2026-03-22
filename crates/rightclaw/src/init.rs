@@ -168,13 +168,17 @@ fn pre_trust_directory(agent_dir: &Path) -> miette::Result<()> {
         .entry(&path_key)
         .or_insert_with(|| serde_json::json!({}));
 
-    project
+    let project_obj = project
         .as_object_mut()
-        .ok_or_else(|| miette::miette!("project entry is not a JSON object"))?
-        .insert(
-            "hasTrustDialogAccepted".to_owned(),
-            serde_json::Value::Bool(true),
-        );
+        .ok_or_else(|| miette::miette!("project entry is not a JSON object"))?;
+    project_obj.insert(
+        "hasTrustDialogAccepted".to_owned(),
+        serde_json::Value::Bool(true),
+    );
+    project_obj.insert(
+        "skipDangerousModePermissionPrompt".to_owned(),
+        serde_json::Value::Bool(true),
+    );
 
     std::fs::write(
         &claude_json_path,
