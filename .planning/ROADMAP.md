@@ -80,10 +80,10 @@ Plans:
   1. `rightclaw init` generates `.claude/settings.json` in the agent directory with `enabledPlugins` for Telegram (when token provided)
   2. Agent launches with Telegram plugin auto-enabled — no manual `/plugin install` step needed
   3. Settings.json template is extensible for future plugins (marketplace support)
-**Plans**: TBD
+**Plans**: 1 plan
 
 Plans:
-- [ ] 03.1-01: TBD
+- [ ] 03.1-01-PLAN.md — Add .claude/settings.json creation to init_rightclaw_home when Telegram token provided
 
 ### Phase 4: Skills and Automation
 **Goal**: Agents can safely install ClawHub skills and run scheduled tasks autonomously
