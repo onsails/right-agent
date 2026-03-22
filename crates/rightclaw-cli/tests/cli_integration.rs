@@ -94,3 +94,95 @@ fn test_list_no_agents_dir() {
         .success()
         .stdout(predicate::str::contains("rightclaw init"));
 }
+
+// --- Phase 2 Plan 03: New subcommand tests ---
+
+#[test]
+fn test_help_shows_new_subcommands() {
+    rightclaw()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("up"))
+        .stdout(predicate::str::contains("down"))
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("restart"))
+        .stdout(predicate::str::contains("attach"));
+}
+
+#[test]
+fn test_up_help_shows_new_flags() {
+    rightclaw()
+        .args(["up", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--agents"))
+        .stdout(predicate::str::contains("--detach"))
+        .stdout(predicate::str::contains("--no-sandbox"));
+}
+
+#[test]
+fn test_down_help() {
+    rightclaw()
+        .args(["down", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stop all agents"));
+}
+
+#[test]
+fn test_status_help() {
+    rightclaw()
+        .args(["status", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Show running agent status"));
+}
+
+#[test]
+fn test_restart_help() {
+    rightclaw()
+        .args(["restart", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent"));
+}
+
+#[test]
+fn test_attach_help() {
+    rightclaw()
+        .args(["attach", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Attach to running"));
+}
+
+#[test]
+fn test_status_no_running_instance() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create run dir but no socket -- simulates no running instance.
+    fs::create_dir_all(dir.path().join("run")).unwrap();
+
+    rightclaw()
+        .args(["--home", home, "status"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No running instance"));
+}
+
+#[test]
+fn test_down_no_state_file() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create run dir but no state.json -- simulates no running instance.
+    fs::create_dir_all(dir.path().join("run")).unwrap();
+
+    rightclaw()
+        .args(["--home", home, "down"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No running instance"));
+}
