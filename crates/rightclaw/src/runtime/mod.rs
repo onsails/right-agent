@@ -1,2 +1,6 @@
-// Runtime module — process-compose client and sandbox management.
-// Implementation in Phase 2 Plan 02.
+pub mod pc_client;
+
+mod deps;
+mod sandbox;
+
+pub use pc_client::{PcClient, ProcessInfo};
