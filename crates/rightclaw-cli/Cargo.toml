@@ -12,6 +12,7 @@ rightclaw = { path = "../rightclaw" }
 clap = { workspace = true }
 miette = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]

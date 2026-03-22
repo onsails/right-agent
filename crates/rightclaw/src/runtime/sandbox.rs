@@ -8,6 +8,9 @@ pub struct RuntimeState {
     pub agents: Vec<AgentState>,
     pub socket_path: String,
     pub started_at: String,
+    /// Whether agents were launched without OpenShell sandboxing.
+    #[serde(default)]
+    pub no_sandbox: bool,
 }
 
 /// Tracks a single agent's sandbox identity for cleanup.
