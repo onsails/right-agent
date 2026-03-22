@@ -245,7 +245,27 @@ async fn cmd_up(
 
     // Generate shell wrappers for each agent.
     for agent in &agents {
-        let wrapper_content = rightclaw::codegen::generate_wrapper(agent, no_sandbox, None)?;
+        // Generate system prompt if agent has crons/ directory (per D-16, D-21).
+        let system_prompt_path = match rightclaw::codegen::generate_system_prompt(agent) {
+            Some(content) => {
+                let path = run_dir.join(format!("{}-system.md", agent.name));
+                std::fs::write(&path, &content).map_err(|e| {
+                    miette::miette!(
+                        "failed to write system prompt for '{}': {e:#}",
+                        agent.name
+                    )
+                })?;
+                tracing::debug!(agent = %agent.name, "wrote system prompt: {}", path.display());
+                Some(path.display().to_string())
+            }
+            None => None,
+        };
+
+        let wrapper_content = rightclaw::codegen::generate_wrapper(
+            agent,
+            no_sandbox,
+            system_prompt_path.as_deref(),
+        )?;
         let wrapper_path = run_dir.join(format!("{}.sh", agent.name));
         std::fs::write(&wrapper_path, &wrapper_content)
             .map_err(|e| miette::miette!("failed to write wrapper for '{}': {e:#}", agent.name))?;
