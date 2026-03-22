@@ -115,10 +115,19 @@ fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_user_id: Option<
         None => rightclaw::init::prompt_telegram_token()?,
     };
 
-    // If --telegram-user-id flag provided, use it. Otherwise prompt if token was provided.
+    // Telegram user ID is required when token is provided (needed for auto-pairing).
     let user_id = match telegram_user_id {
         Some(id) => Some(id.to_string()),
-        None if token.is_some() => prompt_telegram_user_id()?,
+        None if token.is_some() => {
+            let id = prompt_telegram_user_id()?;
+            if id.is_none() {
+                return Err(miette::miette!(
+                    help = "Get your numeric user ID from @userinfobot on Telegram",
+                    "Telegram user ID is required for auto-pairing. Use --telegram-user-id or enter it when prompted."
+                ));
+            }
+            id
+        }
         None => None,
     };
 
