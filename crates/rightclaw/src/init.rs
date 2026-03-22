@@ -6,6 +6,8 @@ const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/AGENTS.md");
 const DEFAULT_POLICY: &str = include_str!("../../../templates/right/policy.yaml");
 const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/BOOTSTRAP.md");
 const DEFAULT_POLICY_TELEGRAM: &str = include_str!("../../../templates/right/policy-telegram.yaml");
+const SKILL_CLAWHUB: &str = include_str!("../../../skills/clawhub/SKILL.md");
+const SKILL_CRONSYNC: &str = include_str!("../../../skills/cronsync/SKILL.md");
 
 /// Initialize the RightClaw home directory with a default "right" agent.
 ///
@@ -58,6 +60,20 @@ pub fn init_rightclaw_home(
             .map_err(|e| miette::miette!("Failed to write {}: {}", path.display(), e))?;
     }
 
+    // Install built-in skills (/clawhub, /cronsync) into the agent's skills/ directory.
+    let built_in_skills: &[(&str, &str)] = &[
+        ("clawhub/SKILL.md", SKILL_CLAWHUB),
+        ("cronsync/SKILL.md", SKILL_CRONSYNC),
+    ];
+    for (skill_path, content) in built_in_skills {
+        let path = agents_dir.join("skills").join(skill_path);
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| {
+            miette::miette!("Failed to create skill directory: {}", e)
+        })?;
+        std::fs::write(&path, content)
+            .map_err(|e| miette::miette!("Failed to write {}: {}", path.display(), e))?;
+    }
+
     // Write Telegram bot token to .env if provided.
     if let Some(token) = telegram_token {
         let env_dir = match telegram_env_dir {
@@ -86,6 +102,8 @@ pub fn init_rightclaw_home(
     println!("  agents/right/AGENTS.md");
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/policy.yaml");
+    println!("  agents/right/skills/clawhub/SKILL.md");
+    println!("  agents/right/skills/cronsync/SKILL.md");
 
     if telegram_token.is_some() {
         println!("  Telegram bot token saved");
@@ -156,6 +174,14 @@ mod tests {
         assert!(
             agents_dir.join("BOOTSTRAP.md").exists(),
             "BOOTSTRAP.md should always be created"
+        );
+        assert!(
+            agents_dir.join("skills/clawhub/SKILL.md").exists(),
+            "clawhub skill should be installed"
+        );
+        assert!(
+            agents_dir.join("skills/cronsync/SKILL.md").exists(),
+            "cronsync skill should be installed"
         );
     }
 
