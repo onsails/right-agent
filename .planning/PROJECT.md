@@ -23,6 +23,12 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by OpenShel
 - ✓ Per-agent shell wrapper with OpenShell sandbox enforcement — Phase 2
 - ✓ process-compose REST API integration via Unix socket — Phase 2
 - ✓ Explicit sandbox destroy on shutdown — Phase 2
+- ✓ Default "Right" agent with BOOTSTRAP.md onboarding (name, creature, vibe, emoji) — Phase 3
+- ✓ Production OpenShell policy.yaml with hard_requirement Landlock + comprehensive comments — Phase 3
+- ✓ install.sh one-liner with platform detection + dependency installation — Phase 3
+- ✓ `rightclaw doctor` validates dependencies and agent structure — Phase 3
+- ✓ Telegram channel setup via `rightclaw init --telegram-token` — Phase 3
+- ✓ Shell wrapper conditional `--channels` flag for Telegram — Phase 3
 
 ### Active
 
@@ -107,4 +113,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-22 after Phase 2 completion*
+*Last updated: 2026-03-22 after Phase 3 completion*
