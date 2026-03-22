@@ -18,6 +18,11 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by OpenShel
 - ✓ Per-agent agent.yaml config with deny_unknown_fields — Phase 1
 - ✓ `rightclaw init` creates ~/.rightclaw/ + default agent — Phase 1
 - ✓ `rightclaw list` shows discovered agents — Phase 1
+- ✓ `rightclaw up` generates wrappers + PC config, launches agents in OpenShell sandboxes — Phase 2
+- ✓ `rightclaw up --agents`, `up -d`, `down`, `status`, `restart`, `attach` — Phase 2
+- ✓ Per-agent shell wrapper with OpenShell sandbox enforcement — Phase 2
+- ✓ process-compose REST API integration via Unix socket — Phase 2
+- ✓ Explicit sandbox destroy on shutdown — Phase 2
 
 ### Active
 
@@ -102,4 +107,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-21 after Phase 1 completion*
+*Last updated: 2026-03-22 after Phase 2 completion*
