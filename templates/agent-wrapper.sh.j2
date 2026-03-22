@@ -21,19 +21,15 @@ exec openshell sandbox create \
   --policy "{{ policy_path }}" \
   --name "rightclaw-{{ agent_name }}" \
   -- "$CLAUDE_BIN" \
-    --append-system-prompt-file "{{ identity_path }}" \
-    {% if system_prompt_path %}--append-system-prompt-file "{{ system_prompt_path }}" \
-    {% endif %}--append-system-prompt "{{ start_prompt }}" \
+    --append-system-prompt-file "{{ combined_prompt_path }}" \
     --dangerously-skip-permissions \
     {% if channels %}--channels {{ channels }} \
-    {% endif %}-p "{{ working_dir }}"
+    {% endif %}
 {% else %}
 # WARNING: Running without sandbox (--no-sandbox mode)
 exec "$CLAUDE_BIN" \
-  --append-system-prompt-file "{{ identity_path }}" \
-  {% if system_prompt_path %}--append-system-prompt-file "{{ system_prompt_path }}" \
-  {% endif %}--append-system-prompt "{{ start_prompt }}" \
+  --append-system-prompt-file "{{ combined_prompt_path }}" \
   --dangerously-skip-permissions \
   {% if channels %}--channels {{ channels }} \
-  {% endif %}-p "{{ working_dir }}"
+  {% endif %}
 {% endif %}
