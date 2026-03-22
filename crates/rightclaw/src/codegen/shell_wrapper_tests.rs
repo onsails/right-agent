@@ -66,7 +66,7 @@ const DUMMY_PROMPT_PATH: &str = "/tmp/run/testbot-prompt.md";
 #[test]
 fn wrapper_with_sandbox_contains_openshell() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("openshell sandbox create"),
@@ -85,7 +85,7 @@ fn wrapper_with_sandbox_contains_openshell() {
 #[test]
 fn wrapper_with_sandbox_contains_combined_prompt_and_permissions() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("--append-system-prompt-file"),
@@ -104,7 +104,7 @@ fn wrapper_with_sandbox_contains_combined_prompt_and_permissions() {
 #[test]
 fn wrapper_no_sandbox_runs_claude_directly() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains(r#"exec "$CLAUDE_BIN""#),
@@ -119,7 +119,7 @@ fn wrapper_no_sandbox_runs_claude_directly() {
 #[test]
 fn wrapper_starts_with_shebang() {
     let agent = make_agent("testbot", Some("Hello"));
-    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.starts_with("#!/usr/bin/env bash"),
@@ -130,7 +130,7 @@ fn wrapper_starts_with_shebang() {
 #[test]
 fn wrapper_no_config_agent_still_renders() {
     let agent = make_agent_no_config("testbot");
-    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("--append-system-prompt-file"),
@@ -145,7 +145,7 @@ fn wrapper_no_config_agent_still_renders() {
 #[test]
 fn wrapper_with_mcp_includes_channels_flag_sandbox() {
     let agent = make_agent_with_mcp("testbot", Some("Go"));
-    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("--channels plugin:telegram@claude-plugins-official"),
@@ -156,7 +156,7 @@ fn wrapper_with_mcp_includes_channels_flag_sandbox() {
 #[test]
 fn wrapper_with_mcp_includes_channels_flag_no_sandbox() {
     let agent = make_agent_with_mcp("testbot", Some("Go"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("--channels plugin:telegram@claude-plugins-official"),
@@ -167,7 +167,7 @@ fn wrapper_with_mcp_includes_channels_flag_no_sandbox() {
 #[test]
 fn wrapper_without_mcp_omits_channels_flag() {
     let agent = make_agent("testbot", Some("Go"));
-    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         !output.contains("--channels"),
@@ -178,7 +178,7 @@ fn wrapper_without_mcp_omits_channels_flag() {
 #[test]
 fn wrapper_without_mcp_omits_channels_flag_no_sandbox() {
     let agent = make_agent("testbot", Some("Go"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         !output.contains("--channels"),
@@ -189,7 +189,7 @@ fn wrapper_without_mcp_omits_channels_flag_no_sandbox() {
 #[test]
 fn wrapper_has_exactly_one_append_system_prompt_file() {
     let agent = make_agent("testbot", Some("Go"));
-    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, false, DUMMY_PROMPT_PATH, None).unwrap();
 
     let count = output.matches("--append-system-prompt-file").count();
     assert_eq!(
@@ -201,7 +201,7 @@ fn wrapper_has_exactly_one_append_system_prompt_file() {
 #[test]
 fn wrapper_has_exactly_one_append_system_prompt_file_no_sandbox() {
     let agent = make_agent("testbot", Some("Go"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH).unwrap();
+    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
 
     let count = output.matches("--append-system-prompt-file").count();
     assert_eq!(

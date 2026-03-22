@@ -13,6 +13,7 @@ pub fn generate_wrapper(
     agent: &AgentDef,
     no_sandbox: bool,
     combined_prompt_path: &str,
+    debug_log_path: Option<&str>,
 ) -> miette::Result<String> {
     let mut env = Environment::new();
     env.add_template("wrapper", WRAPPER_TEMPLATE)
@@ -33,6 +34,8 @@ pub fn generate_wrapper(
         combined_prompt_path => combined_prompt_path,
         no_sandbox => no_sandbox,
         channels => channels,
+        debug => debug_log_path.is_some(),
+        debug_log_path => debug_log_path.unwrap_or_default(),
     })
     .map_err(|e| miette::miette!("template render error: {e:#}"))
 }

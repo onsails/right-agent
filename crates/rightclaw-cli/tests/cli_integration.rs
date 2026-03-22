@@ -144,7 +144,7 @@ fn test_init_with_telegram_token() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "--telegram-token", "123456:ABCdef"])
+        .args(["--home", home, "init", "--telegram-token", "123456:ABCdef", "--telegram-user-id", "999999"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Telegram"));
