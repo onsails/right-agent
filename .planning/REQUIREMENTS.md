@@ -8,12 +8,12 @@
 ### CLI Lifecycle
 
 - [x] **CLI-01**: User can run `rightclaw up <project-path>` to scan agents/, generate process-compose config, and launch all agents
-- [ ] **CLI-02**: User can run `rightclaw up --agents watchdog,reviewer` to launch only specific agents
-- [ ] **CLI-03**: User can run `rightclaw up -d` to launch agents in background with TUI server
-- [ ] **CLI-04**: User can run `rightclaw attach` to connect to running process-compose TUI
+- [x] **CLI-02**: User can run `rightclaw up --agents watchdog,reviewer` to launch only specific agents
+- [x] **CLI-03**: User can run `rightclaw up -d` to launch agents in background with TUI server
+- [x] **CLI-04**: User can run `rightclaw attach` to connect to running process-compose TUI
 - [x] **CLI-05**: User can run `rightclaw status` to see agent states (running, stopped, restarting)
 - [x] **CLI-06**: User can run `rightclaw restart <agent>` to restart a single agent
-- [ ] **CLI-07**: User can run `rightclaw down` to stop all agents and destroy sandboxes
+- [x] **CLI-07**: User can run `rightclaw down` to stop all agents and destroy sandboxes
 
 ### Sandboxing
 
@@ -106,12 +106,12 @@
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | CLI-01 | Phase 2 | Complete |
-| CLI-02 | Phase 2 | Pending |
-| CLI-03 | Phase 2 | Pending |
-| CLI-04 | Phase 2 | Pending |
+| CLI-02 | Phase 2 | Complete |
+| CLI-03 | Phase 2 | Complete |
+| CLI-04 | Phase 2 | Complete |
 | CLI-05 | Phase 2 | Complete |
 | CLI-06 | Phase 2 | Complete |
-| CLI-07 | Phase 2 | Pending |
+| CLI-07 | Phase 2 | Complete |
 | SAND-01 | Phase 2 | Complete |
 | SAND-02 | Phase 2 | Complete |
 | SAND-03 | Phase 2 | Complete |

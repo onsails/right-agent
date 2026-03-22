@@ -49,7 +49,7 @@ Plans:
 Plans:
 - [x] 02-01-PLAN.md — Workspace deps, minijinja templates, codegen module (shell wrapper + process-compose.yaml generation)
 - [x] 02-02-PLAN.md — Runtime module (process-compose REST API client, sandbox tracking/cleanup, dependency verification)
-- [ ] 02-03-PLAN.md — Wire CLI subcommands (up, down, status, restart, attach) and integration tests
+- [x] 02-03-PLAN.md — Wire CLI subcommands (up, down, status, restart, attach) and integration tests
 
 ### Phase 3: Default Agent and Installation
 **Goal**: Users can install RightClaw and have a working agent experience out of the box
