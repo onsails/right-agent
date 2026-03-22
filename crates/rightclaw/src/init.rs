@@ -110,6 +110,17 @@ pub fn init_rightclaw_home(
             miette::miette!("Failed to write settings.json: {}", e)
         })?;
 
+        // Create .mcp.json marker so the shell wrapper detects Telegram and adds --channels flag.
+        // The file content doesn't matter for the plugin (it's loaded via settings.json),
+        // but the wrapper uses .mcp.json existence to decide whether to pass --channels.
+        std::fs::write(
+            agents_dir.join(".mcp.json"),
+            r#"{"telegram": true}"#,
+        )
+        .map_err(|e| {
+            miette::miette!("Failed to write .mcp.json: {}", e)
+        })?;
+
         // Pre-pair Telegram user via access.json so no interactive pairing is needed.
         // The Telegram plugin re-reads this file on every inbound message.
         if let Some(user_id) = telegram_user_id {
