@@ -29,6 +29,9 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by OpenShel
 - ✓ `rightclaw doctor` validates dependencies and agent structure — Phase 3
 - ✓ Telegram channel setup via `rightclaw init --telegram-token` — Phase 3
 - ✓ Shell wrapper conditional `--channels` flag for Telegram — Phase 3
+- ✓ `/clawhub` skill — search, install, remove, list via ClawHub HTTP API with policy gate — Phase 4
+- ✓ `/cronsync` skill — declarative cron reconciliation with lock-file concurrency — Phase 4
+- ✓ System prompt codegen for CronSync bootstrap — Phase 4
 
 ### Active
 
@@ -113,4 +116,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-03-22 after Phase 3 completion*
+*Last updated: 2026-03-22 after Phase 4 completion (all phases complete)*
