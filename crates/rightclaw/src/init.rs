@@ -323,4 +323,43 @@ mod tests {
     fn validate_telegram_token_rejects_empty_string() {
         assert!(validate_telegram_token("").is_err());
     }
+
+    #[test]
+    fn init_with_telegram_creates_settings_json() {
+        let dir = tempdir().unwrap();
+        let env_dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), Some(env_dir.path())).unwrap();
+
+        let settings_path = dir
+            .path()
+            .join("agents/right/.claude/settings.json");
+        assert!(
+            settings_path.exists(),
+            "settings.json should be created when telegram token is provided"
+        );
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(
+            content.contains("enabledPlugins"),
+            "settings.json should contain enabledPlugins"
+        );
+        assert!(
+            content.contains("telegram@claude-plugins-official"),
+            "settings.json should enable telegram plugin"
+        );
+    }
+
+    #[test]
+    fn init_without_telegram_no_settings_json() {
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), None, None).unwrap();
+
+        let settings_path = dir
+            .path()
+            .join("agents/right/.claude/settings.json");
+        assert!(
+            !settings_path.exists(),
+            "settings.json should NOT be created when no telegram token"
+        );
+    }
 }
