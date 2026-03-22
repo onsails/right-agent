@@ -105,8 +105,8 @@ fn wrapper_no_sandbox_runs_claude_directly() {
     let output = generate_wrapper(&agent, true, None).unwrap();
 
     assert!(
-        output.contains("exec claude"),
-        "expected 'exec claude' in no-sandbox mode:\n{output}"
+        output.contains(r#"exec "$CLAUDE_BIN""#),
+        "expected 'exec \"$CLAUDE_BIN\"' in no-sandbox mode:\n{output}"
     );
     assert!(
         !output.contains("openshell"),

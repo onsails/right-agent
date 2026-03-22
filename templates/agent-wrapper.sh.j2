@@ -3,11 +3,24 @@
 # Agent: {{ agent_name }}
 set -euo pipefail
 
+# Resolve claude binary (claude or claude-bun)
+CLAUDE_BIN=""
+for bin in claude claude-bun; do
+  if command -v "$bin" &>/dev/null; then
+    CLAUDE_BIN="$bin"
+    break
+  fi
+done
+if [ -z "$CLAUDE_BIN" ]; then
+  echo "error: claude CLI not found in PATH (tried: claude, claude-bun)" >&2
+  exit 1
+fi
+
 {% if not no_sandbox %}
 exec openshell sandbox create \
   --policy "{{ policy_path }}" \
   --name "rightclaw-{{ agent_name }}" \
-  -- claude \
+  -- "$CLAUDE_BIN" \
     --append-system-prompt-file "{{ identity_path }}" \
     {% if system_prompt_path %}--append-system-prompt-file "{{ system_prompt_path }}" \
     {% endif %}--dangerously-skip-permissions \
@@ -15,7 +28,7 @@ exec openshell sandbox create \
     {% endif %}--prompt "{{ start_prompt }}"
 {% else %}
 # WARNING: Running without sandbox (--no-sandbox mode)
-exec claude \
+exec "$CLAUDE_BIN" \
   --append-system-prompt-file "{{ identity_path }}" \
   {% if system_prompt_path %}--append-system-prompt-file "{{ system_prompt_path }}" \
   {% endif %}--dangerously-skip-permissions \
