@@ -62,11 +62,13 @@ Plans:
   4. Default "Right" agent is general-purpose with no domain-specific skills, suitable as a template for new agents
   5. Default policy.yaml files use `hard_requirement` Landlock mode and cover filesystem, network, and process restrictions
   6. Telegram channel configuration works via `.mcp.json` with policy template including `api.telegram.org` in network allowlist
-**Plans**: TBD
+**Plans**: 4 plans
 
 Plans:
-- [ ] 03-01: TBD
-- [ ] 03-02: TBD
+- [ ] 03-01-PLAN.md — BOOTSTRAP.md onboarding template, production policy.yaml (both variants)
+- [ ] 03-02-PLAN.md — install.sh one-liner script with platform detection and dependency installation
+- [ ] 03-03-PLAN.md — Doctor module (run_doctor) and init.rs extension (telegram_token, BOOTSTRAP.md, policy variant)
+- [ ] 03-04-PLAN.md — Wire Doctor + Init to CLI, shell wrapper --channels flag, integration tests
 
 ### Phase 4: Skills and Automation
 **Goal**: Agents can safely install ClawHub skills and run scheduled tasks autonomously
@@ -93,5 +95,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. Foundation and Agent Discovery | 0/2 | Not started | - |
 | 2. CLI Runtime and Sandboxing | 0/3 | Not started | - |
-| 3. Default Agent and Installation | 0/2 | Not started | - |
+| 3. Default Agent and Installation | 0/4 | Not started | - |
 | 4. Skills and Automation | 0/2 | Not started | - |
