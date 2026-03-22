@@ -25,7 +25,8 @@ exec openshell sandbox create \
     {% if system_prompt_path %}--append-system-prompt-file "{{ system_prompt_path }}" \
     {% endif %}--dangerously-skip-permissions \
     {% if channels %}--channels {{ channels }} \
-    {% endif %}--prompt "{{ start_prompt }}"
+    {% endif %}-p "{{ working_dir }}" \
+    "{{ start_prompt }}"
 {% else %}
 # WARNING: Running without sandbox (--no-sandbox mode)
 exec "$CLAUDE_BIN" \
@@ -33,5 +34,6 @@ exec "$CLAUDE_BIN" \
   {% if system_prompt_path %}--append-system-prompt-file "{{ system_prompt_path }}" \
   {% endif %}--dangerously-skip-permissions \
   {% if channels %}--channels {{ channels }} \
-  {% endif %}--prompt "{{ start_prompt }}"
+  {% endif %}-p "{{ working_dir }}" \
+  "{{ start_prompt }}"
 {% endif %}
