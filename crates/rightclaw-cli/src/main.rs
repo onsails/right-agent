@@ -44,6 +44,9 @@ pub enum Commands {
         /// Run without OpenShell sandbox (development only)
         #[arg(long)]
         no_sandbox: bool,
+        /// Enable debug logging (writes to $RIGHTCLAW_HOME/run/<agent>-debug.log)
+        #[arg(long)]
+        debug: bool,
     },
     /// Stop all agents and destroy sandboxes
     Down,
@@ -95,7 +98,8 @@ async fn main() -> miette::Result<()> {
             agents,
             detach,
             no_sandbox,
-        } => cmd_up(&home, agents, detach, no_sandbox).await,
+            debug,
+        } => cmd_up(&home, agents, detach, no_sandbox, debug).await,
         Commands::Down => cmd_down(&home).await,
         Commands::Status => cmd_status(&home).await,
         Commands::Restart { agent } => cmd_restart(&home, &agent).await,
@@ -230,6 +234,7 @@ async fn cmd_up(
     agents_filter: Option<Vec<String>>,
     detach: bool,
     no_sandbox: bool,
+    debug: bool,
 ) -> miette::Result<()> {
     // Fail fast if required tools are missing.
     rightclaw::runtime::verify_dependencies(no_sandbox)?;
@@ -305,10 +310,16 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "wrote combined prompt: {}", prompt_path.display());
 
         let prompt_path_str = prompt_path.display().to_string();
+        let debug_log = if debug {
+            Some(run_dir.join(format!("{}-debug.log", agent.name)).display().to_string())
+        } else {
+            None
+        };
         let wrapper_content = rightclaw::codegen::generate_wrapper(
             agent,
             no_sandbox,
             &prompt_path_str,
+            debug_log.as_deref(),
         )?;
         let wrapper_path = run_dir.join(format!("{}.sh", agent.name));
         std::fs::write(&wrapper_path, &wrapper_content)

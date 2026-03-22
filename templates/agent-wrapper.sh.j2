@@ -23,13 +23,15 @@ exec openshell sandbox create \
   -- "$CLAUDE_BIN" \
     --append-system-prompt-file "{{ combined_prompt_path }}" \
     --dangerously-skip-permissions \
-    {% if channels %}--channels {{ channels }} \
+    {% if debug %}--debug-file "{{ debug_log_path }}" \
+    {% endif %}{% if channels %}--channels {{ channels }} \
     {% endif %}
 {% else %}
 # WARNING: Running without sandbox (--no-sandbox mode)
 exec "$CLAUDE_BIN" \
   --append-system-prompt-file "{{ combined_prompt_path }}" \
   --dangerously-skip-permissions \
-  {% if channels %}--channels {{ channels }} \
+  {% if debug %}--debug-file "{{ debug_log_path }}" \
+  {% endif %}{% if channels %}--channels {{ channels }} \
   {% endif %}
 {% endif %}
