@@ -39,25 +39,24 @@ impl fmt::Display for DoctorCheck {
 /// and validates agent directory structure. Unlike `verify_dependencies()`,
 /// doctor runs ALL checks and collects results -- never short-circuits.
 pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
-    let mut checks = Vec::new();
-
-    // Binary checks
-    checks.push(check_binary(
-        "rightclaw",
-        Some("https://github.com/onsails/rightclaw"),
-    ));
-    checks.push(check_binary(
-        "process-compose",
-        Some("https://f1bonacc1.github.io/process-compose/installation/"),
-    ));
-    checks.push(check_binary(
-        "openshell",
-        Some("curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh"),
-    ));
-    checks.push(check_binary(
-        "claude",
-        Some("https://docs.anthropic.com/en/docs/claude-code"),
-    ));
+    let mut checks = vec![
+        check_binary(
+            "rightclaw",
+            Some("https://github.com/onsails/rightclaw"),
+        ),
+        check_binary(
+            "process-compose",
+            Some("https://f1bonacc1.github.io/process-compose/installation/"),
+        ),
+        check_binary(
+            "openshell",
+            Some("curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh"),
+        ),
+        check_binary(
+            "claude",
+            Some("https://docs.anthropic.com/en/docs/claude-code"),
+        ),
+    ];
 
     // Agent structure checks
     checks.extend(check_agent_structure(home));

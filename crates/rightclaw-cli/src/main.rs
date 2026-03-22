@@ -89,7 +89,7 @@ async fn main() -> miette::Result<()> {
 }
 
 fn cmd_init(home: &Path) -> miette::Result<()> {
-    rightclaw::init::init_rightclaw_home(home)?;
+    rightclaw::init::init_rightclaw_home(home, None, None)?;
     println!("Initialized RightClaw at {}", home.display());
     println!(
         "Default agent 'right' created at {}/agents/right/",
