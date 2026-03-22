@@ -6,16 +6,10 @@
     pkgs.process-compose
   ];
 
-  languages.rust = {
-    enable = true;
-    channel = "stable";
-    components = [ "rustc" "cargo" "clippy" "rustfmt" "rust-analyzer" ];
-  };
+  languages.rust.enable = true;
 
   enterShell = ''
     echo "RightClaw dev environment"
-    rustc --version
-    cargo --version
   '';
 
   enterTest = ''
