@@ -40,6 +40,7 @@ pub fn generate_wrapper(
         agent_name => agent.name,
         identity_path => agent.identity_path.display().to_string(),
         policy_path => agent.policy_path.display().to_string(),
+        working_dir => agent.path.display().to_string(),
         no_sandbox => no_sandbox,
         start_prompt => start_prompt,
         channels => channels,
