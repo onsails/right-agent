@@ -33,7 +33,7 @@
 
 ### Default Agent
 
-- [ ] **DFLT-01**: RightClaw ships a default "Right" agent in `agents/right/`
+- [x] **DFLT-01**: RightClaw ships a default "Right" agent in `agents/right/`
 - [x] **DFLT-02**: "Right" agent has BOOTSTRAP.md that runs on first conversation -- asks user's name, vibe, personality, emoji
 - [x] **DFLT-03**: BOOTSTRAP.md onboarding writes IDENTITY.md, USER.md, SOUL.md on completion, then self-deletes
 - [x] **DFLT-04**: "Right" agent is general-purpose -- no domain-specific skills, suitable as a starting template
@@ -41,8 +41,8 @@
 ### Installation
 
 - [x] **INST-01**: `install.sh` one-liner installs rightclaw binary, process-compose, and OpenShell
-- [ ] **INST-02**: `rightclaw doctor` validates all dependencies are present and functional (rightclaw, process-compose, openshell, claude CLI)
-- [ ] **INST-03**: `rightclaw doctor` validates agent directory structure and policy files
+- [x] **INST-02**: `rightclaw doctor` validates all dependencies are present and functional (rightclaw, process-compose, openshell, claude CLI)
+- [x] **INST-03**: `rightclaw doctor` validates agent directory structure and policy files
 
 ### Skill Management
 
@@ -64,8 +64,8 @@
 
 ### Telegram Channel
 
-- [ ] **CHAN-01**: Per-agent Telegram channel configuration via `.mcp.json` using official Claude Code Telegram plugin
-- [ ] **CHAN-02**: Default "Right" agent BOOTSTRAP.md includes Telegram bot setup as part of onboarding
+- [x] **CHAN-01**: Per-agent Telegram channel configuration via `.mcp.json` using official Claude Code Telegram plugin
+- [x] **CHAN-02**: Default "Right" agent BOOTSTRAP.md includes Telegram bot setup as part of onboarding
 - [x] **CHAN-03**: OpenShell policy templates include Telegram Bot API endpoint (`api.telegram.org`) in network allowlist
 
 ### Project Setup
@@ -122,13 +122,13 @@
 | WORK-03 | Phase 1 | Complete |
 | WORK-04 | Phase 1 | Complete |
 | WORK-05 | Phase 1 | Complete |
-| DFLT-01 | Phase 3 | Pending |
+| DFLT-01 | Phase 3 | Complete |
 | DFLT-02 | Phase 3 | Complete |
 | DFLT-03 | Phase 3 | Complete |
 | DFLT-04 | Phase 3 | Complete |
 | INST-01 | Phase 3 | Complete |
-| INST-02 | Phase 3 | Pending |
-| INST-03 | Phase 3 | Pending |
+| INST-02 | Phase 3 | Complete |
+| INST-03 | Phase 3 | Complete |
 | SKLM-01 | Phase 4 | Pending |
 | SKLM-02 | Phase 4 | Pending |
 | SKLM-03 | Phase 4 | Pending |
@@ -141,8 +141,8 @@
 | CRON-04 | Phase 4 | Pending |
 | CRON-05 | Phase 4 | Pending |
 | CRON-06 | Phase 4 | Pending |
-| CHAN-01 | Phase 3 | Pending |
-| CHAN-02 | Phase 3 | Pending |
+| CHAN-01 | Phase 3 | Complete |
+| CHAN-02 | Phase 3 | Complete |
 | CHAN-03 | Phase 3 | Complete |
 | PROJ-01 | Phase 1 | Complete |
 | PROJ-02 | Phase 1 | Complete |
