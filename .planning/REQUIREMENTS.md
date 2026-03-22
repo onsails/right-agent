@@ -11,15 +11,15 @@
 - [ ] **CLI-02**: User can run `rightclaw up --agents watchdog,reviewer` to launch only specific agents
 - [ ] **CLI-03**: User can run `rightclaw up -d` to launch agents in background with TUI server
 - [ ] **CLI-04**: User can run `rightclaw attach` to connect to running process-compose TUI
-- [ ] **CLI-05**: User can run `rightclaw status` to see agent states (running, stopped, restarting)
-- [ ] **CLI-06**: User can run `rightclaw restart <agent>` to restart a single agent
+- [x] **CLI-05**: User can run `rightclaw status` to see agent states (running, stopped, restarting)
+- [x] **CLI-06**: User can run `rightclaw restart <agent>` to restart a single agent
 - [ ] **CLI-07**: User can run `rightclaw down` to stop all agents and destroy sandboxes
 
 ### Sandboxing
 
 - [x] **SAND-01**: Each agent launches inside an OpenShell sandbox with its own YAML policy
 - [x] **SAND-02**: Shell wrapper per agent reads policy from agent directory and invokes `openshell sandbox create --policy <path> -- claude`
-- [ ] **SAND-03**: `rightclaw down` explicitly destroys OpenShell sandboxes (signals don't cross container boundaries)
+- [x] **SAND-03**: `rightclaw down` explicitly destroys OpenShell sandboxes (signals don't cross container boundaries)
 - [ ] **SAND-04**: Shipped default policies use `hard_requirement` for Landlock (no silent degradation on older kernels)
 - [ ] **SAND-05**: Shipped default policies cover filesystem, network, and process restrictions — OpenShell validates the YAML, not RightClaw
 
@@ -109,12 +109,12 @@
 | CLI-02 | Phase 2 | Pending |
 | CLI-03 | Phase 2 | Pending |
 | CLI-04 | Phase 2 | Pending |
-| CLI-05 | Phase 2 | Pending |
-| CLI-06 | Phase 2 | Pending |
+| CLI-05 | Phase 2 | Complete |
+| CLI-06 | Phase 2 | Complete |
 | CLI-07 | Phase 2 | Pending |
 | SAND-01 | Phase 2 | Complete |
 | SAND-02 | Phase 2 | Complete |
-| SAND-03 | Phase 2 | Pending |
+| SAND-03 | Phase 2 | Complete |
 | SAND-04 | Phase 3 | Pending |
 | SAND-05 | Phase 3 | Pending |
 | WORK-01 | Phase 1 | Complete |

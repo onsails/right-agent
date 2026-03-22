@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Ready to execute
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-03-22T16:54:40.982Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-03-22T17:00:08.303Z"
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-03-21)
 ## Current Position
 
 Phase: 02 (cli-runtime-and-sandboxing) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 
 ## Performance Metrics
 
@@ -49,6 +49,7 @@ Plan: 2 of 3
 | Phase 01 P01 | 4min | 2 tasks | 13 files |
 | Phase 01 P02 | 5min | 2 tasks | 12 files |
 | Phase 02 P01 | 4min | 2 tasks | 15 files |
+| Phase 02 P02 | 3min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -67,6 +68,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Embedded templates via include_str! from templates/ directory at repo root
 - [Phase 02]: reqwest 0.13 uses 'rustls' feature (not 'rustls-tls')
 - [Phase 02]: include_str\! from codegen/ needs 4 levels up to templates/
+- [Phase 02]: destroy_sandboxes uses best-effort cleanup (warn on failure) -- only exception to fail-fast
+- [Phase 02]: PcClient base_url http://localhost -- host ignored for Unix socket transport
 
 ### Pending Todos
 
@@ -79,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-22T16:54:40.979Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-03-22T17:00:08.301Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
