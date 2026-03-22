@@ -46,21 +46,21 @@
 
 ### Skill Management
 
-- [ ] **SKLM-01**: `/clawhub` Claude Code skill can search ClawHub registry by name or description via HTTP API
-- [ ] **SKLM-02**: `/clawhub` skill can install a skill by slug -- downloads to agent's `skills/` directory
-- [ ] **SKLM-03**: `/clawhub` skill can uninstall a skill by name -- removes from `skills/` directory
-- [ ] **SKLM-04**: `/clawhub` skill can list installed skills for the current agent
-- [ ] **SKLM-05**: Policy gate audits skill permissions (from SKILL.md frontmatter `metadata.openclaw.requires`) before activation
-- [ ] **SKLM-06**: Skills use standard ClawHub SKILL.md format with YAML frontmatter -- drop-in compatible
+- [x] **SKLM-01**: `/clawhub` Claude Code skill can search ClawHub registry by name or description via HTTP API
+- [x] **SKLM-02**: `/clawhub` skill can install a skill by slug -- downloads to agent's `skills/` directory
+- [x] **SKLM-03**: `/clawhub` skill can uninstall a skill by name -- removes from `skills/` directory
+- [x] **SKLM-04**: `/clawhub` skill can list installed skills for the current agent
+- [x] **SKLM-05**: Policy gate audits skill permissions (from SKILL.md frontmatter `metadata.openclaw.requires`) before activation
+- [x] **SKLM-06**: Skills use standard ClawHub SKILL.md format with YAML frontmatter -- drop-in compatible
 
 ### Scheduled Tasks
 
-- [ ] **CRON-01**: CronSync Claude Code skill reads `crons/*.yaml` specs as desired state
-- [ ] **CRON-02**: CronSync reconciles desired state against live cron jobs (CronList) via state.json mapping
-- [ ] **CRON-03**: CronSync creates missing jobs (CronCreate), deletes orphaned jobs (CronDelete), recreates changed jobs
-- [ ] **CRON-04**: Lock-file concurrency control prevents duplicate cron runs -- heartbeat-based with configurable TTL
-- [ ] **CRON-05**: All timestamps in lock files use UTC ISO 8601 format (suffix `Z`)
-- [ ] **CRON-06**: Cron YAML specs support `schedule` (5-field cron), `lock_ttl`, `max_turns`, and `prompt` fields
+- [x] **CRON-01**: CronSync Claude Code skill reads `crons/*.yaml` specs as desired state
+- [x] **CRON-02**: CronSync reconciles desired state against live cron jobs (CronList) via state.json mapping
+- [x] **CRON-03**: CronSync creates missing jobs (CronCreate), deletes orphaned jobs (CronDelete), recreates changed jobs
+- [x] **CRON-04**: Lock-file concurrency control prevents duplicate cron runs -- heartbeat-based with configurable TTL
+- [x] **CRON-05**: All timestamps in lock files use UTC ISO 8601 format (suffix `Z`)
+- [x] **CRON-06**: Cron YAML specs support `schedule` (5-field cron), `lock_ttl`, `max_turns`, and `prompt` fields
 
 ### Telegram Channel
 
@@ -129,18 +129,18 @@
 | INST-01 | Phase 3 | Complete |
 | INST-02 | Phase 3 | Complete |
 | INST-03 | Phase 3 | Complete |
-| SKLM-01 | Phase 4 | Pending |
-| SKLM-02 | Phase 4 | Pending |
-| SKLM-03 | Phase 4 | Pending |
-| SKLM-04 | Phase 4 | Pending |
-| SKLM-05 | Phase 4 | Pending |
-| SKLM-06 | Phase 4 | Pending |
-| CRON-01 | Phase 4 | Pending |
-| CRON-02 | Phase 4 | Pending |
-| CRON-03 | Phase 4 | Pending |
-| CRON-04 | Phase 4 | Pending |
-| CRON-05 | Phase 4 | Pending |
-| CRON-06 | Phase 4 | Pending |
+| SKLM-01 | Phase 4 | Complete |
+| SKLM-02 | Phase 4 | Complete |
+| SKLM-03 | Phase 4 | Complete |
+| SKLM-04 | Phase 4 | Complete |
+| SKLM-05 | Phase 4 | Complete |
+| SKLM-06 | Phase 4 | Complete |
+| CRON-01 | Phase 4 | Complete |
+| CRON-02 | Phase 4 | Complete |
+| CRON-03 | Phase 4 | Complete |
+| CRON-04 | Phase 4 | Complete |
+| CRON-05 | Phase 4 | Complete |
+| CRON-06 | Phase 4 | Complete |
 | CHAN-01 | Phase 3 | Complete |
 | CHAN-02 | Phase 3 | Complete |
 | CHAN-03 | Phase 3 | Complete |
