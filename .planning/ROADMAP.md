@@ -15,7 +15,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 1: Foundation and Agent Discovery** - Rust project scaffold, core types, agent directory parsing
 - [ ] **Phase 2: CLI Runtime and Sandboxing** - Code generation, process-compose lifecycle, OpenShell sandbox enforcement
 - [ ] **Phase 3: Default Agent and Installation** - "Right" agent with onboarding, default policies, Telegram channels, install script, doctor command
-- [ ] **Phase 3.1: Claude Code Settings & Plugin Configuration** - INSERTED — Template .claude/settings.json per agent, enabledPlugins for Telegram, eliminate manual /plugin install step
+- [x] **Phase 3.1: Claude Code Settings & Plugin Configuration** - INSERTED — Template .claude/settings.json per agent, enabledPlugins for Telegram, eliminate manual /plugin install step
+- [ ] **Phase 3.2: Interactive Agent Setup & Telegram Pairing** - INSERTED — `rightclaw pair` command for interactive first-run setup (Telegram pairing, BOOTSTRAP.md onboarding)
 - [ ] **Phase 4: Skills and Automation** - ClawHub skill management with policy gate, CronSync with lock-file concurrency
 
 ## Phase Details
@@ -85,6 +86,20 @@ Plans:
 Plans:
 - [x] 03.1-01-PLAN.md — Add .claude/settings.json creation to init_rightclaw_home when Telegram token provided
 
+### Phase 3.2: Interactive Agent Setup & Telegram Pairing
+**Goal**: Users can interactively set up agents (Telegram pairing, BOOTSTRAP.md onboarding) before running them under process-compose
+**Depends on**: Phase 3.1
+**INSERTED**: Discovered during manual testing — process-compose captures stdin/stdout, preventing Claude Code's interactive TUI from working (Telegram pairing code can't be entered, BOOTSTRAP.md onboarding can't be completed)
+**Requirements**: CHAN-02, DFLT-02, DFLT-03 (strengthening — these require interactive terminal access that process-compose blocks)
+**Success Criteria** (what must be TRUE):
+  1. `rightclaw pair <agent>` launches Claude Code interactively in the foreground with the agent's identity — user can complete Telegram pairing and BOOTSTRAP.md onboarding
+  2. After pairing/onboarding, `rightclaw up` runs agents in background via process-compose as before
+  3. `rightclaw pair` without agent name defaults to the "right" agent
+**Plans**: TBD
+
+Plans:
+- [ ] 03.2-01: TBD
+
 ### Phase 4: Skills and Automation
 **Goal**: Agents can safely install ClawHub skills and run scheduled tasks autonomously
 **Depends on**: Phase 3
@@ -104,12 +119,13 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 3.1 -> 4
+Phases execute in numeric order: 1 -> 2 -> 3 -> 3.1 -> 3.2 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation and Agent Discovery | 2/2 | Complete | 2026-03-21 |
 | 2. CLI Runtime and Sandboxing | 3/3 | Complete | 2026-03-22 |
 | 3. Default Agent and Installation | 4/4 | Complete | 2026-03-22 |
-| 3.1. CC Settings & Plugin Config | 0/1 | Not started | - |
+| 3.1. CC Settings & Plugin Config | 1/1 | Complete | 2026-03-22 |
+| 3.2. Interactive Setup & Pairing | 0/1 | Not started | - |
 | 4. Skills and Automation | 2/2 | Complete | 2026-03-22 |
