@@ -20,8 +20,8 @@
 - [x] **SAND-01**: Each agent launches inside an OpenShell sandbox with its own YAML policy
 - [x] **SAND-02**: Shell wrapper per agent reads policy from agent directory and invokes `openshell sandbox create --policy <path> -- claude`
 - [x] **SAND-03**: `rightclaw down` explicitly destroys OpenShell sandboxes (signals don't cross container boundaries)
-- [ ] **SAND-04**: Shipped default policies use `hard_requirement` for Landlock (no silent degradation on older kernels)
-- [ ] **SAND-05**: Shipped default policies cover filesystem, network, and process restrictions — OpenShell validates the YAML, not RightClaw
+- [x] **SAND-04**: Shipped default policies use `hard_requirement` for Landlock (no silent degradation on older kernels)
+- [x] **SAND-05**: Shipped default policies cover filesystem, network, and process restrictions — OpenShell validates the YAML, not RightClaw
 
 ### Agent Workspace
 
@@ -34,9 +34,9 @@
 ### Default Agent
 
 - [ ] **DFLT-01**: RightClaw ships a default "Right" agent in `agents/right/`
-- [ ] **DFLT-02**: "Right" agent has BOOTSTRAP.md that runs on first conversation -- asks user's name, vibe, personality, emoji
-- [ ] **DFLT-03**: BOOTSTRAP.md onboarding writes IDENTITY.md, USER.md, SOUL.md on completion, then self-deletes
-- [ ] **DFLT-04**: "Right" agent is general-purpose -- no domain-specific skills, suitable as a starting template
+- [x] **DFLT-02**: "Right" agent has BOOTSTRAP.md that runs on first conversation -- asks user's name, vibe, personality, emoji
+- [x] **DFLT-03**: BOOTSTRAP.md onboarding writes IDENTITY.md, USER.md, SOUL.md on completion, then self-deletes
+- [x] **DFLT-04**: "Right" agent is general-purpose -- no domain-specific skills, suitable as a starting template
 
 ### Installation
 
@@ -66,7 +66,7 @@
 
 - [ ] **CHAN-01**: Per-agent Telegram channel configuration via `.mcp.json` using official Claude Code Telegram plugin
 - [ ] **CHAN-02**: Default "Right" agent BOOTSTRAP.md includes Telegram bot setup as part of onboarding
-- [ ] **CHAN-03**: OpenShell policy templates include Telegram Bot API endpoint (`api.telegram.org`) in network allowlist
+- [x] **CHAN-03**: OpenShell policy templates include Telegram Bot API endpoint (`api.telegram.org`) in network allowlist
 
 ### Project Setup
 
@@ -115,17 +115,17 @@
 | SAND-01 | Phase 2 | Complete |
 | SAND-02 | Phase 2 | Complete |
 | SAND-03 | Phase 2 | Complete |
-| SAND-04 | Phase 3 | Pending |
-| SAND-05 | Phase 3 | Pending |
+| SAND-04 | Phase 3 | Complete |
+| SAND-05 | Phase 3 | Complete |
 | WORK-01 | Phase 1 | Complete |
 | WORK-02 | Phase 1 | Complete |
 | WORK-03 | Phase 1 | Complete |
 | WORK-04 | Phase 1 | Complete |
 | WORK-05 | Phase 1 | Complete |
 | DFLT-01 | Phase 3 | Pending |
-| DFLT-02 | Phase 3 | Pending |
-| DFLT-03 | Phase 3 | Pending |
-| DFLT-04 | Phase 3 | Pending |
+| DFLT-02 | Phase 3 | Complete |
+| DFLT-03 | Phase 3 | Complete |
+| DFLT-04 | Phase 3 | Complete |
 | INST-01 | Phase 3 | Complete |
 | INST-02 | Phase 3 | Pending |
 | INST-03 | Phase 3 | Pending |
@@ -143,7 +143,7 @@
 | CRON-06 | Phase 4 | Pending |
 | CHAN-01 | Phase 3 | Pending |
 | CHAN-02 | Phase 3 | Pending |
-| CHAN-03 | Phase 3 | Pending |
+| CHAN-03 | Phase 3 | Complete |
 | PROJ-01 | Phase 1 | Complete |
 | PROJ-02 | Phase 1 | Complete |
 
