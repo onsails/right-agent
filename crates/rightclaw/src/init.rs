@@ -175,17 +175,45 @@ fn pre_trust_directory(agent_dir: &Path) -> miette::Result<()> {
         "hasTrustDialogAccepted".to_owned(),
         serde_json::Value::Bool(true),
     );
-    project_obj.insert(
-        "skipDangerousModePermissionPrompt".to_owned(),
-        serde_json::Value::Bool(true),
-    );
-
     std::fs::write(
         &claude_json_path,
         serde_json::to_string_pretty(&config)
             .map_err(|e| miette::miette!("failed to serialize config: {e}"))?,
     )
     .map_err(|e| miette::miette!("failed to write {}: {}", claude_json_path.display(), e))?;
+
+    // Also write skipDangerousModePermissionPrompt to ~/.claude/settings.json
+    // (user-level settings — separate file from .claude.json).
+    let user_settings_dir = home_dir.join(".claude");
+    std::fs::create_dir_all(&user_settings_dir).map_err(|e| {
+        miette::miette!("failed to create {}: {}", user_settings_dir.display(), e)
+    })?;
+    let user_settings_path = user_settings_dir.join("settings.json");
+
+    let mut user_settings: serde_json::Value = if user_settings_path.exists() {
+        let content = std::fs::read_to_string(&user_settings_path).map_err(|e| {
+            miette::miette!("failed to read {}: {}", user_settings_path.display(), e)
+        })?;
+        serde_json::from_str(&content).map_err(|e| {
+            miette::miette!("failed to parse {}: {}", user_settings_path.display(), e)
+        })?
+    } else {
+        serde_json::json!({})
+    };
+
+    if let Some(obj) = user_settings.as_object_mut() {
+        obj.insert(
+            "skipDangerousModePermissionPrompt".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    std::fs::write(
+        &user_settings_path,
+        serde_json::to_string_pretty(&user_settings)
+            .map_err(|e| miette::miette!("failed to serialize settings: {e}"))?,
+    )
+    .map_err(|e| miette::miette!("failed to write {}: {}", user_settings_path.display(), e))?;
 
     Ok(())
 }
