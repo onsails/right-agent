@@ -17,6 +17,7 @@ const SKILL_CRONSYNC: &str = include_str!("../../../skills/cronsync/SKILL.md");
 /// When `telegram_token` is provided:
 /// - Uses `policy-telegram.yaml` instead of base `policy.yaml`
 /// - Writes the token to `telegram_env_dir/.env` for Claude Code's Telegram plugin
+/// - Creates `.claude/settings.json` with `enabledPlugins` for automatic Telegram plugin activation
 ///
 /// `telegram_env_dir` controls where the `.env` file is written. Pass `None` to
 /// use the default `~/.claude/channels/telegram/` path.
