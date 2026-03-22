@@ -44,12 +44,12 @@ Plans:
   3. `rightclaw status` shows running/stopped state for each agent; `rightclaw restart <agent>` restarts a single agent
   4. `rightclaw attach` connects to a running process-compose TUI session
   5. `rightclaw down` stops all agents and explicitly destroys OpenShell sandboxes (signals do not cross container boundaries)
-**Plans**: TBD
+**Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: TBD
-- [ ] 02-02: TBD
-- [ ] 02-03: TBD
+- [ ] 02-01-PLAN.md — Workspace deps, minijinja templates, codegen module (shell wrapper + process-compose.yaml generation)
+- [ ] 02-02-PLAN.md — Runtime module (process-compose REST API client, sandbox tracking/cleanup, dependency verification)
+- [ ] 02-03-PLAN.md — Wire CLI subcommands (up, down, status, restart, attach) and integration tests
 
 ### Phase 3: Default Agent and Installation
 **Goal**: Users can install RightClaw and have a working agent experience out of the box
