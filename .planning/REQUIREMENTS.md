@@ -40,7 +40,7 @@
 
 ### Installation
 
-- [ ] **INST-01**: `install.sh` one-liner installs rightclaw binary, process-compose, and OpenShell
+- [x] **INST-01**: `install.sh` one-liner installs rightclaw binary, process-compose, and OpenShell
 - [ ] **INST-02**: `rightclaw doctor` validates all dependencies are present and functional (rightclaw, process-compose, openshell, claude CLI)
 - [ ] **INST-03**: `rightclaw doctor` validates agent directory structure and policy files
 
@@ -126,7 +126,7 @@
 | DFLT-02 | Phase 3 | Pending |
 | DFLT-03 | Phase 3 | Pending |
 | DFLT-04 | Phase 3 | Pending |
-| INST-01 | Phase 3 | Pending |
+| INST-01 | Phase 3 | Complete |
 | INST-02 | Phase 3 | Pending |
 | INST-03 | Phase 3 | Pending |
 | SKLM-01 | Phase 4 | Pending |

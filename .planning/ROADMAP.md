@@ -66,7 +66,7 @@ Plans:
 
 Plans:
 - [ ] 03-01-PLAN.md — BOOTSTRAP.md onboarding template, production policy.yaml (both variants)
-- [ ] 03-02-PLAN.md — install.sh one-liner script with platform detection and dependency installation
+- [x] 03-02-PLAN.md — install.sh one-liner script with platform detection and dependency installation
 - [ ] 03-03-PLAN.md — Doctor module (run_doctor) and init.rs extension (telegram_token, BOOTSTRAP.md, policy variant)
 - [ ] 03-04-PLAN.md — Wire Doctor + Init to CLI, shell wrapper --channels flag, integration tests
 

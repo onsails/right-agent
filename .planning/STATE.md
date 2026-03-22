@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to plan
-stopped_at: Phase 3 context gathered
-last_updated: "2026-03-22T17:46:18.320Z"
+status: Ready to execute
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-03-22T18:34:28.158Z"
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 5
-  completed_plans: 5
+  total_plans: 9
+  completed_plans: 6
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-21)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by OpenShell policies, orchestrated by a single CLI command.
-**Current focus:** Phase 02 — cli-runtime-and-sandboxing
+**Current focus:** Phase 03 — default-agent-and-installation
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
+Phase: 03 (default-agent-and-installation) — EXECUTING
+Plan: 2 of 4
 
 ## Performance Metrics
 
@@ -51,6 +51,7 @@ Plan: Not started
 | Phase 02 P01 | 4min | 2 tasks | 15 files |
 | Phase 02 P02 | 3min | 2 tasks | 6 files |
 | Phase 02 P03 | 4min | 2 tasks | 5 files |
+| Phase 03 P02 | 1min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,7 @@ Recent decisions affecting current work:
 - [Phase 02]: PcClient base_url http://localhost -- host ignored for Unix socket transport
 - [Phase 02]: SystemTime for timestamps instead of chrono dependency
 - [Phase 02]: Per-function command handlers (cmd_up, cmd_down, etc.) for cleaner main.rs
+- [Phase 03]: install.sh uses full-path binary invocation and cargo install fallback
 
 ### Pending Todos
 
@@ -85,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-22T17:46:18.317Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-default-agent-and-installation/03-CONTEXT.md
+Last session: 2026-03-22T18:34:28.155Z
+Stopped at: Completed 03-02-PLAN.md
+Resume file: None
