@@ -5,31 +5,21 @@ const WRAPPER_TEMPLATE: &str = include_str!("../../../../templates/agent-wrapper
 
 /// Generate a shell wrapper script for an agent.
 ///
-/// When `no_sandbox` is false, the wrapper invokes `openshell sandbox create`
-/// with the agent's policy. When true, it runs `claude` directly.
-///
-/// If `system_prompt_path` is provided, an additional `--append-system-prompt-file`
-/// flag is included for CronSync bootstrap instructions.
+/// `combined_prompt_path` points to a single file containing the merged
+/// identity + start prompt + optional CronSync bootstrap content.
+/// Claude Code only allows one `--append-system-prompt-file`, so all
+/// system prompt content must be combined into a single file.
 pub fn generate_wrapper(
     agent: &AgentDef,
     no_sandbox: bool,
-    system_prompt_path: Option<&str>,
+    combined_prompt_path: &str,
 ) -> miette::Result<String> {
     let mut env = Environment::new();
     env.add_template("wrapper", WRAPPER_TEMPLATE)
         .map_err(|e| miette::miette!("template parse error: {e:#}"))?;
     let tmpl = env.get_template("wrapper").expect("template just added");
 
-    let start_prompt = agent
-        .config
-        .as_ref()
-        .and_then(|c| c.start_prompt.as_deref())
-        .unwrap_or("You are starting. Read your MEMORY.md to restore context.");
-
     // Detect Telegram channel configuration.
-    // If agent has .mcp.json, set channels to the Telegram plugin identifier.
-    // V1 simplification: .mcp.json presence implies Telegram. Future versions
-    // could parse .mcp.json contents for more granular channel detection.
     let channels: Option<&str> = if agent.mcp_config_path.is_some() {
         Some("plugin:telegram@claude-plugins-official")
     } else {
@@ -38,13 +28,11 @@ pub fn generate_wrapper(
 
     tmpl.render(context! {
         agent_name => agent.name,
-        identity_path => agent.identity_path.display().to_string(),
         policy_path => agent.policy_path.display().to_string(),
         working_dir => agent.path.display().to_string(),
+        combined_prompt_path => combined_prompt_path,
         no_sandbox => no_sandbox,
-        start_prompt => start_prompt,
         channels => channels,
-        system_prompt_path => system_prompt_path,
     })
     .map_err(|e| miette::miette!("template render error: {e:#}"))
 }

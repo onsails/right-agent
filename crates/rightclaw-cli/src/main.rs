@@ -25,6 +25,9 @@ pub enum Commands {
         /// Telegram bot token for channel setup (skip with Enter if interactive)
         #[arg(long)]
         telegram_token: Option<String>,
+        /// Telegram numeric user ID for auto-pairing (get from @userinfobot)
+        #[arg(long)]
+        telegram_user_id: Option<String>,
     },
     /// List discovered agents and their status
     List,
@@ -85,7 +88,7 @@ async fn main() -> miette::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Init { telegram_token } => cmd_init(&home, telegram_token.as_deref()),
+        Commands::Init { telegram_token, telegram_user_id } => cmd_init(&home, telegram_token.as_deref(), telegram_user_id.as_deref()),
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home),
         Commands::Up {
@@ -101,7 +104,7 @@ async fn main() -> miette::Result<()> {
     }
 }
 
-fn cmd_init(home: &Path, telegram_token: Option<&str>) -> miette::Result<()> {
+fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_user_id: Option<&str>) -> miette::Result<()> {
     // If --telegram-token flag provided, validate it upfront.
     // Otherwise prompt interactively (per D-06, D-07).
     let token = match telegram_token {
@@ -112,7 +115,14 @@ fn cmd_init(home: &Path, telegram_token: Option<&str>) -> miette::Result<()> {
         None => rightclaw::init::prompt_telegram_token()?,
     };
 
-    rightclaw::init::init_rightclaw_home(home, token.as_deref(), None)?;
+    // If --telegram-user-id flag provided, use it. Otherwise prompt if token was provided.
+    let user_id = match telegram_user_id {
+        Some(id) => Some(id.to_string()),
+        None if token.is_some() => prompt_telegram_user_id()?,
+        None => None,
+    };
+
+    rightclaw::init::init_rightclaw_home(home, token.as_deref(), user_id.as_deref(), None)?;
 
     println!("Initialized RightClaw at {}", home.display());
     println!(
@@ -121,8 +131,32 @@ fn cmd_init(home: &Path, telegram_token: Option<&str>) -> miette::Result<()> {
     );
     if token.is_some() {
         println!("Telegram channel configured and plugin auto-enabled.");
+        if user_id.is_some() {
+            println!("Telegram user pre-paired (no pairing step needed).");
+        }
     }
     Ok(())
+}
+
+fn prompt_telegram_user_id() -> miette::Result<Option<String>> {
+    use std::io::{self, Write};
+    print!("Telegram numeric user ID for auto-pairing (get from @userinfobot, or Enter to skip): ");
+    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+    let id = input.trim();
+    if id.is_empty() {
+        return Ok(None);
+    }
+    if !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(miette::miette!(
+            help = "Get your numeric user ID from @userinfobot on Telegram",
+            "Invalid Telegram user ID — must be numeric"
+        ));
+    }
+    Ok(Some(id.to_string()))
 }
 
 fn cmd_doctor(home: &Path) -> miette::Result<()> {

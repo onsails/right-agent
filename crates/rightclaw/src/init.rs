@@ -26,6 +26,7 @@ const SKILL_CRONSYNC: &str = include_str!("../../../skills/cronsync/SKILL.md");
 pub fn init_rightclaw_home(
     home: &Path,
     telegram_token: Option<&str>,
+    telegram_user_id: Option<&str>,
     telegram_env_dir: Option<&Path>,
 ) -> miette::Result<()> {
     let agents_dir = home.join("agents").join("right");
@@ -108,6 +109,17 @@ pub fn init_rightclaw_home(
         .map_err(|e| {
             miette::miette!("Failed to write settings.json: {}", e)
         })?;
+
+        // Pre-pair Telegram user via access.json so no interactive pairing is needed.
+        // The Telegram plugin re-reads this file on every inbound message.
+        if let Some(user_id) = telegram_user_id {
+            let access_json = format!(
+                r#"{{"dmPolicy":"allowlist","allowFrom":["{user_id}"],"pending":{{}},"groups":{{}}}}"#
+            );
+            std::fs::write(env_dir.join("access.json"), access_json).map_err(|e| {
+                miette::miette!("Failed to write access.json: {}", e)
+            })?;
+        }
     }
 
     // Pre-trust the agent directory in Claude Code's config so the
@@ -268,7 +280,7 @@ mod tests {
     #[test]
     fn init_creates_default_agent_files() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, None, None).unwrap();
 
         let agents_dir = dir.path().join("agents").join("right");
         assert!(agents_dir.join("IDENTITY.md").exists());
@@ -292,7 +304,7 @@ mod tests {
     #[test]
     fn init_identity_contains_right() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, None, None).unwrap();
 
         let content =
             std::fs::read_to_string(dir.path().join("agents/right/IDENTITY.md")).unwrap();
@@ -305,9 +317,9 @@ mod tests {
     #[test]
     fn init_errors_if_already_initialized() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, None, None).unwrap();
 
-        let result = init_rightclaw_home(dir.path(), None, None);
+        let result = init_rightclaw_home(dir.path(), None, None, None);
         assert!(result.is_err());
         let err = format!("{:?}", result.unwrap_err());
         assert!(
@@ -319,7 +331,7 @@ mod tests {
     #[test]
     fn init_without_telegram_uses_base_policy() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, None, None).unwrap();
 
         let policy = std::fs::read_to_string(
             dir.path().join("agents/right/policy.yaml"),
@@ -339,6 +351,7 @@ mod tests {
         init_rightclaw_home(
             dir.path(),
             Some("123456:ABCdef"),
+            None,
             Some(env_dir.path()),
         )
         .unwrap();
@@ -361,6 +374,7 @@ mod tests {
         init_rightclaw_home(
             dir.path(),
             Some("123456:ABCdef"),
+            None,
             Some(env_dir.path()),
         )
         .unwrap();
@@ -373,7 +387,7 @@ mod tests {
     fn init_without_telegram_does_not_write_env_file() {
         let dir = tempdir().unwrap();
         let env_dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, Some(env_dir.path())).unwrap();
+        init_rightclaw_home(dir.path(), None, None, Some(env_dir.path())).unwrap();
 
         assert!(
             !env_dir.path().join(".env").exists(),
@@ -384,7 +398,7 @@ mod tests {
     #[test]
     fn init_creates_bootstrap_md() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, None, None).unwrap();
 
         let bootstrap = std::fs::read_to_string(
             dir.path().join("agents/right/BOOTSTRAP.md"),
@@ -432,7 +446,7 @@ mod tests {
     fn init_with_telegram_creates_settings_json() {
         let dir = tempdir().unwrap();
         let env_dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), Some(env_dir.path())).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), None, Some(env_dir.path())).unwrap();
 
         let settings_path = dir
             .path()
@@ -456,7 +470,7 @@ mod tests {
     #[test]
     fn init_without_telegram_no_settings_json() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, None, None).unwrap();
 
         let settings_path = dir
             .path()

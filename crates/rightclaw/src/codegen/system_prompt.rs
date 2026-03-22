@@ -1,23 +1,51 @@
+use std::path::Path;
+
 use crate::agent::AgentDef;
 
-/// Generate system prompt content for an agent.
+/// Generate a combined system prompt file content for an agent.
 ///
-/// If the agent has a `crons/` directory, the prompt instructs Claude
-/// to run `/cronsync` on startup to reconcile scheduled tasks.
-/// Returns `None` if no system prompt is needed.
-pub fn generate_system_prompt(agent: &AgentDef) -> Option<String> {
+/// Concatenates: identity file content + start prompt + optional CronSync bootstrap.
+/// Claude Code only allows one `--append-system-prompt-file`, so everything
+/// must be merged into a single file.
+pub fn generate_combined_prompt(agent: &AgentDef) -> miette::Result<String> {
+    let identity_content = std::fs::read_to_string(&agent.identity_path)
+        .map_err(|e| miette::miette!("Failed to read {}: {}", agent.identity_path.display(), e))?;
+
+    let start_prompt = agent
+        .config
+        .as_ref()
+        .and_then(|c| c.start_prompt.as_deref())
+        .unwrap_or("You are starting. Read your MEMORY.md to restore context.");
+
+    let mut content = identity_content;
+    content.push_str("\n\n---\n\n## Startup Instructions\n\n");
+    content.push_str(start_prompt);
+    content.push('\n');
+
+    // Add CronSync bootstrap if agent has crons/ directory
     let crons_dir = agent.path.join("crons");
-    if !crons_dir.is_dir() {
-        return None;
+    if crons_dir.is_dir() && has_yaml_files(&crons_dir) {
+        content.push_str("\n## RightClaw System Instructions\n\n");
+        content.push_str(
+            "On startup, check if the `crons/` directory exists in your agent directory.\n\
+             If it contains `.yaml` files, run `/cronsync` to reconcile scheduled tasks.\n\n\
+             This ensures all declared cron jobs are active after agent restart or session expiry.\n",
+        );
     }
 
-    Some(
-        "## RightClaw System Instructions\n\n\
-         On startup, check if the `crons/` directory exists in your agent directory.\n\
-         If it contains `.yaml` files, run `/cronsync` to reconcile scheduled tasks.\n\n\
-         This ensures all declared cron jobs are active after agent restart or session expiry.\n"
-            .to_owned(),
-    )
+    Ok(content)
+}
+
+fn has_yaml_files(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "yaml" || ext == "yml")
+            })
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
