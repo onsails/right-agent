@@ -10,11 +10,13 @@ exec openshell sandbox create \
   -- claude \
     --append-system-prompt-file "{{ identity_path }}" \
     --dangerously-skip-permissions \
-    --prompt "{{ start_prompt }}"
+    {% if channels %}--channels {{ channels }} \
+    {% endif %}--prompt "{{ start_prompt }}"
 {% else %}
 # WARNING: Running without sandbox (--no-sandbox mode)
 exec claude \
   --append-system-prompt-file "{{ identity_path }}" \
   --dangerously-skip-permissions \
-  --prompt "{{ start_prompt }}"
+  {% if channels %}--channels {{ channels }} \
+  {% endif %}--prompt "{{ start_prompt }}"
 {% endif %}

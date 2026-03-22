@@ -19,12 +19,23 @@ pub fn generate_wrapper(agent: &AgentDef, no_sandbox: bool) -> miette::Result<St
         .and_then(|c| c.start_prompt.as_deref())
         .unwrap_or("You are starting. Read your MEMORY.md to restore context.");
 
+    // Detect Telegram channel configuration.
+    // If agent has .mcp.json, set channels to the Telegram plugin identifier.
+    // V1 simplification: .mcp.json presence implies Telegram. Future versions
+    // could parse .mcp.json contents for more granular channel detection.
+    let channels: Option<&str> = if agent.mcp_config_path.is_some() {
+        Some("plugin:telegram@claude-plugins-official")
+    } else {
+        None
+    };
+
     tmpl.render(context! {
         agent_name => agent.name,
         identity_path => agent.identity_path.display().to_string(),
         policy_path => agent.policy_path.display().to_string(),
         no_sandbox => no_sandbox,
         start_prompt => start_prompt,
+        channels => channels,
     })
     .map_err(|e| miette::miette!("template render error: {e:#}"))
 }

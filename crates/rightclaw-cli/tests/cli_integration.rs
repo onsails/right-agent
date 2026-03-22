@@ -95,6 +95,89 @@ fn test_list_no_agents_dir() {
         .stdout(predicate::str::contains("rightclaw init"));
 }
 
+// --- Phase 3 Plan 04: Doctor and Init --telegram-token tests ---
+
+#[test]
+fn test_help_shows_doctor() {
+    rightclaw()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doctor"));
+}
+
+#[test]
+fn test_doctor_in_valid_home() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Initialize first so agent structure exists.
+    rightclaw()
+        .args(["--home", home, "init"])
+        .assert()
+        .success();
+
+    // Doctor should report the valid agent.
+    rightclaw()
+        .args(["--home", home, "doctor"])
+        .assert()
+        // May still fail overall (openshell/process-compose not in PATH)
+        // but should contain the agent check.
+        .stdout(predicate::str::contains("agents/right/"));
+}
+
+#[test]
+fn test_doctor_missing_agents_dir() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args(["--home", home, "doctor"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("agents/"));
+}
+
+#[test]
+fn test_init_with_telegram_token() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args(["--home", home, "init", "--telegram-token", "123456:ABCdef"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Telegram"));
+
+    // Verify the agent was created with telegram policy.
+    let policy = fs::read_to_string(dir.path().join("agents/right/policy.yaml")).unwrap();
+    assert!(
+        policy.contains("telegram_api:") && !policy.contains("# telegram_api:"),
+        "should use telegram policy variant"
+    );
+}
+
+#[test]
+fn test_init_with_invalid_telegram_token() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args(["--home", home, "init", "--telegram-token", "invalid"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid Telegram bot token"));
+}
+
+#[test]
+fn test_init_help_shows_telegram_token_flag() {
+    rightclaw()
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--telegram-token"));
+}
+
 // --- Phase 2 Plan 03: New subcommand tests ---
 
 #[test]

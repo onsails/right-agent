@@ -31,6 +31,14 @@ fn make_agent(name: &str, start_prompt: Option<&str>) -> AgentDef {
     }
 }
 
+fn make_agent_with_mcp(name: &str, start_prompt: Option<&str>) -> AgentDef {
+    let mut agent = make_agent(name, start_prompt);
+    agent.mcp_config_path = Some(PathBuf::from(format!(
+        "/home/user/.rightclaw/agents/{name}/.mcp.json"
+    )));
+    agent
+}
+
 fn make_agent_no_config(name: &str) -> AgentDef {
     AgentDef {
         name: name.to_owned(),
@@ -147,5 +155,49 @@ fn wrapper_default_prompt_when_config_has_none() {
     assert!(
         output.contains("You are starting. Read your MEMORY.md to restore context."),
         "expected default prompt when start_prompt is None:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_with_mcp_includes_channels_flag_sandbox() {
+    let agent = make_agent_with_mcp("testbot", Some("Go"));
+    let output = generate_wrapper(&agent, false).unwrap();
+
+    assert!(
+        output.contains("--channels plugin:telegram@claude-plugins-official"),
+        "expected --channels flag in sandbox mode:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_with_mcp_includes_channels_flag_no_sandbox() {
+    let agent = make_agent_with_mcp("testbot", Some("Go"));
+    let output = generate_wrapper(&agent, true).unwrap();
+
+    assert!(
+        output.contains("--channels plugin:telegram@claude-plugins-official"),
+        "expected --channels flag in no-sandbox mode:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_without_mcp_omits_channels_flag() {
+    let agent = make_agent("testbot", Some("Go"));
+    let output = generate_wrapper(&agent, false).unwrap();
+
+    assert!(
+        !output.contains("--channels"),
+        "should NOT contain --channels without mcp_config_path:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_without_mcp_omits_channels_flag_no_sandbox() {
+    let agent = make_agent("testbot", Some("Go"));
+    let output = generate_wrapper(&agent, true).unwrap();
+
+    assert!(
+        !output.contains("--channels"),
+        "should NOT contain --channels in no-sandbox without mcp:\n{output}"
     );
 }
