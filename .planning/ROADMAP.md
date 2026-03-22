@@ -83,7 +83,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 03.1-01-PLAN.md — Add .claude/settings.json creation to init_rightclaw_home when Telegram token provided
+- [x] 03.1-01-PLAN.md — Add .claude/settings.json creation to init_rightclaw_home when Telegram token provided
 
 ### Phase 4: Skills and Automation
 **Goal**: Agents can safely install ClawHub skills and run scheduled tasks autonomously
