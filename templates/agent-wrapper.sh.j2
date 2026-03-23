@@ -18,9 +18,10 @@ fi
 
 {% if not no_sandbox %}
 exec openshell sandbox create \
+  --from openclaw \
   --policy "{{ policy_path }}" \
   --name "rightclaw-{{ agent_name }}" \
-  -- "$CLAUDE_BIN" \
+  -- claude \
     --append-system-prompt-file "{{ combined_prompt_path }}" \
     --dangerously-skip-permissions \
     {% if model %}--model {{ model }} \
