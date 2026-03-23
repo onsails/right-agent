@@ -18,8 +18,8 @@ fi
 
 {% if not no_sandbox %}
 exec openshell sandbox create \
-  --from openclaw \
   --auto-providers \
+  --no-keep \
   --policy "{{ policy_path }}" \
   --name "rightclaw-{{ agent_name }}" \
   -- claude \
