@@ -95,7 +95,25 @@ pub fn init_rightclaw_home(
     std::fs::write(claude_skills_dir.join("installed.json"), "{}")
         .map_err(|e| miette::miette!("Failed to write installed.json: {}", e))?;
 
-    // Write Telegram bot token to .env and create .claude/settings.json if provided.
+    // Always create .claude/settings.json with skipDangerousModePermissionPrompt.
+    // This prevents Claude Code from prompting for .claude/ file writes in daemon mode.
+    {
+        let claude_dir = agents_dir.join(".claude");
+        std::fs::create_dir_all(&claude_dir).map_err(|e| {
+            miette::miette!("Failed to create {}: {}", claude_dir.display(), e)
+        })?;
+
+        let settings = if telegram_token.is_some() {
+            r#"{"skipDangerousModePermissionPrompt":true,"enabledPlugins":{"telegram@claude-plugins-official":true}}"#
+        } else {
+            r#"{"skipDangerousModePermissionPrompt":true}"#
+        };
+
+        std::fs::write(claude_dir.join("settings.json"), settings)
+            .map_err(|e| miette::miette!("Failed to write settings.json: {}", e))?;
+    }
+
+    // Write Telegram bot token to .env if provided.
     if let Some(token) = telegram_token {
         let env_dir = match telegram_env_dir {
             Some(dir) => dir.to_path_buf(),
@@ -114,19 +132,6 @@ pub fn init_rightclaw_home(
         )
         .map_err(|e| {
             miette::miette!("Failed to write telegram .env: {}", e)
-        })?;
-
-        // Create .claude/settings.json with Telegram plugin auto-enabled.
-        let claude_dir = agents_dir.join(".claude");
-        std::fs::create_dir_all(&claude_dir).map_err(|e| {
-            miette::miette!("Failed to create {}: {}", claude_dir.display(), e)
-        })?;
-        std::fs::write(
-            claude_dir.join("settings.json"),
-            r#"{"enabledPlugins":{"telegram@claude-plugins-official":true}}"#,
-        )
-        .map_err(|e| {
-            miette::miette!("Failed to write settings.json: {}", e)
         })?;
 
         // Create .mcp.json marker so the shell wrapper detects Telegram and adds --channels flag.
