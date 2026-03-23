@@ -105,15 +105,7 @@ pub fn init_rightclaw_home(
         let mut settings = serde_json::json!({
             "skipDangerousModePermissionPrompt": true,
             "spinnerTipsEnabled": false,
-            "prefersReducedMotion": true,
-            "hooks": {
-                "SessionStart": [{
-                    "hooks": [{
-                        "type": "prompt",
-                        "prompt": "Run /rightcron to reconcile scheduled tasks. If crons/ directory exists with .yaml files, recover all jobs. If no specs exist, this is a no-op. Do this silently — do not message the user about it."
-                    }]
-                }]
-            }
+            "prefersReducedMotion": true
         });
 
         if telegram_token.is_some() {
