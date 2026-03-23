@@ -28,6 +28,7 @@ exec openshell sandbox create \
     {% if model %}--model {{ model }} \
     {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
     {% endif %}{% if channels %}--channels {{ channels }} \
+    {% endif %}{% if startup_prompt %}"{{ startup_prompt }}" \
     {% endif %}
 {% else %}
 # WARNING: Running without sandbox (--no-sandbox mode)
@@ -37,5 +38,6 @@ exec "$CLAUDE_BIN" \
   {% if model %}--model {{ model }} \
   {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
   {% endif %}{% if channels %}--channels {{ channels }} \
+  {% endif %}{% if startup_prompt %}"{{ startup_prompt }}" \
   {% endif %}
 {% endif %}

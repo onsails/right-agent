@@ -29,6 +29,9 @@ pub fn generate_wrapper(
 
     let model = agent.config.as_ref().and_then(|c| c.model.as_deref());
 
+    // Startup prompt — executed as first message (positional arg, stays interactive).
+    let startup_prompt = "Run /rightcron to bootstrap the cron reconciler. Create crons/ directory if missing, schedule the reconciler job, and recover any persisted cron specs. Do this silently without messaging the user.";
+
     tmpl.render(context! {
         agent_name => agent.name,
         policy_path => agent.policy_path.display().to_string(),
@@ -37,6 +40,7 @@ pub fn generate_wrapper(
         no_sandbox => no_sandbox,
         channels => channels,
         model => model,
+        startup_prompt => startup_prompt,
         debug => debug_log_path.is_some(),
         debug_log_path => debug_log_path.unwrap_or_default(),
     })
