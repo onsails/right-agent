@@ -74,13 +74,14 @@ pub fn init_rightclaw_home(
     std::fs::write(&policy_path, &policy_content)
         .map_err(|e| miette::miette!("Failed to write {}: {}", policy_path.display(), e))?;
 
-    // Install built-in skills (/clawhub, /cronsync) into the agent's skills/ directory.
+    // Install built-in skills into .claude/skills/ (standard Agent Skills path).
+    // Claude Code discovers skills from .claude/skills/ relative to cwd.
     let built_in_skills: &[(&str, &str)] = &[
         ("clawhub/SKILL.md", SKILL_CLAWHUB),
         ("cronsync/SKILL.md", SKILL_CRONSYNC),
     ];
     for (skill_path, content) in built_in_skills {
-        let path = agents_dir.join("skills").join(skill_path);
+        let path = agents_dir.join(".claude").join("skills").join(skill_path);
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| {
             miette::miette!("Failed to create skill directory: {}", e)
         })?;
@@ -157,8 +158,8 @@ pub fn init_rightclaw_home(
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/policy.yaml");
     println!("  agents/right/agent.yaml");
-    println!("  agents/right/skills/clawhub/SKILL.md");
-    println!("  agents/right/skills/cronsync/SKILL.md");
+    println!("  agents/right/.claude/skills/clawhub/SKILL.md");
+    println!("  agents/right/.claude/skills/cronsync/SKILL.md");
 
     if telegram_token.is_some() {
         println!("  Telegram bot token saved");
@@ -320,11 +321,11 @@ mod tests {
             "agent.yaml should always be created"
         );
         assert!(
-            agents_dir.join("skills/clawhub/SKILL.md").exists(),
+            agents_dir.join(".claude/skills/clawhub/SKILL.md").exists(),
             "clawhub skill should be installed"
         );
         assert!(
-            agents_dir.join("skills/cronsync/SKILL.md").exists(),
+            agents_dir.join(".claude/skills/cronsync/SKILL.md").exists(),
             "cronsync skill should be installed"
         );
     }
