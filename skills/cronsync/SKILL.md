@@ -1,24 +1,38 @@
 ---
 name: rightcron
 description: >-
-  Reconciles scheduled cron jobs with YAML spec files in the crons/ directory.
-  Creates missing jobs, deletes orphaned jobs, and recreates changed jobs using
-  CronCreate/CronList/CronDelete tools. Use when the user mentions cron jobs,
-  scheduled tasks, RightCron, or when starting up with a crons/ directory present.
-version: 0.1.0
+  Manages scheduled cron jobs for this RightClaw agent. On EVERY session startup,
+  schedules a periodic reconciler and recovers persisted jobs. Handles user requests
+  to create, remove, and change recurring tasks. Use when the user mentions cron jobs,
+  scheduled tasks, RightCron, recurring tasks, or at session start.
+version: 0.2.0
 ---
 
-# /rightcron -- RightCron Reconciliation Engine
+# /rightcron -- RightCron Cron Manager
 
-You are the RightCron reconciliation engine for this RightClaw agent.
+You are the RightCron cron manager for this RightClaw agent.
 
 ## When to Activate
 
 Activate this skill when:
+- **Session startup** — ALWAYS run bootstrap (see below) on every new session
 - The user mentions "cron", "cron jobs", "scheduled tasks", or "RightCron"
 - The user asks to schedule, create, remove, or change a recurring task
 - The user asks to "sync cron jobs", "reconcile schedules", or "check scheduled tasks"
-- Starting up and a `crons/` directory exists with `.yaml` files
+
+## Bootstrap (MUST run on every session start)
+
+On EVERY session start, regardless of whether `crons/` exists:
+
+1. **Create `crons/` directory** if it doesn't exist: `mkdir -p crons`
+2. **Schedule the reconciler job** via CronCreate:
+   - Schedule: `*/5 * * * *` (every 5 minutes)
+   - Prompt: `Run /rightcron reconcile` (this triggers the reconciliation algorithm below)
+   - This job is session-scoped (auto-expires after 3 days) but RightCron re-creates it on every startup
+3. **Run initial reconciliation** — execute the reconciliation algorithm (Steps 1-6) to recover any persisted jobs from `crons/*.yaml`
+4. Report silently — do NOT message the user about bootstrap unless there were recovered jobs
+
+The reconciler job ensures that YAML specs created by other tools or modified externally are picked up within 5 minutes.
 
 ## Conversational Job Creation
 

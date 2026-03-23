@@ -43,12 +43,14 @@ pub fn generate_combined_prompt(agent: &AgentDef) -> miette::Result<String> {
          Never output to console — the user cannot see it.\n",
     );
 
-    // RightCron routing instruction (hooks handle startup reconciliation).
+    // RightCron: startup trigger + routing.
     content.push_str(
-        "\n## Cron Management\n\n\
-         When the user wants to manage cron jobs, scheduled tasks, or recurring tasks, \
-         ALWAYS use the /rightcron skill. NEVER call CronCreate directly — \
-         always write a YAML spec first, then reconcile.\n",
+        "\n## Cron Management (RightCron)\n\n\
+         **On startup:** Run `/rightcron` immediately. It will bootstrap the reconciler \
+         and recover any persisted jobs. Do this before responding to the user.\n\n\
+         **For user requests:** When the user wants to manage cron jobs, scheduled tasks, \
+         or recurring tasks, ALWAYS use the /rightcron skill. NEVER call CronCreate \
+         directly — always write a YAML spec first, then reconcile.\n",
     );
 
     Ok(content)
