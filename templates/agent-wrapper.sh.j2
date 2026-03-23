@@ -17,23 +17,23 @@ if [ -z "$CLAUDE_BIN" ]; then
 fi
 
 {% if not no_sandbox %}
-exec script -qfc "openshell sandbox create \
-  --policy '{{ policy_path }}' \
-  --name 'rightclaw-{{ agent_name }}' \
-  -- '$CLAUDE_BIN' \
-    --append-system-prompt-file '{{ combined_prompt_path }}' \
+exec openshell sandbox create \
+  --policy "{{ policy_path }}" \
+  --name "rightclaw-{{ agent_name }}" \
+  -- "$CLAUDE_BIN" \
+    --append-system-prompt-file "{{ combined_prompt_path }}" \
     --dangerously-skip-permissions \
     {% if model %}--model {{ model }} \
-    {% endif %}{% if debug %}--debug-file '{{ debug_log_path }}' \
+    {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
     {% endif %}{% if channels %}--channels {{ channels }} \
-    {% endif %}" /dev/null
+    {% endif %}
 {% else %}
 # WARNING: Running without sandbox (--no-sandbox mode)
-exec script -qfc "$CLAUDE_BIN \
-  --append-system-prompt-file '{{ combined_prompt_path }}' \
+exec "$CLAUDE_BIN" \
+  --append-system-prompt-file "{{ combined_prompt_path }}" \
   --dangerously-skip-permissions \
   {% if model %}--model {{ model }} \
-  {% endif %}{% if debug %}--debug-file '{{ debug_log_path }}' \
+  {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
   {% endif %}{% if channels %}--channels {{ channels }} \
-  {% endif %}" /dev/null
+  {% endif %}
 {% endif %}
