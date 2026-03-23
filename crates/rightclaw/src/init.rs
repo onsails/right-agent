@@ -6,6 +6,7 @@ const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/AGENTS.md");
 const DEFAULT_POLICY: &str = include_str!("../../../templates/right/policy.yaml");
 const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/BOOTSTRAP.md");
 const DEFAULT_POLICY_TELEGRAM: &str = include_str!("../../../templates/right/policy-telegram.yaml");
+const DEFAULT_AGENT_YAML: &str = include_str!("../../../templates/right/agent.yaml");
 const SKILL_CLAWHUB: &str = include_str!("../../../skills/clawhub/SKILL.md");
 const SKILL_CRONSYNC: &str = include_str!("../../../skills/cronsync/SKILL.md");
 
@@ -54,6 +55,7 @@ pub fn init_rightclaw_home(
         ("AGENTS.md", DEFAULT_AGENTS),
         ("policy.yaml", policy_content),
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
+        ("agent.yaml", DEFAULT_AGENT_YAML),
     ];
 
     for (filename, content) in files {
@@ -144,6 +146,7 @@ pub fn init_rightclaw_home(
     println!("  agents/right/AGENTS.md");
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/policy.yaml");
+    println!("  agents/right/agent.yaml");
     println!("  agents/right/skills/clawhub/SKILL.md");
     println!("  agents/right/skills/cronsync/SKILL.md");
 
@@ -301,6 +304,10 @@ mod tests {
         assert!(
             agents_dir.join("BOOTSTRAP.md").exists(),
             "BOOTSTRAP.md should always be created"
+        );
+        assert!(
+            agents_dir.join("agent.yaml").exists(),
+            "agent.yaml should always be created"
         );
         assert!(
             agents_dir.join("skills/clawhub/SKILL.md").exists(),

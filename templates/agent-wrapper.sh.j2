@@ -23,7 +23,8 @@ exec openshell sandbox create \
   -- "$CLAUDE_BIN" \
     --append-system-prompt-file "{{ combined_prompt_path }}" \
     --dangerously-skip-permissions \
-    {% if debug %}--debug-file "{{ debug_log_path }}" \
+    {% if model %}--model {{ model }} \
+    {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
     {% endif %}{% if channels %}--channels {{ channels }} \
     {% endif %}
 {% else %}
@@ -31,7 +32,8 @@ exec openshell sandbox create \
 exec "$CLAUDE_BIN" \
   --append-system-prompt-file "{{ combined_prompt_path }}" \
   --dangerously-skip-permissions \
-  {% if debug %}--debug-file "{{ debug_log_path }}" \
+  {% if model %}--model {{ model }} \
+  {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
   {% endif %}{% if channels %}--channels {{ channels }} \
   {% endif %}
 {% endif %}

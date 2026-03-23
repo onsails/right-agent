@@ -9,6 +9,7 @@ fn make_agent(name: &str, start_prompt: Option<&str>) -> AgentDef {
         max_restarts: 3,
         backoff_seconds: 5,
         start_prompt: start_prompt.map(String::from),
+        model: None,
     });
     AgentDef {
         name: name.to_owned(),
