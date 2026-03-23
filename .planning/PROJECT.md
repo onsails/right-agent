@@ -97,5 +97,20 @@ This document evolves at phase transitions and milestone boundaries.
 3. Audit Out of Scope — reasons still valid?
 4. Update Context with current state
 
+## Current State
+
+**v1.0 shipped** (2026-03-23). Core runtime works:
+- `rightclaw init/up/down/status/attach` — full CLI lifecycle
+- Telegram channels — auto-pairing, messaging, cron job output
+- Skills management via skills.sh (agentskills.io format)
+- RightCron — declarative cron reconciliation with bootstrap on startup
+- OpenShell sandbox support (requires API key for auth)
+
+**Known limitations (seeds for v2):**
+- BOOTSTRAP.md onboarding doesn't trigger via Telegram (SEED-002)
+- OpenShell sandbox requires ANTHROPIC_API_KEY, no OAuth (SEED-003)
+- Host settings leak into agent sessions (SEED-004)
+- `rightclaw restart` disabled (process-compose bug with is_tty)
+
 ---
-*Last updated: 2026-03-22 after milestone audit*
+*Last updated: 2026-03-23 after v1.0 milestone completion*
