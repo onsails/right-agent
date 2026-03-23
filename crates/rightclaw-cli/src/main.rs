@@ -450,8 +450,26 @@ async fn cmd_status(_home: &Path) -> miette::Result<()> {
 }
 
 async fn cmd_restart(_home: &Path, agent: &str) -> miette::Result<()> {
-    let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
-    client.restart_process(agent).await?;
+    // Use process-compose CLI client instead of REST API — more reliable
+    // with is_tty processes.
+    let status = tokio::process::Command::new("process-compose")
+        .args([
+            "process",
+            "restart",
+            agent,
+            "--port",
+            &rightclaw::runtime::PC_PORT.to_string(),
+        ])
+        .status()
+        .await
+        .map_err(|e| miette::miette!("failed to run process-compose restart: {e:#}"))?;
+
+    if !status.success() {
+        return Err(miette::miette!(
+            "failed to restart agent '{agent}' (exit {})",
+            status.code().unwrap_or(-1)
+        ));
+    }
 
     println!("Restarted agent: {agent}");
     Ok(())
