@@ -1,207 +1,343 @@
-# Technology Stack
+# Stack Research: v2.0 Native Sandbox & Agent Isolation
 
-**Project:** RightClaw
-**Researched:** 2026-03-21
-**Overall Confidence:** HIGH
+**Domain:** Claude Code native sandboxing integration, per-agent HOME isolation
+**Researched:** 2026-03-23
+**Confidence:** HIGH (official docs verified)
 
-## Async vs Sync Decision
+This research covers ONLY what's new for v2.0. The existing stack (clap, tokio, reqwest, serde, serde-saphyr, minijinja, miette+thiserror, tracing, process-compose) is validated and unchanged.
 
-**Decision: Use Tokio (async).** RightClaw makes HTTP calls to process-compose's REST API and to ClawHub's HTTP API. `reqwest` (the only serious Rust HTTP client) is async-first. The CLI also needs to monitor multiple agent processes and react to signals concurrently. Fighting async at the boundary with `block_on` wrappers everywhere is worse than embracing it. The compile-time cost is acceptable for a CLI of this complexity.
+## What Changes in v2.0
 
-## Recommended Stack
+### Removed: OpenShell
 
-### Core Framework
+All OpenShell code paths are removed. No more `openshell` binary dependency, no more `sandbox create/delete`, no more `policy.yaml` parsing.
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| clap | 4.6.0 | CLI argument parsing | Industry standard. Derive API is ergonomic. Powers ripgrep, fd, bat. Subcommand model maps perfectly to `rightclaw up/down/status/attach/restart`. | HIGH |
-| tokio | 1.50.0 | Async runtime | Required by reqwest. Process monitoring and HTTP calls benefit from async. Use `features = ["full"]` for process spawning + signal handling. | HIGH |
-| serde | 1.0.228 | Serialization framework | Non-negotiable for any Rust project touching structured data. | HIGH |
+**Affected codebase:**
+- `runtime/sandbox.rs` — `destroy_sandboxes()` calls `openshell sandbox delete` (remove entirely)
+- `runtime/deps.rs` — `verify_dependencies()` checks for `openshell` (replace with `bwrap`/`socat`)
+- `doctor.rs` — `run_doctor()` checks `openshell` binary (replace with `bwrap`/`socat`)
+- `codegen/shell_wrapper.rs` — generates `openshell sandbox create` command (replace with `HOME=` + `CLAUDE_CONFIG_DIR=`)
+- `templates/agent-wrapper.sh.j2` — template references `openshell` (rewrite)
+- `agent/types.rs` — `AgentDef.policy_path` (remove, replace with settings.json generation)
+- `agent/discovery.rs` — validates `policy.yaml` exists (remove requirement)
+- `runtime/sandbox.rs` — `RuntimeState.no_sandbox`, `AgentState.sandbox_name` (simplify)
 
-### YAML Parsing
+### Added: CC Native Sandbox via `settings.json`
 
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| serde-saphyr | 0.0.22 | YAML deserialization | `serde_yaml` is deprecated (archived March 2024). `serde-saphyr` is the best replacement: panic-free on malformed input, no unsafe code, 1000+ passing tests including full yaml-test-suite, outperforms alternatives in benchmarks. The `serde_yml` fork (0.0.12) has lower adoption and less rigorous testing. | MEDIUM |
+Claude Code has built-in OS-level sandboxing since mid-2025. On Linux it uses bubblewrap for filesystem isolation and socat for network proxy communication. On macOS it uses Seatbelt (works out of the box, no deps).
 
-**Why not `serde_yml`:** Lower test coverage, less active development, just a fork of the deprecated crate without fundamental improvements. `serde-saphyr` is a ground-up rewrite with better safety properties.
+RightClaw generates a per-agent `.claude/settings.json` inside each agent's HOME directory to configure the sandbox.
 
-**Why not `saphyr-serde`:** Part of the saphyr project's own serde layer, but not yet released as stable. `serde-saphyr` is independent and already battle-tested.
+### Added: Per-Agent HOME Isolation via `CLAUDE_CONFIG_DIR`
 
-**Risk:** `serde-saphyr` is at 0.0.22 -- pre-1.0 means possible breaking changes. Pin the exact version and vendor the dependency if stability is critical.
+Claude Code officially supports `CLAUDE_CONFIG_DIR` (documented in env vars page). This redirects where CC stores its config and data files. Combined with setting the cwd to the agent dir, this gives full isolation.
 
-### Template Generation
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| minijinja | 2.18.0 | Generate process-compose.yaml | Jinja2-compatible, minimal dependencies (only serde), actively maintained by Armin Ronacher. Used by crates.io itself. Perfect for generating YAML configs from agent directory scan results. Avoids string concatenation for YAML generation. | HIGH |
-
-**Why not Tera:** Heavier dependency tree, diverges from Jinja2 syntax. MiniJinja is more focused and lighter.
-
-**Why not Askama:** Compile-time templates are overkill here -- we need runtime template rendering since the template content may vary.
-
-**Why not raw string formatting:** Process-compose YAML has enough structure (nested maps, lists, conditional fields) that a template engine prevents YAML formatting bugs.
-
-### HTTP Client
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| reqwest | 0.13.2 | HTTP client for process-compose REST API and ClawHub API | 300M+ downloads. Async-first, ergonomic, handles JSON/headers/auth. Only serious choice for async Rust HTTP. | HIGH |
-
-**Why not `ureq`:** `ureq` 3.x is sync-only (no async). Since we already committed to tokio for process monitoring, using reqwest avoids a split personality.
-
-### Error Handling
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| thiserror | 2.0.18 | Structured error types | Derive macro for library-quality error enums. Use for internal error types (AgentError, PolicyError, ConfigError). | HIGH |
-| miette | 7.6.0 | User-facing diagnostic errors | Compiler-style error output with source snippets, labels, suggestions. When a user's `agent.yaml` has invalid config, miette shows exactly where. Better UX than color-eyre for config-heavy CLIs. | HIGH |
-
-**Why not `color-eyre`:** Repository archived (Aug 2024). `miette` is actively maintained and provides richer diagnostic output for configuration errors, which is the primary error surface in RightClaw.
-
-**Why not `anyhow`:** Too generic. `thiserror` for structured errors + `miette` for presentation is the 2025-2026 best practice for CLIs that parse user config.
-
-### Process Management
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| std::process::Command | stdlib | Spawn process-compose and openshell | Standard library is sufficient for launching external processes. No need for exotic crates. | HIGH |
-| tokio::process | 1.50.0 (via tokio) | Async process spawning/monitoring | Async `Child` with `kill_on_drop`. Use for launching `process-compose up` and monitoring its lifecycle. | HIGH |
-| ctrlc | 3.5.2 | Signal handling (SIGINT/SIGTERM) | Cross-platform Ctrl+C handling. Triggers graceful shutdown: sends `process-compose down` before exit. Simple API, well-maintained. | HIGH |
-
-**Why not `signal-hook`:** More power than needed. RightClaw only needs SIGINT/SIGTERM to trigger graceful shutdown. `ctrlc` with `termination` feature covers this.
-
-**Why not `nix` crate for signals:** Requires unsafe, Unix-only. `ctrlc` abstracts this cleanly.
-
-### Logging/Tracing
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| tracing | 0.1.44 | Structured logging | Ecosystem standard. Structured spans for "agent-x starting", "policy validation", etc. | HIGH |
-| tracing-subscriber | 0.3.23 | Log output formatting | `fmt` subscriber with `EnvFilter` for `RUST_LOG` support. Use `json` feature for machine-readable logs in detached mode. | HIGH |
-
-### Testing
-
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| assert_cmd | 2.2.0 | CLI integration testing | Run `rightclaw` binary, assert on stdout/stderr/exit codes. The standard for Rust CLI testing. | HIGH |
-| predicates | 3.1.4 | Assertion helpers | Pairs with assert_cmd. `predicate::str::contains("agent started")` style assertions. | HIGH |
-| tempfile | (latest) | Temp directories for test agent layouts | Create isolated agent directory structures per test. | HIGH |
-
-**Why not `trycmd`:** Snapshot testing is good for stable CLIs. RightClaw is greenfield -- output format will change frequently. `assert_cmd` gives more control during early development. Consider `trycmd` later for regression testing once output stabilizes.
-
-### Supporting Libraries
-
-| Library | Version | Purpose | When to Use | Confidence |
-|---------|---------|---------|-------------|------------|
-| dirs | latest | XDG/platform directories | Locate config dirs, cache dirs for RightClaw state. | HIGH |
-| which | latest | Find executables in PATH | Verify `process-compose`, `openshell`, `claude` are installed before `rightclaw up`. | HIGH |
-| walkdir | latest | Directory traversal | Scan `agents/` directory to discover agent subdirectories. | HIGH |
-
-## External Dependencies (Not Rust Crates)
-
-| Technology | Version | Purpose | Integration Pattern |
-|------------|---------|---------|---------------------|
-| process-compose | v1.100.0+ | Process orchestration + TUI | RightClaw generates `process-compose.yaml`, launches `process-compose up`. Controls via REST API on `localhost:8080` (or UDS). Auth via `PC_API_TOKEN`. |
-| OpenShell | latest (alpha) | Sandbox enforcement | CLI invocation: `openshell sandbox create --policy <path> -- claude`. Each agent process in process-compose.yaml wraps its command with openshell. |
-| Claude Code CLI | latest | AI agent sessions | Launched inside OpenShell sandboxes. Not directly managed by RightClaw -- process-compose handles lifecycle. |
-
-## Integration Patterns
-
-### process-compose Integration
-
+**Strategy:**
 ```
-rightclaw up
-  1. Scan agents/ directory
-  2. For each agent: read agent.yaml, resolve policy.yaml
-  3. Render process-compose.yaml via minijinja template
-  4. Launch: process-compose up -f <generated>.yaml [-t=false for detached]
-  5. Monitor via REST API: GET http://localhost:{port}/process/{name}/
-  6. Auth: PC_API_TOKEN env var, X-PC-Token-Key header
-
-rightclaw status  -> GET /processes (via REST API or `process-compose process list`)
-rightclaw restart -> POST /process/{name}/restart (via REST API)
-rightclaw down    -> process-compose down (or POST /project/stop)
-rightclaw attach  -> process-compose attach (delegates to PC's TUI client)
+CLAUDE_CONFIG_DIR=~/.rightclaw/agents/<name>/.claude claude --cwd <agent-dir>
 ```
 
-**REST API** is preferred over shelling out to `process-compose` CLI for status/restart/stop because it avoids spawning subprocesses for every operation and provides structured JSON responses.
+This is BETTER than `HOME=<agent-dir>` because:
+1. `CLAUDE_CONFIG_DIR` only redirects CC's config, not all home-relative paths
+2. Shell tools like `git`, `ssh`, `cargo` still find `~/.gitconfig`, `~/.ssh/`, etc.
+3. No risk of breaking tools that depend on `$HOME`
 
-**Unix Domain Sockets** are preferred over TCP for local communication -- use `process-compose -U` to auto-create socket at `<TempDir>/process-compose-<pid>.sock`. Store the socket path in RightClaw's state file for `rightclaw status` to reconnect.
+However, `CLAUDE_CONFIG_DIR` has known bugs (creates local `.claude/` dirs, IDE integration issues). Fallback plan: `HOME=<agent-dir>` works universally but is a blunt instrument.
 
-### OpenShell Integration
+**Recommendation: Use `CLAUDE_CONFIG_DIR` as primary, with `HOME` override as `--legacy-isolation` flag.**
+
+## CC Sandbox `settings.json` Schema
+
+**Confidence: HIGH** — Verified against [official settings docs](https://code.claude.com/docs/en/settings).
+
+The complete sandbox section of `settings.json`:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "excludedCommands": ["docker"],
+    "allowUnsandboxedCommands": false,
+    "enableWeakerNestedSandbox": false,
+    "enableWeakerNetworkIsolation": false,
+    "filesystem": {
+      "allowWrite": ["/tmp/build", "~/.kube"],
+      "denyWrite": ["/etc", "/usr/local/bin"],
+      "denyRead": ["~/.aws/credentials"],
+      "allowRead": ["."],
+      "allowManagedReadPathsOnly": false
+    },
+    "network": {
+      "allowedDomains": ["github.com", "*.npmjs.org"],
+      "allowUnixSockets": ["/var/run/docker.sock"],
+      "allowAllUnixSockets": false,
+      "allowLocalBinding": false,
+      "allowManagedDomainsOnly": false,
+      "httpProxyPort": 8080,
+      "socksProxyPort": 8081
+    }
+  }
+}
+```
+
+### Field Reference
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `sandbox.enabled` | bool | `false` | Enable bash sandboxing (macOS, Linux, WSL2) |
+| `sandbox.autoAllowBashIfSandboxed` | bool | `true` | Auto-approve bash commands when sandboxed |
+| `sandbox.excludedCommands` | string[] | `[]` | Commands that run OUTSIDE the sandbox |
+| `sandbox.allowUnsandboxedCommands` | bool | `true` | Allow `dangerouslyDisableSandbox` escape hatch. Set `false` for strict mode |
+| `sandbox.enableWeakerNestedSandbox` | bool | `false` | Weaker sandbox for Docker (Linux/WSL2 only). Reduces security |
+| `sandbox.enableWeakerNetworkIsolation` | bool | `false` | macOS only: allow system TLS trust service. Needed for Go tools (gh, terraform) |
+| `sandbox.filesystem.allowWrite` | string[] | `[]` | Additional paths for write access (merged across scopes) |
+| `sandbox.filesystem.denyWrite` | string[] | `[]` | Paths to deny write access (merged across scopes) |
+| `sandbox.filesystem.denyRead` | string[] | `[]` | Paths to deny read access (merged across scopes) |
+| `sandbox.filesystem.allowRead` | string[] | `[]` | Re-allow reads within denyRead regions (takes precedence) |
+| `sandbox.filesystem.allowManagedReadPathsOnly` | bool | `false` | Managed-only: ignore user/project allowRead |
+| `sandbox.network.allowedDomains` | string[] | `[]` | Allowed outbound domains. Supports `*` wildcards |
+| `sandbox.network.allowUnixSockets` | string[] | `[]` | Unix socket paths accessible in sandbox |
+| `sandbox.network.allowAllUnixSockets` | bool | `false` | Allow all Unix socket connections |
+| `sandbox.network.allowLocalBinding` | bool | `false` | Allow binding to localhost ports (macOS only) |
+| `sandbox.network.allowManagedDomainsOnly` | bool | `false` | Managed-only: block non-allowed domains without prompting |
+| `sandbox.network.httpProxyPort` | int | (auto) | Custom HTTP proxy port (BYO proxy) |
+| `sandbox.network.socksProxyPort` | int | (auto) | Custom SOCKS5 proxy port (BYO proxy) |
+
+### Path Prefix Rules
+
+| Prefix | Meaning | Example |
+|--------|---------|---------|
+| `/` | Absolute path | `/tmp/build` |
+| `~/` | Home-relative | `~/.kube` |
+| `./` or bare | Relative to project root (project settings) or `~/.claude` (user settings) | `./output` |
+
+Arrays MERGE across all settings scopes (user, project, managed) -- they are concatenated, not replaced.
+
+### RightClaw's Generated `settings.json` per Agent
+
+RightClaw should generate a `settings.json` inside each agent's config directory with:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Edit(*)",
+      "Write(*)"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "allowWrite": [
+        "~/.rightclaw/agents/<agent-name>/",
+        "/tmp"
+      ],
+      "denyRead": [
+        "~/.ssh",
+        "~/.aws",
+        "~/.gnupg"
+      ]
+    },
+    "network": {
+      "allowedDomains": [
+        "api.anthropic.com",
+        "github.com",
+        "*.githubusercontent.com",
+        "registry.npmjs.org"
+      ]
+    }
+  }
+}
+```
+
+**Key decisions:**
+1. `allowUnsandboxedCommands: false` -- strict mode, no escape hatch
+2. `autoAllowBashIfSandboxed: true` -- agents run autonomously, no prompts
+3. `defaultMode: "bypassPermissions"` -- replaces `--dangerously-skip-permissions` flag
+4. Deny reads to credential directories by default
+5. Users can extend via `agent.yaml` sandbox config
+
+### Integration with `--dangerously-skip-permissions`
+
+`--dangerously-skip-permissions` is equivalent to `--permission-mode bypassPermissions`. The sandbox STILL ENFORCES even in bypass mode -- this is the entire point. Bypass mode + sandbox = autonomous agent with OS-level guardrails.
+
+The `settings.json` can set `defaultMode: "bypassPermissions"` to avoid needing the CLI flag entirely. Combined with `skipDangerousModePermissionPrompt: true` in the CC global config (already handled by RightClaw v1.0 trust setup), this enables fully autonomous startup.
+
+## External Dependencies
+
+### bubblewrap (Linux only)
+
+| Distro | Package | Install Command |
+|--------|---------|-----------------|
+| Ubuntu/Debian | `bubblewrap` | `sudo apt-get install bubblewrap` |
+| Fedora/RHEL | `bubblewrap` | `sudo dnf install bubblewrap` |
+| Arch Linux | `bubblewrap` | `sudo pacman -S bubblewrap` |
+| Alpine Linux | `bubblewrap` | `sudo apk add bubblewrap` |
+| openSUSE | `bubblewrap` | `sudo zypper install bubblewrap` |
+| NixOS/nix | `bubblewrap` | Available in nixpkgs |
+
+**Binary name:** `bwrap`
+**What it does:** Low-level unprivileged sandboxing. Creates isolated mount/network/PID namespaces. Used by Flatpak. CC's sandbox runtime invokes `bwrap` to create a namespace where the filesystem is read-only except allowed paths, and the network namespace is removed entirely (forcing traffic through socat proxy).
+**Kernel requirement:** User namespaces must be enabled (default on modern kernels, NOT available on WSL1).
+**Latest version:** 0.11.0 (stable, widely packaged).
+
+### socat (Linux only)
+
+| Distro | Package | Install Command |
+|--------|---------|-----------------|
+| Ubuntu/Debian | `socat` | `sudo apt-get install socat` |
+| Fedora/RHEL | `socat` | `sudo dnf install socat` |
+| Arch Linux | `socat` | `sudo pacman -S socat` |
+| Alpine Linux | `socat` | `sudo apk add socat` |
+| openSUSE | `socat` | `sudo zypper install socat` |
+| NixOS/nix | `socat` | Available in nixpkgs |
+
+**Binary name:** `socat`
+**What it does:** Multipurpose relay (SOcket CAT). CC uses it to bridge Unix domain sockets between the sandboxed namespace and the host's network proxy. Since bubblewrap removes the network namespace entirely, all traffic must flow through a Unix socket to a proxy running on the host. socat handles this relay.
+**Latest version:** 1.8.1.1 (2026-02-12).
+
+### macOS: No Additional Dependencies
+
+Seatbelt is built into macOS. No `brew install` needed. CC sandbox works out of the box on macOS.
+
+## Rust Crate Changes
+
+### No New Crates Needed
+
+The v2.0 changes are primarily about:
+1. **Generating JSON files** -- `serde_json` (already in workspace)
+2. **Modifying shell wrapper template** -- `minijinja` (already in workspace)
+3. **Updating dependency checks** -- `which` (already in workspace)
+4. **File I/O** -- `std::fs` (stdlib)
+
+No new Rust crate dependencies are required for v2.0.
+
+### Crate Usage for New Features
+
+| Feature | Crate | Already In Workspace |
+|---------|-------|---------------------|
+| Generate `settings.json` | `serde_json` + `serde` | Yes |
+| Template new shell wrapper | `minijinja` | Yes |
+| Check for `bwrap`/`socat` | `which` | Yes |
+| Create agent `.claude/` dirs | `std::fs` | stdlib |
+| Path manipulation | `std::path` | stdlib |
+
+## Key Environment Variables
+
+| Variable | Purpose | How RightClaw Uses It |
+|----------|---------|----------------------|
+| `CLAUDE_CONFIG_DIR` | Redirect CC config/data directory | Set to `~/.rightclaw/agents/<name>/.claude` per agent |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Disable telemetry, autoupdater, etc. | Set in agent wrapper (reduces noise, prevents feature flag issues) |
+| `CLAUDE_CODE_TMPDIR` | Override temp directory | Optional: isolate temp files per agent |
+| `CLAUDE_CODE_DISABLE_CRON` | Disable CC's built-in cron | NOT set (we use CC cron via CronSync) |
+
+**CRITICAL GOTCHA from v1.0 memory:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set to ANY value (including "0" or "false") blocks ALL feature flags including channels. If Telegram channels are needed, do NOT set this variable.
+
+## Shell Wrapper Changes
+
+### v1.0 Wrapper (OpenShell)
+```bash
+exec openshell sandbox create \
+  --no-auto-providers \
+  --no-keep \
+  --policy "policy.yaml" \
+  --name "rightclaw-<agent>" \
+  -- claude \
+    --append-system-prompt-file "prompt.md" \
+    --dangerously-skip-permissions \
+    --channels plugin:telegram@claude-plugins-official \
+    -- "startup prompt"
+```
+
+### v2.0 Wrapper (Native Sandbox)
+```bash
+export CLAUDE_CONFIG_DIR="$HOME/.rightclaw/agents/<agent>/.claude"
+exec "$CLAUDE_BIN" \
+  --append-system-prompt-file "prompt.md" \
+  --dangerously-skip-permissions \
+  --channels plugin:telegram@claude-plugins-official \
+  -- "startup prompt"
+```
+
+**Differences:**
+1. No `openshell` invocation at all
+2. `CLAUDE_CONFIG_DIR` set to agent-specific `.claude/` directory
+3. `--dangerously-skip-permissions` remains (sandbox enforces OS-level restrictions independently)
+4. `settings.json` at `$CLAUDE_CONFIG_DIR/settings.json` configures sandbox
+5. No `--no-sandbox` flag needed -- sandbox is controlled via `settings.json` `sandbox.enabled`
+6. No cleanup needed on shutdown (no sandbox create/destroy lifecycle)
+
+## Agent Directory Layout (v2.0)
 
 ```
-# Per-agent command in process-compose.yaml:
-openshell sandbox create --policy agents/{name}/policy.yaml -- claude --profile agents/{name}
-
-# Policy hot-reload (network/inference sections):
-openshell policy set --sandbox {id} --policy agents/{name}/policy.yaml
+~/.rightclaw/agents/<name>/
+  IDENTITY.md              # Required (unchanged)
+  SOUL.md                  # Optional personality
+  USER.md                  # Optional user context
+  AGENTS.md                # Optional operational framework
+  MEMORY.md                # Optional persistent memory
+  BOOTSTRAP.md             # Optional first-run (self-deletes)
+  HEARTBEAT.md             # Optional health check
+  TOOLS.md                 # Optional tool list
+  agent.yaml               # Optional config (restart, model, etc.)
+  .mcp.json                # Optional MCP servers
+  crons/                   # CronSync specs
+  .claude/                 # GENERATED by RightClaw
+    settings.json          # Sandbox config + permissions
+    settings.local.json    # Optional user overrides
+    CLAUDE.md              # Optional agent-scoped instructions
 ```
 
-OpenShell is invoked purely as a CLI wrapper. No Rust SDK exists -- it is itself a Rust binary but exposes no library API. Design for resilience: OpenShell is alpha software, so wrap all invocations with timeout + error recovery.
+**Key change:** `policy.yaml` is REMOVED. Replaced by `.claude/settings.json` (generated). The `.claude/` directory under each agent is where `CLAUDE_CONFIG_DIR` points. CC creates its own state files inside this directory (sessions, memory, etc.).
+
+## What NOT to Use
+
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| `HOME=<agent-dir>` as primary isolation | Breaks git, ssh, cargo, and any tool that reads `$HOME` | `CLAUDE_CONFIG_DIR` |
+| OpenShell sandbox | Removed in v2.0. Alpha instability, API key requirement | CC native sandbox |
+| `policy.yaml` | OpenShell format, not used by CC sandbox | `settings.json` with `sandbox.*` fields |
+| Custom bwrap invocation | CC manages bwrap internally via sandbox runtime | Let CC handle bwrap via `sandbox.enabled: true` |
+| `sandbox.allowUnsandboxedCommands: true` | Allows agents to escape sandbox via `dangerouslyDisableSandbox` param | Set to `false` for strict enforcement |
 
 ## Alternatives Considered
 
-| Category | Recommended | Alternative | Why Not |
-|----------|-------------|-------------|---------|
-| YAML parsing | serde-saphyr | serde_yml | Less rigorous testing, simple fork of deprecated crate |
-| YAML parsing | serde-saphyr | serde_yaml | Deprecated and archived since March 2024 |
-| Template engine | minijinja | tera | Heavier deps, diverges from Jinja2, overkill for YAML generation |
-| Template engine | minijinja | string formatting | Error-prone for nested YAML structures |
-| HTTP client | reqwest | ureq | Sync-only, conflicts with async architecture |
-| Error handling | miette + thiserror | color-eyre | color-eyre archived, miette better for config-error-heavy CLI |
-| Error handling | miette + thiserror | anyhow | Too generic, no structured error types |
-| Signal handling | ctrlc | signal-hook | Overpowered for SIGINT/SIGTERM only |
-| CLI testing | assert_cmd | trycmd | Too rigid for early-stage development |
-| Async runtime | tokio | smol/async-std | Ecosystem is tokio. reqwest needs tokio. No contest. |
+| Recommended | Alternative | When to Use Alternative |
+|-------------|-------------|------------------------|
+| `CLAUDE_CONFIG_DIR` | `HOME` override | If `CLAUDE_CONFIG_DIR` proves buggy for a specific CC version |
+| `settings.json` sandbox | Manual bwrap wrapping | Never for RightClaw -- CC sandbox is more comprehensive (includes network proxy) |
+| Per-agent `.claude/settings.json` | Global `~/.claude/settings.json` | Never -- agents must have independent sandbox configs |
+| `defaultMode: "bypassPermissions"` in settings | `--dangerously-skip-permissions` flag | Flag is fine too, but settings-based is cleaner and avoids the startup permission dialog |
 
-## Cargo.toml Dependencies
+## Version Compatibility
 
-```toml
-[package]
-name = "rightclaw"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-clap = { version = "4.6", features = ["derive"] }
-tokio = { version = "1.50", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde-saphyr = "0.0.22"
-minijinja = "2.18"
-reqwest = { version = "0.13", features = ["json"] }
-thiserror = "2.0"
-miette = { version = "7.6", features = ["fancy"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-ctrlc = { version = "3.5", features = ["termination"] }
-dirs = "6"
-which = "7"
-walkdir = "2"
-
-[dev-dependencies]
-assert_cmd = "2.2"
-predicates = "3.1"
-tempfile = "3"
-```
-
-**Note:** Pin exact versions in `Cargo.lock` (automatic). The ranges above allow compatible updates within semver. For `serde-saphyr` specifically, consider pinning `=0.0.22` since pre-1.0 crates may break on minor bumps.
+| Component | Minimum Version | Why |
+|-----------|-----------------|-----|
+| Claude Code | v2.1+ | Sandbox features, `CLAUDE_CONFIG_DIR` support |
+| Node.js | 22+ | Required by CC for some sandbox features |
+| bubblewrap | 0.4+ | User namespace support (any distro-packaged version works) |
+| socat | 1.7+ | Unix socket relay (any distro-packaged version works) |
+| Linux kernel | 4.18+ | User namespace support for bubblewrap |
 
 ## Sources
 
-- [clap on crates.io](https://crates.io/crates/clap) - v4.6.0, verified 2026-03-21
-- [reqwest on crates.io](https://crates.io/crates/reqwest) - v0.13.2, verified 2026-03-21
-- [serde-saphyr on crates.io](https://crates.io/crates/serde-saphyr) - v0.0.22, verified 2026-03-21
-- [minijinja on crates.io](https://crates.io/crates/minijinja) - v2.18.0, verified 2026-03-21
-- [miette on crates.io](https://crates.io/crates/miette) - v7.6.0, verified 2026-03-21
-- [thiserror on crates.io](https://crates.io/crates/thiserror) - v2.0.18, verified 2026-03-21
-- [tokio on crates.io](https://crates.io/crates/tokio) - v1.50.0, verified 2026-03-21
-- [ctrlc on crates.io](https://crates.io/crates/ctrlc) - v3.5.2, verified 2026-03-21
-- [process-compose GitHub releases](https://github.com/F1bonacc1/process-compose/releases) - v1.100.0
-- [process-compose remote client docs](https://f1bonacc1.github.io/process-compose/client/)
-- [NVIDIA OpenShell GitHub](https://github.com/NVIDIA/OpenShell)
-- [NVIDIA OpenShell Developer Guide](https://docs.nvidia.com/openshell/latest/index.html)
-- [serde_yaml deprecation discussion](https://users.rust-lang.org/t/serde-yaml-deprecation-alternatives/108868)
-- [Rust CLI testing with assert_cmd](https://alexwlchan.net/2025/testing-rust-cli-apps-with-assert-cmd/)
-- [Async Rust: When to Use It](https://www.wyeworks.com/blog/2025/02/25/async-rust-when-to-use-it-when-to-avoid-it/)
+- [Claude Code Sandboxing Docs](https://code.claude.com/docs/en/sandboxing) -- Complete sandbox reference, verified 2026-03-23 (HIGH confidence)
+- [Claude Code Settings Reference](https://code.claude.com/docs/en/settings) -- Full settings.json schema including sandbox fields, verified 2026-03-23 (HIGH confidence)
+- [Claude Code Environment Variables](https://code.claude.com/docs/en/env-vars) -- `CLAUDE_CONFIG_DIR` and all env vars, verified 2026-03-23 (HIGH confidence)
+- [Anthropic Engineering: Claude Code Sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing) -- Architecture overview (MEDIUM confidence -- high-level, no implementation details)
+- [sandbox-runtime npm package](https://github.com/anthropic-experimental/sandbox-runtime) -- Open source sandbox runtime, `@anthropic-ai/sandbox-runtime` (MEDIUM confidence)
+- [bubblewrap GitHub](https://github.com/containers/bubblewrap) -- bubblewrap source and docs (HIGH confidence)
+- [pkgs.org/download/bubblewrap](https://pkgs.org/download/bubblewrap) -- Package availability across distros (HIGH confidence)
+- [pkgs.org/download/socat](https://pkgs.org/download/socat) -- socat package availability (HIGH confidence)
+- [CLAUDE_CONFIG_DIR feature request](https://github.com/anthropics/claude-code/issues/25762) -- Community confirmation of CLAUDE_CONFIG_DIR working (MEDIUM confidence)
+- [Trail of Bits claude-code-config](https://github.com/trailofbits/claude-code-config) -- Industry sandbox configuration patterns (MEDIUM confidence)
+
+---
+*Stack research for: RightClaw v2.0 CC Native Sandbox & Agent Isolation*
+*Researched: 2026-03-23*
