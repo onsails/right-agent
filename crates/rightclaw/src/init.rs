@@ -158,7 +158,7 @@ pub fn init_rightclaw_home(
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/policy.yaml");
     println!("  agents/right/agent.yaml");
-    println!("  agents/right/.claude/skills/clawhub/SKILL.md");
+    println!("  agents/right/.claude/skills/clawhub/SKILL.md  (skills.sh manager)");
     println!("  agents/right/.claude/skills/cronsync/SKILL.md");
 
     if telegram_token.is_some() {
