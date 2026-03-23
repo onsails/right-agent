@@ -449,30 +449,13 @@ async fn cmd_status(_home: &Path) -> miette::Result<()> {
     Ok(())
 }
 
-async fn cmd_restart(_home: &Path, agent: &str) -> miette::Result<()> {
-    // Use process-compose CLI client instead of REST API — more reliable
-    // with is_tty processes.
-    let status = tokio::process::Command::new("process-compose")
-        .args([
-            "process",
-            "restart",
-            agent,
-            "--port",
-            &rightclaw::runtime::PC_PORT.to_string(),
-        ])
-        .status()
-        .await
-        .map_err(|e| miette::miette!("failed to run process-compose restart: {e:#}"))?;
-
-    if !status.success() {
-        return Err(miette::miette!(
-            "failed to restart agent '{agent}' (exit {})",
-            status.code().unwrap_or(-1)
-        ));
-    }
-
-    println!("Restarted agent: {agent}");
-    Ok(())
+async fn cmd_restart(_home: &Path, _agent: &str) -> miette::Result<()> {
+    // process-compose crashes on programmatic restart (both REST API and CLI client).
+    // This is a known process-compose bug. Direct users to the TUI instead.
+    Err(miette::miette!(
+        help = "Use the process-compose TUI: select the agent and press Ctrl+R to restart",
+        "Programmatic restart is not supported (process-compose bug). Use `rightclaw attach` and Ctrl+R instead."
+    ))
 }
 
 fn cmd_attach(_home: &Path) -> miette::Result<()> {
