@@ -27,6 +27,8 @@ pub fn generate_wrapper(
         None
     };
 
+    let model = agent.config.as_ref().and_then(|c| c.model.as_deref());
+
     tmpl.render(context! {
         agent_name => agent.name,
         policy_path => agent.policy_path.display().to_string(),
@@ -34,6 +36,7 @@ pub fn generate_wrapper(
         combined_prompt_path => combined_prompt_path,
         no_sandbox => no_sandbox,
         channels => channels,
+        model => model,
         debug => debug_log_path.is_some(),
         debug_log_path => debug_log_path.unwrap_or_default(),
     })

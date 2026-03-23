@@ -14,6 +14,7 @@ fn make_agent_at(path: PathBuf) -> AgentDef {
             max_restarts: 3,
             backoff_seconds: 5,
             start_prompt: None,
+            model: None,
         }),
         mcp_config_path: None,
         soul_path: None,

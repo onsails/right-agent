@@ -9,6 +9,7 @@ fn make_agent(name: &str, restart: RestartPolicy) -> AgentDef {
         max_restarts: 5,
         backoff_seconds: 10,
         start_prompt: Some("Go".to_owned()),
+        model: None,
     });
     AgentDef {
         name: name.to_owned(),

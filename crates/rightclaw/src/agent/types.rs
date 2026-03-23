@@ -34,6 +34,9 @@ pub struct AgentConfig {
     pub backoff_seconds: u32,
 
     pub start_prompt: Option<String>,
+
+    /// Claude model to use (e.g. "sonnet", "opus", "haiku")
+    pub model: Option<String>,
 }
 
 /// A discovered agent definition from the filesystem.
