@@ -245,22 +245,13 @@ async fn cmd_up(
 
     let socket_path = run_dir.join("pc.sock");
 
-    // Check for stale socket / already-running instance.
-    if socket_path.exists() {
-        let client = rightclaw::runtime::PcClient::new(&socket_path)?;
-        match client.health_check().await {
-            Ok(()) => {
-                return Err(miette::miette!(
-                    "rightclaw is already running. Use `rightclaw down` first or `rightclaw attach` to connect."
-                ));
-            }
-            Err(_) => {
-                // Stale socket -- remove it.
-                tracing::debug!("removing stale socket at {}", socket_path.display());
-                std::fs::remove_file(&socket_path).map_err(|e| {
-                    miette::miette!("failed to remove stale socket: {e:#}")
-                })?;
-            }
+    // Check for already-running instance via TCP health check.
+    {
+        let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+        if client.health_check().await.is_ok() {
+            return Err(miette::miette!(
+                "rightclaw is already running. Use `rightclaw down` first or `rightclaw attach` to connect."
+            ));
         }
     }
 
@@ -359,13 +350,14 @@ async fn cmd_up(
 
     // Build process-compose command.
     let mut cmd = tokio::process::Command::new("process-compose");
+    // Use TCP API (avoids --use-uds which crashes TUI).
+    let pc_port = rightclaw::runtime::PC_PORT.to_string();
     cmd.args([
         "up",
         "-f",
         config_path.to_str().unwrap_or_default(),
-        "--use-uds",
-        "--unix-socket",
-        socket_path.to_str().unwrap_or_default(),
+        "--port",
+        &pc_port,
     ]);
 
     if detach {
@@ -378,7 +370,7 @@ async fn cmd_up(
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         // Verify it's alive.
-        let client = rightclaw::runtime::PcClient::new(&socket_path)?;
+        let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
         client.health_check().await.map_err(|e| {
             miette::miette!("process-compose started but health check failed: {e:#}")
         })?;
@@ -414,19 +406,15 @@ async fn cmd_down(home: &Path) -> miette::Result<()> {
         miette::miette!("No running instance found. Is rightclaw running?")
     })?;
 
-    let socket_path = run_dir.join("pc.sock");
-
     // Best-effort shutdown via REST API.
-    if socket_path.exists() {
-        match rightclaw::runtime::PcClient::new(&socket_path) {
-            Ok(client) => {
-                if let Err(e) = client.shutdown().await {
-                    tracing::warn!("process-compose shutdown request failed (may already be stopped): {e:#}");
-                }
+    match rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT) {
+        Ok(client) => {
+            if let Err(e) = client.shutdown().await {
+                tracing::warn!("process-compose shutdown request failed (may already be stopped): {e:#}");
             }
-            Err(e) => {
-                tracing::warn!("could not connect to process-compose: {e:#}");
-            }
+        }
+        Err(e) => {
+            tracing::warn!("could not connect to process-compose: {e:#}");
         }
     }
 
@@ -435,27 +423,12 @@ async fn cmd_down(home: &Path) -> miette::Result<()> {
         rightclaw::runtime::destroy_sandboxes(&state.agents)?;
     }
 
-    // Clean up socket file.
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path).map_err(|e| {
-            miette::miette!("failed to remove socket file: {e:#}")
-        })?;
-    }
-
     println!("All agents stopped.");
     Ok(())
 }
 
-async fn cmd_status(home: &Path) -> miette::Result<()> {
-    let socket_path = home.join("run").join("pc.sock");
-
-    if !socket_path.exists() {
-        return Err(miette::miette!(
-            "No running instance. Run `rightclaw up` first."
-        ));
-    }
-
-    let client = rightclaw::runtime::PcClient::new(&socket_path)?;
+async fn cmd_status(_home: &Path) -> miette::Result<()> {
+    let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
     let processes = client.list_processes().await?;
 
     if processes.is_empty() {
@@ -476,36 +449,20 @@ async fn cmd_status(home: &Path) -> miette::Result<()> {
     Ok(())
 }
 
-async fn cmd_restart(home: &Path, agent: &str) -> miette::Result<()> {
-    let socket_path = home.join("run").join("pc.sock");
-
-    if !socket_path.exists() {
-        return Err(miette::miette!(
-            "No running instance. Run `rightclaw up` first."
-        ));
-    }
-
-    let client = rightclaw::runtime::PcClient::new(&socket_path)?;
+async fn cmd_restart(_home: &Path, agent: &str) -> miette::Result<()> {
+    let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
     client.restart_process(agent).await?;
 
     println!("Restarted agent: {agent}");
     Ok(())
 }
 
-fn cmd_attach(home: &Path) -> miette::Result<()> {
-    let socket_path = home.join("run").join("pc.sock");
-
-    if !socket_path.exists() {
-        return Err(miette::miette!(
-            "No running instance. Run `rightclaw up` first."
-        ));
-    }
-
+fn cmd_attach(_home: &Path) -> miette::Result<()> {
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new("process-compose")
         .arg("attach")
-        .arg("--unix-socket")
-        .arg(&socket_path)
+        .arg("--port")
+        .arg(rightclaw::runtime::PC_PORT.to_string())
         .exec();
 
     Err(miette::miette!("Failed to attach: {err}"))

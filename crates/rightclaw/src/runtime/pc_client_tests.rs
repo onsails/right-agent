@@ -1,10 +1,9 @@
 use super::*;
 
 #[test]
-fn pc_client_constructs_with_dummy_path() {
-    let path = std::path::Path::new("/tmp/test-pc.sock");
-    let client = PcClient::new(path);
-    assert!(client.is_ok(), "PcClient::new should succeed with any path");
+fn pc_client_constructs_with_port() {
+    let client = PcClient::new(PC_PORT);
+    assert!(client.is_ok(), "PcClient::new should succeed with any port");
 }
 
 #[test]

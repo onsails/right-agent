@@ -1,6 +1,7 @@
-use std::path::Path;
-
 use serde::Deserialize;
+
+/// Default TCP port for the process-compose API.
+pub const PC_PORT: u16 = 18927;
 
 /// Status information for a single process managed by process-compose.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -25,15 +26,14 @@ pub struct PcClient {
 }
 
 impl PcClient {
-    /// Create a new client connected to process-compose via the given Unix socket.
-    pub fn new(socket_path: &Path) -> miette::Result<Self> {
+    /// Create a new client connected to process-compose via TCP.
+    pub fn new(port: u16) -> miette::Result<Self> {
         let client = reqwest::Client::builder()
-            .unix_socket(socket_path)
             .build()
             .map_err(|e| miette::miette!("failed to create process-compose client: {e:#}"))?;
         Ok(Self {
             client,
-            base_url: "http://localhost".to_string(),
+            base_url: format!("http://localhost:{port}"),
         })
     }
 
