@@ -104,9 +104,9 @@ pub fn init_rightclaw_home(
         })?;
 
         let settings = if telegram_token.is_some() {
-            r#"{"skipDangerousModePermissionPrompt":true,"enabledPlugins":{"telegram@claude-plugins-official":true}}"#
+            r#"{"skipDangerousModePermissionPrompt":true,"spinnerTipsEnabled":false,"prefersReducedMotion":true,"enabledPlugins":{"telegram@claude-plugins-official":true}}"#
         } else {
-            r#"{"skipDangerousModePermissionPrompt":true}"#
+            r#"{"skipDangerousModePermissionPrompt":true,"spinnerTipsEnabled":false,"prefersReducedMotion":true}"#
         };
 
         std::fs::write(claude_dir.join("settings.json"), settings)
@@ -505,10 +505,18 @@ mod tests {
             content.contains("telegram@claude-plugins-official"),
             "settings.json should enable telegram plugin"
         );
+        assert!(
+            content.contains("spinnerTipsEnabled"),
+            "settings.json should contain spinnerTipsEnabled"
+        );
+        assert!(
+            content.contains("prefersReducedMotion"),
+            "settings.json should contain prefersReducedMotion"
+        );
     }
 
     #[test]
-    fn init_without_telegram_no_settings_json() {
+    fn init_without_telegram_creates_settings_without_plugin() {
         let dir = tempdir().unwrap();
         init_rightclaw_home(dir.path(), None, None, None).unwrap();
 
@@ -516,8 +524,26 @@ mod tests {
             .path()
             .join("agents/right/.claude/settings.json");
         assert!(
-            !settings_path.exists(),
-            "settings.json should NOT be created when no telegram token"
+            settings_path.exists(),
+            "settings.json should always be created"
+        );
+
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(
+            content.contains("skipDangerousModePermissionPrompt"),
+            "settings.json should contain skipDangerousModePermissionPrompt"
+        );
+        assert!(
+            content.contains("spinnerTipsEnabled"),
+            "settings.json should contain spinnerTipsEnabled"
+        );
+        assert!(
+            content.contains("prefersReducedMotion"),
+            "settings.json should contain prefersReducedMotion"
+        );
+        assert!(
+            !content.contains("enabledPlugins"),
+            "settings.json should NOT contain enabledPlugins without telegram"
         );
     }
 }
