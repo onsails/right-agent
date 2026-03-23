@@ -1,10 +1,11 @@
-# Architecture Research
+# Architecture Research: v2.0 Native Sandbox & Agent Isolation
 
-**Domain:** Multi-agent CLI runtime (Rust CLI wrapping process-compose + OpenShell)
-**Researched:** 2026-03-21
+**Domain:** Multi-agent CLI runtime (Rust CLI wrapping process-compose + CC native sandbox)
+**Researched:** 2026-03-23
 **Confidence:** HIGH
+**Focus:** Integration of CC native sandboxing and per-agent HOME isolation into existing v1.0 architecture
 
-## System Overview
+## System Overview (v2.0)
 
 ```
                             User
@@ -14,437 +15,641 @@
               +--------------+--------------+
               |              |              |
         Agent Discovery  Config Gen    PC Lifecycle
-        (scan agents/)   (YAML emit)   (spawn/attach/stop)
+        (scan agents/)   (codegen)     (spawn/attach/stop)
               |              |              |
               v              v              v
         +----------+  +-----------+  +----------------+
         | AgentDef |->| PCConfig  |->| process-compose|
         | (parsed) |  | Generator |  | (child proc)   |
         +----------+  +-----------+  +----------------+
-              |                            |
-              v                       per-agent process
-        +----------+              +---------------------+
-        | Policy   |              | Shell Wrapper       |
-        | Resolver |              | (generated script)  |
-        +----------+              +--------|------------+
-              |                            |
-              v                            v
-        +----------+              +---------------------+
-        | Merged   |              | openshell sandbox   |
-        | Policy   |              | create --policy ... |
-        | YAML     |              | -- claude ...       |
-        +----------+              +---------------------+
-                                           |
-                                           v
-                                  +---------------------+
-                                  | Claude Code session |
-                                  | (sandboxed agent)   |
-                                  +---------------------+
+              |              |              |
+              v              v         per-agent process
+        +-----------+  +-----------+  +---------------------+
+        | Settings  |  | Combined  |  | Shell Wrapper       |
+        | Generator |  | Prompt    |  | (generated script)  |
+        | (.claude/ |  | Generator |  +--------|------------+
+        | settings) |  +-----------+           |
+        +-----------+                          v
+                                      +---------------------+
+                                      | HOME=$AGENT_DIR     |
+                                      | claude               |
+                                      |   --sandbox-mode ... |
+                                      +---------------------+
+                                               |
+                                               v
+                                      +---------------------+
+                                      | Claude Code session |
+                                      | (native sandbox)    |
+                                      | bubblewrap/Seatbelt |
+                                      +---------------------+
 ```
 
-### Component Responsibilities
+### What Changed from v1.0
 
-| Component | Responsibility | Boundary |
-|-----------|----------------|----------|
-| **CLI (clap)** | Parse commands, dispatch to subsystems | Entry point; no business logic beyond arg routing |
-| **Agent Discovery** | Scan `agents/` dir, parse `agent.yaml`, validate structure | Returns `Vec<AgentDef>`, never generates config |
-| **Policy Resolver** | Find policy per agent (agent-local > `policies/` > default), merge skill policies | Returns `PathBuf` to resolved policy YAML |
-| **Config Generator** | Emit `process-compose.yaml` from agent defs + resolved policies | Pure function: `(Vec<AgentDef>, Options) -> String` |
-| **Shell Wrapper Generator** | Write per-agent `run-<name>.sh` scripts that invoke `openshell sandbox create` | Writes to temp dir, returns script paths |
-| **PC Lifecycle** | Spawn/attach/status/restart/stop process-compose | Owns the child process handle |
-| **ClawHub Client** | HTTP client for ClawHub API (search/install/uninstall skills) | Claude Code skill, not CLI component |
-| **CronSync** | Reconcile cron YAML specs with live CC cron jobs | Claude Code skill, not CLI component |
+| v1.0 (OpenShell) | v2.0 (Native Sandbox) |
+|---|---|
+| Shell wrapper invokes `openshell sandbox create --policy <path> -- claude` | Shell wrapper sets `HOME=$AGENT_DIR` and invokes `claude` directly |
+| Policy defined in `policy.yaml` (OpenShell format) | Sandbox config defined in `.claude/settings.json` (CC native format) |
+| `destroy_sandboxes()` cleanup on `rightclaw down` | No sandbox cleanup needed (bubblewrap is ephemeral per-process) |
+| `RuntimeState.agents[].sandbox_name` tracks sandbox identity | No sandbox name tracking needed |
+| `--no-sandbox` flag skips OpenShell | `--no-sandbox` flag disables `sandbox.enabled` in generated settings |
+| `verify_dependencies()` checks for `openshell` binary | `verify_dependencies()` checks for `bubblewrap` + `socat` (Linux only) |
+| `rightclaw doctor` checks for `openshell` | `rightclaw doctor` checks for `bubblewrap` + `socat` (Linux), nothing on macOS |
+| `policy.yaml` required per agent | `policy.yaml` no longer required (removed from agent validation) |
+| Agent cwd = agent dir, HOME = host HOME | Agent cwd = agent dir, HOME = agent dir |
 
-## Recommended Project Structure
+## Component-Level Changes
+
+### Components to MODIFY
+
+#### 1. `codegen/shell_wrapper.rs` + `agent-wrapper.sh.j2`
+
+**Current:** Two code paths in template -- sandbox (openshell) and no-sandbox (direct claude).
+**New:** Single code path -- always `HOME=$AGENT_DIR exec claude`. The sandbox is activated by the generated `$AGENT_DIR/.claude/settings.json`, not by the wrapper.
+
+Changes:
+- Remove `no_sandbox` parameter from `generate_wrapper()`
+- Remove `policy_path` from template context (no more OpenShell policy)
+- Add `agent_home` to template context (the agent directory path)
+- Template becomes: `export HOME="<agent_home>" && exec "$CLAUDE_BIN" ...`
+- The `--no-sandbox` flag's effect moves to the settings.json generation layer (sandbox.enabled = false)
+
+New template structure:
+```bash
+#!/usr/bin/env bash
+# Generated by rightclaw -- do not edit
+# Agent: {{ agent_name }}
+set -euo pipefail
+
+CLAUDE_BIN=""
+for bin in claude claude-bun; do
+  if command -v "$bin" &>/dev/null; then
+    CLAUDE_BIN="$bin"
+    break
+  fi
+done
+if [ -z "$CLAUDE_BIN" ]; then
+  echo "error: claude CLI not found" >&2
+  exit 1
+fi
+
+export HOME="{{ agent_home }}"
+exec "$CLAUDE_BIN" \
+  --append-system-prompt-file "{{ combined_prompt_path }}" \
+  --dangerously-skip-permissions \
+  {% if model %}--model {{ model }} \
+  {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
+  {% endif %}{% if channels %}--channels {{ channels }} \
+  {% endif %}{% if startup_prompt %}-- "{{ startup_prompt }}"
+  {% else %}
+  {% endif %}
+```
+
+**Confidence:** HIGH -- This is a straightforward template simplification.
+
+#### 2. `codegen/mod.rs`
+
+**Current:** Exports `generate_wrapper`, `generate_combined_prompt`, `generate_process_compose`.
+**New:** Add new export: `generate_agent_settings`.
+
+```rust
+pub mod process_compose;
+pub mod settings;      // NEW
+pub mod shell_wrapper;
+pub mod system_prompt;
+```
+
+#### 3. `agent/types.rs` -- `AgentDef` struct
+
+**Current:** Has `policy_path: PathBuf` (required).
+**New:** Remove `policy_path`. Add optional sandbox config fields to `AgentConfig`.
+
+```rust
+pub struct AgentDef {
+    pub name: String,
+    pub path: PathBuf,
+    pub identity_path: PathBuf,
+    // REMOVED: pub policy_path: PathBuf,
+    pub config: Option<AgentConfig>,
+    pub mcp_config_path: Option<PathBuf>,
+    // ... rest unchanged
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    // existing fields...
+    pub restart: RestartPolicy,
+    pub max_restarts: u32,
+    pub backoff_seconds: u32,
+    pub start_prompt: Option<String>,
+    pub model: Option<String>,
+
+    // NEW: sandbox configuration
+    /// Additional paths the agent can write to (beyond its own dir)
+    pub sandbox_allow_write: Option<Vec<String>>,
+    /// Paths to deny reading
+    pub sandbox_deny_read: Option<Vec<String>>,
+    /// Network domains the agent can access
+    pub sandbox_allowed_domains: Option<Vec<String>>,
+    /// Commands excluded from sandbox
+    pub sandbox_excluded_commands: Option<Vec<String>>,
+}
+```
+
+**Confidence:** HIGH -- Standard struct modification.
+
+#### 4. `agent/discovery.rs`
+
+**Current:** Requires `policy.yaml` per agent (returns error if missing).
+**New:** Remove `policy.yaml` requirement. It is no longer a required file.
+
+```rust
+// REMOVE this block:
+// let policy_path = path.join("policy.yaml");
+// if !policy_path.exists() {
+//     return Err(AgentError::MissingRequiredFile { ... });
+// }
+```
+
+**Impact:** Tests that assert `policy.yaml` is required must be updated. The `make_agent()` test helpers that create policy_path must be updated to remove it.
+
+**Confidence:** HIGH -- Simple removal.
+
+#### 5. `runtime/sandbox.rs`
+
+**Current:** `RuntimeState` with `AgentState.sandbox_name`, `destroy_sandboxes()`, `sandbox_name_for()`.
+**New:** Simplify `RuntimeState`. Remove `AgentState.sandbox_name`, `destroy_sandboxes()`, `sandbox_name_for()`.
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeState {
+    pub agents: Vec<String>,       // Just names, no sandbox tracking
+    pub socket_path: String,
+    pub started_at: String,
+    // REMOVED: no_sandbox (no longer relevant)
+}
+
+// REMOVED: AgentState struct
+// REMOVED: sandbox_name_for()
+// REMOVED: destroy_sandboxes()
+```
+
+**Impact:** `cmd_down` no longer calls `destroy_sandboxes()`. The `--no-sandbox` check in `cmd_down` goes away.
+
+**Confidence:** HIGH -- Pure removal.
+
+#### 6. `runtime/deps.rs`
+
+**Current:** Checks for `process-compose`, `claude`, and optionally `openshell`.
+**New:** Checks for `process-compose`, `claude`, and on Linux: `bubblewrap` (`bwrap`) + `socat`.
+
+```rust
+pub fn verify_dependencies(no_sandbox: bool) -> miette::Result<()> {
+    which::which("process-compose").map_err(|_| { ... })?;
+    find_binary(&["claude", "claude-bun"]).map_err(|_| { ... })?;
+
+    if !no_sandbox && cfg!(target_os = "linux") {
+        which::which("bwrap").map_err(|_| {
+            miette::miette!(
+                help = "Install: sudo apt-get install bubblewrap socat",
+                "bubblewrap (bwrap) not found in PATH"
+            )
+        })?;
+        which::which("socat").map_err(|_| {
+            miette::miette!(
+                help = "Install: sudo apt-get install bubblewrap socat",
+                "socat not found in PATH"
+            )
+        })?;
+    }
+    // macOS: Seatbelt is built-in, no binary check needed
+    Ok(())
+}
+```
+
+**Confidence:** HIGH -- `cfg!(target_os = ...)` is standard Rust.
+
+#### 7. `doctor.rs`
+
+**Current:** Checks `openshell` binary.
+**New:** Replace `openshell` check with platform-conditional `bwrap` + `socat` checks.
+
+#### 8. `init.rs`
+
+**Current:** Creates `policy.yaml`, expands `~` in policy paths. Creates `.claude/settings.json` with plugin config.
+**New:** Stops creating `policy.yaml`. Generates `.claude/settings.json` with sandbox config + existing settings. Stops expanding `~` in policy paths (no policy files).
+
+The `settings.json` generation must include sandbox config:
+```json
+{
+  "skipDangerousModePermissionPrompt": true,
+  "spinnerTipsEnabled": false,
+  "prefersReducedMotion": true,
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "filesystem": {
+      "allowWrite": ["/tmp"]
+    },
+    "network": {
+      "allowedDomains": [
+        "api.anthropic.com",
+        "claude.ai",
+        "statsig.anthropic.com",
+        "sentry.io",
+        "api.github.com"
+      ]
+    }
+  }
+}
+```
+
+Note: When `telegram_token` is provided, add `"api.telegram.org"` to `allowedDomains`.
+
+The `pre_trust_directory()` function needs adjustment. Currently it writes to `~/.claude.json` (host HOME). With HOME override, CC will look at `$AGENT_DIR/.claude.json` instead. However, `pre_trust_directory` sets `hasTrustDialogAccepted` for the agent dir path. Since HOME = agent dir and cwd = agent dir, CC resolves the project as its own HOME dir. This means the trust dialog issue may resolve itself (agent dir is trusted implicitly when it IS the home). **This needs empirical verification during implementation.**
+
+**Confidence:** MEDIUM -- pre_trust behavior under HOME override is unverified.
+
+#### 9. `main.rs` (CLI)
+
+**Current:** `--no-sandbox` flag on `Up` command.
+**New:** Keep `--no-sandbox` but change semantics -- it controls `sandbox.enabled` in generated settings, not OpenShell invocation.
+
+`cmd_up` changes:
+- Remove `RuntimeState.agents[].sandbox_name` construction
+- Remove `RuntimeState.no_sandbox` field
+- Add settings.json generation step between prompt generation and wrapper generation
+- Remove sandbox state cleanup from `cmd_down`
+
+`cmd_down` changes:
+- Remove `destroy_sandboxes()` call entirely
+- Simplify to just: shutdown PC via REST API, clean state file
+
+### Components to ADD
+
+#### 1. `codegen/settings.rs` (NEW)
+
+**Purpose:** Generate per-agent `.claude/settings.json` that configures CC native sandbox.
+
+```rust
+use serde_json::json;
+use crate::agent::AgentDef;
+
+/// Generate the .claude/settings.json content for an agent.
+///
+/// This configures Claude Code's native sandbox (bubblewrap/Seatbelt)
+/// with per-agent filesystem and network restrictions.
+pub fn generate_agent_settings(
+    agent: &AgentDef,
+    no_sandbox: bool,
+    has_telegram: bool,
+) -> miette::Result<String> {
+    let mut settings = json!({
+        "skipDangerousModePermissionPrompt": true,
+        "spinnerTipsEnabled": false,
+        "prefersReducedMotion": true,
+    });
+
+    // Sandbox configuration
+    let sandbox = if no_sandbox {
+        json!({ "enabled": false })
+    } else {
+        let mut allowed_domains = vec![
+            "api.anthropic.com",
+            "claude.ai",
+            "statsig.anthropic.com",
+            "sentry.io",
+            "api.github.com",
+        ];
+        if has_telegram {
+            allowed_domains.push("api.telegram.org");
+        }
+
+        // Merge agent-specific sandbox config
+        let extra_write = agent.config.as_ref()
+            .and_then(|c| c.sandbox_allow_write.as_ref());
+        let extra_domains = agent.config.as_ref()
+            .and_then(|c| c.sandbox_allowed_domains.as_ref());
+
+        let mut allow_write = vec!["/tmp".to_string()];
+        if let Some(extra) = extra_write {
+            allow_write.extend(extra.iter().cloned());
+        }
+
+        if let Some(extra) = extra_domains {
+            allowed_domains.extend(
+                extra.iter().map(|s| s.as_str())
+            );
+        }
+
+        json!({
+            "enabled": true,
+            "autoAllowBashIfSandboxed": true,
+            "filesystem": {
+                "allowWrite": allow_write,
+            },
+            "network": {
+                "allowedDomains": allowed_domains,
+            }
+        })
+    };
+
+    settings["sandbox"] = sandbox;
+
+    if has_telegram {
+        settings["enabledPlugins"] = json!({
+            "telegram@claude-plugins-official": true
+        });
+    }
+
+    serde_json::to_string_pretty(&settings)
+        .map_err(|e| miette::miette!("failed to serialize settings: {e:#}"))
+}
+```
+
+**Confidence:** HIGH -- Straightforward JSON generation.
+
+### Components to REMOVE
+
+| File/Function | What It Does | Why Remove |
+|---|---|---|
+| `runtime::sandbox::destroy_sandboxes()` | Calls `openshell sandbox delete` per agent | OpenShell removed. Bubblewrap is ephemeral (no cleanup). |
+| `runtime::sandbox::sandbox_name_for()` | Generates `rightclaw-{name}` sandbox names | No sandbox naming needed. |
+| `runtime::sandbox::AgentState` | Tracks `name` + `sandbox_name` | Replaced by simple `Vec<String>` of agent names. |
+| `RuntimeState.no_sandbox` field | Tracks whether sandboxes were created | No sandbox lifecycle to track. |
+| `templates/right/policy.yaml` | OpenShell policy template (base) | Replaced by generated settings.json. |
+| `templates/right/policy-telegram.yaml` | OpenShell policy template (Telegram variant) | Replaced by generated settings.json with Telegram domains. |
+| All `openshell` references in wrapper template | `openshell sandbox create` invocation | Replaced by `HOME=...` + direct `claude` invocation. |
+| `agent/discovery.rs` policy_path validation | Requires `policy.yaml` per agent | No longer required. |
+| `AgentDef.policy_path` field | Stores path to policy.yaml | No OpenShell policy needed. |
+
+## Data Flow Changes
+
+### v2.0 `rightclaw up` Flow
 
 ```
-src/
-├── main.rs                # Entry: clap CLI definition, dispatch
-├── cli.rs                 # Clap command/subcommand definitions
-├── agent/
-│   ├── mod.rs             # AgentDef struct, discovery logic
-│   ├── discovery.rs       # Scan agents/ dir, parse agent.yaml
-│   └── types.rs           # AgentDef, AgentConfig structs
-├── policy/
-│   ├── mod.rs             # Policy resolver
-│   └── merge.rs           # Merge agent policy + skill policies (future)
-├── codegen/
-│   ├── mod.rs             # Re-exports
-│   ├── process_compose.rs # Generate process-compose.yaml
-│   └── shell_wrapper.rs   # Generate per-agent run scripts
-├── runtime/
-│   ├── mod.rs             # PC lifecycle management
-│   └── process_compose.rs # Spawn, attach, status, restart, down
-└── error.rs               # Unified error types
-```
-
-### Structure Rationale
-
-- **agent/:** Isolated from codegen so discovery can be tested independently. `AgentDef` is the central data structure everything else consumes.
-- **policy/:** Separate from agent because policy resolution has its own search logic (agent dir, policies/ dir, defaults) and will grow when skill-level policies need merging.
-- **codegen/:** Pure transformation layer. Takes typed data, emits files. No I/O side effects beyond writing to a temp dir. Easy to snapshot-test.
-- **runtime/:** The only module that spawns child processes. Clean boundary for testing (mock the process spawner).
-
-## Data Flow
-
-### `rightclaw up` Flow
-
-```
-User: rightclaw up ~/project --agents watchdog,reviewer
+User: rightclaw up --agents right
 
 1. CLI parses args
-   ↓
+   |
 2. Agent Discovery
-   - Scans ~/project/agents/
+   - Scans ~/.rightclaw/agents/
    - Filters by --agents if specified
-   - Parses agent.yaml per agent (or applies defaults)
-   - Validates: IDENTITY.md must exist
-   ↓ Vec<AgentDef>
-3. Policy Resolution (per agent)
-   - Check agents/<name>/policy.yaml → use if exists
-   - Else check policies/<name>.yaml → use if exists
-   - Else use built-in default policy
-   ↓ Vec<(AgentDef, PathBuf)>
-4. Shell Wrapper Generation
-   - For each agent, emit /tmp/rightclaw/<hash>/run-<name>.sh:
-     #!/bin/bash
-     exec openshell sandbox create \
-       --policy /abs/path/to/policy.yaml \
-       -- claude \
-         --append-system-prompt-file /abs/path/agents/<name>/IDENTITY.md \
-         --dangerously-skip-permissions \
-         -p /abs/path/to/project \
-         --prompt "<start_prompt>"
-   - chmod +x
-   ↓ Vec<PathBuf> (script paths)
-5. process-compose.yaml Generation
-   - Map each agent to a process entry:
-     - command: /tmp/rightclaw/<hash>/run-<name>.sh
-     - working_dir: project path
-     - availability: from agent.yaml or defaults
-   - Write to /tmp/rightclaw/<hash>/process-compose.yaml
-   ↓ PathBuf
-6. process-compose Spawn
-   - rightclaw up    → process-compose up -f <yaml>
-   - rightclaw up -d → process-compose up -f <yaml> --tui=false
-   ↓ Child process (or detached)
+   - Parses agent.yaml per agent
+   - Validates: IDENTITY.md must exist (policy.yaml NO LONGER required)
+   | Vec<AgentDef>
+   v
+3. Per-agent Settings Generation (NEW)
+   - Generate .claude/settings.json per agent
+   - Merges: base settings + sandbox config + agent.yaml sandbox overrides
+   - Writes to $AGENT_DIR/.claude/settings.json
+   | (settings written to disk)
+   v
+4. Combined Prompt Generation (UNCHANGED)
+   - Merge IDENTITY.md + start_prompt + rightcron bootstrap
+   - Write to run/<agent>-prompt.md
+   | PathBuf
+   v
+5. Shell Wrapper Generation (SIMPLIFIED)
+   - Template: HOME=<agent_dir> exec claude ...
+   - No openshell, no policy_path
+   - Write to run/<agent>.sh, chmod +x
+   | PathBuf
+   v
+6. process-compose.yaml Generation (UNCHANGED)
+   - Map agents to process entries with wrapper paths
+   | PathBuf
+   v
+7. Runtime State (SIMPLIFIED)
+   - Just agent names, socket path, timestamp
+   - No sandbox_name, no no_sandbox flag
+   | state.json
+   v
+8. process-compose Spawn (UNCHANGED)
+   - process-compose up -f <yaml> --port <port>
 ```
 
-### `rightclaw attach` Flow
+### v2.0 `rightclaw down` Flow (SIMPLIFIED)
 
 ```
-1. Find running process-compose socket
-   - Default: /tmp/rightclaw/<hash>/process-compose.sock
-   - Or from state file: /tmp/rightclaw/state.json
-2. Execute: process-compose attach --unix-socket <sock>
+1. Read state.json
+2. Shutdown process-compose via REST API
+3. Done (no sandbox cleanup needed)
 ```
 
-### `rightclaw status` Flow
+### HOME Override: How It Affects Claude Code
 
-```
-1. Find process-compose socket
-2. Query via process-compose REST API or CLI:
-   process-compose process list --unix-socket <sock> --output json
-3. Format and display agent states
-```
+When `HOME=/home/user/.rightclaw/agents/right` is set:
 
-### `rightclaw restart <agent>` Flow
+**User-level settings resolution:**
+- `~/.claude/` resolves to `/home/user/.rightclaw/agents/right/.claude/`
+- `~/.claude/settings.json` = agent-specific settings (sandbox config, plugin config)
+- `~/.claude.json` resolves to `/home/user/.rightclaw/agents/right/.claude.json`
 
-```
-1. Find process-compose socket
-2. Execute: process-compose process restart <agent> --unix-socket <sock>
-```
+**Project-level settings resolution:**
+- CC's cwd = agent dir (set by process-compose working_dir)
+- `.claude/settings.json` in cwd = same file as user-level (HOME = cwd)
+- This means user and project scopes converge, which is fine -- both point to agent-scoped config
 
-### `rightclaw down` Flow
+**What CC naturally scopes per agent:**
+- `.claude/memory/` -- auto-memory writes go to agent dir
+- `.claude/skills/` -- skill discovery is per-agent
+- `.claude/settings.json` -- sandbox config is per-agent
+- `.claude/settings.local.json` -- local overrides per-agent
+- `.claude.json` -- session state per-agent
+- CLAUDE.md -- read from cwd (agent dir)
 
-```
-1. Find process-compose socket
-2. Execute: process-compose down --unix-socket <sock>
-3. Clean up /tmp/rightclaw/<hash>/
-```
+**What CC might still leak from host:**
+- Nothing significant. By setting HOME to agent dir, CC has no path to host `~/.claude/` unless the sandbox explicitly allows reads to the real home directory.
+- The Telegram plugin `.env` is at `~/.claude/channels/telegram/.env`. With HOME overridden, this resolves to `$AGENT_DIR/.claude/channels/telegram/.env`. The `init` code must write the Telegram `.env` inside the agent dir, not the host home.
 
-### Key Data Structures
+**Critical behavioral changes:**
+1. **Git config**: `~/.gitconfig` resolves to agent dir. If agents need git, a `.gitconfig` must be placed in each agent dir, or `GIT_CONFIG_GLOBAL` env var must point to the real host gitconfig.
+2. **SSH keys**: `~/.ssh/` resolves to agent dir. Agents needing git over SSH need `GIT_SSH_COMMAND` or the sandbox must allow reading the real `~/.ssh/`.
+3. **NPM/other tools**: `~/.npmrc`, `~/.config/` all resolve to agent dir. For most RightClaw agents this is fine (they don't run npm).
 
-```rust
-/// Parsed from agents/<name>/agent.yaml (all optional with defaults)
-struct AgentConfig {
-    restart: RestartPolicy,        // default: OnFailure
-    max_restarts: u32,             // default: 5
-    backoff_seconds: u32,          // default: 10
-    start_prompt: Option<String>,  // default: generic "restore context" prompt
-}
+**Confidence:** HIGH for the core mechanism. MEDIUM for edge cases around git/SSH (may need per-agent env vars in shell wrapper).
 
-/// Discovered from scanning agents/ directory
-struct AgentDef {
-    name: String,                  // directory name
-    dir: PathBuf,                  // absolute path to agents/<name>/
-    identity_file: PathBuf,        // agents/<name>/IDENTITY.md
-    config: AgentConfig,           // parsed agent.yaml or defaults
-    mcp_config: Option<PathBuf>,   // agents/<name>/.mcp.json if exists
-    has_crons: bool,               // agents/<name>/crons/ exists
-}
+## process-compose.yaml Changes
 
-/// Runtime state persisted to /tmp/rightclaw/state.json
-struct RuntimeState {
-    project_dir: PathBuf,
-    config_dir: PathBuf,           // /tmp/rightclaw/<hash>/
-    socket_path: PathBuf,
-    agents: Vec<String>,
-    started_at: String,            // ISO 8601
-}
+The template itself (`process-compose.yaml.j2`) requires **no changes**. It already uses `working_dir` per agent and calls the wrapper script. The wrapper's contents change, but the template that generates `process-compose.yaml` stays identical.
 
-enum RestartPolicy { Never, OnFailure, Always }
-```
+However, the `ProcessAgent` struct needs a new `environment` field to pass `HOME` via process-compose instead of the shell wrapper. There are two valid approaches:
 
-## Architectural Patterns
+**Option A: HOME in shell wrapper** (recommended)
+- Wrapper does `export HOME="{{ agent_home }}"`
+- process-compose template unchanged
+- Simpler, more debuggable (inspect wrapper to see all env)
 
-### Pattern 1: Code Generation over Runtime Templating
+**Option B: HOME in process-compose.yaml**
+- Template adds `environment:` section per process
+- Wrapper has no HOME override
+- process-compose manages env
 
-**What:** Generate static YAML and shell scripts to disk, then hand them to process-compose. Do not template at runtime or pass complex args through environment variables.
+**Recommendation: Option A.** The shell wrapper is already the "codegen unit" -- putting HOME there keeps all agent launch config in one place. It's also easier to test (snapshot the wrapper output).
 
-**When to use:** Always for this project. process-compose reads files; OpenShell reads files. Generating files is the natural interface.
+## Architectural Patterns (New)
+
+### Pattern 5: Settings as Security Boundary
+
+**What:** Security enforcement moves from an external sandbox manager (OpenShell) to CC's native sandbox, configured via generated `settings.json`. The settings file IS the security policy.
+
+**When to use:** Always in v2.0. The `codegen/settings.rs` module generates per-agent settings that control filesystem access, network domains, and command execution boundaries.
 
 **Trade-offs:**
-- Pro: Debuggable (inspect generated files), testable (snapshot tests), no runtime templating bugs
-- Pro: process-compose gets a normal YAML file it can hot-reload
-- Con: Temp directory management, cleanup on crash
+- Pro: No external dependency (OpenShell). Simpler lifecycle (no create/destroy).
+- Pro: CC natively understands these settings -- no mismatch between policy and runtime.
+- Pro: macOS gets sandboxing for free (Seatbelt built-in).
+- Con: Less granular than OpenShell policies (no per-binary network rules).
+- Con: CC's sandbox is configurable by the agent itself (it can modify its own settings.json). This is mitigated by the fact that permission rules at managed scope can't be overridden.
 
-```rust
-// codegen/process_compose.rs
-pub fn generate(agents: &[AgentDef], opts: &GenOptions) -> String {
-    let mut yaml = serde_yaml::Mapping::new();
-    // ... build process entries from agent defs
-    serde_yaml::to_string(&yaml).unwrap()
-}
+### Pattern 6: HOME Override for Agent Isolation
 
-// In runtime: write to disk, then spawn process-compose pointing at it
-```
+**What:** Setting `HOME=$AGENT_DIR` makes CC treat the agent directory as the user's home. All user-scoped CC config (settings, memory, session state) naturally scopes per-agent without any custom logic.
 
-### Pattern 2: Layered Defaults
-
-**What:** Every config field has a built-in default. `agent.yaml` overrides. CLI flags override `agent.yaml`.
-
-**When to use:** For agent configuration. Users should get working behavior with zero config.
+**When to use:** Always. This is the core isolation mechanism.
 
 **Trade-offs:**
-- Pro: Zero-config MVP works immediately
-- Con: Need clear documentation of default values and override order
+- Pro: Zero CC-specific code for isolation. HOME is a Unix primitive.
+- Pro: `.claude/` directory naturally lands in agent dir.
+- Pro: Agents can't see each other's config, memory, or session state.
+- Con: Breaks host-level tool config (git, ssh). Mitigated by explicit env vars in wrapper.
+- Con: `pre_trust_directory()` behavior needs verification under HOME override.
 
-### Pattern 3: Process Socket for Lifecycle
+## Anti-Patterns (Updated)
 
-**What:** Use process-compose's Unix socket API for all lifecycle operations after initial spawn. Store socket path in state file.
+### Anti-Pattern 2 (Updated): Generating OpenShell Policies
 
-**When to use:** For `status`, `restart`, `down`, `attach` commands.
+**What people do:** Continue maintaining OpenShell policy.yaml files and the openshell invocation path.
+**Why it's wrong:** OpenShell is alpha, requires API key, adds a heavy dependency, and is architecturally redundant now that CC has native sandboxing.
+**Do this instead:** Generate `.claude/settings.json` with `sandbox.*` config. Let CC's built-in sandbox handle enforcement.
 
-**Trade-offs:**
-- Pro: No PID tracking, no signal management, no race conditions
-- Pro: process-compose handles all the hard process management
-- Con: Depends on process-compose's socket being available and stable
+### Anti-Pattern 5 (New): Mixing Host and Agent HOME
 
-### Pattern 4: Thin CLI, Fat Config
+**What people do:** Set HOME for CC but let other tools (git, npm) inherit the real HOME through env var fallbacks.
+**Why it's wrong:** Creates a split-brain where CC sees one HOME and subprocesses see another. Breaks the isolation model.
+**Do this instead:** Set HOME once in the shell wrapper. Provide explicit env vars (`GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`) for tools that need host-level config.
 
-**What:** The CLI itself has minimal logic. It discovers, resolves, generates, and delegates. All intelligence is in the config generation and in the agents themselves (Claude Code sessions with skills).
+### Anti-Pattern 6 (New): Relying on CC to Create .claude/
 
-**When to use:** This is the core architectural principle. RightClaw is a launcher, not an orchestrator.
+**What people do:** Let CC auto-create `.claude/` on first run instead of pre-creating it with settings.
+**Why it's wrong:** The sandbox config must exist BEFORE CC starts (otherwise the first run is unsandboxed). The settings.json must be written during `rightclaw up`, not lazily.
+**Do this instead:** `codegen/settings.rs` writes `.claude/settings.json` during `rightclaw up`, before process-compose spawns agents.
 
-**Trade-offs:**
-- Pro: Simple codebase, easy to maintain
-- Pro: Agents are autonomous (no coupling to the CLI)
-- Con: Limited ability to coordinate between agents (by design for v1)
-
-## Anti-Patterns
-
-### Anti-Pattern 1: Building a Process Manager
-
-**What people do:** Implement restart logic, health checks, log aggregation in the CLI.
-**Why it's wrong:** process-compose already does all of this with a mature TUI. Reimplementing it means maintaining a buggy subset.
-**Do this instead:** Generate correct process-compose config. Let process-compose handle process lifecycle. Use its REST API for queries.
-
-### Anti-Pattern 2: Dynamic Policy Assembly at Runtime
-
-**What people do:** Build OpenShell policies by merging fragments in memory and passing them through environment variables or stdin.
-**Why it's wrong:** Policies are security-critical. Dynamic assembly is hard to audit, hard to debug, easy to get wrong.
-**Do this instead:** Write resolved policies to disk as static YAML files. Each agent gets one policy file. Audit by reading the file.
-
-### Anti-Pattern 3: Agent Coordination Through CLI
-
-**What people do:** Build inter-agent messaging, shared state, or coordination protocols into the CLI.
-**Why it's wrong:** Agents are independent Claude Code sessions. The CLI is a launcher. Mixing concerns makes both harder to maintain.
-**Do this instead:** For v1, agents don't coordinate. For v2, use an MCP memory server that agents connect to independently. The CLI never mediates.
-
-### Anti-Pattern 4: Hardcoded Agent Definitions
-
-**What people do:** Define agent behavior in the CLI code rather than in the agent directory structure.
-**Why it's wrong:** Makes adding/removing agents a code change instead of a directory operation.
-**Do this instead:** The CLI discovers agents from `agents/`. It knows nothing about what a "watchdog" or "reviewer" does. An agent is just: a name (dir), an identity (IDENTITY.md), optional config (agent.yaml), optional policy.
-
-## Integration Points
+## Integration Points (Updated)
 
 ### External Services
 
 | Service | Integration Pattern | Notes |
 |---------|---------------------|-------|
-| **process-compose** | Child process spawn + Unix socket API | Socket for lifecycle ops. CLI must find/store socket path. |
-| **OpenShell** | Via generated shell wrapper scripts | `openshell sandbox create --policy <file> -- claude ...` |
-| **Claude Code CLI** | Invoked inside OpenShell sandbox | `--append-system-prompt-file`, `--dangerously-skip-permissions`, `-p` |
-| **ClawHub API** | HTTP client inside a Claude Code skill | Not a CLI concern. The `/clawhub` skill handles this. |
+| **process-compose** | Child process spawn + TCP API | Unchanged from v1.0. |
+| **Claude Code CLI** | Direct invocation with `HOME` override | No intermediate sandbox manager. `--dangerously-skip-permissions` still used. |
+| **bubblewrap** (Linux) | Invoked internally by CC when sandbox enabled | RightClaw doesn't call bwrap directly. CC does. |
+| **Seatbelt** (macOS) | Invoked internally by CC | Same -- RightClaw just enables it via settings. |
+| **ClawHub/CronSync** | Unchanged | Skills run inside CC session as before. |
 
 ### Internal Boundaries
 
 | Boundary | Communication | Notes |
 |----------|---------------|-------|
-| CLI -> Agent Discovery | Function call, returns `Vec<AgentDef>` | Pure data, no side effects |
-| Agent Discovery -> Policy Resolver | Per-agent `AgentDef` -> `PathBuf` | File existence checks only |
-| Policy Resolver -> Shell Wrapper Gen | `(AgentDef, PolicyPath)` -> script file | Writes to temp dir |
-| Shell Wrapper Gen -> PC Config Gen | Script paths feed into YAML | Pure string generation |
-| PC Config Gen -> PC Lifecycle | YAML path -> child process spawn | Only place with side effects |
+| CLI -> Agent Discovery | `Vec<AgentDef>` | Unchanged, except no `policy_path` |
+| Agent Discovery -> Settings Gen | `AgentDef` -> JSON string | NEW boundary |
+| Settings Gen -> Wrapper Gen | Settings.json written to disk, wrapper uses same agent dir | Implicit (filesystem) |
+| Wrapper Gen -> PC Config Gen | Wrapper paths feed into YAML | Unchanged |
+| PC Config Gen -> PC Lifecycle | YAML path -> child process spawn | Unchanged |
 
-## Build Order (Dependencies Between Components)
+## Build Order for v2.0 Migration
 
-The build order is dictated by data flow dependencies. Each layer depends only on layers above it.
+Dependencies between changes dictate this order:
 
 ```
-Phase 1: Foundation
-├── error.rs          (no deps)
-├── agent/types.rs    (no deps, just structs)
-└── cli.rs            (clap defs, no logic)
+Phase 1: Remove OpenShell (foundation removal)
+  1.1 Remove policy_path from AgentDef
+  1.2 Remove policy.yaml requirement from discovery.rs
+  1.3 Remove AgentState, sandbox_name_for, destroy_sandboxes from sandbox.rs
+  1.4 Simplify RuntimeState (remove no_sandbox, sandbox tracking)
+  1.5 Remove policy.yaml templates (templates/right/policy*.yaml)
+  Note: Code won't compile until all references are updated.
+        Do 1.1-1.4 atomically in one commit.
 
-Phase 2: Discovery
-└── agent/discovery.rs  (depends on: types)
-    - Scan agents/ dir
-    - Parse agent.yaml (serde_yaml)
-    - Validate structure
+Phase 2: Add settings generation (new capability)
+  2.1 Add sandbox fields to AgentConfig (sandbox_allow_write, etc.)
+  2.2 Create codegen/settings.rs with generate_agent_settings()
+  2.3 Add to codegen/mod.rs exports
+  2.4 Write tests for settings generation
 
-Phase 3: Policy Resolution
-└── policy/mod.rs  (depends on: types)
-    - Search order: agent dir > policies/ > default
-    - Return path to resolved policy
+Phase 3: Update shell wrapper (template change)
+  3.1 Rewrite agent-wrapper.sh.j2 (remove openshell, add HOME)
+  3.2 Update generate_wrapper() signature (remove no_sandbox, policy_path; add agent_home)
+  3.3 Update shell_wrapper_tests.rs
+  3.4 Update process-compose template if needed (likely no changes)
 
-Phase 4: Code Generation
-├── codegen/shell_wrapper.rs  (depends on: types)
-│   - Generate per-agent run-<name>.sh
-│   - Template: openshell sandbox create --policy ... -- claude ...
-└── codegen/process_compose.rs  (depends on: types)
-    - Generate process-compose.yaml
-    - Map AgentDef + script paths to PC process entries
+Phase 4: Update init (first-run setup)
+  4.1 Stop creating policy.yaml in init
+  4.2 Generate settings.json with sandbox config in init
+  4.3 Move Telegram .env inside agent dir ($HOME-relative path)
+  4.4 Update pre_trust_directory for HOME override behavior
+  4.5 Update init tests
 
-Phase 5: Runtime
-└── runtime/process_compose.rs  (depends on: all above)
-    - Spawn process-compose
-    - Store state (socket path, config dir)
-    - Implement attach/status/restart/down
+Phase 5: Update runtime (cmd_up, cmd_down, deps, doctor)
+  5.1 Update verify_dependencies: openshell -> bubblewrap+socat (Linux only)
+  5.2 Update doctor.rs: openshell -> bubblewrap+socat (platform-conditional)
+  5.3 Update cmd_up: add settings generation step, remove sandbox state
+  5.4 Update cmd_down: remove destroy_sandboxes call
+  5.5 Update cmd_pair: add HOME override
+  5.6 Remove --no-sandbox from CLI or change semantics
 
-Phase 6: Wire It Up
-└── main.rs  (depends on: all)
-    - CLI dispatch: match subcommand, call subsystems
+Phase 6: Integration testing
+  6.1 End-to-end test: rightclaw up with native sandbox
+  6.2 Verify agent isolation (one agent can't read another's .claude/)
+  6.3 Verify Telegram channel still works under HOME override
 ```
 
 ### Why This Order
 
-1. **Types first** because everything depends on `AgentDef` and `AgentConfig`.
-2. **Discovery before codegen** because codegen consumes discovered agents. You can test discovery in isolation with fixture directories.
-3. **Policy resolution in parallel with discovery** — both are independent lookups, but policy feeds into shell wrapper gen.
-4. **Codegen before runtime** because runtime just spawns what codegen produced. Codegen is pure and easily snapshot-tested.
-5. **Runtime last** because it's the only module with real side effects (child processes, sockets). Hardest to test, fewest changes needed.
+1. **Remove first, add second.** OpenShell removal (Phase 1) breaks compilation but that's intentional -- the compiler catches all leftover references. Do it atomically.
+2. **Settings gen before wrapper update.** The new wrapper depends on settings.json existing. Build the generator, then the consumer.
+3. **Init after codegen.** Init uses the same settings generation logic. Build the library function first, then call it from init.
+4. **Runtime last.** cmd_up orchestrates everything. Update it after all pieces are in place.
+5. **Integration testing after all code changes.** No point testing mid-migration.
 
-## Skill Management Architecture (ClawHub)
+## Telegram Under HOME Override
 
-This is a **Claude Code skill**, not a CLI component. It runs inside an agent's CC session.
+This deserves special attention because the Telegram plugin's `.env` file path changes.
 
-```
-User: "install TheSethRose/agent-browser"
-  ↓
-Claude invokes /clawhub skill
-  ↓
-┌──────────────────────────────────────┐
-│ /clawhub install                      │
-│                                       │
-│ 1. HTTP GET clawhub.dev/api/search    │
-│    → find skill by name               │
-│ 2. git clone skill repo               │
-│    → into .claude/skills/<name>/      │
-│ 3. Parse SKILL.md frontmatter         │
-│    → extract metadata.openshell       │
-│ 4. Policy gate                        │
-│    → audit requested permissions      │
-│    → block suspicious patterns        │
-│    → prompt user for confirmation     │
-│ 5. Register in skills/installed.json  │
-│ 6. Hot-reload: tell OpenShell to      │
-│    update network_policies if needed  │
-└──────────────────────────────────────┘
-```
+**v1.0:** Telegram `.env` at `~/.claude/channels/telegram/.env` (host HOME)
+**v2.0:** With HOME override, `~` resolves to agent dir. So the `.env` must live at `$AGENT_DIR/.claude/channels/telegram/.env`.
 
-The CLI has **no role** in skill management. Skills are installed and managed within agent sessions. The CLI only discovers what exists in `agents/<name>/skills/` for the purpose of policy resolution (if skill policies need merging).
+Changes needed:
+- `init.rs`: Write Telegram `.env` inside agent dir instead of host `~/.claude/channels/telegram/`
+- `init.rs`: Write `access.json` inside agent dir instead of host path
+- The Telegram plugin reads `.env` from `$HOME/.claude/channels/telegram/` -- with HOME overridden, it finds the agent-scoped copy.
 
-## CronSync Architecture
+This is actually cleaner than v1.0 because each agent can have its own Telegram bot token, whereas v1.0 shared one token across all agents.
 
-Also a Claude Code skill, not a CLI component. Each agent runs its own CronSync independently.
+**Confidence:** MEDIUM -- Telegram plugin path resolution behavior under HOME override needs empirical verification. The plugin may hardcode paths.
 
-```
-/loop 5m /cronsync
-  ↓ (every 5 min)
-1. Read agents/<name>/crons/*.yaml → desired state
-2. CronList tool → actual state
-3. Load crons/state.json → name↔ID mapping
-4. Reconcile:
-   - Missing job → CronCreate, save ID
-   - Orphan job  → CronDelete, remove ID
-   - Changed spec → Delete + Create, update ID
-   - Match → skip
-5. Write updated crons/state.json
-```
+## Edge Cases and Risks
 
-Lock-file concurrency control prevents overlapping cron executions. Lock files live in `crons/.locks/<name>.json` with heartbeat timestamps.
+### CC Self-Modification Risk
+CC can modify its own `.claude/settings.json` during a session (e.g., if a skill or prompt tells it to). This could disable the sandbox mid-session. Mitigation: The `sandbox.enabled` setting could be set at managed scope (which CC can't override), but managed settings require server-managed delivery or OS-level plist. For RightClaw, the pragmatic answer is: if the agent disables its own sandbox, that's a user-configuration problem, not a RightClaw bug. The `--dangerously-skip-permissions` flag already means we're trusting the agent.
 
-## Default "Right" Agent Bootstrap
+### `.claude.json` Accumulation
+CC writes session state to `~/.claude.json`. With HOME override, each agent accumulates its own `.claude.json`. This is fine for isolation but means stale session data piles up in agent dirs. No action needed -- CC manages its own cleanup.
 
-```
-agents/right/
-├── IDENTITY.md      # "I am Right, your general-purpose assistant"
-├── BOOTSTRAP.md     # First-run onboarding flow
-├── SOUL.md          # Personality/values template
-├── AGENTS.md        # Operational framework
-├── MEMORY.md        # Empty, populated over time
-├── agent.yaml       # restart: on_failure, defaults
-└── skills/
-    └── cronsync/
-        └── SKILL.md
-
-Bootstrap flow (BOOTSTRAP.md):
-1. Detect first run (IDENTITY.md has placeholder values)
-2. Ask user: name, vibe, personality preferences
-3. Write IDENTITY.md with user's choices
-4. Write USER.md with user context
-5. Write SOUL.md with personality
-6. Delete BOOTSTRAP.md (self-removing)
-7. Continue as configured agent
-```
-
-## Temp Directory Layout
-
-```
-/tmp/rightclaw/<hash>/
-├── process-compose.yaml    # Generated PC config
-├── run-watchdog.sh          # Shell wrapper for watchdog agent
-├── run-reviewer.sh          # Shell wrapper for reviewer agent
-├── run-right.sh             # Shell wrapper for right agent
-├── state.json               # Runtime state (socket path, agents, etc.)
-└── process-compose.sock     # Unix socket (created by PC)
-```
-
-`<hash>` is derived from the absolute path of the project directory. This allows multiple rightclaw instances for different projects to coexist.
+### process-compose env Propagation
+When process-compose spawns the wrapper script, it inherits the parent environment. The wrapper sets HOME, which overrides whatever the parent had. This is correct behavior. No changes needed to process-compose config.
 
 ## Sources
 
-- [process-compose documentation](https://f1bonacc1.github.io/process-compose/)
-- [process-compose configuration reference](https://f1bonacc1.github.io/process-compose/configuration/)
-- [NVIDIA OpenShell Developer Guide](https://docs.nvidia.com/openshell/latest/index.html)
-- [OpenShell Policy Schema Reference](https://docs.nvidia.com/openshell/latest/reference/policy-schema.html)
-- [OpenShell Sandbox Management](https://docs.nvidia.com/openshell/latest/sandboxes/manage-sandboxes.html)
-- [OpenShell Custom Policies](https://docs.nvidia.com/openshell/latest/sandboxes/policies.html)
-- [OpenShell GitHub](https://github.com/NVIDIA/OpenShell)
+- [Claude Code Sandboxing Documentation](https://code.claude.com/docs/en/sandboxing) -- official sandbox config reference
+- [Claude Code Settings Documentation](https://code.claude.com/docs/en/settings) -- settings.json schema and scope hierarchy
+- [Anthropic Engineering: Claude Code Sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing) -- internal architecture details
+- [Trail of Bits Claude Code Config](https://github.com/trailofbits/claude-code-config) -- production sandbox configuration example
+- [sandbox-runtime npm package](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime) -- open source sandbox implementation
+- [OpenClaw cwd issue #27627](https://github.com/openclaw/openclaw/issues/27627) -- cwd-based sandbox write permissions behavior
 
 ---
-*Architecture research for: RightClaw multi-agent CLI runtime*
-*Researched: 2026-03-21*
+*Architecture research for: RightClaw v2.0 native sandbox and agent HOME isolation*
+*Researched: 2026-03-23*
