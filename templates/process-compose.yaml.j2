@@ -7,7 +7,6 @@ processes:
   {{ agent.name }}:
     command: "{{ agent.wrapper_path }}"
     working_dir: "{{ agent.working_dir }}"
-    is_tty: true
     availability:
       restart: "{{ agent.restart_policy }}"
       backoff_seconds: {{ agent.backoff_seconds }}
