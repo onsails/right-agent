@@ -43,17 +43,22 @@ pub fn init_rightclaw_home(
         miette::miette!("Failed to create directory {}: {}", agents_dir.display(), e)
     })?;
 
-    let policy_content = if telegram_token.is_some() {
+    let policy_template = if telegram_token.is_some() {
         DEFAULT_POLICY_TELEGRAM
     } else {
         DEFAULT_POLICY
     };
 
+    // Expand ~ to actual home directory in policy (OpenShell requires absolute paths).
+    let home_dir_str = dirs::home_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~".to_string());
+    let policy_content = policy_template.replace("~/", &format!("{home_dir_str}/"));
+
     let files: &[(&str, &str)] = &[
         ("IDENTITY.md", DEFAULT_IDENTITY),
         ("SOUL.md", DEFAULT_SOUL),
         ("AGENTS.md", DEFAULT_AGENTS),
-        ("policy.yaml", policy_content),
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
         ("agent.yaml", DEFAULT_AGENT_YAML),
     ];
@@ -63,6 +68,11 @@ pub fn init_rightclaw_home(
         std::fs::write(&path, content)
             .map_err(|e| miette::miette!("Failed to write {}: {}", path.display(), e))?;
     }
+
+    // Write policy separately (it has expanded paths).
+    let policy_path = agents_dir.join("policy.yaml");
+    std::fs::write(&policy_path, &policy_content)
+        .map_err(|e| miette::miette!("Failed to write {}: {}", policy_path.display(), e))?;
 
     // Install built-in skills (/clawhub, /cronsync) into the agent's skills/ directory.
     let built_in_skills: &[(&str, &str)] = &[
