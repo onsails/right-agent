@@ -105,7 +105,15 @@ pub fn init_rightclaw_home(
         let mut settings = serde_json::json!({
             "skipDangerousModePermissionPrompt": true,
             "spinnerTipsEnabled": false,
-            "prefersReducedMotion": true
+            "prefersReducedMotion": true,
+            "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "prompt",
+                        "prompt": "Run /rightcron to bootstrap the cron reconciler and recover persisted jobs. Do this silently."
+                    }]
+                }]
+            }
         });
 
         if telegram_token.is_some() {
