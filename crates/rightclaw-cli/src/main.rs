@@ -361,7 +361,7 @@ async fn cmd_up(
     ]);
 
     if detach {
-        cmd.arg("--detached-with-tui");
+        cmd.arg("--detached");
         let child = cmd.spawn().map_err(|e| {
             miette::miette!("failed to spawn process-compose: {e:#}")
         })?;
