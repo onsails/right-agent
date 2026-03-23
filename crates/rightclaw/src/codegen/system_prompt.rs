@@ -19,6 +19,19 @@ pub fn generate_combined_prompt(agent: &AgentDef) -> miette::Result<String> {
 
     let mut content = identity_content;
     content.push_str("\n\n---\n\n## Startup Instructions\n\n");
+
+    // Check for BOOTSTRAP.md — first-run onboarding takes priority
+    let bootstrap_path = agent.path.join("BOOTSTRAP.md");
+    if bootstrap_path.exists() {
+        content.push_str(
+            "**IMPORTANT: First-run onboarding required.**\n\n\
+             Read `BOOTSTRAP.md` in your agent directory and follow its instructions \
+             before doing anything else. The onboarding will ask for the user's name, \
+             personality preferences, and create your identity files. After completing \
+             onboarding, delete BOOTSTRAP.md as instructed.\n\n",
+        );
+    }
+
     content.push_str(start_prompt);
     content.push('\n');
 
