@@ -95,22 +95,39 @@ pub fn init_rightclaw_home(
     std::fs::write(claude_skills_dir.join("installed.json"), "{}")
         .map_err(|e| miette::miette!("Failed to write installed.json: {}", e))?;
 
-    // Always create .claude/settings.json with skipDangerousModePermissionPrompt.
-    // This prevents Claude Code from prompting for .claude/ file writes in daemon mode.
+    // Always create .claude/settings.json with agent-specific settings.
     {
         let claude_dir = agents_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir).map_err(|e| {
             miette::miette!("Failed to create {}: {}", claude_dir.display(), e)
         })?;
 
-        let settings = if telegram_token.is_some() {
-            r#"{"skipDangerousModePermissionPrompt":true,"spinnerTipsEnabled":false,"prefersReducedMotion":true,"enabledPlugins":{"telegram@claude-plugins-official":true}}"#
-        } else {
-            r#"{"skipDangerousModePermissionPrompt":true,"spinnerTipsEnabled":false,"prefersReducedMotion":true}"#
-        };
+        let mut settings = serde_json::json!({
+            "skipDangerousModePermissionPrompt": true,
+            "spinnerTipsEnabled": false,
+            "prefersReducedMotion": true,
+            "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "prompt",
+                        "prompt": "Run /rightcron to reconcile scheduled tasks. If crons/ directory exists with .yaml files, recover all jobs. If no specs exist, this is a no-op. Do this silently — do not message the user about it."
+                    }]
+                }]
+            }
+        });
 
-        std::fs::write(claude_dir.join("settings.json"), settings)
-            .map_err(|e| miette::miette!("Failed to write settings.json: {}", e))?;
+        if telegram_token.is_some() {
+            settings["enabledPlugins"] = serde_json::json!({
+                "telegram@claude-plugins-official": true
+            });
+        }
+
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&settings)
+                .map_err(|e| miette::miette!("Failed to serialize settings: {e}"))?,
+        )
+        .map_err(|e| miette::miette!("Failed to write settings.json: {}", e))?;
     }
 
     // Write Telegram bot token to .env if provided.
