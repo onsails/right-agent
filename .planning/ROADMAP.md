@@ -63,7 +63,10 @@ Plans:
   2. When Telegram is configured, `rightclaw up` copies channel config to the agent HOME's `.claude/channels/telegram/` so the Telegram plugin finds it under HOME override
   3. Each agent's `.claude/` contains pre-created `settings.json`, `settings.local.json` (empty `{}`), and `skills/` directory -- CC never triggers protected directory write prompts
   4. Telegram channel remains functional as a permission relay safety net for any edge case prompts that bypass suppression
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 09-01-PLAN.md -- AgentConfig Telegram fields, codegen/telegram.rs, codegen/skills.rs, init.rs refactor
+- [ ] 09-02-PLAN.md -- Wire cmd_up steps 6-9, git Warn doctor check
 
 ### Phase 10: Doctor & Managed Settings
 **Goal**: Users can opt into machine-wide domain blocking and get warned about managed settings conflicts
@@ -85,5 +88,5 @@ Phases execute in numeric order: 8 -> 9 -> 10
 | 6. Sandbox Configuration | v2.0 | 2/2 | Complete | 2026-03-24 |
 | 7. Platform Compatibility | v2.0 | 2/2 | Complete | 2026-03-24 |
 | 8. HOME Isolation & Permission Model | v2.1 | 0/2 | Planned    |  |
-| 9. Agent Environment Setup | v2.1 | 0/? | Not started | - |
+| 9. Agent Environment Setup | v2.1 | 0/2 | Planned | - |
 | 10. Doctor & Managed Settings | v2.1 | 0/? | Not started | - |
