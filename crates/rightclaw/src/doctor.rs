@@ -54,6 +54,26 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
         ),
     ];
 
+    // Linux-only sandbox dependency checks
+    if std::env::consts::OS == "linux" {
+        let bwrap_check = check_binary(
+            "bwrap",
+            Some("Install bubblewrap: sudo apt install bubblewrap (or dnf/pacman)"),
+        );
+        let bwrap_found = bwrap_check.status == CheckStatus::Pass;
+        checks.push(bwrap_check);
+
+        checks.push(check_binary(
+            "socat",
+            Some("Install socat: sudo apt install socat (or dnf/pacman)"),
+        ));
+
+        // Only run smoke test if bwrap binary was found
+        if bwrap_found {
+            checks.push(check_bwrap_sandbox());
+        }
+    }
+
     // Agent structure checks
     checks.extend(check_agent_structure(home));
 
