@@ -158,7 +158,7 @@ fn wrapper_has_exactly_one_append_system_prompt_file() {
 #[test]
 fn wrapper_contains_home_override() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("export HOME=\"/home/user/.rightclaw/agents/testbot\""),
@@ -169,7 +169,7 @@ fn wrapper_contains_home_override() {
 #[test]
 fn wrapper_contains_git_env_forwarding() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
 
     let expected = [
         "export GIT_CONFIG_GLOBAL=\"${GIT_CONFIG_GLOBAL:-}\"",
@@ -186,7 +186,7 @@ fn wrapper_contains_git_env_forwarding() {
 #[test]
 fn wrapper_contains_anthropic_key_forwarding() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("export ANTHROPIC_API_KEY=\"${ANTHROPIC_API_KEY:-}\""),
@@ -197,7 +197,7 @@ fn wrapper_contains_anthropic_key_forwarding() {
 #[test]
 fn wrapper_home_override_after_env_capture() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
 
     let home_idx = output
         .lines()
@@ -227,7 +227,7 @@ fn wrapper_home_override_after_env_capture() {
 #[test]
 fn wrapper_home_override_before_exec() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    let output = generate_wrapper(&agent, true, DUMMY_PROMPT_PATH, None).unwrap();
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
 
     let home_idx = output
         .lines()
@@ -248,12 +248,11 @@ fn wrapper_home_override_before_exec() {
 #[test]
 fn wrapper_retains_dangerously_skip_permissions() {
     let agent = make_agent("testbot", Some("Do the thing"));
-    // Test both sandbox and no-sandbox modes.
-    for no_sandbox in [false, true] {
-        let output = generate_wrapper(&agent, no_sandbox, DUMMY_PROMPT_PATH, None).unwrap();
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+    {
         assert!(
             output.contains("--dangerously-skip-permissions"),
-            "expected --dangerously-skip-permissions (no_sandbox={no_sandbox}) in:\n{output}"
+            "expected --dangerously-skip-permissions in:\n{output}"
         );
     }
 }

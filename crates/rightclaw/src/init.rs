@@ -163,7 +163,6 @@ pub fn init_rightclaw_home(
         name: "right".to_owned(),
         path: agents_dir.clone(),
         identity_path: agents_dir.join("IDENTITY.md"),
-        policy_path: agents_dir.join("policy.yaml"),
         config: None,
         mcp_config_path: None,
         soul_path: None,
