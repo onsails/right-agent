@@ -4,6 +4,8 @@
   packages = [
     pkgs.git
     pkgs.process-compose
+    pkgs.bubblewrap
+    pkgs.socat
   ];
 
   languages.rust.enable = true;
