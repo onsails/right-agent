@@ -75,6 +75,10 @@ pub fn init_rightclaw_home(
     std::fs::write(claude_skills_dir.join("installed.json"), "{}")
         .map_err(|e| miette::miette!("Failed to write installed.json: {}", e))?;
 
+    // Resolve host HOME once, before any HOME env manipulation (Phase 8).
+    let host_home = dirs::home_dir()
+        .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
+
     // Generate .claude/settings.json via codegen (D-17, D-18).
     // Build a synthetic AgentDef for the default "right" agent.
     // Note: .mcp.json doesn't exist on disk yet at this point, but
@@ -99,8 +103,6 @@ pub fn init_rightclaw_home(
             heartbeat_path: None,
         };
 
-        let host_home = dirs::home_dir()
-            .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
         let settings = crate::codegen::generate_settings(&agent_def, false, &host_home)?;
         let claude_dir = agents_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir).map_err(|e| {
@@ -176,6 +178,10 @@ pub fn init_rightclaw_home(
         heartbeat_path: None,
     };
     crate::codegen::generate_agent_claude_json(&trust_agent)?;
+
+    // Create credential symlink so agent can use OAuth under HOME override (D-07, D-08).
+    // host_home was already resolved at function start (before any HOME manipulation).
+    crate::codegen::create_credential_symlink(&trust_agent, &host_home)?;
 
     println!("Created RightClaw home at {}", home.display());
     println!("  agents/right/IDENTITY.md");
