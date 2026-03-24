@@ -64,6 +64,21 @@ pub struct AgentConfig {
     /// Per-agent sandbox overrides from `sandbox:` section.
     #[serde(default)]
     pub sandbox: Option<SandboxOverrides>,
+
+    /// Path to file containing the Telegram bot token, relative to the agent directory.
+    /// Takes precedence over `telegram_token` if both are set.
+    #[serde(default)]
+    pub telegram_token_file: Option<String>,
+
+    /// Inline Telegram bot token. Fallback if `telegram_token_file` is not set.
+    /// Prefer `telegram_token_file` to avoid committing secrets into agent.yaml.
+    #[serde(default)]
+    pub telegram_token: Option<String>,
+
+    /// Numeric Telegram user ID for access.json pre-pairing.
+    /// If absent, access.json is not written; user must pair interactively.
+    #[serde(default)]
+    pub telegram_user_id: Option<String>,
 }
 
 /// A discovered agent definition from the filesystem.
@@ -98,6 +113,55 @@ pub struct AgentDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_config_telegram_token_file_field() {
+        let yaml = r#"telegram_token_file: ".telegram.env""#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.telegram_token_file.as_deref(), Some(".telegram.env"));
+        assert_eq!(config.telegram_token, None);
+        assert_eq!(config.telegram_user_id, None);
+    }
+
+    #[test]
+    fn agent_config_telegram_token_field() {
+        let yaml = r#"telegram_token: "123:abc""#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.telegram_token.as_deref(), Some("123:abc"));
+        assert_eq!(config.telegram_token_file, None);
+        assert_eq!(config.telegram_user_id, None);
+    }
+
+    #[test]
+    fn agent_config_telegram_user_id_field() {
+        let yaml = r#"telegram_user_id: "987654321""#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.telegram_user_id.as_deref(), Some("987654321"));
+        assert_eq!(config.telegram_token_file, None);
+        assert_eq!(config.telegram_token, None);
+    }
+
+    #[test]
+    fn agent_config_without_telegram_defaults_to_none() {
+        let yaml = "{}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.telegram_token_file, None);
+        assert_eq!(config.telegram_token, None);
+        assert_eq!(config.telegram_user_id, None);
+    }
+
+    #[test]
+    fn agent_config_all_telegram_fields_together() {
+        let yaml = r#"
+telegram_token_file: ".telegram.env"
+telegram_token: "123:abc"
+telegram_user_id: "987654321"
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.telegram_token_file.as_deref(), Some(".telegram.env"));
+        assert_eq!(config.telegram_token.as_deref(), Some("123:abc"));
+        assert_eq!(config.telegram_user_id.as_deref(), Some("987654321"));
+    }
 
     #[test]
     fn agent_config_deserializes_full_yaml() {

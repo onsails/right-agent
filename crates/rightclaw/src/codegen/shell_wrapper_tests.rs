@@ -11,6 +11,9 @@ fn make_agent(name: &str, start_prompt: Option<&str>) -> AgentDef {
         start_prompt: start_prompt.map(String::from),
         model: None,
         sandbox: None,
+        telegram_token_file: None,
+        telegram_token: None,
+        telegram_user_id: None,
     });
     AgentDef {
         name: name.to_owned(),

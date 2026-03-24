@@ -105,6 +105,9 @@ fn merges_user_overrides_with_defaults() {
         start_prompt: None,
         model: None,
         sandbox: Some(overrides),
+        telegram_token_file: None,
+        telegram_token: None,
+        telegram_user_id: None,
     };
     let agent = make_test_agent("test-agent", Some(config));
     let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
@@ -242,6 +245,9 @@ fn merges_user_allow_read_overrides() {
         start_prompt: None,
         model: None,
         sandbox: Some(overrides),
+        telegram_token_file: None,
+        telegram_token: None,
+        telegram_user_id: None,
     };
     let agent = make_test_agent("test-agent", Some(config));
     let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();

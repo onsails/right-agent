@@ -11,6 +11,9 @@ fn make_agent(name: &str, restart: RestartPolicy) -> AgentDef {
         start_prompt: Some("Go".to_owned()),
         model: None,
         sandbox: None,
+        telegram_token_file: None,
+        telegram_token: None,
+        telegram_user_id: None,
     });
     AgentDef {
         name: name.to_owned(),
