@@ -1,5 +1,5 @@
 ---
-status: partial
+status: complete
 phase: v2.0 (phases 05-07 combined)
 source: [05-01-SUMMARY.md, 05-02-SUMMARY.md, 06-01-SUMMARY.md, 06-02-SUMMARY.md, 07-01-SUMMARY.md, 07-02-SUMMARY.md]
 started: 2026-03-24T16:00:00Z
@@ -58,31 +58,31 @@ result: pass
 notes: Fixed — bubblewrap and socat added to devenv.nix. Doctor shows bwrap ok, socat ok, bwrap-sandbox ok.
 
 ### 10. Sandbox blocks filesystem writes outside agent dir
-expected: Agent running via `rightclaw up` cannot write to `/tmp/should-fail` or any path outside its own agent directory. `touch /tmp/should-fail` executed inside the agent's bash should fail with a permission/sandbox error.
-result: [pending]
-notes: Requires interactive CC session with API key. Run `rightclaw up`, attach, ask agent to `touch /tmp/should-fail`.
+expected: Agent running via `rightclaw up` cannot write to `/tmp/should-fail` or any path outside its own agent directory.
+result: pass
+notes: `touch /tmp/should-fail` returned exit code 1 — "Read-only file system". Sandbox correctly enforces filesystem isolation.
 
 ### 11. Sandbox allows filesystem writes inside agent dir
-expected: Agent can write files inside its own directory (e.g. `touch ~/test-file` from agent cwd). Should succeed without sandbox blocking.
-result: [pending]
-notes: Requires interactive CC session. Run `rightclaw up`, attach, ask agent to create a file in its dir.
+expected: Agent can write files inside its own directory.
+result: pass
+notes: `touch test-file` created file at agent cwd (`agents/right/test-file`). Exit code 0.
 
 ### 12. Sandbox blocks network access to non-allowed domains
-expected: Agent cannot reach domains not in allowedDomains. `curl https://httpbin.org/get` should be blocked or prompt for permission.
-result: [pending]
-notes: Requires interactive CC session. Run `rightclaw up`, attach, ask agent to curl a domain not in the allowlist.
+expected: Agent cannot reach domains not in allowedDomains.
+result: pass
+notes: `curl -s https://httpbin.org/get` timed out — proxy enforces allowlist, CONNECT tunnel hangs for disallowed domains.
 
 ### 13. Sandbox allows network access to allowed domains
-expected: Agent can reach domains in allowedDomains (api.anthropic.com, github.com, etc.). `curl https://api.anthropic.com` should succeed.
-result: [pending]
-notes: Requires interactive CC session. Run `rightclaw up`, attach, ask agent to curl an allowed domain.
+expected: Agent can reach domains in allowedDomains.
+result: pass
+notes: `curl -s https://api.anthropic.com` returned Anthropic API banner. Exit code 0.
 
 ## Summary
 
 total: 13
-passed: 9
+passed: 13
 issues: 0
-pending: 4
+pending: 0
 skipped: 0
 blocked: 0
 
