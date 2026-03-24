@@ -99,7 +99,9 @@ pub fn init_rightclaw_home(
             heartbeat_path: None,
         };
 
-        let settings = crate::codegen::generate_settings(&agent_def, false)?;
+        let host_home = dirs::home_dir()
+            .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
+        let settings = crate::codegen::generate_settings(&agent_def, false, &host_home)?;
         let claude_dir = agents_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir).map_err(|e| {
             miette::miette!("Failed to create {}: {}", claude_dir.display(), e)

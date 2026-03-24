@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentConfig, AgentDef, RestartPolicy, SandboxOverrides};
 use crate::codegen::generate_settings;
@@ -25,7 +25,7 @@ fn make_test_agent(name: &str, config: Option<AgentConfig>) -> AgentDef {
 #[test]
 fn generates_sandbox_enabled_by_default() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
     assert_eq!(settings["sandbox"]["enabled"], true);
     assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], true);
     assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
@@ -37,7 +37,7 @@ fn generates_sandbox_enabled_by_default() {
 #[test]
 fn includes_default_allow_write() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     let allow_write = settings["sandbox"]["filesystem"]["allowWrite"]
         .as_array()
@@ -53,7 +53,7 @@ fn includes_default_allow_write() {
 #[test]
 fn includes_default_allowed_domains() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     let domains = settings["sandbox"]["network"]["allowedDomains"]
         .as_array()
@@ -79,7 +79,7 @@ fn includes_default_allowed_domains() {
 #[test]
 fn no_sandbox_disables_sandbox_only() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, true).unwrap();
+    let settings = generate_settings(&agent, true, Path::new("/home/user")).unwrap();
 
     assert_eq!(settings["sandbox"]["enabled"], false);
     // Other settings still present
@@ -94,6 +94,7 @@ fn no_sandbox_disables_sandbox_only() {
 fn merges_user_overrides_with_defaults() {
     let overrides = SandboxOverrides {
         allow_write: vec!["/tmp/custom".to_string()],
+        allow_read: vec![],
         allowed_domains: vec!["custom.example.com".to_string()],
         excluded_commands: vec!["docker".to_string()],
     };
@@ -106,7 +107,7 @@ fn merges_user_overrides_with_defaults() {
         sandbox: Some(overrides),
     };
     let agent = make_test_agent("test-agent", Some(config));
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     let allow_write = settings["sandbox"]["filesystem"]["allowWrite"]
         .as_array()
@@ -142,7 +143,7 @@ fn merges_user_overrides_with_defaults() {
 #[test]
 fn excluded_commands_omitted_when_empty() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     assert!(
         settings["sandbox"].get("excludedCommands").is_none(),
@@ -155,7 +156,7 @@ fn excluded_commands_omitted_when_empty() {
 fn includes_telegram_plugin_when_mcp_present() {
     let mut agent = make_test_agent("test-agent", None);
     agent.mcp_config_path = Some(PathBuf::from("/fake/.mcp.json"));
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     assert_eq!(
         settings["enabledPlugins"]["telegram@claude-plugins-official"],
@@ -167,7 +168,7 @@ fn includes_telegram_plugin_when_mcp_present() {
 #[test]
 fn omits_telegram_plugin_when_no_mcp() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     assert!(
         settings.get("enabledPlugins").is_none(),
@@ -178,17 +179,75 @@ fn omits_telegram_plugin_when_no_mcp() {
 #[test]
 fn includes_deny_read_security_defaults() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
         .as_array()
         .expect("denyRead should be an array");
 
-    let expected = ["~/.ssh", "~/.aws", "~/.gnupg"];
+    // Must use absolute paths, not tilde-relative (HOME-05).
+    let expected = [
+        "/home/user/.ssh",
+        "/home/user/.aws",
+        "/home/user/.gnupg",
+        "/home/user/",
+    ];
     for path in &expected {
         assert!(
             deny_read.iter().any(|v| v == path),
             "missing denyRead path {path} in {deny_read:?}"
         );
     }
+}
+
+#[test]
+fn deny_read_uses_absolute_paths_not_tilde() {
+    let agent = make_test_agent("test-agent", None);
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
+        .as_array()
+        .unwrap();
+    for path in deny_read {
+        let s = path.as_str().unwrap();
+        assert!(!s.starts_with("~/"), "denyRead path should not use tilde: {s}");
+        assert!(s.starts_with('/'), "denyRead path should be absolute: {s}");
+    }
+}
+
+#[test]
+fn includes_allow_read_with_agent_path() {
+    let agent = make_test_agent("test-agent", None);
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let allow_read = settings["sandbox"]["filesystem"]["allowRead"]
+        .as_array()
+        .expect("allowRead should be an array");
+    assert!(
+        allow_read.iter().any(|v| v == "/home/user/.rightclaw/agents/test-agent"),
+        "allowRead should contain agent path, got: {allow_read:?}"
+    );
+}
+
+#[test]
+fn merges_user_allow_read_overrides() {
+    let overrides = SandboxOverrides {
+        allow_write: vec![],
+        allow_read: vec!["/data/shared".to_string()],
+        allowed_domains: vec![],
+        excluded_commands: vec![],
+    };
+    let config = AgentConfig {
+        restart: RestartPolicy::OnFailure,
+        max_restarts: 3,
+        backoff_seconds: 5,
+        start_prompt: None,
+        model: None,
+        sandbox: Some(overrides),
+    };
+    let agent = make_test_agent("test-agent", Some(config));
+    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let allow_read = settings["sandbox"]["filesystem"]["allowRead"]
+        .as_array()
+        .unwrap();
+    assert!(allow_read.iter().any(|v| v == "/data/shared"));
+    assert!(allow_read.iter().any(|v| v == "/home/user/.rightclaw/agents/test-agent"));
 }

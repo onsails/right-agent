@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::agent::AgentDef;
 
 /// Default domains agents need to reach.
@@ -10,18 +12,23 @@ const DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
     "api.telegram.org",
 ];
 
-/// Sensitive paths denied for reading by default (security-first).
-const DEFAULT_DENY_READ: &[&str] = &["~/.ssh", "~/.aws", "~/.gnupg"];
-
 /// Generate a `.claude/settings.json` value for an agent.
 ///
 /// Produces sandbox configuration with filesystem and network restrictions.
 /// When `no_sandbox` is true, `sandbox.enabled` is `false` but all other
 /// settings remain (agents still need skipDangerousModePermissionPrompt, etc.).
 ///
+/// `host_home` must be the real host home directory (resolved before any HOME
+/// env override). Used to build absolute denyRead paths — tilde paths resolve
+/// to the agent dir under HOME override, making denyRead ineffective (HOME-05).
+///
 /// User overrides from `agent.yaml` `sandbox:` section are merged with
 /// generated defaults (arrays are extended, not replaced).
-pub fn generate_settings(agent: &AgentDef, no_sandbox: bool) -> miette::Result<serde_json::Value> {
+pub fn generate_settings(
+    agent: &AgentDef,
+    no_sandbox: bool,
+    host_home: &Path,
+) -> miette::Result<serde_json::Value> {
     // Base filesystem allowWrite: agent's own directory (absolute path, D-02).
     let mut allow_write = vec![agent.path.display().to_string()];
 
@@ -33,16 +40,29 @@ pub fn generate_settings(agent: &AgentDef, no_sandbox: bool) -> miette::Result<s
 
     let mut excluded_commands: Vec<String> = vec![];
 
-    // Merge user overrides from agent.yaml sandbox section (D-08).
+    // Build allowRead: agent path as default, plus user overrides (D-09b).
+    // Agent path must be in allowRead because it lives inside the denied host HOME.
+    let mut allow_read = vec![agent.path.display().to_string()];
+
+    // Merge user overrides from agent.yaml sandbox section (D-08, D-09b).
     if let Some(ref config) = agent.config {
         if let Some(ref overrides) = config.sandbox {
             allow_write.extend(overrides.allow_write.iter().cloned());
             allowed_domains.extend(overrides.allowed_domains.iter().cloned());
             excluded_commands.extend(overrides.excluded_commands.iter().cloned());
+            allow_read.extend(overrides.allow_read.iter().cloned());
         }
     }
 
-    let deny_read: Vec<String> = DEFAULT_DENY_READ.iter().map(|s| (*s).to_string()).collect();
+    // Build denyRead with absolute host HOME paths (HOME-05).
+    // Tilde paths (e.g. ~/.ssh) resolve to agent HOME under override, defeating denyRead.
+    let deny_read = vec![
+        host_home.join(".ssh").display().to_string(),
+        host_home.join(".aws").display().to_string(),
+        host_home.join(".gnupg").display().to_string(),
+        // Belt: deny entire host HOME. allowRead[agent_path] overrides this for agent dir.
+        format!("{}/", host_home.display()),
+    ];
 
     let mut settings = serde_json::json!({
         // Non-sandbox settings (D-04).
@@ -57,6 +77,7 @@ pub fn generate_settings(agent: &AgentDef, no_sandbox: bool) -> miette::Result<s
             "allowUnsandboxedCommands": false,
             "filesystem": {
                 "allowWrite": allow_write,
+                "allowRead": allow_read,
                 "denyRead": deny_read,
             },
             "network": {

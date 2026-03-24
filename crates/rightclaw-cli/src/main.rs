@@ -331,7 +331,7 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "wrote wrapper: {}", wrapper_path.display());
 
         // Generate .claude/settings.json with sandbox config (Phase 6).
-        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox)?;
+        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home)?;
         let claude_dir = agent.path.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;

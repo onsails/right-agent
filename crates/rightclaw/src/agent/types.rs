@@ -30,6 +30,10 @@ pub struct SandboxOverrides {
     #[serde(default)]
     pub allow_write: Vec<String>,
 
+    /// Additional paths to allow reading (appended to defaults, D-09b).
+    #[serde(default)]
+    pub allow_read: Vec<String>,
+
     /// Additional domains to allow (appended to defaults).
     #[serde(default)]
     pub allowed_domains: Vec<String>,
@@ -166,6 +170,8 @@ restart: on_failure
 sandbox:
   allow_write:
     - "/tmp/builds"
+  allow_read:
+    - "/data/shared"
   allowed_domains:
     - "registry.npmjs.org"
   excluded_commands:
@@ -174,8 +180,30 @@ sandbox:
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let sandbox = config.sandbox.unwrap();
         assert_eq!(sandbox.allow_write, vec!["/tmp/builds"]);
+        assert_eq!(sandbox.allow_read, vec!["/data/shared"]);
         assert_eq!(sandbox.allowed_domains, vec!["registry.npmjs.org"]);
         assert_eq!(sandbox.excluded_commands, vec!["docker"]);
+    }
+
+    #[test]
+    fn sandbox_overrides_deserializes_allow_read() {
+        let yaml = r#"
+sandbox:
+  allow_read:
+    - "/data/shared"
+    - "/mnt/datasets"
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = config.sandbox.unwrap();
+        assert_eq!(sandbox.allow_read, vec!["/data/shared", "/mnt/datasets"]);
+    }
+
+    #[test]
+    fn sandbox_overrides_allow_read_defaults_empty() {
+        let yaml = "sandbox: {}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = config.sandbox.unwrap();
+        assert!(sandbox.allow_read.is_empty(), "allow_read should default to empty vec");
     }
 
     #[test]
@@ -191,6 +219,7 @@ sandbox:
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let sandbox = config.sandbox.unwrap();
         assert!(sandbox.allow_write.is_empty());
+        assert!(sandbox.allow_read.is_empty());
         assert!(sandbox.allowed_domains.is_empty());
         assert!(sandbox.excluded_commands.is_empty());
     }
