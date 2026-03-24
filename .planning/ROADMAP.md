@@ -32,7 +32,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. `rightclaw down` shuts down process-compose only -- no sandbox destroy step
   4. No OpenShell references remain in the codebase (sandbox.rs lifecycle, policy.yaml handling, openshell dep checks)
   5. Default agent template does not include policy.yaml files
-**Plans**: TBD
+**Plans:** 2 plans
+
+Plans:
+- [ ] 05-01-PLAN.md -- Remove all OpenShell production code (structs, functions, templates, wrappers)
+- [ ] 05-02-PLAN.md -- Update all tests for simplified OpenShell-free types and APIs
 
 ### Phase 6: Sandbox Configuration
 **Goal**: Each agent launches with CC native sandbox enforced via generated settings.json -- filesystem and network restrictions scoped per agent
@@ -63,6 +67,6 @@ Phases execute in numeric order: 5 -> 6 -> 7
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 5. Remove OpenShell | v2.0 | 0/0 | Not started | - |
+| 5. Remove OpenShell | v2.0 | 0/2 | Planning complete | - |
 | 6. Sandbox Configuration | v2.0 | 0/0 | Not started | - |
 | 7. Platform Compatibility | v2.0 | 0/0 | Not started | - |
