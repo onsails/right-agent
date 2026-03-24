@@ -55,12 +55,15 @@ in agent dir (Phase 9), settings.local.json scaffold (Phase 9).
 ### Credential Symlink
 
 - **D-07:** `rightclaw up` creates symlink: `$AGENT_DIR/.claude/.credentials.json`
-  → `~/.claude/.credentials.json` (using absolute host HOME path, not `~/`, to avoid
-  resolution under override). HOME-03.
+  → `[absolute_real_host_home]/.claude/.credentials.json`. CRITICAL: use
+  `dirs::home_dir()` captured BEFORE any HOME override — never use `~/` here as it
+  would create a self-referential symlink if HOME is already overridden. HOME-03.
+  **Symlink is mandatory — without it agents cannot authenticate.**
 
 - **D-08:** If host credentials file does not exist (new user, macOS Keychain-only
-  auth): warn and skip the symlink — do NOT fail fast. Message: "Warning: no OAuth
-  credentials found at [path] — agents will need ANTHROPIC_API_KEY to authenticate."
+  auth): warn prominently and skip the symlink — do NOT fail fast. Message:
+  "Warning: no OAuth credentials found at [path] — agents will need ANTHROPIC_API_KEY
+  to authenticate." Without the symlink, agents are completely non-functional.
 
 ### Sandbox Path Resolution
 
@@ -84,21 +87,14 @@ in agent dir (Phase 9), settings.local.json scaffold (Phase 9).
 
 ### OAuth Validation Gate
 
-- **D-10: BLOCKER — manual test required before Phase 8 can be considered complete.**
+- **D-10: VALIDATED 2026-03-24.**
 
-  Test plan:
-  1. Baseline: `export HOME=/tmp/test-agent-dir; mkdir -p $HOME/.claude; claude -p "hello" --output-format json`
-     → Does CC authenticate via OAuth? Does it error? What fails?
-  2. Symlink: Create `$HOME/.claude/.credentials.json` → `~/.claude/.credentials.json`,
-     repeat test → Does symlink fix auth?
+  Test results:
+  - Baseline (no symlink): FAILS — "Not logged in · Please run /login"
+  - Symlink to absolute real credentials path: **WORKS** — full API response
 
-  Outcomes:
-  - Both work → proceed with HOME override + symlink (current plan)
-  - Only symlink works → symlink is required, document it
-  - Neither works → fallback decision needed (potentially: drop HOME override,
-    use ANTHROPIC_API_KEY as required field, or alternative isolation approach)
-
-  **Fallback TBD after test.** Do not finalize implementation until test runs.
+  **Conclusion: symlink is REQUIRED.** Without it, agents cannot authenticate at all.
+  HOME override approach is confirmed valid. Proceed with current plan.
 
 ### Integration Tests
 
