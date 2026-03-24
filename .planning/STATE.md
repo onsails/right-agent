@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: native-sandbox-agent-isolation
-status: Defining requirements
+status: Ready to plan
 stopped_at: null
-last_updated: "2026-03-23"
+last_updated: "2026-03-24"
 progress:
-  total_phases: 0
+  total_phases: 3
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -19,20 +19,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-23)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Defining requirements for v2.0
+**Current focus:** Phase 5 - Remove OpenShell
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-03-23 — Milestone v2.0 started
+Phase: 5 of 7 (Remove OpenShell)
+Plan: 0 of 0 in current phase
+Status: Ready to plan
+Last activity: 2026-03-24 -- Roadmap created for v2.0 milestone
+
+Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
 **Velocity:**
-
-- Total plans completed: 0
+- Total plans completed: 0 (v2.0)
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -43,24 +44,10 @@ Last activity: 2026-03-23 — Milestone v2.0 started
 | - | - | - | - |
 
 **Recent Trend:**
-
 - Last 5 plans: -
 - Trend: -
 
 *Updated after each plan completion*
-| Phase 01 P01 | 4min | 2 tasks | 13 files |
-| Phase 01 P02 | 5min | 2 tasks | 12 files |
-| Phase 02 P01 | 4min | 2 tasks | 15 files |
-| Phase 02 P02 | 3min | 2 tasks | 6 files |
-| Phase 02 P03 | 4min | 2 tasks | 5 files |
-| Phase 03 P02 | 1min | 1 tasks | 1 files |
-| Phase 03 P01 | 2min | 2 tasks | 3 files |
-| Phase 03 P03 | 3min | 2 tasks | 4 files |
-| Phase 03 P04 | 2min | 2 tasks | 5 files |
-| Phase 04 P02 | 3min | 2 tasks | 7 files |
-| Phase 04 P01 | 3min | 2 tasks | 2 files |
-| Phase 03.1 P01 | 2min | 1 tasks | 1 files |
-| Phase 03.2 P01 | 2min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -69,34 +56,9 @@ Last activity: 2026-03-23 — Milestone v2.0 started
 Decisions are logged in PROJECT.md Key Decisions table.
 Recent decisions affecting current work:
 
-- [Roadmap]: Coarse granularity -- 4 phases compressing 7 research-suggested phases
-- [Roadmap]: SAND-04/SAND-05 in Phase 1 (policy schema) rather than Phase 2 (runtime) -- types before logic
-- [Roadmap]: Telegram channel support (CHAN-*) grouped with default agent (Phase 3) since CHAN-02 ties to BOOTSTRAP.md
-- [Phase 01]: Added clap env feature for RIGHTCLAW_HOME env var support
-- [Phase 01]: resolve_home takes env_home as parameter (not std::env), per CLAUDE.rust.md
-- [Phase 01]: AgentConfig uses deny_unknown_fields for strict YAML validation
-- [Phase 01]: Tests extracted to separate _tests.rs files using #[path] attribute for separation of concerns
-- [Phase 01]: Embedded templates via include_str! from templates/ directory at repo root
-- [Phase 02]: reqwest 0.13 uses 'rustls' feature (not 'rustls-tls')
-- [Phase 02]: include_str\! from codegen/ needs 4 levels up to templates/
-- [Phase 02]: destroy_sandboxes uses best-effort cleanup (warn on failure) -- only exception to fail-fast
-- [Phase 02]: PcClient base_url http://localhost -- host ignored for Unix socket transport
-- [Phase 02]: SystemTime for timestamps instead of chrono dependency
-- [Phase 02]: Per-function command handlers (cmd_up, cmd_down, etc.) for cleaner main.rs
-- [Phase 03]: install.sh uses full-path binary invocation and cargo install fallback
-- [Phase 03]: Static policy files (two variants) over templated generation to preserve YAML comments as documentation
-- [Phase 03]: telegram_env_dir parameter on init_rightclaw_home for testability instead of always writing to ~/.claude
-- [Phase 03]: BOOTSTRAP.md presence reported as Warn (not Fail) since it is expected on fresh installs
-- [Phase 03]: mcp_config_path.is_some() as Telegram channel signal for --channels flag (v1 simplification)
-- [Phase 03]: cmd_doctor reuses DoctorCheck Display impl for consistent output formatting
-- [Phase 04]: generate_system_prompt returns Option<String> instead of empty string for cleaner API
-- [Phase 04]: System prompt file at run/<agent>-system.md regenerated on every rightclaw up invocation
-- [Phase 04]: clawhub.ai as base URL (research confirmed move from clawhub.com)
-- [Phase 04]: BLOCK semantics for policy gate -- no auto-expansion of policy.yaml
-- [Phase 04]: SHA-256 hash for prompt change detection in CronSync state.json
-- [Phase 04]: Lock guard logic embedded in CronCreate prompt text
-- [Phase 03.1]: Raw JSON string literal for fixed-format settings.json -- no serde_json dependency needed
-- [Phase 03.2]: Unix CommandExt replaces process for pair command -- same pattern as cmd_attach for seamless terminal handoff
+- [v2.0 roadmap]: CC native sandbox (bubblewrap/Seatbelt) replaces OpenShell -- no API key, simpler stack
+- [v2.0 roadmap]: HOME override deferred to v2.1 -- edge cases with trust files, git/SSH, Telegram, credentials
+- [v2.0 roadmap]: Coarse granularity -- 3 phases (remove OpenShell, add sandbox config, update tooling)
 
 ### Pending Todos
 
@@ -104,11 +66,11 @@ None yet.
 
 ### Blockers/Concerns
 
-- OpenShell is alpha (3 days old) -- may have breaking changes during implementation. Abstract behind trait.
-- OAuth token race condition with multiple concurrent Claude Code sessions -- default to API keys.
+- Ubuntu 24.04+ AppArmor blocks unprivileged bubblewrap -- doctor must detect and guide fix (Phase 7)
+- Write/Edit tools bypass bwrap sandbox in bypassPermissions mode -- CC limitation, accepted constraint
 
 ## Session Continuity
 
-Last session: 2026-03-22T22:08:33.960Z
-Stopped at: Completed 03.2-01-PLAN.md
+Last session: 2026-03-24
+Stopped at: Roadmap created for v2.0, ready to plan Phase 5
 Resume file: None
