@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Headless Agent Isolation
-status: Ready to plan
-stopped_at: Phase 9 context gathered
-last_updated: "2026-03-24T23:08:18.310Z"
+status: Ready to execute
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-03-24T23:32:26.501Z"
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 4
+  completed_plans: 3
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-24)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 08 — home-isolation-permission-model
+**Current focus:** Phase 09 — agent-environment-setup
 
 ## Current Position
 
-Phase: 9
-Plan: Not started
+Phase: 09 (agent-environment-setup) — EXECUTING
+Plan: 2 of 2
 
 ## Performance Metrics
 
@@ -50,6 +50,7 @@ Plan: Not started
 *Updated after each plan completion*
 | Phase 08 P01 | 15 | 2 tasks | 7 files |
 | Phase 08 P02 | 15 | 2 tasks | 6 files |
+| Phase 09 P01 | 5 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -69,6 +70,9 @@ Recent decisions affecting current work:
 - [Phase 08]: generate_settings() takes host_home parameter -- callers resolve before any HOME manipulation
 - [Phase 08]: denyRead denies entire host HOME (trailing slash), allowRead[agent_path] creates exception
 - [Phase 08]: create_credential_symlink added to init so agent is OAuth-ready immediately
+- [Phase 09]: telegram_token_file path resolved relative to agent.path, not cwd
+- [Phase 09]: .mcp.json is create-if-absent to preserve user customizations
+- [Phase 09]: install_builtin_skills extracted from init.rs for reuse in cmd_up (plan 02)
 
 ### Pending Todos
 
@@ -82,6 +86,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T23:08:18.304Z
-Stopped at: Phase 9 context gathered
-Resume file: .planning/phases/09-agent-environment-setup/09-CONTEXT.md
+Last session: 2026-03-24T23:32:26.498Z
+Stopped at: Completed 09-01-PLAN.md
+Resume file: None
