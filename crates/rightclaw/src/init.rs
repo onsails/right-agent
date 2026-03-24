@@ -5,8 +5,6 @@ const DEFAULT_SOUL: &str = include_str!("../../../templates/right/SOUL.md");
 const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/AGENTS.md");
 const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/BOOTSTRAP.md");
 const DEFAULT_AGENT_YAML: &str = include_str!("../../../templates/right/agent.yaml");
-const SKILL_CLAWHUB: &str = include_str!("../../../skills/clawhub/SKILL.md");
-const SKILL_RIGHTCRON: &str = include_str!("../../../skills/cronsync/SKILL.md");
 
 /// Initialize the RightClaw home directory with a default "right" agent.
 ///
@@ -56,24 +54,7 @@ pub fn init_rightclaw_home(
 
     // Install built-in skills into .claude/skills/ (standard Agent Skills path).
     // Claude Code discovers skills from .claude/skills/ relative to cwd.
-    let built_in_skills: &[(&str, &str)] = &[
-        ("clawhub/SKILL.md", SKILL_CLAWHUB),
-        ("rightcron/SKILL.md", SKILL_RIGHTCRON),
-    ];
-    let claude_skills_dir = agents_dir.join(".claude").join("skills");
-    for (skill_path, content) in built_in_skills {
-        let path = claude_skills_dir.join(skill_path);
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| {
-            miette::miette!("Failed to create skill directory: {}", e)
-        })?;
-        std::fs::write(&path, content)
-            .map_err(|e| miette::miette!("Failed to write {}: {}", path.display(), e))?;
-    }
-
-    // Pre-create installed.json so Claude Code doesn't prompt for file creation
-    // (--dangerously-skip-permissions doesn't bypass .claude/ write prompts).
-    std::fs::write(claude_skills_dir.join("installed.json"), "{}")
-        .map_err(|e| miette::miette!("Failed to write installed.json: {}", e))?;
+    crate::codegen::install_builtin_skills(&agents_dir)?;
 
     // Resolve host HOME once, before any HOME env manipulation (Phase 8).
     let host_home = dirs::home_dir()
