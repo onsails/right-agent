@@ -14,17 +14,16 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 - ✓ Rust project with edition 2024, Cargo workspace, devenv — Phase 1
 - ✓ Agent directory structure follows OpenClaw conventions — Phase 1
-- ✓ Agent discovery and validation (IDENTITY.md + policy.yaml required) — Phase 1
+- ✓ Agent discovery and validation (IDENTITY.md required, policy.yaml removed Phase 5) — Phase 1
 - ✓ Per-agent agent.yaml config with deny_unknown_fields — Phase 1
 - ✓ `rightclaw init` creates ~/.rightclaw/ + default agent — Phase 1
 - ✓ `rightclaw list` shows discovered agents — Phase 1
-- ✓ `rightclaw up` generates wrappers + PC config, launches agents in OpenShell sandboxes — Phase 2
+- ✓ `rightclaw up` generates wrappers + PC config, launches agents directly — Phase 2 (OpenShell removed Phase 5)
 - ✓ `rightclaw up --agents`, `up -d`, `down`, `status`, `restart`, `attach` — Phase 2
-- ✓ Per-agent shell wrapper with OpenShell sandbox enforcement — Phase 2
+- ✓ Per-agent shell wrapper with direct claude invocation — Phase 2 (OpenShell removed Phase 5)
 - ✓ process-compose REST API integration via Unix socket — Phase 2
-- ✓ Explicit sandbox destroy on shutdown — Phase 2
 - ✓ Default "Right" agent with BOOTSTRAP.md onboarding (name, creature, vibe, emoji) — Phase 3
-- ✓ Production OpenShell policy.yaml with hard_requirement Landlock + comprehensive comments — Phase 3
+- ~~Production OpenShell policy.yaml~~ — removed Phase 5 (replaced by CC native sandbox)
 - ✓ install.sh one-liner with platform detection + dependency installation — Phase 3
 - ✓ `rightclaw doctor` validates dependencies and agent structure — Phase 3
 - ✓ Telegram channel setup via `rightclaw init --telegram-token` — Phase 3
@@ -115,6 +114,8 @@ This document evolves at phase transitions and milestone boundaries.
 ## Current State
 
 **v1.0 shipped** (2026-03-23). v2.0 in progress.
+
+**Phase 5 complete** (2026-03-24): All OpenShell code removed. Shell wrappers launch claude directly. sandbox.rs replaced by state.rs. Agent validation simplified to IDENTITY.md only.
 
 **v2.0 addresses:**
 - SEED-003: OpenShell API key requirement → CC native sandbox needs no API key
