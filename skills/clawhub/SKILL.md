@@ -94,7 +94,7 @@ rm -rf /tmp/skills-install
 
 **Step 3: Policy gate audit**
 
-Before activating the skill, audit its permissions. Read the downloaded `.claude/skills/<name>/SKILL.md` frontmatter and check for `metadata.openclaw` and `metadata.openshell` sections.
+Before activating the skill, audit its permissions. Read the downloaded `.claude/skills/<name>/SKILL.md` frontmatter and check for `metadata.openclaw` sections.
 
 Check each permission category:
 
@@ -102,8 +102,8 @@ Check each permission category:
 |----------|-------------------|--------------|
 | Required binaries | `metadata.openclaw.requires.bins` | Run `which <bin>` for each -- is it in PATH? |
 | Required env vars | `metadata.openclaw.requires.env` | Run `echo $VAR` for each -- is it set? |
-| Network access | `metadata.openshell.network` | Check agent's `policy.yaml` -- are these domains allowed? |
-| Filesystem access | `metadata.openshell.filesystem` | Check agent's `policy.yaml` -- is this access level allowed? |
+| Network access | `metadata.openclaw.requires.network` | Check agent's `.claude/settings.json` sandbox.network.allowedDomains -- are these domains allowed? |
+| Filesystem access | `metadata.openclaw.requires.filesystem` | Check agent's `.claude/settings.json` sandbox.filesystem.allowWrite -- is this access level allowed? |
 
 **If ANY check fails: BLOCK the installation.**
 
@@ -113,11 +113,11 @@ Display a permissions audit table:
 |------------|----------|--------|
 | Binary: python3 | Yes | MISSING -- not in PATH |
 | Env: OPENAI_API_KEY | Yes | MISSING -- not set |
-| Network: api.openai.com | Yes | BLOCKED -- not in policy.yaml |
-| Filesystem: read-write | Yes | OK -- allowed by policy |
+| Network: api.openai.com | Yes | BLOCKED -- not in sandbox allowedDomains |
+| Filesystem: read-write | Yes | OK -- allowed by sandbox config |
 
 Tell the user:
-> Installation blocked. The skill requires permissions that your agent does not have. Update your agent's `policy.yaml` to allow the missing permissions, then retry the installation.
+> Installation blocked. The skill requires permissions that your agent does not have. Update your agent's `agent.yaml` sandbox section to allow the missing permissions, then retry the installation.
 
 **If all checks pass** (or the skill has no special requirements): proceed to Step 4.
 
@@ -215,7 +215,7 @@ If `npx` is unavailable, suggest the user re-install the skill: `npx skills add 
 
 1. All timestamps MUST use UTC ISO 8601 format with the `Z` suffix (e.g., `2026-03-22T10:00:00Z`).
 2. Never install a skill without running the policy gate audit first. No exceptions.
-3. Never auto-expand the agent's policy.yaml to accommodate a skill's requirements. The user must explicitly update policy.yaml.
+3. Never auto-expand the agent's sandbox config to accommodate a skill's requirements. The user must explicitly update `agent.yaml` sandbox overrides.
 4. Each agent has its own `.claude/skills/` directory and `installed.json` -- no shared or global skill location.
 5. Skills installed manually (via git clone or `npx skills add`) appear in `list` output but are tracked differently.
 6. The `--copy` flag is mandatory for `npx skills add` to ensure files are portable and not symlinked.
