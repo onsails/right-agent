@@ -64,28 +64,28 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SBMG-01 | — | Pending |
-| SBMG-02 | — | Pending |
-| SBMG-03 | — | Pending |
-| SBMG-04 | — | Pending |
-| SBMG-05 | — | Pending |
-| SBCF-01 | — | Pending |
-| SBCF-02 | — | Pending |
-| SBCF-03 | — | Pending |
-| SBCF-04 | — | Pending |
-| SBCF-05 | — | Pending |
-| SBCF-06 | — | Pending |
-| PLAT-01 | — | Pending |
-| PLAT-02 | — | Pending |
-| PLAT-03 | — | Pending |
-| PLAT-04 | — | Pending |
-| PLAT-05 | — | Pending |
+| SBMG-01 | Phase 5 | Pending |
+| SBMG-02 | Phase 5 | Pending |
+| SBMG-03 | Phase 5 | Pending |
+| SBMG-04 | Phase 5 | Pending |
+| SBMG-05 | Phase 5 | Pending |
+| SBCF-01 | Phase 6 | Pending |
+| SBCF-02 | Phase 6 | Pending |
+| SBCF-03 | Phase 6 | Pending |
+| SBCF-04 | Phase 6 | Pending |
+| SBCF-05 | Phase 6 | Pending |
+| SBCF-06 | Phase 6 | Pending |
+| PLAT-01 | Phase 7 | Pending |
+| PLAT-02 | Phase 7 | Pending |
+| PLAT-03 | Phase 7 | Pending |
+| PLAT-04 | Phase 7 | Pending |
+| PLAT-05 | Phase 7 | Pending |
 
 **Coverage:**
 - v2.0 requirements: 16 total
-- Mapped to phases: 0
-- Unmapped: 16
+- Mapped to phases: 16
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-24*
-*Last updated: 2026-03-24 after initial definition*
+*Last updated: 2026-03-24 after roadmap creation*
