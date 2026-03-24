@@ -1,343 +1,547 @@
-# Stack Research: v2.0 Native Sandbox & Agent Isolation
+# Stack Research: Headless Agent Isolation
 
-**Domain:** Claude Code native sandboxing integration, per-agent HOME isolation
-**Researched:** 2026-03-23
-**Confidence:** HIGH (official docs verified)
+**Domain:** Claude Code settings/permissions/config for headless multi-agent isolation
+**Researched:** 2026-03-24
+**Confidence:** HIGH (verified against official Claude Code docs at code.claude.com)
 
-This research covers ONLY what's new for v2.0. The existing stack (clap, tokio, reqwest, serde, serde-saphyr, minijinja, miette+thiserror, tracing, process-compose) is validated and unchanged.
+## Executive Summary
 
-## What Changes in v2.0
+v2.1 drops `--dangerously-skip-permissions` and replaces it with explicit `permissions.allow` rules + sandbox + `dontAsk` mode. This research documents the exact CC settings schema, managed settings mechanism, `CLAUDE_CONFIG_DIR` behavior, and HOME override implications needed to implement full headless agent isolation.
 
-### Removed: OpenShell
+---
 
-All OpenShell code paths are removed. No more `openshell` binary dependency, no more `sandbox create/delete`, no more `policy.yaml` parsing.
+## 1. Replacing `--dangerously-skip-permissions`
 
-**Affected codebase:**
-- `runtime/sandbox.rs` — `destroy_sandboxes()` calls `openshell sandbox delete` (remove entirely)
-- `runtime/deps.rs` — `verify_dependencies()` checks for `openshell` (replace with `bwrap`/`socat`)
-- `doctor.rs` — `run_doctor()` checks `openshell` binary (replace with `bwrap`/`socat`)
-- `codegen/shell_wrapper.rs` — generates `openshell sandbox create` command (replace with `HOME=` + `CLAUDE_CONFIG_DIR=`)
-- `templates/agent-wrapper.sh.j2` — template references `openshell` (rewrite)
-- `agent/types.rs` — `AgentDef.policy_path` (remove, replace with settings.json generation)
-- `agent/discovery.rs` — validates `policy.yaml` exists (remove requirement)
-- `runtime/sandbox.rs` — `RuntimeState.no_sandbox`, `AgentState.sandbox_name` (simplify)
+### The Replacement Stack
 
-### Added: CC Native Sandbox via `settings.json`
+Three CC mechanisms combine to achieve prompt-free operation without bypass mode:
 
-Claude Code has built-in OS-level sandboxing since mid-2025. On Linux it uses bubblewrap for filesystem isolation and socat for network proxy communication. On macOS it uses Seatbelt (works out of the box, no deps).
+| Mechanism | What It Does | Where Configured |
+|-----------|-------------|-----------------|
+| `permissions.allow` | Pre-approves specific tools/commands | `.claude/settings.json` (project) |
+| `sandbox.enabled` + `autoAllowBashIfSandboxed` | Auto-approves all bash within sandbox boundaries | `.claude/settings.json` (project) |
+| `defaultMode: "dontAsk"` | Auto-denies anything not pre-approved (no prompts) | `.claude/settings.json` or CLI flag |
 
-RightClaw generates a per-agent `.claude/settings.json` inside each agent's HOME directory to configure the sandbox.
+### Why This Is Better
 
-### Added: Per-Agent HOME Isolation via `CLAUDE_CONFIG_DIR`
+`--dangerously-skip-permissions` maps to `defaultMode: "bypassPermissions"` -- it approves EVERYTHING. The replacement approves only what's whitelisted and denies everything else silently. No prompts, no bypasses.
 
-Claude Code officially supports `CLAUDE_CONFIG_DIR` (documented in env vars page). This redirects where CC stores its config and data files. Combined with setting the cwd to the agent dir, this gives full isolation.
+### Permission Rule Syntax (Verified)
 
-**Strategy:**
-```
-CLAUDE_CONFIG_DIR=~/.rightclaw/agents/<name>/.claude claude --cwd <agent-dir>
-```
-
-This is BETTER than `HOME=<agent-dir>` because:
-1. `CLAUDE_CONFIG_DIR` only redirects CC's config, not all home-relative paths
-2. Shell tools like `git`, `ssh`, `cargo` still find `~/.gitconfig`, `~/.ssh/`, etc.
-3. No risk of breaking tools that depend on `$HOME`
-
-However, `CLAUDE_CONFIG_DIR` has known bugs (creates local `.claude/` dirs, IDE integration issues). Fallback plan: `HOME=<agent-dir>` works universally but is a blunt instrument.
-
-**Recommendation: Use `CLAUDE_CONFIG_DIR` as primary, with `HOME` override as `--legacy-isolation` flag.**
-
-## CC Sandbox `settings.json` Schema
-
-**Confidence: HIGH** — Verified against [official settings docs](https://code.claude.com/docs/en/settings).
-
-The complete sandbox section of `settings.json`:
-
-```json
-{
-  "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "excludedCommands": ["docker"],
-    "allowUnsandboxedCommands": false,
-    "enableWeakerNestedSandbox": false,
-    "enableWeakerNetworkIsolation": false,
-    "filesystem": {
-      "allowWrite": ["/tmp/build", "~/.kube"],
-      "denyWrite": ["/etc", "/usr/local/bin"],
-      "denyRead": ["~/.aws/credentials"],
-      "allowRead": ["."],
-      "allowManagedReadPathsOnly": false
-    },
-    "network": {
-      "allowedDomains": ["github.com", "*.npmjs.org"],
-      "allowUnixSockets": ["/var/run/docker.sock"],
-      "allowAllUnixSockets": false,
-      "allowLocalBinding": false,
-      "allowManagedDomainsOnly": false,
-      "httpProxyPort": 8080,
-      "socksProxyPort": 8081
-    }
-  }
-}
-```
-
-### Field Reference
-
-| Field | Type | Default | Purpose |
-|-------|------|---------|---------|
-| `sandbox.enabled` | bool | `false` | Enable bash sandboxing (macOS, Linux, WSL2) |
-| `sandbox.autoAllowBashIfSandboxed` | bool | `true` | Auto-approve bash commands when sandboxed |
-| `sandbox.excludedCommands` | string[] | `[]` | Commands that run OUTSIDE the sandbox |
-| `sandbox.allowUnsandboxedCommands` | bool | `true` | Allow `dangerouslyDisableSandbox` escape hatch. Set `false` for strict mode |
-| `sandbox.enableWeakerNestedSandbox` | bool | `false` | Weaker sandbox for Docker (Linux/WSL2 only). Reduces security |
-| `sandbox.enableWeakerNetworkIsolation` | bool | `false` | macOS only: allow system TLS trust service. Needed for Go tools (gh, terraform) |
-| `sandbox.filesystem.allowWrite` | string[] | `[]` | Additional paths for write access (merged across scopes) |
-| `sandbox.filesystem.denyWrite` | string[] | `[]` | Paths to deny write access (merged across scopes) |
-| `sandbox.filesystem.denyRead` | string[] | `[]` | Paths to deny read access (merged across scopes) |
-| `sandbox.filesystem.allowRead` | string[] | `[]` | Re-allow reads within denyRead regions (takes precedence) |
-| `sandbox.filesystem.allowManagedReadPathsOnly` | bool | `false` | Managed-only: ignore user/project allowRead |
-| `sandbox.network.allowedDomains` | string[] | `[]` | Allowed outbound domains. Supports `*` wildcards |
-| `sandbox.network.allowUnixSockets` | string[] | `[]` | Unix socket paths accessible in sandbox |
-| `sandbox.network.allowAllUnixSockets` | bool | `false` | Allow all Unix socket connections |
-| `sandbox.network.allowLocalBinding` | bool | `false` | Allow binding to localhost ports (macOS only) |
-| `sandbox.network.allowManagedDomainsOnly` | bool | `false` | Managed-only: block non-allowed domains without prompting |
-| `sandbox.network.httpProxyPort` | int | (auto) | Custom HTTP proxy port (BYO proxy) |
-| `sandbox.network.socksProxyPort` | int | (auto) | Custom SOCKS5 proxy port (BYO proxy) |
-
-### Path Prefix Rules
-
-| Prefix | Meaning | Example |
-|--------|---------|---------|
-| `/` | Absolute path | `/tmp/build` |
-| `~/` | Home-relative | `~/.kube` |
-| `./` or bare | Relative to project root (project settings) or `~/.claude` (user settings) | `./output` |
-
-Arrays MERGE across all settings scopes (user, project, managed) -- they are concatenated, not replaced.
-
-### RightClaw's Generated `settings.json` per Agent
-
-RightClaw should generate a `settings.json` inside each agent's config directory with:
+Rules follow format `Tool` or `Tool(specifier)`. Evaluation order: **deny -> ask -> allow**. First match wins.
 
 ```json
 {
   "permissions": {
     "allow": [
-      "Bash(*)",
-      "Read(*)",
-      "Edit(*)",
-      "Write(*)"
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Agent(Explore)"
     ],
-    "defaultMode": "bypassPermissions"
+    "deny": [
+      "Read(./.env)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)"
+    ]
+  }
+}
+```
+
+**Tool names for permission rules:**
+- `Bash` / `Bash(npm run *)` / `Bash(git commit *)` -- glob patterns with `*`
+- `Read` / `Read(./.env)` -- gitignore-spec patterns
+- `Edit` / `Edit(/src/**/*.ts)` -- applies to all file-editing tools
+- `Write` -- same as Edit for permissions
+- `WebFetch` / `WebFetch(domain:example.com)`
+- `WebSearch`
+- `Glob`, `Grep` -- read-only, no approval needed by default
+- `Agent(name)` -- subagent control
+- `mcp__servername__toolname` -- MCP tool control
+
+**Path pattern prefixes for Read/Edit rules:**
+
+| Prefix | Meaning | Example |
+|--------|---------|---------|
+| `//path` | Absolute from filesystem root | `Read(//Users/alice/secrets/**)` |
+| `~/path` | Relative to home directory | `Read(~/Documents/*.pdf)` |
+| `/path` | Relative to project root | `Edit(/src/**/*.ts)` |
+| `path` or `./path` | Relative to current directory | `Read(*.env)` |
+
+**Confidence:** HIGH -- verified from official docs at code.claude.com/docs/en/permissions
+
+### `dontAsk` Mode Details
+
+- Denies everything not pre-approved via `permissions.allow` rules
+- No prompts shown -- tools auto-denied silently
+- Available as `defaultMode: "dontAsk"` in settings or `--permission-mode dontAsk` CLI flag
+- **Known issue:** Subagents spawned via Task tool also run in `dontAsk` mode and get auto-denied if parent didn't pre-approve their tools. Must pre-approve `Agent(Explore)` etc. in `permissions.allow`.
+
+**Confidence:** HIGH -- documented behavior, confirmed by multiple GitHub issues
+
+### RightClaw Implementation Plan
+
+Current wrapper template:
+```bash
+exec "$CLAUDE_BIN" \
+  --dangerously-skip-permissions \
+  ...
+```
+
+Replace with:
+```bash
+exec "$CLAUDE_BIN" \
+  --permission-mode dontAsk \
+  ...
+```
+
+Combined with project-level `.claude/settings.json`:
+```json
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Agent(Explore)"
+    ],
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)"
+    ]
   },
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": true,
     "allowUnsandboxedCommands": false,
     "filesystem": {
-      "allowWrite": [
-        "~/.rightclaw/agents/<agent-name>/",
-        "/tmp"
-      ],
-      "denyRead": [
-        "~/.ssh",
-        "~/.aws",
-        "~/.gnupg"
-      ]
+      "allowWrite": ["<agent_dir>"],
+      "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"]
     },
     "network": {
       "allowedDomains": [
         "api.anthropic.com",
         "github.com",
-        "*.githubusercontent.com",
-        "registry.npmjs.org"
+        "*.npmjs.org",
+        "crates.io",
+        "agentskills.io",
+        "api.telegram.org"
       ]
     }
   }
 }
 ```
 
-**Key decisions:**
-1. `allowUnsandboxedCommands: false` -- strict mode, no escape hatch
-2. `autoAllowBashIfSandboxed: true` -- agents run autonomously, no prompts
-3. `defaultMode: "bypassPermissions"` -- replaces `--dangerously-skip-permissions` flag
-4. Deny reads to credential directories by default
-5. Users can extend via `agent.yaml` sandbox config
+### What Can Be Removed
 
-### Integration with `--dangerously-skip-permissions`
+- `skipDangerousModePermissionPrompt: true` -- no longer needed (we don't use bypass mode)
+- `--dangerously-skip-permissions` CLI flag -- replaced by `--permission-mode dontAsk`
+- The `pre_trust_directory()` write to `~/.claude/settings.json` setting `skipDangerousModePermissionPrompt` -- no longer relevant
 
-`--dangerously-skip-permissions` is equivalent to `--permission-mode bypassPermissions`. The sandbox STILL ENFORCES even in bypass mode -- this is the entire point. Bypass mode + sandbox = autonomous agent with OS-level guardrails.
+---
 
-The `settings.json` can set `defaultMode: "bypassPermissions"` to avoid needing the CLI flag entirely. Combined with `skipDangerousModePermissionPrompt: true` in the CC global config (already handled by RightClaw v1.0 trust setup), this enables fully autonomous startup.
+## 2. Managed Settings (`managed-settings.json`)
 
-## External Dependencies
+### File Locations (Verified)
 
-### bubblewrap (Linux only)
+| Platform | Path |
+|----------|------|
+| Linux/WSL | `/etc/claude-code/managed-settings.json` |
+| macOS | `/Library/Application Support/ClaudeCode/managed-settings.json` |
+| Windows | `C:\Program Files\ClaudeCode\managed-settings.json` |
 
-| Distro | Package | Install Command |
-|--------|---------|-----------------|
-| Ubuntu/Debian | `bubblewrap` | `sudo apt-get install bubblewrap` |
-| Fedora/RHEL | `bubblewrap` | `sudo dnf install bubblewrap` |
-| Arch Linux | `bubblewrap` | `sudo pacman -S bubblewrap` |
-| Alpine Linux | `bubblewrap` | `sudo apk add bubblewrap` |
-| openSUSE | `bubblewrap` | `sudo zypper install bubblewrap` |
-| NixOS/nix | `bubblewrap` | Available in nixpkgs |
+**Confidence:** HIGH -- verified from official docs
 
-**Binary name:** `bwrap`
-**What it does:** Low-level unprivileged sandboxing. Creates isolated mount/network/PID namespaces. Used by Flatpak. CC's sandbox runtime invokes `bwrap` to create a namespace where the filesystem is read-only except allowed paths, and the network namespace is removed entirely (forcing traffic through socat proxy).
-**Kernel requirement:** User namespaces must be enabled (default on modern kernels, NOT available on WSL1).
-**Latest version:** 0.11.0 (stable, widely packaged).
+### Precedence (Cannot Be Overridden)
 
-### socat (Linux only)
+Managed settings have HIGHEST precedence. User, project, and local settings cannot override them.
 
-| Distro | Package | Install Command |
-|--------|---------|-----------------|
-| Ubuntu/Debian | `socat` | `sudo apt-get install socat` |
-| Fedora/RHEL | `socat` | `sudo dnf install socat` |
-| Arch Linux | `socat` | `sudo pacman -S socat` |
-| Alpine Linux | `socat` | `sudo apk add socat` |
-| openSUSE | `socat` | `sudo zypper install socat` |
-| NixOS/nix | `socat` | Available in nixpkgs |
+Full hierarchy (highest to lowest):
+1. **Managed** (server-managed > MDM/OS-level > `managed-settings.json`)
+2. **Command line arguments**
+3. **Local project** (`.claude/settings.local.json`)
+4. **Shared project** (`.claude/settings.json`)
+5. **User** (`~/.claude/settings.json`)
 
-**Binary name:** `socat`
-**What it does:** Multipurpose relay (SOcket CAT). CC uses it to bridge Unix domain sockets between the sandboxed namespace and the host's network proxy. Since bubblewrap removes the network namespace entirely, all traffic must flow through a Unix socket to a proxy running on the host. socat handles this relay.
-**Latest version:** 1.8.1.1 (2026-02-12).
+**Array settings merge across scopes** -- they concatenate and deduplicate, not replace.
 
-### macOS: No Additional Dependencies
+### Schema (Enterprise-Only Properties)
 
-Seatbelt is built into macOS. No `brew install` needed. CC sandbox works out of the box on macOS.
+These properties ONLY take effect in managed settings:
 
-## Rust Crate Changes
+| Setting | Type | Description |
+|---------|------|-------------|
+| `disableBypassPermissionsMode` | `"disable"` | Prevents `bypassPermissions` mode and `--dangerously-skip-permissions` flag |
+| `allowManagedPermissionRulesOnly` | `boolean` | Only rules in managed settings apply; user/project `allow`/`ask`/`deny` ignored |
+| `allowManagedHooksOnly` | `boolean` | Only managed hooks and SDK hooks load; user/project/plugin hooks blocked |
+| `allowManagedMcpServersOnly` | `boolean` | Only admin-defined MCP server allowlist applies |
+| `sandbox.network.allowManagedDomainsOnly` | `boolean` | Only managed `allowedDomains` + managed `WebFetch(domain:...)` rules apply. Non-allowed domains blocked silently (no prompt). Denied domains still merge from all sources. |
+| `sandbox.filesystem.allowManagedReadPathsOnly` | `boolean` | Only managed `allowRead` paths respected |
+| `strictKnownMarketplaces` | `array` | Allowlist of plugin marketplaces users can add |
+| `blockedMarketplaces` | `array` | Blocklist of marketplace sources |
+| `channelsEnabled` | `boolean` | Allow channels for Team/Enterprise users |
 
-### No New Crates Needed
+### RightClaw Usage of Managed Settings
 
-The v2.0 changes are primarily about:
-1. **Generating JSON files** -- `serde_json` (already in workspace)
-2. **Modifying shell wrapper template** -- `minijinja` (already in workspace)
-3. **Updating dependency checks** -- `which` (already in workspace)
-4. **File I/O** -- `std::fs` (stdlib)
+**Critical consideration:** Managed settings are machine-wide. Writing to `/etc/claude-code/` affects ALL Claude Code sessions on the machine, not just RightClaw agents.
 
-No new Rust crate dependencies are required for v2.0.
+- **Option A: Use managed settings** -- Enforces network policy globally. Requires sudo/admin. Affects user's interactive CC sessions too.
+- **Option B: Use project-level settings only** -- Per-agent, no sudo needed. But `allowManagedDomainsOnly` only works in managed settings. Domains CAN be extended by user via their own settings.json.
+- **Recommendation: Option B for now.** Use project-level `sandbox.network.allowedDomains` without `allowManagedDomainsOnly`. Accept that users can extend the domain list via their user settings -- this is acceptable since users already control the machine. Managed settings are enterprise-grade overkill for a developer tool. Document Option A for users who want stricter enforcement.
 
-### Crate Usage for New Features
+**Confidence:** HIGH -- verified schema from official docs
 
-| Feature | Crate | Already In Workspace |
-|---------|-------|---------------------|
-| Generate `settings.json` | `serde_json` + `serde` | Yes |
-| Template new shell wrapper | `minijinja` | Yes |
-| Check for `bwrap`/`socat` | `which` | Yes |
-| Create agent `.claude/` dirs | `std::fs` | stdlib |
-| Path manipulation | `std::path` | stdlib |
+---
 
-## Key Environment Variables
+## 3. HOME Override and Config Resolution
 
-| Variable | Purpose | How RightClaw Uses It |
-|----------|---------|----------------------|
-| `CLAUDE_CONFIG_DIR` | Redirect CC config/data directory | Set to `~/.rightclaw/agents/<name>/.claude` per agent |
-| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Disable telemetry, autoupdater, etc. | Set in agent wrapper (reduces noise, prevents feature flag issues) |
-| `CLAUDE_CODE_TMPDIR` | Override temp directory | Optional: isolate temp files per agent |
-| `CLAUDE_CODE_DISABLE_CRON` | Disable CC's built-in cron | NOT set (we use CC cron via CronSync) |
+### How CC Resolves Config Files (Verified)
 
-**CRITICAL GOTCHA from v1.0 memory:** `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set to ANY value (including "0" or "false") blocks ALL feature flags including channels. If Telegram channels are needed, do NOT set this variable.
+CC reads from these paths, all relative to `$HOME`:
 
-## Shell Wrapper Changes
+| File | Resolved Path | Purpose |
+|------|--------------|---------|
+| `~/.claude.json` | `$HOME/.claude.json` | Preferences, OAuth, MCP, project trust, caches |
+| `~/.claude/settings.json` | `$HOME/.claude/settings.json` | User-level settings |
+| `~/.claude/.credentials.json` | `$HOME/.claude/.credentials.json` | API credentials (Linux/Windows) |
+| `~/.claude/CLAUDE.md` | `$HOME/.claude/CLAUDE.md` | Global instructions |
+| `~/.claude/commands/` | `$HOME/.claude/commands/` | Global slash commands |
+| `~/.claude/agents/` | `$HOME/.claude/agents/` | User subagents |
+| `~/.claude/skills/` | `$HOME/.claude/skills/` | User skills |
+| `~/.claude/plugins/` | `$HOME/.claude/plugins/` | Plugin storage |
+| `~/.claude/channels/telegram/` | `$HOME/.claude/channels/telegram/` | Telegram channel config |
 
-### v1.0 Wrapper (OpenShell)
+Project-level files (relative to cwd):
+
+| File | Resolved Path | Purpose |
+|------|--------------|---------|
+| `.claude/settings.json` | `$CWD/.claude/settings.json` | Project settings |
+| `.claude/settings.local.json` | `$CWD/.claude/settings.local.json` | Local project settings |
+| `.mcp.json` | `$CWD/.mcp.json` | Project MCP servers |
+| `CLAUDE.md` | `$CWD/CLAUDE.md` | Project instructions |
+
+### `CLAUDE_CONFIG_DIR` Environment Variable
+
+| Aspect | Status |
+|--------|--------|
+| Documented? | Listed in env-vars reference with one-liner: "Customize where Claude Code stores its configuration and data files" |
+| What it redirects | `.claude.json`, `.credentials.json`, `projects/`, `shell-snapshots/`, `statsig/`, `todos/`, `settings.json` |
+| What it does NOT redirect | Project-level `.claude/settings.local.json` (still created in cwd) |
+| Bugs | IDE integration breaks. Behavior was unclear until v2.0.42+. |
+| Stability | Partially supported, not fully documented |
+
+**Confidence:** MEDIUM -- env var exists and is listed officially, but behavior details come from GitHub issues, not docs
+
+### What Breaks When `$HOME` is Overridden
+
+Setting `HOME=$AGENT_DIR` causes CC to look for ALL home-relative configs under the agent directory:
+
+| Config | Default | With HOME=$AGENT_DIR | Impact |
+|--------|---------|---------------------|--------|
+| `~/.claude.json` | `$HOME/.claude.json` | `$AGENT_DIR/.claude.json` | **BREAKS**: Trust entries, OAuth, preferences lost |
+| `~/.claude/settings.json` | `$HOME/.claude/settings.json` | `$AGENT_DIR/.claude/settings.json` | **OK**: This is what we want -- agent-local settings |
+| `~/.claude/.credentials.json` | `$HOME/.claude/.credentials.json` | `$AGENT_DIR/.claude/.credentials.json` | **BREAKS**: Credentials not found |
+| macOS Keychain | System keychain | System keychain | **OK**: Keychain is per-user, not per-HOME |
+| `~/.claude/channels/telegram/` | Under real home | Under agent dir | **BREAKS**: Telegram token/access.json not found |
+| `~/.claude/plugins/` | Under real home | Under agent dir | **BREAKS**: Plugins not found |
+| Git config (`~/.gitconfig`) | Under real home | Under agent dir | **BREAKS**: Git identity/auth gone |
+| SSH keys (`~/.ssh/`) | Under real home | Under agent dir | **BREAKS**: SSH auth gone |
+
+### The `CLAUDE_CONFIG_DIR` Approach (Better Than HOME Override)
+
+Instead of overriding `$HOME`, use `CLAUDE_CONFIG_DIR=$AGENT_DIR/.claude-config`:
+
+| Config | Resolved Path | Impact |
+|--------|--------------|--------|
+| `.claude.json` | `$AGENT_DIR/.claude-config/.claude.json` | Isolated per-agent |
+| `settings.json` | `$AGENT_DIR/.claude-config/settings.json` | Isolated per-agent |
+| `.credentials.json` | `$AGENT_DIR/.claude-config/.credentials.json` | Needs to be seeded from host |
+| Project `.claude/settings.json` | `$AGENT_DIR/.claude/settings.json` | Still works (cwd-relative) |
+| Git config | `~/.gitconfig` (real HOME) | Still works |
+| SSH keys | `~/.ssh/` (real HOME) | Still works |
+| Telegram | `~/.claude/channels/telegram/` (real HOME) | Still works |
+
+**Recommendation: Use `CLAUDE_CONFIG_DIR` NOT `$HOME` override.**
+
+`CLAUDE_CONFIG_DIR` provides the isolation we need (per-agent trust state, settings, credentials) without breaking git, SSH, Telegram, or other host-dependent config.
+
+**Confidence:** MEDIUM -- CLAUDE_CONFIG_DIR redirects the right files based on GitHub issue analysis, but some edge cases may exist due to incomplete documentation
+
+### Trust Dialog Handling Under Isolation
+
+Current code writes `hasTrustDialogAccepted: true` to `~/.claude.json` under a project path key. With `CLAUDE_CONFIG_DIR`:
+
+1. Create `$AGENT_DIR/.claude-config/.claude.json` with:
+```json
+{
+  "projects": {
+    "<absolute_agent_dir_path>": {
+      "hasTrustDialogAccepted": true,
+      "hasTrustDialogHooksAccepted": true
+    }
+  },
+  "hasCompletedOnboarding": true
+}
+```
+
+2. This pre-populates the agent's isolated config with trust for its own directory.
+3. No need to modify the host's `~/.claude.json` at all.
+
+### Credential Forwarding
+
+On Linux, credentials are in `~/.claude/.credentials.json`. With `CLAUDE_CONFIG_DIR`:
+- Copy or symlink credentials to `$AGENT_DIR/.claude-config/.credentials.json`
+- OR set `ANTHROPIC_API_KEY` env var (simpler, avoids credential file management)
+- OR use `apiKeyHelper` in settings.json to fetch credentials dynamically
+
+**Recommendation:** Use `ANTHROPIC_API_KEY` env var. It's simpler, avoids file management, and is the standard approach for headless/CI deployments. The shell wrapper already has access to the env.
+
+On macOS, OAuth tokens are in the system Keychain, which is per-user not per-HOME. This works regardless of `CLAUDE_CONFIG_DIR`.
+
+---
+
+## 4. Environment Variables Reference
+
+### Config Path Control
+
+| Variable | Purpose | Confidence |
+|----------|---------|------------|
+| `CLAUDE_CONFIG_DIR` | Redirects where CC stores config/data files | MEDIUM |
+| `CLAUDE_CODE_TMPDIR` | Override temp directory (CC appends `/claude/`) | HIGH |
+
+### Auth Control
+
+| Variable | Purpose | Confidence |
+|----------|---------|------------|
+| `ANTHROPIC_API_KEY` | API key (overrides OAuth in non-interactive mode) | HIGH |
+| `ANTHROPIC_AUTH_TOKEN` | Custom Authorization header value | HIGH |
+| `ANTHROPIC_BASE_URL` | Override API endpoint | HIGH |
+
+### Behavior Control
+
+| Variable | Purpose | Confidence |
+|----------|---------|------------|
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Disables auto-updates, feedback, telemetry, error reporting. ANY value (even "0") enables. | HIGH |
+| `CLAUDE_CODE_SIMPLE` | Minimal system prompt, only Bash/Read/Edit tools. Same as `--bare`. | HIGH |
+| `CLAUDE_CODE_DISABLE_CRON` | Disables scheduled tasks | HIGH |
+| `CLAUDECODE` | Set to `1` in CC-spawned shells (detect CC context) | HIGH |
+| `DISABLE_AUTOUPDATER` | Skip auto-updates | HIGH |
+
+### Relevant for RightClaw Wrapper
+
+The shell wrapper should set:
 ```bash
-exec openshell sandbox create \
-  --no-auto-providers \
-  --no-keep \
-  --policy "policy.yaml" \
-  --name "rightclaw-<agent>" \
-  -- claude \
-    --append-system-prompt-file "prompt.md" \
-    --dangerously-skip-permissions \
-    --channels plugin:telegram@claude-plugins-official \
-    -- "startup prompt"
+export CLAUDE_CONFIG_DIR="$AGENT_DIR/.claude-config"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export DISABLE_AUTOUPDATER=1
 ```
 
-### v2.0 Wrapper (Native Sandbox)
-```bash
-export CLAUDE_CONFIG_DIR="$HOME/.rightclaw/agents/<agent>/.claude"
-exec "$CLAUDE_BIN" \
-  --append-system-prompt-file "prompt.md" \
-  --dangerously-skip-permissions \
-  --channels plugin:telegram@claude-plugins-official \
-  -- "startup prompt"
+And forward `ANTHROPIC_API_KEY` from the parent environment if set.
+
+---
+
+## 5. Complete Generated Settings Schema for v2.1
+
+### Per-Agent `.claude/settings.json` (Project-Level)
+
+```json
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Agent(Explore)"
+    ],
+    "deny": [
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.gnupg/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": [],
+    "filesystem": {
+      "allowWrite": ["<agent_dir_absolute_path>"],
+      "denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"]
+    },
+    "network": {
+      "allowedDomains": [
+        "api.anthropic.com",
+        "github.com",
+        "*.npmjs.org",
+        "crates.io",
+        "agentskills.io",
+        "api.telegram.org"
+      ]
+    }
+  },
+  "spinnerTipsEnabled": false,
+  "prefersReducedMotion": true,
+  "enabledPlugins": {
+    "telegram@claude-plugins-official": true
+  }
+}
 ```
 
-**Differences:**
-1. No `openshell` invocation at all
-2. `CLAUDE_CONFIG_DIR` set to agent-specific `.claude/` directory
-3. `--dangerously-skip-permissions` remains (sandbox enforces OS-level restrictions independently)
-4. `settings.json` at `$CLAUDE_CONFIG_DIR/settings.json` configures sandbox
-5. No `--no-sandbox` flag needed -- sandbox is controlled via `settings.json` `sandbox.enabled`
-6. No cleanup needed on shutdown (no sandbox create/destroy lifecycle)
+### Per-Agent `.claude-config/.claude.json` (Isolated Global Config)
 
-## Agent Directory Layout (v2.0)
-
-```
-~/.rightclaw/agents/<name>/
-  IDENTITY.md              # Required (unchanged)
-  SOUL.md                  # Optional personality
-  USER.md                  # Optional user context
-  AGENTS.md                # Optional operational framework
-  MEMORY.md                # Optional persistent memory
-  BOOTSTRAP.md             # Optional first-run (self-deletes)
-  HEARTBEAT.md             # Optional health check
-  TOOLS.md                 # Optional tool list
-  agent.yaml               # Optional config (restart, model, etc.)
-  .mcp.json                # Optional MCP servers
-  crons/                   # CronSync specs
-  .claude/                 # GENERATED by RightClaw
-    settings.json          # Sandbox config + permissions
-    settings.local.json    # Optional user overrides
-    CLAUDE.md              # Optional agent-scoped instructions
+```json
+{
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/home/user/.rightclaw/agents/right": {
+      "hasTrustDialogAccepted": true,
+      "hasTrustDialogHooksAccepted": true
+    }
+  }
+}
 ```
 
-**Key change:** `policy.yaml` is REMOVED. Replaced by `.claude/settings.json` (generated). The `.claude/` directory under each agent is where `CLAUDE_CONFIG_DIR` points. CC creates its own state files inside this directory (sessions, memory, etc.).
+### Key Schema Changes from v2.0
 
-## What NOT to Use
+| Setting | v2.0 | v2.1 | Reason |
+|---------|------|------|--------|
+| `skipDangerousModePermissionPrompt` | `true` | **removed** | Not using bypass mode anymore |
+| `--dangerously-skip-permissions` | Yes | **removed** | Replaced by `--permission-mode dontAsk` |
+| `permissions.allow` | Not present | Array of tool rules | Explicit tool whitelist |
+| `permissions.deny` | Not present | Array of deny rules | Explicit denials |
+| `permissions.defaultMode` | Not present | `"dontAsk"` | Silent deny of non-allowed tools |
+| `CLAUDE_CONFIG_DIR` | Not set | `$AGENT_DIR/.claude-config` | Per-agent config isolation |
+| Trust in `~/.claude.json` | Host file | Per-agent `.claude-config/.claude.json` | No host file modification |
+
+---
+
+## 6. Interaction Between Sandbox and Permissions
+
+Key insight from official docs: **Sandbox and permissions are complementary layers.**
+
+- **Permissions** control CC's built-in tools (Read, Edit, Bash, WebFetch, etc.)
+- **Sandbox** provides OS-level enforcement for Bash subprocesses only
+- Read/Edit deny rules do NOT prevent `cat .env` in Bash -- sandbox does
+- `autoAllowBashIfSandboxed: true` auto-approves Bash commands WITHIN sandbox boundaries
+- `allowUnsandboxedCommands: false` prevents sandbox escape via `dangerouslyDisableSandbox` parameter
+- `excludedCommands` runs those commands outside sandbox (use sparingly)
+
+For fully headless agents:
+1. `permissions.allow: ["Bash", "Read", "Edit", ...]` -- pre-approve all needed tools
+2. `permissions.defaultMode: "dontAsk"` -- silently deny anything not listed
+3. `sandbox.enabled: true` -- OS-level enforcement for Bash
+4. `sandbox.autoAllowBashIfSandboxed: true` -- no bash prompts
+5. `sandbox.allowUnsandboxedCommands: false` -- no escape hatch
+
+This gives prompt-free operation with actual OS-level security boundaries.
+
+---
+
+## 7. What NOT to Use
 
 | Avoid | Why | Use Instead |
 |-------|-----|-------------|
-| `HOME=<agent-dir>` as primary isolation | Breaks git, ssh, cargo, and any tool that reads `$HOME` | `CLAUDE_CONFIG_DIR` |
-| OpenShell sandbox | Removed in v2.0. Alpha instability, API key requirement | CC native sandbox |
-| `policy.yaml` | OpenShell format, not used by CC sandbox | `settings.json` with `sandbox.*` fields |
-| Custom bwrap invocation | CC manages bwrap internally via sandbox runtime | Let CC handle bwrap via `sandbox.enabled: true` |
-| `sandbox.allowUnsandboxedCommands: true` | Allows agents to escape sandbox via `dangerouslyDisableSandbox` param | Set to `false` for strict enforcement |
+| `--dangerously-skip-permissions` | Approves everything, no boundaries | `--permission-mode dontAsk` + allow rules |
+| `defaultMode: "bypassPermissions"` | Same as above, in settings form | `defaultMode: "dontAsk"` |
+| `$HOME` override to agent dir | Breaks git, SSH, Telegram, credentials | `CLAUDE_CONFIG_DIR` |
+| `/etc/claude-code/managed-settings.json` | Machine-wide, affects all CC sessions, needs sudo | Project-level settings in `.claude/settings.json` |
+| `skipDangerousModePermissionPrompt` | Tied to bypass mode which we're dropping | Not needed with `dontAsk` |
 
-## Alternatives Considered
+---
 
-| Recommended | Alternative | When to Use Alternative |
-|-------------|-------------|------------------------|
-| `CLAUDE_CONFIG_DIR` | `HOME` override | If `CLAUDE_CONFIG_DIR` proves buggy for a specific CC version |
-| `settings.json` sandbox | Manual bwrap wrapping | Never for RightClaw -- CC sandbox is more comprehensive (includes network proxy) |
-| Per-agent `.claude/settings.json` | Global `~/.claude/settings.json` | Never -- agents must have independent sandbox configs |
-| `defaultMode: "bypassPermissions"` in settings | `--dangerously-skip-permissions` flag | Flag is fine too, but settings-based is cleaner and avoids the startup permission dialog |
+## 8. Alternatives Considered
 
-## Version Compatibility
+### Permission Mode Alternatives
 
-| Component | Minimum Version | Why |
-|-----------|-----------------|-----|
-| Claude Code | v2.1+ | Sandbox features, `CLAUDE_CONFIG_DIR` support |
-| Node.js | 22+ | Required by CC for some sandbox features |
-| bubblewrap | 0.4+ | User namespace support (any distro-packaged version works) |
-| socat | 1.7+ | Unix socket relay (any distro-packaged version works) |
-| Linux kernel | 4.18+ | User namespace support for bubblewrap |
+| Mode | Behavior | Why Not for RightClaw |
+|------|----------|----------------------|
+| `bypassPermissions` | Approve everything | No boundaries, the thing we're replacing |
+| `acceptEdits` | Auto-approve file edits only | Still prompts for Bash, not headless-ready |
+| `default` | Prompt for everything | Not headless-compatible |
+| `plan` | Read-only, no modifications | Agents need to act |
+| **`dontAsk`** | **Deny non-allowed, no prompts** | **Correct choice for headless agents** |
+
+### Config Isolation Alternatives
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **`CLAUDE_CONFIG_DIR`** | Isolates CC config, preserves git/SSH/etc | Partially documented, some edge cases |
+| `$HOME` override | Complete isolation | Breaks everything that uses `$HOME` |
+| Symlinks | Works with existing paths | Fragile, race conditions |
+| `--bare` mode | No config loading at all | Loses skills, CLAUDE.md, hooks |
+| Docker/container | Full isolation | Overkill, CC already has sandbox |
+
+**Recommendation:** `CLAUDE_CONFIG_DIR` is the right balance. If edge cases surface, fall back to seeding a minimal `$AGENT_DIR/.claude-config/` with just the trust file.
+
+---
+
+## 9. Sandbox Settings Complete Reference
+
+All keys under the `"sandbox"` object in settings.json:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | `boolean` | `false` | Enable bash sandboxing |
+| `autoAllowBashIfSandboxed` | `boolean` | `true` | Auto-approve bash when sandboxed |
+| `excludedCommands` | `string[]` | `[]` | Commands that run outside sandbox |
+| `allowUnsandboxedCommands` | `boolean` | `true` | Allow `dangerouslyDisableSandbox` escape hatch |
+| `filesystem.allowWrite` | `string[]` | `[]` | Additional writable paths (merges across scopes) |
+| `filesystem.denyWrite` | `string[]` | `[]` | Paths blocked from writing (merges) |
+| `filesystem.denyRead` | `string[]` | `[]` | Paths blocked from reading (merges) |
+| `filesystem.allowRead` | `string[]` | `[]` | Re-allow reading within denyRead regions (takes precedence) |
+| `filesystem.allowManagedReadPathsOnly` | `boolean` | `false` | (Managed only) Only managed allowRead paths |
+| `network.allowedDomains` | `string[]` | `[]` | Allowed outbound domains (supports `*.example.com` wildcards) |
+| `network.allowManagedDomainsOnly` | `boolean` | `false` | (Managed only) Only managed domains, silent block |
+| `network.allowUnixSockets` | `string[]` | `[]` | Unix socket paths accessible in sandbox |
+| `network.allowAllUnixSockets` | `boolean` | `false` | Allow all Unix socket connections |
+| `network.allowLocalBinding` | `boolean` | `false` | Allow binding to localhost ports (macOS only) |
+| `network.httpProxyPort` | `number|null` | `null` | Custom HTTP proxy port |
+| `network.socksProxyPort` | `number|null` | `null` | Custom SOCKS5 proxy port |
+| `enableWeakerNestedSandbox` | `boolean` | `false` | Weaker sandbox for unprivileged Docker (Linux/WSL2) |
+| `enableWeakerNetworkIsolation` | `boolean` | `false` | (macOS) Allow TLS trust service access |
+
+**Sandbox path prefixes** (for filesystem.allowWrite, denyWrite, denyRead, allowRead):
+
+| Prefix | Meaning |
+|--------|---------|
+| `/` | Absolute path from filesystem root |
+| `~/` | Relative to home directory |
+| `./` or no prefix | Relative to project root (project settings) or `~/.claude` (user settings) |
+
+---
 
 ## Sources
 
-- [Claude Code Sandboxing Docs](https://code.claude.com/docs/en/sandboxing) -- Complete sandbox reference, verified 2026-03-23 (HIGH confidence)
-- [Claude Code Settings Reference](https://code.claude.com/docs/en/settings) -- Full settings.json schema including sandbox fields, verified 2026-03-23 (HIGH confidence)
-- [Claude Code Environment Variables](https://code.claude.com/docs/en/env-vars) -- `CLAUDE_CONFIG_DIR` and all env vars, verified 2026-03-23 (HIGH confidence)
-- [Anthropic Engineering: Claude Code Sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing) -- Architecture overview (MEDIUM confidence -- high-level, no implementation details)
-- [sandbox-runtime npm package](https://github.com/anthropic-experimental/sandbox-runtime) -- Open source sandbox runtime, `@anthropic-ai/sandbox-runtime` (MEDIUM confidence)
-- [bubblewrap GitHub](https://github.com/containers/bubblewrap) -- bubblewrap source and docs (HIGH confidence)
-- [pkgs.org/download/bubblewrap](https://pkgs.org/download/bubblewrap) -- Package availability across distros (HIGH confidence)
-- [pkgs.org/download/socat](https://pkgs.org/download/socat) -- socat package availability (HIGH confidence)
-- [CLAUDE_CONFIG_DIR feature request](https://github.com/anthropics/claude-code/issues/25762) -- Community confirmation of CLAUDE_CONFIG_DIR working (MEDIUM confidence)
-- [Trail of Bits claude-code-config](https://github.com/trailofbits/claude-code-config) -- Industry sandbox configuration patterns (MEDIUM confidence)
+- [Claude Code Settings (official)](https://code.claude.com/docs/en/settings) -- complete settings schema, sandbox settings table, managed settings locations
+- [Claude Code Permissions (official)](https://code.claude.com/docs/en/permissions) -- permission rule syntax, modes, managed-only settings table
+- [Claude Code Sandboxing (official)](https://code.claude.com/docs/en/sandboxing) -- sandbox architecture, filesystem/network isolation, auto-allow mode
+- [Claude Code Environment Variables (official)](https://code.claude.com/docs/en/env-vars) -- CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, all env vars
+- [Claude Code Headless Mode (official)](https://code.claude.com/docs/en/headless) -- --bare mode, --allowedTools, non-interactive usage
+- [Secure Deployment Guide (official)](https://platform.claude.com/docs/en/agent-sdk/secure-deployment) -- proxy patterns, credential management, isolation technologies
+- [Claude Code Settings Examples (GitHub)](https://github.com/anthropics/claude-code/tree/main/examples/settings) -- settings-lax.json, settings-strict.json, settings-bash-sandbox.json
+- [CLAUDE_CONFIG_DIR issue #3833](https://github.com/anthropics/claude-code/issues/3833) -- CLAUDE_CONFIG_DIR behavior analysis
+- [hasTrustDialogHooksAccepted issue #5572](https://github.com/anthropics/claude-code/issues/5572) -- trust dialog config fields
+- [dontAsk subagent issue #11934](https://github.com/anthropics/claude-code/issues/11934) -- dontAsk mode + subagent interaction
 
 ---
-*Stack research for: RightClaw v2.0 CC Native Sandbox & Agent Isolation*
-*Researched: 2026-03-23*
+*Stack research for: RightClaw v2.1 Headless Agent Isolation*
+*Researched: 2026-03-24*

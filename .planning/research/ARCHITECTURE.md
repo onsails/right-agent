@@ -1,11 +1,11 @@
-# Architecture Research: v2.0 Native Sandbox & Agent Isolation
+# Architecture Research: v2.1 Headless Agent Isolation
 
-**Domain:** Multi-agent CLI runtime (Rust CLI wrapping process-compose + CC native sandbox)
-**Researched:** 2026-03-23
+**Domain:** Multi-agent CLI runtime -- managed settings, HOME override, dropping bypass mode
+**Researched:** 2026-03-24
 **Confidence:** HIGH
-**Focus:** Integration of CC native sandboxing and per-agent HOME isolation into existing v1.0 architecture
+**Focus:** How managed-settings.json, HOME override, and permissions.allow integrate with existing codegen architecture
 
-## System Overview (v2.0)
+## System Overview (v2.1 Target)
 
 ```
                             User
@@ -26,61 +26,352 @@
               v              v         per-agent process
         +-----------+  +-----------+  +---------------------+
         | Settings  |  | Combined  |  | Shell Wrapper       |
-        | Generator |  | Prompt    |  | (generated script)  |
+  NEW-->| Generator |  | Prompt    |  | (generated script)  |
         | (.claude/ |  | Generator |  +--------|------------+
         | settings) |  +-----------+           |
-        +-----------+                          v
-                                      +---------------------+
-                                      | HOME=$AGENT_DIR     |
-                                      | claude               |
-                                      |   --sandbox-mode ... |
-                                      +---------------------+
-                                               |
-                                               v
-                                      +---------------------+
-                                      | Claude Code session |
-                                      | (native sandbox)    |
-                                      | bubblewrap/Seatbelt |
-                                      +---------------------+
+        +-----------+       |            exec $CLAUDE_BIN
+              |             |       NEW: no --dangerously-skip-permissions
+              v             v       NEW: HOME=$AGENT_HOME
+        +-----------+  +-----------+
+   NEW->| Managed   |  | Per-agent |
+        | Settings  |  | .claude/  |
+        | Generator |  | settings  |
+        | (/etc/cc/)|  | .json     |
+        +-----------+  +-----------+
+              |
+              v
+        +---------------------+
+   NEW->| Home Scaffold       |
+        | (agent HOME dir     |
+        |  with trust, auth,  |
+        |  git/SSH forwarding)|
+        +---------------------+
 ```
 
-### What Changed from v1.0
+## Current Architecture (v2.0 Baseline)
 
-| v1.0 (OpenShell) | v2.0 (Native Sandbox) |
-|---|---|
-| Shell wrapper invokes `openshell sandbox create --policy <path> -- claude` | Shell wrapper sets `HOME=$AGENT_DIR` and invokes `claude` directly |
-| Policy defined in `policy.yaml` (OpenShell format) | Sandbox config defined in `.claude/settings.json` (CC native format) |
-| `destroy_sandboxes()` cleanup on `rightclaw down` | No sandbox cleanup needed (bubblewrap is ephemeral per-process) |
-| `RuntimeState.agents[].sandbox_name` tracks sandbox identity | No sandbox name tracking needed |
-| `--no-sandbox` flag skips OpenShell | `--no-sandbox` flag disables `sandbox.enabled` in generated settings |
-| `verify_dependencies()` checks for `openshell` binary | `verify_dependencies()` checks for `bubblewrap` + `socat` (Linux only) |
-| `rightclaw doctor` checks for `openshell` | `rightclaw doctor` checks for `bubblewrap` + `socat` (Linux), nothing on macOS |
-| `policy.yaml` required per agent | `policy.yaml` no longer required (removed from agent validation) |
-| Agent cwd = agent dir, HOME = host HOME | Agent cwd = agent dir, HOME = agent dir |
+### Codegen Pipeline
 
-## Component-Level Changes
+`cmd_up()` in main.rs drives the pipeline for each agent:
 
-### Components to MODIFY
+1. **`generate_combined_prompt(agent)`** -- produces `{name}-prompt.md` in `run/`
+2. **`generate_wrapper(agent, prompt_path, debug_log)`** -- produces `{name}.sh` in `run/`
+3. **`generate_settings(agent, no_sandbox)`** -- writes `.claude/settings.json` into `agent.path`
+4. **`generate_process_compose(agents, run_dir)`** -- produces `process-compose.yaml` in `run/`
 
-#### 1. `codegen/shell_wrapper.rs` + `agent-wrapper.sh.j2`
+### Current Files and Responsibilities
 
-**Current:** Two code paths in template -- sandbox (openshell) and no-sandbox (direct claude).
-**New:** Single code path -- always `HOME=$AGENT_DIR exec claude`. The sandbox is activated by the generated `$AGENT_DIR/.claude/settings.json`, not by the wrapper.
+| File | Responsibility | Changes Needed for v2.1 |
+|------|---------------|-------------------------|
+| `codegen/settings.rs` | Generates per-agent `.claude/settings.json` with sandbox config | Add `permissions.allow` + `defaultMode`, remove `skipDangerousModePermissionPrompt` |
+| `codegen/shell_wrapper.rs` | Generates bash wrapper calling `claude` | Remove `--dangerously-skip-permissions`, add `HOME` override |
+| `templates/agent-wrapper.sh.j2` | Jinja2 template for wrapper script | Add `export HOME=`, remove `--dangerously-skip-permissions` |
+| `init.rs` | Creates `~/.rightclaw/agents/right/` + pre-trust | Scaffold HOME dir, update trust path, new `managed-settings.json` |
+| `agent/types.rs` | `AgentDef`, `AgentConfig`, `SandboxOverrides` | Add `permissions` section to `AgentConfig` |
+| `codegen/mod.rs` | Re-exports codegen functions | Add `generate_managed_settings`, `scaffold_agent_home` |
+| `codegen/process_compose.rs` | Generates process-compose.yaml | No changes expected |
+| `codegen/system_prompt.rs` | Generates combined prompt content | No changes expected |
+| `config.rs` | Resolves `RIGHTCLAW_HOME` | No changes expected |
+| `doctor.rs` | Validates dependencies and agent structure | Add HOME scaffold validation |
+
+## Integration Architecture: Three New Subsystems
+
+### Subsystem 1: Managed Settings Generation
+
+**What:** Write `/etc/claude-code/managed-settings.json` (Linux) with `allowManagedDomainsOnly: true` and the merged domain allowlist.
+
+**Why managed settings, not project settings:** The `allowManagedDomainsOnly` flag is a managed-settings-only feature. It cannot be set in user, project, or local settings. Without it, non-allowed domains prompt the user (blocking headless operation). With it, non-allowed domains are silently blocked.
+
+**Where in code:** New file `codegen/managed_settings.rs`
+
+**Data flow:**
+```
+AgentDef[] (all agents)
+    |
+    v
+Collect all allowed_domains from:
+  - DEFAULT_ALLOWED_DOMAINS (settings.rs constant)
+  - Per-agent SandboxOverrides.allowed_domains
+    |
+    v
+Merge, deduplicate
+    |
+    v
+Write /etc/claude-code/managed-settings.json:
+{
+  "sandbox": {
+    "network": {
+      "allowedDomains": [...merged...],
+      "allowManagedDomainsOnly": true
+    }
+  },
+  "permissions": {
+    "disableBypassPermissionsMode": "disable"
+  }
+}
+```
+
+**Domain merging tension:** Managed settings arrays merge with project/user settings. But `allowManagedDomainsOnly: true` means ONLY managed `allowedDomains` are respected -- domains from project/user/local settings are ignored. This is exactly what we want: per-agent `.claude/settings.json` domains become decorative. The managed file is the single source of truth.
+
+**Consequence for per-agent overrides:** Per-agent `sandbox.allowed_domains` in `agent.yaml` must be merged INTO the managed settings, not into the per-agent project settings. This is a design inversion from v2.0 where they merged into `.claude/settings.json`. The managed settings file must contain the union of all agents' domain needs.
+
+**Alternative considered: Per-agent managed settings via HOME override.** If each agent has its own HOME, each could have its own `/etc/claude-code/managed-settings.json` equivalent. But CC reads managed settings from a SYSTEM path (`/etc/claude-code/`), not relative to HOME. So this doesn't work -- there's one managed-settings.json for the entire machine. All agents share it.
+
+**Privilege concern:** Writing to `/etc/claude-code/` requires root. Options:
+1. **Require sudo for `rightclaw up`** -- bad UX, breaks non-root workflows
+2. **Pre-create with install.sh** -- `install.sh` already runs with root, could set up the dir with correct perms
+3. **Use a different managed settings delivery** -- MDM/plist on macOS, but overkill
+4. **Recommendation:** `install.sh` creates `/etc/claude-code/` owned by the user (or group-writable). Then `rightclaw up` writes managed-settings.json without sudo. Doctor checks this.
+
+### Subsystem 2: HOME Override (Agent Isolation)
+
+**What:** Each agent runs with `HOME` pointing to a dedicated directory, isolating it from host `~/.claude.json`, `~/.claude/settings.json`, and other user config.
+
+**Where HOME lives:**
+```
+~/.rightclaw/
+  homes/
+    right/           <-- HOME for agent "right"
+      .claude.json   <-- trust entries (pre-generated)
+      .claude/
+        settings.json  <-- user-scope settings (pre-generated)
+    scout/
+      .claude.json
+      .claude/
+        settings.json
+```
+
+**Why separate from agent dir:** Agent dir (`~/.rightclaw/agents/right/`) is the cwd (working directory) where CC reads project-scoped config (`.claude/settings.json`, CLAUDE.md, skills). HOME is where CC reads user-scoped config (`~/.claude.json`, `~/.claude/settings.json`). These are different scopes in CC's hierarchy:
+
+| Scope | Reads from | Our control |
+|-------|-----------|-------------|
+| Managed | `/etc/claude-code/managed-settings.json` | `generate_managed_settings()` |
+| User | `$HOME/.claude/settings.json` | HOME override + `scaffold_agent_home()` |
+| Project | `<cwd>/.claude/settings.json` | `generate_settings()` (existing) |
+| Local | `<cwd>/.claude/settings.local.json` | Not used |
+
+**Shell wrapper changes:**
+
+Current template:
+```bash
+exec "$CLAUDE_BIN" \
+  --append-system-prompt-file "{{ combined_prompt_path }}" \
+  --dangerously-skip-permissions \
+  ...
+```
+
+New template:
+```bash
+export HOME="{{ agent_home }}"
+export CLAUDE_CONFIG_DIR="{{ agent_home }}/.claude"
+# Forward SSH agent from real home
+{% if ssh_auth_sock %}export SSH_AUTH_SOCK="{{ ssh_auth_sock }}"{% endif %}
+# Forward git config
+export GIT_CONFIG_GLOBAL="{{ real_home }}/.gitconfig"
+
+exec "$CLAUDE_BIN" \
+  --append-system-prompt-file "{{ combined_prompt_path }}" \
+  ...
+```
+
+Key changes:
+- **Remove `--dangerously-skip-permissions`** -- replaced by `permissions.allow` in settings
+- **Add `HOME` export** -- points to agent-specific home
+- **Add `CLAUDE_CONFIG_DIR` export** -- explicitly point CC to the right config dir (belt-and-suspenders with HOME)
+- **Forward `SSH_AUTH_SOCK`** -- agents still need git push/pull via SSH
+- **Forward `GIT_CONFIG_GLOBAL`** -- agents inherit user's git identity (name, email, signing)
+- **ANTHROPIC_API_KEY** -- must be passed through (env var, not file-based)
+
+**What goes in the agent HOME:**
+
+| File | Purpose | Generated by |
+|------|---------|-------------|
+| `.claude.json` | Trust entry for agent's cwd | `scaffold_agent_home()` |
+| `.claude/settings.json` | User-scope settings (spinnerTips, prefersReducedMotion, skipDangerousModePermissionPrompt) | `scaffold_agent_home()` |
+| `.claude/channels/telegram/.env` | Telegram bot token (if configured) | `scaffold_agent_home()` |
+| `.claude/channels/telegram/access.json` | Telegram pairing (if configured) | `scaffold_agent_home()` |
+
+**What does NOT go in agent HOME:**
+- OAuth tokens (agents use `ANTHROPIC_API_KEY` env var)
+- Plugins/marketplaces (not needed, skills are in agent cwd)
+- Auto-memory (managed via agent cwd)
+- Session transcripts (ephemeral, don't need host state)
+
+### Subsystem 3: Permissions-Based Authorization (Replacing --dangerously-skip-permissions)
+
+**What:** Instead of `--dangerously-skip-permissions` (which shows a scary "bypass mode" warning), use explicit `permissions.allow` rules + sandbox to achieve the same effect without the warning.
+
+**How it works:**
+
+In the per-agent project settings (`<cwd>/.claude/settings.json`):
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Edit(*)",
+      "Read(*)",
+      "Write(*)",
+      "WebFetch(*)",
+      "mcp__*"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    ...
+  }
+}
+```
+
+And in the managed settings (`/etc/claude-code/managed-settings.json`):
+```json
+{
+  "permissions": {
+    "disableBypassPermissionsMode": "disable"
+  }
+}
+```
+
+Wait -- this is contradictory. `defaultMode: "bypassPermissions"` and `disableBypassPermissionsMode: "disable"` conflict. Let me reconsider.
+
+**Revised approach:**
+
+The goal is: no permission prompts, no bypass warning, sandbox enforced.
+
+Option A: `permissions.allow` with wildcards + `defaultMode: "acceptEdits"` + sandbox auto-allow
+- `permissions.allow: ["Bash(*)", "Edit(*)", "Read(*)", "Write(*)", ...]` auto-approves everything
+- `sandbox.autoAllowBashIfSandboxed: true` auto-approves sandboxed bash
+- `sandbox.allowUnsandboxedCommands: false` forces all commands through sandbox
+- No `--dangerously-skip-permissions` needed
+- No bypass warning shown
+- **Risk:** Bash wildcard `Bash(*)` doesn't match commands with shell operators (`&&`, `||`, `|`, `;`, `>`, `$()`, backticks). Those would still prompt.
+
+Option B: Keep `--dangerously-skip-permissions` but suppress the warning via `skipDangerousModePermissionPrompt`
+- Already doing this in v2.0
+- Works, but the flag name is alarming for documentation/audits
+- CC could remove or change behavior of this flag
+
+Option C: `defaultMode: "bypassPermissions"` in settings (no CLI flag needed)
+- Settings-driven bypass mode. Same behavior as `--dangerously-skip-permissions` but configured via settings
+- If `disableBypassPermissionsMode` is set in managed settings, this won't work
+- But we control managed settings too, so don't set `disableBypassPermissionsMode`
+
+**Recommendation: Option A (permissions.allow wildcards + sandbox auto-allow).**
+
+Rationale:
+- Cleanest from a security audit perspective
+- No bypass mode at all -- permissions are explicitly granted
+- Sandbox provides real OS-level enforcement
+- The shell operator limitation of `Bash(*)` is mitigated by `autoAllowBashIfSandboxed: true` -- sandboxed commands bypass the permission check entirely regardless of pattern matching
+- `allowUnsandboxedCommands: false` ensures nothing escapes the sandbox
+
+**What changes in settings.rs:**
+
+```rust
+// Current settings.json output:
+{
+  "skipDangerousModePermissionPrompt": true,  // REMOVE
+  "sandbox": { ... },
+}
+
+// New settings.json output:
+{
+  "permissions": {
+    "allow": [
+      "Edit(*)",
+      "Write(*)",
+      "Read(*)",
+      "WebFetch(*)",
+      "mcp__*"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,  // (or false if no_sandbox)
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    ...
+  },
+  "spinnerTipsEnabled": false,
+  "prefersReducedMotion": true,
+}
+```
+
+Note: `Bash(*)` is intentionally NOT in the allow list. Bash commands are auto-approved by `autoAllowBashIfSandboxed: true` when sandbox is enabled. When sandbox is disabled (`--no-sandbox`), bash commands would need `Bash(*)` in the allow list, but `--no-sandbox` is a dev-only flag where prompts are acceptable.
+
+## Code Change Map
+
+### 1. New: `codegen/managed_settings.rs`
+
+```rust
+pub fn generate_managed_settings(
+    agents: &[AgentDef],
+) -> miette::Result<serde_json::Value>
+```
+
+- Collects `DEFAULT_ALLOWED_DOMAINS` + all per-agent `sandbox.allowed_domains`
+- Produces JSON with `allowManagedDomainsOnly: true`
+- Called once per `rightclaw up`, not per-agent
+
+### 2. New: `codegen/home_scaffold.rs`
+
+```rust
+pub fn scaffold_agent_home(
+    agent: &AgentDef,
+    homes_dir: &Path,      // ~/.rightclaw/homes/
+    real_home: &Path,       // actual $HOME
+    telegram_env: Option<TelegramEnv>,
+) -> miette::Result<PathBuf>  // returns agent home path
+```
+
+- Creates `~/.rightclaw/homes/{agent_name}/`
+- Writes `.claude.json` with `hasTrustDialogAccepted: true` for agent cwd
+- Writes `.claude/settings.json` with user-scope settings (skipDangerousModePermissionPrompt, reduced motion, etc.)
+- Copies Telegram env/access files if configured
+- Returns the HOME path for use in wrapper generation
+
+### 3. Modified: `codegen/settings.rs`
 
 Changes:
-- Remove `no_sandbox` parameter from `generate_wrapper()`
-- Remove `policy_path` from template context (no more OpenShell policy)
-- Add `agent_home` to template context (the agent directory path)
-- Template becomes: `export HOME="<agent_home>" && exec "$CLAUDE_BIN" ...`
-- The `--no-sandbox` flag's effect moves to the settings.json generation layer (sandbox.enabled = false)
+- Remove `"skipDangerousModePermissionPrompt": true` from output (moves to user-scope settings in agent HOME)
+- Add `"permissions": { "allow": [...] }` section
+- Keep sandbox config as-is (it's project-scope, correct location)
+- Remove `allowedDomains` from project settings (moved to managed settings)
+- Keep `allowWrite`, `denyRead`, `excludedCommands` in project settings (these merge normally)
 
-New template structure:
+New signature (unchanged, but output changes):
+```rust
+pub fn generate_settings(agent: &AgentDef, no_sandbox: bool) -> miette::Result<serde_json::Value>
+```
+
+### 4. Modified: `codegen/shell_wrapper.rs`
+
+Changes to `generate_wrapper()`:
+- Add `agent_home: &str` parameter
+- Add `real_home: &str` parameter
+- Add `ssh_auth_sock: Option<&str>` parameter
+- Remove reference to `--dangerously-skip-permissions` in context
+
+### 5. Modified: `templates/agent-wrapper.sh.j2`
+
 ```bash
 #!/usr/bin/env bash
 # Generated by rightclaw -- do not edit
 # Agent: {{ agent_name }}
 set -euo pipefail
 
+# Per-agent HOME isolation
+export HOME="{{ agent_home }}"
+export CLAUDE_CONFIG_DIR="{{ agent_home }}/.claude"
+
+# Forward host environment
+export GIT_CONFIG_GLOBAL="{{ real_home }}/.gitconfig"
+{% if ssh_auth_sock %}export SSH_AUTH_SOCK="{{ ssh_auth_sock }}"
+{% endif %}
+
+# Resolve claude binary
 CLAUDE_BIN=""
 for bin in claude claude-bun; do
   if command -v "$bin" &>/dev/null; then
@@ -93,10 +384,8 @@ if [ -z "$CLAUDE_BIN" ]; then
   exit 1
 fi
 
-export HOME="{{ agent_home }}"
 exec "$CLAUDE_BIN" \
   --append-system-prompt-file "{{ combined_prompt_path }}" \
-  --dangerously-skip-permissions \
   {% if model %}--model {{ model }} \
   {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
   {% endif %}{% if channels %}--channels {{ channels }} \
@@ -105,551 +394,313 @@ exec "$CLAUDE_BIN" \
   {% endif %}
 ```
 
-**Confidence:** HIGH -- This is a straightforward template simplification.
+Key change: `--dangerously-skip-permissions` is GONE. Replaced by `permissions.allow` in settings + sandbox auto-allow.
 
-#### 2. `codegen/mod.rs`
+### 6. Modified: `init.rs`
 
-**Current:** Exports `generate_wrapper`, `generate_combined_prompt`, `generate_process_compose`.
-**New:** Add new export: `generate_agent_settings`.
+Changes:
+- `pre_trust_directory()` now writes to agent HOME's `.claude.json` instead of host's `~/.claude.json`
+- Remove writes to host's `~/.claude/settings.json` (no longer needed since HOME is overridden)
+- Call `scaffold_agent_home()` during init to set up the HOME directory
+- Telegram env files go to agent HOME's `.claude/channels/telegram/` instead of host's
 
+### 7. Modified: `agent/types.rs`
+
+Add optional `permissions` section to `AgentConfig`:
 ```rust
-pub mod process_compose;
-pub mod settings;      // NEW
-pub mod shell_wrapper;
-pub mod system_prompt;
-```
-
-#### 3. `agent/types.rs` -- `AgentDef` struct
-
-**Current:** Has `policy_path: PathBuf` (required).
-**New:** Remove `policy_path`. Add optional sandbox config fields to `AgentConfig`.
-
-```rust
-pub struct AgentDef {
-    pub name: String,
-    pub path: PathBuf,
-    pub identity_path: PathBuf,
-    // REMOVED: pub policy_path: PathBuf,
-    pub config: Option<AgentConfig>,
-    pub mcp_config_path: Option<PathBuf>,
-    // ... rest unchanged
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentConfig {
-    // existing fields...
-    pub restart: RestartPolicy,
-    pub max_restarts: u32,
-    pub backoff_seconds: u32,
-    pub start_prompt: Option<String>,
-    pub model: Option<String>,
-
-    // NEW: sandbox configuration
-    /// Additional paths the agent can write to (beyond its own dir)
-    pub sandbox_allow_write: Option<Vec<String>>,
-    /// Paths to deny reading
-    pub sandbox_deny_read: Option<Vec<String>>,
-    /// Network domains the agent can access
-    pub sandbox_allowed_domains: Option<Vec<String>>,
-    /// Commands excluded from sandbox
-    pub sandbox_excluded_commands: Option<Vec<String>>,
+pub struct PermissionOverrides {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 ```
 
-**Confidence:** HIGH -- Standard struct modification.
+### 8. Modified: `doctor.rs`
 
-#### 4. `agent/discovery.rs`
+Add checks:
+- `/etc/claude-code/` directory exists and is writable
+- Agent HOME directories exist
+- `.claude.json` trust entries are valid
 
-**Current:** Requires `policy.yaml` per agent (returns error if missing).
-**New:** Remove `policy.yaml` requirement. It is no longer a required file.
+### 9. Modified: `main.rs` (`cmd_up`)
 
-```rust
-// REMOVE this block:
-// let policy_path = path.join("policy.yaml");
-// if !policy_path.exists() {
-//     return Err(AgentError::MissingRequiredFile { ... });
-// }
+New steps in the pipeline:
+```
+1. discover agents
+2. for each agent:
+   a. scaffold_agent_home()        <-- NEW
+   b. generate_combined_prompt()
+   c. generate_wrapper()           <-- MODIFIED (new params)
+   d. generate_settings()          <-- MODIFIED (new output)
+3. generate_managed_settings()     <-- NEW (once, not per-agent)
+4. write managed-settings.json to /etc/claude-code/
+5. generate_process_compose()
+6. launch
 ```
 
-**Impact:** Tests that assert `policy.yaml` is required must be updated. The `make_agent()` test helpers that create policy_path must be updated to remove it.
+## Data Flow Diagrams
 
-**Confidence:** HIGH -- Simple removal.
+### Domain Allowlist Flow (NEW)
 
-#### 5. `runtime/sandbox.rs`
-
-**Current:** `RuntimeState` with `AgentState.sandbox_name`, `destroy_sandboxes()`, `sandbox_name_for()`.
-**New:** Simplify `RuntimeState`. Remove `AgentState.sandbox_name`, `destroy_sandboxes()`, `sandbox_name_for()`.
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RuntimeState {
-    pub agents: Vec<String>,       // Just names, no sandbox tracking
-    pub socket_path: String,
-    pub started_at: String,
-    // REMOVED: no_sandbox (no longer relevant)
-}
-
-// REMOVED: AgentState struct
-// REMOVED: sandbox_name_for()
-// REMOVED: destroy_sandboxes()
 ```
-
-**Impact:** `cmd_down` no longer calls `destroy_sandboxes()`. The `--no-sandbox` check in `cmd_down` goes away.
-
-**Confidence:** HIGH -- Pure removal.
-
-#### 6. `runtime/deps.rs`
-
-**Current:** Checks for `process-compose`, `claude`, and optionally `openshell`.
-**New:** Checks for `process-compose`, `claude`, and on Linux: `bubblewrap` (`bwrap`) + `socat`.
-
-```rust
-pub fn verify_dependencies(no_sandbox: bool) -> miette::Result<()> {
-    which::which("process-compose").map_err(|_| { ... })?;
-    find_binary(&["claude", "claude-bun"]).map_err(|_| { ... })?;
-
-    if !no_sandbox && cfg!(target_os = "linux") {
-        which::which("bwrap").map_err(|_| {
-            miette::miette!(
-                help = "Install: sudo apt-get install bubblewrap socat",
-                "bubblewrap (bwrap) not found in PATH"
-            )
-        })?;
-        which::which("socat").map_err(|_| {
-            miette::miette!(
-                help = "Install: sudo apt-get install bubblewrap socat",
-                "socat not found in PATH"
-            )
-        })?;
-    }
-    // macOS: Seatbelt is built-in, no binary check needed
-    Ok(())
-}
-```
-
-**Confidence:** HIGH -- `cfg!(target_os = ...)` is standard Rust.
-
-#### 7. `doctor.rs`
-
-**Current:** Checks `openshell` binary.
-**New:** Replace `openshell` check with platform-conditional `bwrap` + `socat` checks.
-
-#### 8. `init.rs`
-
-**Current:** Creates `policy.yaml`, expands `~` in policy paths. Creates `.claude/settings.json` with plugin config.
-**New:** Stops creating `policy.yaml`. Generates `.claude/settings.json` with sandbox config + existing settings. Stops expanding `~` in policy paths (no policy files).
-
-The `settings.json` generation must include sandbox config:
-```json
-{
-  "skipDangerousModePermissionPrompt": true,
-  "spinnerTipsEnabled": false,
-  "prefersReducedMotion": true,
-  "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "filesystem": {
-      "allowWrite": ["/tmp"]
-    },
-    "network": {
-      "allowedDomains": [
-        "api.anthropic.com",
-        "claude.ai",
-        "statsig.anthropic.com",
-        "sentry.io",
-        "api.github.com"
-      ]
-    }
-  }
-}
-```
-
-Note: When `telegram_token` is provided, add `"api.telegram.org"` to `allowedDomains`.
-
-The `pre_trust_directory()` function needs adjustment. Currently it writes to `~/.claude.json` (host HOME). With HOME override, CC will look at `$AGENT_DIR/.claude.json` instead. However, `pre_trust_directory` sets `hasTrustDialogAccepted` for the agent dir path. Since HOME = agent dir and cwd = agent dir, CC resolves the project as its own HOME dir. This means the trust dialog issue may resolve itself (agent dir is trusted implicitly when it IS the home). **This needs empirical verification during implementation.**
-
-**Confidence:** MEDIUM -- pre_trust behavior under HOME override is unverified.
-
-#### 9. `main.rs` (CLI)
-
-**Current:** `--no-sandbox` flag on `Up` command.
-**New:** Keep `--no-sandbox` but change semantics -- it controls `sandbox.enabled` in generated settings, not OpenShell invocation.
-
-`cmd_up` changes:
-- Remove `RuntimeState.agents[].sandbox_name` construction
-- Remove `RuntimeState.no_sandbox` field
-- Add settings.json generation step between prompt generation and wrapper generation
-- Remove sandbox state cleanup from `cmd_down`
-
-`cmd_down` changes:
-- Remove `destroy_sandboxes()` call entirely
-- Simplify to just: shutdown PC via REST API, clean state file
-
-### Components to ADD
-
-#### 1. `codegen/settings.rs` (NEW)
-
-**Purpose:** Generate per-agent `.claude/settings.json` that configures CC native sandbox.
-
-```rust
-use serde_json::json;
-use crate::agent::AgentDef;
-
-/// Generate the .claude/settings.json content for an agent.
-///
-/// This configures Claude Code's native sandbox (bubblewrap/Seatbelt)
-/// with per-agent filesystem and network restrictions.
-pub fn generate_agent_settings(
-    agent: &AgentDef,
-    no_sandbox: bool,
-    has_telegram: bool,
-) -> miette::Result<String> {
-    let mut settings = json!({
-        "skipDangerousModePermissionPrompt": true,
-        "spinnerTipsEnabled": false,
-        "prefersReducedMotion": true,
-    });
-
-    // Sandbox configuration
-    let sandbox = if no_sandbox {
-        json!({ "enabled": false })
-    } else {
-        let mut allowed_domains = vec![
-            "api.anthropic.com",
-            "claude.ai",
-            "statsig.anthropic.com",
-            "sentry.io",
-            "api.github.com",
-        ];
-        if has_telegram {
-            allowed_domains.push("api.telegram.org");
-        }
-
-        // Merge agent-specific sandbox config
-        let extra_write = agent.config.as_ref()
-            .and_then(|c| c.sandbox_allow_write.as_ref());
-        let extra_domains = agent.config.as_ref()
-            .and_then(|c| c.sandbox_allowed_domains.as_ref());
-
-        let mut allow_write = vec!["/tmp".to_string()];
-        if let Some(extra) = extra_write {
-            allow_write.extend(extra.iter().cloned());
-        }
-
-        if let Some(extra) = extra_domains {
-            allowed_domains.extend(
-                extra.iter().map(|s| s.as_str())
-            );
-        }
-
-        json!({
-            "enabled": true,
-            "autoAllowBashIfSandboxed": true,
-            "filesystem": {
-                "allowWrite": allow_write,
-            },
+agent.yaml (per-agent)          DEFAULT_ALLOWED_DOMAINS
+  sandbox:                          (settings.rs const)
+    allowed_domains:                    |
+      - custom.example.com             |
+              |                        |
+              v                        v
+        +-----------------------------+
+        | generate_managed_settings() |
+        | (merge + deduplicate)       |
+        +-----------------------------+
+                    |
+                    v
+        /etc/claude-code/managed-settings.json
+        {
+          "sandbox": {
             "network": {
-                "allowedDomains": allowed_domains,
+              "allowedDomains": [
+                "api.anthropic.com",  // from defaults
+                "github.com",
+                "custom.example.com", // from agent override
+                ...
+              ],
+              "allowManagedDomainsOnly": true
             }
-        })
-    };
+          }
+        }
+                    |
+                    v
+        Claude Code reads managed settings
+        (highest priority, overrides all)
+                    |
+                    v
+        Non-listed domains: SILENTLY BLOCKED
+        (no user prompt -- headless safe)
+```
 
-    settings["sandbox"] = sandbox;
+### Settings Scope Distribution (NEW)
 
-    if has_telegram {
-        settings["enabledPlugins"] = json!({
-            "telegram@claude-plugins-official": true
-        });
+```
++------------------------------------------------------------------+
+| MANAGED (/etc/claude-code/managed-settings.json)                  |
+| - allowedDomains (union of all agents)                            |
+| - allowManagedDomainsOnly: true                                   |
+| - (optionally) disableBypassPermissionsMode: "disable"            |
+| Written by: generate_managed_settings()                           |
+| Scope: Machine-wide, all agents share this                        |
++------------------------------------------------------------------+
+
++------------------------------------------------------------------+
+| USER ($AGENT_HOME/.claude/settings.json)                          |
+| - skipDangerousModePermissionPrompt: true                         |
+| - spinnerTipsEnabled: false                                       |
+| - prefersReducedMotion: true                                      |
+| Written by: scaffold_agent_home()                                 |
+| Scope: Per-agent (via HOME override)                              |
++------------------------------------------------------------------+
+
++------------------------------------------------------------------+
+| PROJECT (<agent_cwd>/.claude/settings.json)                       |
+| - permissions.allow: [Edit(*), Write(*), Read(*), ...]            |
+| - sandbox.enabled: true                                           |
+| - sandbox.autoAllowBashIfSandboxed: true                          |
+| - sandbox.allowUnsandboxedCommands: false                         |
+| - sandbox.filesystem.allowWrite: [agent_path, ...]                |
+| - sandbox.filesystem.denyRead: [~/.ssh, ...]                      |
+| - sandbox.excludedCommands: [...]                                 |
+| - enabledPlugins (if telegram)                                    |
+| Written by: generate_settings()                                   |
+| Scope: Per-agent (written to agent cwd)                           |
++------------------------------------------------------------------+
+
++------------------------------------------------------------------+
+| TRUST ($AGENT_HOME/.claude.json)                                  |
+| - projects.<agent_cwd>.hasTrustDialogAccepted: true               |
+| Written by: scaffold_agent_home()                                 |
+| Scope: Per-agent (via HOME override)                              |
++------------------------------------------------------------------+
+```
+
+### HOME Override Flow
+
+```
+Real $HOME                    Agent HOME
+(/home/user/)                 (~/.rightclaw/homes/right/)
+     |                              |
+     |-- .gitconfig  <---------+    |-- .claude.json (trust)
+     |-- .ssh/agent.sock  <-+  |    |-- .claude/
+     |-- .claude.json       |  |    |     |-- settings.json (user scope)
+     |-- .claude/            |  |    |     |-- channels/telegram/.env
+     |     |-- settings.json |  |    |
+     |     |-- ...           |  |    (no .ssh, no .gnupg, no .aws)
+     |                       |  |
+     |                       |  |
+     Forwarded via env vars: |  |
+       SSH_AUTH_SOCK --------+  |
+       GIT_CONFIG_GLOBAL ------+
+```
+
+## Anti-Patterns to Avoid
+
+### Anti-Pattern 1: Per-Agent Managed Settings
+
+**What people might do:** Try to write per-agent managed-settings.json by putting it in the agent's HOME
+**Why it's wrong:** Claude Code reads managed settings from a SYSTEM path (`/etc/claude-code/` on Linux, `/Library/Application Support/ClaudeCode/` on macOS). HOME override does not affect this lookup.
+**Do this instead:** Write one shared managed-settings.json with the union of all agents' domain needs.
+
+### Anti-Pattern 2: Domains in Both Managed and Project Settings
+
+**What people might do:** Put `allowedDomains` in both managed settings and per-agent `.claude/settings.json`
+**Why it's wrong:** When `allowManagedDomainsOnly: true`, CC ignores domains from project/user/local settings. The per-agent domains become dead config that confuses maintainers.
+**Do this instead:** Put ALL domains in managed settings only. Remove `allowedDomains` from project settings entirely.
+
+### Anti-Pattern 3: Mixing HOME Override with Host Config Mutation
+
+**What people might do:** Write trust entries to both host `~/.claude.json` and agent HOME's `.claude.json`
+**Why it's wrong:** With HOME override, CC reads `$HOME/.claude.json`, not the real home's. Writing to host's file is wasted I/O and creates stale state.
+**Do this instead:** Only write to agent HOME's `.claude.json`. Stop touching the host's config.
+
+### Anti-Pattern 4: Copying OAuth Tokens to Agent HOME
+
+**What people might do:** Copy `~/.claude.json`'s OAuth session data to agent HOME
+**Why it's wrong:** OAuth tokens are user-specific, may expire, and copying them creates a security surface (token sprawl). Agents should use `ANTHROPIC_API_KEY` env var.
+**Do this instead:** Pass `ANTHROPIC_API_KEY` as an environment variable in the shell wrapper or process-compose environment section.
+
+### Anti-Pattern 5: Using CLAUDE_CONFIG_DIR Instead of HOME
+
+**What people might do:** Set only `CLAUDE_CONFIG_DIR` without overriding HOME
+**Why it's wrong:** `CLAUDE_CONFIG_DIR` affects where CC stores config data but `.claude.json` (trust state) is read from `$HOME/.claude.json`, not `$CLAUDE_CONFIG_DIR`. Also, `CLAUDE_CONFIG_DIR` has known bugs (still creates local `.claude/` dirs, IDE integration issues).
+**Do this instead:** Override `HOME` (which moves everything) AND set `CLAUDE_CONFIG_DIR` as belt-and-suspenders.
+
+## Edge Cases
+
+### Edge Case 1: No ANTHROPIC_API_KEY Set
+
+If the user has no API key and relies on OAuth login, HOME override breaks authentication because the OAuth token is in the real home's `.claude.json`.
+
+**Mitigation:** `rightclaw doctor` checks for `ANTHROPIC_API_KEY` in environment. If not set, warn that headless mode requires an API key. This is already documented in MEMORY.md (SEED-003).
+
+### Edge Case 2: macOS Managed Settings Path Differs
+
+macOS uses `/Library/Application Support/ClaudeCode/managed-settings.json`, not `/etc/claude-code/`.
+
+**Mitigation:** Use conditional path in `generate_managed_settings()`:
+```rust
+fn managed_settings_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
     }
-
-    serde_json::to_string_pretty(&settings)
-        .map_err(|e| miette::miette!("failed to serialize settings: {e:#}"))
 }
 ```
 
-**Confidence:** HIGH -- Straightforward JSON generation.
+### Edge Case 3: Multiple RightClaw Instances
 
-### Components to REMOVE
+If two users run `rightclaw up` on the same machine, the managed-settings.json is overwritten. Last writer wins.
 
-| File/Function | What It Does | Why Remove |
-|---|---|---|
-| `runtime::sandbox::destroy_sandboxes()` | Calls `openshell sandbox delete` per agent | OpenShell removed. Bubblewrap is ephemeral (no cleanup). |
-| `runtime::sandbox::sandbox_name_for()` | Generates `rightclaw-{name}` sandbox names | No sandbox naming needed. |
-| `runtime::sandbox::AgentState` | Tracks `name` + `sandbox_name` | Replaced by simple `Vec<String>` of agent names. |
-| `RuntimeState.no_sandbox` field | Tracks whether sandboxes were created | No sandbox lifecycle to track. |
-| `templates/right/policy.yaml` | OpenShell policy template (base) | Replaced by generated settings.json. |
-| `templates/right/policy-telegram.yaml` | OpenShell policy template (Telegram variant) | Replaced by generated settings.json with Telegram domains. |
-| All `openshell` references in wrapper template | `openshell sandbox create` invocation | Replaced by `HOME=...` + direct `claude` invocation. |
-| `agent/discovery.rs` policy_path validation | Requires `policy.yaml` per agent | No longer required. |
-| `AgentDef.policy_path` field | Stores path to policy.yaml | No OpenShell policy needed. |
+**Mitigation:** This is acceptable for single-user deployments (RightClaw's target). Document as a known limitation. Future: use file locking or per-user managed settings paths.
 
-## Data Flow Changes
+### Edge Case 4: Agent Needs to Write Outside Its Directory
 
-### v2.0 `rightclaw up` Flow
+An agent that runs `npm install` needs write access to `node_modules/` which may be in a different path. Sandbox `allowWrite` handles this via `SandboxOverrides.allow_write` in agent.yaml.
 
-```
-User: rightclaw up --agents right
+**No change needed:** This already works in v2.0.
 
-1. CLI parses args
-   |
-2. Agent Discovery
-   - Scans ~/.rightclaw/agents/
-   - Filters by --agents if specified
-   - Parses agent.yaml per agent
-   - Validates: IDENTITY.md must exist (policy.yaml NO LONGER required)
-   | Vec<AgentDef>
-   v
-3. Per-agent Settings Generation (NEW)
-   - Generate .claude/settings.json per agent
-   - Merges: base settings + sandbox config + agent.yaml sandbox overrides
-   - Writes to $AGENT_DIR/.claude/settings.json
-   | (settings written to disk)
-   v
-4. Combined Prompt Generation (UNCHANGED)
-   - Merge IDENTITY.md + start_prompt + rightcron bootstrap
-   - Write to run/<agent>-prompt.md
-   | PathBuf
-   v
-5. Shell Wrapper Generation (SIMPLIFIED)
-   - Template: HOME=<agent_dir> exec claude ...
-   - No openshell, no policy_path
-   - Write to run/<agent>.sh, chmod +x
-   | PathBuf
-   v
-6. process-compose.yaml Generation (UNCHANGED)
-   - Map agents to process entries with wrapper paths
-   | PathBuf
-   v
-7. Runtime State (SIMPLIFIED)
-   - Just agent names, socket path, timestamp
-   - No sandbox_name, no no_sandbox flag
-   | state.json
-   v
-8. process-compose Spawn (UNCHANGED)
-   - process-compose up -f <yaml> --port <port>
-```
+### Edge Case 5: Git Identity in Agent HOME
 
-### v2.0 `rightclaw down` Flow (SIMPLIFIED)
+`git commit` uses the committer identity from `~/.gitconfig`. With HOME override, git won't find the real config.
+
+**Mitigation:** `GIT_CONFIG_GLOBAL` env var explicitly points to the real home's `.gitconfig`. This is forwarded in the shell wrapper.
+
+### Edge Case 6: SSH Agent Forwarding
+
+`git push` over SSH needs the SSH agent socket. With HOME override, `~/.ssh/` doesn't exist in agent HOME.
+
+**Mitigation:** `SSH_AUTH_SOCK` env var is forwarded from the real environment. SSH agent socket is independent of HOME.
+
+## Build Order (Phase Dependency Graph)
 
 ```
-1. Read state.json
-2. Shutdown process-compose via REST API
-3. Done (no sandbox cleanup needed)
+Phase 1: managed_settings.rs
+  - New file, no dependencies on other changes
+  - Can be tested in isolation
+  - install.sh update for /etc/claude-code/ permissions
+
+Phase 2: home_scaffold.rs
+  - New file, depends on AgentDef only
+  - Creates HOME directory structure
+  - Writes .claude.json trust + .claude/settings.json user-scope
+
+Phase 3: settings.rs changes
+  - Remove allowedDomains (moved to managed)
+  - Add permissions.allow
+  - Remove skipDangerousModePermissionPrompt (moved to user-scope)
+  - Depends on: understanding of what goes where (Phases 1+2)
+
+Phase 4: shell_wrapper.rs + template changes
+  - Remove --dangerously-skip-permissions
+  - Add HOME, CLAUDE_CONFIG_DIR, GIT_CONFIG_GLOBAL, SSH_AUTH_SOCK exports
+  - Depends on: Phase 2 (needs agent_home path)
+
+Phase 5: init.rs changes
+  - Use scaffold_agent_home() instead of pre_trust_directory()
+  - Update Telegram env paths
+  - Depends on: Phase 2
+
+Phase 6: agent/types.rs changes
+  - Add PermissionOverrides to AgentConfig
+  - Independent, can be done anytime
+
+Phase 7: main.rs cmd_up changes
+  - Wire everything together
+  - Depends on: all previous phases
+
+Phase 8: doctor.rs changes
+  - Add new checks
+  - Depends on: Phases 1+2 (needs to know what to check)
+
+Phase 9: Integration testing
+  - End-to-end wrapper generation + settings validation
+  - Depends on: all previous phases
 ```
 
-### HOME Override: How It Affects Claude Code
+## Recommended Phased Implementation
 
-When `HOME=/home/user/.rightclaw/agents/right` is set:
+**Phase 1: Managed Settings Foundation**
+- `codegen/managed_settings.rs` -- generate managed-settings.json
+- `install.sh` update -- create `/etc/claude-code/` with correct perms
+- `doctor.rs` -- check `/etc/claude-code/` writability
+- Tests: unit tests for domain merging, correct JSON output
 
-**User-level settings resolution:**
-- `~/.claude/` resolves to `/home/user/.rightclaw/agents/right/.claude/`
-- `~/.claude/settings.json` = agent-specific settings (sandbox config, plugin config)
-- `~/.claude.json` resolves to `/home/user/.rightclaw/agents/right/.claude.json`
+**Phase 2: HOME Scaffold**
+- `codegen/home_scaffold.rs` -- create agent HOME dirs with trust + user settings
+- `agent/types.rs` -- add PermissionOverrides
+- Tests: unit tests for HOME directory structure, trust entry format
 
-**Project-level settings resolution:**
-- CC's cwd = agent dir (set by process-compose working_dir)
-- `.claude/settings.json` in cwd = same file as user-level (HOME = cwd)
-- This means user and project scopes converge, which is fine -- both point to agent-scoped config
-
-**What CC naturally scopes per agent:**
-- `.claude/memory/` -- auto-memory writes go to agent dir
-- `.claude/skills/` -- skill discovery is per-agent
-- `.claude/settings.json` -- sandbox config is per-agent
-- `.claude/settings.local.json` -- local overrides per-agent
-- `.claude.json` -- session state per-agent
-- CLAUDE.md -- read from cwd (agent dir)
-
-**What CC might still leak from host:**
-- Nothing significant. By setting HOME to agent dir, CC has no path to host `~/.claude/` unless the sandbox explicitly allows reads to the real home directory.
-- The Telegram plugin `.env` is at `~/.claude/channels/telegram/.env`. With HOME overridden, this resolves to `$AGENT_DIR/.claude/channels/telegram/.env`. The `init` code must write the Telegram `.env` inside the agent dir, not the host home.
-
-**Critical behavioral changes:**
-1. **Git config**: `~/.gitconfig` resolves to agent dir. If agents need git, a `.gitconfig` must be placed in each agent dir, or `GIT_CONFIG_GLOBAL` env var must point to the real host gitconfig.
-2. **SSH keys**: `~/.ssh/` resolves to agent dir. Agents needing git over SSH need `GIT_SSH_COMMAND` or the sandbox must allow reading the real `~/.ssh/`.
-3. **NPM/other tools**: `~/.npmrc`, `~/.config/` all resolve to agent dir. For most RightClaw agents this is fine (they don't run npm).
-
-**Confidence:** HIGH for the core mechanism. MEDIUM for edge cases around git/SSH (may need per-agent env vars in shell wrapper).
-
-## process-compose.yaml Changes
-
-The template itself (`process-compose.yaml.j2`) requires **no changes**. It already uses `working_dir` per agent and calls the wrapper script. The wrapper's contents change, but the template that generates `process-compose.yaml` stays identical.
-
-However, the `ProcessAgent` struct needs a new `environment` field to pass `HOME` via process-compose instead of the shell wrapper. There are two valid approaches:
-
-**Option A: HOME in shell wrapper** (recommended)
-- Wrapper does `export HOME="{{ agent_home }}"`
-- process-compose template unchanged
-- Simpler, more debuggable (inspect wrapper to see all env)
-
-**Option B: HOME in process-compose.yaml**
-- Template adds `environment:` section per process
-- Wrapper has no HOME override
-- process-compose manages env
-
-**Recommendation: Option A.** The shell wrapper is already the "codegen unit" -- putting HOME there keeps all agent launch config in one place. It's also easier to test (snapshot the wrapper output).
-
-## Architectural Patterns (New)
-
-### Pattern 5: Settings as Security Boundary
-
-**What:** Security enforcement moves from an external sandbox manager (OpenShell) to CC's native sandbox, configured via generated `settings.json`. The settings file IS the security policy.
-
-**When to use:** Always in v2.0. The `codegen/settings.rs` module generates per-agent settings that control filesystem access, network domains, and command execution boundaries.
-
-**Trade-offs:**
-- Pro: No external dependency (OpenShell). Simpler lifecycle (no create/destroy).
-- Pro: CC natively understands these settings -- no mismatch between policy and runtime.
-- Pro: macOS gets sandboxing for free (Seatbelt built-in).
-- Con: Less granular than OpenShell policies (no per-binary network rules).
-- Con: CC's sandbox is configurable by the agent itself (it can modify its own settings.json). This is mitigated by the fact that permission rules at managed scope can't be overridden.
-
-### Pattern 6: HOME Override for Agent Isolation
-
-**What:** Setting `HOME=$AGENT_DIR` makes CC treat the agent directory as the user's home. All user-scoped CC config (settings, memory, session state) naturally scopes per-agent without any custom logic.
-
-**When to use:** Always. This is the core isolation mechanism.
-
-**Trade-offs:**
-- Pro: Zero CC-specific code for isolation. HOME is a Unix primitive.
-- Pro: `.claude/` directory naturally lands in agent dir.
-- Pro: Agents can't see each other's config, memory, or session state.
-- Con: Breaks host-level tool config (git, ssh). Mitigated by explicit env vars in wrapper.
-- Con: `pre_trust_directory()` behavior needs verification under HOME override.
-
-## Anti-Patterns (Updated)
-
-### Anti-Pattern 2 (Updated): Generating OpenShell Policies
-
-**What people do:** Continue maintaining OpenShell policy.yaml files and the openshell invocation path.
-**Why it's wrong:** OpenShell is alpha, requires API key, adds a heavy dependency, and is architecturally redundant now that CC has native sandboxing.
-**Do this instead:** Generate `.claude/settings.json` with `sandbox.*` config. Let CC's built-in sandbox handle enforcement.
-
-### Anti-Pattern 5 (New): Mixing Host and Agent HOME
-
-**What people do:** Set HOME for CC but let other tools (git, npm) inherit the real HOME through env var fallbacks.
-**Why it's wrong:** Creates a split-brain where CC sees one HOME and subprocesses see another. Breaks the isolation model.
-**Do this instead:** Set HOME once in the shell wrapper. Provide explicit env vars (`GIT_CONFIG_GLOBAL`, `GIT_SSH_COMMAND`) for tools that need host-level config.
-
-### Anti-Pattern 6 (New): Relying on CC to Create .claude/
-
-**What people do:** Let CC auto-create `.claude/` on first run instead of pre-creating it with settings.
-**Why it's wrong:** The sandbox config must exist BEFORE CC starts (otherwise the first run is unsandboxed). The settings.json must be written during `rightclaw up`, not lazily.
-**Do this instead:** `codegen/settings.rs` writes `.claude/settings.json` during `rightclaw up`, before process-compose spawns agents.
-
-## Integration Points (Updated)
-
-### External Services
-
-| Service | Integration Pattern | Notes |
-|---------|---------------------|-------|
-| **process-compose** | Child process spawn + TCP API | Unchanged from v1.0. |
-| **Claude Code CLI** | Direct invocation with `HOME` override | No intermediate sandbox manager. `--dangerously-skip-permissions` still used. |
-| **bubblewrap** (Linux) | Invoked internally by CC when sandbox enabled | RightClaw doesn't call bwrap directly. CC does. |
-| **Seatbelt** (macOS) | Invoked internally by CC | Same -- RightClaw just enables it via settings. |
-| **ClawHub/CronSync** | Unchanged | Skills run inside CC session as before. |
-
-### Internal Boundaries
-
-| Boundary | Communication | Notes |
-|----------|---------------|-------|
-| CLI -> Agent Discovery | `Vec<AgentDef>` | Unchanged, except no `policy_path` |
-| Agent Discovery -> Settings Gen | `AgentDef` -> JSON string | NEW boundary |
-| Settings Gen -> Wrapper Gen | Settings.json written to disk, wrapper uses same agent dir | Implicit (filesystem) |
-| Wrapper Gen -> PC Config Gen | Wrapper paths feed into YAML | Unchanged |
-| PC Config Gen -> PC Lifecycle | YAML path -> child process spawn | Unchanged |
-
-## Build Order for v2.0 Migration
-
-Dependencies between changes dictate this order:
-
-```
-Phase 1: Remove OpenShell (foundation removal)
-  1.1 Remove policy_path from AgentDef
-  1.2 Remove policy.yaml requirement from discovery.rs
-  1.3 Remove AgentState, sandbox_name_for, destroy_sandboxes from sandbox.rs
-  1.4 Simplify RuntimeState (remove no_sandbox, sandbox tracking)
-  1.5 Remove policy.yaml templates (templates/right/policy*.yaml)
-  Note: Code won't compile until all references are updated.
-        Do 1.1-1.4 atomically in one commit.
-
-Phase 2: Add settings generation (new capability)
-  2.1 Add sandbox fields to AgentConfig (sandbox_allow_write, etc.)
-  2.2 Create codegen/settings.rs with generate_agent_settings()
-  2.3 Add to codegen/mod.rs exports
-  2.4 Write tests for settings generation
-
-Phase 3: Update shell wrapper (template change)
-  3.1 Rewrite agent-wrapper.sh.j2 (remove openshell, add HOME)
-  3.2 Update generate_wrapper() signature (remove no_sandbox, policy_path; add agent_home)
-  3.3 Update shell_wrapper_tests.rs
-  3.4 Update process-compose template if needed (likely no changes)
-
-Phase 4: Update init (first-run setup)
-  4.1 Stop creating policy.yaml in init
-  4.2 Generate settings.json with sandbox config in init
-  4.3 Move Telegram .env inside agent dir ($HOME-relative path)
-  4.4 Update pre_trust_directory for HOME override behavior
-  4.5 Update init tests
-
-Phase 5: Update runtime (cmd_up, cmd_down, deps, doctor)
-  5.1 Update verify_dependencies: openshell -> bubblewrap+socat (Linux only)
-  5.2 Update doctor.rs: openshell -> bubblewrap+socat (platform-conditional)
-  5.3 Update cmd_up: add settings generation step, remove sandbox state
-  5.4 Update cmd_down: remove destroy_sandboxes call
-  5.5 Update cmd_pair: add HOME override
-  5.6 Remove --no-sandbox from CLI or change semantics
-
-Phase 6: Integration testing
-  6.1 End-to-end test: rightclaw up with native sandbox
-  6.2 Verify agent isolation (one agent can't read another's .claude/)
-  6.3 Verify Telegram channel still works under HOME override
-```
-
-### Why This Order
-
-1. **Remove first, add second.** OpenShell removal (Phase 1) breaks compilation but that's intentional -- the compiler catches all leftover references. Do it atomically.
-2. **Settings gen before wrapper update.** The new wrapper depends on settings.json existing. Build the generator, then the consumer.
-3. **Init after codegen.** Init uses the same settings generation logic. Build the library function first, then call it from init.
-4. **Runtime last.** cmd_up orchestrates everything. Update it after all pieces are in place.
-5. **Integration testing after all code changes.** No point testing mid-migration.
-
-## Telegram Under HOME Override
-
-This deserves special attention because the Telegram plugin's `.env` file path changes.
-
-**v1.0:** Telegram `.env` at `~/.claude/channels/telegram/.env` (host HOME)
-**v2.0:** With HOME override, `~` resolves to agent dir. So the `.env` must live at `$AGENT_DIR/.claude/channels/telegram/.env`.
-
-Changes needed:
-- `init.rs`: Write Telegram `.env` inside agent dir instead of host `~/.claude/channels/telegram/`
-- `init.rs`: Write `access.json` inside agent dir instead of host path
-- The Telegram plugin reads `.env` from `$HOME/.claude/channels/telegram/` -- with HOME overridden, it finds the agent-scoped copy.
-
-This is actually cleaner than v1.0 because each agent can have its own Telegram bot token, whereas v1.0 shared one token across all agents.
-
-**Confidence:** MEDIUM -- Telegram plugin path resolution behavior under HOME override needs empirical verification. The plugin may hardcode paths.
-
-## Edge Cases and Risks
-
-### CC Self-Modification Risk
-CC can modify its own `.claude/settings.json` during a session (e.g., if a skill or prompt tells it to). This could disable the sandbox mid-session. Mitigation: The `sandbox.enabled` setting could be set at managed scope (which CC can't override), but managed settings require server-managed delivery or OS-level plist. For RightClaw, the pragmatic answer is: if the agent disables its own sandbox, that's a user-configuration problem, not a RightClaw bug. The `--dangerously-skip-permissions` flag already means we're trusting the agent.
-
-### `.claude.json` Accumulation
-CC writes session state to `~/.claude.json`. With HOME override, each agent accumulates its own `.claude.json`. This is fine for isolation but means stale session data piles up in agent dirs. No action needed -- CC manages its own cleanup.
-
-### process-compose env Propagation
-When process-compose spawns the wrapper script, it inherits the parent environment. The wrapper sets HOME, which overrides whatever the parent had. This is correct behavior. No changes needed to process-compose config.
+**Phase 3: Drop Bypass Mode**
+- `codegen/settings.rs` -- add permissions.allow, remove stale fields
+- `templates/agent-wrapper.sh.j2` -- remove `--dangerously-skip-permissions`, add HOME export
+- `codegen/shell_wrapper.rs` -- new parameters for HOME, SSH, git
+- `init.rs` -- use scaffold_agent_home, stop mutating host config
+- `main.rs` -- wire managed settings + HOME scaffold into cmd_up pipeline
+- Tests: integration tests for full wrapper + settings output
 
 ## Sources
 
-- [Claude Code Sandboxing Documentation](https://code.claude.com/docs/en/sandboxing) -- official sandbox config reference
-- [Claude Code Settings Documentation](https://code.claude.com/docs/en/settings) -- settings.json schema and scope hierarchy
-- [Anthropic Engineering: Claude Code Sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing) -- internal architecture details
-- [Trail of Bits Claude Code Config](https://github.com/trailofbits/claude-code-config) -- production sandbox configuration example
-- [sandbox-runtime npm package](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime) -- open source sandbox implementation
-- [OpenClaw cwd issue #27627](https://github.com/openclaw/openclaw/issues/27627) -- cwd-based sandbox write permissions behavior
+- [Claude Code Settings Reference](https://code.claude.com/docs/en/settings) -- settings hierarchy, merging, managed settings paths (verified 2026-03-24, HIGH confidence)
+- [Claude Code Sandboxing](https://code.claude.com/docs/en/sandboxing) -- allowManagedDomainsOnly behavior, sandbox config (verified 2026-03-24, HIGH confidence)
+- [Claude Code Environment Variables](https://code.claude.com/docs/en/env-vars) -- CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY (verified 2026-03-24, HIGH confidence)
+- [Claude Code Permissions](https://code.claude.com/docs/en/permissions) -- permissions.allow syntax, disableBypassPermissionsMode (verified 2026-03-24, HIGH confidence)
+- [CLAUDE_CONFIG_DIR Bug Report](https://github.com/anthropics/claude-code/issues/3833) -- still creates local .claude/ dirs (MEDIUM confidence)
+- [CLAUDE_CONFIG_DIR Feature Request](https://github.com/anthropics/claude-code/issues/28808) -- documented limitations
+- [Claude Code hasTrustDialogAccepted behavior](https://github.com/anthropics/claude-code/issues/9113) -- trust not persisting in some cases (MEDIUM confidence)
+- [--dangerously-skip-permissions .claude/ write bug](https://github.com/anthropics/claude-code/issues/35718) -- bypass doesn't fully bypass (MEDIUM confidence)
 
 ---
-*Architecture research for: RightClaw v2.0 native sandbox and agent HOME isolation*
-*Researched: 2026-03-23*
+*Architecture research for: v2.1 Headless Agent Isolation*
+*Researched: 2026-03-24*

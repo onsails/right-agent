@@ -1,384 +1,541 @@
-# Pitfalls Research
+# Pitfalls Research: Headless Agent Isolation (v2.1)
 
-**Domain:** Replacing OpenShell sandbox with CC native sandbox + per-agent HOME isolation
-**Researched:** 2026-03-23
-**Confidence:** HIGH (official docs verified, codebase audited, known issues confirmed)
+**Domain:** HOME override, managed settings, dropping `--dangerously-skip-permissions`, headless autonomous agents
+**Researched:** 2026-03-24
+**Confidence:** HIGH (official docs verified, CC issue tracker audited, codebase audited, race conditions confirmed by multiple reporters)
+
+---
 
 ## Critical Pitfalls
 
-### Pitfall 1: `pre_trust_directory()` Writes to Real HOME, Not Agent HOME
+Mistakes here cause agents to hang indefinitely, fail to authenticate, or run without the security controls you think are enforced.
+
+### Pitfall 1: `.claude.json` Race Condition Corrupts Trust State Across Agents
 
 **What goes wrong:**
-The existing `init.rs::pre_trust_directory()` writes trust state to `~/.claude.json` and `~/.claude/settings.json` using `dirs::home_dir()`. In v2.0, each agent's `$HOME` is `~/.rightclaw/agents/<name>/`. But Claude Code reads trust state from the `$HOME` it sees at runtime. If `$HOME` points to the agent dir, CC will look for `.claude.json` at `~/.rightclaw/agents/right/.claude.json` -- but `pre_trust_directory()` wrote it to the real `~/.claude.json`. The agent hits the workspace trust dialog and blocks, waiting for interactive input that never comes.
+Claude Code stores per-project trust state, OAuth session, MCP configs, and preferences in a single `~/.claude.json` file. With per-agent HOME override (`HOME=<agent_dir>`), each agent gets its OWN `.claude.json` at `<agent_dir>/.claude.json` -- this isolation is actually correct and avoids the race. BUT if any code path still writes to the REAL `~/.claude.json` (like `pre_trust_directory()` currently does, or if `rightclaw init` writes trust there), the old race condition applies.
+
+The bigger risk: if v2.1 does NOT set `HOME` per-agent and instead uses `CLAUDE_CONFIG_DIR` or some other mechanism that still shares `~/.claude.json`, then ALL agents write trust state, allowed tools, and caches to the same file. Claude Code uses non-atomic writes (truncate + write, no file locking). With 3+ concurrent agents, `.claude.json` corrupts within minutes. This is confirmed as a known CC bug reported 8+ times since June 2025, all closed without resolution (GitHub #28922). One user with 30+ sessions saw 14 corruptions in 11 hours (GitHub #18998).
 
 **Why it happens:**
-The v1.0 code uses `dirs::home_dir()` (which reads the real HOME from `/etc/passwd`) to locate CC config files. In OpenShell, the sandbox ran with the real HOME, so this worked. With per-agent HOME override, the runtime HOME and the init-time HOME diverge.
+Claude Code was designed for single-instance use. The `.claude.json` file is a monolithic state bag (trust, OAuth, MCP, caches) with no file locking or atomic writes. RightClaw runs multiple concurrent CC instances by design.
 
-**How to avoid:**
-- `pre_trust_directory()` must write `.claude.json` relative to the agent's directory (the agent's runtime HOME), not the real user HOME.
-- Write `hasTrustDialogAccepted: true` into `<agent_dir>/.claude.json`, since that is where CC will look when `HOME=<agent_dir>`.
-- The `skipDangerousModePermissionPrompt` in `<agent_dir>/.claude/settings.json` already exists -- verify CC reads it from the overridden HOME.
-- Test: launch `HOME=/tmp/test-agent claude --version` and check which `.claude.json` it reads.
+**Consequences:**
+- Corrupted `.claude.json` causes all agents to crash on startup
+- Trust state lost -- agents re-prompt for workspace trust (hangs headless)
+- OAuth tokens corrupted -- agents lose authentication
+- Allowed tools list corrupted -- permissions reset unpredictably
 
-**Warning signs:**
-- Agent hangs immediately on launch with "Quick safety check" prompt.
-- `hasTrustDialogAccepted` is set in the real `~/.claude.json` but agent still prompts.
-- Works fine with `--no-sandbox` (because HOME is not overridden).
+**Prevention:**
+- Per-agent `HOME` override is the correct solution -- each agent gets its own `.claude.json`
+- NEVER share a single `~/.claude.json` across agents
+- `pre_trust_directory()` must write to `<agent_dir>/.claude.json`, not the real `~/.claude.json`
+- Validate at `rightclaw up` time that no two agents share the same HOME
 
-**Phase to address:** Phase 1 (HOME isolation implementation). This is the first thing that will break.
+**Detection:**
+- JSON parse errors in agent startup logs
+- Agents that worked moments ago suddenly fail with "corrupted config"
+- `~/.claude.json` contains truncated or invalid JSON
+
+**Phase to address:** Phase 1 (HOME isolation implementation). This is the fundamental reason per-agent HOME exists.
+
+**Confidence:** HIGH -- confirmed by multiple CC issue reports (#28922, #18998) and CC official docs acknowledging backup mechanism
 
 ---
 
-### Pitfall 2: OAuth Credentials Inaccessible Under Overridden HOME
+### Pitfall 2: `skipDangerousModePermissionPrompt` Is Broken in Multiple CC Versions
 
 **What goes wrong:**
-Claude Code stores OAuth credentials in the macOS Keychain (keyed to the app, not to HOME) or in `~/.claude/.credentials.json` on Linux. When HOME is overridden to the agent dir, CC on Linux looks for credentials at `<agent_dir>/.claude/.credentials.json` -- which does not exist. The agent cannot authenticate.
+The v2.0 codebase sets `skipDangerousModePermissionPrompt: true` in `settings.json` and passes `--dangerously-skip-permissions` on the CLI. The v2.1 milestone wants to drop the CLI flag and use `permissions.allow` + sandbox instead. But `skipDangerousModePermissionPrompt` itself is broken:
 
-On macOS, Keychain access works regardless of HOME (it is keyed by app bundle identifier). But on Linux, credential discovery is HOME-dependent.
+1. **Setting location ambiguity:** Must be a TOP-LEVEL key in `settings.json`, NOT nested under `permissions` (GitHub #26233). The setting is undocumented.
+2. **VS Code regression (v2.1.42+):** The dialog doesn't render in VS Code, so the session silently falls back to default mode -- every command prompts (GitHub #25503, blog post from testinginproduction.co).
+3. **Still prompts for Bash in v2.1.71:** Even with the setting present, certain commands still trigger prompts (GitHub #32466).
+4. **Blocks `~/.claude/` writes (v2.1.77+):** A new permission gate blocks writes to `~/.claude/` paths even with `--dangerously-skip-permissions`, breaking skill memory writes (GitHub #35718).
+5. **Complete bypass regression (v2.1.77+):** Bypass permissions is "broken in all Claude Code versions newer than v2.1.77" (GitHub #36168).
 
-**Why it happens:**
-CC's credential resolution on Linux uses `$HOME/.claude/.credentials.json`. The v1.0 OpenShell approach ran with real HOME and allowed read access to `~/.claude` in the policy. With HOME override, the credentials file simply is not at the expected path.
+**Why it matters for v2.1:**
+If v2.1 drops `--dangerously-skip-permissions` and relies on `permissions.allow` + `defaultMode: "bypassPermissions"`, the agent still gets the bypass warning dialog unless `skipDangerousModePermissionPrompt` is set correctly. And given the regressions, even that may not work on the user's CC version. The whole bypass permissions mechanism is unstable.
 
-**How to avoid:**
-- **API keys (recommended):** Pass `ANTHROPIC_API_KEY` env var per agent. API keys are not HOME-dependent. This also solves the OAuth token race condition from v1.0 (Pitfall 3 in old research).
-- **Credential symlink:** Symlink `<agent_dir>/.claude/.credentials.json` -> `~/.claude/.credentials.json`. But this re-introduces the multi-agent OAuth race condition.
-- **CLAUDE_CONFIG_DIR:** Set `CLAUDE_CONFIG_DIR` env var to point at the real `~/.claude/` for credential resolution while using `HOME` override for agent isolation. Verify this actually works -- GitHub issue #3833 reports unclear behavior.
-- **Test:** Which files does CC actually read from `$HOME/.claude/` vs `$CLAUDE_CONFIG_DIR`?
+**Prevention:**
+- Do NOT rely on `bypassPermissions` mode OR `--dangerously-skip-permissions` for v2.1
+- Instead, use `permissions.allow` with explicit tool patterns + `defaultMode: "default"` or `"acceptEdits"` + sandbox
+- Test against the user's actual CC version at `rightclaw up` time
+- Add `rightclaw doctor` check: verify CC version is compatible with the permission strategy
 
-**Warning signs:**
-- Agent starts but immediately errors with "ANTHROPIC_API_KEY not set" or "Please run /login."
-- Works on macOS (Keychain) but fails on Linux.
-- Works with `--no-sandbox` (real HOME used).
+**Detection:**
+- Agent hangs on launch with "WARNING: Claude Code running in Bypass Permissions mode" dialog
+- Agent runs but prompts for every Bash command (fell back to default mode)
+- Skill writes to `.claude/` fail with permission denied
 
-**Phase to address:** Phase 1 (HOME isolation). Authentication is a hard blocker -- nothing works without it.
+**Phase to address:** Phase 1 (permission strategy). This is the core design decision for v2.1 -- the approach to replace `--dangerously-skip-permissions`.
+
+**Confidence:** HIGH -- multiple CC GitHub issues confirm the instability, blog post documents the VS Code regression
 
 ---
 
-### Pitfall 3: Bubblewrap Fails on Ubuntu 24.04+ Due to AppArmor User Namespace Restrictions
+### Pitfall 3: `permissions.allow` Cannot Fully Replace `--dangerously-skip-permissions`
 
 **What goes wrong:**
-Ubuntu 24.04 LTS ships with `kernel.apparmor_restrict_unprivileged_userns=1` by default. Bubblewrap uses `--unshare-net` to create an isolated network namespace, which requires creating a user namespace first. AppArmor blocks this unless `bwrap` has an explicit AppArmor profile granting the `userns` permission. The sandbox fails with: `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`.
+The v2.1 plan is to replace `--dangerously-skip-permissions` with explicit `permissions.allow` rules in `settings.json`. But there is a gap:
 
-This is confirmed as an open issue on Anthropic's own sandbox-runtime repo (issue #74).
+1. **`.claude/` directory writes still prompt:** Even in `bypassPermissions` mode, writes to `.git`, `.claude`, `.vscode`, and `.idea` directories trigger confirmation prompts. Exception: `.claude/commands`, `.claude/agents`, and `.claude/skills` are exempt. But `.claude/settings.json`, `.claude/CLAUDE.md`, memory files, and other `.claude/` paths still prompt. This means skill memory writes, installed.json updates, and any agent self-modification trigger interactive prompts that block headless operation.
 
-**Why it happens:**
-Ubuntu's security team restricted unprivileged user namespaces to reduce kernel attack surface (user namespaces have been a rich source of privilege escalation bugs). The restriction is per-application via AppArmor profiles. `bwrap` is deliberately not given a permissive profile because it could be used by any malicious program to obtain capabilities.
+2. **Permission pattern fragility:** Bash permission patterns like `Bash(curl *)` are fragile -- options before the URL, different protocols, redirects, variables, and extra spaces all defeat the pattern. The docs explicitly warn about this.
 
-Ubuntu 25.04+ further tightens this by enabling `apparmor_restrict_unprivileged_unconfined` by default, closing bypass routes via `aa-exec` and `busybox`.
+3. **Read/Edit deny rules don't apply to Bash:** A `Read(./.env)` deny rule blocks the Read tool but does NOT prevent `cat .env` in Bash. Sandbox enforcement is needed for defense-in-depth.
 
-**How to avoid:**
-- `rightclaw doctor` must detect this condition: check `sysctl kernel.apparmor_restrict_unprivileged_userns` and test `bwrap --unshare-net echo ok`.
-- Provide a fix script or doctor hint: create `/etc/apparmor.d/local-bwrap` with `userns` permission, then `sudo systemctl reload apparmor`.
-- Document the fix prominently -- Ubuntu 24.04 LTS is the most common developer desktop.
-- Consider whether `--share-net` (using the proxy without network namespace isolation) is acceptable as a fallback, since CC's own proxy-based filtering still provides domain-level restriction.
-- On Debian, the older `kernel.unprivileged_userns_clone=1` sysctl is needed instead.
+4. **`dontAsk` mode is SDK-only:** The `dontAsk` mode (auto-deny unapproved tools) is only available in the TypeScript SDK, not the CLI.
 
-**Warning signs:**
-- `rightclaw up` works on macOS/Fedora but fails on Ubuntu.
-- `bwrap` errors mentioning "Operation not permitted" or "Permission denied."
-- `rightclaw doctor` shows `bubblewrap` as installed but sandbox still fails.
+**Why it matters:**
+If the agent needs to write to its own `.claude/` directory (skill installs, memory, etc.), `permissions.allow` alone cannot prevent the interactive prompt. The sandbox provides OS-level enforcement but doesn't suppress permission prompts for `.claude/` writes.
 
-**Phase to address:** Phase 1 (sandbox setup) and install script update. This is the most common Linux distro -- cannot ship without handling it.
+**Prevention:**
+- Accept that some `.claude/` writes will still prompt in default mode
+- Pre-create all `.claude/` files at `rightclaw up` time (installed.json, memory files, skill directories)
+- Use `autoAllowBashIfSandboxed: true` with sandbox to auto-approve Bash commands within sandbox boundaries
+- For `.claude/` writes that skills perform: add `sandbox.filesystem.allowWrite` for the agent's `.claude/` directory
+- Consider keeping `--dangerously-skip-permissions` as a fallback with sandbox enforcement as the primary safety layer (this is the Trail of Bits recommended approach)
+
+**Detection:**
+- Agent hangs waiting for "authorize Claude to modify its config files" prompt
+- Skill installs silently fail
+- Agent modifies `.claude/` state but gets stuck on next attempt
+
+**Phase to address:** Phase 1 (permission strategy). Fundamental design question: do we fully drop bypass mode or keep it with sandbox as the safety layer?
+
+**Confidence:** HIGH -- official CC docs explicitly document the `.claude/` write protection in bypass mode
 
 ---
 
-### Pitfall 4: CC Sandbox Settings Resolution With Overridden HOME
+### Pitfall 4: Workspace Trust Requires `.git` Directory in Agent Dir
 
 **What goes wrong:**
-CC's sandbox settings follow a multi-scope precedence: Managed > CLI > Local > Project > User. The "User" scope reads from `~/.claude/settings.json`. The "Project" scope reads from `<cwd>/.claude/settings.json`. With HOME override:
+Claude Code's workspace trust check has a subtle dependency: it only shows the "Do you trust the files in this folder?" dialog in directories WITHOUT a `.git` directory. If the directory IS a git repo, the trust prompt does not appear. This is confirmed behavior (GitHub #28506).
 
-1. User-level sandbox settings (`~/.claude/settings.json`) resolve to `<agent_dir>/.claude/settings.json` -- which is the SAME file as the project-level settings (since cwd = agent dir = HOME).
-2. This means user-scope and project-scope collapse into a single file. Settings that should only apply globally now apply only to the agent, and vice versa.
-3. Managed settings at `/etc/claude-code/managed-settings.json` (Linux) still work correctly since they use absolute paths.
+With per-agent HOME override, `HOME=<agent_dir>` means `<agent_dir>` IS the working directory. If `<agent_dir>` has no `.git/`, the trust dialog appears on every launch. Even with `hasTrustDialogAccepted: true` in `.claude.json`, some CC versions still show the prompt (GitHub #9113, #12227).
 
-The `~` prefix in `sandbox.filesystem.allowWrite` resolves to `$HOME`, so `~/.kube` becomes `<agent_dir>/.kube`, not the real user's `~/.kube`. If the agent needs to access paths relative to the real user home (SSH keys, git config), the tilde-expanded paths will be wrong.
+Additionally, there's `hasTrustDialogHooksAccepted` -- a separate flag that can't even be set via `claude config set` (GitHub #5572). Without it, hooks are skipped with "workspace trust not accepted" debug message.
+
+Some evidence suggests trust state is stored server-side (tied to account + workspace path), not just locally. If true, local config changes are futile for some trust prompts.
 
 **Why it happens:**
-CC was designed for single-user, single-instance use where HOME, cwd, and user identity are all consistent. Per-agent HOME isolation breaks this assumption.
+CC's trust mechanism evolved organically -- trust dialog, hooks trust dialog, per-project tool allowlists, server-side state -- all with different persistence and different bypass behaviors.
 
-**How to avoid:**
-- Use absolute paths in all sandbox settings, never `~/` prefix. Generate `settings.json` with fully expanded paths.
-- Accept that user-scope and project-scope collapse. This is actually fine for per-agent isolation -- each agent IS a "user" with its own settings. Just do not rely on the distinction.
-- For paths that must reference the real user HOME (e.g., SSH keys), use absolute paths in `sandbox.filesystem.allowRead` and `sandbox.filesystem.allowWrite`.
-- Test: generate a `settings.json` with `~/some-path` and verify what CC resolves it to under overridden HOME.
+**Prevention:**
+- Ensure every agent dir is a git repo: `git init <agent_dir>` at `rightclaw init` or `rightclaw up` time
+- Write BOTH `hasTrustDialogAccepted: true` AND `hasTrustDialogHooksAccepted: true` to `<agent_dir>/.claude.json`
+- Set these via `claude config set` from within the agent dir (if CC supports it under HOME override)
+- Test: verify agent starts without any interactive prompt from a fresh state
 
-**Warning signs:**
-- Sandbox allows access to wrong directories (agent dir instead of real user home).
-- `sandbox.filesystem.denyRead: ["~/"]` blocks the agent's own directory instead of the user's home.
-- Settings that work with `--no-sandbox` break with sandbox enabled.
+**Detection:**
+- Agent hangs immediately on first launch with "Quick safety check" prompt
+- Works after manual acceptance but blocks again after clean state
+- Debug logs show "workspace trust not accepted"
 
-**Phase to address:** Phase 1 (settings generation). Affects every generated `settings.json`.
+**Phase to address:** Phase 1 (HOME isolation). Must be solved before any agent can launch headlessly.
+
+**Confidence:** HIGH -- confirmed by CC issues #28506, #9113, #5572; the `.git` dependency is documented in issue discussions
 
 ---
 
-### Pitfall 5: SSH/Git Identity Lost Under Overridden HOME
+### Pitfall 5: `allowManagedDomainsOnly` Requires Managed Settings Scope -- Cannot Be Set Per-Agent
 
 **What goes wrong:**
-SSH reads keys and config from `$HOME/.ssh/`. Git reads global config from `$HOME/.gitconfig`. When HOME is the agent directory, SSH cannot find keys and git loses the user's name/email/signing config. Agents that need to push to git repos or access private repos via SSH will fail silently or with cryptic auth errors.
+The v2.1 plan uses `allowManagedDomainsOnly: true` for silent domain blocking (no prompts for unapproved domains). But this setting is a "managed-only" setting -- it can ONLY be set in `/etc/claude-code/managed-settings.json` (Linux) or `/Library/Application Support/ClaudeCode/managed-settings.json` (macOS). It CANNOT be set in user settings (`~/.claude/settings.json`) or project settings (`.claude/settings.json`).
+
+This means:
+1. It applies to ALL Claude Code instances on the machine, not just RightClaw agents
+2. It requires `sudo` to write to `/etc/claude-code/`
+3. It blocks domains for the user's regular Claude Code usage too
+4. It cannot be customized per-agent
+
+Without `allowManagedDomainsOnly`, non-allowed domains trigger an interactive prompt ("Allow this domain?") instead of being silently blocked. This hangs headless agents.
 
 **Why it happens:**
-SSH and git both resolve `~` and `$HOME` to find their configuration. SSH is particularly strict: it checks file permissions on `~/.ssh/` and refuses to use keys if permissions are wrong. Even symlinks can trigger permission check failures on some SSH versions.
+Managed settings are designed for enterprise IT departments deploying organization-wide policies, not for per-agent configuration. The managed-only restriction is intentional to prevent users from accidentally locking themselves out.
 
-Additionally, `gpg` (for commit signing), `npm` (`~/.npmrc`), `pip` (`~/.config/pip/`), and many other tools use HOME-relative config paths.
+**Prevention:**
+- Use `sandbox.network.allowedDomains` in per-agent settings (this IS settable per-agent) + `sandbox.enabled: true` + `allowUnsandboxedCommands: false`
+- With sandbox enabled and `autoAllowBashIfSandboxed: true`, network access to allowed domains works without prompts
+- For domains NOT in the allow list: the sandbox blocks them at the OS level (no prompt), but WebFetch tool still prompts. To handle WebFetch: add `WebFetch(domain:api.anthropic.com)` etc. to `permissions.allow`
+- If the user is willing to install managed settings system-wide, provide `rightclaw config managed-settings install` helper
+- Alternatively: file a feature request for `allowManagedDomainsOnly` to work at user/project scope
 
-**How to avoid:**
-- Set `GIT_CONFIG_GLOBAL` env var to point at the real user's `~/.gitconfig`. This overrides HOME-based git config resolution.
-- Set `SSH_AUTH_SOCK` to forward the user's SSH agent into the agent process. The SSH agent does not depend on HOME -- it uses a socket.
-- For direct SSH key access (no agent), symlink or copy `~/.ssh/` into the agent dir with correct permissions (700 for dir, 600 for keys). But this leaks SSH keys into the agent's sandbox -- security tradeoff.
-- Alternatively, set `GIT_SSH_COMMAND="ssh -F /real/home/.ssh/config -i /real/home/.ssh/id_ed25519"` to explicitly point SSH at the real key location.
-- For git author identity, set `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` env vars in the process-compose environment.
-- For sandbox filesystem access: add the real `~/.ssh/` to `sandbox.filesystem.allowRead` (read-only!) so the sandbox does not block SSH key reads.
+**Detection:**
+- Agent hangs with "Allow access to domain X?" prompt
+- Agent reports "network access blocked" for domains not in allow list
+- Setting `allowManagedDomainsOnly` in `settings.json` has no effect
 
-**Warning signs:**
-- `git push` fails with "Permission denied (publickey)."
-- Commits appear with wrong author identity.
-- `git config --global user.name` returns empty inside agent.
-- SSH prompts "Are you sure you want to continue connecting?" (missing `known_hosts`).
+**Phase to address:** Phase 2 (network isolation). Not a startup blocker if sandbox is used, but blocks full headless operation for non-sandboxed network tools.
 
-**Phase to address:** Phase 2 (agent environment setup). Not a blocker for basic functionality but a blocker for any git workflow.
+**Confidence:** HIGH -- official CC docs explicitly list `allowManagedDomainsOnly` as managed-only
 
 ---
 
 ## Moderate Pitfalls
 
-### Pitfall 6: Telegram Channel .env and Plugin State Under Overridden HOME
+### Pitfall 6: `~/` Path Resolution Under HOME Override Produces Wrong Paths
 
 **What goes wrong:**
-The Telegram plugin reads its bot token from `~/.claude/channels/telegram/.env` and access control from `~/.claude/channels/telegram/access.json`. With HOME override, these paths resolve to `<agent_dir>/.claude/channels/telegram/` -- but `init.rs` writes the token to the real user's `~/.claude/channels/telegram/.env` by default.
+CC resolves `~` in `sandbox.filesystem.allowWrite`, `denyRead`, etc. to `$HOME`. With `HOME=<agent_dir>`, `~/.ssh` resolves to `<agent_dir>/.ssh`, not the real user's `~/.ssh`. The existing v2.0 code generates:
 
-Additionally, the Telegram plugin requires feature flags from GrowthBook, and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` (which blocks ALL feature flags including `tengu_harbor`) must not be set.
+```json
+"denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"]
+```
 
-**How to avoid:**
-- `init_rightclaw_home()` already has a `telegram_env_dir` parameter for overriding the .env path. Use it to write into the agent dir: `<agent_dir>/.claude/channels/telegram/`.
-- Verify that the Telegram plugin reads `.env` relative to `$HOME` or relative to the Claude config dir.
-- If Telegram state is HOME-relative, write all Telegram config into the agent dir during init.
-- Test: launch agent with HOME override, verify Telegram plugin finds the bot token.
+With HOME override, this denies read access to `<agent_dir>/.ssh` (which doesn't exist) and ALLOWS read access to the real `~/.ssh` (which contains private keys). The security intent is completely inverted.
 
-**Warning signs:**
-- Telegram channel connected with `--no-sandbox` but silent under sandbox.
-- Bot token "not found" errors in Claude debug logs.
-- Plugin loads but ignores messages (missing `access.json`).
+**Prevention:**
+- Already identified in v2.0 PITFALLS.md but NOT yet implemented
+- Replace ALL `~/` paths in generated `settings.json` with absolute paths expanded at generation time
+- In `generate_settings()`: resolve `dirs::home_dir()` and use absolute paths like `/home/wb/.ssh`
+- For `allowWrite` of the agent dir: already uses `agent.path.display()` (absolute) -- this is correct
+- For `denyRead`: use `format!("{}", real_home.join(".ssh").display())`
 
-**Phase to address:** Phase 2 (Telegram integration update).
+**Detection:**
+- Agent can read real `~/.ssh` despite `denyRead: ["~/.ssh"]`
+- Agent is blocked from its own `<agent_dir>/.ssh` (which doesn't exist)
+- Security audit reveals sandbox allows access to unintended paths
+
+**Phase to address:** Phase 1 (settings generation update). Security-critical.
+
+**Confidence:** HIGH -- this is simple path resolution logic documented in CC sandbox docs
 
 ---
 
-### Pitfall 7: macOS Seatbelt Deprecation and Undocumented Profile Language
+### Pitfall 7: OAuth Credential Symlink/Copy Creates Security and Race Condition
 
 **What goes wrong:**
-macOS uses `sandbox-exec` (Seatbelt) for CC's sandbox enforcement. Apple deprecated `sandbox-exec` years ago. The man page says "DEPRECATED." The Sandbox Profile Language (SBPL) is undocumented -- a Scheme-like DSL with no official reference. macOS updates can change SBPL semantics or break existing profiles without warning.
+With `HOME=<agent_dir>`, CC on Linux looks for `.claude/.credentials.json` at `<agent_dir>/.claude/.credentials.json`. If using OAuth (not API key), the credentials file doesn't exist in the agent dir. Common "fix" attempts:
 
-**Why it happens:**
-Apple wants developers to use the App Sandbox (requires `.app` bundles with entitlements), which is unsuitable for CLI tools. There is no documented, supported alternative to `sandbox-exec` for CLI sandboxing on macOS. Apple, Anthropic, OpenAI, and Google all use `sandbox-exec` despite the deprecation.
+1. **Symlink:** `<agent_dir>/.claude/.credentials.json -> ~/.claude/.credentials.json` -- all agents share one file. OAuth token refresh from any agent corrupts the shared file for others (same non-atomic write problem as `.claude.json`).
+2. **Copy:** Copy `.credentials.json` into each agent dir at `rightclaw up`. Tokens expire and need refresh. If one agent refreshes, other agents still have stale tokens.
+3. **`CLAUDE_CONFIG_DIR`:** Unclear behavior (GitHub #3833, #25762). May or may not split credential resolution from HOME resolution. Not officially supported for this use case.
 
-The upcoming macOS 26 "Containers" feature may eventually replace Seatbelt for CLI isolation, but details are sparse.
+**Prevention:**
+- **API keys are the only reliable option.** Use `ANTHROPIC_API_KEY` env var per agent. API keys don't expire, don't need refresh, and don't depend on HOME.
+- If API key is not possible: use `apiKeyHelper` in `settings.json` -- a script that outputs a valid key/token. The script runs outside the sandbox, has access to the real HOME, and returns a fresh token.
+- Document clearly: "RightClaw requires `ANTHROPIC_API_KEY` or `apiKeyHelper` -- OAuth is not supported with HOME isolation"
 
-**How to avoid:**
-- Accept the deprecation as "deprecated but not going anywhere." Apple's own system software uses Seatbelt internally.
-- Do not write custom SBPL profiles. Rely on CC's built-in Seatbelt profile generation from `settings.json`. This way, Anthropic handles any SBPL changes.
-- RightClaw only needs to generate the correct `settings.json` -- CC handles the Seatbelt translation.
-- Pin to a tested CC version. When macOS updates ship, test sandbox functionality before upgrading.
-- No `bubblewrap` or `socat` needed on macOS -- one fewer dependency to manage.
+**Detection:**
+- Agent errors with "Please run /login" or "ANTHROPIC_API_KEY not set"
+- Works on macOS (Keychain doesn't depend on HOME) but fails on Linux
+- Multiple agents with symlinked credentials fail intermittently
 
-**Warning signs:**
-- Sandbox works on macOS 15 but breaks after macOS update.
-- `sandbox-exec` errors in system log.
-- CC falls back to unsandboxed mode silently on macOS.
+**Phase to address:** Phase 1 (HOME isolation). Authentication is a hard blocker.
 
-**Phase to address:** Phase 1 (cross-platform testing). Low risk for now -- just ensure awareness.
+**Confidence:** HIGH -- confirmed by CC docs on credential locations and `.claude.json` race condition reports
 
 ---
 
-### Pitfall 8: Removing OpenShell Code Paths Without Breaking Existing Installs
+### Pitfall 8: CC Version Skew Breaks Permission Strategy
 
 **What goes wrong:**
-v1.0 users have `policy.yaml` in every agent dir, `openshell` checks in doctor and deps, OpenShell-specific sandbox state in runtime JSON, and shell wrappers that call `openshell sandbox create`. A v2.0 upgrade must cleanly migrate without breaking running agents or leaving orphaned OpenShell sandboxes.
+Claude Code's permission system is actively evolving with regressions across versions:
+- v2.1.42: `skipDangerousModePermissionPrompt` regression in VS Code
+- v2.1.71: `--dangerously-skip-permissions` still prompts for some commands
+- v2.1.77: Bypass permissions fully broken
+- v2.1.79: Edit tool prompts despite bypassPermissions
 
-**Why it happens:**
-Schema evolution. `RuntimeState` struct has `no_sandbox: bool` and `AgentState` has `sandbox_name: String` -- both OpenShell-specific. The `AgentDef` struct requires `policy_path` (OpenShell policy). Doctor checks for `openshell` binary. Shell wrapper template contains OpenShell conditional blocks.
+RightClaw generates `settings.json` with permission rules, but the user's CC version may not honor them correctly. A settings key that works in CC v2.1.60 may be broken in v2.1.77 and fixed in v2.1.80.
 
-**How to avoid:**
-- **Migration path:** `rightclaw up` in v2.0 should detect v1.0 runtime state (presence of `sandbox_name` in state file) and run `openshell sandbox destroy` for any active sandboxes before starting with the new sandbox backend.
-- **AgentDef evolution:** Make `policy_path` optional (no longer required). Add a new `settings_path` for the CC sandbox settings.json.
-- **Doctor update:** Remove `openshell` check, add `bubblewrap` + `socat` checks (Linux only). Detect platform and skip bwrap check on macOS.
-- **Shell wrapper template:** Replace the OpenShell conditional with HOME override + CC native sandbox.
-- **Backward compatibility:** If `policy.yaml` exists in an agent dir, ignore it (do not error). Users may have custom policies they want to keep as documentation.
-- **Runtime state:** New `RuntimeState` struct should not include OpenShell fields. Handle deserialization of old state files gracefully (serde `#[serde(default)]` on removed fields).
+**Prevention:**
+- Add CC version detection to `rightclaw doctor` and `rightclaw up`
+- Parse `claude --version` output
+- Maintain a compatibility matrix: which RightClaw version works with which CC version range
+- Pin CC version recommendation in docs and doctor output
+- Consider CC `autoUpdatesChannel: "stable"` in generated settings (uses ~1-week-old versions, skips regression releases)
 
-**Warning signs:**
-- `rightclaw up` on v2.0 crashes because state file has unexpected fields.
-- Orphaned OpenShell sandboxes after upgrade.
-- Doctor reports "openshell not found" as failure on v2.0.
+**Detection:**
+- Agent works on developer's machine, fails on user's machine with different CC version
+- Permissions worked yesterday, broken after CC auto-update
+- Different agents behave differently despite identical settings
 
-**Phase to address:** Phase 1 (migration). Must be addressed before any v2.0 release.
+**Phase to address:** Phase 2 (doctor improvements). Not a startup blocker but prevents support headaches.
+
+**Confidence:** MEDIUM -- based on pattern of CC regressions in issue tracker; specific version numbers may shift
 
 ---
 
-### Pitfall 9: Process-Compose Environment Variables Not Reaching Claude Code
+### Pitfall 9: Managed Settings Conflict With Per-Agent Settings
 
 **What goes wrong:**
-The v2.0 shell wrapper needs to set multiple environment variables (`HOME`, `GIT_CONFIG_GLOBAL`, `SSH_AUTH_SOCK`, `ANTHROPIC_API_KEY`, etc.) before launching `claude`. These must be passed through process-compose's process environment. But process-compose's YAML `environment` section and the shell wrapper's `export` statements interact differently:
+If the user (or their organization) has `/etc/claude-code/managed-settings.json` deployed, it takes precedence over ALL other settings including RightClaw's generated per-agent `settings.json`. This can:
 
-1. If env vars are in the YAML `environment` block, they are set before the wrapper runs -- good.
-2. If env vars are in the shell wrapper via `export`, they affect only the wrapper's children -- good.
-3. But `is_tty: true` in process-compose may interact with the env differently (known v1.0 issue: `is_tty: true` causes restart crashes).
-4. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set to ANY value (even "0" or "false") disables ALL feature flags, breaking Telegram channels and other features.
+1. **Override permission rules:** If managed settings set `allowManagedPermissionRulesOnly: true`, RightClaw's per-agent `permissions.allow` rules are IGNORED. Only managed rules apply.
+2. **Override sandbox config:** If managed settings set `allowManagedReadPathsOnly: true`, per-agent `allowRead` entries are ignored.
+3. **Block sandbox domains:** If managed settings don't include domains the agent needs (e.g., `api.telegram.org`), those domains are blocked with no override possible.
+4. **Disable bypass mode:** If managed settings set `disableBypassPermissionsMode: "disable"`, agents cannot use `--dangerously-skip-permissions` at all.
 
-**How to avoid:**
-- Set all agent-specific env vars in the shell wrapper (`export HOME=...`), not in process-compose YAML. The wrapper is the single source of truth for agent environment.
-- Never set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` unless explicitly intended.
-- Test env var propagation: add `env` to the wrapper and verify all expected vars are set inside the Claude session.
-- For `ANTHROPIC_API_KEY`, use process-compose's `environment` section (from a secure source) or an `apiKeyHelper` script in the agent's `settings.json`.
+The user won't know why their agents are broken because the managed settings are invisible to them (deployed by IT).
 
-**Warning signs:**
-- Agent launches but env vars are not set (check with `/status` inside CC).
-- `ANTHROPIC_API_KEY` visible in process-compose logs (security leak).
-- Telegram stops working after adding an unrelated env var.
+**Prevention:**
+- Add `rightclaw doctor` check: detect presence of `/etc/claude-code/managed-settings.json` and warn about potential conflicts
+- Parse the managed settings file (if readable) and report conflicts with generated per-agent settings
+- Document: "If your organization uses managed settings, verify they don't conflict with RightClaw's generated settings"
+- Support `rightclaw up --show-effective-settings` to dump the merged settings CC will actually use (run `claude --print-config` or `/status`)
 
-**Phase to address:** Phase 1 (wrapper generation).
+**Detection:**
+- Agent ignores permission rules set in `.claude/settings.json`
+- Sandbox configuration doesn't match what RightClaw generated
+- `rightclaw doctor` shows settings.json is correct but agent behaves differently
+
+**Phase to address:** Phase 2 (doctor + diagnostics). Edge case but devastating when hit.
+
+**Confidence:** HIGH -- official CC docs document managed settings precedence
 
 ---
 
-### Pitfall 10: CC Sandbox Network Proxy + Socat Socket Path Conflicts With Multiple Agents
+### Pitfall 10: Git/SSH Identity Loss Under HOME Override
 
 **What goes wrong:**
-CC's sandbox on Linux creates socat bridges using Unix domain sockets in `/tmp/` (e.g., `/tmp/claude-http-*.sock`, `/tmp/claude-socks-*.sock`). With multiple agents, each Claude instance needs its own proxy sockets. If CC uses PID-based or random naming, this works. But if there is any shared state in the proxy setup, concurrent agents may conflict.
+Already identified in v2.0 PITFALLS.md but NOT yet implemented. With `HOME=<agent_dir>`:
 
-Additionally, the socat bridges and proxy servers run OUTSIDE the sandbox (on the host). If multiple agents share the same proxy port configuration, they may collide.
+- SSH reads keys from `$HOME/.ssh/` -- nonexistent under agent dir
+- Git reads global config from `$HOME/.gitconfig` -- nonexistent under agent dir
+- GPG reads keyring from `$HOME/.gnupg/` -- nonexistent under agent dir
+- npm reads `$HOME/.npmrc` -- nonexistent
+- Known hosts file at `$HOME/.ssh/known_hosts` missing -- SSH prompts "Are you sure you want to continue connecting?" (hangs headless)
 
-**How to avoid:**
-- Trust CC's own socket naming -- it likely uses PID or random suffixes. Verify by launching two CC instances and checking `/tmp/claude-*` sockets.
-- If CC exposes `sandbox.network.httpProxyPort` and `sandbox.network.socksProxyPort` settings, ensure RightClaw does NOT set these (let CC auto-assign), or assign unique ports per agent.
-- Test: launch 3 agents simultaneously, verify all have network access, check for socket collisions.
+**Prevention:**
+- In shell wrapper, set env vars BEFORE `exec claude`:
+  ```bash
+  export GIT_CONFIG_GLOBAL="/home/wb/.gitconfig"
+  export GIT_AUTHOR_NAME="..."
+  export GIT_AUTHOR_EMAIL="..."
+  export GIT_COMMITTER_NAME="..."
+  export GIT_COMMITTER_EMAIL="..."
+  export SSH_AUTH_SOCK="${SSH_AUTH_SOCK}"  # forward from parent
+  export GIT_SSH_COMMAND="ssh -F /home/wb/.ssh/config -o UserKnownHostsFile=/home/wb/.ssh/known_hosts"
+  ```
+- Add `sandbox.network.allowUnixSockets` for SSH agent socket path
+- For sandbox: add real `~/.ssh/` to `sandbox.filesystem.allowRead` (absolute path) so sandbox doesn't block SSH reads
+- Do NOT symlink `~/.ssh/` into agent dir with write access -- security risk (agent/skill could modify SSH keys)
 
-**Warning signs:**
-- Second agent fails with "address already in use" on proxy port.
-- Intermittent network failures in some agents but not others.
-- `socat` errors in system log about socket binding.
+**Detection:**
+- `git push` fails with "Permission denied (publickey)"
+- Commits appear with wrong author identity
+- SSH prompts "Are you sure you want to continue connecting?" (hangs headless)
+- `git config --global user.name` returns empty inside agent
 
-**Phase to address:** Phase 2 (multi-agent testing).
+**Phase to address:** Phase 1 (shell wrapper enhancement). Blocks any git workflow.
+
+**Confidence:** HIGH -- straightforward env var behavior, already identified in v2.0
+
+---
+
+### Pitfall 11: Telegram Plugin Path Resolution Under HOME Override
+
+**What goes wrong:**
+The Telegram plugin reads its bot token from `~/.claude/channels/telegram/.env` and access control from `~/.claude/channels/telegram/access.json`. With `HOME=<agent_dir>`, these resolve to `<agent_dir>/.claude/channels/telegram/` -- but `init_rightclaw_home()` writes the token to the real `~/.claude/channels/telegram/` by default (when `telegram_env_dir` is None).
+
+Currently, `init_rightclaw_home()` has a `telegram_env_dir` parameter but it's only used in tests. The production code path in `cmd_init()` passes `None`, causing Telegram config to be written to the real HOME.
+
+**Prevention:**
+- When HOME override is active, `rightclaw up` must copy/generate Telegram config into `<agent_dir>/.claude/channels/telegram/`
+- Modify `cmd_init()` to pass the agent dir as `telegram_env_dir` when the Telegram token is provided
+- At `rightclaw up` time: if Telegram is configured but `.env` is in real HOME, copy it to agent dir
+- Alternatively: generate Telegram env at `rightclaw up` time (not just `init`), ensuring it goes to the right place
+
+**Detection:**
+- Telegram channel connected in `rightclaw pair` mode but silent under `rightclaw up` with HOME override
+- Bot token "not found" errors in Claude debug logs
+- Plugin loads but ignores messages (missing `access.json`)
+
+**Phase to address:** Phase 2 (Telegram integration update). Not a startup blocker but blocks Telegram functionality.
+
+**Confidence:** HIGH -- codebase audit confirms the path issue in `init.rs:120`
+
+---
+
+## Minor Pitfalls
+
+### Pitfall 12: Process-Compose Environment Section Leaks Secrets
+
+**What goes wrong:**
+If API keys or tokens are set in the process-compose YAML `environment:` section, they become visible via `process-compose process list` and the REST API. The TUI also shows env vars for each process.
+
+**Prevention:**
+- Set secrets in the shell wrapper (`export ANTHROPIC_API_KEY=...`) or use CC's `apiKeyHelper` in settings.json
+- Never put `ANTHROPIC_API_KEY` in process-compose YAML
+- Consider reading API key from a file at wrapper startup: `export ANTHROPIC_API_KEY=$(cat /path/to/key)`
+
+**Phase to address:** Phase 1 (wrapper generation). Security concern.
+
+**Confidence:** HIGH -- process-compose REST API exposes env vars by design
+
+---
+
+### Pitfall 13: Sandbox Proxy Socket Conflicts With Custom Ports
+
+**What goes wrong:**
+CC's sandbox creates proxy sockets (HTTP/SOCKS) to enforce network isolation. If `sandbox.network.httpProxyPort` or `socksProxyPort` is set in settings and multiple agents use the same port, only the first agent can bind.
+
+By default, CC auto-assigns ports, which should avoid conflicts. But if RightClaw sets explicit proxy ports (or the user does via agent.yaml overrides), conflicts arise.
+
+**Prevention:**
+- Do NOT set `httpProxyPort` or `socksProxyPort` in generated settings -- let CC auto-assign
+- If overrides exist in agent.yaml, validate uniqueness across all agents at `rightclaw up` time
+- Add a validation step: if any `SandboxOverrides` includes proxy ports, ensure no duplicates
+
+**Phase to address:** Phase 2 (multi-agent validation). Low probability but easy to prevent.
+
+**Confidence:** MEDIUM -- inferred from CC docs; proxy auto-assignment likely works but not explicitly confirmed for multi-instance
+
+---
+
+### Pitfall 14: `autoMemoryDirectory` Setting Redirects Memory Writes
+
+**What goes wrong:**
+CC has an `autoMemoryDirectory` setting that controls where auto-memory files are stored. If this setting exists in user settings (`~/.claude/settings.json`), it applies to all projects. With HOME override, user settings are at `<agent_dir>/.claude/settings.json` (which is also the project settings). If `autoMemoryDirectory` is set to a path with `~/`, it resolves under the agent HOME. If set to an absolute path, all agents may write memory to the same directory (race condition).
+
+**Prevention:**
+- Do NOT set `autoMemoryDirectory` in generated settings
+- If agents need separate memory: their agent dirs already isolate `.claude/` directories
+- Document: do not set `autoMemoryDirectory` in agent.yaml overrides
+
+**Phase to address:** Phase 3 (documentation). Low priority.
+
+**Confidence:** MEDIUM -- theoretical based on docs; CC notes this setting is "not accepted in project settings" to prevent repo-controlled redirection, but user settings behavior under HOME override is untested
 
 ---
 
 ## Technical Debt Patterns
 
-Shortcuts that seem reasonable but create long-term problems.
+Shortcuts that seem reasonable but create problems.
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Symlinking real `~/.claude/` into agent dirs instead of proper isolation | Quick fix for credential access | All agents share settings, memory, OAuth tokens -- defeats isolation purpose | Never for production; acceptable for prototype validation only |
-| Hardcoding absolute paths to user HOME in shell wrapper | Works on the dev machine | Breaks on any other user's machine or CI | Never |
-| Using `--no-sandbox` as default for macOS | Avoids Seatbelt complexity | No sandbox on macOS defeats the security proposition | Only for explicit dev mode |
-| Skipping bwrap AppArmor fix in install.sh | Simpler install script | Every Ubuntu 24.04 user hits a wall on first run | Never -- must handle at install time |
-| Setting `enableWeakerNestedSandbox: true` by default | Works in Docker/CI | Substantially weakens filesystem isolation | Only when additional container isolation exists |
+| Keep `--dangerously-skip-permissions` with sandbox | Works immediately, no permission gaps | Bypass warning dialog on every version, CC regressions break it regularly, Trail of Bits security concern (users copy the pattern without sandbox) | Only if sandbox enforcement is verified before launch |
+| Use `defaultMode: "bypassPermissions"` in settings.json instead of CLI flag | No CLI flag needed | Same regressions as CLI flag, VS Code fallback bug, `.claude/` writes still prompt | Only in sandboxed+containerized environments |
+| Symlink real `~/.claude/` into agent dir | Quick auth fix | Defeats entire isolation purpose, shared state = race conditions, security leak | Never for production |
+| Skip `.git` init in agent dir | Simpler init | Trust dialog blocks every headless launch | Never |
+| Use `CLAUDE_CONFIG_DIR` instead of HOME override | More targeted, doesn't affect SSH/Git | Undocumented, unclear behavior (CC issues #3833, #25762), may not work | Only after verification with specific CC version |
+| Set managed settings at `/etc/claude-code/` | `allowManagedDomainsOnly` works | Affects ALL CC instances on machine, requires sudo | Only if user understands system-wide impact |
+| Use `permissions.allow: ["Bash"]` to auto-allow all Bash | No need for bypass mode | Doesn't auto-allow Edit/Write/WebFetch, need separate rules for each tool | Only with additional tool-specific allow rules |
 
 ## Integration Gotchas
 
-Common mistakes when connecting to external services during the sandbox transition.
-
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| CC native sandbox | Generating `settings.json` with `~/` paths under overridden HOME | Use absolute paths everywhere in generated settings |
-| CC workspace trust | Writing trust to real `~/.claude.json` while agent HOME is different | Write trust to `<agent_dir>/.claude.json` |
-| CC credentials (Linux) | Expecting `~/.claude/.credentials.json` to be found under overridden HOME | Use `ANTHROPIC_API_KEY` env var, or `CLAUDE_CONFIG_DIR` pointing to real config |
-| process-compose | Setting sensitive env vars in YAML (visible in `pc status`) | Set env vars in shell wrapper, or use `apiKeyHelper` in settings.json |
-| SSH/Git | Expecting `~/.ssh/` and `~/.gitconfig` to exist under agent HOME | Set `GIT_CONFIG_GLOBAL`, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` env vars |
-| Telegram plugin | Writing .env to real HOME while agent uses overridden HOME | Write .env into `<agent_dir>/.claude/channels/telegram/` |
-| bubblewrap (Ubuntu 24.04+) | Assuming `apt install bubblewrap` is sufficient | Must also configure AppArmor profile for bwrap |
+| CC permission modes | Using `bypassPermissions` and expecting no prompts | Use sandbox + `autoAllowBashIfSandboxed` + explicit `permissions.allow` for tools |
+| CC managed settings | Setting `allowManagedDomainsOnly` in per-agent settings | Must be in `/etc/claude-code/managed-settings.json` (or use sandbox domains instead) |
+| CC workspace trust | Writing trust to real `~/.claude.json` | Write to `<agent_dir>/.claude.json` AND ensure `.git/` exists in agent dir |
+| CC credentials | Assuming OAuth works with HOME override | Use `ANTHROPIC_API_KEY` env var or `apiKeyHelper` in settings.json |
+| CC `.claude/` writes | Expecting `permissions.allow` to suppress all prompts | Pre-create all `.claude/` files at `rightclaw up` time |
+| CC version compat | Assuming current CC version behavior is stable | Pin CC version recommendation, add version check to doctor |
+| Sandbox path resolution | Using `~/.ssh` in denyRead with HOME override | Use absolute paths: `/home/user/.ssh` |
+| Shell wrapper secrets | Putting API key in process-compose YAML env section | Set in wrapper script or use `apiKeyHelper` |
+| SSH under sandbox | Expecting SSH to work without explicit socket allowance | Add `sandbox.network.allowUnixSockets` for SSH agent socket |
+| Git under HOME override | Expecting `~/.gitconfig` to be found | Set `GIT_CONFIG_GLOBAL` env var in wrapper |
 
 ## Security Mistakes
 
-Domain-specific security issues for the sandbox migration.
-
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Symlinking real `~/.ssh/` into agent sandbox with write access | Agent (or malicious skill) can modify SSH keys or add authorized_keys | Read-only access only via `sandbox.filesystem.allowRead`, or use SSH agent socket |
-| Setting `allowAllUnixSockets: true` in sandbox settings | Exposes Docker socket, D-Bus, and other system sockets to agent | Explicitly list only needed sockets (e.g., SSH agent) |
-| Copying `ANTHROPIC_API_KEY` into generated files on disk | Key visible in wrapper scripts, process-compose YAML | Use `apiKeyHelper` script or env var injection at runtime |
-| Using `enableWeakerNestedSandbox` on bare metal | Disables user namespace isolation, significantly weakens sandbox | Only enable when already inside a container |
-| Not denying `~/.ssh/` in sandbox read rules | Agent can read SSH private keys and known_hosts | Add `"~/.ssh"` to `sandbox.filesystem.denyRead` unless explicitly needed |
-| Allowing `sandbox.filesystem.allowWrite` to PATH directories | Agent can plant malicious executables | Never allow write to `/usr/local/bin`, `/usr/bin`, or any PATH directory |
+| Using `bypassPermissions` without sandbox on bare metal | Agent has unrestricted access to entire filesystem and network | Always pair with sandbox; Anthropic engineers only use bypass mode inside containers |
+| Symlinking `~/.ssh/` with write access into agent dir | Agent/malicious skill can modify SSH keys, add authorized_keys entries | Read-only access only via `sandbox.filesystem.allowRead` with absolute path |
+| Setting `enableWeakerNestedSandbox` on bare metal | Disables user namespace isolation, substantially weakens sandbox | Only when running inside Docker/container with additional isolation |
+| Allowing `sandbox.filesystem.allowWrite` to HOME or PATH directories | Agent can modify shell config (`.bashrc`), plant executables | Never allow write to PATH dirs or shell configs |
+| Putting `ANTHROPIC_API_KEY` in generated files on disk | Key visible in wrapper scripts if file permissions are lax | Use `apiKeyHelper` script or read key from secure storage at runtime; set wrapper permissions to 700 |
+| Not denying read access to credential files | Agent can read SSH keys, AWS credentials, GPG keyring | Explicit `sandbox.filesystem.denyRead` with absolute paths for sensitive directories |
+| Setting `allowAllUnixSockets: true` | Exposes Docker socket, D-Bus, and other system sockets | Explicitly list only needed sockets (SSH agent) |
+| Sharing `~/.claude.json` across agents | Race condition corrupts auth, trust, and all CC state | Per-agent HOME isolation |
 
 ## UX Pitfalls
 
-Common user experience mistakes during the sandbox migration.
-
 | Pitfall | User Impact | Better Approach |
 |---------|-------------|-----------------|
-| Silent sandbox failure (agent runs unsandboxed without warning) | False sense of security | Detect sandbox status and show clear indicator in `rightclaw status` |
-| bwrap AppArmor error with no actionable fix hint | User stuck on Ubuntu 24.04 | `rightclaw doctor` detects condition and prints exact fix commands |
-| Upgrade from v1.0 orphans OpenShell sandboxes | Memory/resource leak, confusion | `rightclaw up` detects and cleans orphaned v1.0 sandboxes |
-| SSH/Git failures with cryptic error messages | Agent cannot work with repos | Clear error: "SSH keys not available in sandbox. Run `rightclaw config set git-access`" or similar |
-| Agent-specific settings not taking effect | Debugging nightmare | `rightclaw doctor` includes per-agent settings validation |
+| Silent fallback to default mode (CC VS Code regression) | Agent appears to work but prompts for everything | Add startup self-test: verify permission mode is active |
+| Managed settings silently overriding per-agent config | User's agent config has no effect, no indication why | `rightclaw doctor` detects managed settings and warns |
+| CC version auto-update breaking permissions | Agent worked yesterday, broken today | Recommend `autoUpdatesChannel: "stable"` in generated settings |
+| SSH "Are you sure?" prompt hanging headless agent | Agent blocks indefinitely on first SSH connection | Pre-populate `known_hosts` or set `StrictHostKeyChecking=accept-new` in wrapper |
+| Trust dialog re-appearing after CC update | Agent stops working after CC update | Write trust state AND ensure `.git/` exists AND set `hasTrustDialogHooksAccepted` |
+| Opaque "Permission denied" errors from sandbox | User doesn't know which sandbox rule blocked | Add `rightclaw doctor --agent <name>` to validate effective settings |
 
 ## "Looks Done But Isn't" Checklist
 
-Things that appear complete but are missing critical pieces.
-
-- [ ] **HOME override:** Often missing `.claude.json` trust file in agent dir -- verify agent does not hang on workspace trust dialog
-- [ ] **Sandbox settings:** Often missing `sandbox.enabled: true` -- verify CC actually activates the sandbox, not just running unsandboxed
-- [ ] **bwrap install:** Often missing AppArmor profile on Ubuntu 24.04 -- verify `bwrap --unshare-net echo ok` works
-- [ ] **Git identity:** Often missing `GIT_CONFIG_GLOBAL` -- verify `git config user.name` returns correct value inside agent
-- [ ] **SSH access:** Often missing SSH agent forwarding or key access -- verify `ssh -T git@github.com` works inside agent
-- [ ] **Multi-agent proxy:** Often missing concurrent socket test -- verify 3+ agents can all access network simultaneously
-- [ ] **OpenShell cleanup:** Often missing migration code -- verify no orphaned v1.0 sandboxes remain after upgrade
-- [ ] **Telegram token:** Often written to wrong HOME -- verify bot responds under overridden HOME
-- [ ] **Credential access:** Often assumes macOS behavior on Linux -- verify `ANTHROPIC_API_KEY` or credential file is accessible
+- [ ] **Permissions strategy:** Often assumes `permissions.allow: ["Bash"]` covers everything -- verify Edit, Write, WebFetch, MCP tools are also allowed
+- [ ] **HOME override:** Often missing `.git/` directory in agent dir -- verify trust dialog doesn't appear
+- [ ] **HOME override:** Often missing `hasTrustDialogHooksAccepted` -- verify hooks fire on SessionStart
+- [ ] **Credentials:** Often assumes OAuth works -- verify `ANTHROPIC_API_KEY` or `apiKeyHelper` is configured
+- [ ] **Path resolution:** Often uses `~/` in sandbox settings -- verify all paths are absolute under HOME override
+- [ ] **Git identity:** Often missing `GIT_COMMITTER_*` -- verify both author and committer are set
+- [ ] **SSH known_hosts:** Often forgotten -- verify SSH doesn't prompt on first connection
+- [ ] **Managed settings:** Often ignored -- verify `/etc/claude-code/managed-settings.json` doesn't conflict
+- [ ] **Multi-agent proxy:** Often untested -- verify 3+ agents can all access network simultaneously
+- [ ] **Telegram path:** Often written to real HOME -- verify bot responds under overridden HOME
+- [ ] **API key security:** Often visible in process-compose or wrapper -- verify key is not in logs or REST API
 
 ## Recovery Strategies
 
-When pitfalls occur despite prevention, how to recover.
-
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Trust dialog blocks agent | LOW | Write `.claude.json` with `hasTrustDialogAccepted: true` into agent dir, restart |
-| OAuth credentials not found | LOW | Set `ANTHROPIC_API_KEY` env var, restart agent |
-| bwrap AppArmor failure | MEDIUM | Create AppArmor profile, reload AppArmor, restart rightclaw |
-| Wrong paths in sandbox settings | LOW | Regenerate `settings.json` with absolute paths, restart |
-| SSH/Git identity lost | LOW | Set `GIT_CONFIG_GLOBAL` and `GIT_SSH_COMMAND` env vars in wrapper, restart |
-| Orphaned OpenShell sandboxes | LOW | `openshell sandbox list` then `openshell sandbox delete` for each, or `docker rm` |
-| Socat socket conflict | MEDIUM | Kill conflicting processes, let CC auto-assign new socket paths on restart |
-| Agent dir permissions wrong | LOW | `chmod 700 <agent_dir>`, `chmod 600 <agent_dir>/.claude/.credentials.json` |
+| `.claude.json` corruption | LOW | Restore from backup (CC keeps 5 timestamped backups), or regenerate with `claude config set` |
+| Trust dialog blocks agent | LOW | Create `.git/` in agent dir, write trust state to `<agent_dir>/.claude.json`, restart |
+| Permission mode regression | MEDIUM | Downgrade CC to last known working version, or switch permission strategy |
+| OAuth credentials not found | LOW | Set `ANTHROPIC_API_KEY` env var, restart |
+| Sandbox paths wrong | LOW | Regenerate `settings.json` with absolute paths via `rightclaw up` |
+| SSH/Git identity lost | LOW | Set env vars in wrapper, restart |
+| Managed settings conflict | MEDIUM | Contact IT to understand managed settings, adjust RightClaw config to work within constraints |
+| Telegram in wrong HOME | LOW | Copy `.env` and `access.json` to agent's `.claude/channels/telegram/`, restart |
+| CC version incompatibility | MEDIUM | Pin CC version: `npm install -g @anthropic-ai/claude-code@<version>` |
 
 ## Pitfall-to-Phase Mapping
 
-How roadmap phases should address these pitfalls.
-
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| #1 Trust file location | Phase 1: HOME isolation | Agent starts without trust dialog prompt |
-| #2 OAuth credentials | Phase 1: HOME isolation | Agent authenticates on Linux with overridden HOME |
-| #3 bwrap AppArmor | Phase 1: install/doctor | `rightclaw doctor` detects and reports bwrap status on Ubuntu 24.04 |
-| #4 Settings path resolution | Phase 1: settings generation | `sandbox.filesystem` paths resolve to intended absolute locations |
-| #5 SSH/Git identity | Phase 2: agent env setup | `git push` works from inside sandboxed agent |
-| #6 Telegram .env path | Phase 2: Telegram update | Telegram bot responds under overridden HOME |
-| #7 macOS Seatbelt | Phase 1: cross-platform test | Sandbox activates on macOS without errors |
-| #8 OpenShell migration | Phase 1: migration | v1.0 state file deserializes without crash, orphaned sandboxes cleaned |
-| #9 Env var propagation | Phase 1: wrapper generation | All expected env vars present inside CC session |
-| #10 Proxy socket conflicts | Phase 2: multi-agent test | 3+ agents run concurrently with network access |
+| #1 `.claude.json` race condition | Phase 1: HOME isolation | Each agent has isolated `.claude.json`, no shared state |
+| #2 `skipDangerousModePermissionPrompt` broken | Phase 1: permission strategy | Agent starts without bypass warning dialog |
+| #3 `permissions.allow` gaps | Phase 1: permission strategy | Agent runs headlessly with all needed tool access |
+| #4 Workspace trust + `.git` | Phase 1: HOME isolation | Agent starts without trust dialog from fresh state |
+| #5 `allowManagedDomainsOnly` scope | Phase 2: network isolation | Non-allowed domains blocked silently without prompt |
+| #6 `~/` path resolution | Phase 1: settings generation | denyRead paths resolve to real user directories |
+| #7 OAuth credentials | Phase 1: authentication | Agent authenticates with API key under HOME override |
+| #8 CC version skew | Phase 2: doctor | `rightclaw doctor` reports CC version compatibility |
+| #9 Managed settings conflict | Phase 2: doctor | `rightclaw doctor` detects and warns about managed settings |
+| #10 Git/SSH identity | Phase 1: wrapper enhancement | `git push` works from inside agent with HOME override |
+| #11 Telegram paths | Phase 2: Telegram update | Bot responds under overridden HOME |
+| #12 Secret leakage | Phase 1: wrapper + security | API key not visible in PC REST API or logs |
+| #13 Proxy port conflicts | Phase 2: multi-agent validation | 3+ agents run with network access concurrently |
+| #14 autoMemoryDirectory | Phase 3: documentation | Documented as unsupported with per-agent HOME |
 
 ## Sources
 
-- [Claude Code Sandboxing Docs](https://code.claude.com/docs/en/sandboxing) -- official sandbox architecture, settings, platform specifics
-- [Claude Code Settings Reference](https://code.claude.com/docs/en/settings) -- sandbox.* settings keys, scopes, precedence
-- [Anthropic Engineering: Claude Code Sandboxing](https://www.anthropic.com/engineering/claude-code-sandboxing) -- proxy architecture, socat/bwrap internals
-- [sandbox-runtime issue #74: bwrap fails on Ubuntu 24.04+](https://github.com/anthropic-experimental/sandbox-runtime/issues/74) -- confirmed AppArmor conflict
-- [Ubuntu: Restricted unprivileged user namespaces](https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces) -- AppArmor userns restriction design
-- [bubblewrap GitHub](https://github.com/containers/bubblewrap) -- bwrap user namespace requirements
-- [ArchWiki: Bubblewrap](https://wiki.archlinux.org/title/Bubblewrap) -- AppArmor profile workaround
-- [Claude Code issue #3833: CLAUDE_CONFIG_DIR behavior unclear](https://github.com/anthropics/claude-code/issues/3833)
-- [Claude Code issue #25762: Feature request for CLAUDE_CONFIG_DIR](https://github.com/anthropics/claude-code/issues/25762)
-- [Claude Code issue #9113: Workspace trust not respecting pre-config](https://github.com/anthropics/claude-code/issues/9113)
+### Official Documentation
+- [Claude Code Settings Reference](https://code.claude.com/docs/en/settings) -- complete settings hierarchy, managed settings locations, merge behavior
+- [Claude Code Permissions Docs](https://code.claude.com/docs/en/permissions) -- permissions.allow syntax, defaultMode options, managed-only settings list
+- [Claude Code Sandboxing Docs](https://code.claude.com/docs/en/sandboxing) -- allowManagedDomainsOnly, sandbox path resolution, security limitations
+
+### Claude Code Issue Tracker
+- [#28922: .claude.json race condition reported 8 times](https://github.com/anthropics/claude-code/issues/28922) -- concurrent write corruption
+- [#18998: Severe .claude.json corruption with 30+ sessions](https://github.com/anthropics/claude-code/issues/18998) -- 14 corruptions in 11 hours
+- [#25503: --dangerously-skip-permissions should bypass dialog](https://github.com/anthropics/claude-code/issues/25503) -- skipDangerousModePermissionPrompt regression
+- [#35718: bypass mode doesn't bypass ~/.claude/ writes](https://github.com/anthropics/claude-code/issues/35718) -- skill memory blocked
+- [#36168: bypass permissions broken in v2.1.77+](https://github.com/anthropics/claude-code/issues/36168) -- complete regression
+- [#32466: bypass mode still prompts for Bash commands](https://github.com/anthropics/claude-code/issues/32466) -- v2.1.71 regression
+- [#28506: bypass doesn't bypass workspace trust](https://github.com/anthropics/claude-code/issues/28506) -- .git dependency discovered
+- [#9113: workspace trust not respecting pre-config](https://github.com/anthropics/claude-code/issues/9113) -- trust dialog bug
+- [#5572: hasTrustDialogHooksAccepted can't be set via config](https://github.com/anthropics/claude-code/issues/5572)
+- [#26233: skipDangerousModePermissionPrompt undocumented](https://github.com/anthropics/claude-code/issues/26233)
+- [#3833: CLAUDE_CONFIG_DIR behavior unclear](https://github.com/anthropics/claude-code/issues/3833)
+- [#29026: Desktop app ignores settings.json permissions](https://github.com/anthropics/claude-code/issues/29026)
+- [#18160: Bash permission patterns not matching](https://github.com/anthropics/claude-code/issues/18160)
 - [CVE-2026-33068: Workspace trust dialog bypass via repo settings](https://github.com/anthropics/claude-code/security/advisories/GHSA-mmgp-wc2j-qcv7)
-- [Claude Code Authentication Docs](https://code.claude.com/docs/en/authentication) -- credential storage locations
-- [sandbox-exec deprecation (OpenAI Codex issue #215)](https://github.com/openai/codex/issues/215) -- macOS Seatbelt status
-- [Hacker News: macOS Seatbelt situation](https://news.ycombinator.com/item?id=44283454) -- community analysis of deprecation
-- [Git Environment Variables](https://git-scm.com/book/en/v2/Git-Internals-Environment-Variables) -- GIT_CONFIG_GLOBAL, GIT_SSH_COMMAND
-- [ssh_config(5) man page](https://www.man7.org/linux/man-pages/man5/ssh_config.5.html) -- SSH HOME dependency
-- [Trail of Bits: claude-code-config](https://github.com/trailofbits/claude-code-config) -- opinionated sandbox configuration reference
-- Existing codebase: `init.rs` (pre_trust_directory), `sandbox.rs` (RuntimeState), `shell_wrapper.rs`, `doctor.rs`, `deps.rs`
-- Project memory: SEED-003 (OpenShell API key), SEED-004 (host settings leak)
+
+### Blog Posts and Analysis
+- [Debugging Claude Code's Bypass Permissions Regression](https://www.testinginproduction.co/blog/debugging-claude-code-bypass-permissions) -- VS Code silent fallback analysis
+- [Trail of Bits claude-code-config](https://github.com/trailofbits/claude-code-config) -- opinionated sandbox config reference
+- [managed-settings.com](https://managed-settings.com/) -- managed settings configuration guide
+
+### Existing Codebase
+- `init.rs` (`pre_trust_directory()`) -- writes to real `~/.claude.json`, needs HOME-aware update
+- `codegen/settings.rs` (`generate_settings()`) -- uses `~/.ssh` in denyRead, needs absolute paths
+- `templates/agent-wrapper.sh.j2` -- hardcodes `--dangerously-skip-permissions`, needs replacement
+- `agent/types.rs` (`SandboxOverrides`) -- may need new fields for permission rules
+- `main.rs` (`cmd_up`) -- generates settings per-agent, needs HOME override and trust setup
 
 ---
-*Pitfalls research for: CC native sandbox + per-agent HOME isolation (v2.0 migration)*
-*Researched: 2026-03-23*
+*Pitfalls research for: Headless agent isolation -- HOME override + managed settings + dropping bypass mode (v2.1)*
+*Researched: 2026-03-24*
