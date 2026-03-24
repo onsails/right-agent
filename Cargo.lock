@@ -1415,6 +1415,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "dirs",
  "miette",
  "predicates",
  "rightclaw",
