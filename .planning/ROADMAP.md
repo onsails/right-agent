@@ -62,7 +62,11 @@ Plans:
   2. `rightclaw doctor` detects Ubuntu 24.04+ AppArmor restriction on unprivileged user namespaces and prints fix guidance
   3. `rightclaw doctor` no longer checks for OpenShell
   4. `install.sh` installs bubblewrap and socat on Linux (apt/dnf/pacman), skips on macOS, and no longer installs OpenShell
-**Plans**: TBD
+**Plans:** 2 plans
+
+Plans:
+- [ ] 07-01-PLAN.md -- Add bwrap/socat binary checks and bwrap smoke test to doctor.rs
+- [ ] 07-02-PLAN.md -- Replace OpenShell install with sandbox deps in install.sh
 
 ## Progress
 
@@ -73,4 +77,4 @@ Phases execute in numeric order: 5 -> 6 -> 7
 |-------|-----------|----------------|--------|-----------|
 | 5. Remove OpenShell | v2.0 | 2/2 | Complete | 2026-03-24 |
 | 6. Sandbox Configuration | v2.0 | 0/2 | Planning complete | - |
-| 7. Platform Compatibility | v2.0 | 0/0 | Not started | - |
+| 7. Platform Compatibility | v2.0 | 0/2 | Planning complete | - |
