@@ -1,15 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.1
-milestone_name: headless-agent-isolation
+milestone: v2.0
+milestone_name: Native Sandbox & Agent Isolation
 status: Defining requirements
-stopped_at: null
-last_updated: "2026-03-24"
+stopped_at: v2.1 requirements blocked — awaiting manual dontAsk mode testing
+last_updated: "2026-03-24T19:29:45.319Z"
+last_activity: 2026-03-24 — Milestone v2.1 started
 progress:
-  total_phases: 0
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_phases: 3
+  completed_phases: 3
+  total_plans: 6
+  completed_plans: 6
 ---
 
 # Project State
@@ -86,6 +87,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T15:14:21.507Z
-Stopped at: Completed 07-01-PLAN.md
-Resume file: None
+Last session: 2026-03-24T19:29:45.316Z
+Stopped at: v2.1 requirements blocked — awaiting manual dontAsk mode testing
+Resume file: .planning/research/SUMMARY.md
