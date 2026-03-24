@@ -36,7 +36,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] 05-01-PLAN.md -- Remove all OpenShell production code (structs, functions, templates, wrappers)
-- [ ] 05-02-PLAN.md -- Update all tests for simplified OpenShell-free types and APIs
+- [x] 05-02-PLAN.md -- Update all tests for simplified OpenShell-free types and APIs
 
 ### Phase 6: Sandbox Configuration
 **Goal**: Each agent launches with CC native sandbox enforced via generated settings.json -- filesystem and network restrictions scoped per agent

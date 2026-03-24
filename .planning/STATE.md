@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Native Sandbox & Agent Isolation
-status: Ready to execute
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-03-24T13:30:56.649Z"
+status: Phase complete — ready for verification
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-03-24T13:36:56.453Z"
 progress:
   total_phases: 3
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State
@@ -47,6 +47,7 @@ Plan: 2 of 2
 
 *Updated after each plan completion*
 | Phase 05 P01 | 9min | 2 tasks | 20 files |
+| Phase 05 P02 | 2min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -60,6 +61,7 @@ Recent decisions affecting current work:
 - [v2.0 roadmap]: Coarse granularity -- 3 phases (remove OpenShell, add sandbox config, update tooling)
 - [Phase 05]: Kept --no-sandbox CLI flag as no-op for Phase 6 sandbox config reuse
 - [Phase 05]: state.rs replaces sandbox.rs with sandbox-agnostic structs for clean Phase 6 foundation
+- [Phase 05]: v1 state.json backward compat verified -- serde ignores unknown fields (sandbox_name, no_sandbox) in simplified structs
 
 ### Pending Todos
 
@@ -72,6 +74,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T13:30:56.647Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-03-24T13:36:56.450Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None
