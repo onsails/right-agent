@@ -1,28 +1,18 @@
 use super::*;
 
 #[test]
-fn sandbox_name_for_prefixes_with_rightclaw() {
-    assert_eq!(sandbox_name_for("myagent"), "rightclaw-myagent");
-    assert_eq!(sandbox_name_for("watch-dog"), "rightclaw-watch-dog");
-    assert_eq!(sandbox_name_for("a"), "rightclaw-a");
-}
-
-#[test]
 fn runtime_state_json_roundtrip() {
     let state = RuntimeState {
         agents: vec![
             AgentState {
                 name: "agent1".to_string(),
-                sandbox_name: "rightclaw-agent1".to_string(),
             },
             AgentState {
                 name: "agent2".to_string(),
-                sandbox_name: "rightclaw-agent2".to_string(),
             },
         ],
         socket_path: "/tmp/pc.sock".to_string(),
         started_at: "2026-03-22T12:00:00Z".to_string(),
-        no_sandbox: false,
     };
 
     let json = serde_json::to_string_pretty(&state).unwrap();
@@ -38,11 +28,9 @@ fn write_state_and_read_state_roundtrip() {
     let state = RuntimeState {
         agents: vec![AgentState {
             name: "test-agent".to_string(),
-            sandbox_name: "rightclaw-test-agent".to_string(),
         }],
         socket_path: "/run/pc.sock".to_string(),
         started_at: "2026-03-22T16:00:00Z".to_string(),
-        no_sandbox: false,
     };
 
     write_state(&state, &path).unwrap();

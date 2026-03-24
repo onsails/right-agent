@@ -48,8 +48,6 @@ pub struct AgentDef {
     pub path: PathBuf,
     /// Path to IDENTITY.md (required).
     pub identity_path: PathBuf,
-    /// Path to policy.yaml (required).
-    pub policy_path: PathBuf,
     /// Parsed agent.yaml if present.
     pub config: Option<AgentConfig>,
     /// Path to .mcp.json if present.
