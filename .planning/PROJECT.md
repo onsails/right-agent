@@ -114,9 +114,18 @@ This document evolves at phase transitions and milestone boundaries.
 
 **Known limitations:**
 - SEED-002: BOOTSTRAP.md onboarding doesn't trigger via Telegram
-- SEED-004: Per-agent HOME isolation deferred (edge cases with trust files, git/SSH)
 - `rightclaw restart` disabled (process-compose is_tty bug)
 - `test_status_no_running_instance` integration test fails (pre-existing)
 
+## Current Milestone: v2.1 Headless Agent Isolation
+
+**Goal:** Make agents fully autonomous without interactive TUI prompts — complete isolation from host config, silent sandbox enforcement, no bypass warnings.
+
+**Target features:**
+- Drop `--dangerously-skip-permissions`, use explicit `permissions.allow` + sandbox (no bypass warning)
+- Managed settings for `allowManagedDomainsOnly: true` (silent domain blocking)
+- Per-agent `$HOME` override — agents don't see host config
+- Solve HOME edge cases: trust file, OAuth/API key, git/SSH env forwarding
+
 ---
-*Last updated: 2026-03-24 after v2.0 milestone*
+*Last updated: 2026-03-24 — milestone v2.1 started*

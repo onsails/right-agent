@@ -1,30 +1,32 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.0
-milestone_name: Native Sandbox & Agent Isolation
-status: v2.0 milestone complete
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-03-24T15:36:20.685Z"
+milestone: v2.1
+milestone_name: headless-agent-isolation
+status: Defining requirements
+stopped_at: null
+last_updated: "2026-03-24"
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 6
-  completed_plans: 6
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-23)
+See: .planning/PROJECT.md (updated 2026-03-24)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 07 — platform-compatibility
+**Current focus:** Defining requirements for v2.1
 
 ## Current Position
 
-Phase: 07
-Plan: Not started
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-24 — Milestone v2.1 started
 
 ## Performance Metrics
 
