@@ -75,25 +75,35 @@ pub fn init_rightclaw_home(
     std::fs::write(claude_skills_dir.join("installed.json"), "{}")
         .map_err(|e| miette::miette!("Failed to write installed.json: {}", e))?;
 
-    // Always create .claude/settings.json with agent-specific settings.
+    // Generate .claude/settings.json via codegen (D-17, D-18).
+    // Build a synthetic AgentDef for the default "right" agent.
+    // Note: .mcp.json doesn't exist on disk yet at this point, but
+    // generate_settings() only checks mcp_config_path.is_some(), never reads the file.
     {
+        let agent_def = crate::agent::AgentDef {
+            name: "right".to_string(),
+            path: agents_dir.clone(),
+            identity_path: agents_dir.join("IDENTITY.md"),
+            config: None,
+            mcp_config_path: if telegram_token.is_some() {
+                Some(agents_dir.join(".mcp.json"))
+            } else {
+                None
+            },
+            soul_path: None,
+            user_path: None,
+            memory_path: None,
+            agents_path: None,
+            tools_path: None,
+            bootstrap_path: None,
+            heartbeat_path: None,
+        };
+
+        let settings = crate::codegen::generate_settings(&agent_def, false)?;
         let claude_dir = agents_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir).map_err(|e| {
             miette::miette!("Failed to create {}: {}", claude_dir.display(), e)
         })?;
-
-        let mut settings = serde_json::json!({
-            "skipDangerousModePermissionPrompt": true,
-            "spinnerTipsEnabled": false,
-            "prefersReducedMotion": true
-        });
-
-        if telegram_token.is_some() {
-            settings["enabledPlugins"] = serde_json::json!({
-                "telegram@claude-plugins-official": true
-            });
-        }
-
         std::fs::write(
             claude_dir.join("settings.json"),
             serde_json::to_string_pretty(&settings)
@@ -462,6 +472,22 @@ mod tests {
             content.contains("prefersReducedMotion"),
             "settings.json should contain prefersReducedMotion"
         );
+    }
+
+    #[test]
+    fn init_creates_settings_with_sandbox_config() {
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), None, None, None).unwrap();
+
+        let settings_path = dir.path().join("agents/right/.claude/settings.json");
+        let content = std::fs::read_to_string(&settings_path).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(json["sandbox"]["enabled"], true);
+        assert_eq!(json["sandbox"]["autoAllowBashIfSandboxed"], true);
+        assert_eq!(json["sandbox"]["allowUnsandboxedCommands"], false);
+        assert!(json["sandbox"]["filesystem"]["allowWrite"].as_array().is_some());
+        assert!(json["sandbox"]["network"]["allowedDomains"].as_array().is_some());
     }
 
     #[test]
