@@ -179,6 +179,86 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
     checks
 }
 
+/// Check if bubblewrap sandbox works by running a smoke test.
+///
+/// Runs `bwrap --ro-bind / / --unshare-net --dev /dev true` which exercises the
+/// same code path Claude Code's sandbox-runtime uses. Must include `--unshare-net`
+/// to detect AppArmor restrictions on network namespace creation (RTM_NEWADDR).
+fn check_bwrap_sandbox() -> DoctorCheck {
+    let result = std::process::Command::new("bwrap")
+        .args([
+            "--ro-bind", "/", "/", "--unshare-net", "--dev", "/dev", "true",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    match result {
+        Ok(output) if output.status.success() => DoctorCheck {
+            name: "bwrap-sandbox".to_string(),
+            status: CheckStatus::Pass,
+            detail: "bubblewrap sandbox functional".to_string(),
+            fix: None,
+        },
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = if stderr.contains("RTM_NEWADDR")
+                || stderr.contains("Operation not permitted")
+            {
+                "AppArmor restricts bubblewrap user namespaces".to_string()
+            } else if stderr.contains("No permissions") {
+                "unprivileged user namespaces disabled".to_string()
+            } else {
+                format!("bubblewrap sandbox test failed: {}", stderr.trim())
+            };
+            DoctorCheck {
+                name: "bwrap-sandbox".to_string(),
+                status: CheckStatus::Fail,
+                detail,
+                fix: Some(bwrap_fix_guidance()),
+            }
+        }
+        Err(e) => DoctorCheck {
+            name: "bwrap-sandbox".to_string(),
+            status: CheckStatus::Fail,
+            detail: format!("failed to run bwrap smoke test: {e}"),
+            fix: Some(bwrap_fix_guidance()),
+        },
+    }
+}
+
+/// Generate fix guidance for bubblewrap sandbox failures.
+///
+/// Primary fix: per-application AppArmor profile (targeted, secure).
+/// Secondary fix: system-wide sysctl disable (temporary workaround).
+fn bwrap_fix_guidance() -> String {
+    "\
+Create an AppArmor profile for bwrap:
+
+  sudo tee /etc/apparmor.d/bwrap << 'PROFILE'
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/bwrap>
+  }
+  PROFILE
+
+  sudo apparmor_parser -r /etc/apparmor.d/bwrap
+
+Or temporarily disable the restriction:
+
+  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+For persistent fix, add to /etc/sysctl.d/60-bwrap-userns.conf:
+
+  kernel.apparmor_restrict_unprivileged_userns=0
+
+See: https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces"
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +426,74 @@ mod tests {
         assert!(binary_names.contains(&"process-compose"), "missing process-compose check");
         assert!(binary_names.contains(&"claude"), "missing claude check");
         assert!(!binary_names.contains(&"openshell"), "openshell should not be checked");
+    }
+
+    #[test]
+    fn check_bwrap_sandbox_returns_doctor_check() {
+        // Call the function directly -- will pass or fail depending on host,
+        // but must not panic and must return correct shape.
+        let check = check_bwrap_sandbox();
+        assert_eq!(check.name, "bwrap-sandbox");
+        // Status is either Pass or Fail depending on system -- just verify it's set
+        assert!(
+            check.status == CheckStatus::Pass || check.status == CheckStatus::Fail,
+            "status must be Pass or Fail, got: {:?}",
+            check.status
+        );
+    }
+
+    #[test]
+    fn bwrap_fix_guidance_contains_apparmor_profile() {
+        let guidance = bwrap_fix_guidance();
+        assert!(
+            guidance.contains("apparmor_parser"),
+            "fix guidance must mention apparmor_parser"
+        );
+        assert!(
+            guidance.contains("/etc/apparmor.d/bwrap"),
+            "fix guidance must include AppArmor profile path"
+        );
+        assert!(
+            guidance.contains("sysctl"),
+            "fix guidance must mention sysctl workaround"
+        );
+        assert!(
+            guidance.contains("https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces"),
+            "fix guidance must include Ubuntu docs link"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_doctor_includes_bwrap_socat_on_linux() {
+        let dir = tempdir().unwrap();
+        let checks = run_doctor(dir.path());
+
+        let check_names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            check_names.contains(&"bwrap"),
+            "Linux doctor must check for bwrap"
+        );
+        assert!(
+            check_names.contains(&"socat"),
+            "Linux doctor must check for socat"
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn run_doctor_skips_bwrap_socat_on_non_linux() {
+        let dir = tempdir().unwrap();
+        let checks = run_doctor(dir.path());
+
+        let check_names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            !check_names.contains(&"bwrap"),
+            "non-Linux doctor must not check for bwrap"
+        );
+        assert!(
+            !check_names.contains(&"socat"),
+            "non-Linux doctor must not check for socat"
+        );
     }
 }
