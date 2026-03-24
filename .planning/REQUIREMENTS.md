@@ -9,7 +9,7 @@
 
 - [x] **PERM-01**: Shell wrapper keeps `--dangerously-skip-permissions` (all tools auto-approved including future MCP tools and crons)
 - [x] **PERM-02**: Pre-populate `.claude.json` in agent HOME with bypass-accepted state to suppress warning dialog on every launch
-- [ ] **PERM-03**: Permission relay active via Telegram channel as safety net for any edge case prompts that bypass suppression
+- [x] **PERM-03**: Permission relay active via Telegram channel as safety net for any edge case prompts that bypass suppression
 
 ### HOME Isolation
 
@@ -21,7 +21,7 @@
 
 ### Agent Environment
 
-- [ ] **AENV-01**: `rightclaw up` initializes `.git/` in each agent directory (bare init so CC recognizes trusted workspace)
+- [x] **AENV-01**: `rightclaw up` initializes `.git/` in each agent directory (bare init so CC recognizes trusted workspace)
 - [x] **AENV-02**: `rightclaw up` copies Telegram channel config to agent HOME (`$AGENT_DIR/.claude/channels/telegram/`) when Telegram is configured
 - [x] **AENV-03**: Pre-populated `.claude/` includes: `settings.json` (sandbox config), `settings.local.json` (empty `{}`), `skills/` (copied from init)
 
@@ -53,13 +53,13 @@
 |-------------|-------|--------|
 | PERM-01 | Phase 8 | Complete |
 | PERM-02 | Phase 8 | Complete |
-| PERM-03 | Phase 9 | Pending |
+| PERM-03 | Phase 9 | Complete |
 | HOME-01 | Phase 8 | Complete |
 | HOME-02 | Phase 8 | Complete |
 | HOME-03 | Phase 8 | Complete |
 | HOME-04 | Phase 8 | Complete |
 | HOME-05 | Phase 8 | Complete |
-| AENV-01 | Phase 9 | Pending |
+| AENV-01 | Phase 9 | Complete |
 | AENV-02 | Phase 9 | Complete |
 | AENV-03 | Phase 9 | Complete |
 | TOOL-01 | Phase 10 | Pending |

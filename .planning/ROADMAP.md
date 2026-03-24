@@ -66,7 +66,7 @@ Plans:
 **Plans:** 1/2 plans executed
 Plans:
 - [x] 09-01-PLAN.md -- AgentConfig Telegram fields, codegen/telegram.rs, codegen/skills.rs, init.rs refactor
-- [ ] 09-02-PLAN.md -- Wire cmd_up steps 6-9, git Warn doctor check
+- [x] 09-02-PLAN.md -- Wire cmd_up steps 6-9, git Warn doctor check
 
 ### Phase 10: Doctor & Managed Settings
 **Goal**: Users can opt into machine-wide domain blocking and get warned about managed settings conflicts
