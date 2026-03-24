@@ -117,9 +117,11 @@ This document evolves at phase transitions and milestone boundaries.
 
 **Phase 5 complete** (2026-03-24): All OpenShell code removed. Shell wrappers launch claude directly. sandbox.rs replaced by state.rs. Agent validation simplified to IDENTITY.md only.
 
+**Phase 6 complete** (2026-03-24): Per-agent `.claude/settings.json` generated with CC native sandbox config. Filesystem restricted to agent dir, network allowlist with 6 default domains, secure defaults. `SandboxOverrides` in agent.yaml for per-agent customization with merge semantics.
+
 **v2.0 addresses:**
 - SEED-003: OpenShell API key requirement → CC native sandbox needs no API key
 - SEED-004: Host settings leak → per-agent HOME isolation
 
 ---
-*Last updated: 2026-03-23 — milestone v2.0 started*
+*Last updated: 2026-03-24 — Phase 6 complete*
