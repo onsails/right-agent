@@ -1,7 +1,7 @@
 # Requirements: RightClaw
 
 **Defined:** 2026-03-24
-**Core Value:** Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
+**Core Value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
 
 ## v2.1 Requirements
 
@@ -13,7 +13,7 @@
 
 ### HOME Isolation
 
-- [ ] **HOME-01**: Shell wrapper sets `HOME=$AGENT_DIR` before launching claude — agent sees only its own `.claude/`, `.claude.json`, settings, memory
+- [ ] **HOME-01**: Shell wrapper sets `HOME=$AGENT_DIR` before launching claude -- agent sees only its own `.claude/`, `.claude.json`, settings, memory
 - [ ] **HOME-02**: `rightclaw up` generates per-agent `.claude.json` with workspace trust entries (`hasTrustDialogAccepted`) + bypass-accepted state inside agent dir
 - [ ] **HOME-03**: `rightclaw up` symlinks host OAuth credentials (`~/.claude/.credentials.json`) to each agent's `.claude/.credentials.json`
 - [ ] **HOME-04**: Shell wrapper forwards git/SSH identity via env vars (`GIT_CONFIG_GLOBAL`, `SSH_AUTH_SOCK`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`)
@@ -35,14 +35,14 @@
 ### Smart Task Routing (v2.2+)
 
 - **ROUTE-01**: System prompt instructs agent to use background execution for complex tasks with channel feedback
-- **ROUTE-02**: Model routing by complexity — opus for hard, sonnet for moderate, haiku subagent for simple questions
+- **ROUTE-02**: Model routing by complexity -- opus for hard, sonnet for moderate, haiku subagent for simple questions
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
 | Drop --dangerously-skip-permissions | Breaks crons, MCP tools, headless operation. Sandbox is the security layer, not permissions. |
-| dontAsk mode as default | Silently denies unknown tools — breaks user-installed MCP servers and crons |
+| dontAsk mode as default | Silently denies unknown tools -- breaks user-installed MCP servers and crons |
 | allowManagedDomainsOnly as default | Machine-wide side effect, needs sudo, conflicts with per-agent domains. Opt-in only. |
 | CLAUDE_CONFIG_DIR as primary | Buggy (9+ open issues). HOME override is more reliable and comprehensive. |
 | Credential copy instead of symlink | Symlink keeps tokens fresh. CC reads/writes credentials outside sandbox. Race condition risk accepted. |
@@ -51,25 +51,25 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PERM-01 | — | Pending |
-| PERM-02 | — | Pending |
-| PERM-03 | — | Pending |
-| HOME-01 | — | Pending |
-| HOME-02 | — | Pending |
-| HOME-03 | — | Pending |
-| HOME-04 | — | Pending |
-| HOME-05 | — | Pending |
-| AENV-01 | — | Pending |
-| AENV-02 | — | Pending |
-| AENV-03 | — | Pending |
-| TOOL-01 | — | Pending |
-| TOOL-02 | — | Pending |
+| PERM-01 | Phase 8 | Pending |
+| PERM-02 | Phase 8 | Pending |
+| PERM-03 | Phase 9 | Pending |
+| HOME-01 | Phase 8 | Pending |
+| HOME-02 | Phase 8 | Pending |
+| HOME-03 | Phase 8 | Pending |
+| HOME-04 | Phase 8 | Pending |
+| HOME-05 | Phase 8 | Pending |
+| AENV-01 | Phase 9 | Pending |
+| AENV-02 | Phase 9 | Pending |
+| AENV-03 | Phase 9 | Pending |
+| TOOL-01 | Phase 10 | Pending |
+| TOOL-02 | Phase 10 | Pending |
 
 **Coverage:**
 - v2.1 requirements: 13 total
-- Mapped to phases: 0
-- Unmapped: 13
+- Mapped to phases: 13
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-24*
-*Last updated: 2026-03-24 after initial definition*
+*Last updated: 2026-03-24 after roadmap creation*
