@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 2 plans
 
 Plans:
-- [ ] 05-01-PLAN.md -- Remove all OpenShell production code (structs, functions, templates, wrappers)
+- [x] 05-01-PLAN.md -- Remove all OpenShell production code (structs, functions, templates, wrappers)
 - [ ] 05-02-PLAN.md -- Update all tests for simplified OpenShell-free types and APIs
 
 ### Phase 6: Sandbox Configuration
