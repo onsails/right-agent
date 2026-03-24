@@ -49,10 +49,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Host OAuth credentials are symlinked into each agent's `.claude/.credentials.json` so agents authenticate without copies going stale
   4. Shell wrapper forwards git identity (`GIT_CONFIG_GLOBAL`), SSH (`SSH_AUTH_SOCK`, `GIT_SSH_COMMAND`), and author info so git operations work under HOME override
   5. All generated sandbox `allowWrite`/`denyRead` paths use absolute paths (not `~/` which resolves to agent HOME, not real HOME)
-**Plans:** 2 plans
+**Plans:** 0/2 plans executed
 Plans:
-- [ ] 08-01-PLAN.md -- Shell wrapper HOME override, env forwarding, .claude.json generation, credential symlink
-- [ ] 08-02-PLAN.md -- Sandbox absolute path hardening, allowRead support, integration tests
+- [x] 08-01-PLAN.md -- Shell wrapper HOME override, env forwarding, .claude.json generation, credential symlink
+- [x] 08-02-PLAN.md -- Sandbox absolute path hardening, allowRead support, integration tests
 
 ### Phase 9: Agent Environment Setup
 **Goal**: Agents launch with a fully pre-populated environment -- no CC prompts for missing config, trust dialogs, or channel setup
@@ -84,6 +84,6 @@ Phases execute in numeric order: 8 -> 9 -> 10
 | 5. Remove OpenShell | v2.0 | 2/2 | Complete | 2026-03-24 |
 | 6. Sandbox Configuration | v2.0 | 2/2 | Complete | 2026-03-24 |
 | 7. Platform Compatibility | v2.0 | 2/2 | Complete | 2026-03-24 |
-| 8. HOME Isolation & Permission Model | v2.1 | 0/2 | Planning | - |
+| 8. HOME Isolation & Permission Model | v2.1 | 0/2 | Planned    |  |
 | 9. Agent Environment Setup | v2.1 | 0/? | Not started | - |
 | 10. Doctor & Managed Settings | v2.1 | 0/? | Not started | - |

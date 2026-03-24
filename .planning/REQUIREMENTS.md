@@ -7,17 +7,17 @@
 
 ### Permission Model
 
-- [ ] **PERM-01**: Shell wrapper keeps `--dangerously-skip-permissions` (all tools auto-approved including future MCP tools and crons)
-- [ ] **PERM-02**: Pre-populate `.claude.json` in agent HOME with bypass-accepted state to suppress warning dialog on every launch
+- [x] **PERM-01**: Shell wrapper keeps `--dangerously-skip-permissions` (all tools auto-approved including future MCP tools and crons)
+- [x] **PERM-02**: Pre-populate `.claude.json` in agent HOME with bypass-accepted state to suppress warning dialog on every launch
 - [ ] **PERM-03**: Permission relay active via Telegram channel as safety net for any edge case prompts that bypass suppression
 
 ### HOME Isolation
 
-- [ ] **HOME-01**: Shell wrapper sets `HOME=$AGENT_DIR` before launching claude -- agent sees only its own `.claude/`, `.claude.json`, settings, memory
-- [ ] **HOME-02**: `rightclaw up` generates per-agent `.claude.json` with workspace trust entries (`hasTrustDialogAccepted`) + bypass-accepted state inside agent dir
-- [ ] **HOME-03**: `rightclaw up` symlinks host OAuth credentials (`~/.claude/.credentials.json`) to each agent's `.claude/.credentials.json`
-- [ ] **HOME-04**: Shell wrapper forwards git/SSH identity via env vars (`GIT_CONFIG_GLOBAL`, `SSH_AUTH_SOCK`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`)
-- [ ] **HOME-05**: Generated sandbox `allowWrite` paths use absolute paths (not `~/` which would resolve to agent HOME under override)
+- [x] **HOME-01**: Shell wrapper sets `HOME=$AGENT_DIR` before launching claude -- agent sees only its own `.claude/`, `.claude.json`, settings, memory
+- [x] **HOME-02**: `rightclaw up` generates per-agent `.claude.json` with workspace trust entries (`hasTrustDialogAccepted`) + bypass-accepted state inside agent dir
+- [x] **HOME-03**: `rightclaw up` symlinks host OAuth credentials (`~/.claude/.credentials.json`) to each agent's `.claude/.credentials.json`
+- [x] **HOME-04**: Shell wrapper forwards git/SSH identity via env vars (`GIT_CONFIG_GLOBAL`, `SSH_AUTH_SOCK`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`)
+- [x] **HOME-05**: Generated sandbox `allowWrite` paths use absolute paths (not `~/` which would resolve to agent HOME under override)
 
 ### Agent Environment
 
@@ -51,14 +51,14 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PERM-01 | Phase 8 | Pending |
-| PERM-02 | Phase 8 | Pending |
+| PERM-01 | Phase 8 | Complete |
+| PERM-02 | Phase 8 | Complete |
 | PERM-03 | Phase 9 | Pending |
-| HOME-01 | Phase 8 | Pending |
-| HOME-02 | Phase 8 | Pending |
-| HOME-03 | Phase 8 | Pending |
-| HOME-04 | Phase 8 | Pending |
-| HOME-05 | Phase 8 | Pending |
+| HOME-01 | Phase 8 | Complete |
+| HOME-02 | Phase 8 | Complete |
+| HOME-03 | Phase 8 | Complete |
+| HOME-04 | Phase 8 | Complete |
+| HOME-05 | Phase 8 | Complete |
 | AENV-01 | Phase 9 | Pending |
 | AENV-02 | Phase 9 | Pending |
 | AENV-03 | Phase 9 | Pending |
