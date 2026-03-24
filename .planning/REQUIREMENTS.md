@@ -22,8 +22,8 @@
 ### Agent Environment
 
 - [ ] **AENV-01**: `rightclaw up` initializes `.git/` in each agent directory (bare init so CC recognizes trusted workspace)
-- [ ] **AENV-02**: `rightclaw up` copies Telegram channel config to agent HOME (`$AGENT_DIR/.claude/channels/telegram/`) when Telegram is configured
-- [ ] **AENV-03**: Pre-populated `.claude/` includes: `settings.json` (sandbox config), `settings.local.json` (empty `{}`), `skills/` (copied from init)
+- [x] **AENV-02**: `rightclaw up` copies Telegram channel config to agent HOME (`$AGENT_DIR/.claude/channels/telegram/`) when Telegram is configured
+- [x] **AENV-03**: Pre-populated `.claude/` includes: `settings.json` (sandbox config), `settings.local.json` (empty `{}`), `skills/` (copied from init)
 
 ### Doctor & Tooling
 
@@ -60,8 +60,8 @@
 | HOME-04 | Phase 8 | Complete |
 | HOME-05 | Phase 8 | Complete |
 | AENV-01 | Phase 9 | Pending |
-| AENV-02 | Phase 9 | Pending |
-| AENV-03 | Phase 9 | Pending |
+| AENV-02 | Phase 9 | Complete |
+| AENV-03 | Phase 9 | Complete |
 | TOOL-01 | Phase 10 | Pending |
 | TOOL-02 | Phase 10 | Pending |
 
