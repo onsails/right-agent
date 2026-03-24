@@ -7,11 +7,11 @@
 
 ### Sandbox Migration
 
-- [ ] **SBMG-01**: User can run `rightclaw up` without OpenShell installed — CC native sandbox used instead
-- [ ] **SBMG-02**: All OpenShell code paths removed from codebase (sandbox.rs, openshell dep checks, sandbox create/destroy lifecycle)
-- [ ] **SBMG-03**: Shell wrapper launches `claude` directly instead of wrapping with `openshell sandbox create`
-- [ ] **SBMG-04**: `rightclaw down` no longer attempts OpenShell sandbox destroy — process-compose shutdown is sufficient
-- [ ] **SBMG-05**: OpenShell policy.yaml files removed from default agent template
+- [x] **SBMG-01**: User can run `rightclaw up` without OpenShell installed — CC native sandbox used instead
+- [x] **SBMG-02**: All OpenShell code paths removed from codebase (sandbox.rs, openshell dep checks, sandbox create/destroy lifecycle)
+- [x] **SBMG-03**: Shell wrapper launches `claude` directly instead of wrapping with `openshell sandbox create`
+- [x] **SBMG-04**: `rightclaw down` no longer attempts OpenShell sandbox destroy — process-compose shutdown is sufficient
+- [x] **SBMG-05**: OpenShell policy.yaml files removed from default agent template
 
 ### Sandbox Configuration
 
@@ -64,11 +64,11 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SBMG-01 | Phase 5 | Pending |
-| SBMG-02 | Phase 5 | Pending |
-| SBMG-03 | Phase 5 | Pending |
-| SBMG-04 | Phase 5 | Pending |
-| SBMG-05 | Phase 5 | Pending |
+| SBMG-01 | Phase 5 | Complete |
+| SBMG-02 | Phase 5 | Complete |
+| SBMG-03 | Phase 5 | Complete |
+| SBMG-04 | Phase 5 | Complete |
+| SBMG-05 | Phase 5 | Complete |
 | SBCF-01 | Phase 6 | Pending |
 | SBCF-02 | Phase 6 | Pending |
 | SBCF-03 | Phase 6 | Pending |

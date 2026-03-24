@@ -2,16 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Native Sandbox & Agent Isolation
-status: planning
-stopped_at: Phase 5 context gathered
-last_updated: "2026-03-24T11:57:00.038Z"
-last_activity: 2026-03-24 -- Roadmap created for v2.0 milestone
+status: Ready to execute
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-03-24T13:30:56.649Z"
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 2
+  completed_plans: 1
 ---
 
 # Project State
@@ -21,16 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-23)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 5 - Remove OpenShell
+**Current focus:** Phase 05 — remove-openshell
 
 ## Current Position
 
-Phase: 5 of 7 (Remove OpenShell)
-Plan: 0 of 0 in current phase
-Status: Ready to plan
-Last activity: 2026-03-24 -- Roadmap created for v2.0 milestone
-
-Progress: [░░░░░░░░░░] 0%
+Phase: 05 (remove-openshell) — EXECUTING
+Plan: 2 of 2
 
 ## Performance Metrics
 
@@ -52,6 +46,7 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+| Phase 05 P01 | 9min | 2 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -63,6 +58,8 @@ Recent decisions affecting current work:
 - [v2.0 roadmap]: CC native sandbox (bubblewrap/Seatbelt) replaces OpenShell -- no API key, simpler stack
 - [v2.0 roadmap]: HOME override deferred to v2.1 -- edge cases with trust files, git/SSH, Telegram, credentials
 - [v2.0 roadmap]: Coarse granularity -- 3 phases (remove OpenShell, add sandbox config, update tooling)
+- [Phase 05]: Kept --no-sandbox CLI flag as no-op for Phase 6 sandbox config reuse
+- [Phase 05]: state.rs replaces sandbox.rs with sandbox-agnostic structs for clean Phase 6 foundation
 
 ### Pending Todos
 
@@ -75,6 +72,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T11:57:00.035Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-remove-openshell/05-CONTEXT.md
+Last session: 2026-03-24T13:30:56.647Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: None
