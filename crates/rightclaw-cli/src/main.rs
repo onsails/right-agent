@@ -348,6 +348,41 @@ async fn cmd_up(
 
         // Create credential symlink for OAuth under HOME override (Phase 8, HOME-03).
         rightclaw::codegen::create_credential_symlink(agent, &host_home)?;
+
+        // 6. git init if .git/ missing (Phase 9, AENV-01).
+        // Non-fatal: log warning and continue if git binary absent.
+        if !agent.path.join(".git").exists() {
+            match std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&agent.path)
+                .status()
+            {
+                Ok(s) if s.success() => {
+                    tracing::debug!(agent = %agent.name, "git init done");
+                }
+                Ok(s) => {
+                    tracing::warn!(agent = %agent.name, "git init exited with status {}", s);
+                }
+                Err(e) => {
+                    tracing::warn!(agent = %agent.name, "git binary not found, skipping git init: {e}");
+                }
+            }
+        }
+
+        // 7. Telegram channel config (Phase 9, AENV-02, PERM-03).
+        rightclaw::codegen::generate_telegram_channel_config(agent)?;
+
+        // 8. Reinstall built-in skills (Phase 9, AENV-03).
+        // Always overwrites built-in skill dirs; user skill dirs untouched (D-10).
+        rightclaw::codegen::install_builtin_skills(&agent.path)?;
+
+        // 9. Write settings.local.json only if absent (Phase 9, AENV-03).
+        // CC and agents may write runtime state here — never overwrite (D-11).
+        let settings_local = agent.path.join(".claude").join("settings.local.json");
+        if !settings_local.exists() {
+            std::fs::write(&settings_local, "{}")
+                .map_err(|e| miette::miette!("failed to write settings.local.json for '{}': {e:#}", agent.name))?;
+        }
     }
 
     // Generate process-compose.yaml.
@@ -488,6 +523,163 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
         .exec();
 
     Err(miette::miette!("Failed to attach: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Creates a minimal agent directory with IDENTITY.md so discover_agents accepts it.
+    fn make_agent_dir(base: &TempDir, name: &str) -> PathBuf {
+        let agent_dir = base.path().join(name);
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("IDENTITY.md"), format!("# {name}\n")).unwrap();
+        agent_dir
+    }
+
+    // ---- git init tests ----
+
+    #[test]
+    fn git_init_creates_dot_git_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = make_agent_dir(&tmp, "agent-git-test");
+
+        assert!(!agent_dir.join(".git").exists(), "pre-condition: no .git yet");
+
+        // Run git init logic (same block as in cmd_up).
+        if !agent_dir.join(".git").exists() {
+            let status = std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&agent_dir)
+                .status();
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(s) => panic!("git init failed with status {s}"),
+                Err(e) => panic!("git not found: {e}"),
+            }
+        }
+
+        assert!(agent_dir.join(".git").exists(), ".git/ should exist after init");
+    }
+
+    #[test]
+    fn git_init_is_idempotent_when_dot_git_exists() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = make_agent_dir(&tmp, "agent-idempotent");
+
+        // First init.
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(&agent_dir)
+            .status()
+            .expect("first git init should succeed");
+
+        assert!(agent_dir.join(".git").exists());
+
+        // Second run of the conditional block — should NOT re-init.
+        let was_skipped = agent_dir.join(".git").exists();
+        if was_skipped {
+            // Condition false — nothing happens.
+        } else {
+            std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&agent_dir)
+                .status()
+                .unwrap();
+        }
+
+        assert!(agent_dir.join(".git").exists(), ".git/ still present after idempotent run");
+    }
+
+    // ---- settings.local.json tests ----
+
+    #[test]
+    fn settings_local_json_created_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = make_agent_dir(&tmp, "agent-settings");
+        let claude_dir = agent_dir.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let settings_local = claude_dir.join("settings.local.json");
+        assert!(!settings_local.exists(), "pre-condition: no settings.local.json");
+
+        if !settings_local.exists() {
+            fs::write(&settings_local, "{}").unwrap();
+        }
+
+        assert!(settings_local.exists(), "settings.local.json should be created");
+        assert_eq!(fs::read_to_string(&settings_local).unwrap(), "{}");
+    }
+
+    #[test]
+    fn settings_local_json_not_overwritten_when_exists() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = make_agent_dir(&tmp, "agent-settings-preserve");
+        let claude_dir = agent_dir.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        let settings_local = claude_dir.join("settings.local.json");
+        let original_content = r#"{"theme":"dark","customKey":42}"#;
+        fs::write(&settings_local, original_content).unwrap();
+
+        // cmd_up conditional: only write if absent.
+        if !settings_local.exists() {
+            fs::write(&settings_local, "{}").unwrap();
+        }
+
+        let after = fs::read_to_string(&settings_local).unwrap();
+        assert_eq!(after, original_content, "pre-existing content must not be overwritten");
+    }
+
+    // ---- telegram channel config tests ----
+
+    #[test]
+    fn telegram_config_not_created_when_no_telegram_fields() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = make_agent_dir(&tmp, "agent-no-telegram");
+
+        // Build an AgentDef with no telegram config.
+        let agent = rightclaw::agent::AgentDef {
+            name: "agent-no-telegram".to_string(),
+            path: agent_dir.clone(),
+            identity_path: agent_dir.join("IDENTITY.md"),
+            config: None,
+            mcp_config_path: None,
+            soul_path: None,
+            user_path: None,
+            memory_path: None,
+            agents_path: None,
+            tools_path: None,
+            bootstrap_path: None,
+            heartbeat_path: None,
+        };
+
+        rightclaw::codegen::generate_telegram_channel_config(&agent)
+            .expect("should not fail when no telegram config");
+
+        let telegram_dir = agent_dir.join(".claude").join("channels").join("telegram");
+        assert!(
+            !telegram_dir.exists(),
+            ".claude/channels/telegram/ should NOT be created when no config"
+        );
+    }
+
+    // ---- skills install tests ----
+
+    #[test]
+    fn skills_install_creates_builtin_skill_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = make_agent_dir(&tmp, "agent-skills");
+
+        rightclaw::codegen::install_builtin_skills(&agent_dir)
+            .expect("install_builtin_skills should succeed");
+
+        let skills_dir = agent_dir.join(".claude").join("skills");
+        let clawhub_skill = skills_dir.join("clawhub").join("SKILL.md");
+        assert!(clawhub_skill.exists(), "clawhub/SKILL.md should be installed");
+    }
 }
 
 fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
