@@ -15,12 +15,12 @@
 
 ### Sandbox Configuration
 
-- [ ] **SBCF-01**: `rightclaw up` generates per-agent `.claude/settings.json` in each agent directory with sandbox enabled
-- [ ] **SBCF-02**: Generated settings.json includes filesystem restrictions (allowWrite scoped to agent dir + workspace)
-- [ ] **SBCF-03**: Generated settings.json includes network restrictions (allowedDomains for Telegram, skills.sh, Anthropic API)
-- [ ] **SBCF-04**: Generated settings.json sets `allowUnsandboxedCommands: false` and `autoAllowBashIfSandboxed: true` as secure defaults
-- [ ] **SBCF-05**: User can override sandbox settings per-agent via `agent.yaml` sandbox section (allowWrite, allowedDomains, excludedCommands)
-- [ ] **SBCF-06**: agent.yaml sandbox overrides merge with (not replace) generated defaults
+- [x] **SBCF-01**: `rightclaw up` generates per-agent `.claude/settings.json` in each agent directory with sandbox enabled
+- [x] **SBCF-02**: Generated settings.json includes filesystem restrictions (allowWrite scoped to agent dir + workspace)
+- [x] **SBCF-03**: Generated settings.json includes network restrictions (allowedDomains for Telegram, skills.sh, Anthropic API)
+- [x] **SBCF-04**: Generated settings.json sets `allowUnsandboxedCommands: false` and `autoAllowBashIfSandboxed: true` as secure defaults
+- [x] **SBCF-05**: User can override sandbox settings per-agent via `agent.yaml` sandbox section (allowWrite, allowedDomains, excludedCommands)
+- [x] **SBCF-06**: agent.yaml sandbox overrides merge with (not replace) generated defaults
 
 ### Platform Compatibility
 
@@ -69,12 +69,12 @@
 | SBMG-03 | Phase 5 | Complete |
 | SBMG-04 | Phase 5 | Complete |
 | SBMG-05 | Phase 5 | Complete |
-| SBCF-01 | Phase 6 | Pending |
-| SBCF-02 | Phase 6 | Pending |
-| SBCF-03 | Phase 6 | Pending |
-| SBCF-04 | Phase 6 | Pending |
-| SBCF-05 | Phase 6 | Pending |
-| SBCF-06 | Phase 6 | Pending |
+| SBCF-01 | Phase 6 | Complete |
+| SBCF-02 | Phase 6 | Complete |
+| SBCF-03 | Phase 6 | Complete |
+| SBCF-04 | Phase 6 | Complete |
+| SBCF-05 | Phase 6 | Complete |
+| SBCF-06 | Phase 6 | Complete |
 | PLAT-01 | Phase 7 | Pending |
 | PLAT-02 | Phase 7 | Pending |
 | PLAT-03 | Phase 7 | Pending |

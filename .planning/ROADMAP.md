@@ -50,7 +50,7 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 06-01-PLAN.md -- Create SandboxOverrides type and codegen/settings.rs module with generate_settings()
+- [x] 06-01-PLAN.md -- Create SandboxOverrides type and codegen/settings.rs module with generate_settings()
 - [ ] 06-02-PLAN.md -- Wire generate_settings() into cmd_up() and refactor init.rs
 
 ### Phase 7: Platform Compatibility

@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Native Sandbox & Agent Isolation
-status: Ready to plan
-stopped_at: Phase 6 context gathered
-last_updated: "2026-03-24T14:10:54.422Z"
+status: Ready to execute
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-03-24T14:38:16.759Z"
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 4
+  completed_plans: 3
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-23)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 05 — remove-openshell
+**Current focus:** Phase 06 — sandbox-configuration
 
 ## Current Position
 
-Phase: 6
-Plan: Not started
+Phase: 06 (sandbox-configuration) — EXECUTING
+Plan: 2 of 2
 
 ## Performance Metrics
 
@@ -48,6 +48,7 @@ Plan: Not started
 *Updated after each plan completion*
 | Phase 05 P01 | 9min | 2 tasks | 20 files |
 | Phase 05 P02 | 2min | 2 tasks | 1 files |
+| Phase 06 P01 | 4min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -62,6 +63,8 @@ Recent decisions affecting current work:
 - [Phase 05]: Kept --no-sandbox CLI flag as no-op for Phase 6 sandbox config reuse
 - [Phase 05]: state.rs replaces sandbox.rs with sandbox-agnostic structs for clean Phase 6 foundation
 - [Phase 05]: v1 state.json backward compat verified -- serde ignores unknown fields (sandbox_name, no_sandbox) in simplified structs
+- [Phase 06]: denyRead defaults include ~/.ssh, ~/.aws, ~/.gnupg for security-first sandbox config
+- [Phase 06]: excludedCommands omitted from settings JSON when empty for cleaner output
 
 ### Pending Todos
 
@@ -74,6 +77,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-24T14:10:54.419Z
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-sandbox-configuration/06-CONTEXT.md
+Last session: 2026-03-24T14:38:16.756Z
+Stopped at: Completed 06-01-PLAN.md
+Resume file: None
