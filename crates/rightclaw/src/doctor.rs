@@ -35,7 +35,8 @@ impl fmt::Display for DoctorCheck {
 
 /// Run all doctor checks against the given RightClaw home directory.
 ///
-/// Checks 3 binaries in PATH (rightclaw, process-compose, claude)
+/// Checks 3 core binaries in PATH (rightclaw, process-compose, claude),
+/// adds Linux-only sandbox dependency checks (bwrap, socat, bwrap smoke test),
 /// and validates agent directory structure. Unlike `verify_dependencies()`,
 /// doctor runs ALL checks and collects results -- never short-circuits.
 pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {

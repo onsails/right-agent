@@ -27,8 +27,8 @@
 - [ ] **PLAT-01**: `rightclaw doctor` checks for bubblewrap and socat on Linux (not required on macOS)
 - [ ] **PLAT-02**: `rightclaw doctor` detects Ubuntu 24.04+ AppArmor restriction on unprivileged user namespaces and provides fix guidance
 - [ ] **PLAT-03**: `rightclaw doctor` no longer checks for OpenShell installation
-- [ ] **PLAT-04**: `install.sh` installs bubblewrap and socat on Linux (apt/dnf/pacman detection), skips on macOS
-- [ ] **PLAT-05**: `install.sh` no longer installs OpenShell
+- [x] **PLAT-04**: `install.sh` installs bubblewrap and socat on Linux (apt/dnf/pacman detection), skips on macOS
+- [x] **PLAT-05**: `install.sh` no longer installs OpenShell
 
 ## Future Requirements
 
@@ -78,8 +78,8 @@
 | PLAT-01 | Phase 7 | Pending |
 | PLAT-02 | Phase 7 | Pending |
 | PLAT-03 | Phase 7 | Pending |
-| PLAT-04 | Phase 7 | Pending |
-| PLAT-05 | Phase 7 | Pending |
+| PLAT-04 | Phase 7 | Complete |
+| PLAT-05 | Phase 7 | Complete |
 
 **Coverage:**
 - v2.0 requirements: 16 total

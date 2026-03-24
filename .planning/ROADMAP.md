@@ -66,7 +66,7 @@ Plans:
 
 Plans:
 - [ ] 07-01-PLAN.md -- Add bwrap/socat binary checks and bwrap smoke test to doctor.rs
-- [ ] 07-02-PLAN.md -- Replace OpenShell install with sandbox deps in install.sh
+- [x] 07-02-PLAN.md -- Replace OpenShell install with sandbox deps in install.sh
 
 ## Progress
 
