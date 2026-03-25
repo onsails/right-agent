@@ -59,7 +59,9 @@ Plans:
   2. `rightclaw init` and `rightclaw up` install a `/skills` skill into each agent's `.claude/skills/` directory
   3. The `/skills` skill uses `npx skills find <query>` for search and `npx skills add <owner>/<repo> -a claude` for install
   4. `rightclaw up` removes `.claude/skills/clawhub/` from existing agent dirs if present
-**Plans**: TBD
+**Plans:** 1 plan
+Plans:
+- [ ] 12-01-PLAN.md — rename clawhub dir/constant/paths, update all tests, add stale dir cleanup in cmd_up (SKILLS-01 through SKILLS-05)
 
 ### Phase 13: Policy Gate Rework
 **Goal**: The `/skills` SKILL.md policy gate reflects CC-native sandbox reality — no OpenShell references, instructs agent to check `settings.json` capabilities before activating a skill
@@ -77,5 +79,5 @@ Plans:
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 11. Env Var Injection | v2.2 | 2/2 | Complete    | 2026-03-25 |
-| 12. Skills Registry Rename | v2.2 | 0/? | Not started | - |
+| 12. Skills Registry Rename | v2.2 | 0/1 | Not started | - |
 | 13. Policy Gate Rework | v2.2 | 0/? | Not started | - |
