@@ -1,30 +1,30 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.1
-milestone_name: Headless Agent Isolation
-status: v2.1 milestone complete
-stopped_at: Completed 10-01-PLAN.md
-last_updated: "2026-03-25T13:59:48.823Z"
+milestone: v2.2
+milestone_name: Skills Registry
+status: Defining requirements
+stopped_at: Not started
+last_updated: "2026-03-25T00:00:00.000Z"
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 5
-  completed_plans: 5
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-24)
+See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 10 — doctor-managed-settings
+**Current focus:** v2.2 — Skills Registry
 
 ## Current Position
 
-Phase: 10
-Plan: Not started
+Phase: Not started (defining requirements)
+Plan: —
 
 ## Performance Metrics
 

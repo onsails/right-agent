@@ -51,7 +51,13 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 ### Active
 
-(No active requirements — run `/gsd:new-milestone` to define next)
+- [ ] `/skills` skill replaces `/clawhub` — skills.sh (Vercel) as primary registry
+- [ ] `/skills search`, `install`, `remove`, `list` via skills.sh API
+- [ ] ClawHub kept as secondary/fallback for OpenClaw backward compatibility
+- [ ] Policy gate reworked — drop OpenShell/policy.yaml refs, check CC-native sandbox capabilities
+- [ ] `env:` section in `agent.yaml` — per-agent env var injection
+- [ ] Shell wrapper exports `env:` vars before `exec claude`
+- [ ] `SKILL_CLAWHUB` renamed in Rust codebase; init.rs installs `/skills` instead
 
 ### Out of Scope
 
@@ -131,9 +137,15 @@ This document evolves at phase transitions and milestone boundaries.
 - `test_status_no_running_instance` integration test fails (pre-existing)
 - Tech debt: git absence warning in `verify_dependencies()` (called by `rightclaw up`) but not surfaced by `rightclaw doctor`
 
-## Current Milestone
+## Current Milestone: v2.2 Skills Registry
 
-No active milestone. Run `/gsd:new-milestone` to define next.
+**Goal:** Replace ClawHub with skills.sh as primary registry, ship `/skills` skill manager, add per-agent env var injection.
+
+**Target features:**
+- Drop `/clawhub`, ship `/skills` — skills.sh (Vercel) as primary (200+ curated, agentskills.io format)
+- ClawHub as secondary/fallback for OpenClaw ecosystem compat
+- Policy gate reworked for CC-native sandbox (drop OpenShell/policy.yaml refs)
+- `env:` section in `agent.yaml` — per-agent env var injection via shell wrapper
 
 ---
-*Last updated: 2026-03-25 — v2.1 milestone complete (headless-agent-isolation)*
+*Last updated: 2026-03-25 — v2.2 milestone started (skills-registry)*
