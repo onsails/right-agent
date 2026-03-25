@@ -21,8 +21,12 @@ pub fn install_builtin_skills(agent_path: &Path) -> miette::Result<()> {
         std::fs::write(&path, content)
             .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))?;
     }
-    std::fs::write(claude_skills_dir.join("installed.json"), "{}")
-        .map_err(|e| miette::miette!("failed to write installed.json: {e:#}"))?;
+    // Create-if-absent: preserve user-installed skill registry across restarts
+    let installed_json_path = claude_skills_dir.join("installed.json");
+    if !installed_json_path.exists() {
+        std::fs::write(&installed_json_path, "{}")
+            .map_err(|e| miette::miette!("failed to write installed.json: {e:#}"))?;
+    }
     Ok(())
 }
 
@@ -68,6 +72,36 @@ mod tests {
         install_builtin_skills(dir.path()).unwrap();
         assert!(dir.path().join(".claude/skills/clawhub/SKILL.md").exists());
         assert!(dir.path().join(".claude/skills/rightcron/SKILL.md").exists());
+    }
+
+    #[test]
+    fn installed_json_preserves_existing_content() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path()).unwrap();
+
+        // Simulate user installing a skill (modifies installed.json)
+        let installed_path = dir.path().join(".claude/skills/installed.json");
+        std::fs::write(&installed_path, r#"{"my-skill":"1.0"}"#).unwrap();
+
+        // Second call must NOT overwrite
+        install_builtin_skills(dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(&installed_path).unwrap();
+        assert_eq!(
+            content,
+            r#"{"my-skill":"1.0"}"#,
+            "installed.json must not be overwritten on subsequent install_builtin_skills calls"
+        );
+    }
+
+    #[test]
+    fn installed_json_created_on_first_call() {
+        let dir = tempdir().unwrap();
+        let installed_path = dir.path().join(".claude/skills/installed.json");
+        assert!(!installed_path.exists(), "should not exist before first call");
+        install_builtin_skills(dir.path()).unwrap();
+        let content = std::fs::read_to_string(&installed_path).unwrap();
+        assert_eq!(content, "{}", "first call should create installed.json with empty object");
     }
 
     #[test]
