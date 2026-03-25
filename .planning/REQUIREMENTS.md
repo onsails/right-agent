@@ -27,8 +27,8 @@
 
 ### Doctor & Tooling
 
-- [ ] **TOOL-01**: `rightclaw config strict-sandbox` writes `/etc/claude-code/managed-settings.json` with `allowManagedDomainsOnly: true` (opt-in, requires sudo)
-- [ ] **TOOL-02**: `rightclaw doctor` warns if `/etc/claude-code/managed-settings.json` exists and may conflict with RightClaw settings
+- [x] **TOOL-01**: `rightclaw config strict-sandbox` writes `/etc/claude-code/managed-settings.json` with `allowManagedDomainsOnly: true` (opt-in, requires sudo)
+- [x] **TOOL-02**: `rightclaw doctor` warns if `/etc/claude-code/managed-settings.json` exists and may conflict with RightClaw settings
 
 ## Future Requirements
 
@@ -62,8 +62,8 @@
 | AENV-01 | Phase 9 | Complete |
 | AENV-02 | Phase 9 | Complete |
 | AENV-03 | Phase 9 | Complete |
-| TOOL-01 | Phase 10 | Pending |
-| TOOL-02 | Phase 10 | Pending |
+| TOOL-01 | Phase 10 | Complete |
+| TOOL-02 | Phase 10 | Complete |
 
 **Coverage:**
 - v2.1 requirements: 13 total
