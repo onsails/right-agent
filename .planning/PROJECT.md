@@ -118,26 +118,22 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v2.1 Phase 10 complete** (2026-03-25). Doctor & Managed Settings — `rightclaw config strict-sandbox` opt-in command and doctor conflict detection for `/etc/claude-code/managed-settings.json`. 154 lib tests, 20 integration tests.
+**v2.1 shipped** (2026-03-25). Headless Agent Isolation complete — agents run fully autonomous with no interactive TUI prompts. Per-agent HOME isolation, credential symlinks, pre-populated .claude/ scaffold, managed-settings doctor check. 154 lib tests, 20 integration tests.
 
 **Shipped versions:**
 - v1.0 (2026-03-23): Core runtime — CLI, process-compose, OpenShell sandbox, Telegram, skills, RightCron
 - v2.0 (2026-03-24): Native sandbox — replaced OpenShell with CC sandbox (bubblewrap/Seatbelt), per-agent settings.json, SandboxOverrides in agent.yaml, doctor AppArmor smoke test
+- v2.1 (2026-03-25): Headless agent isolation — per-agent HOME override + credential symlinks + git/SSH forwarding, pre-populated .claude/ scaffold (settings.json, settings.local.json, skills/), git init, Telegram channel copy, managed-settings doctor check
 
 **Known limitations:**
 - SEED-002: BOOTSTRAP.md onboarding doesn't trigger via Telegram
 - `rightclaw restart` disabled (process-compose is_tty bug)
 - `test_status_no_running_instance` integration test fails (pre-existing)
+- Tech debt: git absence warning in `verify_dependencies()` (called by `rightclaw up`) but not surfaced by `rightclaw doctor`
 
-## Current Milestone: v2.1 Headless Agent Isolation
+## Current Milestone
 
-**Goal:** Make agents fully autonomous without interactive TUI prompts — complete isolation from host config, silent sandbox enforcement, no bypass warnings.
-
-**Target features:**
-- Drop `--dangerously-skip-permissions`, use explicit `permissions.allow` + sandbox (no bypass warning)
-- Managed settings for `allowManagedDomainsOnly: true` (silent domain blocking)
-- Per-agent `$HOME` override — agents don't see host config
-- Solve HOME edge cases: trust file, OAuth/API key, git/SSH env forwarding
+No active milestone. Run `/gsd:new-milestone` to define next.
 
 ---
-*Last updated: 2026-03-25 — Phase 10 complete (doctor-managed-settings)*
+*Last updated: 2026-03-25 — v2.1 milestone complete (headless-agent-isolation)*

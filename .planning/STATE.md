@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v2.1
 milestone_name: Headless Agent Isolation
-status: Milestone complete
+status: v2.1 milestone complete
 stopped_at: Completed 10-01-PLAN.md
-last_updated: "2026-03-25T12:43:14.326Z"
+last_updated: "2026-03-25T13:59:48.823Z"
 progress:
   total_phases: 3
   completed_phases: 3
