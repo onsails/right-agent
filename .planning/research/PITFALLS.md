@@ -1,541 +1,443 @@
-# Pitfalls Research: Headless Agent Isolation (v2.1)
+# Pitfalls Research: v2.2 Skills Registry
 
-**Domain:** HOME override, managed settings, dropping `--dangerously-skip-permissions`, headless autonomous agents
-**Researched:** 2026-03-24
-**Confidence:** HIGH (official docs verified, CC issue tracker audited, codebase audited, race conditions confirmed by multiple reporters)
+**Domain:** Registry integration replacement (ClawHub → skills.sh), env var injection into agent shell wrappers, skill manager UX, CC-native sandbox interaction with injected vars
+**Researched:** 2026-03-25
+**Confidence:** HIGH (codebase audited, current wrapper/codegen inspected, seeds read, CC sandbox behavior verified from v2.1 research)
 
 ---
 
 ## Critical Pitfalls
 
-Mistakes here cause agents to hang indefinitely, fail to authenticate, or run without the security controls you think are enforced.
-
-### Pitfall 1: `.claude.json` Race Condition Corrupts Trust State Across Agents
+### Pitfall 1: Env Var Values With Spaces/Special Chars Break the Bash Wrapper
 
 **What goes wrong:**
-Claude Code stores per-project trust state, OAuth session, MCP configs, and preferences in a single `~/.claude.json` file. With per-agent HOME override (`HOME=<agent_dir>`), each agent gets its OWN `.claude.json` at `<agent_dir>/.claude.json` -- this isolation is actually correct and avoids the race. BUT if any code path still writes to the REAL `~/.claude.json` (like `pre_trust_directory()` currently does, or if `rightclaw init` writes trust there), the old race condition applies.
+The current wrapper template (`agent-wrapper.sh.j2`) emits shell variable assignments rendered by minijinja. If `agent.yaml` contains:
 
-The bigger risk: if v2.1 does NOT set `HOME` per-agent and instead uses `CLAUDE_CONFIG_DIR` or some other mechanism that still shares `~/.claude.json`, then ALL agents write trust state, allowed tools, and caches to the same file. Claude Code uses non-atomic writes (truncate + write, no file locking). With 3+ concurrent agents, `.claude.json` corrupts within minutes. This is confirmed as a known CC bug reported 8+ times since June 2025, all closed without resolution (GitHub #28922). One user with 30+ sessions saw 14 corruptions in 11 hours (GitHub #18998).
+```yaml
+env:
+  MY_PROMPT: "Hello, world! I am the agent."
+```
+
+And the template renders it as:
+
+```bash
+export MY_PROMPT=Hello, world! I am the agent.
+```
+
+The shell splits on spaces and the comma. Even with:
+
+```bash
+export MY_PROMPT="{{ value }}"
+```
+
+minijinja's default auto-escaping is OFF for non-HTML templates, so a value containing `"` (double quote) or `\` (backslash) or `$` breaks the shell assignment. An adversarial skill author who tricks a user into setting:
+
+```yaml
+env:
+  EVIL: "\"; exec malicious_binary #"
+```
+
+gets arbitrary command execution at wrapper startup (before `exec claude`), entirely outside the CC sandbox — the wrapper runs unconfined.
 
 **Why it happens:**
-Claude Code was designed for single-instance use. The `.claude.json` file is a monolithic state bag (trust, OAuth, MCP, caches) with no file locking or atomic writes. RightClaw runs multiple concurrent CC instances by design.
+Shell quoting is subtly different from YAML string escaping. Values that round-trip cleanly through YAML still break shell. The template has no mechanism to shell-escape values. The existing wrapper already handles `startup_prompt` by passing it through unquoted in `-- "{{ startup_prompt }}"` — same risk exists there.
 
-**Consequences:**
-- Corrupted `.claude.json` causes all agents to crash on startup
-- Trust state lost -- agents re-prompt for workspace trust (hangs headless)
-- OAuth tokens corrupted -- agents lose authentication
-- Allowed tools list corrupted -- permissions reset unpredictably
+**How to avoid:**
+- In `generate_wrapper()`, shell-escape all user-supplied values before injecting into the template. Use `shlex`-style escaping: wrap each value in single quotes and replace any `'` in the value with `'\''`.
+- In Rust: implement a `shell_quote(s: &str) -> String` helper: `format!("'{}'", s.replace('\'', "'\\''"))`.
+- Never emit user-supplied values directly into the template without escaping.
+- The `startup_prompt` variable has the same problem — fix it in the same pass.
 
-**Prevention:**
-- Per-agent `HOME` override is the correct solution -- each agent gets its own `.claude.json`
-- NEVER share a single `~/.claude.json` across agents
-- `pre_trust_directory()` must write to `<agent_dir>/.claude.json`, not the real `~/.claude.json`
-- Validate at `rightclaw up` time that no two agents share the same HOME
+**Warning signs:**
+- Test: set `env: { VAR: "hello world" }` and inspect the generated wrapper. If the line reads `export VAR=hello world` (no quotes), the bug is present.
+- Test: set `env: { VAR: "it's fine" }` — if the apostrophe breaks the script, the bug is present.
+- `set -euo pipefail` at the top of the wrapper will cause `exit 1` silently on a bad export, making the agent appear to crash on launch for no obvious reason.
 
-**Detection:**
-- JSON parse errors in agent startup logs
-- Agents that worked moments ago suddenly fail with "corrupted config"
-- `~/.claude.json` contains truncated or invalid JSON
-
-**Phase to address:** Phase 1 (HOME isolation implementation). This is the fundamental reason per-agent HOME exists.
-
-**Confidence:** HIGH -- confirmed by multiple CC issue reports (#28922, #18998) and CC official docs acknowledging backup mechanism
+**Phase to address:** Phase 1 (env var injection). Must be solved in the same commit that adds `env:` support. Never ship user value injection without shell quoting.
 
 ---
 
-### Pitfall 2: `skipDangerousModePermissionPrompt` Is Broken in Multiple CC Versions
+### Pitfall 2: Env Vars Injected AFTER the HOME Override Lose Host Values
 
 **What goes wrong:**
-The v2.0 codebase sets `skipDangerousModePermissionPrompt: true` in `settings.json` and passes `--dangerously-skip-permissions` on the CLI. The v2.1 milestone wants to drop the CLI flag and use `permissions.allow` + sandbox instead. But `skipDangerousModePermissionPrompt` itself is broken:
+The current wrapper structure is:
 
-1. **Setting location ambiguity:** Must be a TOP-LEVEL key in `settings.json`, NOT nested under `permissions` (GitHub #26233). The setting is undocumented.
-2. **VS Code regression (v2.1.42+):** The dialog doesn't render in VS Code, so the session silently falls back to default mode -- every command prompts (GitHub #25503, blog post from testinginproduction.co).
-3. **Still prompts for Bash in v2.1.71:** Even with the setting present, certain commands still trigger prompts (GitHub #32466).
-4. **Blocks `~/.claude/` writes (v2.1.77+):** A new permission gate blocks writes to `~/.claude/` paths even with `--dangerously-skip-permissions`, breaking skill memory writes (GitHub #35718).
-5. **Complete bypass regression (v2.1.77+):** Bypass permissions is "broken in all Claude Code versions newer than v2.1.77" (GitHub #36168).
+```bash
+# 1. Capture identity vars from host env BEFORE HOME override
+export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-}"
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+# ...
 
-**Why it matters for v2.1:**
-If v2.1 drops `--dangerously-skip-permissions` and relies on `permissions.allow` + `defaultMode: "bypassPermissions"`, the agent still gets the bypass warning dialog unless `skipDangerousModePermissionPrompt` is set correctly. And given the regressions, even that may not work on the user's CC version. The whole bypass permissions mechanism is unstable.
+# 2. Override HOME
+export HOME="{{ working_dir }}"
 
-**Prevention:**
-- Do NOT rely on `bypassPermissions` mode OR `--dangerously-skip-permissions` for v2.1
-- Instead, use `permissions.allow` with explicit tool patterns + `defaultMode: "default"` or `"acceptEdits"` + sandbox
-- Test against the user's actual CC version at `rightclaw up` time
-- Add `rightclaw doctor` check: verify CC version is compatible with the permission strategy
+# 3. exec claude
+exec "$CLAUDE_BIN" ...
+```
 
-**Detection:**
-- Agent hangs on launch with "WARNING: Claude Code running in Bypass Permissions mode" dialog
-- Agent runs but prompts for every Bash command (fell back to default mode)
-- Skill writes to `.claude/` fail with permission denied
+If `env:` vars are injected between step 2 and step 3 (the obvious "append to bottom" placement), vars that reference `$HOME` in their values resolve to the agent dir, not the host home:
 
-**Phase to address:** Phase 1 (permission strategy). This is the core design decision for v2.1 -- the approach to replace `--dangerously-skip-permissions`.
+```yaml
+env:
+  CUSTOM_CACHE: "$HOME/.cache/myapp"  # user means /home/wb/.cache/myapp
+```
 
-**Confidence:** HIGH -- multiple CC GitHub issues confirm the instability, blog post documents the VS Code regression
+After HOME override, `$HOME/.cache/myapp` resolves to `<agent_dir>/.cache/myapp`. The agent writes to its own dir — probably intentional. But for vars like:
 
----
+```yaml
+env:
+  GIT_CONFIG_GLOBAL: "$HOME/.gitconfig"
+```
 
-### Pitfall 3: `permissions.allow` Cannot Fully Replace `--dangerously-skip-permissions`
+...this silently overrides the already-captured `GIT_CONFIG_GLOBAL` and points it at a non-existent path in the agent dir.
 
-**What goes wrong:**
-The v2.1 plan is to replace `--dangerously-skip-permissions` with explicit `permissions.allow` rules in `settings.json`. But there is a gap:
-
-1. **`.claude/` directory writes still prompt:** Even in `bypassPermissions` mode, writes to `.git`, `.claude`, `.vscode`, and `.idea` directories trigger confirmation prompts. Exception: `.claude/commands`, `.claude/agents`, and `.claude/skills` are exempt. But `.claude/settings.json`, `.claude/CLAUDE.md`, memory files, and other `.claude/` paths still prompt. This means skill memory writes, installed.json updates, and any agent self-modification trigger interactive prompts that block headless operation.
-
-2. **Permission pattern fragility:** Bash permission patterns like `Bash(curl *)` are fragile -- options before the URL, different protocols, redirects, variables, and extra spaces all defeat the pattern. The docs explicitly warn about this.
-
-3. **Read/Edit deny rules don't apply to Bash:** A `Read(./.env)` deny rule blocks the Read tool but does NOT prevent `cat .env` in Bash. Sandbox enforcement is needed for defense-in-depth.
-
-4. **`dontAsk` mode is SDK-only:** The `dontAsk` mode (auto-deny unapproved tools) is only available in the TypeScript SDK, not the CLI.
-
-**Why it matters:**
-If the agent needs to write to its own `.claude/` directory (skill installs, memory, etc.), `permissions.allow` alone cannot prevent the interactive prompt. The sandbox provides OS-level enforcement but doesn't suppress permission prompts for `.claude/` writes.
-
-**Prevention:**
-- Accept that some `.claude/` writes will still prompt in default mode
-- Pre-create all `.claude/` files at `rightclaw up` time (installed.json, memory files, skill directories)
-- Use `autoAllowBashIfSandboxed: true` with sandbox to auto-approve Bash commands within sandbox boundaries
-- For `.claude/` writes that skills perform: add `sandbox.filesystem.allowWrite` for the agent's `.claude/` directory
-- Consider keeping `--dangerously-skip-permissions` as a fallback with sandbox enforcement as the primary safety layer (this is the Trail of Bits recommended approach)
-
-**Detection:**
-- Agent hangs waiting for "authorize Claude to modify its config files" prompt
-- Skill installs silently fail
-- Agent modifies `.claude/` state but gets stuck on next attempt
-
-**Phase to address:** Phase 1 (permission strategy). Fundamental design question: do we fully drop bypass mode or keep it with sandbox as the safety layer?
-
-**Confidence:** HIGH -- official CC docs explicitly document the `.claude/` write protection in bypass mode
-
----
-
-### Pitfall 4: Workspace Trust Requires `.git` Directory in Agent Dir
-
-**What goes wrong:**
-Claude Code's workspace trust check has a subtle dependency: it only shows the "Do you trust the files in this folder?" dialog in directories WITHOUT a `.git` directory. If the directory IS a git repo, the trust prompt does not appear. This is confirmed behavior (GitHub #28506).
-
-With per-agent HOME override, `HOME=<agent_dir>` means `<agent_dir>` IS the working directory. If `<agent_dir>` has no `.git/`, the trust dialog appears on every launch. Even with `hasTrustDialogAccepted: true` in `.claude.json`, some CC versions still show the prompt (GitHub #9113, #12227).
-
-Additionally, there's `hasTrustDialogHooksAccepted` -- a separate flag that can't even be set via `claude config set` (GitHub #5572). Without it, hooks are skipped with "workspace trust not accepted" debug message.
-
-Some evidence suggests trust state is stored server-side (tied to account + workspace path), not just locally. If true, local config changes are futile for some trust prompts.
+More critically: if a user puts `ANTHROPIC_API_KEY` in `env:`, it must appear BEFORE the HOME override section (where the existing capture happens) to correctly chain. But if it's injected after, both the capture line AND the user's line exist — the user's line wins (last assignment wins in bash), but the ordering is confusing.
 
 **Why it happens:**
-CC's trust mechanism evolved organically -- trust dialog, hooks trust dialog, per-project tool allowlists, server-side state -- all with different persistence and different bypass behaviors.
+The wrapper has a specific ordering contract for HOME isolation (v2.1 design). `env:` injection is a new feature that was not part of that design, so there is no obvious "correct" insertion point.
 
-**Prevention:**
-- Ensure every agent dir is a git repo: `git init <agent_dir>` at `rightclaw init` or `rightclaw up` time
-- Write BOTH `hasTrustDialogAccepted: true` AND `hasTrustDialogHooksAccepted: true` to `<agent_dir>/.claude.json`
-- Set these via `claude config set` from within the agent dir (if CC supports it under HOME override)
-- Test: verify agent starts without any interactive prompt from a fresh state
+**How to avoid:**
+- Inject user `env:` vars AFTER the HOME override block, clearly documented.
+- Expand `$HOME` references in env var values at codegen time in Rust (before writing the wrapper), replacing `$HOME` with the actual agent path. This makes the wrapper self-documenting and avoids runtime expansion surprises.
+- Alternatively, emit `env:` vars with single-quoted values (preventing `$HOME` expansion entirely) and document that `$HOME` expansion is not supported in `env:` values.
+- Add a validation step: warn if any user env key conflicts with the six identity vars already exported (`GIT_CONFIG_GLOBAL`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND`, `ANTHROPIC_API_KEY`). Override is allowed but emit a warning at `rightclaw up` time.
 
-**Detection:**
-- Agent hangs immediately on first launch with "Quick safety check" prompt
-- Works after manual acceptance but blocks again after clean state
-- Debug logs show "workspace trust not accepted"
+**Warning signs:**
+- Test: set `env: { ANTHROPIC_API_KEY: "sk-test" }` and inspect generated wrapper — do two `export ANTHROPIC_API_KEY=...` lines appear?
+- Test: agent dir path appears in an env var that should point to the host filesystem.
 
-**Phase to address:** Phase 1 (HOME isolation). Must be solved before any agent can launch headlessly.
-
-**Confidence:** HIGH -- confirmed by CC issues #28506, #9113, #5572; the `.git` dependency is documented in issue discussions
+**Phase to address:** Phase 1 (env var injection). Ordering contract must be explicit in the template design doc and enforced in codegen.
 
 ---
 
-### Pitfall 5: `allowManagedDomainsOnly` Requires Managed Settings Scope -- Cannot Be Set Per-Agent
+### Pitfall 3: `deny_unknown_fields` on `AgentConfig` Blocks Migration for Existing Users
 
 **What goes wrong:**
-The v2.1 plan uses `allowManagedDomainsOnly: true` for silent domain blocking (no prompts for unapproved domains). But this setting is a "managed-only" setting -- it can ONLY be set in `/etc/claude-code/managed-settings.json` (Linux) or `/Library/Application Support/ClaudeCode/managed-settings.json` (macOS). It CANNOT be set in user settings (`~/.claude/settings.json`) or project settings (`.claude/settings.json`).
+`AgentConfig` is deserialized with `#[serde(deny_unknown_fields)]`. This is correct for validation — it catches typos. But when v2.2 adds `env:` field to `AgentConfig`, any existing user who:
+1. Has an `agent.yaml` without an `env:` section — works fine (field is `Option` or `default`).
+2. Upgrades rightclaw but has a custom field in their `agent.yaml` that was never in the spec — **their agent fails to load** with "unknown field" error.
 
-This means:
-1. It applies to ALL Claude Code instances on the machine, not just RightClaw agents
-2. It requires `sudo` to write to `/etc/claude-code/`
-3. It blocks domains for the user's regular Claude Code usage too
-4. It cannot be customized per-agent
+The second case is not hypothetical. Users copy-paste agent.yaml from OpenClaw examples, which may have additional fields (e.g., `version:`, `tags:`, `description:`) that ClawHub uses but RightClaw never exposed. These users currently get the "unknown field" error already (pre-existing). But v2.2 is the first release where this could regress a working setup: if a user added a comment field workaround for something (e.g., `_env_note: "see .env"`) and their agent was silently ignoring it (impossible given deny_unknown_fields, but they think it works), adding `env:` doesn't help them.
 
-Without `allowManagedDomainsOnly`, non-allowed domains trigger an interactive prompt ("Allow this domain?") instead of being silently blocked. This hangs headless agents.
+More practically: v2.2 adds `env:` as a first-class field. Users who try `env:` on an older rightclaw build (before upgrade) get "unknown field" error — which is correct but confusing. The error message from serde-saphyr says `unknown field 'env' in AgentConfig` which is not actionable without docs.
 
 **Why it happens:**
-Managed settings are designed for enterprise IT departments deploying organization-wide policies, not for per-agent configuration. The managed-only restriction is intentional to prevent users from accidentally locking themselves out.
+`deny_unknown_fields` is good hygiene but produces opaque errors. The error message doesn't say "upgrade rightclaw" or "check docs."
 
-**Prevention:**
-- Use `sandbox.network.allowedDomains` in per-agent settings (this IS settable per-agent) + `sandbox.enabled: true` + `allowUnsandboxedCommands: false`
-- With sandbox enabled and `autoAllowBashIfSandboxed: true`, network access to allowed domains works without prompts
-- For domains NOT in the allow list: the sandbox blocks them at the OS level (no prompt), but WebFetch tool still prompts. To handle WebFetch: add `WebFetch(domain:api.anthropic.com)` etc. to `permissions.allow`
-- If the user is willing to install managed settings system-wide, provide `rightclaw config managed-settings install` helper
-- Alternatively: file a feature request for `allowManagedDomainsOnly` to work at user/project scope
+**How to avoid:**
+- Add `env` field to `AgentConfig` with `#[serde(default)]` so agents without `env:` continue to work.
+- Keep `deny_unknown_fields` — it's correct.
+- When `AgentConfig` deserialization fails, wrap the error with miette context that says "check your agent.yaml against the schema at <docs URL>".
+- In `rightclaw doctor`: validate all agent.yaml files and report schema errors with actionable guidance, not just at `rightclaw up` time.
 
-**Detection:**
-- Agent hangs with "Allow access to domain X?" prompt
-- Agent reports "network access blocked" for domains not in allow list
-- Setting `allowManagedDomainsOnly` in `settings.json` has no effect
+**Warning signs:**
+- Integration test `test_init_creates_agent` passes but real-world agents with extra fields fail.
+- User reports "unknown field 'env'" after editing their agent.yaml — this means the new field name clashes with something they have.
 
-**Phase to address:** Phase 2 (network isolation). Not a startup blocker if sandbox is used, but blocks full headless operation for non-sandboxed network tools.
+**Phase to address:** Phase 1 (AgentConfig extension). The `env:` field addition must be backward-compatible.
 
-**Confidence:** HIGH -- official CC docs explicitly list `allowManagedDomainsOnly` as managed-only
+---
+
+### Pitfall 4: `installed.json` Tracks Two Registries Differently — `list` Output Diverges From Reality
+
+**What goes wrong:**
+The current `/skills` skill (in `skills/clawhub/SKILL.md`) tracks installed skills in `.claude/skills/installed.json` with a `"source": "skills.sh"` field. When v2.2 adds ClawHub as a secondary/fallback registry, skills installed from ClawHub will have `"source": "clawhub"`. The `list` command scans `.claude/skills/` for directories containing `SKILL.md` AND reads `installed.json`.
+
+Problems:
+1. Skills installed via the OLD `/clawhub` skill (before v2.2) have `"source": "clawhub"` in their `installed.json`. After upgrade, the new `/skills` skill reads the same file — no migration. These entries show up correctly.
+2. Skills installed manually (no `installed.json` entry) show `"source": "manual"` — fine.
+3. The NEW edge case: a skill installed from skills.sh is removed, reinstalled from ClawHub. `installed.json` has two approaches but one directory — if the install step doesn't update the existing entry, you get stale source metadata.
+4. More critically: `install_builtin_skills()` in Rust always writes `{}` to `installed.json` — it **resets the registry** on every `rightclaw up` call. Line from `codegen/skills.rs`:
+
+   ```rust
+   ("clawhub/SKILL.md", SKILL_CLAWHUB),
+   ```
+
+   ...is being renamed but `install_builtin_skills()` also writes `installed.json` with `{}`. Any skills tracked by the agent in `installed.json` (installed by the user via `/skills install`) are **wiped on every `rightclaw up`**.
+
+This is the most severe bug in the current design: `rightclaw up` reinstalls built-in skills (correct) but also resets `installed.json` to `{}` (incorrect). After v2.2, users install skills via `/skills install`, which writes to `installed.json`. On next `rightclaw up`, that file is reset.
+
+**Why it happens:**
+`install_builtin_skills()` was written to create the file if absent (correct) but unconditionally overwrites it (incorrect). The original intent was "idempotent" but the implementation is "destructive."
+
+**How to avoid:**
+- Fix `install_builtin_skills()` to only write `installed.json` if the file does NOT exist (create-if-absent semantics).
+- Never overwrite `installed.json` from Rust codegen — it is agent-owned state.
+- Write a regression test: create `installed.json` with some content, call `install_builtin_skills()`, verify content is unchanged.
+- In the SKILL.md skill update: document that `installed.json` is the source of truth for user-installed skills and must not be overwritten by the runtime.
+
+**Warning signs:**
+- After `rightclaw up`, `npx skills list` shows no user-installed skills.
+- User reports "I installed skill X yesterday but it's gone today."
+- The `installed.json` always contains `{}` even after installing skills.
+
+**Phase to address:** Phase 1 (install_builtin_skills fix). This is a data-loss bug that must be fixed before v2.2 ships any user-facing `/skills install`.
+
+---
+
+### Pitfall 5: Policy Gate Checks OpenShell `metadata.openclaw` — Silently Passes All skills.sh Skills
+
+**What goes wrong:**
+The current `/skills` SKILL.md has a policy gate (Step 3 of install) that checks `metadata.openclaw.requires.*` frontmatter fields. skills.sh skills use the agentskills.io format, which does NOT use `metadata.openclaw`. The SKILL.md policy check reads those fields — but for skills.sh skills, those fields are absent. The gate evaluates to "no requirements found" → "all checks pass" → install proceeds.
+
+This means the policy gate is a no-op for the primary registry. Users get false assurance that skills are audited before install. A skill from skills.sh could require `BROWSER_USE_API_KEY` (env var), Chrome binary, and network access to `api.openai.com` — none of which the agent has — but the gate passes.
+
+The v2.2 plan says "Policy gate reworked — drop OpenShell/policy.yaml refs, check CC-native sandbox capabilities." This is correct but needs to cover agentskills.io format, not just openclaw format.
+
+**Why it happens:**
+The policy gate was written for ClawHub/OpenClaw skills. The migration to skills.sh was done in SKILL.md content but the policy gate logic was not updated.
+
+**How to avoid:**
+- Rework the gate to parse agentskills.io SKILL.md frontmatter fields (if the spec defines requirements). Check the agentskills.io specification for requirement syntax.
+- At minimum, add a heuristic check: read the SKILL.md body for `env:` references or bash commands that suggest external binaries or services, and warn the user.
+- Check CC-native sandbox capabilities: read the agent's `.claude/settings.json` and verify that `allowedDomains` includes any domains the skill documentation mentions.
+- Document the limitation clearly: "Policy gate checks CC-native sandbox settings and agentskills.io metadata. Skills with undocumented requirements will pass the gate."
+
+**Warning signs:**
+- The gate shows "All checks passed" for a skill that clearly requires Node.js and an API key.
+- The gate only ever shows requirements for skills with `metadata.openclaw:` in their frontmatter (i.e., only ClawHub skills trigger it).
+
+**Phase to address:** Phase 2 (policy gate rework). The gate should be reworked to be format-agnostic.
+
+---
+
+### Pitfall 6: Env Vars Containing Secrets Leak Into `process-compose` REST API
+
+**What goes wrong:**
+process-compose exposes a REST API on `localhost:8080` (or the configured port). The `/process/info` and `/process/list` endpoints return the full process configuration including environment variables. Any env var set in the wrapper script via `export` is inherited by the `process-compose` child processes and captured in its memory. The REST API leaks them.
+
+In practice, the wrapper uses `exec` to replace itself with `claude`, so env vars are in the `claude` process, not the wrapper. But process-compose captures env vars at process start, before `exec`. The env snapshot in process-compose's memory contains everything exported before `exec claude`.
+
+If `env:` vars include `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or any other secret the user injects, those secrets are accessible to anyone who can reach `localhost:8080`. This is already a risk with the existing `ANTHROPIC_API_KEY` capture — v2.2 makes it worse by encouraging users to inject more secrets.
+
+**Why it happens:**
+The TUI design of process-compose shows env vars for each process as a feature. What's useful for debugging is dangerous for secrets. The existing wrapper already has `export ANTHROPIC_API_KEY=...` — v2.2 adds more.
+
+**How to avoid:**
+- For secrets: prefer reading from a file at wrapper startup (`export SECRET=$(cat "$AGENT_DIR/.secret_name")`) rather than embedding literal values in the generated wrapper. The file can have 0600 permissions.
+- Document in agent.yaml schema: `env:` values that start with `$` are expanded from host environment at wrapper startup (not embedded in the script). The wrapper should emit `export VAR="${VAR:-}"` style (forward from host) rather than literal values.
+- For the `ANTHROPIC_API_KEY` already in the wrapper: add a comment noting this limitation; consider the `apiKeyHelper` alternative.
+- Rate-limit or auth-gate the process-compose REST API port if running on a shared machine.
+- Note: the existing `ANTHROPIC_API_KEY` capture in the wrapper uses `"${ANTHROPIC_API_KEY:-}"` which forwards the host value — that's the correct pattern for secrets.
+
+**Warning signs:**
+- `curl http://localhost:8080/process/info` returns env vars including secrets.
+- process-compose TUI shows `ANTHROPIC_API_KEY=sk-ant-...` in the process detail pane.
+
+**Phase to address:** Phase 1 (env var injection). The `env:` feature documentation must describe the secret leakage risk and recommend the forwarding-from-host pattern over literal embedding.
 
 ---
 
 ## Moderate Pitfalls
 
-### Pitfall 6: `~/` Path Resolution Under HOME Override Produces Wrong Paths
+### Pitfall 7: CC Sandbox Blocks `npx` — the Primary Skills CLI
 
 **What goes wrong:**
-CC resolves `~` in `sandbox.filesystem.allowWrite`, `denyRead`, etc. to `$HOME`. With `HOME=<agent_dir>`, `~/.ssh` resolves to `<agent_dir>/.ssh`, not the real user's `~/.ssh`. The existing v2.0 code generates:
+The `/skills` skill uses `npx skills add <slug>` as its primary install mechanism. `npx` requires:
+1. Network access to `registry.npmjs.org` (to download the `skills` package)
+2. Write access to npm's cache directory (typically `~/.npm/` — which under HOME override resolves to `<agent_dir>/.npm/`)
+3. Write access to a temp directory for extraction
 
-```json
-"denyRead": ["~/.ssh", "~/.aws", "~/.gnupg"]
-```
+The current CC native sandbox (`settings.json` generated by `generate_settings()`) has a default-deny network policy with an explicit `allowedDomains` list. `registry.npmjs.org` is NOT in the default list. The Bash tool runs under sandbox constraints (bubblewrap on Linux), so `npx skills add` fails silently or with a cryptic network error.
 
-With HOME override, this denies read access to `<agent_dir>/.ssh` (which doesn't exist) and ALLOWS read access to the real `~/.ssh` (which contains private keys). The security intent is completely inverted.
+The SKILL.md has a fallback to `git clone` — which requires:
+1. Network access to `github.com` — also NOT in the default list
+2. SSH or HTTPS access
 
-**Prevention:**
-- Already identified in v2.0 PITFALLS.md but NOT yet implemented
-- Replace ALL `~/` paths in generated `settings.json` with absolute paths expanded at generation time
-- In `generate_settings()`: resolve `dirs::home_dir()` and use absolute paths like `/home/wb/.ssh`
-- For `allowWrite` of the agent dir: already uses `agent.path.display()` (absolute) -- this is correct
-- For `denyRead`: use `format!("{}", real_home.join(".ssh").display())`
+So both primary and fallback mechanisms fail inside the default sandbox.
 
-**Detection:**
-- Agent can read real `~/.ssh` despite `denyRead: ["~/.ssh"]`
-- Agent is blocked from its own `<agent_dir>/.ssh` (which doesn't exist)
-- Security audit reveals sandbox allows access to unintended paths
+**Why it happens:**
+The skill was designed before v2.0 sandbox was the enforcement layer. Network defaults were not updated.
 
-**Phase to address:** Phase 1 (settings generation update). Security-critical.
+**How to avoid:**
+- Add `registry.npmjs.org`, `github.com`, and `api.github.com` to the default `allowed_domains` list in `generate_settings()`, OR document that agents using `/skills install` need to add those domains to their `sandbox.allowed_domains` in `agent.yaml`.
+- A middle ground: add a comment in the generated `settings.json` listing the domains needed for skill management, and update the doctor check to warn if those domains are absent and the skills skill is installed.
+- The SKILL.md should document this: "Requires `registry.npmjs.org` and `github.com` in your agent's `sandbox.allowed_domains`."
 
-**Confidence:** HIGH -- this is simple path resolution logic documented in CC sandbox docs
+**Warning signs:**
+- `/skills install vercel-labs/some-skill` returns "network error" or "command not found for npx"
+- `npx skills find` silently returns no results (network blocked, treated as empty response)
+- The `git clone` fallback in SKILL.md fails with "Could not resolve host"
+
+**Phase to address:** Phase 1 or 2. Either add the domains to defaults or document as a required manual override.
 
 ---
 
-### Pitfall 7: OAuth Credential Symlink/Copy Creates Security and Race Condition
+### Pitfall 8: `SKILL_CLAWHUB` Const Rename Breaks Idempotency Check in Tests
 
 **What goes wrong:**
-With `HOME=<agent_dir>`, CC on Linux looks for `.claude/.credentials.json` at `<agent_dir>/.claude/.credentials.json`. If using OAuth (not API key), the credentials file doesn't exist in the agent dir. Common "fix" attempts:
+`codegen/skills.rs` has `const SKILL_CLAWHUB: &str = include_str!("../../../../skills/clawhub/SKILL.md")`. The rename in v2.2 (to `skills` or `rightskills`) requires:
+1. Renaming the directory `skills/clawhub/` to `skills/skills/` (or `skills/rightskills/`)
+2. Renaming `SKILL_CLAWHUB` const
+3. Updating `install_builtin_skills()` to write `skills/SKILL.md` instead of `clawhub/SKILL.md`
+4. Updating the install tests that assert `clawhub/SKILL.md` exists
+5. Updating `init.rs` print statements and test assertions (lines 173, 250 assert `clawhub/SKILL.md`)
 
-1. **Symlink:** `<agent_dir>/.claude/.credentials.json -> ~/.claude/.credentials.json` -- all agents share one file. OAuth token refresh from any agent corrupts the shared file for others (same non-atomic write problem as `.claude.json`).
-2. **Copy:** Copy `.credentials.json` into each agent dir at `rightclaw up`. Tokens expire and need refresh. If one agent refreshes, other agents still have stale tokens.
-3. **`CLAUDE_CONFIG_DIR`:** Unclear behavior (GitHub #3833, #25762). May or may not split credential resolution from HOME resolution. Not officially supported for this use case.
+If any of these five locations are updated but not all, the build may succeed (if the old directory still exists) but deployed skill will be the old file, or tests will fail on the new path while the binary installs to the old path.
 
-**Prevention:**
-- **API keys are the only reliable option.** Use `ANTHROPIC_API_KEY` env var per agent. API keys don't expire, don't need refresh, and don't depend on HOME.
-- If API key is not possible: use `apiKeyHelper` in `settings.json` -- a script that outputs a valid key/token. The script runs outside the sandbox, has access to the real HOME, and returns a fresh token.
-- Document clearly: "RightClaw requires `ANTHROPIC_API_KEY` or `apiKeyHelper` -- OAuth is not supported with HOME isolation"
+**Why it happens:**
+The skill path appears in four different places: the filesystem (skills/ dir), the Rust const, the install function, and test assertions. A rename is a refactor, not a one-line change.
 
-**Detection:**
-- Agent errors with "Please run /login" or "ANTHROPIC_API_KEY not set"
-- Works on macOS (Keychain doesn't depend on HOME) but fails on Linux
-- Multiple agents with symlinked credentials fail intermittently
+**How to avoid:**
+- Do the rename atomically: `rg -l "clawhub"` to find all occurrences, update all in one commit.
+- After rename: `cargo test` will catch any missed path. The `installs_clawhub_skill` test will fail if the path is wrong.
+- The install is idempotent by design — the old `clawhub/SKILL.md` directory from previous runs will stay on disk. Add cleanup: `rightclaw up` should remove the old `clawhub/` directory if the new `skills/` directory now exists (migration step, one-time).
 
-**Phase to address:** Phase 1 (HOME isolation). Authentication is a hard blocker.
+**Warning signs:**
+- After rename, `rightclaw up` still installs to `.claude/skills/clawhub/` because the old path was not updated in `install_builtin_skills()`.
+- Old agents have BOTH `.claude/skills/clawhub/SKILL.md` AND `.claude/skills/skills/SKILL.md` — two versions of the skill, both active, one stale.
 
-**Confidence:** HIGH -- confirmed by CC docs on credential locations and `.claude.json` race condition reports
+**Phase to address:** Phase 1 (rename). Simple but must be complete across all four locations.
 
 ---
 
-### Pitfall 8: CC Version Skew Breaks Permission Strategy
+### Pitfall 9: ClawHub Backward Compatibility Adds API Ambiguity
 
 **What goes wrong:**
-Claude Code's permission system is actively evolving with regressions across versions:
-- v2.1.42: `skipDangerousModePermissionPrompt` regression in VS Code
-- v2.1.71: `--dangerously-skip-permissions` still prompts for some commands
-- v2.1.77: Bypass permissions fully broken
-- v2.1.79: Edit tool prompts despite bypassPermissions
+The v2.2 plan keeps ClawHub as secondary/fallback. The `/skills` skill will call skills.sh first, then fall back to ClawHub. But:
 
-RightClaw generates `settings.json` with permission rules, but the user's CC version may not honor them correctly. A settings key that works in CC v2.1.60 may be broken in v2.1.77 and fixed in v2.1.80.
+1. skills.sh returns skills in agentskills.io format. ClawHub returns skills with `metadata.openclaw`. If the skill name exists in both registries, the user gets the skills.sh version (no policy gate for openclaw requirements) — this could silently install an under-featured version.
 
-**Prevention:**
-- Add CC version detection to `rightclaw doctor` and `rightclaw up`
-- Parse `claude --version` output
-- Maintain a compatibility matrix: which RightClaw version works with which CC version range
-- Pin CC version recommendation in docs and doctor output
-- Consider CC `autoUpdatesChannel: "stable"` in generated settings (uses ~1-week-old versions, skips regression releases)
+2. ClawHub had the ClawHavoc incident (341 malicious skills). RightClaw's fallback to ClawHub means users who don't find a skill on skills.sh are automatically exposed to the larger, less-curated, post-incident-but-not-fully-cleaned ClawHub.
 
-**Detection:**
-- Agent works on developer's machine, fails on user's machine with different CC version
-- Permissions worked yesterday, broken after CC auto-update
-- Different agents behave differently despite identical settings
+3. The skills.sh `npx skills add` CLI downloads from GitHub. ClawHub's fallback path likely uses a different API. The SKILL.md needs to clearly separate "primary path (npx)" from "fallback path (ClawHub API direct)".
 
-**Phase to address:** Phase 2 (doctor improvements). Not a startup blocker but prevents support headaches.
+**Why it happens:**
+The fallback design conflates two different trust levels (curated vs. post-incident) into a single user-facing flow. Users see "install skill" without knowing which registry served it.
 
-**Confidence:** MEDIUM -- based on pattern of CC regressions in issue tracker; specific version numbers may shift
+**How to avoid:**
+- Be explicit in the skill output: show which registry served the result. "Installing from skills.sh (verified)" vs "Installing from ClawHub (unverified, requires permission review)."
+- For ClawHub installs, always run the full `metadata.openclaw` policy gate — do not skip it just because the gate is a partial check.
+- Consider requiring explicit `--registry clawhub` to use ClawHub rather than auto-fallback. The security incident justifies opting out of automatic fallback.
+- Document the registry trust hierarchy in SKILL.md.
+
+**Warning signs:**
+- User sees "Installed from ClawHub" but assumed they were getting the skills.sh version.
+- ClawHub fallback happens silently — user doesn't know which registry served the skill.
+
+**Phase to address:** Phase 2 (ClawHub fallback design). The fallback UX should be explicit, not silent.
 
 ---
 
-### Pitfall 9: Managed Settings Conflict With Per-Agent Settings
+### Pitfall 10: Skills Installed From skills.sh Survive `rightclaw up` But `installed.json` Is Reset (See Pitfall 4)
 
-**What goes wrong:**
-If the user (or their organization) has `/etc/claude-code/managed-settings.json` deployed, it takes precedence over ALL other settings including RightClaw's generated per-agent `settings.json`. This can:
+This is the secondary consequence of Pitfall 4. Even though the skill files survive in `.claude/skills/<name>/` (because `install_builtin_skills()` only overwrites `clawhub/SKILL.md` and `rightcron/SKILL.md`), the `installed.json` registry is reset to `{}`. This means:
 
-1. **Override permission rules:** If managed settings set `allowManagedPermissionRulesOnly: true`, RightClaw's per-agent `permissions.allow` rules are IGNORED. Only managed rules apply.
-2. **Override sandbox config:** If managed settings set `allowManagedReadPathsOnly: true`, per-agent `allowRead` entries are ignored.
-3. **Block sandbox domains:** If managed settings don't include domains the agent needs (e.g., `api.telegram.org`), those domains are blocked with no override possible.
-4. **Disable bypass mode:** If managed settings set `disableBypassPermissionsMode: "disable"`, agents cannot use `--dangerously-skip-permissions` at all.
+1. `list` shows skills as "manual" (found on disk, not in registry) even though they were installed via `/skills install`.
+2. `update` via `npx skills update` may not know which skills to update (no registry).
+3. `remove` via the CLI may fail if `installed.json` doesn't have the entry.
 
-The user won't know why their agents are broken because the managed settings are invisible to them (deployed by IT).
+This reinforces the Pitfall 4 fix: `install_builtin_skills()` must never overwrite `installed.json` if it already exists.
 
-**Prevention:**
-- Add `rightclaw doctor` check: detect presence of `/etc/claude-code/managed-settings.json` and warn about potential conflicts
-- Parse the managed settings file (if readable) and report conflicts with generated per-agent settings
-- Document: "If your organization uses managed settings, verify they don't conflict with RightClaw's generated settings"
-- Support `rightclaw up --show-effective-settings` to dump the merged settings CC will actually use (run `claude --print-config` or `/status`)
-
-**Detection:**
-- Agent ignores permission rules set in `.claude/settings.json`
-- Sandbox configuration doesn't match what RightClaw generated
-- `rightclaw doctor` shows settings.json is correct but agent behaves differently
-
-**Phase to address:** Phase 2 (doctor + diagnostics). Edge case but devastating when hit.
-
-**Confidence:** HIGH -- official CC docs document managed settings precedence
-
----
-
-### Pitfall 10: Git/SSH Identity Loss Under HOME Override
-
-**What goes wrong:**
-Already identified in v2.0 PITFALLS.md but NOT yet implemented. With `HOME=<agent_dir>`:
-
-- SSH reads keys from `$HOME/.ssh/` -- nonexistent under agent dir
-- Git reads global config from `$HOME/.gitconfig` -- nonexistent under agent dir
-- GPG reads keyring from `$HOME/.gnupg/` -- nonexistent under agent dir
-- npm reads `$HOME/.npmrc` -- nonexistent
-- Known hosts file at `$HOME/.ssh/known_hosts` missing -- SSH prompts "Are you sure you want to continue connecting?" (hangs headless)
-
-**Prevention:**
-- In shell wrapper, set env vars BEFORE `exec claude`:
-  ```bash
-  export GIT_CONFIG_GLOBAL="/home/wb/.gitconfig"
-  export GIT_AUTHOR_NAME="..."
-  export GIT_AUTHOR_EMAIL="..."
-  export GIT_COMMITTER_NAME="..."
-  export GIT_COMMITTER_EMAIL="..."
-  export SSH_AUTH_SOCK="${SSH_AUTH_SOCK}"  # forward from parent
-  export GIT_SSH_COMMAND="ssh -F /home/wb/.ssh/config -o UserKnownHostsFile=/home/wb/.ssh/known_hosts"
-  ```
-- Add `sandbox.network.allowUnixSockets` for SSH agent socket path
-- For sandbox: add real `~/.ssh/` to `sandbox.filesystem.allowRead` (absolute path) so sandbox doesn't block SSH reads
-- Do NOT symlink `~/.ssh/` into agent dir with write access -- security risk (agent/skill could modify SSH keys)
-
-**Detection:**
-- `git push` fails with "Permission denied (publickey)"
-- Commits appear with wrong author identity
-- SSH prompts "Are you sure you want to continue connecting?" (hangs headless)
-- `git config --global user.name` returns empty inside agent
-
-**Phase to address:** Phase 1 (shell wrapper enhancement). Blocks any git workflow.
-
-**Confidence:** HIGH -- straightforward env var behavior, already identified in v2.0
-
----
-
-### Pitfall 11: Telegram Plugin Path Resolution Under HOME Override
-
-**What goes wrong:**
-The Telegram plugin reads its bot token from `~/.claude/channels/telegram/.env` and access control from `~/.claude/channels/telegram/access.json`. With `HOME=<agent_dir>`, these resolve to `<agent_dir>/.claude/channels/telegram/` -- but `init_rightclaw_home()` writes the token to the real `~/.claude/channels/telegram/` by default (when `telegram_env_dir` is None).
-
-Currently, `init_rightclaw_home()` has a `telegram_env_dir` parameter but it's only used in tests. The production code path in `cmd_init()` passes `None`, causing Telegram config to be written to the real HOME.
-
-**Prevention:**
-- When HOME override is active, `rightclaw up` must copy/generate Telegram config into `<agent_dir>/.claude/channels/telegram/`
-- Modify `cmd_init()` to pass the agent dir as `telegram_env_dir` when the Telegram token is provided
-- At `rightclaw up` time: if Telegram is configured but `.env` is in real HOME, copy it to agent dir
-- Alternatively: generate Telegram env at `rightclaw up` time (not just `init`), ensuring it goes to the right place
-
-**Detection:**
-- Telegram channel connected in `rightclaw pair` mode but silent under `rightclaw up` with HOME override
-- Bot token "not found" errors in Claude debug logs
-- Plugin loads but ignores messages (missing `access.json`)
-
-**Phase to address:** Phase 2 (Telegram integration update). Not a startup blocker but blocks Telegram functionality.
-
-**Confidence:** HIGH -- codebase audit confirms the path issue in `init.rs:120`
-
----
-
-## Minor Pitfalls
-
-### Pitfall 12: Process-Compose Environment Section Leaks Secrets
-
-**What goes wrong:**
-If API keys or tokens are set in the process-compose YAML `environment:` section, they become visible via `process-compose process list` and the REST API. The TUI also shows env vars for each process.
-
-**Prevention:**
-- Set secrets in the shell wrapper (`export ANTHROPIC_API_KEY=...`) or use CC's `apiKeyHelper` in settings.json
-- Never put `ANTHROPIC_API_KEY` in process-compose YAML
-- Consider reading API key from a file at wrapper startup: `export ANTHROPIC_API_KEY=$(cat /path/to/key)`
-
-**Phase to address:** Phase 1 (wrapper generation). Security concern.
-
-**Confidence:** HIGH -- process-compose REST API exposes env vars by design
-
----
-
-### Pitfall 13: Sandbox Proxy Socket Conflicts With Custom Ports
-
-**What goes wrong:**
-CC's sandbox creates proxy sockets (HTTP/SOCKS) to enforce network isolation. If `sandbox.network.httpProxyPort` or `socksProxyPort` is set in settings and multiple agents use the same port, only the first agent can bind.
-
-By default, CC auto-assigns ports, which should avoid conflicts. But if RightClaw sets explicit proxy ports (or the user does via agent.yaml overrides), conflicts arise.
-
-**Prevention:**
-- Do NOT set `httpProxyPort` or `socksProxyPort` in generated settings -- let CC auto-assign
-- If overrides exist in agent.yaml, validate uniqueness across all agents at `rightclaw up` time
-- Add a validation step: if any `SandboxOverrides` includes proxy ports, ensure no duplicates
-
-**Phase to address:** Phase 2 (multi-agent validation). Low probability but easy to prevent.
-
-**Confidence:** MEDIUM -- inferred from CC docs; proxy auto-assignment likely works but not explicitly confirmed for multi-instance
-
----
-
-### Pitfall 14: `autoMemoryDirectory` Setting Redirects Memory Writes
-
-**What goes wrong:**
-CC has an `autoMemoryDirectory` setting that controls where auto-memory files are stored. If this setting exists in user settings (`~/.claude/settings.json`), it applies to all projects. With HOME override, user settings are at `<agent_dir>/.claude/settings.json` (which is also the project settings). If `autoMemoryDirectory` is set to a path with `~/`, it resolves under the agent HOME. If set to an absolute path, all agents may write memory to the same directory (race condition).
-
-**Prevention:**
-- Do NOT set `autoMemoryDirectory` in generated settings
-- If agents need separate memory: their agent dirs already isolate `.claude/` directories
-- Document: do not set `autoMemoryDirectory` in agent.yaml overrides
-
-**Phase to address:** Phase 3 (documentation). Low priority.
-
-**Confidence:** MEDIUM -- theoretical based on docs; CC notes this setting is "not accepted in project settings" to prevent repo-controlled redirection, but user settings behavior under HOME override is untested
+**Phase to address:** Phase 1 (same fix as Pitfall 4).
 
 ---
 
 ## Technical Debt Patterns
 
-Shortcuts that seem reasonable but create problems.
-
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Keep `--dangerously-skip-permissions` with sandbox | Works immediately, no permission gaps | Bypass warning dialog on every version, CC regressions break it regularly, Trail of Bits security concern (users copy the pattern without sandbox) | Only if sandbox enforcement is verified before launch |
-| Use `defaultMode: "bypassPermissions"` in settings.json instead of CLI flag | No CLI flag needed | Same regressions as CLI flag, VS Code fallback bug, `.claude/` writes still prompt | Only in sandboxed+containerized environments |
-| Symlink real `~/.claude/` into agent dir | Quick auth fix | Defeats entire isolation purpose, shared state = race conditions, security leak | Never for production |
-| Skip `.git` init in agent dir | Simpler init | Trust dialog blocks every headless launch | Never |
-| Use `CLAUDE_CONFIG_DIR` instead of HOME override | More targeted, doesn't affect SSH/Git | Undocumented, unclear behavior (CC issues #3833, #25762), may not work | Only after verification with specific CC version |
-| Set managed settings at `/etc/claude-code/` | `allowManagedDomainsOnly` works | Affects ALL CC instances on machine, requires sudo | Only if user understands system-wide impact |
-| Use `permissions.allow: ["Bash"]` to auto-allow all Bash | No need for bypass mode | Doesn't auto-allow Edit/Write/WebFetch, need separate rules for each tool | Only with additional tool-specific allow rules |
+| Emit env vars without shell quoting | Simpler template | Security vulnerability (command injection) + silent crashes for values with spaces | Never |
+| Forward all `agent.yaml` `env:` vars to process-compose YAML environment section | Easier to debug (visible in TUI) | Secrets visible in REST API and TUI | Never for secrets; acceptable for non-sensitive debug vars if documented |
+| Keep `metadata.openclaw` policy gate as-is for ClawHub skills | No new code | Gate is a no-op for skills.sh (primary registry) | Acceptable as temporary measure if labeled "ClawHub only" |
+| Auto-fallback to ClawHub without user consent | More skills findable | Exposes users to post-ClawHavoc registry without warning | Never without explicit user opt-in |
+| Expand `$HOME` in env values at runtime (let bash do it) | Zero codegen effort | HOME resolves to agent dir after HOME override — confusing, potentially wrong | Never; expand or quote at codegen time |
+| Write `installed.json` as `{}` on every `rightclaw up` | Guaranteed clean state | Data loss of user-installed skills registry | Never |
+| Inject env vars literally into wrapper script | Readable generated output | Secrets in wrapper file on disk; visible if file permissions are lax | Only for non-sensitive, non-secret vars |
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| CC permission modes | Using `bypassPermissions` and expecting no prompts | Use sandbox + `autoAllowBashIfSandboxed` + explicit `permissions.allow` for tools |
-| CC managed settings | Setting `allowManagedDomainsOnly` in per-agent settings | Must be in `/etc/claude-code/managed-settings.json` (or use sandbox domains instead) |
-| CC workspace trust | Writing trust to real `~/.claude.json` | Write to `<agent_dir>/.claude.json` AND ensure `.git/` exists in agent dir |
-| CC credentials | Assuming OAuth works with HOME override | Use `ANTHROPIC_API_KEY` env var or `apiKeyHelper` in settings.json |
-| CC `.claude/` writes | Expecting `permissions.allow` to suppress all prompts | Pre-create all `.claude/` files at `rightclaw up` time |
-| CC version compat | Assuming current CC version behavior is stable | Pin CC version recommendation, add version check to doctor |
-| Sandbox path resolution | Using `~/.ssh` in denyRead with HOME override | Use absolute paths: `/home/user/.ssh` |
-| Shell wrapper secrets | Putting API key in process-compose YAML env section | Set in wrapper script or use `apiKeyHelper` |
-| SSH under sandbox | Expecting SSH to work without explicit socket allowance | Add `sandbox.network.allowUnixSockets` for SSH agent socket |
-| Git under HOME override | Expecting `~/.gitconfig` to be found | Set `GIT_CONFIG_GLOBAL` env var in wrapper |
+| skills.sh `npx skills add` | Assuming `npx` and npm registry are accessible inside CC sandbox | Add `registry.npmjs.org`, `github.com` to `allowed_domains` or document as prerequisite |
+| CC sandbox + env vars | Assuming injected env vars are visible inside sandboxed Bash | They are — env vars pass through to bubblewrap child. But the sandbox may block what those vars point to (e.g., a path outside allowRead). |
+| ClawHub API | Sending unauthenticated requests after ClawHavoc | Check if ClawHub added auth/rate limiting post-incident; handle 429/403 explicitly |
+| agentskills.io SKILL.md format | Reading `metadata.openclaw.*` fields on skills.sh skills | Parse standard YAML frontmatter only; `metadata.openclaw` is absent for skills.sh skills |
+| `installed.json` | Assuming it reflects all installed skills | Skills installed via `npx skills add` directly (bypassing the SKILL.md skill) won't be in `installed.json`; the `list` command handles this via disk scan |
+| process-compose REST API | Putting secrets in process-compose YAML `environment:` | Use wrapper `export VAR="${VAR:-}"` forwarding instead; secrets stay out of PC's config |
+| minijinja template | Not escaping user values | Use shell quoting helper in Rust before passing to template context |
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Using `bypassPermissions` without sandbox on bare metal | Agent has unrestricted access to entire filesystem and network | Always pair with sandbox; Anthropic engineers only use bypass mode inside containers |
-| Symlinking `~/.ssh/` with write access into agent dir | Agent/malicious skill can modify SSH keys, add authorized_keys entries | Read-only access only via `sandbox.filesystem.allowRead` with absolute path |
-| Setting `enableWeakerNestedSandbox` on bare metal | Disables user namespace isolation, substantially weakens sandbox | Only when running inside Docker/container with additional isolation |
-| Allowing `sandbox.filesystem.allowWrite` to HOME or PATH directories | Agent can modify shell config (`.bashrc`), plant executables | Never allow write to PATH dirs or shell configs |
-| Putting `ANTHROPIC_API_KEY` in generated files on disk | Key visible in wrapper scripts if file permissions are lax | Use `apiKeyHelper` script or read key from secure storage at runtime; set wrapper permissions to 700 |
-| Not denying read access to credential files | Agent can read SSH keys, AWS credentials, GPG keyring | Explicit `sandbox.filesystem.denyRead` with absolute paths for sensitive directories |
-| Setting `allowAllUnixSockets: true` | Exposes Docker socket, D-Bus, and other system sockets | Explicitly list only needed sockets (SSH agent) |
-| Sharing `~/.claude.json` across agents | Race condition corrupts auth, trust, and all CC state | Per-agent HOME isolation |
+| Injecting `agent.yaml` `env:` values directly into wrapper without shell quoting | Command injection at wrapper startup, outside CC sandbox | Shell-escape all user values with `'...'` quoting and `'\''` for embedded single quotes |
+| Embedding secret values literally in generated wrapper script | Secret on disk in `~/.rightclaw/agents/<name>/run.sh` (agent state dir); visible if permissions are lax | Use `export VAR="${VAR:-}"` to forward from host env; document "set secrets in host env, reference via $VAR in agent.yaml" |
+| Silent fallback to ClawHub without showing trust level | User installs a post-ClawHavoc skill believing it came from the curated skills.sh | Show source registry in all install confirmations; require explicit opt-in for ClawHub |
+| Skipping policy gate for skills.sh skills because `metadata.openclaw` is absent | Skills with undocumented network/binary requirements install silently, then fail at runtime | Gate should check CC-native sandbox settings regardless of skill format |
+| `env:` values referencing `$HOME` after HOME override | Paths resolve to agent dir instead of host home | Expand or prohibit `$HOME` references in env values; document the override behavior |
 
 ## UX Pitfalls
 
 | Pitfall | User Impact | Better Approach |
 |---------|-------------|-----------------|
-| Silent fallback to default mode (CC VS Code regression) | Agent appears to work but prompts for everything | Add startup self-test: verify permission mode is active |
-| Managed settings silently overriding per-agent config | User's agent config has no effect, no indication why | `rightclaw doctor` detects managed settings and warns |
-| CC version auto-update breaking permissions | Agent worked yesterday, broken today | Recommend `autoUpdatesChannel: "stable"` in generated settings |
-| SSH "Are you sure?" prompt hanging headless agent | Agent blocks indefinitely on first SSH connection | Pre-populate `known_hosts` or set `StrictHostKeyChecking=accept-new` in wrapper |
-| Trust dialog re-appearing after CC update | Agent stops working after CC update | Write trust state AND ensure `.git/` exists AND set `hasTrustDialogHooksAccepted` |
-| Opaque "Permission denied" errors from sandbox | User doesn't know which sandbox rule blocked | Add `rightclaw doctor --agent <name>` to validate effective settings |
+| `npx` fails silently inside sandbox — no clear error | User runs `/skills install`, gets no output or cryptic "network error" | Check if `registry.npmjs.org` is in allowed_domains before attempting install; emit actionable error |
+| `installed.json` reset on `rightclaw up` | Installed skills appear as "manual" in list; update/remove may fail | Fix Pitfall 4; never overwrite user-owned registry |
+| Registry not shown in install confirmation | User doesn't know if skill came from skills.sh or ClawHub | Always show "Installed from skills.sh" or "Installed from ClawHub" |
+| Version pinning not supported | Updating a skill always gets latest; no rollback | Track `version` field in `installed.json` entry; show diff before update |
+| Offline install fails completely | Developer environments with restricted outbound may not reach skills.sh or GitHub | Document `git clone` manual fallback with exact steps; provide `rightclaw skill bundle` as future work |
+| `/clawhub` skill still present after rename | Users with `/clawhub` in their prompts or memory get a skill not found error | Provide migration: `rightclaw up` replaces old `clawhub/` dir with new `skills/` dir; old prompts still work if /clawhub is an alias in the new skill |
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Permissions strategy:** Often assumes `permissions.allow: ["Bash"]` covers everything -- verify Edit, Write, WebFetch, MCP tools are also allowed
-- [ ] **HOME override:** Often missing `.git/` directory in agent dir -- verify trust dialog doesn't appear
-- [ ] **HOME override:** Often missing `hasTrustDialogHooksAccepted` -- verify hooks fire on SessionStart
-- [ ] **Credentials:** Often assumes OAuth works -- verify `ANTHROPIC_API_KEY` or `apiKeyHelper` is configured
-- [ ] **Path resolution:** Often uses `~/` in sandbox settings -- verify all paths are absolute under HOME override
-- [ ] **Git identity:** Often missing `GIT_COMMITTER_*` -- verify both author and committer are set
-- [ ] **SSH known_hosts:** Often forgotten -- verify SSH doesn't prompt on first connection
-- [ ] **Managed settings:** Often ignored -- verify `/etc/claude-code/managed-settings.json` doesn't conflict
-- [ ] **Multi-agent proxy:** Often untested -- verify 3+ agents can all access network simultaneously
-- [ ] **Telegram path:** Often written to real HOME -- verify bot responds under overridden HOME
-- [ ] **API key security:** Often visible in process-compose or wrapper -- verify key is not in logs or REST API
+- [ ] **Shell quoting:** Env var values with spaces, quotes, and special characters — verify the generated wrapper is valid bash with `bash -n run.sh`
+- [ ] **installed.json preservation:** Run `rightclaw up` twice after installing a skill — verify `installed.json` still has the entry after the second `up`
+- [ ] **HOME ordering:** Inject an env var that references `$HOME` — verify it resolves as the user intended (agent dir vs. host home)
+- [ ] **Conflict warning:** Add `ANTHROPIC_API_KEY` to `env:` — verify `rightclaw up` warns about the conflict with the identity-var capture section
+- [ ] **Rename completeness:** After renaming clawhub → skills, verify NO `.claude/skills/clawhub/` directories exist on agents from a fresh `rightclaw up` (old dirs must be cleaned up)
+- [ ] **sandbox allows npx:** Fresh agent with default sandbox — verify `/skills search` returns results (not a silent network failure)
+- [ ] **Policy gate format:** Install a skills.sh skill with known requirements — verify the gate checks CC sandbox settings, not just `metadata.openclaw` fields
+- [ ] **Secret visibility:** Run `curl http://localhost:8080/process/info` — verify no secrets appear in the response
+- [ ] **Backward compat:** Existing agents without `env:` in `agent.yaml` — verify `rightclaw up` succeeds without schema error
+- [ ] **ClawHub source label:** Install a skill via ClawHub fallback — verify the output says "from ClawHub" not "from skills.sh"
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| `.claude.json` corruption | LOW | Restore from backup (CC keeps 5 timestamped backups), or regenerate with `claude config set` |
-| Trust dialog blocks agent | LOW | Create `.git/` in agent dir, write trust state to `<agent_dir>/.claude.json`, restart |
-| Permission mode regression | MEDIUM | Downgrade CC to last known working version, or switch permission strategy |
-| OAuth credentials not found | LOW | Set `ANTHROPIC_API_KEY` env var, restart |
-| Sandbox paths wrong | LOW | Regenerate `settings.json` with absolute paths via `rightclaw up` |
-| SSH/Git identity lost | LOW | Set env vars in wrapper, restart |
-| Managed settings conflict | MEDIUM | Contact IT to understand managed settings, adjust RightClaw config to work within constraints |
-| Telegram in wrong HOME | LOW | Copy `.env` and `access.json` to agent's `.claude/channels/telegram/`, restart |
-| CC version incompatibility | MEDIUM | Pin CC version: `npm install -g @anthropic-ai/claude-code@<version>` |
+| Shell injection via env var | HIGH (security incident) | Rotate all secrets that were in env vars; audit wrapper scripts for injected code; fix quoting and regenerate wrappers |
+| `installed.json` wiped by `rightclaw up` | MEDIUM | Re-install lost skills via `/skills install`; fix Pitfall 4 to prevent recurrence |
+| `npx` blocked by sandbox | LOW | Add `registry.npmjs.org` and `github.com` to `agent.yaml` `sandbox.allowed_domains`, re-run `rightclaw up` |
+| Old `clawhub/` dir present alongside new `skills/` dir | LOW | `rm -rf ~/.rightclaw/agents/<name>/.claude/skills/clawhub/`, restart agent |
+| Env var ordering broke `ANTHROPIC_API_KEY` | LOW | Fix ordering in wrapper template, re-run `rightclaw up` to regenerate all wrappers |
+| ClawHub fallback installed malicious skill | HIGH | `rm -rf .claude/skills/<name>/`, remove from `installed.json`, rotate any credentials the skill accessed |
 
 ## Pitfall-to-Phase Mapping
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| #1 `.claude.json` race condition | Phase 1: HOME isolation | Each agent has isolated `.claude.json`, no shared state |
-| #2 `skipDangerousModePermissionPrompt` broken | Phase 1: permission strategy | Agent starts without bypass warning dialog |
-| #3 `permissions.allow` gaps | Phase 1: permission strategy | Agent runs headlessly with all needed tool access |
-| #4 Workspace trust + `.git` | Phase 1: HOME isolation | Agent starts without trust dialog from fresh state |
-| #5 `allowManagedDomainsOnly` scope | Phase 2: network isolation | Non-allowed domains blocked silently without prompt |
-| #6 `~/` path resolution | Phase 1: settings generation | denyRead paths resolve to real user directories |
-| #7 OAuth credentials | Phase 1: authentication | Agent authenticates with API key under HOME override |
-| #8 CC version skew | Phase 2: doctor | `rightclaw doctor` reports CC version compatibility |
-| #9 Managed settings conflict | Phase 2: doctor | `rightclaw doctor` detects and warns about managed settings |
-| #10 Git/SSH identity | Phase 1: wrapper enhancement | `git push` works from inside agent with HOME override |
-| #11 Telegram paths | Phase 2: Telegram update | Bot responds under overridden HOME |
-| #12 Secret leakage | Phase 1: wrapper + security | API key not visible in PC REST API or logs |
-| #13 Proxy port conflicts | Phase 2: multi-agent validation | 3+ agents run with network access concurrently |
-| #14 autoMemoryDirectory | Phase 3: documentation | Documented as unsupported with per-agent HOME |
+| #1 Shell quoting | Phase 1: env var injection | `bash -n` on generated wrapper; test with `VAR="it's a 'test'"` |
+| #2 HOME ordering | Phase 1: env var injection | Inspect generated wrapper; confirm env vars appear after HOME override block |
+| #3 deny_unknown_fields migration | Phase 1: AgentConfig extension | Existing agents without `env:` load without error |
+| #4 installed.json reset | Phase 1: install_builtin_skills fix | `rightclaw up` twice; `installed.json` unchanged after second run |
+| #5 Policy gate format-agnostic | Phase 2: policy gate rework | Install a skills.sh skill; gate checks `allowedDomains` against skill docs |
+| #6 Secret leakage to PC REST API | Phase 1: env var injection | `curl localhost:8080/process/info` shows no secrets |
+| #7 npx blocked by sandbox | Phase 1 or 2: sandbox defaults | Fresh agent; `/skills search` returns results |
+| #8 rename completeness | Phase 1: rename | `rg -l "clawhub"` returns only comments/docs after rename |
+| #9 ClawHub fallback UX | Phase 2: ClawHub fallback design | Install output shows registry source; ClawHub requires explicit opt-in |
+| #10 installed.json / on-disk divergence | Phase 1: same as #4 | `list` shows user-installed skills as "skills.sh" not "manual" after `rightclaw up` |
 
 ## Sources
 
-### Official Documentation
-- [Claude Code Settings Reference](https://code.claude.com/docs/en/settings) -- complete settings hierarchy, managed settings locations, merge behavior
-- [Claude Code Permissions Docs](https://code.claude.com/docs/en/permissions) -- permissions.allow syntax, defaultMode options, managed-only settings list
-- [Claude Code Sandboxing Docs](https://code.claude.com/docs/en/sandboxing) -- allowManagedDomainsOnly, sandbox path resolution, security limitations
+### Codebase Audited
+- `/home/wb/dev/rightclaw/templates/agent-wrapper.sh.j2` — current wrapper; identity vars captured before HOME override; no env var injection yet
+- `/home/wb/dev/rightclaw/crates/rightclaw/src/codegen/shell_wrapper.rs` — `generate_wrapper()`; no shell escaping of user values
+- `/home/wb/dev/rightclaw/crates/rightclaw/src/codegen/skills.rs` — `SKILL_CLAWHUB` const; `install_builtin_skills()` unconditionally writes `installed.json` as `{}`
+- `/home/wb/dev/rightclaw/crates/rightclaw/src/agent/types.rs` — `AgentConfig` with `deny_unknown_fields`; no `env:` field yet
+- `/home/wb/dev/rightclaw/crates/rightclaw/src/init.rs` — `clawhub` path references at lines 173, 250
+- `/home/wb/dev/rightclaw/skills/clawhub/SKILL.md` — current `/skills` skill; policy gate checks `metadata.openclaw` only
+- `/home/wb/dev/rightclaw/templates/process-compose.yaml.j2` — no `environment:` section; env vars handled in wrapper
 
-### Claude Code Issue Tracker
-- [#28922: .claude.json race condition reported 8 times](https://github.com/anthropics/claude-code/issues/28922) -- concurrent write corruption
-- [#18998: Severe .claude.json corruption with 30+ sessions](https://github.com/anthropics/claude-code/issues/18998) -- 14 corruptions in 11 hours
-- [#25503: --dangerously-skip-permissions should bypass dialog](https://github.com/anthropics/claude-code/issues/25503) -- skipDangerousModePermissionPrompt regression
-- [#35718: bypass mode doesn't bypass ~/.claude/ writes](https://github.com/anthropics/claude-code/issues/35718) -- skill memory blocked
-- [#36168: bypass permissions broken in v2.1.77+](https://github.com/anthropics/claude-code/issues/36168) -- complete regression
-- [#32466: bypass mode still prompts for Bash commands](https://github.com/anthropics/claude-code/issues/32466) -- v2.1.71 regression
-- [#28506: bypass doesn't bypass workspace trust](https://github.com/anthropics/claude-code/issues/28506) -- .git dependency discovered
-- [#9113: workspace trust not respecting pre-config](https://github.com/anthropics/claude-code/issues/9113) -- trust dialog bug
-- [#5572: hasTrustDialogHooksAccepted can't be set via config](https://github.com/anthropics/claude-code/issues/5572)
-- [#26233: skipDangerousModePermissionPrompt undocumented](https://github.com/anthropics/claude-code/issues/26233)
-- [#3833: CLAUDE_CONFIG_DIR behavior unclear](https://github.com/anthropics/claude-code/issues/3833)
-- [#29026: Desktop app ignores settings.json permissions](https://github.com/anthropics/claude-code/issues/29026)
-- [#18160: Bash permission patterns not matching](https://github.com/anthropics/claude-code/issues/18160)
-- [CVE-2026-33068: Workspace trust dialog bypass via repo settings](https://github.com/anthropics/claude-code/security/advisories/GHSA-mmgp-wc2j-qcv7)
+### Project Context
+- `.planning/seeds/SEED-005` — skills.sh background, registry landscape
+- `.planning/seeds/SEED-006` — env var injection design, rename plan, policy gate rework
+- `.planning/PROJECT.md` — v2.2 Active requirements
 
-### Blog Posts and Analysis
-- [Debugging Claude Code's Bypass Permissions Regression](https://www.testinginproduction.co/blog/debugging-claude-code-bypass-permissions) -- VS Code silent fallback analysis
-- [Trail of Bits claude-code-config](https://github.com/trailofbits/claude-code-config) -- opinionated sandbox config reference
-- [managed-settings.com](https://managed-settings.com/) -- managed settings configuration guide
-
-### Existing Codebase
-- `init.rs` (`pre_trust_directory()`) -- writes to real `~/.claude.json`, needs HOME-aware update
-- `codegen/settings.rs` (`generate_settings()`) -- uses `~/.ssh` in denyRead, needs absolute paths
-- `templates/agent-wrapper.sh.j2` -- hardcodes `--dangerously-skip-permissions`, needs replacement
-- `agent/types.rs` (`SandboxOverrides`) -- may need new fields for permission rules
-- `main.rs` (`cmd_up`) -- generates settings per-agent, needs HOME override and trust setup
+### Known Behavior (from v2.1 research)
+- CC sandbox env var inheritance: env vars set before `exec` are inherited by the child process; bubblewrap does not strip env vars
+- process-compose REST API exposes process config including env (confirmed via `process-compose` docs, v2.1 Pitfall 12)
+- HOME override ordering contract: identity vars must be captured before HOME override (v2.1 Phase 8 design decision, now in wrapper)
 
 ---
-*Pitfalls research for: Headless agent isolation -- HOME override + managed settings + dropping bypass mode (v2.1)*
-*Researched: 2026-03-24*
+*Pitfalls research for: v2.2 Skills Registry — registry replacement, env var injection, skill manager UX, CC sandbox interaction*
+*Researched: 2026-03-25*

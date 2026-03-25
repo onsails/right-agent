@@ -1,409 +1,315 @@
-# Feature Research: Headless Agent Isolation (v2.1)
+# Feature Research: Skills Registry (v2.2)
 
-**Domain:** Multi-agent runtime -- eliminating interactive prompts for fully autonomous headless operation
-**Researched:** 2026-03-24
-**Confidence:** HIGH (CC official docs verified, GitHub issues cross-referenced, existing codebase analyzed)
+**Domain:** Agent skill manager — multi-registry skill lifecycle management for Claude Code agents
+**Researched:** 2026-03-25
+**Confidence:** HIGH (skills.sh CLI verified via GitHub/docs; agentskills.io spec fetched directly; ClawHub metadata.openclaw from openclaw/clawhub source; CC sandbox fields from code.claude.com docs)
 
-## Interactive Prompt Catalog
+---
 
-Every interactive prompt/dialog Claude Code can show that blocks a headless agent. This is the definitive list based on official docs, GitHub issues, and empirical testing.
+## Context: What Already Exists
 
-### Prompt 1: Bypass Permissions Warning Dialog
+The existing `/clawhub` skill (in `skills/clawhub/SKILL.md`) already implements the core skill lifecycle using skills.sh as primary registry. It supports search, install, remove, list, and update via `npx skills`. The policy gate audits `metadata.openclaw` frontmatter against the agent's `.claude/settings.json`. This is v2.2's starting point, not a blank slate.
 
-**Trigger:** Launching CC with `--dangerously-skip-permissions` (or `--permission-mode bypassPermissions`)
-**What it shows:** "WARNING: Claude Code running in Bypass Permissions mode. Yes, I accept / No, exit"
-**Blocking?:** YES -- hangs until user clicks "Yes, I accept"
-**Current mitigation:** `skipDangerousModePermissionPrompt: true` in `~/.claude/settings.json`
-**Status:** CC bug #25503 (OPEN) -- the flag itself should be sufficient, but CC requires the persisted setting
-**v2.0 state:** RightClaw writes `skipDangerousModePermissionPrompt: true` to both host `~/.claude/settings.json` and agent `.claude/settings.json` via `pre_trust_directory()`
-**v2.1 approach:** Eliminate `--dangerously-skip-permissions` entirely. Use `permissions.allow` + sandbox instead. No bypass = no bypass warning.
-**Confidence:** HIGH (official docs + issue #25503)
+**v2.2 scope is three bounded changes:**
+1. Rename `/clawhub` → `/skills` (skill file + Rust constants + install paths)
+2. Rework policy gate (drop OpenShell/policy.yaml refs, check CC-native sandbox fields)
+3. Add `env:` section to `agent.yaml` + shell wrapper export
 
-### Prompt 2: Workspace Trust Dialog
+---
 
-**Trigger:** Launching CC from a directory not yet trusted in `~/.claude.json`
-**What it shows:** "Quick safety check: Is this a project you created or one you trust? 1. Yes, I trust this folder / 2. No, exit"
-**Blocking?:** YES -- hangs until user selects option
-**When it appears:** Only in directories WITHOUT a `.git` folder, OR directories not in `~/.claude.json` projects with `hasTrustDialogAccepted: true`
-**Current mitigation:** `pre_trust_directory()` in `init.rs` writes `hasTrustDialogAccepted: true` to `~/.claude.json`
-**Critical edge case with HOME override:** CC reads trust from `~/.claude.json`. With `HOME=<agent-dir>`, `~/.claude.json` resolves to `<agent-dir>/.claude.json`, not the host's `~/.claude.json`. Trust entries must exist in BOTH locations.
-**v2.1 approach:** With HOME override, write `.claude.json` with trust entry into agent dir. Also keep host-level trust as fallback. Alternatively, `CLAUDE_CONFIG_DIR` may redirect where CC reads `.claude.json` -- needs verification.
-**Security note:** CVE-2026-33068 (fixed in v2.1.53) -- trust dialog could be bypassed via repo-controlled `.claude/settings.json` setting `defaultMode: bypassPermissions`. Fixed by evaluating trust dialog before loading repo settings.
-**Confidence:** HIGH (official docs + issue #28506 + CVE-2026-33068)
+## Registry Landscape
 
-### Prompt 3: Protected Directory Write Prompt
+### skills.sh (Primary)
 
-**Trigger:** CC attempts to write to `.claude/`, `.git/`, `.vscode/`, or `.idea/` directories
-**What it shows:** "Authorize Claude to modify its config files for this session?"
-**Blocking?:** YES -- even in `bypassPermissions` mode (regression since v2.1.78)
-**Exception:** Writes to `.claude/commands/`, `.claude/agents/`, `.claude/skills/` are EXEMPT (CC routinely writes there)
-**Current mitigation:** None effective -- `--dangerously-skip-permissions` does NOT bypass this (issue #35718)
-**v2.1 impact:** If agents need to write to their own `.claude/` (e.g., skill memory, settings), this prompt blocks headless operation. The `.claude/skills/` exemption covers most cases, but `.claude/settings.json` writes would be blocked.
-**v2.1 approach:** Use `permissions.allow` with `Edit(.claude/**)` to explicitly allow. This MAY not help because the protected-directory logic is evaluated independently. Alternative: ensure RightClaw generates all `.claude/` files BEFORE launch so CC never needs to create/modify them. Pre-populate `.claude/settings.json`, `.claude/settings.local.json`, `.claude/skills/installed.json` at generation time.
-**Confidence:** HIGH (issue #35718, confirmed regression from v2.1.78)
+**What it is:** Vercel's open agent skills ecosystem directory. 90,000+ skills indexed, telemetry-based leaderboard. Launched January 20, 2026.
 
-### Prompt 4: Tool Permission Prompts (Bash, Edit, Write)
+**CLI:** `npx skills` — no install required, runs via npx. Commands:
 
-**Trigger:** CC wants to use a tool not yet approved
-**What it shows:** "Allow Claude to run [command]? Yes / Yes, don't ask again / No"
-**Blocking?:** YES -- hangs for each unapproved tool use
-**Current mitigation:** `--dangerously-skip-permissions` auto-approves everything
-**v2.1 approach:** Replace `--dangerously-skip-permissions` with explicit `permissions.allow` rules:
-```json
-{
-  "permissions": {
-    "allow": ["Bash", "Read", "Edit", "Write", "WebFetch", "Agent(*)"],
-    "deny": ["Read(./.env)", "Read(./.env.*)"]
-  }
-}
+| Command | Flags | Notes |
+|---------|-------|-------|
+| `add <owner/repo>` | `--list`, `--skill <name>`, `-a <agent>`, `--copy`, `-y`, `--all`, `-g` | Primary install command |
+| `find [query]` | — | Interactive fzf-style search OR keyword |
+| `list` / `ls` | `-g` | Lists installed skills |
+| `remove [name]` | `-a <agent>`, `--all`, `-g` | Uninstall |
+| `check` | — | Detect available updates |
+| `update` | — | Upgrade all installed |
+| `init` | — | Create new SKILL.md template |
+
+**Agent targets:** `claude-code`, `cursor`, `opencode`, and 40+ others. `-a claude-code` installs to `.claude/skills/`. `-a claude` is an accepted alias (per current SKILL.md).
+
+**Discovery fallback:** If `npx skills find` fails, GitHub topic search `--topic=agent-skill` is the documented fallback.
+
+**Public HTTP API:** No documented public REST API. The leaderboard data (skills.sh/leaderboard) is web-only. Programmatic search = `npx skills find` or GitHub API.
+
+**Security:** No built-in verification (unlike ClawHub's VirusTotal gate). Telemetry collects skill name + timestamp by default; `DISABLE_TELEMETRY=1` disables.
+
+### ClawHub (Secondary / Fallback)
+
+**What it is:** OpenClaw's registry. 13,729+ community skills as of Feb 2026. Vector (semantic) search powered by OpenAI embeddings. Had ClawHavoc supply chain attack (Feb 2026) — 341 confirmed malicious skills, now VirusTotal-gated.
+
+**API:** HTTP REST at clawhub.ai. Semantic search endpoint. Skills have SHA-256 hashes in frontmatter for verification. VirusTotal Code Insight verdict per skill.
+
+**`metadata.openclaw` format (ClawHub extension, not in agentskills.io standard):**
+```yaml
+metadata:
+  openclaw:
+    requires:
+      env:
+        - TODOIST_API_KEY
+      bins:
+        - curl
+      bins_any:
+        - chrome
+        - chromium
+    primaryEnv: TODOIST_API_KEY
+    install:
+      - kind: brew
+        formula: jq
+        bins: [jq]
+      - kind: node
+        package: typescript
+        bins: [tsc]
 ```
-Combined with `sandbox.autoAllowBashIfSandboxed: true`, this auto-approves Bash commands inside the sandbox without prompts. `Edit` and `Write` tools need explicit allow rules.
-**Key difference from bypass mode:** `permissions.allow` respects deny rules. Bypass mode ignores allow/deny (except protected directories). Allow rules are SAFER because they can be scoped.
-**Confidence:** HIGH (official permissions docs)
+Fields: `requires.env` (must-have env vars), `requires.bins` (all required), `requires.bins_any` (at least one), `requires.config` (config file paths), `install` (auto-install specs with kinds: `brew`, `node`, `go`, `uv`), `primaryEnv` (key env var).
 
-### Prompt 5: New Domain Network Access Prompt
+**Known bug (Issue #522, Feb 2026):** `requires.env` not extracted into registry metadata — scanner always shows "Required env vars: none." The frontmatter is the authoritative source; do not rely on registry metadata for policy checks. Read SKILL.md directly after download.
 
-**Trigger:** Sandbox-enabled CC tries to access a domain not in `allowedDomains`
-**What it shows:** "Allow network access to [domain]? Allow once / Allow always / Deny"
-**Blocking?:** YES for 5 minutes (curl timeout), then fails silently
-**Current mitigation:** Comprehensive `allowedDomains` list in sandbox settings
-**v2.1 approach:** Two options:
-  1. **Comprehensive allowedDomains** in project-level settings (current approach) -- works but user can add domains interactively. Missing a domain = 5-minute hang.
-  2. **`allowManagedDomainsOnly: true`** in managed settings -- silently blocks non-allowed domains (no prompt). Requires managed-settings.json at system level. Machine-wide impact.
-**Recommendation:** Use option 2 (`allowManagedDomainsOnly: true`) via `rightclaw init --strict-sandbox`. Document machine-wide impact. For users who don't want machine-wide, option 1 with generous default domain list + per-agent overrides.
-**Confidence:** HIGH (official sandbox docs + SEED-008 UAT testing)
+### agentskills.io Standard (SKILL.md Format)
 
-### Prompt 6: MCP Server Authorization Prompt
+Anthropic-published open standard (December 2025). Supported by 16+ agents: Claude Code, Cursor, Gemini CLI, OpenAI Codex, GitHub Copilot, VS Code, OpenHands, Goose, etc.
 
-**Trigger:** CC discovers unapproved MCP servers in `.mcp.json` or `~/.claude.json`
-**What it shows:** "1 MCP server needs auth: [server name]. Approve / Deny"
-**Blocking?:** YES -- hangs until approved
-**Current mitigation:** `--dangerously-skip-permissions` auto-approves. Also: setting `enableAllProjectMcpServers: true` in settings.json auto-approves project-level MCP servers.
-**v2.1 approach:** Set `enableAllProjectMcpServers: true` in agent `.claude/settings.json`. With HOME override, host MCP servers (Canva, Gmail, etc.) are no longer visible -- only agent-specific MCP servers load.
-**Confidence:** HIGH (official settings docs)
+**Frontmatter fields (authoritative from spec, fetched directly):**
 
-### Prompt 7: ANTHROPIC_API_KEY Approval Prompt
+| Field | Required | Constraints | Notes |
+|-------|----------|-------------|-------|
+| `name` | Yes | 1-64 chars, lowercase+hyphens, no consecutive `--`, matches dir name | Primary key |
+| `description` | Yes | 1-1024 chars, what+when | Loaded at startup for all skills (~100 tokens) |
+| `license` | No | Free text | — |
+| `compatibility` | No | 1-500 chars, freeform | Environment requirements (binaries, network, etc.) — NOT machine-parseable |
+| `metadata` | No | Arbitrary key-value map | Where `metadata.openclaw` and other extensions live |
+| `allowed-tools` | No | Space-delimited tool list | Experimental: `Bash(git:*) Read` |
 
-**Trigger:** `ANTHROPIC_API_KEY` env var is set in interactive mode
-**What it shows:** "API key detected. Use this key instead of your subscription? Yes / No"
-**Blocking?:** YES in interactive mode only. In `-p` mode (non-interactive), API key is auto-used.
-**Current mitigation:** RightClaw agents run in interactive mode (not `-p`), so this prompt appears on first launch.
-**v2.1 approach:** Two options:
-  1. Pre-approve via `~/.claude.json` key approval state (undocumented, fragile)
-  2. Don't use `ANTHROPIC_API_KEY` -- use OAuth via subscription
-  3. Accept one-time prompt on first agent launch
-**Recommendation:** Document that OAuth-based agents avoid this entirely. For API key users, the one-time approval is acceptable (CC persists the decision in `.claude.json`). With HOME override, each agent needs separate approval -- use OAuth instead.
-**Confidence:** MEDIUM (observed behavior, not fully documented)
+**`metadata` is a free-form catch-all.** `metadata.openclaw` is a ClawHub extension, not part of the agentskills.io standard. The `compatibility` field is the standard's way to declare environment requirements — it is freeform prose, not machine-parseable.
 
-### Prompt 8: Plugin/Marketplace Trust Prompt
+**Progressive disclosure:** `name` + `description` loaded at startup; full SKILL.md body loaded on activation. Keep under 500 lines; reference external files for detail.
 
-**Trigger:** CC discovers new plugins from `extraKnownMarketplaces` in project settings
-**What it shows:** "Install marketplace [name]? / Install plugin [name]?"
-**Blocking?:** YES -- hangs until approved
-**Current mitigation:** `--dangerously-skip-permissions` does NOT bypass plugin trust
-**v2.1 approach:** Pre-install all plugins via settings.json `enabledPlugins` at generation time. With HOME override, only agent-specific plugins are visible. If using Telegram plugin, pre-enable it in generated settings:
-```json
-{ "enabledPlugins": { "telegram@claude-plugins-official": true } }
-```
-Already implemented in `generate_settings()`.
-**Confidence:** MEDIUM (observed behavior, partially documented)
-
-## Permissions.allow vs --dangerously-skip-permissions
-
-### Coverage Comparison
-
-| Capability | `--dangerously-skip-permissions` | `permissions.allow` + sandbox |
-|-----------|------|------|
-| Auto-approve Bash commands | YES | YES (via `"Bash"` allow + `autoAllowBashIfSandboxed`) |
-| Auto-approve file edits | YES | YES (via `"Edit"` allow) |
-| Auto-approve file writes | YES | YES (via `"Write"` allow) |
-| Auto-approve file reads | YES (all reads auto-approved anyway) | YES (reads never prompt by default) |
-| Auto-approve WebFetch | YES | YES (via `"WebFetch"` allow) |
-| Auto-approve MCP tools | YES | YES (via `mcp__*` allow rules) |
-| Auto-approve subagents | YES | YES (via `"Agent(*)"` allow) |
-| Skip bypass warning dialog | Requires `skipDangerousModePermissionPrompt` | N/A (no bypass = no warning) |
-| Protected directory writes (.claude/, .git/) | NO (still prompts since v2.1.78) | UNTESTED -- `Edit(.claude/**)` may work but protected-dir logic may override |
-| Deny rules respected | NO (bypass ignores allow/deny except protected dirs) | YES (deny rules always evaluated first) |
-| Sandbox filesystem enforcement on Edit/Write tools | NO (Write tool bypasses bwrap in bypass mode) | YES (sandbox enforced for Bash; Edit/Write use permission rules) |
-| Network domain prompts | YES (auto-allows all domains) | Requires `allowedDomains` list or `allowManagedDomainsOnly` |
-
-### Key Insight: The Permission Evaluation Order
-
-CC evaluates permissions in this order:
-1. **Deny rules** (from `disallowed_tools` and `settings.json`) -- if match, BLOCKED even in bypass mode
-2. **Permission mode** -- `bypassPermissions` approves everything reaching this step; `dontAsk` denies unlisted tools
-3. **Allow rules** (from `allowed_tools` and `settings.json`) -- if match, APPROVED
-4. **canUseTool callback** (SDK only) -- in `dontAsk` mode, this step is skipped and tool is DENIED
-
-**For RightClaw v2.1:** Use `defaultMode: "default"` (or no mode) with broad `permissions.allow` rules. This gives the same auto-approval as bypass mode but RESPECTS deny rules and doesn't trigger the bypass warning dialog.
-
-### Recommended Settings for Headless Agents
-
-```json
-{
-  "skipDangerousModePermissionPrompt": true,
-  "spinnerTipsEnabled": false,
-  "prefersReducedMotion": true,
-  "permissions": {
-    "allow": [
-      "Bash",
-      "Read",
-      "Edit",
-      "Write",
-      "WebFetch",
-      "Agent(*)"
-    ],
-    "deny": [
-      "Read(./.env)",
-      "Read(./.env.*)"
-    ]
-  },
-  "sandbox": {
-    "enabled": true,
-    "autoAllowBashIfSandboxed": true,
-    "allowUnsandboxedCommands": false,
-    "filesystem": {
-      "allowWrite": ["/tmp"],
-      "denyRead": ["/home/user/.ssh", "/home/user/.aws", "/home/user/.gnupg"]
-    },
-    "network": {
-      "allowedDomains": ["api.anthropic.com", "github.com", "npmjs.org", "crates.io", "agentskills.io"]
-    }
-  },
-  "enableAllProjectMcpServers": true,
-  "disableAllHooks": true
-}
-```
-
-**Why `disableAllHooks: true`:** With HOME override, host hooks (GSD workflows, personal automations) don't load from host `~/.claude/settings.json`. But if hooks exist in the agent's `.claude/settings.json`, they would fire. Disabling hooks prevents unexpected behavior. Agent-specific hooks can be explicitly enabled per agent.
-
-### Protected Directory Problem -- The Hard One
-
-The biggest obstacle to dropping `--dangerously-skip-permissions`: **protected directory writes**.
-
-Current behavior (v2.1.78+):
-- Even in `bypassPermissions` mode, writes to `.claude/`, `.git/`, `.vscode/`, `.idea/` prompt for confirmation
-- Exception: `.claude/commands/`, `.claude/agents/`, `.claude/skills/` are auto-approved
-- `permissions.allow` with `Edit(.claude/**)` has NOT been tested against the protected-directory gate
-
-**Risk:** If `permissions.allow` ALSO doesn't bypass the protected-directory gate, then agents that need to modify `.claude/settings.json`, `.claude/CLAUDE.md`, or any `.claude/` files outside the exempted subdirs will be blocked.
-
-**Mitigation strategy:**
-1. Generate ALL `.claude/` files before launch (settings.json, skills/, installed.json)
-2. Agent skills that write to `.claude/skills/*/memory/` are in the exempted path
-3. If CC writes to `.claude/settings.local.json` automatically (for persisting approved permissions), this may trigger the prompt -- test empirically
-4. Fallback: keep `--dangerously-skip-permissions` with `skipDangerousModePermissionPrompt: true` until CC fixes #35718
-
-## HOME Override Behavior Catalog
-
-### What `HOME=<agent-dir>` Does
-
-Sets `$HOME` to the agent directory (e.g., `~/.rightclaw/agents/right`). CC resolves `~` via `$HOME`, so all user-level config paths redirect to the agent directory.
-
-### What `CLAUDE_CONFIG_DIR=<agent-dir>/.claude` Does
-
-Redirects CC's config directory (where `settings.json`, `sessions/`, `skills/`, `memory/`, etc. live). This is a belt-and-suspenders complement to HOME override. Known issues: partially respected (9+ open bugs).
-
-### Resolution Table
-
-| Path | Normal Resolution | With HOME Override | Correct? |
-|------|------------------|-------------------|----------|
-| `~/.claude/settings.json` | `/home/user/.claude/settings.json` | `<agent-dir>/.claude/settings.json` | YES -- per-agent settings |
-| `~/.claude/skills/` | `/home/user/.claude/skills/` | `<agent-dir>/.claude/skills/` | YES -- per-agent skills |
-| `~/.claude/agents/` | `/home/user/.claude/agents/` | `<agent-dir>/.claude/agents/` | YES -- per-agent subagents (won't load host's) |
-| `~/.claude.json` | `/home/user/.claude.json` | `<agent-dir>/.claude.json` | NEEDS FIX -- trust entries must be here |
-| `~/.claude/CLAUDE.md` | `/home/user/.claude/CLAUDE.md` | `<agent-dir>/.claude/CLAUDE.md` | YES -- host CLAUDE.md not loaded |
-| `~/.claude/channels/telegram/.env` | `/home/user/.claude/channels/telegram/.env` | `<agent-dir>/.claude/channels/telegram/.env` | NEEDS FIX -- must copy/create here |
-| `~/.claude/channels/telegram/access.json` | `/home/user/.claude/channels/telegram/access.json` | `<agent-dir>/.claude/channels/telegram/access.json` | NEEDS FIX -- must copy/create here |
-| Host hooks in `~/.claude/settings.json` | Loaded | NOT loaded | BENEFIT -- no host hook interference |
-| Host MCP servers in `~/.claude.json` | Loaded | NOT loaded | BENEFIT -- no unrelated MCP servers |
-| OAuth tokens in `~/.claude.json` | Available | NOT available | ISSUE -- agents need ANTHROPIC_API_KEY or copied OAuth |
-| `sandbox.filesystem.denyRead: ["~/.ssh"]` | Denies `/home/user/.ssh` | Denies `<agent-dir>/.ssh` (doesn't exist) | BROKEN -- must use absolute paths |
-| `pre_trust_directory()` target | Host `~/.claude.json` | `<agent-dir>/.claude.json` | NEEDS FIX -- trust must be in agent-scoped location |
-| `/etc/claude-code/managed-settings.json` | Loaded | Still loaded (absolute path) | OK -- system-level settings unaffected by HOME |
-
-### What CC Auto-Creates in `~/.claude/`
-
-CC auto-creates these directories/files as needed:
-- `~/.claude/` (directory itself)
-- `~/.claude/settings.json` (on first permission decision or `/config`)
-- `~/.claude/settings.local.json` (for local permission persistence, also `.gitignore`s it)
-- `~/.claude/sessions/` (conversation history)
-- `~/.claude/memory/` (auto-memory files)
-- `~/.claude/plans/` (plan files)
-- `~/.claude/ide/` (IDE integration lock files)
-- `~/.claude/local/` (local installation binary)
-
-With HOME override, these auto-create inside the agent dir. This is CORRECT behavior for isolation.
-
-### Authentication with HOME Override
-
-| Auth Method | Works with HOME Override? | Notes |
-|------------|--------------------------|-------|
-| `ANTHROPIC_API_KEY` env var | YES | Env vars are independent of HOME. Pass via process-compose env. |
-| OAuth via `~/.claude.json` | NO (without migration) | OAuth tokens stored in host `.claude.json`. Agent's `.claude.json` is empty. Must copy or symlink. |
-| `apiKeyHelper` in settings.json | YES | Helper script runs relative to agent context. |
-| Bedrock/Vertex/Foundry | YES | Use env vars (`CLAUDE_CODE_USE_BEDROCK`, etc.) |
-
-**Recommendation:** Require `ANTHROPIC_API_KEY` for headless agents. OAuth is designed for interactive use with browser-based login flows. API keys are the intended headless auth mechanism.
-
-### Git/SSH Access with HOME Override
-
-| Resource | Default Location | With HOME Override | Solution |
-|----------|-----------------|-------------------|----------|
-| `~/.gitconfig` | `/home/user/.gitconfig` | `<agent-dir>/.gitconfig` (doesn't exist) | Set `GIT_CONFIG_GLOBAL=/home/user/.gitconfig` env var |
-| `~/.ssh/` | `/home/user/.ssh/` | `<agent-dir>/.ssh` (doesn't exist) | Set `SSH_AUTH_SOCK` (if using agent), or use `GIT_SSH_COMMAND` with explicit key path |
-| `~/.gitignore_global` | `/home/user/.gitignore_global` | `<agent-dir>/.gitignore_global` | Set via `GIT_CONFIG_GLOBAL` or `core.excludesFile` in agent `.gitconfig` |
-| `~/.npmrc` | `/home/user/.npmrc` | `<agent-dir>/.npmrc` | Copy or set `NPM_CONFIG_USERCONFIG` |
-
-**Env vars to forward in shell wrapper:**
-```bash
-export HOME="<agent-dir>"
-export GIT_CONFIG_GLOBAL="/home/user/.gitconfig"
-# SSH agent forwarding -- only if SSH_AUTH_SOCK exists
-if [ -n "$SSH_AUTH_SOCK" ]; then
-  export SSH_AUTH_SOCK="$SSH_AUTH_SOCK"
-fi
-```
+---
 
 ## Feature Landscape
 
-### Table Stakes (Agents Must Work Without Prompts)
+### Table Stakes (Users Expect These)
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Drop `--dangerously-skip-permissions` for `permissions.allow` | Bypass mode shows warning dialog, doesn't respect deny rules, has protected-dir regression | MEDIUM | Use `"Bash", "Read", "Edit", "Write", "WebFetch"` in allow list. Sandbox handles Bash auto-approval. |
-| Per-agent HOME override | Agents must not see host config, hooks, MCP servers, or other agents' state | MEDIUM | `HOME=<agent-dir>` in wrapper. CLAUDE_CONFIG_DIR as backup. Handle trust, Telegram, git/SSH edge cases. |
-| Workspace trust for HOME-overridden agents | Trust dialog blocks headless launch | LOW | Write `.claude.json` with trust entry into agent dir during `rightclaw up` codegen, not just `init`. |
-| Pre-populate all `.claude/` files before launch | Protected-dir prompt blocks any CC writes to `.claude/` (v2.1.78+ regression) | LOW | Already mostly done (settings.json, skills/, installed.json). Add: settings.local.json (empty), channels/ dir structure. |
-| `allowManagedDomainsOnly` support | Network domain prompts hang headless agents for 5 minutes | MEDIUM | `rightclaw init --strict-sandbox` writes managed-settings.json. Document machine-wide impact. |
-| `enableAllProjectMcpServers: true` in settings | MCP auth prompts block headless agents | LOW | Add to generated settings.json. |
-| `disableAllHooks: true` in settings | Prevent host/stale hooks from firing in agent context | LOW | Add to generated settings.json. Can be overridden per-agent. |
-| `ANTHROPIC_API_KEY` passthrough | OAuth doesn't work cleanly with HOME override | LOW | Document as recommended auth for headless agents. Forward from process-compose env. |
-| Git/SSH env forwarding | Agents need git access but HOME override breaks gitconfig/SSH | LOW | Forward `GIT_CONFIG_GLOBAL`, `SSH_AUTH_SOCK` in wrapper. |
-| Telegram channel files in agent HOME | HOME override breaks Telegram `.env` and `access.json` paths | MEDIUM | Copy/create Telegram channel files in `<agent-dir>/.claude/channels/telegram/` during codegen. |
+| Search skills.sh registry | Any skill manager has search | LOW | `npx skills find <query>` already in SKILL.md; GitHub topic fallback documented |
+| Install by owner/repo slug | Standard package manager pattern | LOW | `npx skills add <slug> -a claude --copy -y` already implemented |
+| Remove installed skill | Symmetry with install | LOW | `npx skills remove <name> -a claude -y` already implemented |
+| List installed skills | Users need inventory visibility | LOW | `npx skills list -a claude` + scan `.claude/skills/` already implemented |
+| `installed.json` tracking per agent | Know what's installed, track source | LOW | Already implemented; source field (`skills.sh` vs `manual`) already present |
+| Skill renamed `/clawhub` → `/skills` | Name must match primary registry (skills.sh, not ClawHub) | LOW | Rename: `skills/clawhub/` dir → `skills/skills/`, `SKILL_CLAWHUB` const in `codegen/skills.rs`, `init.rs` print statement, tests |
+| Manual install fallback | npx not always available | LOW | `git clone` fallback already in SKILL.md |
+| Policy gate before any skill activation | Security hygiene — block skills missing deps before they run | MEDIUM | Gate exists; needs rework to check CC-native sandbox instead of policy.yaml |
 
 ### Differentiators (Competitive Advantage)
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Zero-prompt headless launch | No RightClaw agent ever shows an interactive prompt. Complete "fire and forget" | MEDIUM | Combination of all table stakes above. Unique vs OpenClaw which has no isolation. |
-| Managed settings deployment via CLI | `rightclaw init --strict-sandbox` sets up machine-wide silent domain blocking | LOW | Writes `/etc/claude-code/managed-settings.json`. Requires sudo. Clear messaging. |
-| Permission deny rules respected | Unlike bypass mode, agents respect deny rules for sensitive files | LOW | `permissions.deny` prevents reading `.env`, secrets, etc. even with broad allow. |
-| Per-agent environment isolation report | `rightclaw doctor` reports each agent's isolation status: HOME override, trust, Telegram, permissions | MEDIUM | Extend doctor to validate agent-level config completeness. |
-| Agent startup health check | Detect and report missing trust entries, missing Telegram files, missing API key before launch | MEDIUM | Pre-flight check in `rightclaw up` before spawning process-compose. |
+| Policy gate checks CC-native sandbox | Show actual sandbox state (`settings.json` `allowedDomains`, `allowWrite`) not dead OpenShell refs | MEDIUM | Read agent's `.claude/settings.json` → check `sandbox.network.allowedDomains` and `sandbox.filesystem.allowWrite`; drop all `policy.yaml` path mentions |
+| `env:` section in `agent.yaml` | Per-agent env var injection — skills that need API keys work without host env exposure | LOW-MEDIUM | Add `env: Option<IndexMap<String, String>>` to `AgentConfig`; export in shell wrapper before `exec claude`; `${VAR}` host env passthrough syntax |
+| Shell wrapper env export block | Env vars available to all bash commands run by skills (inside sandbox) | LOW | Add export loop in `agent-wrapper.sh.j2` after identity vars, before HOME override |
+| ClawHub as secondary/fallback | Backward compat with OpenClaw ecosystem (13,729+ skills, semantic search) | LOW | `gh search` fallback partially done; explicit ClawHub HTTP fallback in install/search flow |
+| Skills update command | Drift management for installed skills | LOW | `npx skills update` already in SKILL.md |
+| `compatibility` field display in audit | Show freeform compatibility string during install — user sees what skill expects | LOW | Parse `compatibility` from frontmatter; display in policy gate audit table (freeform only, no enforcement) |
 
-### Anti-Features (Do NOT Build)
+### Anti-Features (Commonly Requested, Often Problematic)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|-----------------|-------------|
-| OAuth token copying/sharing between agents | "I don't want to set API keys" | OAuth tokens are session-bound, expire, require browser refresh. Copying creates stale token issues. CC may detect token mismatch and force re-auth. | Use `ANTHROPIC_API_KEY` for headless agents. OAuth is for interactive human use. |
-| `--dangerously-skip-permissions` with workarounds | "Just fix the bypass warning" | Bypass mode doesn't respect deny rules, has active regressions (#35718), and Anthropic is moving away from it. Building on a foundation they're deprecating is risky. | `permissions.allow` + sandbox is the intended replacement. Aligns with CC's security direction. |
-| `dontAsk` mode as default | "Auto-deny everything not in allow list" | `dontAsk` is SDK-only (TypeScript), not available via CLI flag or settings.json. Attempting to set it via settings.json is undocumented and may not work. | Use `permissions.allow` with explicit rules. Unlisted tools prompt (won't happen if all tools are allowed). |
-| Per-agent managed-settings.json | "Each agent should have its own managed settings" | Managed settings are machine-wide by design. Per-agent managed settings would require CC to support multiple managed-settings paths, which it doesn't. | Use project-level settings for per-agent config. Managed settings only for machine-wide policies (domain blocking). |
-| Symlinking host `.claude/` into agent dir | "Share plugins/settings across agents" | Defeats isolation. Changes in one agent affect others. Symlink races with concurrent agents. | Each agent gets own `.claude/` populated at codegen time. Shared resources via `agent.yaml` overrides. |
+| Secrets management / vault integration | API keys in agent.yaml are plaintext | secretspec/vault adds external dependency, complex UX, requires design — scope creep for v2.2 | Use `env: VAR: "${VAR}"` passthrough — value comes from host env, never stored in agent.yaml. SEED-006 explicitly flags secretspec as future design work; defer to v2.3+ |
+| Auto-expand sandbox for skill requirements | Convenience — install skill and it just works | Violates RightClaw's security model: users must explicitly consent to capability expansion. Expanding sandbox silently defeats the entire point of the policy gate | Block install, show audit table, tell user exactly what to add to `agent.yaml sandbox:` section |
+| Global skill registry (shared across agents) | Save disk space, single update | Breaks agent isolation — HOME override means each agent has own `.claude/`; shared skills create cross-agent state leakage | Per-agent `.claude/skills/` is the correct model. SKILL.md files are small; per-agent storage is acceptable |
+| Auto-install binary dependencies from `metadata.openclaw.install` | `install` field has brew/node/go/uv spec | Executing arbitrary install steps is privilege escalation — changes host system state outside sandbox; requires trust in skill author | Block install, show what binary is missing, show the `install` spec for user to run manually |
+| Semantic search via HTTP API | Better discovery than keyword search | skills.sh has no public REST API; ClawHub has one but was supply-chain compromised; building an API client for a compromised registry is risky | `npx skills find` (interactive fzf) + GitHub topic search covers search adequately |
+| `--force` flag to skip policy gate | Power users want to bypass | Defeats the purpose; RightClaw's value is enforced hygiene; one `--force` install creating a credential-stealing skill destroys user trust | No force flag. If a check is a false positive, fix the check. If user wants unsafe install, they can copy manually |
+| Symlinking skills from host `.claude/skills/` into agent | "Share my personal skills across agents" | Symlink races with concurrent agents; changes in one agent affect others; defeats per-agent isolation | Copy at install time via `--copy` flag (already enforced). Document why symlinking is not supported |
+
+---
 
 ## Feature Dependencies
 
 ```
-[Drop --dangerously-skip-permissions]
-    |
-    +--requires--> [permissions.allow in settings.json]
-    |                  +--generates--> [Broad allow rules: Bash, Edit, Write, Read, WebFetch]
-    |                  +--generates--> [Targeted deny rules: .env, secrets]
-    |
-    +--requires--> [Pre-populate .claude/ files]
-    |                  +--avoids--> [Protected directory write prompt]
-    |
-    +--requires--> [allowManagedDomainsOnly OR comprehensive allowedDomains]
-                       +--avoids--> [Network domain prompt]
+[Rename /clawhub → /skills (Rust)]
+    └──required before──> [All downstream tests pass]
+    └──touches──> [skills/clawhub/ dir rename]
+    └──touches──> [SKILL_CLAWHUB const in codegen/skills.rs]
+    └──touches──> [init.rs print statement]
+    └──touches──> [codegen/skills.rs tests asserting "clawhub/SKILL.md"]
 
-[Per-agent HOME override]
-    |
-    +--requires--> [Trust entry in agent-scoped .claude.json]
-    +--requires--> [Telegram files in agent-scoped .claude/channels/]
-    +--requires--> [Git/SSH env forwarding]
-    +--requires--> [ANTHROPIC_API_KEY for auth]
-    |
-    +--enables---> [Host config isolation (no host hooks, MCP, settings)]
-    +--enables---> [Per-agent auto-memory isolation]
-    +--enables---> [Per-agent session isolation]
+[env: section in AgentConfig (Rust types)]
+    └──required before──> [Shell wrapper env export]
+    └──required before──> [env vars available to skill commands at runtime]
+    └──touches──> [agent/types.rs AgentConfig struct]
+    └──touches──> [deny_unknown_fields — must add field or it rejects env:]
+    └──touches──> [agent-wrapper.sh.j2 template]
+    └──touches──> [codegen/shell_wrapper.rs context builder]
 
-[allowManagedDomainsOnly]
-    +--requires--> [rightclaw init --strict-sandbox]
-    +--conflicts--> [Per-agent allowedDomains in project settings]
-    (managed allowedDomains override project-level ones)
+[Policy gate rework (SKILL.md instruction update)]
+    └──depends on──> [Read .claude/settings.json at skill install time]
+    └──independent of──> [Rename]
+    └──independent of──> [env: injection]
+    └──touches──> [skills/clawhub/SKILL.md policy gate section]
+
+[ClawHub secondary fallback]
+    └──enhances──> [Search command]
+    └──independent of──> [Policy gate rework]
+    └──independent of──> [Rename]
 ```
 
 ### Dependency Notes
 
-- **Dropping --dangerously-skip-permissions requires permissions.allow:** Without explicit allow rules, every tool use prompts. The allow rules replace the blanket bypass.
-- **Pre-populate .claude/ avoids protected directory prompt:** CC's protected-directory logic (v2.1.78+) prompts on ANY write to `.claude/` except exempted subdirs. Generating all files before launch prevents CC from needing to write there.
-- **allowManagedDomainsOnly conflicts with per-agent allowedDomains:** When `allowManagedDomainsOnly: true` is set in managed settings, ONLY managed-level `allowedDomains` are respected. Project-level domains are ignored. This means agent.yaml `sandbox.allowed_domains` overrides stop working for network. Workaround: put the superset of all agent domains in managed settings, or don't use `allowManagedDomainsOnly`.
-- **HOME override requires trust in agent-scoped location:** CC reads trust from `~/.claude.json`. With HOME override, that's `<agent-dir>/.claude.json`. Trust entry must be there.
+- **Rename is the foundation:** `SKILL_CLAWHUB` const rename and directory rename (`skills/clawhub/` → `skills/skills/`) must happen atomically. `init.rs` has a print statement referencing `agents/right/.claude/skills/clawhub/SKILL.md` — must update. Tests in `codegen/skills.rs` assert `clawhub/SKILL.md` exists — all must update together.
+- **env: injection is two parts:** (1) `AgentConfig` gets `env` field — `deny_unknown_fields` will REJECT agent.yaml files with `env:` until the field is added to the struct. (2) wrapper template iterates the map. Both must ship together.
+- **Shell wrapper env export order matters:** Env vars must be exported AFTER the identity vars (GIT_CONFIG_GLOBAL, SSH_AUTH_SOCK, etc.) but BEFORE the `export HOME=` line. Reason: values using `${VAR}` syntax resolve from the parent process env (process-compose), which is correct. After HOME override, `~` in a value would resolve against agent dir — acceptable if that's what the user specifies.
+- **Policy gate rework is SKILL.md only:** The gate logic lives in the SKILL.md instruction file (executed by Claude). Rework = update the markdown instructions. No Rust changes required.
+- **`deny_unknown_fields` on AgentConfig is the primary risk:** Any agent.yaml using `env:` before the Rust struct is updated will fail validation with "unknown field". Must update struct + tests atomically.
+
+---
 
 ## MVP Definition
 
-### Launch With (v2.1 Core)
+### Launch With (v2.2)
 
-- [ ] **`permissions.allow` in generated settings.json** -- `["Bash", "Read", "Edit", "Write", "WebFetch"]` replaces `--dangerously-skip-permissions`
-- [ ] **Remove `--dangerously-skip-permissions` from wrapper template** -- no more bypass mode
-- [ ] **Per-agent HOME override in wrapper** -- `HOME=<agent-dir>` + `CLAUDE_CONFIG_DIR=<agent-dir>/.claude`
-- [ ] **Agent-scoped `.claude.json` with trust entry** -- generate during `rightclaw up`, not just `init`
-- [ ] **Telegram files in agent HOME** -- copy `.env` and `access.json` to `<agent-dir>/.claude/channels/telegram/`
-- [ ] **Git/SSH env forwarding** -- `GIT_CONFIG_GLOBAL`, `SSH_AUTH_SOCK` in wrapper
-- [ ] **`enableAllProjectMcpServers: true`** in generated settings
-- [ ] **`disableAllHooks: true`** in generated settings (overridable per agent)
-- [ ] **Pre-populate `.claude/settings.local.json`** (empty JSON `{}`) to prevent CC auto-creation prompt
-- [ ] **ANTHROPIC_API_KEY documentation** -- recommend for headless agents, document OAuth limitations
+These are the three scoped features from the milestone. All are bounded; none require new infrastructure.
 
-### Add After Validation (v2.1.x)
+- [ ] **Rename `/clawhub` → `/skills`** — Name must match primary registry. Low complexity. Rename: directory, Rust const, init.rs print statement, tests. Update `install_builtin_skills()` to install `skills/SKILL.md` not `clawhub/SKILL.md`.
+- [ ] **Policy gate rework** — Drop dead `policy.yaml` references. Read `sandbox.network.allowedDomains` and `sandbox.filesystem.allowWrite` from agent's `.claude/settings.json`. Without this the gate reports against a model that no longer exists (OpenShell).
+- [ ] **`env:` in `agent.yaml` + shell wrapper export** — Add `env` field to `AgentConfig`, iterate in wrapper template. Unblocks skills requiring API keys (browser-use, etc.). Without this, agents cannot use skills needing env vars not in process-compose's inherited environment.
 
-- [ ] **`rightclaw init --strict-sandbox`** -- writes managed-settings.json with `allowManagedDomainsOnly: true` + domain superset
-- [ ] **Agent startup health check** -- pre-flight validation before process-compose launch
-- [ ] **`rightclaw doctor` agent isolation report** -- per-agent trust, Telegram, permissions status
+### Add After Validation (v2.2.x)
 
-### Future Consideration (v2.2+)
+- [ ] **ClawHub explicit secondary fallback** — Already partially implemented via `gh search` fallback. Add explicit ClawHub HTTP API call in install/search flow when skills.sh fails. Gate behind a `--source clawhub` opt-in flag to be explicit about using the compromised registry.
+- [ ] **`compatibility` field display in policy audit** — Show freeform `compatibility` string from SKILL.md during install. Low effort, adds transparency for skills using the standard field instead of `metadata.openclaw`.
 
-- [ ] **Protected directory prompt fix** -- if/when CC fixes #35718, simplify .claude/ pre-population
-- [ ] **`dontAsk` mode support** -- if CC adds CLI/settings support for dontAsk, use it as alternative to broad allow rules
-- [ ] **Per-agent managed settings** -- if CC adds per-directory managed settings, migrate from machine-wide
+### Future Consideration (v2.3+)
+
+- [ ] **Secretspec / `.secrets.yaml`** — Per SEED-006, design needed. Vault integration, `source: env|file|vault` abstraction. Blocked on design, not implementation.
+- [ ] **Auto-update cron for skills** — `npx skills update` on a schedule via `/rightcron`. Requires careful handling of built-in skill overwrite logic.
+- [ ] **Tech Leads Club as verified source** — Snyk-scanned, content-hashed skills. Add as third registry option behind `--source tls` flag.
+- [ ] **`allowed-tools` frontmatter enforcement** — When a SKILL.md declares `allowed-tools: Bash(git:*) Read`, enforce that the skill only uses declared tools. Requires CC support for this experimental field.
+
+---
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| `permissions.allow` in settings.json | HIGH | LOW | P1 |
-| Remove `--dangerously-skip-permissions` from wrapper | HIGH | LOW | P1 |
-| Per-agent HOME override | HIGH | MEDIUM | P1 |
-| Agent-scoped `.claude.json` trust | HIGH | LOW | P1 |
-| Telegram files in agent HOME | HIGH (Telegram users) | LOW | P1 |
-| Git/SSH env forwarding | HIGH | LOW | P1 |
-| `enableAllProjectMcpServers` | MEDIUM | LOW | P1 |
-| `disableAllHooks` | MEDIUM | LOW | P1 |
-| Pre-populate `settings.local.json` | MEDIUM | LOW | P1 |
-| ANTHROPIC_API_KEY docs | MEDIUM | LOW | P1 |
-| `rightclaw init --strict-sandbox` | MEDIUM | MEDIUM | P2 |
-| Agent startup health check | MEDIUM | MEDIUM | P2 |
-| Doctor isolation report | LOW | MEDIUM | P3 |
+| Rename `/clawhub` → `/skills` | HIGH (naming accuracy, removes confusion) | LOW (rename const, dir, tests) | P1 |
+| Policy gate rework (CC-native sandbox) | HIGH (correctness — old gate checks dead fields) | MEDIUM (update SKILL.md instructions, read settings.json) | P1 |
+| `env:` in `agent.yaml` + wrapper export | HIGH (unblocks class of skills needing API keys) | LOW-MEDIUM (add Rust field + template loop) | P1 |
+| ClawHub explicit secondary fallback | MEDIUM (backward compat with OpenClaw ecosystem) | LOW (partially implemented) | P2 |
+| `compatibility` field display | LOW (informational only) | LOW (parse + display) | P2 |
+| Secretspec / vault | MEDIUM (security hygiene) | HIGH (design + implementation) | P3 |
+
+---
+
+## Policy Gate: Precise Change Specification
+
+The policy gate lives in the SKILL.md instructions (Claude executes them). Current v2.1 state vs required v2.2 state:
+
+| Check | Current (broken) | Reworked (correct) |
+|-------|-----------------|-------------------|
+| Required binaries | `which <bin>` | Keep as-is (still valid) |
+| Required env vars | `echo $VAR` | Keep as-is (still valid) |
+| Network access | Check `policy.yaml` allowedDomains | Check agent's `.claude/settings.json` → `sandbox.network.allowedDomains` |
+| Filesystem access | Check `policy.yaml` allowWrite | Check agent's `.claude/settings.json` → `sandbox.filesystem.allowWrite` |
+| Policy file reference | "Check agent's `policy.yaml`" in SKILL.md text | Remove all policy.yaml mentions; replace with settings.json path |
+| Sandbox enabled check | None | Add: check `sandbox.enabled` is `true`; warn if sandbox is off |
+
+**What the reworked gate reads from `.claude/settings.json` (relative to agent cwd):**
+- `sandbox.enabled` — is sandbox active at all?
+- `sandbox.network.allowedDomains` — array of allowed domains
+- `sandbox.filesystem.allowWrite` — array of writable paths
+- `sandbox.autoAllowBashIfSandboxed` — auto-run mode (informational for user)
+
+**What `metadata.openclaw.requires` supplies (from downloaded SKILL.md):**
+- `requires.env` — env var names → check via `echo $VAR` (unchanged)
+- `requires.bins` — binary names → check via `which` (unchanged)
+- `requires.bins_any` — at-least-one binary check (unchanged)
+- `requires.network` — domain list → check against `sandbox.network.allowedDomains` (NEW source)
+- `requires.filesystem` — path list → check against `sandbox.filesystem.allowWrite` (NEW source)
+
+Gate logic is unchanged (block on any miss, display audit table). Only the source for network/filesystem data changes.
+
+---
+
+## env: Section Design
+
+**`agent.yaml` shape:**
+```yaml
+env:
+  BROWSER_USE_API_KEY: "${BROWSER_USE_API_KEY}"   # passthrough from host env (resolved by shell)
+  CUSTOM_VAR: "literal-value"                      # literal string
+  HOME_RELATIVE: "~/some/path"                     # resolved against host HOME before wrapper override
+```
+
+**Rust type addition to `AgentConfig` (agent/types.rs):**
+Use `IndexMap<String, String>` (ordered, reproducible) not `HashMap` (nondeterministic). Field is optional with empty default to avoid breaking existing agent.yaml files without `env:`.
+
+```rust
+/// Per-agent environment variables injected into the shell wrapper.
+/// Values support `${VAR}` host-env passthrough (resolved by bash at runtime).
+#[serde(default)]
+pub env: IndexMap<String, String>,
+```
+
+Note: `deny_unknown_fields` on `AgentConfig` will REJECT any agent.yaml with `env:` until this field is added. This is the breaking change risk — must add field before any agent.yaml adoption.
+
+**Shell wrapper template block position (agent-wrapper.sh.j2):**
+Insert after identity env var block, before `export HOME=`:
+
+```bash
+# Per-agent env vars from agent.yaml env: section
+{% for key, value in env %}
+export {{ key }}="{{ value }}"
+{% endfor %}
+```
+
+Position rationale: (1) After identity vars so they're already set if needed. (2) Before `HOME=` override so `${VAR}` references resolve from process-compose's inherited environment (the host env), not the agent dir context. This is the intended behavior for passthrough.
+
+---
+
+## Competitor Feature Analysis
+
+| Feature | npx skills (skills.sh) | clawhub CLI | RightClaw /skills |
+|---------|----------------------|-------------|------------------|
+| Search | `npx skills find <q>` | `clawhub search <q>` (semantic) | `npx skills find` + GitHub fallback |
+| Install | `npx skills add <owner/repo>` | `clawhub install <slug>` | `npx skills add` + git clone fallback |
+| Remove | `npx skills remove` | `clawhub uninstall` | `npx skills remove` + manual fallback |
+| Update | `npx skills update` | `clawhub update --all` | `npx skills update` |
+| Policy gate | None | VirusTotal + SHA256 hash | CC-native sandbox check (custom) |
+| Multi-registry | No (skills.sh only) | No (ClawHub only) | Yes (skills.sh primary, ClawHub fallback) |
+| Install tracking | Lock file (tree SHA) | Registry metadata | `installed.json` per agent |
+| Env var injection | Out of scope | Out of scope | `env:` in agent.yaml |
+| Security post-ClawHavoc | No verification | VirusTotal-gated | Policy gate checks CC sandbox state |
+
+---
 
 ## Sources
 
-- [Claude Code Permissions Documentation](https://code.claude.com/docs/en/permissions) -- permission modes, rule syntax, managed-only settings, HIGH confidence
-- [Claude Code Sandboxing Documentation](https://code.claude.com/docs/en/sandboxing) -- sandbox modes, autoAllowBashIfSandboxed, domain prompts, HIGH confidence
-- [Claude Code Settings Reference](https://code.claude.com/docs/en/settings) -- complete settings.json schema, scopes, precedence, HIGH confidence
-- [Claude Code Environment Variables](https://code.claude.com/docs/en/env-vars) -- CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, all env vars, HIGH confidence
-- [Claude Code Headless Mode](https://code.claude.com/docs/en/headless) -- -p flag, --bare mode, --allowedTools, HIGH confidence
-- [GitHub Issue #25503: Bypass permissions dialog regression](https://github.com/anthropics/claude-code/issues/25503) -- OPEN, confirmed regression v2.1.42+, HIGH confidence
-- [GitHub Issue #28506: Workspace trust prompt not bypassed](https://github.com/anthropics/claude-code/issues/28506) -- CLOSED (trust only in non-git dirs), HIGH confidence
-- [GitHub Issue #35718: Protected directory write prompt](https://github.com/anthropics/claude-code/issues/35718) -- CLOSED, regression v2.1.78+, confirmed by multiple users, HIGH confidence
-- [GitHub Issue #3833: CLAUDE_CONFIG_DIR behavior unclear](https://github.com/anthropics/claude-code/issues/3833) -- OPEN, hybrid behavior documented, MEDIUM confidence
-- [CVE-2026-33068: Workspace trust dialog bypass via repo settings](https://advisories.gitlab.com/pkg/npm/@anthropic-ai/claude-code/CVE-2026-33068/) -- fixed in v2.1.53, HIGH confidence
-- [SEED-004: Per-agent HOME isolation](SEED-004-per-agent-home-isolation.md) -- internal project seed, HIGH confidence
-- [SEED-008: Managed settings for strict sandbox](SEED-008-managed-settings-strict-sandbox.md) -- internal project seed, HIGH confidence
-- [SmartScope Claude Code Auto Approve Guide](https://smartscope.blog/en/generative-ai/claude/claude-code-auto-permission-guide/) -- community guide on permission modes, MEDIUM confidence
-- [morphllm: 5 Modes, Only 1 Nuclear](https://www.morphllm.com/claude-code-dangerously-skip-permissions) -- comprehensive bypass mode analysis, MEDIUM confidence
+- [agentskills.io/specification](https://agentskills.io/specification) — official spec, fetched directly (HIGH confidence)
+- [github.com/vercel-labs/skills](https://github.com/vercel-labs/skills) — skills CLI source, fetched directly (HIGH confidence)
+- [skills.sh/docs/cli](https://skills.sh/docs/cli) — CLI docs (MEDIUM confidence — partial content returned by WebFetch)
+- [code.claude.com/docs/en/sandboxing](https://code.claude.com/docs/en/sandboxing) — CC sandbox fields schema, fetched directly (HIGH confidence)
+- [openclaw/clawhub#522](https://github.com/openclaw/clawhub/issues/522) — ClawHub `requires.env` not extracted into registry bug (MEDIUM confidence, from WebSearch)
+- `metadata.openclaw` format from openclaw/clawhub docs/skill-format.md (MEDIUM confidence, from WebSearch summary)
+- SEED-005, SEED-006 — project seeds (HIGH confidence, read directly)
+- `skills/clawhub/SKILL.md` — current implementation (HIGH confidence, read directly)
+- `crates/rightclaw/src/agent/types.rs` — current `AgentConfig` struct with `deny_unknown_fields` (HIGH confidence, read directly)
+- `templates/agent-wrapper.sh.j2` — current wrapper template with identity var order (HIGH confidence, read directly)
+- `crates/rightclaw/src/codegen/skills.rs` — current `install_builtin_skills()` with clawhub path (HIGH confidence, read directly)
+- [vercel-labs/skills GitHub README](https://github.com/vercel-labs/skills) — CLI command list (HIGH confidence, fetched directly)
+- [ClawHavoc attack details](https://github.com/openclaw/clawhub) — supply chain attack context (MEDIUM confidence, WebSearch)
 
 ---
-*Feature research for: Headless Agent Isolation (v2.1)*
-*Researched: 2026-03-24*
+*Feature research for: RightClaw v2.2 Skills Registry milestone*
+*Researched: 2026-03-25*
