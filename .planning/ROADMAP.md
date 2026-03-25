@@ -29,7 +29,7 @@
 
 ### Phases
 
-- [ ] **Phase 11: Env Var Injection** - Per-agent env vars declared in agent.yaml, shell-quoted and injected before `exec claude`
+- [x] **Phase 11: Env Var Injection** - Per-agent env vars declared in agent.yaml, shell-quoted and injected before `exec claude` (completed 2026-03-25)
 - [ ] **Phase 12: Skills Registry Rename** - `/clawhub` replaced by `/skills` (skills.sh primary, ClawHub removed completely), stale dirs cleaned
 - [ ] **Phase 13: Policy Gate Rework** - `/skills` SKILL.md policy gate rewritten for CC-native sandbox; drops all OpenShell/policy.yaml references
 
@@ -45,9 +45,9 @@
   3. Env vars appear in the wrapper before `export HOME=` so identity vars cannot shadow them
   4. `installed.json` is created on first `rightclaw up` but not overwritten on subsequent runs — user-installed skill state persists across restarts
   5. The generated `agent.yaml` template includes a comment warning that `env:` values are stored in plaintext and must not contain secrets
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 Plans:
-- [ ] 11-01-PLAN.md — env field in AgentConfig, shell wrapper injection, quoting tests (ENV-01, ENV-02, ENV-03)
+- [x] 11-01-PLAN.md — env field in AgentConfig, shell wrapper injection, quoting tests (ENV-01, ENV-02, ENV-03)
 - [x] 11-02-PLAN.md — installed.json create-if-absent fix, agent.yaml template comment (ENV-04, ENV-05)
 
 ### Phase 12: Skills Registry Rename
@@ -76,6 +76,6 @@ Plans:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 11. Env Var Injection | v2.2 | 1/2 | In Progress|  |
+| 11. Env Var Injection | v2.2 | 2/2 | Complete   | 2026-03-25 |
 | 12. Skills Registry Rename | v2.2 | 0/? | Not started | - |
 | 13. Policy Gate Rework | v2.2 | 0/? | Not started | - |
