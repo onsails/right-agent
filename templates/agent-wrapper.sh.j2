@@ -10,6 +10,14 @@ export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-}"
 export SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}"
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-}"
 export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+{% if env_exports %}
+
+# Per-agent env vars from agent.yaml (D-03: after identity captures, before HOME).
+# Values are literal — no shell expansion. Single-quoted.
+{% for line in env_exports %}
+{{ line }}
+{% endfor %}
+{% endif %}
 
 # Override HOME so CC reads agent-local .claude/, .claude.json, sessions, memory (D-01).
 export HOME="{{ working_dir }}"

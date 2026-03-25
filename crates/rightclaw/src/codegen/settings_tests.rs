@@ -108,6 +108,7 @@ fn merges_user_overrides_with_defaults() {
         telegram_token_file: None,
         telegram_token: None,
         telegram_user_id: None,
+        env: std::collections::HashMap::new(),
     };
     let agent = make_test_agent("test-agent", Some(config));
     let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
@@ -248,6 +249,7 @@ fn merges_user_allow_read_overrides() {
         telegram_token_file: None,
         telegram_token: None,
         telegram_user_id: None,
+        env: std::collections::HashMap::new(),
     };
     let agent = make_test_agent("test-agent", Some(config));
     let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();

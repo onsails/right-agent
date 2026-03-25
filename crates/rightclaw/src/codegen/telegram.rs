@@ -104,6 +104,7 @@ mod tests {
             telegram_token_file: None,
             telegram_token: None,
             telegram_user_id: None,
+            env: std::collections::HashMap::new(),
         }
     }
 

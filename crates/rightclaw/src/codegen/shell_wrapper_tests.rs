@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
@@ -14,6 +15,7 @@ fn make_agent(name: &str, start_prompt: Option<&str>) -> AgentDef {
         telegram_token_file: None,
         telegram_token: None,
         telegram_user_id: None,
+        env: HashMap::new(),
     });
     AgentDef {
         name: name.to_owned(),
@@ -258,4 +260,126 @@ fn wrapper_retains_dangerously_skip_permissions() {
             "expected --dangerously-skip-permissions in:\n{output}"
         );
     }
+}
+
+// Phase 11: env var injection tests
+
+fn make_agent_with_env(name: &str, env: HashMap<String, String>) -> AgentDef {
+    let config = Some(AgentConfig {
+        restart: RestartPolicy::OnFailure,
+        max_restarts: 3,
+        backoff_seconds: 5,
+        start_prompt: None,
+        model: None,
+        sandbox: None,
+        telegram_token_file: None,
+        telegram_token: None,
+        telegram_user_id: None,
+        env,
+    });
+    AgentDef {
+        name: name.to_owned(),
+        path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
+        identity_path: PathBuf::from(format!(
+            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
+        )),
+        config,
+        mcp_config_path: None,
+        soul_path: None,
+        user_path: None,
+        memory_path: None,
+        agents_path: None,
+        tools_path: None,
+        bootstrap_path: None,
+        heartbeat_path: None,
+    }
+}
+
+#[test]
+fn wrapper_env_basic() {
+    let mut env = HashMap::new();
+    env.insert("MY_VAR".to_owned(), "hello world".to_owned());
+    let agent = make_agent_with_env("testbot", env);
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+
+    assert!(
+        output.contains("export MY_VAR='hello world'"),
+        "expected export MY_VAR='hello world' in:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_env_single_quote_escape() {
+    let mut env = HashMap::new();
+    env.insert("MSG".to_owned(), "it's alive".to_owned());
+    let agent = make_agent_with_env("testbot", env);
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+
+    assert!(
+        output.contains(r"export MSG='it'\''s alive'"),
+        "expected single-quote escaped export in:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_env_special_chars() {
+    let mut env = HashMap::new();
+    env.insert("TOKEN".to_owned(), "$secret`hack`".to_owned());
+    let agent = make_agent_with_env("testbot", env);
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+
+    assert!(
+        output.contains("export TOKEN='$secret`hack`'"),
+        "expected literal single-quoted TOKEN with special chars in:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_env_before_home() {
+    let mut env = HashMap::new();
+    env.insert("MYKEY".to_owned(), "myval".to_owned());
+    let agent = make_agent_with_env("testbot", env);
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+
+    // Collect lines to vec once — used for both position lookups.
+    let lines: Vec<&str> = output.lines().collect();
+    let home_idx = lines
+        .iter()
+        .position(|l| l.contains("export HOME="))
+        .expect("HOME export line not found");
+
+    // Find the last env: export line.
+    let env_idx = lines
+        .iter()
+        .rposition(|l| l.contains("export MYKEY="))
+        .expect("MYKEY export line not found");
+
+    assert!(
+        env_idx < home_idx,
+        "env var export (line {env_idx}) must appear BEFORE HOME override (line {home_idx})"
+    );
+}
+
+#[test]
+fn wrapper_no_env_no_exports() {
+    let agent = make_agent("testbot", Some("Go"));
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+
+    assert!(
+        !output.contains("export MY_VAR="),
+        "should NOT contain extra export MY_VAR= in:\n{output}"
+    );
+}
+
+#[test]
+fn wrapper_env_empty_value() {
+    let mut env = HashMap::new();
+    env.insert("EMPTY".to_owned(), String::new());
+    let agent = make_agent_with_env("testbot", env);
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+
+    assert!(
+        output.contains("export EMPTY=''"),
+        "expected export EMPTY='' in:\n{output}"
+    );
 }

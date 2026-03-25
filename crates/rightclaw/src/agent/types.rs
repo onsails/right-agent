@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -79,6 +80,12 @@ pub struct AgentConfig {
     /// If absent, access.json is not written; user must pair interactively.
     #[serde(default)]
     pub telegram_user_id: Option<String>,
+
+    /// Per-agent environment variables injected into the shell wrapper before `exec claude`.
+    /// Values are stored as-is (plaintext). Single-quoted in the generated wrapper — no
+    /// shell expansion, no host variable forwarding. See D-01 in phase 11 context.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 /// A discovered agent definition from the filesystem.
