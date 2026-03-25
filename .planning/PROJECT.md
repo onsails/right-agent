@@ -55,8 +55,9 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - [ ] `/skills search`, `install`, `remove`, `list` via skills.sh API
 - [ ] ClawHub kept as secondary/fallback for OpenClaw backward compatibility
 - [ ] Policy gate reworked — drop OpenShell/policy.yaml refs, check CC-native sandbox capabilities
-- [ ] `env:` section in `agent.yaml` — per-agent env var injection
-- [ ] Shell wrapper exports `env:` vars before `exec claude`
+- ✓ `env:` section in `agent.yaml` — per-agent env var injection (single-quoted, no expansion) — v2.2 Phase 11
+- ✓ Shell wrapper exports `env:` vars after identity captures, before `export HOME=` — v2.2 Phase 11
+- ✓ `install_builtin_skills()` uses create-if-absent for `installed.json` — survives restarts — v2.2 Phase 11
 - [ ] `SKILL_CLAWHUB` renamed in Rust codebase; init.rs installs `/skills` instead
 
 ### Out of Scope
@@ -148,4 +149,4 @@ This document evolves at phase transitions and milestone boundaries.
 - `env:` section in `agent.yaml` — per-agent env var injection via shell wrapper
 
 ---
-*Last updated: 2026-03-25 — v2.2 milestone started (skills-registry)*
+*Last updated: 2026-03-25 — Phase 11 complete (env-var-injection)*
