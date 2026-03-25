@@ -10,8 +10,8 @@
 - [ ] **ENV-01**: User can declare `env:` key-value pairs in `agent.yaml` that get injected into the agent's shell environment before `exec claude`
 - [ ] **ENV-02**: Injected env var values are properly shell-quoted in the generated wrapper script (no injection, no breakage on spaces/special chars)
 - [ ] **ENV-03**: Env vars are injected before the `export HOME=` override so identity vars (`GIT_AUTHOR_NAME`, etc.) are not shadowed
-- [ ] **ENV-04**: `installed.json` is created-if-absent (not overwritten) on every `rightclaw up`, preserving user-installed skill registry state
-- [ ] **ENV-05**: `agent.yaml` documentation (comments in generated template) warns that `env:` values are stored in plaintext — not for secrets
+- [x] **ENV-04**: `installed.json` is created-if-absent (not overwritten) on every `rightclaw up`, preserving user-installed skill registry state
+- [x] **ENV-05**: `agent.yaml` documentation (comments in generated template) warns that `env:` values are stored in plaintext — not for secrets
 
 ### Skills Registry
 
@@ -45,8 +45,8 @@
 | ENV-01 | Phase 11 | Pending |
 | ENV-02 | Phase 11 | Pending |
 | ENV-03 | Phase 11 | Pending |
-| ENV-04 | Phase 11 | Pending |
-| ENV-05 | Phase 11 | Pending |
+| ENV-04 | Phase 11 | Complete |
+| ENV-05 | Phase 11 | Complete |
 | SKILLS-01 | Phase 12 | Pending |
 | SKILLS-02 | Phase 12 | Pending |
 | SKILLS-03 | Phase 12 | Pending |

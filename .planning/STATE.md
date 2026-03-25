@@ -2,16 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Skills Registry
-status: planning
-stopped_at: Phase 11 context gathered
-last_updated: "2026-03-25T21:56:15.910Z"
-last_activity: 2026-03-25 — v2.2 roadmap created, 3 phases derived from 12 requirements
+status: Ready to execute
+stopped_at: Completed 11-02-PLAN.md
+last_updated: "2026-03-25T22:42:07.240Z"
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 2
+  completed_plans: 1
 ---
 
 # Project State
@@ -21,16 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** v2.2 Phase 11 — Env Var Injection
+**Current focus:** Phase 11 — env-var-injection
 
 ## Current Position
 
-Phase: 11 of 13 (Env Var Injection)
-Plan: — (not started)
-Status: Ready to plan
-Last activity: 2026-03-25 — v2.2 roadmap created, 3 phases derived from 12 requirements
-
-Progress: [░░░░░░░░░░] 0%
+Phase: 11 (env-var-injection) — EXECUTING
+Plan: 2 of 2
 
 ## Performance Metrics
 
@@ -54,6 +48,7 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: Improving
 
 *Updated after each plan completion*
+| Phase 11 P02 | 8 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -67,6 +62,8 @@ Recent decisions affecting current work:
 - [Phase 10]: write_managed_settings(dir, path) extracted from cmd_config_strict_sandbox for testability
 - [Phase 09]: install_builtin_skills extracted from init.rs for reuse in cmd_up
 - [Phase 09]: settings.local.json written with {} only when absent — preserves runtime CC and agent writes
+- [Phase 11]: installed.json uses create-if-absent (not unconditional overwrite) — same pattern as settings.local.json from Phase 9
+- [Phase 11]: env: example in agent.yaml is fully commented out — zero impact on existing agents, purely documentary
 
 ### Pending Todos
 
@@ -79,6 +76,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-25T21:56:15.907Z
-Stopped at: Phase 11 context gathered
-Resume file: .planning/phases/11-env-var-injection/11-CONTEXT.md
+Last session: 2026-03-25T22:42:07.237Z
+Stopped at: Completed 11-02-PLAN.md
+Resume file: None

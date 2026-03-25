@@ -45,10 +45,10 @@
   3. Env vars appear in the wrapper before `export HOME=` so identity vars cannot shadow them
   4. `installed.json` is created on first `rightclaw up` but not overwritten on subsequent runs — user-installed skill state persists across restarts
   5. The generated `agent.yaml` template includes a comment warning that `env:` values are stored in plaintext and must not contain secrets
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 Plans:
 - [ ] 11-01-PLAN.md — env field in AgentConfig, shell wrapper injection, quoting tests (ENV-01, ENV-02, ENV-03)
-- [ ] 11-02-PLAN.md — installed.json create-if-absent fix, agent.yaml template comment (ENV-04, ENV-05)
+- [x] 11-02-PLAN.md — installed.json create-if-absent fix, agent.yaml template comment (ENV-04, ENV-05)
 
 ### Phase 12: Skills Registry Rename
 **Goal**: The `/clawhub` skill and all ClawHub references are replaced by `/skills` backed by skills.sh; existing agent dirs are cleaned of stale clawhub directories
@@ -76,6 +76,6 @@ Plans:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 11. Env Var Injection | v2.2 | 0/2 | Not started | - |
+| 11. Env Var Injection | v2.2 | 1/2 | In Progress|  |
 | 12. Skills Registry Rename | v2.2 | 0/? | Not started | - |
 | 13. Policy Gate Rework | v2.2 | 0/? | Not started | - |
