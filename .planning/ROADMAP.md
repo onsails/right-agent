@@ -76,6 +76,6 @@ Plans:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 11. Env Var Injection | v2.2 | 2/2 | Complete   | 2026-03-25 |
+| 11. Env Var Injection | v2.2 | 2/2 | Complete    | 2026-03-25 |
 | 12. Skills Registry Rename | v2.2 | 0/? | Not started | - |
 | 13. Policy Gate Rework | v2.2 | 0/? | Not started | - |
