@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 8: HOME Isolation & Permission Model** - Per-agent HOME override with credential forwarding, explicit permissions replacing bypass mode
 - [ ] **Phase 9: Agent Environment Setup** - Pre-populate complete agent environment: git init, Telegram channel copy, full .claude/ scaffold
-- [ ] **Phase 10: Doctor & Managed Settings** - Opt-in managed-settings command and doctor conflict detection
+- [x] **Phase 10: Doctor & Managed Settings** - Opt-in managed-settings command and doctor conflict detection (completed 2026-03-25)
 
 ## Phase Details
 
@@ -75,9 +75,9 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. `rightclaw config strict-sandbox` writes `/etc/claude-code/managed-settings.json` with `allowManagedDomainsOnly: true` (requires sudo, prompts user)
   2. `rightclaw doctor` detects existing `/etc/claude-code/managed-settings.json` and warns if it may conflict with RightClaw's per-agent settings
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 Plans:
-- [ ] 10-01-PLAN.md -- Config strict-sandbox command + doctor managed-settings conflict check
+- [x] 10-01-PLAN.md -- Config strict-sandbox command + doctor managed-settings conflict check
 
 ## Progress
 
@@ -91,4 +91,4 @@ Phases execute in numeric order: 8 -> 9 -> 10
 | 7. Platform Compatibility | v2.0 | 2/2 | Complete | 2026-03-24 |
 | 8. HOME Isolation & Permission Model | v2.1 | 0/2 | Planned    |  |
 | 9. Agent Environment Setup | v2.1 | 1/2 | In Progress|  |
-| 10. Doctor & Managed Settings | v2.1 | 0/1 | Not started | - |
+| 10. Doctor & Managed Settings | v2.1 | 1/1 | Complete   | 2026-03-25 |
