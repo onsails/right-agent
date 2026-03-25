@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::Path;
 
+const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
+
 /// Status of a single doctor check.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckStatus {
@@ -77,6 +79,12 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
 
     // Agent structure checks
     checks.extend(check_agent_structure(home));
+
+    // Managed settings conflict check — cross-platform, D-05.
+    // Only emits a check if the file exists (D-08: silent skip when absent).
+    if let Some(check) = check_managed_settings(MANAGED_SETTINGS_PATH) {
+        checks.push(check);
+    }
 
     checks
 }
@@ -246,6 +254,52 @@ fn check_bwrap_sandbox() -> DoctorCheck {
             fix: Some(bwrap_fix_guidance()),
         },
     }
+}
+
+/// Check if /etc/claude-code/managed-settings.json exists and warn about potential conflicts.
+///
+/// Returns None when the file is absent (D-08: silent skip).
+/// Returns Warn with rich detail when allowManagedDomainsOnly:true (D-06).
+/// Returns Warn with generic detail for any other content (D-07).
+fn check_managed_settings(path: &str) -> Option<DoctorCheck> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return None, // D-08: silent skip when file absent or unreadable
+    };
+
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&content);
+    let (detail, fix) = match parsed {
+        Ok(ref v)
+            if v.get("allowManagedDomainsOnly")
+                .and_then(|v| v.as_bool())
+                == Some(true) =>
+        {
+            // D-06: strict mode active
+            (
+                "allowManagedDomainsOnly:true \u{2014} per-agent allowedDomains may be overridden by system policy"
+                    .to_string(),
+                Some(
+                    "Review /etc/claude-code/managed-settings.json \u{2014} enabled via: sudo rightclaw config strict-sandbox"
+                        .to_string(),
+                ),
+            )
+        }
+        _ => {
+            // D-07: file exists but content unexpected, unparseable, or flag absent/false
+            (
+                "managed-settings.json found \u{2014} content may affect agent sandbox behavior"
+                    .to_string(),
+                Some("Review /etc/claude-code/managed-settings.json".to_string()),
+            )
+        }
+    };
+
+    Some(DoctorCheck {
+        name: "managed-settings".to_string(),
+        status: CheckStatus::Warn,
+        detail,
+        fix,
+    })
 }
 
 /// Generate fix guidance for bubblewrap sandbox failures.
@@ -515,6 +569,97 @@ mod tests {
         assert!(
             !check_names.contains(&"socat"),
             "non-Linux doctor must not check for socat"
+        );
+    }
+
+    // ---- check_managed_settings tests ----
+
+    #[test]
+    fn check_managed_settings_returns_none_when_file_absent() {
+        let result = check_managed_settings("/nonexistent-rightclaw-test/managed-settings.json");
+        assert!(result.is_none(), "should return None when file does not exist");
+    }
+
+    #[test]
+    fn check_managed_settings_returns_warn_with_strict_message_when_flag_true() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("managed-settings.json");
+        std::fs::write(&path, "{\"allowManagedDomainsOnly\": true}\n").unwrap();
+
+        let result = check_managed_settings(path.to_str().unwrap());
+        let check = result.expect("should return Some when file exists");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("allowManagedDomainsOnly:true"),
+            "detail must mention allowManagedDomainsOnly:true, got: {}",
+            check.detail
+        );
+        let fix = check.fix.expect("should have fix hint");
+        assert!(
+            fix.contains("sudo rightclaw config strict-sandbox"),
+            "fix must contain sudo command, got: {fix}"
+        );
+    }
+
+    #[test]
+    fn check_managed_settings_returns_warn_with_generic_message_when_flag_false() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("managed-settings.json");
+        std::fs::write(&path, "{\"allowManagedDomainsOnly\": false}").unwrap();
+
+        let result = check_managed_settings(path.to_str().unwrap());
+        let check = result.expect("should return Some when file exists");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("content may affect"),
+            "detail must use generic message when flag is false, got: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn check_managed_settings_returns_warn_with_generic_message_for_invalid_json() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("managed-settings.json");
+        std::fs::write(&path, "not valid json at all!!!").unwrap();
+
+        let result = check_managed_settings(path.to_str().unwrap());
+        let check = result.expect("should return Some when file exists");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("content may affect"),
+            "detail must use generic message for invalid JSON, got: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn check_managed_settings_returns_warn_with_generic_message_when_key_absent() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("managed-settings.json");
+        std::fs::write(&path, "{\"someOtherKey\": true}").unwrap();
+
+        let result = check_managed_settings(path.to_str().unwrap());
+        let check = result.expect("should return Some when file exists");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("content may affect"),
+            "detail must use generic message when key is absent, got: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn check_managed_settings_fix_hint_contains_sudo_command_when_flag_true() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("managed-settings.json");
+        std::fs::write(&path, "{\"allowManagedDomainsOnly\": true}").unwrap();
+
+        let check = check_managed_settings(path.to_str().unwrap()).unwrap();
+        let fix = check.fix.unwrap();
+        assert!(
+            fix.contains("sudo rightclaw config strict-sandbox"),
+            "fix hint must include the sudo command, got: {fix}"
         );
     }
 }
