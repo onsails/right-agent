@@ -42,15 +42,15 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| ENV-01 | — | — |
-| ENV-02 | — | — |
-| ENV-03 | — | — |
-| ENV-04 | — | — |
-| ENV-05 | — | — |
-| SKILLS-01 | — | — |
-| SKILLS-02 | — | — |
-| SKILLS-03 | — | — |
-| SKILLS-04 | — | — |
-| SKILLS-05 | — | — |
-| GATE-01 | — | — |
-| GATE-02 | — | — |
+| ENV-01 | Phase 11 | Pending |
+| ENV-02 | Phase 11 | Pending |
+| ENV-03 | Phase 11 | Pending |
+| ENV-04 | Phase 11 | Pending |
+| ENV-05 | Phase 11 | Pending |
+| SKILLS-01 | Phase 12 | Pending |
+| SKILLS-02 | Phase 12 | Pending |
+| SKILLS-03 | Phase 12 | Pending |
+| SKILLS-04 | Phase 12 | Pending |
+| SKILLS-05 | Phase 12 | Pending |
+| GATE-01 | Phase 13 | Pending |
+| GATE-02 | Phase 13 | Pending |
