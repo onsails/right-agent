@@ -46,6 +46,8 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `rightclaw up` reinstalls built-in skills into each agent's .claude/skills/ on every launch — v2.1 Phase 9
 - ✓ `rightclaw up` writes settings.local.json with {} if absent, never overwrites existing — v2.1 Phase 9
 - ✓ `rightclaw doctor` warns (non-fatal) when git binary absent — v2.1 Phase 9
+- ✓ `rightclaw config strict-sandbox` writes `/etc/claude-code/managed-settings.json` with `allowManagedDomainsOnly: true` (requires sudo) — v2.1 Phase 10
+- ✓ `rightclaw doctor` detects managed-settings.json and warns if `allowManagedDomainsOnly:true` may conflict with per-agent settings — v2.1 Phase 10
 
 ### Active
 
@@ -116,7 +118,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v2.1 Phase 9 complete** (2026-03-24). Agent environment setup — git init, Telegram channel config, skills refresh, settings.local.json pre-creation all wired into `rightclaw up`. 148 lib tests, 20 integration tests.
+**v2.1 Phase 10 complete** (2026-03-25). Doctor & Managed Settings — `rightclaw config strict-sandbox` opt-in command and doctor conflict detection for `/etc/claude-code/managed-settings.json`. 154 lib tests, 20 integration tests.
 
 **Shipped versions:**
 - v1.0 (2026-03-23): Core runtime — CLI, process-compose, OpenShell sandbox, Telegram, skills, RightCron
@@ -138,4 +140,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Solve HOME edge cases: trust file, OAuth/API key, git/SSH env forwarding
 
 ---
-*Last updated: 2026-03-24 — Phase 9 complete (agent-environment-setup)*
+*Last updated: 2026-03-25 — Phase 10 complete (doctor-managed-settings)*
