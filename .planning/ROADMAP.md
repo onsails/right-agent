@@ -97,4 +97,4 @@ Plans:
 | 11. Env Var Injection | v2.2 | 2/2 | Complete    | 2026-03-25 |
 | 12. Skills Registry Rename | v2.2 | 1/1 | Complete    | 2026-03-26 |
 | 13. Policy Gate Rework | v2.2 | 1/1 | Complete    | 2026-03-26 |
-| 14. rightskills Rename | v2.2 | 1/1 | Complete   | 2026-03-26 |
+| 14. rightskills Rename | v2.2 | 1/1 | Complete    | 2026-03-26 |
