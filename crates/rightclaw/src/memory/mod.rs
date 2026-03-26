@@ -1,4 +1,6 @@
 pub mod error;
+pub mod guard;
+pub mod store;
 mod migrations;
 
 pub use error::MemoryError;
@@ -17,9 +19,27 @@ pub fn open_db(agent_path: &std::path::Path) -> Result<(), MemoryError> {
     Ok(())
 }
 
+/// Opens (or creates) the per-agent SQLite memory database and returns the live connection.
+///
+/// Unlike `open_db`, this function returns the `Connection` for use by store operations.
+/// Callers are responsible for keeping it alive for the duration of their operations.
+///
+/// - Same WAL + busy_timeout + migration logic as `open_db`.
+/// - Idempotent: safe to call multiple times on the same path.
+pub fn open_connection(
+    agent_path: &std::path::Path,
+) -> Result<rusqlite::Connection, MemoryError> {
+    let db_path = agent_path.join("memory.db");
+    let mut conn = rusqlite::Connection::open(&db_path)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "busy_timeout", 5000)?;
+    migrations::MIGRATIONS.to_latest(&mut conn)?;
+    Ok(conn)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::open_db;
+    use super::{open_connection, open_db};
     use tempfile::tempdir;
 
     #[test]
@@ -143,5 +163,46 @@ mod tests {
         .unwrap();
         let result = conn.execute("DELETE FROM memory_events WHERE id=1", []);
         assert!(result.is_err(), "DELETE on memory_events should be blocked");
+    }
+
+    // --- open_connection tests ---
+
+    #[test]
+    fn open_connection_returns_live_connection() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path()).unwrap();
+        // Verify memories table is accessible
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "memories table should exist via open_connection");
+    }
+
+    #[test]
+    fn open_connection_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let conn1 = open_connection(dir.path());
+        assert!(conn1.is_ok(), "first open_connection call should succeed");
+        drop(conn1);
+        let conn2 = open_connection(dir.path());
+        assert!(conn2.is_ok(), "second open_connection call should also succeed");
+    }
+
+    #[test]
+    fn open_connection_creates_db_file() {
+        let dir = tempdir().unwrap();
+        assert!(
+            !dir.path().join("memory.db").exists(),
+            "db file should not exist before open_connection"
+        );
+        let _conn = open_connection(dir.path()).unwrap();
+        assert!(
+            dir.path().join("memory.db").exists(),
+            "db file should exist after open_connection"
+        );
     }
 }
