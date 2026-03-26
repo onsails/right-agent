@@ -1,10 +1,8 @@
-/// Injection guard: detects prompt injection patterns in memory content.
+/// Static list of injection patterns (all lowercase — compared against lowercased input).
 ///
-/// Uses a conservative list of 15 low-false-positive patterns derived from
+/// Conservative list of 15 low-false-positive patterns derived from
 /// OWASP LLM01:2025 and the Rebuff heuristics scanner.
 /// Source: .planning/phases/17-memory-skill/17-SEC01-RESEARCH.md
-
-/// Static list of injection patterns (all lowercase — compared against lowercased input).
 pub static INJECTION_PATTERNS: &[&str] = &[
     "ignore previous instructions",
     "ignore all previous instructions",
