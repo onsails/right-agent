@@ -49,7 +49,7 @@
 - ClawHub as fallback or opt-in — removed completely per user decision
 - `npx` sandbox domain whitelisting in managed-settings — deferred (document approach in SKILL.md instead)
 - Skill version pinning or lockfile — v2.3
-- Stale `.claude/skills/skills/` cleanup in `cmd_up` — not in production, deferred
+- ~~Stale `.claude/skills/skills/` cleanup in `cmd_up`~~ — superseded by CLEANUP-02
 
 ## Traceability
 
