@@ -22,10 +22,10 @@
 
 ### CLI Inspection
 
-- [ ] **CLI-01**: `rightclaw memory list <agent>` shows paginated memory table with timestamps
-- [ ] **CLI-02**: `rightclaw memory search <agent> <query>` uses same FTS5 index as skill
-- [ ] **CLI-03**: `rightclaw memory delete <agent> <id>` hard-deletes entry (operator bypass of soft-delete)
-- [ ] **CLI-04**: `rightclaw memory stats <agent>` shows DB size, entry count, oldest/newest entry
+- [x] **CLI-01**: `rightclaw memory list <agent>` shows paginated memory table with timestamps
+- [x] **CLI-02**: `rightclaw memory search <agent> <query>` uses same FTS5 index as skill
+- [x] **CLI-03**: `rightclaw memory delete <agent> <id>` hard-deletes entry (operator bypass of soft-delete)
+- [x] **CLI-04**: `rightclaw memory stats <agent>` shows DB size, entry count, oldest/newest entry
 
 ### Security
 
@@ -74,10 +74,10 @@
 | SKILL-04 | Phase 17 | Complete |
 | SKILL-05 | Phase 17 | Complete |
 | SEC-01 | Phase 17 | Complete |
-| CLI-01 | Phase 18 | Pending |
-| CLI-02 | Phase 18 | Pending |
-| CLI-03 | Phase 18 | Pending |
-| CLI-04 | Phase 18 | Pending |
+| CLI-01 | Phase 18 | Complete |
+| CLI-02 | Phase 18 | Complete |
+| CLI-03 | Phase 18 | Complete |
+| CLI-04 | Phase 18 | Complete |
 
 **Coverage:**
 - v2.3 requirements: 17 total
