@@ -183,7 +183,6 @@ fn discover_detects_optional_files() {
 
     fs::write(agent_dir.join("SOUL.md"), "soul").unwrap();
     fs::write(agent_dir.join("USER.md"), "user").unwrap();
-    fs::write(agent_dir.join("MEMORY.md"), "memory").unwrap();
     fs::write(agent_dir.join("AGENTS.md"), "agents").unwrap();
     fs::write(agent_dir.join("TOOLS.md"), "tools").unwrap();
     fs::write(agent_dir.join("BOOTSTRAP.md"), "bootstrap").unwrap();
@@ -194,7 +193,6 @@ fn discover_detects_optional_files() {
     let a = &agents[0];
     assert!(a.soul_path.is_some());
     assert!(a.user_path.is_some());
-    assert!(a.memory_path.is_some());
     assert!(a.agents_path.is_some());
     assert!(a.tools_path.is_some());
     assert!(a.bootstrap_path.is_some());

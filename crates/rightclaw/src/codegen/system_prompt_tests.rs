@@ -21,7 +21,6 @@ fn make_agent_at(path: std::path::PathBuf) -> AgentDef {
         mcp_config_path: None,
         soul_path: None,
         user_path: None,
-        memory_path: None,
         agents_path: None,
         tools_path: None,
         bootstrap_path: None,
