@@ -6,6 +6,7 @@ description: >-
   and lists all installed skills. Use when the user wants to find, install, remove, update, or
   list Claude Code skills, or mentions skills.sh, skill packages, or skill management.
 version: 0.3.0
+compatibility: Requires Node.js (npx), internet access to skills.sh and npmjs.org
 ---
 
 # /skills -- Agent Skills Manager (skills.sh)
@@ -92,34 +93,77 @@ cp -r /tmp/skills-install/skills/<name>/* .claude/skills/<name>/ 2>/dev/null || 
 rm -rf /tmp/skills-install
 ```
 
+**Pre-install domain check**
+
+Before running `npx skills add`, verify that the install command itself can reach its required domains.
+
+Read `.claude/settings.json` and check `sandbox.network.allowedDomains`:
+
+```bash
+cat .claude/settings.json
+```
+
+- If `skills.sh` is absent from `allowedDomains`: warn and stop.
+  > Warning: `skills.sh` is not in your sandbox `allowedDomains`. Add it to your `agent.yaml` sandbox overrides: `allowed_domains: [skills.sh, registry.npmjs.org]`
+  > After updating `agent.yaml`, run `rightclaw up` to regenerate `settings.json`, then retry.
+- If `registry.npmjs.org` (or `npmjs.org`) is absent: add the same warning.
+- If both are present: proceed with `npx skills add`.
+
 **Step 3: Policy gate audit**
 
-Before activating the skill, audit its permissions. Read the downloaded `.claude/skills/<name>/SKILL.md` frontmatter and check for `metadata.openclaw` sections.
+After the skill files are downloaded to `.claude/skills/<name>/`, read the skill's SKILL.md and check its `compatibility` field:
 
-Check each permission category:
+```bash
+head -20 .claude/skills/<name>/SKILL.md
+```
 
-| Category | Frontmatter field | Verification |
-|----------|-------------------|--------------|
-| Required binaries | `metadata.openclaw.requires.bins` | Run `which <bin>` for each -- is it in PATH? |
-| Required env vars | `metadata.openclaw.requires.env` | Run `echo $VAR` for each -- is it set? |
-| Network access | `metadata.openclaw.requires.network` | Check agent's `.claude/settings.json` sandbox.network.allowedDomains -- are these domains allowed? |
-| Filesystem access | `metadata.openclaw.requires.filesystem` | Check agent's `.claude/settings.json` sandbox.filesystem.allowWrite -- is this access level allowed? |
+**If the skill has no `compatibility` field:** treat as no requirements — proceed directly to Step 4.
 
-**If ANY check fails: BLOCK the installation.**
+**If a `compatibility` field is present:** interpret it as natural language to identify requirement categories:
 
-Display a permissions audit table:
+- **Bins:** binary names (e.g., `git`, `docker`, `python3`, `node`, `jq`) — any named executable tool
+- **Env vars:** ALL_CAPS_WITH_UNDERSCORES tokens that are not domain names (e.g., `OPENAI_API_KEY`, `GITHUB_TOKEN`)
+- **Network:** domain-like tokens containing dots (e.g., `api.openai.com`, `registry.npmjs.org`)
+- **Filesystem write:** any phrase like "read-write access", "writes to", "modifies files outside", "filesystem write"
+
+Run the following checks:
+
+```bash
+# Read the agent's sandbox configuration
+cat .claude/settings.json
+
+# Check each required binary
+which <bin>
+
+# Check each required env var
+printenv <VAR>
+```
+
+Apply the two-tier gate:
+
+**BLOCK (sandbox-enforced — do not proceed):**
+- A required network domain is NOT present in `sandbox.network.allowedDomains` in `.claude/settings.json`
+- A required filesystem write path is NOT covered by `sandbox.filesystem.allowWrite` in `.claude/settings.json`
+
+**WARN only (advisory — proceed after informing the user):**
+- A required binary is not found in PATH (`which` returns nothing)
+- A required env var is not set (`printenv` returns nothing)
+
+Display the full audit result as a table before deciding to proceed or block:
 
 | Permission | Required | Status |
 |------------|----------|--------|
-| Binary: python3 | Yes | MISSING -- not in PATH |
-| Env: OPENAI_API_KEY | Yes | MISSING -- not set |
-| Network: api.openai.com | Yes | BLOCKED -- not in sandbox allowedDomains |
-| Filesystem: read-write | Yes | OK -- allowed by sandbox config |
+| Binary: git | Yes | OK |
+| Env: OPENAI_API_KEY | Yes | WARN — not set |
+| Network: api.openai.com | Yes | BLOCK — not in allowedDomains |
+| Filesystem: read-write | Yes | OK |
 
-Tell the user:
-> Installation blocked. The skill requires permissions that your agent does not have. Update your agent's `agent.yaml` sandbox section to allow the missing permissions, then retry the installation.
+**If any BLOCK condition is present:**
+> Installation blocked. The skill requires network or filesystem access that your agent's sandbox does not allow. Add the missing domains or write paths to your `agent.yaml` sandbox section, then run `rightclaw up` to regenerate `settings.json`, and retry the installation.
 
-**If all checks pass** (or the skill has no special requirements): proceed to Step 4.
+Do NOT auto-expand the agent's sandbox config. The user must explicitly update `agent.yaml`.
+
+**If no BLOCK conditions (WARNs only or all pass):** inform the user of any warnings, then proceed to Step 4.
 
 **Step 4: Register in installed.json**
 
@@ -214,7 +258,7 @@ If `npx` is unavailable, suggest the user re-install the skill: `npx skills add 
 ## Important Rules
 
 1. All timestamps MUST use UTC ISO 8601 format with the `Z` suffix (e.g., `2026-03-22T10:00:00Z`).
-2. Never install a skill without running the policy gate audit first. No exceptions.
+2. Never install a skill without running the pre-install domain check (Step 2) and the policy gate audit (Step 3) first. No exceptions.
 3. Never auto-expand the agent's sandbox config to accommodate a skill's requirements. The user must explicitly update `agent.yaml` sandbox overrides.
 4. Each agent has its own `.claude/skills/` directory and `installed.json` -- no shared or global skill location.
 5. Skills installed manually (via git clone or `npx skills add`) appear in `list` output but are tracked differently.
