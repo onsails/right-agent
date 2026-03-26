@@ -728,7 +728,6 @@ mod tests {
             mcp_config_path: None,
             soul_path: None,
             user_path: None,
-            memory_path: None,
             agents_path: None,
             tools_path: None,
             bootstrap_path: None,
