@@ -170,7 +170,7 @@ pub fn init_rightclaw_home(
     println!("  agents/right/AGENTS.md");
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/agent.yaml");
-    println!("  agents/right/.claude/skills/skills/SKILL.md  (skills.sh manager)");
+    println!("  agents/right/.claude/skills/rightskills/SKILL.md  (skills.sh manager)");
     println!("  agents/right/.claude/skills/rightcron/SKILL.md");
 
     if telegram_token.is_some() {
@@ -247,8 +247,8 @@ mod tests {
             "agent.yaml should always be created"
         );
         assert!(
-            agents_dir.join(".claude/skills/skills/SKILL.md").exists(),
-            "skills skill should be installed"
+            agents_dir.join(".claude/skills/rightskills/SKILL.md").exists(),
+            "rightskills skill should be installed"
         );
         assert!(
             agents_dir.join(".claude/skills/rightcron/SKILL.md").exists(),
