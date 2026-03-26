@@ -27,6 +27,56 @@ pub enum ConfigCommands {
     StrictSandbox,
 }
 
+/// Subcommands for `rightclaw memory`.
+#[derive(Subcommand)]
+pub enum MemoryCommands {
+    /// Show paginated memory table (newest first)
+    List {
+        /// Agent name
+        agent: String,
+        /// Max entries to show (default: 10)
+        #[arg(long, default_value = "10")]
+        limit: i64,
+        /// Skip first N entries (for pagination)
+        #[arg(long, default_value = "0")]
+        offset: i64,
+        /// Emit newline-delimited JSON instead of table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Full-text search memories (FTS5 BM25)
+    Search {
+        /// Agent name
+        agent: String,
+        /// FTS5 search query
+        query: String,
+        /// Max entries to show (default: 10)
+        #[arg(long, default_value = "10")]
+        limit: i64,
+        /// Skip first N entries (for pagination)
+        #[arg(long, default_value = "0")]
+        offset: i64,
+        /// Emit newline-delimited JSON instead of table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hard-delete a memory entry (operator bypass of soft-delete)
+    Delete {
+        /// Agent name
+        agent: String,
+        /// Memory entry ID to delete
+        id: i64,
+    },
+    /// Show memory database statistics
+    Stats {
+        /// Agent name
+        agent: String,
+        /// Emit JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize RightClaw home directory with default agent
@@ -77,6 +127,11 @@ pub enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
+    },
+    /// Inspect and manage agent memory databases
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
     },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
@@ -129,6 +184,16 @@ async fn main() -> miette::Result<()> {
         Commands::Pair { agent } => cmd_pair(&home, agent.as_deref()),
         Commands::Config { command } => match command {
             ConfigCommands::StrictSandbox => cmd_config_strict_sandbox(),
+        },
+        Commands::Memory { command } => match command {
+            MemoryCommands::List { agent, limit, offset, json } =>
+                cmd_memory_list(&home, &agent, limit, offset, json),
+            MemoryCommands::Search { agent, query, limit, offset, json } =>
+                cmd_memory_search(&home, &agent, &query, limit, offset, json),
+            MemoryCommands::Delete { agent, id } =>
+                cmd_memory_delete(&home, &agent, id),
+            MemoryCommands::Stats { agent, json } =>
+                cmd_memory_stats(&home, &agent, json),
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
@@ -567,10 +632,128 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{write_managed_settings, ConfigCommands};
+    use super::{resolve_agent_db, truncate_content, write_managed_settings, ConfigCommands, MemoryCommands};
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    // ---- memory commands variant existence (compile-time) ----
+
+    #[test]
+    fn memory_commands_list_variant_exists() {
+        let _ = MemoryCommands::List {
+            agent: "x".to_string(),
+            limit: 10,
+            offset: 0,
+            json: false,
+        };
+    }
+
+    #[test]
+    fn memory_commands_stats_variant_exists() {
+        let _ = MemoryCommands::Stats {
+            agent: "x".to_string(),
+            json: false,
+        };
+    }
+
+    // ---- resolve_agent_db error paths ----
+
+    #[test]
+    fn resolve_agent_db_errors_on_missing_agent_dir() {
+        let tmp = TempDir::new().unwrap();
+        // home exists but agents/nonexistent does not
+        let result = resolve_agent_db(tmp.path(), "nonexistent");
+        let err = result.expect_err("should fail when agent dir missing");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not found at"),
+            "error must mention 'not found at', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_agent_db_errors_on_missing_memory_db() {
+        let tmp = TempDir::new().unwrap();
+        // create agent dir but no memory.db
+        let agent_dir = tmp.path().join("agents").join("testagent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        let result = resolve_agent_db(tmp.path(), "testagent");
+        let err = result.expect_err("should fail when memory.db missing");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("no memory database"),
+            "error must mention 'no memory database', got: {msg}"
+        );
+    }
+
+    // ---- Task 2: search/delete variant existence (compile-time) ----
+
+    #[test]
+    fn memory_commands_search_variant_exists() {
+        let _ = MemoryCommands::Search {
+            agent: "x".to_string(),
+            query: "q".to_string(),
+            limit: 10,
+            offset: 0,
+            json: false,
+        };
+    }
+
+    #[test]
+    fn memory_commands_delete_variant_exists() {
+        let _ = MemoryCommands::Delete {
+            agent: "x".to_string(),
+            id: 1,
+        };
+    }
+
+    // ---- truncate_content tests ----
+
+    #[test]
+    fn truncate_content_truncates_long_string() {
+        let s = "a".repeat(65);
+        let result = truncate_content(&s, 60);
+        let char_count: usize = result.chars().count();
+        assert_eq!(char_count, 61, "truncated string should be 61 chars (60 + ellipsis), got {char_count}");
+        assert!(result.ends_with('…'), "truncated string should end with ellipsis");
+    }
+
+    #[test]
+    fn truncate_content_preserves_short_string() {
+        let result = truncate_content("hello", 60);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn truncate_content_handles_multibyte() {
+        // "你好世界test" = 4 CJK + 4 ASCII = 8 chars total
+        let result = truncate_content("你好世界test", 4);
+        // should not panic; 4 chars taken + ellipsis = 5 chars
+        let char_count: usize = result.chars().count();
+        assert_eq!(char_count, 5, "should be 5 chars (4 + ellipsis), got {char_count}");
+        assert!(result.ends_with('…'));
+    }
+
+    // ---- format_size tests ----
+
+    #[test]
+    fn format_size_bytes() {
+        use super::format_size;
+        assert_eq!(format_size(512), "512 B");
+    }
+
+    #[test]
+    fn format_size_kb() {
+        use super::format_size;
+        assert_eq!(format_size(2048), "2.0 KB");
+    }
+
+    #[test]
+    fn format_size_mb() {
+        use super::format_size;
+        assert_eq!(format_size(2_097_152), "2.0 MB");
+    }
 
     // ---- config strict-sandbox tests ----
 
@@ -858,6 +1041,257 @@ fn write_managed_settings(dir: &str, path: &str) -> miette::Result<()> {
 fn cmd_config_strict_sandbox() -> miette::Result<()> {
     write_managed_settings(MANAGED_SETTINGS_DIR, MANAGED_SETTINGS_PATH)?;
     println!("Wrote {MANAGED_SETTINGS_PATH} — machine-wide domain blocking enabled.");
+    Ok(())
+}
+
+/// Truncate content to at most `max_chars` characters, appending '…' if truncated.
+/// Uses char-safe slicing (avoids byte-boundary panic on multi-byte UTF-8).
+fn truncate_content(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
+/// Auto-scale byte count to human-readable size string.
+fn format_size(bytes: u64) -> String {
+    if bytes < 1_024 {
+        format!("{bytes} B")
+    } else if bytes < 1_048_576 {
+        format!("{:.1} KB", bytes as f64 / 1_024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    }
+}
+
+/// Resolve agent directory and open its memory database.
+///
+/// Returns a live `Connection` or a fatal miette error.
+fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<rusqlite::Connection> {
+    let agent_path = home.join("agents").join(agent);
+    if !agent_path.exists() {
+        return Err(miette::miette!(
+            "agent '{}' not found at {}",
+            agent,
+            agent_path.display()
+        ));
+    }
+    let db_path = agent_path.join("memory.db");
+    if !db_path.exists() {
+        return Err(miette::miette!(
+            "no memory database for agent '{}' — run `rightclaw up` first",
+            agent
+        ));
+    }
+    rightclaw::memory::open_connection(&agent_path)
+        .map_err(|e| miette::miette!("failed to open memory.db for '{}': {e:#}", agent))
+}
+
+fn cmd_memory_list(
+    home: &Path,
+    agent: &str,
+    limit: i64,
+    offset: i64,
+    json: bool,
+) -> miette::Result<()> {
+    let conn = resolve_agent_db(home, agent)?;
+    let entries = rightclaw::memory::list_memories(&conn, limit, offset)
+        .map_err(|e| miette::miette!("failed to list memories: {e:#}"))?;
+
+    if json {
+        for entry in &entries {
+            println!(
+                "{}",
+                serde_json::to_string(entry)
+                    .map_err(|e| miette::miette!("JSON serialization failed: {e:#}"))?
+            );
+        }
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("No memories for agent '{agent}'.");
+        return Ok(());
+    }
+
+    println!("{:<6} {:<61} {:<20} {}", "ID", "CONTENT", "STORED_BY", "CREATED_AT");
+    for entry in &entries {
+        let truncated = truncate_content(&entry.content, 60);
+        let stored_by = entry.stored_by.as_deref().unwrap_or("(unknown)");
+        println!(
+            "{:<6} {:<61} {:<20} {}",
+            entry.id, truncated, stored_by, entry.created_at
+        );
+    }
+
+    // Pagination footer (text mode only, when result count == limit)
+    if entries.len() as i64 == limit {
+        let total: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM memories WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| miette::miette!("failed to count memories: {e:#}"))?;
+        println!(
+            "\n{} of {} entries shown  (--offset {} for next page)",
+            limit,
+            total,
+            offset + limit
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> {
+    // resolve_agent_db validates agent dir and memory.db existence before opening.
+    let conn = resolve_agent_db(home, agent)?;
+
+    // db_path needed only for fs metadata (file size) — derive from home, not conn.
+    let db_path = home.join("agents").join(agent).join("memory.db");
+    let db_size = std::fs::metadata(&db_path)
+        .map_err(|e| miette::miette!("failed to stat memory.db: {e:#}"))?
+        .len();
+
+    let (total_entries, oldest, newest): (i64, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT count(*), min(created_at), max(created_at) \
+             FROM memories WHERE deleted_at IS NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| miette::miette!("failed to query stats: {e:#}"))?;
+
+    if json {
+        let obj = serde_json::json!({
+            "agent": agent,
+            "db_size_bytes": db_size,
+            "total_entries": total_entries,
+            "oldest": oldest,
+            "newest": newest,
+        });
+        println!("{obj}");
+        return Ok(());
+    }
+
+    println!("Agent:         {agent}");
+    println!("DB size:       {}", format_size(db_size));
+    println!("Total entries: {total_entries}");
+    println!("Oldest:        {}", oldest.as_deref().unwrap_or("(none)"));
+    println!("Newest:        {}", newest.as_deref().unwrap_or("(none)"));
+
+    Ok(())
+}
+
+fn cmd_memory_search(
+    home: &Path,
+    agent: &str,
+    query: &str,
+    limit: i64,
+    offset: i64,
+    json: bool,
+) -> miette::Result<()> {
+    let conn = resolve_agent_db(home, agent)?;
+    let entries = rightclaw::memory::search_memories_paged(&conn, query, limit, offset)
+        .map_err(|e| {
+            // FTS5 query syntax errors are common — give a helpful hint.
+            miette::miette!(
+                help = "FTS5 syntax: use simple words or phrases. Avoid special chars like * at start.",
+                "search failed: {e:#}"
+            )
+        })?;
+
+    if json {
+        for entry in &entries {
+            println!(
+                "{}",
+                serde_json::to_string(entry)
+                    .map_err(|e| miette::miette!("JSON serialization failed: {e:#}"))?
+            );
+        }
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("No memories match '{query}' for agent '{agent}'.");
+        return Ok(());
+    }
+
+    println!("{:<6} {:<61} {:<20} {}", "ID", "CONTENT", "STORED_BY", "CREATED_AT");
+    for entry in &entries {
+        let truncated = truncate_content(&entry.content, 60);
+        let stored_by = entry.stored_by.as_deref().unwrap_or("(unknown)");
+        println!(
+            "{:<6} {:<61} {:<20} {}",
+            entry.id, truncated, stored_by, entry.created_at
+        );
+    }
+
+    // Pagination footer (text mode only)
+    if entries.len() as i64 == limit {
+        println!(
+            "\n{} results shown  (--offset {} for next page)",
+            limit,
+            offset + limit
+        );
+    }
+
+    Ok(())
+}
+
+fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
+    use rusqlite::OptionalExtension;
+    use std::io::{self, Write};
+
+    let conn = resolve_agent_db(home, agent)?;
+
+    // Check soft-deleted rows too (hard-delete works on any existing row).
+    let any_row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT content, stored_by FROM memories WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| miette::miette!("DB query failed: {e:#}"))?;
+
+    match any_row {
+        None => {
+            return Err(miette::miette!("memory entry {id} not found for agent '{agent}'"));
+        }
+        Some((content, stored_by)) => {
+            println!("  id:        {id}");
+            println!("  content:   {}", truncate_content(&content, 60));
+            println!("  stored_by: {}", stored_by.as_deref().unwrap_or("(unknown)"));
+        }
+    }
+
+    print!("Hard-delete this entry? [y/N]: ");
+    io::stdout()
+        .flush()
+        .map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+
+    if input.trim().to_lowercase() != "y" {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    rightclaw::memory::hard_delete_memory(&conn, id).map_err(|e| match e {
+        rightclaw::memory::MemoryError::NotFound(n) => {
+            miette::miette!("memory entry {n} not found for agent '{agent}'")
+        }
+        other => miette::miette!("failed to delete memory: {other:#}"),
+    })?;
+
+    println!("Deleted memory entry {id}.");
     Ok(())
 }
 
