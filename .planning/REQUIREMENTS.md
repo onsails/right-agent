@@ -7,10 +7,10 @@
 
 ### Database Foundation
 
-- [ ] **DB-01**: `rightclaw up` creates per-agent `memory.db` (WAL mode + busy_timeout=5000ms) if absent
-- [ ] **DB-02**: V1 schema is append-only — memories table with `content, tags, stored_by, created_at, deleted_at, expires_at, importance`; SQLite triggers block UPDATE/DELETE
-- [ ] **DB-03**: FTS5 virtual table included in V1 schema for full-text search
-- [ ] **DB-04**: Schema migrations use rusqlite_migration 2.5 (user_version pragma); `to_latest()` called on every DB open
+- [x] **DB-01**: `rightclaw up` creates per-agent `memory.db` (WAL mode + busy_timeout=5000ms) if absent
+- [x] **DB-02**: V1 schema is append-only — memories table with `content, tags, stored_by, created_at, deleted_at, expires_at, importance`; SQLite triggers block UPDATE/DELETE
+- [x] **DB-03**: FTS5 virtual table included in V1 schema for full-text search
+- [x] **DB-04**: Schema migrations use rusqlite_migration 2.5 (user_version pragma); `to_latest()` called on every DB open
 
 ### Memory Skill
 
@@ -61,10 +61,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DB-01 | Phase 16 | Pending |
-| DB-02 | Phase 16 | Pending |
-| DB-03 | Phase 16 | Pending |
-| DB-04 | Phase 16 | Pending |
+| DB-01 | Phase 16 | Complete |
+| DB-02 | Phase 16 | Complete |
+| DB-03 | Phase 16 | Complete |
+| DB-04 | Phase 16 | Complete |
 | SEC-02 | Phase 16 | Complete |
 | SEC-03 | Phase 16 | Complete |
 | DOCTOR-01 | Phase 16 | Pending |
