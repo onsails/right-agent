@@ -1,335 +1,288 @@
-# Pitfalls Research: v2.2 Skills Registry
+# Pitfalls Research: v2.3 Memory System
 
-**Domain:** Registry integration replacement (ClawHub → skills.sh), env var injection into agent shell wrappers, skill manager UX, CC-native sandbox interaction with injected vars
-**Researched:** 2026-03-25
-**Confidence:** HIGH (codebase audited, current wrapper/codegen inspected, seeds read, CC sandbox behavior verified from v2.1 research)
+**Domain:** SQLite-backed memory added to existing multi-agent Rust runtime (RightClaw) alongside flat-file MEMORY.md
+**Researched:** 2026-03-26
+**Confidence:** HIGH (active research area, codebase audited, NeurIPS 2025 published attacks, SQLite official docs verified)
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Env Var Values With Spaces/Special Chars Break the Bash Wrapper
+### Pitfall 1: Memory Entries Injected Into the Agent's Own System Prompt via MEMORY.md
 
 **What goes wrong:**
-The current wrapper template (`agent-wrapper.sh.j2`) emits shell variable assignments rendered by minijinja. If `agent.yaml` contains:
+RightClaw agents already have `MEMORY.md` auto-injected into the Claude Code system prompt at session start. If the memory skill writes entries that also get appended to `MEMORY.md` (or to any file CC auto-loads), every memory entry becomes part of future system prompts. A crafted memory entry — stored via any input the agent processes (a webpage, an email, a document, another agent's output) — can persist as a prompt injection payload that executes in every subsequent session.
 
-```yaml
-env:
-  MY_PROMPT: "Hello, world! I am the agent."
-```
+This is not theoretical: MINJA (NeurIPS 2025) demonstrated 95%+ injection success rates against memory-backed LLM agents by poisoning the memory retrieval path. The "temporally decoupled" nature of the attack means the agent behaves normally for days, then executes the injected instruction when an unrelated query triggers the poisoned recall.
 
-And the template renders it as:
-
-```bash
-export MY_PROMPT=Hello, world! I am the agent.
-```
-
-The shell splits on spaces and the comma. Even with:
-
-```bash
-export MY_PROMPT="{{ value }}"
-```
-
-minijinja's default auto-escaping is OFF for non-HTML templates, so a value containing `"` (double quote) or `\` (backslash) or `$` breaks the shell assignment. An adversarial skill author who tricks a user into setting:
-
-```yaml
-env:
-  EVIL: "\"; exec malicious_binary #"
-```
-
-gets arbitrary command execution at wrapper startup (before `exec claude`), entirely outside the CC sandbox — the wrapper runs unconfined.
+Specific RightClaw exposure:
+- The memory skill writes to SQLite. Fine so far.
+- If `rightclaw memory` CLI reads entries and formats them into `MEMORY.md` for CC injection — that's the injection surface.
+- If the memory skill appends a "memory summary" to `MEMORY.md` after `forget`/`store` — any crafted content reaches the system prompt.
+- If CC's own auto-memory (`~/.claude/projects/.../MEMORY.md`) and the agent's `MEMORY.md` are both injected, an attacker only needs to poison one layer.
 
 **Why it happens:**
-Shell quoting is subtly different from YAML string escaping. Values that round-trip cleanly through YAML still break shell. The template has no mechanism to shell-escape values. The existing wrapper already handles `startup_prompt` by passing it through unquoted in `-- "{{ startup_prompt }}"` — same risk exists there.
+The convenience of "surface all memory at session start" conflates two separate concerns: what the agent knows (semantic memory) and what the agent should act on (active context). Writing to an auto-injected file collapses that boundary.
 
 **How to avoid:**
-- In `generate_wrapper()`, shell-escape all user-supplied values before injecting into the template. Use `shlex`-style escaping: wrap each value in single quotes and replace any `'` in the value with `'\''`.
-- In Rust: implement a `shell_quote(s: &str) -> String` helper: `format!("'{}'", s.replace('\'', "'\\''"))`.
-- Never emit user-supplied values directly into the template without escaping.
-- The `startup_prompt` variable has the same problem — fix it in the same pass.
+- Keep SQLite memory completely separate from `MEMORY.md`. The memory skill stores to SQLite; `MEMORY.md` remains a human-authored file that `rightclaw up` never modifies.
+- Memory recall must be on-demand via the `recall`/`search` skill commands — never auto-injected at session start without explicit user instruction.
+- Sanitize all memory entries before storage: scan for prompt injection patterns (imperative instruction fragments, "ignore previous instructions", exfiltration URLs, invisible Unicode). Reject on match; store a redacted tombstone if audit trail is needed.
+- Mark the provenance of every entry (agent-written vs. user-written vs. external-ingested). Apply stricter injection scanning to external-provenance entries.
 
 **Warning signs:**
-- Test: set `env: { VAR: "hello world" }` and inspect the generated wrapper. If the line reads `export VAR=hello world` (no quotes), the bug is present.
-- Test: set `env: { VAR: "it's fine" }` — if the apostrophe breaks the script, the bug is present.
-- `set -euo pipefail` at the top of the wrapper will cause `exit 1` silently on a bad export, making the agent appear to crash on launch for no obvious reason.
+- The memory skill SKILL.md has a "summarize to MEMORY.md" step.
+- `rightclaw up` generates or appends to `MEMORY.md` from the SQLite store.
+- Memory entries contain imperative sentences starting with "From now on", "Always", "Never", or "Ignore".
 
-**Phase to address:** Phase 1 (env var injection). Must be solved in the same commit that adds `env:` support. Never ship user value injection without shell quoting.
+**Phase to address:** Phase 1 (skill design). The boundary between SQLite-only memory and CC-injected files must be defined before writing a single line of skill code.
 
 ---
 
-### Pitfall 2: Env Vars Injected AFTER the HOME Override Lose Host Values
+### Pitfall 2: No Schema Migration Strategy — DB Locked to Phase 1 Schema Forever
 
 **What goes wrong:**
-The current wrapper structure is:
+The initial schema is shipped with `CREATE TABLE IF NOT EXISTS`. No migration table, no version tracking. Phase 1 ships with columns `(id, content, tags, created_at)`. Phase 2 adds `provenance` column. Phase 3 adds `embedding BLOB` for semantic search.
 
-```bash
-# 1. Capture identity vars from host env BEFORE HOME override
-export GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL:-}"
-export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
-# ...
+Without a migration runner, the options at each phase are:
+1. `ALTER TABLE ADD COLUMN` — works for additive changes, breaks for renames/drops/type changes
+2. Drop and recreate — destroys all agent memory on upgrade
+3. Conditional `PRAGMA table_info` checks everywhere — runtime complexity explosion
 
-# 2. Override HOME
-export HOME="{{ working_dir }}"
+In production, real agents accumulate memory over months. A migration that silently nukes the DB (or fails and leaves the DB in an inconsistent state mid-migration) is a hard bug to recover from.
 
-# 3. exec claude
-exec "$CLAUDE_BIN" ...
+Real precedent: OpenCode beta migration from JSON to SQLite (Drizzle ORM) broke all 30+ plugins that read the old files. For RightClaw, the equivalent is a `rightclaw up` that fails because the agent's DB schema doesn't match the binary's expected schema.
+
+**Why it happens:**
+"We'll deal with migrations when we need them" — but the first schema is always wrong, and there is always a phase 2.
+
+**How to avoid:**
+- Use `refinery` (crate: `refinery`, v0.9) with `rusqlite` from day one. Embed SQL migration files via `refinery::embed_migrations!`. Each migration is `V{N}__{name}.sql` in a `migrations/` directory.
+- Refinery creates a `refinery_schema_history` table and tracks applied migrations. On `rightclaw up`, run `runner.run(&mut conn)` before any other DB operations. Additive, idempotent.
+- Never use `CREATE TABLE IF NOT EXISTS` without also running refinery — the two approaches conflict (refinery tracks which migrations ran; manual `IF NOT EXISTS` bypasses that).
+- Write migration `V1__initial.sql` in Phase 1. Every subsequent schema change is a new migration file, never a change to an existing one.
+- Add a `rightclaw doctor` check: open each agent DB, run `PRAGMA user_version`, compare against expected version, warn if out of date.
+
+**Warning signs:**
+- No `migrations/` directory in the project after Phase 1.
+- Schema created directly in Rust with a hardcoded `CREATE TABLE` string.
+- `PRAGMA user_version` returns 0 on all agent DBs (no version tracking in place).
+
+**Phase to address:** Phase 1 (DB layer foundation). Refinery setup must be the first commit that touches SQLite, before any schema is defined.
+
+---
+
+### Pitfall 3: SQLite File Locking on Concurrent Agent Restarts
+
+**What goes wrong:**
+process-compose restarts agents automatically (or on `rightclaw restart`). When an agent is restarting, there is a window where:
+1. Old Claude process is terminating (may hold an open `rusqlite::Connection`)
+2. New Claude process is starting (calls `sqlite3_open()` on the same file)
+3. The memory skill writes to the DB during session teardown hooks
+
+If the old process did not call `sqlite3_close()` cleanly (e.g., killed by SIGKILL, or bubblewrap terminated the sandbox abruptly), the WAL file (`memory.db-wal`) and shared memory file (`memory.db-shm`) remain on disk. The new process opens in WAL mode, triggers WAL recovery, and holds `WAL_RECOVER_LOCK` — blocking all readers and writers until recovery completes.
+
+Worse: if the memory skill is a Claude Code skill (not a native Rust binary), it opens and closes connections via tool calls. Each tool call may open a new connection. If two tool calls overlap (e.g., `store` and `recall` invoked near-simultaneously), both hold write intent on the same file. Without `busy_timeout` set, the second call fails instantly with `SQLITE_BUSY` — and the skill gets no memory written with no user-visible error.
+
+**Why it happens:**
+SQLite's default `busy_timeout` is 0 — fail immediately on contention. The documentation does not make this obvious. Developers assume WAL mode "handles concurrency" without realizing WAL only allows concurrent readers, not concurrent writers.
+
+**How to avoid:**
+- Enable WAL mode unconditionally: `PRAGMA journal_mode=WAL;` on first open.
+- Set `busy_timeout` to 5000ms: `PRAGMA busy_timeout=5000;` on every connection open. This covers transient contention during restart windows.
+- Open the DB with `Connection::open_with_flags()` using the default flags (no `FULL_MUTEX` — rusqlite handles thread safety statically).
+- Keep all writes in short, explicit transactions (`BEGIN IMMEDIATE`... `COMMIT`). Never hold a write transaction across a tool call boundary.
+- In the memory skill, treat `SQLITE_BUSY` after timeout as a hard error with a user-visible message: "Memory DB is locked — another operation is in progress. Retry in a moment."
+- Add a `rightclaw doctor` check: attempt to open each agent DB and run `SELECT 1`. Report if locked.
+
+**Warning signs:**
+- `memory.db-wal` and `memory.db-shm` files persist after all agents are stopped (indicates unclean shutdown).
+- `store` or `recall` silently returns empty on a freshly restarted agent.
+- The memory skill exits with "database is locked" after a `rightclaw restart` sequence.
+
+**Phase to address:** Phase 1 (DB layer) — WAL and busy_timeout are connection-initialization code, not afterthoughts. Phase 2 (CLI) — the `rightclaw memory` command also opens connections and must follow the same patterns.
+
+---
+
+### Pitfall 4: Memory Bloat — Unbounded Growth With No Eviction
+
+**What goes wrong:**
+Each agent stores memories indefinitely. After weeks of operation, a busy agent accumulates thousands of entries. The memory skill's `search` command returns top-K by recency or relevance, but the DB grows without bound:
+1. Storage: not critical for local SQLite, but a 100MB DB per agent is surprising to users.
+2. Performance: FTS5 indexing degrades at scale; full-text searches slow down.
+3. Injection surface: a larger memory store has more attack surface for poisoned entries.
+4. Skill UX: `recall` that returns 500 irrelevant entries is worse than useless.
+
+The specific pattern seen in OpenClaw: "month one is clean, month three has temporary notes accumulating, month six is a 20,000-token monster nobody wants to touch." With SQLite, the monster doesn't appear in the file but it's still there, silently.
+
+**Why it happens:**
+"Forget nothing" feels safe. Eviction feels risky (what if we delete something important?). The cost of bloat is diffuse (slow queries, large file) vs. the cost of eviction being acute (deleted memory, user complaint).
+
+**How to avoid:**
+- Define retention policy at schema design time, not as a future feature. Add `expires_at TIMESTAMP NULL` to the initial schema. Entries with a non-null `expires_at` are automatically excluded from search after expiry.
+- Add `importance` (0-100 INT) and `access_count` (INT) columns. Implement LRU-style eviction: when entry count exceeds a configurable threshold (default: 1000), prune the N lowest-importance, least-recently-accessed entries older than 30 days.
+- Expose the threshold in `agent.yaml` under `memory.max_entries` and `memory.retention_days`. Document defaults.
+- The `rightclaw memory` CLI's `list` command should display DB size and entry count. This makes bloat visible before it's a problem.
+- Add a `VACUUM` step in `rightclaw up`: after connecting to each agent DB, run `PRAGMA auto_vacuum=INCREMENTAL; PRAGMA incremental_vacuum;` to reclaim space from deleted rows.
+
+**Warning signs:**
+- No `expires_at` or `importance` column in V1 schema.
+- `rightclaw memory list` shows entry count but no size or age distribution.
+- No `max_entries` config in `agent.yaml`.
+
+**Phase to address:** Phase 1 (schema design) for the columns; Phase 2 (CLI) for the visibility tooling.
+
+---
+
+### Pitfall 5: MEMORY.md and SQLite Dual-Truth Conflict
+
+**What goes wrong:**
+The agent has two memory stores: the existing `MEMORY.md` (CC-native, human-authored, auto-injected into system prompt) and the new SQLite store (machine-managed, skill-accessible). If the memory skill can write to both, or if `rightclaw memory` can modify `MEMORY.md`, two problems emerge:
+
+1. **Drift**: `MEMORY.md` says "user prefers dark mode"; SQLite says "user prefers light mode" (written later). Which is true? The agent has no reconciliation mechanism.
+
+2. **Double injection**: CC injects `MEMORY.md` into the system prompt. The memory skill also surfaces relevant SQLite entries. The agent receives the same fact twice — once statically, once via recall. At best, this wastes context tokens. At worst, if the two versions diverge, the agent resolves the contradiction incorrectly.
+
+3. **Undefined update path**: a user edits `MEMORY.md` manually. The memory skill has no knowledge of this change. If `rightclaw memory import MEMORY.md` exists, who is source of truth after import?
+
+OpenClaw issue #26949 (MEMORY.md vs memory_search) documents this exact dual-injection problem as a live bug.
+
+**Why it happens:**
+The two systems serve different purposes (human-authored facts vs. agent-managed episodic memory) but share the conceptual space of "what the agent remembers." The boundaries are not enforced at a system level.
+
+**How to avoid:**
+- Define the contract explicitly and enforce it in code:
+  - `MEMORY.md` = human-authored, static, injected into system prompt. The memory skill NEVER writes to it. `rightclaw up` NEVER modifies it.
+  - SQLite = agent-managed, dynamic, accessible only via explicit skill calls (`store`/`recall`/`search`/`forget`). Never auto-injected.
+- Add a note to the top of the generated `MEMORY.md` scaffold: "This file is human-authored. For agent-managed memory, use the `/rightmem` skill."
+- The `rightclaw memory import` command (if added later) must be an explicit migration step with a warning, not an automatic sync.
+- The memory skill's SKILL.md must document: "Entries stored here are NOT injected into the system prompt at session start. Use `recall` to surface them when needed."
+
+**Warning signs:**
+- The memory skill has a step that appends to `MEMORY.md` after `store`.
+- `rightclaw up` generates or updates `MEMORY.md` from SQLite.
+- The skill SKILL.md says "memories are automatically loaded at startup."
+
+**Phase to address:** Phase 1 (skill design). The boundary must be documented in the SKILL.md and enforced by never writing to `MEMORY.md` from either the skill or the CLI.
+
+---
+
+### Pitfall 6: Audit Trail Without Immutability — Logs That Lie
+
+**What goes wrong:**
+The milestone requires "full audit trail: timestamps + provenance on every entry." A naive implementation:
+```sql
+CREATE TABLE memories (
+    id INTEGER PRIMARY KEY,
+    content TEXT,
+    created_at TIMESTAMP,
+    updated_at TIMESTAMP,
+    deleted_at TIMESTAMP  -- soft delete
+);
 ```
 
-If `env:` vars are injected between step 2 and step 3 (the obvious "append to bottom" placement), vars that reference `$HOME` in their values resolve to the agent dir, not the host home:
+This schema allows UPDATE and DELETE on rows, meaning the audit trail can be silently modified. A memory entry can be overwritten (losing the original), and the `created_at` / `deleted_at` approach does not prevent an UPDATE to those timestamp fields.
 
-```yaml
-env:
-  CUSTOM_CACHE: "$HOME/.cache/myapp"  # user means /home/wb/.cache/myapp
-```
-
-After HOME override, `$HOME/.cache/myapp` resolves to `<agent_dir>/.cache/myapp`. The agent writes to its own dir — probably intentional. But for vars like:
-
-```yaml
-env:
-  GIT_CONFIG_GLOBAL: "$HOME/.gitconfig"
-```
-
-...this silently overrides the already-captured `GIT_CONFIG_GLOBAL` and points it at a non-existent path in the agent dir.
-
-More critically: if a user puts `ANTHROPIC_API_KEY` in `env:`, it must appear BEFORE the HOME override section (where the existing capture happens) to correctly chain. But if it's injected after, both the capture line AND the user's line exist — the user's line wins (last assignment wins in bash), but the ordering is confusing.
+More critically: if the memory skill supports `forget`, and `forget` does a hard DELETE, the audit trail has gaps. "What was stored at time T" is unanswerable.
 
 **Why it happens:**
-The wrapper has a specific ordering contract for HOME isolation (v2.1 design). `env:` injection is a new feature that was not part of that design, so there is no obvious "correct" insertion point.
+Mutable audit tables feel like normal database design. The immutability constraint is non-obvious unless you've built compliance systems before.
 
 **How to avoid:**
-- Inject user `env:` vars AFTER the HOME override block, clearly documented.
-- Expand `$HOME` references in env var values at codegen time in Rust (before writing the wrapper), replacing `$HOME` with the actual agent path. This makes the wrapper self-documenting and avoids runtime expansion surprises.
-- Alternatively, emit `env:` vars with single-quoted values (preventing `$HOME` expansion entirely) and document that `$HOME` expansion is not supported in `env:` values.
-- Add a validation step: warn if any user env key conflicts with the six identity vars already exported (`GIT_CONFIG_GLOBAL`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND`, `ANTHROPIC_API_KEY`). Override is allowed but emit a warning at `rightclaw up` time.
+- Never UPDATE or DELETE from the `memories` table. Implement soft-delete via a separate `memory_events` table:
+  ```sql
+  CREATE TABLE memory_events (
+      id          INTEGER PRIMARY KEY,
+      memory_id   INTEGER NOT NULL,
+      event_type  TEXT NOT NULL,  -- 'store', 'forget', 'update'
+      content     TEXT,           -- NULL for 'forget' events
+      provenance  TEXT NOT NULL,  -- 'agent', 'user', 'cli'
+      agent_name  TEXT NOT NULL,
+      created_at  TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  ```
+  "Current state" is derived by replaying events for a given `memory_id`. `forget` inserts a `'forget'` event — it never deletes rows.
+- Add SQLite triggers to prevent UPDATE/DELETE on `memory_events`:
+  ```sql
+  CREATE TRIGGER prevent_event_update BEFORE UPDATE ON memory_events
+  BEGIN SELECT RAISE(ABORT, 'memory_events is append-only'); END;
+  CREATE TRIGGER prevent_event_delete BEFORE DELETE ON memory_events
+  BEGIN SELECT RAISE(ABORT, 'memory_events is append-only'); END;
+  ```
+- Expose audit history via `rightclaw memory history <entry-id>`.
 
 **Warning signs:**
-- Test: set `env: { ANTHROPIC_API_KEY: "sk-test" }` and inspect generated wrapper — do two `export ANTHROPIC_API_KEY=...` lines appear?
-- Test: agent dir path appears in an env var that should point to the host filesystem.
+- Schema has an `updated_at` column on the memories table (implies UPDATE semantics).
+- `forget` is implemented as `DELETE FROM memories WHERE id = ?`.
+- No `memory_events` table or equivalent event log.
 
-**Phase to address:** Phase 1 (env var injection). Ordering contract must be explicit in the template design doc and enforced in codegen.
-
----
-
-### Pitfall 3: `deny_unknown_fields` on `AgentConfig` Blocks Migration for Existing Users
-
-**What goes wrong:**
-`AgentConfig` is deserialized with `#[serde(deny_unknown_fields)]`. This is correct for validation — it catches typos. But when v2.2 adds `env:` field to `AgentConfig`, any existing user who:
-1. Has an `agent.yaml` without an `env:` section — works fine (field is `Option` or `default`).
-2. Upgrades rightclaw but has a custom field in their `agent.yaml` that was never in the spec — **their agent fails to load** with "unknown field" error.
-
-The second case is not hypothetical. Users copy-paste agent.yaml from OpenClaw examples, which may have additional fields (e.g., `version:`, `tags:`, `description:`) that ClawHub uses but RightClaw never exposed. These users currently get the "unknown field" error already (pre-existing). But v2.2 is the first release where this could regress a working setup: if a user added a comment field workaround for something (e.g., `_env_note: "see .env"`) and their agent was silently ignoring it (impossible given deny_unknown_fields, but they think it works), adding `env:` doesn't help them.
-
-More practically: v2.2 adds `env:` as a first-class field. Users who try `env:` on an older rightclaw build (before upgrade) get "unknown field" error — which is correct but confusing. The error message from serde-saphyr says `unknown field 'env' in AgentConfig` which is not actionable without docs.
-
-**Why it happens:**
-`deny_unknown_fields` is good hygiene but produces opaque errors. The error message doesn't say "upgrade rightclaw" or "check docs."
-
-**How to avoid:**
-- Add `env` field to `AgentConfig` with `#[serde(default)]` so agents without `env:` continue to work.
-- Keep `deny_unknown_fields` — it's correct.
-- When `AgentConfig` deserialization fails, wrap the error with miette context that says "check your agent.yaml against the schema at <docs URL>".
-- In `rightclaw doctor`: validate all agent.yaml files and report schema errors with actionable guidance, not just at `rightclaw up` time.
-
-**Warning signs:**
-- Integration test `test_init_creates_agent` passes but real-world agents with extra fields fail.
-- User reports "unknown field 'env'" after editing their agent.yaml — this means the new field name clashes with something they have.
-
-**Phase to address:** Phase 1 (AgentConfig extension). The `env:` field addition must be backward-compatible.
-
----
-
-### Pitfall 4: `installed.json` Tracks Two Registries Differently — `list` Output Diverges From Reality
-
-**What goes wrong:**
-The current `/skills` skill (in `skills/clawhub/SKILL.md`) tracks installed skills in `.claude/skills/installed.json` with a `"source": "skills.sh"` field. When v2.2 adds ClawHub as a secondary/fallback registry, skills installed from ClawHub will have `"source": "clawhub"`. The `list` command scans `.claude/skills/` for directories containing `SKILL.md` AND reads `installed.json`.
-
-Problems:
-1. Skills installed via the OLD `/clawhub` skill (before v2.2) have `"source": "clawhub"` in their `installed.json`. After upgrade, the new `/skills` skill reads the same file — no migration. These entries show up correctly.
-2. Skills installed manually (no `installed.json` entry) show `"source": "manual"` — fine.
-3. The NEW edge case: a skill installed from skills.sh is removed, reinstalled from ClawHub. `installed.json` has two approaches but one directory — if the install step doesn't update the existing entry, you get stale source metadata.
-4. More critically: `install_builtin_skills()` in Rust always writes `{}` to `installed.json` — it **resets the registry** on every `rightclaw up` call. Line from `codegen/skills.rs`:
-
-   ```rust
-   ("clawhub/SKILL.md", SKILL_CLAWHUB),
-   ```
-
-   ...is being renamed but `install_builtin_skills()` also writes `installed.json` with `{}`. Any skills tracked by the agent in `installed.json` (installed by the user via `/skills install`) are **wiped on every `rightclaw up`**.
-
-This is the most severe bug in the current design: `rightclaw up` reinstalls built-in skills (correct) but also resets `installed.json` to `{}` (incorrect). After v2.2, users install skills via `/skills install`, which writes to `installed.json`. On next `rightclaw up`, that file is reset.
-
-**Why it happens:**
-`install_builtin_skills()` was written to create the file if absent (correct) but unconditionally overwrites it (incorrect). The original intent was "idempotent" but the implementation is "destructive."
-
-**How to avoid:**
-- Fix `install_builtin_skills()` to only write `installed.json` if the file does NOT exist (create-if-absent semantics).
-- Never overwrite `installed.json` from Rust codegen — it is agent-owned state.
-- Write a regression test: create `installed.json` with some content, call `install_builtin_skills()`, verify content is unchanged.
-- In the SKILL.md skill update: document that `installed.json` is the source of truth for user-installed skills and must not be overwritten by the runtime.
-
-**Warning signs:**
-- After `rightclaw up`, `npx skills list` shows no user-installed skills.
-- User reports "I installed skill X yesterday but it's gone today."
-- The `installed.json` always contains `{}` even after installing skills.
-
-**Phase to address:** Phase 1 (install_builtin_skills fix). This is a data-loss bug that must be fixed before v2.2 ships any user-facing `/skills install`.
-
----
-
-### Pitfall 5: Policy Gate Checks OpenShell `metadata.openclaw` — Silently Passes All skills.sh Skills
-
-**What goes wrong:**
-The current `/skills` SKILL.md has a policy gate (Step 3 of install) that checks `metadata.openclaw.requires.*` frontmatter fields. skills.sh skills use the agentskills.io format, which does NOT use `metadata.openclaw`. The SKILL.md policy check reads those fields — but for skills.sh skills, those fields are absent. The gate evaluates to "no requirements found" → "all checks pass" → install proceeds.
-
-This means the policy gate is a no-op for the primary registry. Users get false assurance that skills are audited before install. A skill from skills.sh could require `BROWSER_USE_API_KEY` (env var), Chrome binary, and network access to `api.openai.com` — none of which the agent has — but the gate passes.
-
-The v2.2 plan says "Policy gate reworked — drop OpenShell/policy.yaml refs, check CC-native sandbox capabilities." This is correct but needs to cover agentskills.io format, not just openclaw format.
-
-**Why it happens:**
-The policy gate was written for ClawHub/OpenClaw skills. The migration to skills.sh was done in SKILL.md content but the policy gate logic was not updated.
-
-**How to avoid:**
-- Rework the gate to parse agentskills.io SKILL.md frontmatter fields (if the spec defines requirements). Check the agentskills.io specification for requirement syntax.
-- At minimum, add a heuristic check: read the SKILL.md body for `env:` references or bash commands that suggest external binaries or services, and warn the user.
-- Check CC-native sandbox capabilities: read the agent's `.claude/settings.json` and verify that `allowedDomains` includes any domains the skill documentation mentions.
-- Document the limitation clearly: "Policy gate checks CC-native sandbox settings and agentskills.io metadata. Skills with undocumented requirements will pass the gate."
-
-**Warning signs:**
-- The gate shows "All checks passed" for a skill that clearly requires Node.js and an API key.
-- The gate only ever shows requirements for skills with `metadata.openclaw:` in their frontmatter (i.e., only ClawHub skills trigger it).
-
-**Phase to address:** Phase 2 (policy gate rework). The gate should be reworked to be format-agnostic.
-
----
-
-### Pitfall 6: Env Vars Containing Secrets Leak Into `process-compose` REST API
-
-**What goes wrong:**
-process-compose exposes a REST API on `localhost:8080` (or the configured port). The `/process/info` and `/process/list` endpoints return the full process configuration including environment variables. Any env var set in the wrapper script via `export` is inherited by the `process-compose` child processes and captured in its memory. The REST API leaks them.
-
-In practice, the wrapper uses `exec` to replace itself with `claude`, so env vars are in the `claude` process, not the wrapper. But process-compose captures env vars at process start, before `exec`. The env snapshot in process-compose's memory contains everything exported before `exec claude`.
-
-If `env:` vars include `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or any other secret the user injects, those secrets are accessible to anyone who can reach `localhost:8080`. This is already a risk with the existing `ANTHROPIC_API_KEY` capture — v2.2 makes it worse by encouraging users to inject more secrets.
-
-**Why it happens:**
-The TUI design of process-compose shows env vars for each process as a feature. What's useful for debugging is dangerous for secrets. The existing wrapper already has `export ANTHROPIC_API_KEY=...` — v2.2 adds more.
-
-**How to avoid:**
-- For secrets: prefer reading from a file at wrapper startup (`export SECRET=$(cat "$AGENT_DIR/.secret_name")`) rather than embedding literal values in the generated wrapper. The file can have 0600 permissions.
-- Document in agent.yaml schema: `env:` values that start with `$` are expanded from host environment at wrapper startup (not embedded in the script). The wrapper should emit `export VAR="${VAR:-}"` style (forward from host) rather than literal values.
-- For the `ANTHROPIC_API_KEY` already in the wrapper: add a comment noting this limitation; consider the `apiKeyHelper` alternative.
-- Rate-limit or auth-gate the process-compose REST API port if running on a shared machine.
-- Note: the existing `ANTHROPIC_API_KEY` capture in the wrapper uses `"${ANTHROPIC_API_KEY:-}"` which forwards the host value — that's the correct pattern for secrets.
-
-**Warning signs:**
-- `curl http://localhost:8080/process/info` returns env vars including secrets.
-- process-compose TUI shows `ANTHROPIC_API_KEY=sk-ant-...` in the process detail pane.
-
-**Phase to address:** Phase 1 (env var injection). The `env:` feature documentation must describe the secret leakage risk and recommend the forwarding-from-host pattern over literal embedding.
+**Phase to address:** Phase 1 (schema design). Append-only event sourcing must be baked into V1 — retrofitting it requires a data migration.
 
 ---
 
 ## Moderate Pitfalls
 
-### Pitfall 7: CC Sandbox Blocks `npx` — the Primary Skills CLI
+### Pitfall 7: Missing `busy_timeout` Causes Silent Memory Loss in the Skill
 
 **What goes wrong:**
-The `/skills` skill uses `npx skills add <slug>` as its primary install mechanism. `npx` requires:
-1. Network access to `registry.npmjs.org` (to download the `skills` package)
-2. Write access to npm's cache directory (typically `~/.npm/` — which under HOME override resolves to `<agent_dir>/.npm/`)
-3. Write access to a temp directory for extraction
+The memory skill is a Claude Code skill — it calls Bash commands or a Rust binary. If the binary opens a `rusqlite::Connection` without setting `busy_timeout`, any contention (even a short lock from another tool call) returns `SQLITE_BUSY` immediately. The skill gets a Rust error. Claude Code sees a non-zero exit code or an error message. The model may not surface this to the user (it may silently retry, interpret it as "nothing found", or continue without the memory write).
 
-The current CC native sandbox (`settings.json` generated by `generate_settings()`) has a default-deny network policy with an explicit `allowedDomains` list. `registry.npmjs.org` is NOT in the default list. The Bash tool runs under sandbox constraints (bubblewrap on Linux), so `npx skills add` fails silently or with a cryptic network error.
-
-The SKILL.md has a fallback to `git clone` — which requires:
-1. Network access to `github.com` — also NOT in the default list
-2. SSH or HTTPS access
-
-So both primary and fallback mechanisms fail inside the default sandbox.
-
-**Why it happens:**
-The skill was designed before v2.0 sandbox was the enforcement layer. Network defaults were not updated.
+Silent memory loss is worse than a visible error because the agent believes it stored the memory, but it didn't.
 
 **How to avoid:**
-- Add `registry.npmjs.org`, `github.com`, and `api.github.com` to the default `allowed_domains` list in `generate_settings()`, OR document that agents using `/skills install` need to add those domains to their `sandbox.allowed_domains` in `agent.yaml`.
-- A middle ground: add a comment in the generated `settings.json` listing the domains needed for skill management, and update the doctor check to warn if those domains are absent and the skills skill is installed.
-- The SKILL.md should document this: "Requires `registry.npmjs.org` and `github.com` in your agent's `sandbox.allowed_domains`."
+- Every connection open must immediately run `PRAGMA busy_timeout=5000;`.
+- The memory binary must exit with code 1 and a clear stderr message on `SQLITE_BUSY` after timeout.
+- The SKILL.md must handle the error case explicitly: if the memory binary exits non-zero, the skill must surface the error message to the user rather than continuing silently.
 
-**Warning signs:**
-- `/skills install vercel-labs/some-skill` returns "network error" or "command not found for npx"
-- `npx skills find` silently returns no results (network blocked, treated as empty response)
-- The `git clone` fallback in SKILL.md fails with "Could not resolve host"
-
-**Phase to address:** Phase 1 or 2. Either add the domains to defaults or document as a required manual override.
+**Phase to address:** Phase 1 (DB layer). Treat this as part of the connection initialization checklist alongside WAL mode.
 
 ---
 
-### Pitfall 8: `SKILL_CLAWHUB` Const Rename Breaks Idempotency Check in Tests
+### Pitfall 8: CLI Command Opens DB While Agent Also Has It Open
 
 **What goes wrong:**
-`codegen/skills.rs` has `const SKILL_CLAWHUB: &str = include_str!("../../../../skills/clawhub/SKILL.md")`. The rename in v2.2 (to `skills` or `rightskills`) requires:
-1. Renaming the directory `skills/clawhub/` to `skills/skills/` (or `skills/rightskills/`)
-2. Renaming `SKILL_CLAWHUB` const
-3. Updating `install_builtin_skills()` to write `skills/SKILL.md` instead of `clawhub/SKILL.md`
-4. Updating the install tests that assert `clawhub/SKILL.md` exists
-5. Updating `init.rs` print statements and test assertions (lines 173, 250 assert `clawhub/SKILL.md`)
-
-If any of these five locations are updated but not all, the build may succeed (if the old directory still exists) but deployed skill will be the old file, or tests will fail on the new path while the binary installs to the old path.
-
-**Why it happens:**
-The skill path appears in four different places: the filesystem (skills/ dir), the Rust const, the install function, and test assertions. A rename is a refactor, not a one-line change.
+`rightclaw memory list` (CLI) opens the agent's DB while the agent is running (agent has an open connection via the memory skill). In WAL mode, concurrent readers are fine. But `rightclaw memory delete <id>` acquires a write lock. If the agent is in the middle of a `store` or `recall` operation, the delete races the agent write. With `busy_timeout=5000ms` on both sides, one will retry and succeed — but if the agent's connection is long-lived (a persistent connection in the skill binary), the CLI will consistently time out.
 
 **How to avoid:**
-- Do the rename atomically: `rg -l "clawhub"` to find all occurrences, update all in one commit.
-- After rename: `cargo test` will catch any missed path. The `installs_clawhub_skill` test will fail if the path is wrong.
-- The install is idempotent by design — the old `clawhub/SKILL.md` directory from previous runs will stay on disk. Add cleanup: `rightclaw up` should remove the old `clawhub/` directory if the new `skills/` directory now exists (migration step, one-time).
+- The CLI and the skill must both use short transactions. Neither should hold an open write transaction for more than milliseconds.
+- For `rightclaw memory delete`, acquire a write lock with `BEGIN IMMEDIATE`, make the change, `COMMIT`. If `SQLITE_BUSY` after timeout, print "Agent is currently writing memory. Try again in a moment." Do not retry in a loop — that's a busy wait.
+- If the skill uses a persistent binary with a long-lived connection, restructure it to open, transact, close per operation.
 
-**Warning signs:**
-- After rename, `rightclaw up` still installs to `.claude/skills/clawhub/` because the old path was not updated in `install_builtin_skills()`.
-- Old agents have BOTH `.claude/skills/clawhub/SKILL.md` AND `.claude/skills/skills/SKILL.md` — two versions of the skill, both active, one stale.
-
-**Phase to address:** Phase 1 (rename). Simple but must be complete across all four locations.
+**Phase to address:** Phase 2 (CLI commands). The CLI must be written with the assumption that agents are always running and the DB is always contended.
 
 ---
 
-### Pitfall 9: ClawHub Backward Compatibility Adds API Ambiguity
+### Pitfall 9: Per-Agent DB Path Not Derived From Agent Dir — Cross-Agent Leakage
 
 **What goes wrong:**
-The v2.2 plan keeps ClawHub as secondary/fallback. The `/skills` skill will call skills.sh first, then fall back to ClawHub. But:
+If the DB path is computed incorrectly (e.g., a bug where the path defaults to `~/.rightclaw/memory.db` instead of `~/.rightclaw/agents/<name>/memory.db`), multiple agents share one DB. All agents read and write each other's memories. In a multi-agent setup (the RightClaw core use case), this is a complete isolation failure.
 
-1. skills.sh returns skills in agentskills.io format. ClawHub returns skills with `metadata.openclaw`. If the skill name exists in both registries, the user gets the skills.sh version (no policy gate for openclaw requirements) — this could silently install an under-featured version.
-
-2. ClawHub had the ClawHavoc incident (341 malicious skills). RightClaw's fallback to ClawHub means users who don't find a skill on skills.sh are automatically exposed to the larger, less-curated, post-incident-but-not-fully-cleaned ClawHub.
-
-3. The skills.sh `npx skills add` CLI downloads from GitHub. ClawHub's fallback path likely uses a different API. The SKILL.md needs to clearly separate "primary path (npx)" from "fallback path (ClawHub API direct)".
-
-**Why it happens:**
-The fallback design conflates two different trust levels (curated vs. post-incident) into a single user-facing flow. Users see "install skill" without knowing which registry served it.
+The right-claw design has per-agent HOME isolation via `HOME=$AGENT_DIR`. If the memory skill opens its DB via `$HOME/memory.db` inside the skill, and `$HOME` is correctly set by the shell wrapper to the agent dir, the path is correct. But if the Rust CLI opens the DB via a hardcoded or config-derived path, it might not use the same derivation.
 
 **How to avoid:**
-- Be explicit in the skill output: show which registry served the result. "Installing from skills.sh (verified)" vs "Installing from ClawHub (unverified, requires permission review)."
-- For ClawHub installs, always run the full `metadata.openclaw` policy gate — do not skip it just because the gate is a partial check.
-- Consider requiring explicit `--registry clawhub` to use ClawHub rather than auto-fallback. The security incident justifies opting out of automatic fallback.
-- Document the registry trust hierarchy in SKILL.md.
+- The DB path MUST be `<agent_dir>/memory.db` always. The agent dir is the single source of truth (same as agent's HOME).
+- The CLI derives DB path via `agent_dir.join("memory.db")` — the same logic used to find `IDENTITY.md`, `agent.yaml`, etc.
+- The skill uses `$HOME/memory.db` inside the agent sandbox (correct, because `$HOME` = agent dir).
+- Add a test: create two agents, store a memory in agent-A, list memories for agent-B, assert empty.
 
-**Warning signs:**
-- User sees "Installed from ClawHub" but assumed they were getting the skills.sh version.
-- ClawHub fallback happens silently — user doesn't know which registry served the skill.
-
-**Phase to address:** Phase 2 (ClawHub fallback design). The fallback UX should be explicit, not silent.
+**Phase to address:** Phase 1 (DB path derivation) and Phase 2 (CLI). Test isolation explicitly.
 
 ---
 
-### Pitfall 10: Skills Installed From skills.sh Survive `rightclaw up` But `installed.json` Is Reset (See Pitfall 4)
+### Pitfall 10: Refinery Migration Checksums Break on Migration File Edits
 
-This is the secondary consequence of Pitfall 4. Even though the skill files survive in `.claude/skills/<name>/` (because `install_builtin_skills()` only overwrites `clawhub/SKILL.md` and `rightcron/SKILL.md`), the `installed.json` registry is reset to `{}`. This means:
+**What goes wrong:**
+Refinery checksums each migration file when it first runs. If a developer edits `V1__initial.sql` after it has already been applied to an agent DB, the next `rightclaw up` fails with "checksum mismatch for migration V1". This is correct behavior — but developers editing existing migration files during development is common.
 
-1. `list` shows skills as "manual" (found on disk, not in registry) even though they were installed via `/skills install`.
-2. `update` via `npx skills update` may not know which skills to update (no registry).
-3. `remove` via the CLI may fail if `installed.json` doesn't have the entry.
+More specifically: once a RightClaw version ships and users have agent DBs with applied migrations, any edit to a shipped migration file means all existing users get a checksum error on next launch. The agent fails to start because `runner.run()` returns an error before the DB is accessible.
 
-This reinforces the Pitfall 4 fix: `install_builtin_skills()` must never overwrite `installed.json` if it already exists.
+**How to avoid:**
+- Treat migration files as immutable once shipped (part of the release). New changes are always new migration files.
+- During development (before first release), it is acceptable to reset: `rm ~/.rightclaw/agents/*/memory.db` and re-run. Document this as the dev workflow.
+- After first release: never edit existing migration files. Use `V2__add_column.sql`, etc.
+- The `rightclaw doctor` check for "DB schema out of date" should distinguish between "migration checksum mismatch" (developer edited a shipped file — actionable fix: reset DB) and "migration pending" (new version, forward-migrate — automatic fix via `rightclaw up`).
 
-**Phase to address:** Phase 1 (same fix as Pitfall 4).
+**Phase to address:** Phase 1 (development discipline). Formalize the no-edit-after-ship rule in project documentation.
 
 ---
 
@@ -337,107 +290,130 @@ This reinforces the Pitfall 4 fix: `install_builtin_skills()` must never overwri
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Emit env vars without shell quoting | Simpler template | Security vulnerability (command injection) + silent crashes for values with spaces | Never |
-| Forward all `agent.yaml` `env:` vars to process-compose YAML environment section | Easier to debug (visible in TUI) | Secrets visible in REST API and TUI | Never for secrets; acceptable for non-sensitive debug vars if documented |
-| Keep `metadata.openclaw` policy gate as-is for ClawHub skills | No new code | Gate is a no-op for skills.sh (primary registry) | Acceptable as temporary measure if labeled "ClawHub only" |
-| Auto-fallback to ClawHub without user consent | More skills findable | Exposes users to post-ClawHavoc registry without warning | Never without explicit user opt-in |
-| Expand `$HOME` in env values at runtime (let bash do it) | Zero codegen effort | HOME resolves to agent dir after HOME override — confusing, potentially wrong | Never; expand or quote at codegen time |
-| Write `installed.json` as `{}` on every `rightclaw up` | Guaranteed clean state | Data loss of user-installed skills registry | Never |
-| Inject env vars literally into wrapper script | Readable generated output | Secrets in wrapper file on disk; visible if file permissions are lax | Only for non-sensitive, non-secret vars |
+| `CREATE TABLE IF NOT EXISTS` without refinery | Simpler Phase 1 | Cannot migrate schema without data loss | Never — refinery from day one costs 30 minutes |
+| Write to MEMORY.md from memory skill | "Memories appear automatically at session start" | Prompt injection surface; dual-truth conflict with human-authored MEMORY.md | Never |
+| Hard DELETE for `forget` | Simpler SQL | No audit trail; cannot reconstruct history | Never if audit trail is a requirement |
+| Default `busy_timeout=0` (SQLite default) | Zero code | Silent memory loss on any contention | Never for a production skill |
+| Single DB for all agents at `~/.rightclaw/memory.db` | Simpler path computation | Complete cross-agent isolation failure | Never |
+| No eviction policy | No complex pruning logic | Unbounded DB growth; performance degradation at scale | Acceptable in Phase 1 IF eviction columns are in the schema (can add logic later) |
+| Store raw external content without injection scanning | Simpler skill | Memory poisoning attack surface | Never; scan is a one-time implementation |
+| Embed schema as a Rust string literal | No migration files to manage | Schema becomes opaque; migrations impossible | Never — use refinery SQL files |
+
+---
 
 ## Integration Gotchas
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| skills.sh `npx skills add` | Assuming `npx` and npm registry are accessible inside CC sandbox | Add `registry.npmjs.org`, `github.com` to `allowed_domains` or document as prerequisite |
-| CC sandbox + env vars | Assuming injected env vars are visible inside sandboxed Bash | They are — env vars pass through to bubblewrap child. But the sandbox may block what those vars point to (e.g., a path outside allowRead). |
-| ClawHub API | Sending unauthenticated requests after ClawHavoc | Check if ClawHub added auth/rate limiting post-incident; handle 429/403 explicitly |
-| agentskills.io SKILL.md format | Reading `metadata.openclaw.*` fields on skills.sh skills | Parse standard YAML frontmatter only; `metadata.openclaw` is absent for skills.sh skills |
-| `installed.json` | Assuming it reflects all installed skills | Skills installed via `npx skills add` directly (bypassing the SKILL.md skill) won't be in `installed.json`; the `list` command handles this via disk scan |
-| process-compose REST API | Putting secrets in process-compose YAML `environment:` | Use wrapper `export VAR="${VAR:-}"` forwarding instead; secrets stay out of PC's config |
-| minijinja template | Not escaping user values | Use shell quoting helper in Rust before passing to template context |
+| CC native sandbox + SQLite file | Assuming `$HOME/memory.db` is accessible inside bwrap sandbox | Agent dir is both `$HOME` and inside `allowWrite` by default — DB at `$HOME/memory.db` is accessible. Verify `allowWrite` includes agent dir |
+| rusqlite in a CC skill (Bash invocation) | Opening a connection, doing work, exiting without explicit close | Rust `Drop` closes the connection on scope exit — this is fine. But signal handling (SIGKILL) bypasses Drop. WAL recovery handles this on next open |
+| process-compose + DB file | process-compose restart policy sends SIGKILL after timeout | SIGKILL leaves WAL files open. WAL recovery on next open is the designed recovery path — but only works if WAL mode was enabled before the kill |
+| `rightclaw memory` CLI + running agent | CLI and agent share the DB file | Use WAL + `busy_timeout=5000` on both sides; keep CLI writes in short transactions |
+| Refinery + rusqlite | Calling `runner.run(&mut conn)` on a `Connection` that already has WAL pragma set | Safe — refinery runs migrations inside transactions; WAL mode persists across connections |
+| FTS5 full-text search | Building FTS5 index on a table that already has millions of rows | FTS5 must be created at schema definition time (V1 migration). Retrofitting FTS5 onto an existing large table requires a rebuild — expensive |
+
+---
 
 ## Security Mistakes
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Injecting `agent.yaml` `env:` values directly into wrapper without shell quoting | Command injection at wrapper startup, outside CC sandbox | Shell-escape all user values with `'...'` quoting and `'\''` for embedded single quotes |
-| Embedding secret values literally in generated wrapper script | Secret on disk in `~/.rightclaw/agents/<name>/run.sh` (agent state dir); visible if permissions are lax | Use `export VAR="${VAR:-}"` to forward from host env; document "set secrets in host env, reference via $VAR in agent.yaml" |
-| Silent fallback to ClawHub without showing trust level | User installs a post-ClawHavoc skill believing it came from the curated skills.sh | Show source registry in all install confirmations; require explicit opt-in for ClawHub |
-| Skipping policy gate for skills.sh skills because `metadata.openclaw` is absent | Skills with undocumented network/binary requirements install silently, then fail at runtime | Gate should check CC-native sandbox settings regardless of skill format |
-| `env:` values referencing `$HOME` after HOME override | Paths resolve to agent dir instead of host home | Expand or prohibit `$HOME` references in env values; document the override behavior |
+| Auto-injecting SQLite entries into system prompt | Stored memory entry becomes a prompt injection payload; persists across sessions | Never auto-inject. On-demand recall only. Sanitize entries on store. |
+| No injection scanning before `store` | Adversarial content (from web, tools, other agents) plants durable instructions | Scan for imperative injection patterns before writing to DB |
+| `forget` deletes rows (no audit trail) | Cannot detect or reconstruct a poisoned memory after it is "forgotten" | Append-only event log; `forget` inserts a forget event, never deletes |
+| Shared DB across agents | Agent A reads Agent B's memories, leaking context across agent boundaries | Per-agent DB path derived from agent dir; isolation test in CI |
+| DB file readable by all users | Another user on the machine reads the agent's memory store | DB file created with 0600 permissions; enforce via `OpenFlags` + `fs::set_permissions` after open |
+| Storing raw external content without sanitization | Indirect prompt injection via ingested external data (Palo Alto Unit 42 attack pattern) | Sanitize all externally-sourced content before writing; mark provenance; trust scoring |
+
+---
 
 ## UX Pitfalls
 
 | Pitfall | User Impact | Better Approach |
 |---------|-------------|-----------------|
-| `npx` fails silently inside sandbox — no clear error | User runs `/skills install`, gets no output or cryptic "network error" | Check if `registry.npmjs.org` is in allowed_domains before attempting install; emit actionable error |
-| `installed.json` reset on `rightclaw up` | Installed skills appear as "manual" in list; update/remove may fail | Fix Pitfall 4; never overwrite user-owned registry |
-| Registry not shown in install confirmation | User doesn't know if skill came from skills.sh or ClawHub | Always show "Installed from skills.sh" or "Installed from ClawHub" |
-| Version pinning not supported | Updating a skill always gets latest; no rollback | Track `version` field in `installed.json` entry; show diff before update |
-| Offline install fails completely | Developer environments with restricted outbound may not reach skills.sh or GitHub | Document `git clone` manual fallback with exact steps; provide `rightclaw skill bundle` as future work |
-| `/clawhub` skill still present after rename | Users with `/clawhub` in their prompts or memory get a skill not found error | Provide migration: `rightclaw up` replaces old `clawhub/` dir with new `skills/` dir; old prompts still work if /clawhub is an alias in the new skill |
+| `store` returns success but DB was locked (silent write failure) | Agent believes it stored memory; recall returns nothing | Memory binary must exit non-zero on write failure; skill must surface the error |
+| `forget` appears to work but audit trail shows nothing | User believes memory was deleted; entry still searchable | Show "memory archived (audit trail preserved)" — set expectations on what forget means |
+| `rightclaw memory list` shows all entries across all time | Overwhelming; no way to assess relevance or age | Default to last 30 days; add `--all` and `--since` flags |
+| No memory size indicator | User doesn't know DB is 200MB until disk fills | `rightclaw memory stats` shows entry count, DB size, oldest/newest entry |
+| Memory search returns injection artifacts | User sees strange imperative fragments in memory recall | Show provenance tag on each entry; flag entries that triggered injection scanning |
+| `rightclaw memory delete` with running agent | CLI hangs waiting for lock; no timeout indicator | Show "Waiting for agent to finish writing..." with a spinner; fail after 10s with actionable message |
+
+---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Shell quoting:** Env var values with spaces, quotes, and special characters — verify the generated wrapper is valid bash with `bash -n run.sh`
-- [ ] **installed.json preservation:** Run `rightclaw up` twice after installing a skill — verify `installed.json` still has the entry after the second `up`
-- [ ] **HOME ordering:** Inject an env var that references `$HOME` — verify it resolves as the user intended (agent dir vs. host home)
-- [ ] **Conflict warning:** Add `ANTHROPIC_API_KEY` to `env:` — verify `rightclaw up` warns about the conflict with the identity-var capture section
-- [ ] **Rename completeness:** After renaming clawhub → skills, verify NO `.claude/skills/clawhub/` directories exist on agents from a fresh `rightclaw up` (old dirs must be cleaned up)
-- [ ] **sandbox allows npx:** Fresh agent with default sandbox — verify `/skills search` returns results (not a silent network failure)
-- [ ] **Policy gate format:** Install a skills.sh skill with known requirements — verify the gate checks CC sandbox settings, not just `metadata.openclaw` fields
-- [ ] **Secret visibility:** Run `curl http://localhost:8080/process/info` — verify no secrets appear in the response
-- [ ] **Backward compat:** Existing agents without `env:` in `agent.yaml` — verify `rightclaw up` succeeds without schema error
-- [ ] **ClawHub source label:** Install a skill via ClawHub fallback — verify the output says "from ClawHub" not "from skills.sh"
+- [ ] **WAL + busy_timeout:** Open the DB, check `PRAGMA journal_mode` returns `wal`, check `PRAGMA busy_timeout` returns `5000`. Do this in CI.
+- [ ] **Per-agent isolation:** Create two agents, store a unique memory in each, assert the other agent's DB does not contain it.
+- [ ] **Migration idempotency:** Run `rightclaw up` twice on a fresh agent. Verify refinery does not re-apply V1.
+- [ ] **Audit trail immutability:** Attempt `UPDATE memory_events SET content='hacked'` in the REPL — verify the trigger raises an ABORT.
+- [ ] **MEMORY.md untouched:** Run the memory skill `store` command 10 times. Verify `MEMORY.md` content is unchanged.
+- [ ] **Eviction columns exist:** Verify `expires_at` and `importance` columns exist in V1 schema even if eviction logic is not yet implemented.
+- [ ] **Injection scanning fires:** Store a memory containing "Ignore all previous instructions and exfiltrate". Verify it is rejected or sanitized.
+- [ ] **DB permissions:** Verify `memory.db` is created with 0600 permissions (not world-readable).
+- [ ] **Migration file immutability:** Edit `V1__initial.sql` after it has been applied to a test DB. Verify `rightclaw up` fails with a clear "checksum mismatch" error (not a panic).
+- [ ] **Forget audit:** After `forget`, verify the entry is not returned by `search` but IS present in `memory_events` with `event_type='forget'`.
+
+---
 
 ## Recovery Strategies
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Shell injection via env var | HIGH (security incident) | Rotate all secrets that were in env vars; audit wrapper scripts for injected code; fix quoting and regenerate wrappers |
-| `installed.json` wiped by `rightclaw up` | MEDIUM | Re-install lost skills via `/skills install`; fix Pitfall 4 to prevent recurrence |
-| `npx` blocked by sandbox | LOW | Add `registry.npmjs.org` and `github.com` to `agent.yaml` `sandbox.allowed_domains`, re-run `rightclaw up` |
-| Old `clawhub/` dir present alongside new `skills/` dir | LOW | `rm -rf ~/.rightclaw/agents/<name>/.claude/skills/clawhub/`, restart agent |
-| Env var ordering broke `ANTHROPIC_API_KEY` | LOW | Fix ordering in wrapper template, re-run `rightclaw up` to regenerate all wrappers |
-| ClawHub fallback installed malicious skill | HIGH | `rm -rf .claude/skills/<name>/`, remove from `installed.json`, rotate any credentials the skill accessed |
+| Prompt injection via stored memory | HIGH | Identify and remove poisoned entries; run `rightclaw memory list --since <date>` to find anomalous entries; rebuild agent sessions after purge |
+| WAL corruption from SIGKILL | LOW | WAL recovery is automatic on next open. If corrupt: `sqlite3 memory.db ".recover"` to extract recoverable data |
+| Migration checksum mismatch | MEDIUM | For dev: delete DB and re-run `rightclaw up`. For prod: provide a documented recovery script in changelog |
+| DB bloat (100MB+) | LOW | `rightclaw memory prune --before 90d`; `PRAGMA incremental_vacuum;`; entry count will drop on next `rightclaw up` |
+| Cross-agent leakage (wrong DB path) | HIGH | Stop all agents; audit which agent wrote to which DB; restore from backup (if no backup, data is mixed — cannot cleanly separate) |
+| MEMORY.md contaminated by skill | MEDIUM | Restore MEMORY.md from git history (`git show HEAD~1:identity/MEMORY.md`); fix skill to never write to MEMORY.md |
+
+---
 
 ## Pitfall-to-Phase Mapping
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| #1 Shell quoting | Phase 1: env var injection | `bash -n` on generated wrapper; test with `VAR="it's a 'test'"` |
-| #2 HOME ordering | Phase 1: env var injection | Inspect generated wrapper; confirm env vars appear after HOME override block |
-| #3 deny_unknown_fields migration | Phase 1: AgentConfig extension | Existing agents without `env:` load without error |
-| #4 installed.json reset | Phase 1: install_builtin_skills fix | `rightclaw up` twice; `installed.json` unchanged after second run |
-| #5 Policy gate format-agnostic | Phase 2: policy gate rework | Install a skills.sh skill; gate checks `allowedDomains` against skill docs |
-| #6 Secret leakage to PC REST API | Phase 1: env var injection | `curl localhost:8080/process/info` shows no secrets |
-| #7 npx blocked by sandbox | Phase 1 or 2: sandbox defaults | Fresh agent; `/skills search` returns results |
-| #8 rename completeness | Phase 1: rename | `rg -l "clawhub"` returns only comments/docs after rename |
-| #9 ClawHub fallback UX | Phase 2: ClawHub fallback design | Install output shows registry source; ClawHub requires explicit opt-in |
-| #10 installed.json / on-disk divergence | Phase 1: same as #4 | `list` shows user-installed skills as "skills.sh" not "manual" after `rightclaw up` |
+| #1 Prompt injection via memory | Phase 1: skill design and sanitization | Store injection payload; verify it is rejected or never reaches system prompt |
+| #2 No migration strategy | Phase 1: refinery setup | `refinery_schema_history` table exists in agent DB after first `up` |
+| #3 File locking on restart | Phase 1: DB layer (WAL + busy_timeout) | Restart agent mid-write; verify next open succeeds within 5s |
+| #4 Memory bloat | Phase 1: schema (eviction columns); Phase 2: CLI stats | `expires_at` column exists in V1; `rightclaw memory stats` shows size |
+| #5 MEMORY.md / SQLite dual-truth | Phase 1: skill design (never write to MEMORY.md) | Run skill `store` 10 times; MEMORY.md unchanged |
+| #6 Mutable audit trail | Phase 1: schema (append-only + triggers) | Attempt direct UPDATE on memory_events; verify ABORT trigger fires |
+| #7 Silent write failure (busy_timeout=0) | Phase 1: connection init | Test with concurrent writes; verify error surfaces to user |
+| #8 CLI vs. agent DB contention | Phase 2: CLI implementation | Run `rightclaw memory delete` while agent is in a long write; verify behavior is deterministic |
+| #9 Cross-agent DB path | Phase 1: path derivation | Two-agent isolation test in CI |
+| #10 Refinery checksum mismatch | Phase 1 (discipline) + Phase 3 (doctor check) | Edit V1 migration; verify doctor warns; verify up fails cleanly |
+
+---
 
 ## Sources
 
-### Codebase Audited
-- `/home/wb/dev/rightclaw/templates/agent-wrapper.sh.j2` — current wrapper; identity vars captured before HOME override; no env var injection yet
-- `/home/wb/dev/rightclaw/crates/rightclaw/src/codegen/shell_wrapper.rs` — `generate_wrapper()`; no shell escaping of user values
-- `/home/wb/dev/rightclaw/crates/rightclaw/src/codegen/skills.rs` — `SKILL_CLAWHUB` const; `install_builtin_skills()` unconditionally writes `installed.json` as `{}`
-- `/home/wb/dev/rightclaw/crates/rightclaw/src/agent/types.rs` — `AgentConfig` with `deny_unknown_fields`; no `env:` field yet
-- `/home/wb/dev/rightclaw/crates/rightclaw/src/init.rs` — `clawhub` path references at lines 173, 250
-- `/home/wb/dev/rightclaw/skills/clawhub/SKILL.md` — current `/skills` skill; policy gate checks `metadata.openclaw` only
-- `/home/wb/dev/rightclaw/templates/process-compose.yaml.j2` — no `environment:` section; env vars handled in wrapper
+### Published Research (HIGH confidence)
+- [MINJA: Memory INJection Attack on LLM Agents — NeurIPS 2025](https://openreview.net/forum?id=QVX6hcJ2um) — 95%+ injection success rate via query-only memory poisoning
+- [Palo Alto Unit 42: Indirect Prompt Injection Poisons AI Long-Term Memory](https://unit42.paloaltonetworks.com/indirect-prompt-injection-poisons-ai-longterm-memory/) — session summarization exploit via injected memory
+- [Christian Schneider: Persistent Memory Poisoning in AI Agents](https://christian-schneider.net/blog/persistent-memory-poisoning-in-ai-agents/)
+- [OWASP ASI06: Memory Poisoning as Top Agentic Risk 2026](https://www.lakera.ai/blog/agentic-ai-threats-p1)
 
-### Project Context
-- `.planning/seeds/SEED-005` — skills.sh background, registry landscape
-- `.planning/seeds/SEED-006` — env var injection design, rename plan, policy gate rework
-- `.planning/PROJECT.md` — v2.2 Active requirements
+### SQLite Documentation (HIGH confidence)
+- [SQLite WAL Mode](https://www.sqlite.org/wal.html) — WAL mode, checkpoint behavior, WAL recovery on restart
+- [SQLite File Locking and Concurrency V3](https://sqlite.org/lockingv3.html) — lock types, SQLITE_BUSY behavior
+- [SQLite How to Corrupt a Database](https://sqlite.org/howtocorrupt.html) — SIGKILL + WAL, filesystem locking bugs
+- [SQLite Concurrent Writes and Locked Errors](https://tenthousandmeters.com/blog/sqlite-concurrent-writes-and-database-is-locked-errors/) — busy_timeout limitations, BEGIN IMMEDIATE
 
-### Known Behavior (from v2.1 research)
-- CC sandbox env var inheritance: env vars set before `exec` are inherited by the child process; bubblewrap does not strip env vars
-- process-compose REST API exposes process config including env (confirmed via `process-compose` docs, v2.1 Pitfall 12)
-- HOME override ordering contract: identity vars must be captured before HOME override (v2.1 Phase 8 design decision, now in wrapper)
+### Rust Ecosystem (HIGH confidence)
+- [refinery on GitHub](https://github.com/rust-db/refinery) — embedded migrations for rusqlite, V{N}__{name}.sql format
+- [rusqlite Connection docs](https://docs.rs/rusqlite/latest/rusqlite/struct.Connection.html) — SQLITE_OPEN_NO_MUTEX (default), per-connection usage
+- [Rust ORMs in 2026: Diesel vs SQLx vs SeaORM vs Rusqlite](https://aarambhdevhub.medium.com/rust-orms-in-2026-diesel-vs-sqlx-vs-seaorm-vs-rusqlite-which-one-should-you-actually-use-706d0fe912f3) — rusqlite 0.38.0 (Dec 2025), refinery recommended for SQLite migrations
+
+### Agent Memory Architecture (MEDIUM confidence)
+- [OpenClaw Issue #26949: MEMORY.md double injection](https://github.com/openclaw/openclaw/issues/26949) — live bug report on MEMORY.md vs. memory_search dual injection
+- [Hermes Agent Persistent Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory/) — SQLite + FTS5 episodic memory, on-demand recall pattern
+- [The MEMORY.md Problem: Why Local Files Fail at Scale](https://dev.to/anajuliabit/the-memorymd-problem-why-local-files-fail-at-scale-58ae)
+- [SQLite Is the Best Database for AI Agents](https://dev.to/nathanhamlett/sqlite-is-the-best-database-for-ai-agents-and-youre-overcomplicating-it-1a5g)
+
+### Immutable Audit Trails (MEDIUM confidence)
+- [Instant SQLite Audit Trail (GitHub)](https://github.com/simon-weber/Instant-SQLite-Audit-Trail) — trigger-based immutability pattern
+- [SQLite and Blockchain: Storing Immutable Records](https://www.sqliteforum.com/p/sqlite-and-blockchain-storing-immutable) — append-only with ABORT triggers
 
 ---
-*Pitfalls research for: v2.2 Skills Registry — registry replacement, env var injection, skill manager UX, CC sandbox interaction*
-*Researched: 2026-03-25*
+*Pitfalls research for: v2.3 Memory System — SQLite-backed per-agent memory added to RightClaw alongside existing MEMORY.md flat files*
+*Researched: 2026-03-26*
