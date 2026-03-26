@@ -73,6 +73,10 @@ fn contains_default_start_prompt() {
         content.contains("You are starting."),
         "expected default start prompt in:\n{content}"
     );
+    assert!(
+        content.contains("mcp__rightmemory__store"),
+        "expected memory tool reference in default start prompt:\n{content}"
+    );
 }
 
 #[test]

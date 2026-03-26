@@ -13,7 +13,7 @@ pub fn generate_combined_prompt(agent: &AgentDef) -> miette::Result<String> {
         .config
         .as_ref()
         .and_then(|c| c.start_prompt.as_deref())
-        .unwrap_or("You are starting.");
+        .unwrap_or("You are starting. Use mcp__rightmemory__store/recall/search/forget to manage persistent memory.");
 
     let mut content = identity_content;
     content.push_str("\n\n---\n\n## Startup Instructions\n\n");
