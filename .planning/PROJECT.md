@@ -51,6 +51,10 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 ### Active
 
+- ✓ Per-agent `memory.db` (SQLite, WAL mode) created on `rightclaw up`; V1 schema with `memories` + `memory_events` (append-only, ABORT triggers) + FTS5 virtual table; rusqlite_migration 2.5 — v2.3 Phase 16
+- ✓ `memory_path` field removed from `AgentDef`; MEMORY.md no longer referenced in codebase (CC manages it natively); default start_prompt updated to `"You are starting."` — v2.3 Phase 16
+- ✓ `rightclaw doctor` warns (non-fatal) when `sqlite3` binary absent from PATH — v2.3 Phase 16
+
 - ✓ `/skills` skill replaces `/clawhub` — skills.sh (Vercel) as primary registry; ClawHub removed completely — v2.2 Phase 12
 - ✓ `rightclaw up` removes stale `.claude/skills/clawhub/` from existing agent dirs — v2.2 Phase 12
 - ✓ `SKILL_CLAWHUB` renamed to `SKILL_SKILLS`; init/up installs `skills/SKILL.md` — v2.2 Phase 12
@@ -151,4 +155,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Full audit trail: timestamps + provenance on every entry
 
 ---
-*Last updated: 2026-03-26 — v2.3 started — Memory System milestone*
+*Last updated: 2026-03-26 — v2.3 Phase 16 complete — DB Foundation shipped*
