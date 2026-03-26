@@ -76,12 +76,17 @@ Plans:
 - [x] 13-01-PLAN.md — rewrite Step 3 policy gate, add Step 2 domain pre-check, add skill-doctor command, update frontmatter compatibility field (GATE-01, GATE-02)
 
 ### Phase 14: rightskills Rename
-**Goal**: Rename the `/skills` skill to `/rightskills` — the directory on disk, the Rust constant, and the SKILL.md name field — so agent invocation uses `/rightskills` instead of `/skills`; stale `skills/` dirs are cleaned from existing agent dirs on upgrade
+**Goal**: Rename the `/skills` skill to `/rightskills` — the directory on disk, the Rust constant, and the SKILL.md name field — so agent invocation uses `/rightskills` instead of `/skills`; no stale cleanup (not in production)
 **Depends on**: Phase 13
-**Requirements**: TBD
+**Requirements**: RS-01, RS-02, RS-03, RS-04
 **Success Criteria** (what must be TRUE):
-  1. TBD (to be captured in discuss-phase)
-**Plans:** TBD
+  1. `skills/rightskills/SKILL.md` exists; `skills/skills/` does not exist
+  2. SKILL.md frontmatter `name: rightskills`; heading `# /rightskills -- Agent Skills Manager (skills.sh)`
+  3. Rust constant is `SKILL_RIGHTSKILLS`, `include_str!` and install path tuple both reference `skills/rightskills/SKILL.md`
+  4. All test assertions updated; `cargo build --workspace` and `cargo test --workspace` both pass
+**Plans:** 1 plan
+Plans:
+- [ ] 14-01-PLAN.md — rename directory, update SKILL.md, update Rust constant/paths/tests (RS-01 through RS-04)
 
 ## Progress
 
@@ -92,4 +97,4 @@ Plans:
 | 11. Env Var Injection | v2.2 | 2/2 | Complete    | 2026-03-25 |
 | 12. Skills Registry Rename | v2.2 | 1/1 | Complete    | 2026-03-26 |
 | 13. Policy Gate Rework | v2.2 | 1/1 | Complete    | 2026-03-26 |
-| 14. rightskills Rename | v2.2 | TBD | Pending     | |
+| 14. rightskills Rename | v2.2 | 0/1 | Pending     | |
