@@ -58,7 +58,12 @@ See [milestones/v2.2-ROADMAP.md](milestones/v2.2-ROADMAP.md)
   3. FTS5 virtual table exists in the schema from day one; `user_version` pragma reflects correct migration version
   4. No code path in `cmd_up` or any skill touches `MEMORY.md` — verified by grep/test
   5. `rightclaw doctor` warns (non-fatal) when `sqlite3` binary is absent from PATH
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 16-01-PLAN.md — memory module: rusqlite deps, error type, V1 SQL schema, open_db(), 9 unit tests
+- [ ] 16-02-PLAN.md — dead code removal: memory_path from AgentDef, MEMORY.md scan, stale default start_prompt
+- [ ] 16-03-PLAN.md — integration: open_db wired into cmd_up step 10, sqlite3 Warn check in doctor
 
 ### Phase 17: Memory Skill
 **Goal**: Agents can store, retrieve, search, and forget memories via built-in slash commands
@@ -89,6 +94,6 @@ Phases execute in numeric order: 16 → 17 → 18
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 16. DB Foundation | v2.3 | 0/? | Not started | - |
+| 16. DB Foundation | v2.3 | 0/3 | Not started | - |
 | 17. Memory Skill | v2.3 | 0/? | Not started | - |
 | 18. CLI Inspection | v2.3 | 0/? | Not started | - |
