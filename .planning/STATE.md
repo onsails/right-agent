@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Skills Registry
-status: Ready to plan
-stopped_at: Phase 13 context gathered
-last_updated: "2026-03-26T10:17:19.755Z"
+status: Phase complete — ready for verification
+stopped_at: Completed 13-01-PLAN.md
+last_updated: "2026-03-26T10:49:17.105Z"
 progress:
   total_phases: 3
-  completed_phases: 2
-  total_plans: 3
-  completed_plans: 3
+  completed_phases: 3
+  total_plans: 4
+  completed_plans: 4
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 12 — skills-registry-rename
+**Current focus:** Phase 13 — policy-gate-rework
 
 ## Current Position
 
-Phase: 13
-Plan: Not started
+Phase: 13 (policy-gate-rework) — EXECUTING
+Plan: 1 of 1
 
 ## Performance Metrics
 
@@ -51,6 +51,7 @@ Plan: Not started
 | Phase 11 P02 | 8 | 2 tasks | 2 files |
 | Phase 11 P01 | 10min | 2 tasks | 9 files |
 | Phase 12 P01 | 188 | 2 tasks | 4 files |
+| Phase 13 P01 | 2 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -70,6 +71,8 @@ Recent decisions affecting current work:
 - [Phase 11]: env_exports built as Vec<String> in Rust before template rendering (D-03: after identity captures, before HOME)
 - [Phase 12]: ClawHub removed completely — skills.sh is sole registry, no fallback (SKILLS-01 through SKILLS-05)
 - [Phase 12]: Stale clawhub cleanup uses let _ = pattern — only acceptable error-ignoring in codebase (best-effort stale dir removal)
+- [Phase 13]: Replaced Step 3 in full — prose compatibility gate reads sandbox.network.allowedDomains and sandbox.filesystem.allowWrite; BLOCK on network/filesystem only, WARN on bins/env
+- [Phase 13]: skill-doctor unions installed.json + disk scan for complete skill coverage, labels untracked as manual
 
 ### Pending Todos
 
@@ -82,6 +85,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T10:17:19.752Z
-Stopped at: Phase 13 context gathered
-Resume file: .planning/phases/13-policy-gate-rework/13-CONTEXT.md
+Last session: 2026-03-26T10:49:17.102Z
+Stopped at: Completed 13-01-PLAN.md
+Resume file: None
