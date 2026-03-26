@@ -59,33 +59,31 @@
 
 ## Traceability
 
-Populated by roadmapper.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DB-01 | — | Pending |
-| DB-02 | — | Pending |
-| DB-03 | — | Pending |
-| DB-04 | — | Pending |
-| SKILL-01 | — | Pending |
-| SKILL-02 | — | Pending |
-| SKILL-03 | — | Pending |
-| SKILL-04 | — | Pending |
-| SKILL-05 | — | Pending |
-| CLI-01 | — | Pending |
-| CLI-02 | — | Pending |
-| CLI-03 | — | Pending |
-| CLI-04 | — | Pending |
-| SEC-01 | — | Pending |
-| SEC-02 | — | Pending |
-| SEC-03 | — | Pending |
-| DOCTOR-01 | — | Pending |
+| DB-01 | Phase 16 | Pending |
+| DB-02 | Phase 16 | Pending |
+| DB-03 | Phase 16 | Pending |
+| DB-04 | Phase 16 | Pending |
+| SEC-02 | Phase 16 | Pending |
+| SEC-03 | Phase 16 | Pending |
+| DOCTOR-01 | Phase 16 | Pending |
+| SKILL-01 | Phase 17 | Pending |
+| SKILL-02 | Phase 17 | Pending |
+| SKILL-03 | Phase 17 | Pending |
+| SKILL-04 | Phase 17 | Pending |
+| SKILL-05 | Phase 17 | Pending |
+| SEC-01 | Phase 17 | Pending |
+| CLI-01 | Phase 18 | Pending |
+| CLI-02 | Phase 18 | Pending |
+| CLI-03 | Phase 18 | Pending |
+| CLI-04 | Phase 18 | Pending |
 
 **Coverage:**
 - v2.3 requirements: 17 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 17 ⚠️
+- Mapped to phases: 17
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-03-26*
-*Last updated: 2026-03-26 after initial definition*
+*Last updated: 2026-03-26 — traceability populated by roadmapper*
