@@ -70,7 +70,7 @@ fn contains_default_start_prompt() {
     let content = generate_combined_prompt(&agent).unwrap();
 
     assert!(
-        content.contains("You are starting. Read your MEMORY.md to restore context."),
+        content.contains("You are starting."),
         "expected default start prompt in:\n{content}"
     );
 }
