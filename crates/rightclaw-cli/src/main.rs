@@ -402,6 +402,11 @@ async fn cmd_up(
             std::fs::write(&settings_local, "{}")
                 .map_err(|e| miette::miette!("failed to write settings.local.json for '{}': {e:#}", agent.name))?;
         }
+
+        // 10. Initialize per-agent memory database (Phase 16, DB-01).
+        rightclaw::memory::open_db(&agent.path)
+            .map_err(|e| miette::miette!("failed to open memory database for '{}': {e:#}", agent.name))?;
+        tracing::debug!(agent = %agent.name, "memory.db initialized");
     }
 
     // Generate process-compose.yaml.
