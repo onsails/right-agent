@@ -48,12 +48,14 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `rightclaw doctor` warns (non-fatal) when git binary absent — v2.1 Phase 9
 - ✓ `rightclaw config strict-sandbox` writes `/etc/claude-code/managed-settings.json` with `allowManagedDomainsOnly: true` (requires sudo) — v2.1 Phase 10
 - ✓ `rightclaw doctor` detects managed-settings.json and warns if `allowManagedDomainsOnly:true` may conflict with per-agent settings — v2.1 Phase 10
-
-### Active
-
 - ✓ Per-agent `memory.db` (SQLite, WAL mode) created on `rightclaw up`; V1 schema with `memories` + `memory_events` (append-only, ABORT triggers) + FTS5 virtual table; rusqlite_migration 2.5 — v2.3 Phase 16
 - ✓ `memory_path` field removed from `AgentDef`; MEMORY.md no longer referenced in codebase (CC manages it natively); default start_prompt updated to `"You are starting."` — v2.3 Phase 16
 - ✓ `rightclaw doctor` warns (non-fatal) when `sqlite3` binary absent from PATH — v2.3 Phase 16
+- ✓ `rightclaw memory-server` subcommand: rmcp 1.3 stdio MCP server exposing store/recall/search/forget tools backed by per-agent SQLite — v2.3 Phase 17 (SKILL-01..04)
+- ✓ `cmd_up` generates per-agent `.mcp.json` with `mcpServers.rightmemory` entry on every `rightclaw up` — v2.3 Phase 17 (SKILL-05)
+- ✓ `store_memory` rejects content matching 15 OWASP-derived injection patterns via `guard::has_injection` — v2.3 Phase 17 (SEC-01)
+
+### Active
 
 - ✓ `/skills` skill replaces `/clawhub` — skills.sh (Vercel) as primary registry; ClawHub removed completely — v2.2 Phase 12
 - ✓ `rightclaw up` removes stale `.claude/skills/clawhub/` from existing agent dirs — v2.2 Phase 12
@@ -155,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Full audit trail: timestamps + provenance on every entry
 
 ---
-*Last updated: 2026-03-26 — v2.3 Phase 16 complete — DB Foundation shipped*
+*Last updated: 2026-03-26 — v2.3 Phase 17 complete — Memory Skill shipped (MCP store/recall/search/forget, injection guard, .mcp.json codegen)*
