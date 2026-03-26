@@ -94,6 +94,6 @@ Phases execute in numeric order: 16 → 17 → 18
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 16. DB Foundation | v2.3 | 3/3 | Complete   | 2026-03-26 |
+| 16. DB Foundation | v2.3 | 3/3 | Complete    | 2026-03-26 |
 | 17. Memory Skill | v2.3 | 0/? | Not started | - |
 | 18. CLI Inspection | v2.3 | 0/? | Not started | - |
