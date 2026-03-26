@@ -25,6 +25,7 @@ metrics:
   completed: "2026-03-26"
   tasks_completed: 2
   files_modified: 1
+requirements-completed: [GATE-01, GATE-02]
 ---
 
 # Phase 13 Plan 01: Policy Gate Rework Summary

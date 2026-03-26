@@ -33,6 +33,7 @@ metrics:
   tasks_completed: 2
   files_modified: 9
 requirements: [ENV-01, ENV-02, ENV-03]
+requirements-completed: [ENV-01, ENV-02, ENV-03]
 ---
 
 # Phase 11 Plan 01: Env Var Injection Summary
