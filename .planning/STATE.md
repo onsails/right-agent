@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Skills Registry
 status: Milestone complete
-stopped_at: Completed 13-01-PLAN.md
-last_updated: "2026-03-26T10:51:19.250Z"
+stopped_at: Phase 14 context gathered
+last_updated: "2026-03-26T11:14:45.316Z"
 progress:
-  total_phases: 3
+  total_phases: 4
   completed_phases: 3
   total_plans: 4
   completed_plans: 4
@@ -85,6 +85,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T10:49:17.102Z
-Stopped at: Completed 13-01-PLAN.md
-Resume file: None
+Last session: 2026-03-26T11:14:45.313Z
+Stopped at: Phase 14 context gathered
+Resume file: .planning/phases/14-rightskills-rename/14-CONTEXT.md
