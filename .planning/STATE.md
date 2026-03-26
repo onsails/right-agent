@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Skills Registry
-status: Phase complete — ready for verification
+status: Milestone complete
 stopped_at: Completed 13-01-PLAN.md
-last_updated: "2026-03-26T10:49:17.105Z"
+last_updated: "2026-03-26T10:51:19.250Z"
 progress:
   total_phases: 3
   completed_phases: 3
@@ -23,8 +23,8 @@ See: .planning/PROJECT.md (updated 2026-03-25)
 
 ## Current Position
 
-Phase: 13 (policy-gate-rework) — EXECUTING
-Plan: 1 of 1
+Phase: 13
+Plan: Not started
 
 ## Performance Metrics
 
