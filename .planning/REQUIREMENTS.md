@@ -35,8 +35,8 @@
 
 ### v2.2 Cleanup
 
-- [ ] **CLEANUP-01**: `11-01-SUMMARY.md` and `13-01-SUMMARY.md` frontmatter updated to use `requirements-completed:` field (not `dependency_graph.provides`) listing their respective REQ-IDs
-- [ ] **CLEANUP-02**: `cmd_up` agent loop includes `.claude/skills/skills/` stale dir removal before `install_builtin_skills()`; unit test added parallel to existing clawhub cleanup tests
+- [x] **CLEANUP-01**: `11-01-SUMMARY.md` and `13-01-SUMMARY.md` frontmatter updated to use `requirements-completed:` field (not `dependency_graph.provides`) listing their respective REQ-IDs
+- [x] **CLEANUP-02**: `cmd_up` agent loop includes `.claude/skills/skills/` stale dir removal before `install_builtin_skills()`; unit test added parallel to existing clawhub cleanup tests
 
 ## Future Requirements (Deferred)
 
@@ -71,5 +71,5 @@
 | RS-02 | Phase 14 | Complete |
 | RS-03 | Phase 14 | Complete |
 | RS-04 | Phase 14 | Complete |
-| CLEANUP-01 | Phase 15 | Pending |
-| CLEANUP-02 | Phase 15 | Pending |
+| CLEANUP-01 | Phase 15 | Complete |
+| CLEANUP-02 | Phase 15 | Complete |

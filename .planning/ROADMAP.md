@@ -33,7 +33,7 @@
 - [x] **Phase 12: Skills Registry Rename** - `/clawhub` replaced by `/skills` (skills.sh primary, ClawHub removed completely), stale dirs cleaned (completed 2026-03-26)
 - [x] **Phase 13: Policy Gate Rework** - `/skills` SKILL.md policy gate rewritten for CC-native sandbox; drops all OpenShell/policy.yaml references (completed 2026-03-26)
 - [x] **Phase 14: rightskills Rename** - Rename `/skills` skill to `/rightskills` — directory, Rust constant, SKILL.md name field, stale dir cleanup for existing agent dirs (completed 2026-03-26)
-- [ ] **Phase 15: v2.2 Cleanup** - Fix SUMMARY.md frontmatter gaps (ENV-01/02/03, GATE-01/02) and add `.claude/skills/skills/` stale cleanup to `cmd_up` before shipping
+- [x] **Phase 15: v2.2 Cleanup** - Fix SUMMARY.md frontmatter gaps (ENV-01/02/03, GATE-01/02) and add `.claude/skills/skills/` stale cleanup to `cmd_up` before shipping (completed 2026-03-26)
 
 ## Phase Details
 
@@ -96,9 +96,9 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. `11-01-SUMMARY.md` and `13-01-SUMMARY.md` frontmatter contain `requirements-completed:` listing their respective REQ-IDs
   2. `cmd_up` agent loop includes `let _ = std::fs::remove_dir_all(agent.path.join(".claude/skills/skills"))` before `install_builtin_skills()`; unit test confirms cleanup behavior
-**Plans:** 0/1 plans
+**Plans:** 1/1 plans complete
 Plans:
-- [ ] 15-01-PLAN.md — fix SUMMARY.md frontmatter, add stale skills/ cleanup to cmd_up with test (CLEANUP-01, CLEANUP-02)
+- [x] 15-01-PLAN.md — fix SUMMARY.md frontmatter, add stale skills/ cleanup to cmd_up with test (CLEANUP-01, CLEANUP-02)
 
 ## Progress
 
@@ -110,4 +110,4 @@ Plans:
 | 12. Skills Registry Rename | v2.2 | 1/1 | Complete    | 2026-03-26 |
 | 13. Policy Gate Rework | v2.2 | 1/1 | Complete    | 2026-03-26 |
 | 14. rightskills Rename | v2.2 | 1/1 | Complete    | 2026-03-26 |
-| 15. v2.2 Cleanup | v2.2 | 0/1 | Not started | - |
+| 15. v2.2 Cleanup | v2.2 | 1/1 | Complete   | 2026-03-26 |

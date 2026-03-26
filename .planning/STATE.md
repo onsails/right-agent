@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Skills Registry
-status: Milestone complete
-stopped_at: Completed 14-01-PLAN.md
-last_updated: "2026-03-26T11:34:51.985Z"
+status: Phase complete — ready for verification
+stopped_at: Completed 15-01-PLAN.md
+last_updated: "2026-03-26T12:34:47.192Z"
 progress:
-  total_phases: 4
-  completed_phases: 4
-  total_plans: 5
-  completed_plans: 5
+  total_phases: 5
+  completed_phases: 5
+  total_plans: 6
+  completed_plans: 6
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 14 — rightskills-rename
+**Current focus:** Phase 15 — v2-2-cleanup
 
 ## Current Position
 
-Phase: 14
-Plan: Not started
+Phase: 15 (v2-2-cleanup) — EXECUTING
+Plan: 1 of 1
 
 ## Performance Metrics
 
@@ -53,6 +53,7 @@ Plan: Not started
 | Phase 12 P01 | 188 | 2 tasks | 4 files |
 | Phase 13 P01 | 2 | 2 tasks | 1 files |
 | Phase 14-rightskills-rename P01 | 2 | 2 tasks | 4 files |
+| Phase 15-v2-2-cleanup P01 | 2 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Recent decisions affecting current work:
 - [Phase 13]: Replaced Step 3 in full — prose compatibility gate reads sandbox.network.allowedDomains and sandbox.filesystem.allowWrite; BLOCK on network/filesystem only, WARN on bins/env
 - [Phase 13]: skill-doctor unions installed.json + disk scan for complete skill coverage, labels untracked as manual
 - [Phase 14-rightskills-rename]: SKILL_SKILLS -> SKILL_RIGHTSKILLS; install path tuple: skills/SKILL.md -> rightskills/SKILL.md; no stale cleanup (D-10)
+- [Phase 15-v2-2-cleanup]: keep both requirements: and requirements-completed: fields in 11-01-SUMMARY.md for compatibility
+- [Phase 15-v2-2-cleanup]: stale skills/ cleanup uses same let _ = pattern as clawhub cleanup — best-effort, never fatal (CLEANUP-02)
 
 ### Pending Todos
 
@@ -87,6 +90,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T11:31:50.245Z
-Stopped at: Completed 14-01-PLAN.md
+Last session: 2026-03-26T12:34:47.189Z
+Stopped at: Completed 15-01-PLAN.md
 Resume file: None
