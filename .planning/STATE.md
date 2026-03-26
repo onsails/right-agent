@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.2
 milestone_name: Skills Registry
-status: Ready to plan
-stopped_at: Phase 12 context gathered
-last_updated: "2026-03-25T22:59:14.591Z"
+status: Phase complete — ready for verification
+stopped_at: Completed 12-01-PLAN.md
+last_updated: "2026-03-26T09:10:25.307Z"
 progress:
   total_phases: 3
-  completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  completed_phases: 2
+  total_plans: 3
+  completed_plans: 3
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-25)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 11 — env-var-injection
+**Current focus:** Phase 12 — skills-registry-rename
 
 ## Current Position
 
-Phase: 12
-Plan: Not started
+Phase: 12 (skills-registry-rename) — EXECUTING
+Plan: 1 of 1
 
 ## Performance Metrics
 
@@ -50,6 +50,7 @@ Plan: Not started
 *Updated after each plan completion*
 | Phase 11 P02 | 8 | 2 tasks | 2 files |
 | Phase 11 P01 | 10min | 2 tasks | 9 files |
+| Phase 12 P01 | 188 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -67,6 +68,8 @@ Recent decisions affecting current work:
 - [Phase 11]: env: example in agent.yaml is fully commented out — zero impact on existing agents, purely documentary
 - [Phase 11]: Single-quote escaping via replace for env vars — safe for $, backticks, spaces without shell expansion
 - [Phase 11]: env_exports built as Vec<String> in Rust before template rendering (D-03: after identity captures, before HOME)
+- [Phase 12]: ClawHub removed completely — skills.sh is sole registry, no fallback (SKILLS-01 through SKILLS-05)
+- [Phase 12]: Stale clawhub cleanup uses let _ = pattern — only acceptable error-ignoring in codebase (best-effort stale dir removal)
 
 ### Pending Todos
 
@@ -79,6 +82,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-25T22:59:14.588Z
-Stopped at: Phase 12 context gathered
-Resume file: .planning/phases/12-skills-registry-rename/12-CONTEXT.md
+Last session: 2026-03-26T09:10:25.304Z
+Stopped at: Completed 12-01-PLAN.md
+Resume file: None
