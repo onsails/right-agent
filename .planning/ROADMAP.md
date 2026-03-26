@@ -77,7 +77,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 17-01-PLAN.md — memory operations library: injection guard, CRUD store functions (store/recall/search/forget), open_connection helper
+- [x] 17-01-PLAN.md — memory operations library: injection guard, CRUD store functions (store/recall/search/forget), open_connection helper
 - [ ] 17-02-PLAN.md — MCP server + CLI integration: rmcp stdio server, MemoryServer subcommand, .mcp.json codegen, start_prompt update
 
 ### Phase 18: CLI Inspection
@@ -99,5 +99,5 @@ Phases execute in numeric order: 16 → 17 → 18
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 16. DB Foundation | v2.3 | 3/3 | Complete    | 2026-03-26 |
-| 17. Memory Skill | v2.3 | 0/2 | Planning complete | - |
+| 17. Memory Skill | v2.3 | 1/2 | In Progress|  |
 | 18. CLI Inspection | v2.3 | 0/? | Not started | - |

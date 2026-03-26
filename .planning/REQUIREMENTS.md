@@ -14,10 +14,10 @@
 
 ### Memory Skill
 
-- [ ] **SKILL-01**: Agent can store a memory via `/remember` — provenance (agent name, source_tool) auto-recorded
-- [ ] **SKILL-02**: Agent can look up memories via `/recall` — tag/keyword lookup
-- [ ] **SKILL-03**: Agent can full-text search memories via `/search` — FTS5 BM25 ranking
-- [ ] **SKILL-04**: Agent can soft-delete a memory via `/forget` — entry excluded from recall/search; audit row preserved
+- [x] **SKILL-01**: Agent can store a memory via `/remember` — provenance (agent name, source_tool) auto-recorded
+- [x] **SKILL-02**: Agent can look up memories via `/recall` — tag/keyword lookup
+- [x] **SKILL-03**: Agent can full-text search memories via `/search` — FTS5 BM25 ranking
+- [x] **SKILL-04**: Agent can soft-delete a memory via `/forget` — entry excluded from recall/search; audit row preserved
 - [ ] **SKILL-05**: `rightmemory` skill installed as built-in by `install_builtin_skills()` on every `rightclaw up`
 
 ### CLI Inspection
@@ -29,7 +29,7 @@
 
 ### Security
 
-- [ ] **SEC-01**: `/remember` scans entry for prompt injection patterns before writing; rejects on match
+- [x] **SEC-01**: `/remember` scans entry for prompt injection patterns before writing; rejects on match
 - [x] **SEC-02**: No code path writes to `MEMORY.md` from skill or CLI — strict separation enforced
 - [x] **SEC-03**: Memory recall is always on-demand — never auto-injected into system prompt
 
@@ -68,12 +68,12 @@
 | SEC-02 | Phase 16 | Complete |
 | SEC-03 | Phase 16 | Complete |
 | DOCTOR-01 | Phase 16 | Complete |
-| SKILL-01 | Phase 17 | Pending |
-| SKILL-02 | Phase 17 | Pending |
-| SKILL-03 | Phase 17 | Pending |
-| SKILL-04 | Phase 17 | Pending |
+| SKILL-01 | Phase 17 | Complete |
+| SKILL-02 | Phase 17 | Complete |
+| SKILL-03 | Phase 17 | Complete |
+| SKILL-04 | Phase 17 | Complete |
 | SKILL-05 | Phase 17 | Pending |
-| SEC-01 | Phase 17 | Pending |
+| SEC-01 | Phase 17 | Complete |
 | CLI-01 | Phase 18 | Pending |
 | CLI-02 | Phase 18 | Pending |
 | CLI-03 | Phase 18 | Pending |

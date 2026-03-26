@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Memory System
-status: verifying
-stopped_at: Phase 17 context gathered
-last_updated: "2026-03-26T22:02:29.558Z"
-last_activity: 2026-03-26 - Completed quick task 260326-us1: Replace is_tty with is_interactive in process-compose template
+status: executing
+stopped_at: Completed 17-01-PLAN.md
+last_updated: "2026-03-26T22:22:36.460Z"
+last_activity: 2026-03-26
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 5
+  completed_plans: 4
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 16 — DB Foundation
+**Current focus:** Phase 17 — memory-skill
 
 ## Current Position
 
-Phase: 17
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 17 (memory-skill) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-03-26
 
 Progress: [░░░░░░░░░░] 0%
@@ -46,6 +46,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 16-db-foundation P02 | 5 | 2 tasks | 11 files |
 | Phase 16-db-foundation P01 | 3 | 2 tasks | 9 files |
 | Phase 16 P03 | 90 | 2 tasks | 2 files |
+| Phase 17 P01 | 4 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -62,6 +63,9 @@ Recent decisions relevant to v2.3:
 - [Phase 16-02]: Task 2 system_prompt default was pre-completed by plan 16-01 (commit e11f9ff)
 - [Phase 16-db-foundation]: rusqlite 0.39 bundled + rusqlite_migration 2.5 for per-agent SQLite memory; WAL mode + FTS5 + ABORT triggers in V1 schema
 - [Phase 16]: sqlite3 check uses inline Warn override pattern — matches RESEARCH.md Pattern 5
+- [Phase 17]: Use str::contains() on lowercased input over 15-pattern list — no regex crate, matches SEC-01 research
+- [Phase 17]: open_connection() returns live Connection for store ops; open_db() retained for cmd_up callers
+- [Phase 17]: Injection guard is first line of store_memory() — structural guarantee cannot be bypassed
 
 ### Pending Todos
 
@@ -80,6 +84,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T22:02:29.555Z
-Stopped at: Phase 17 context gathered
-Resume file: .planning/phases/17-memory-skill/17-CONTEXT.md
+Last session: 2026-03-26T22:22:36.456Z
+Stopped at: Completed 17-01-PLAN.md
+Resume file: None
