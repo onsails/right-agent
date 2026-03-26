@@ -43,7 +43,7 @@ See [milestones/v2.2-ROADMAP.md](milestones/v2.2-ROADMAP.md)
 **Milestone Goal:** Give each agent a per-agent SQLite-backed memory store — persistent across restarts, queryable via a built-in skill, and inspectable from the CLI.
 
 - [x] **Phase 16: DB Foundation** - Per-agent SQLite module with append-only schema, WAL mode, migrations, security invariants, and doctor check (completed 2026-03-26)
-- [ ] **Phase 17: Memory Skill** - `rightmemory` built-in skill with /remember /recall /search /forget and injection scanning
+- [ ] **Phase 17: Memory Skill** - `rightmemory` MCP stdio server with store/recall/search/forget tools and injection scanning
 - [ ] **Phase 18: CLI Inspection** - `rightclaw memory` subcommand with list, search, delete, stats
 
 ## Phase Details
@@ -66,15 +66,19 @@ Plans:
 - [x] 16-03-PLAN.md — integration: open_db wired into cmd_up step 10, sqlite3 Warn check in doctor
 
 ### Phase 17: Memory Skill
-**Goal**: Agents can store, retrieve, search, and forget memories via built-in slash commands
+**Goal**: Agents can store, retrieve, search, and forget memories via MCP tools backed by per-agent SQLite
 **Depends on**: Phase 16
 **Requirements**: SKILL-01, SKILL-02, SKILL-03, SKILL-04, SKILL-05, SEC-01
 **Success Criteria** (what must be TRUE):
-  1. Agent session has `/remember`, `/recall`, `/search`, and `/forget` commands available via the `rightmemory` built-in skill installed on every `rightclaw up`
-  2. `/remember` records `stored_by` (agent name) and `source_tool` provenance automatically — no manual input required
-  3. `/forget <id>` excludes the entry from all subsequent `/recall` and `/search` results while preserving the audit row in `memory_events`
-  4. `/remember` rejects entries matching prompt injection patterns and returns an error message — the write is not persisted
-**Plans**: TBD
+  1. Agent session has `mcp__rightmemory__store/recall/search/forget` tools available via MCP server launched on every `rightclaw up`
+  2. `store` tool records `stored_by` (agent name) and `source_tool` provenance automatically — no manual input required
+  3. `forget` tool excludes the entry from all subsequent `recall` and `search` results while preserving the audit row in `memory_events`
+  4. `store` tool rejects entries matching prompt injection patterns and returns an error message — the write is not persisted
+**Plans**: 2 plans
+
+Plans:
+- [ ] 17-01-PLAN.md — memory operations library: injection guard, CRUD store functions (store/recall/search/forget), open_connection helper
+- [ ] 17-02-PLAN.md — MCP server + CLI integration: rmcp stdio server, MemoryServer subcommand, .mcp.json codegen, start_prompt update
 
 ### Phase 18: CLI Inspection
 **Goal**: Operators can inspect, query, and manage any agent's memory database from the terminal without entering an agent session
@@ -95,5 +99,5 @@ Phases execute in numeric order: 16 → 17 → 18
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 16. DB Foundation | v2.3 | 3/3 | Complete    | 2026-03-26 |
-| 17. Memory Skill | v2.3 | 0/? | Not started | - |
+| 17. Memory Skill | v2.3 | 0/2 | Planning complete | - |
 | 18. CLI Inspection | v2.3 | 0/? | Not started | - |
