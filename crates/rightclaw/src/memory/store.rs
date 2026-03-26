@@ -105,6 +105,73 @@ pub fn search_memories(
     Ok(entries)
 }
 
+/// List all non-deleted memories ordered by created_at DESC.
+///
+/// Returns up to `limit` entries starting at `offset`.
+pub fn list_memories(
+    conn: &Connection,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content, tags, stored_by, source_tool, created_at, importance \
+         FROM memories \
+         WHERE deleted_at IS NULL \
+         ORDER BY created_at DESC, id DESC \
+         LIMIT ?1 OFFSET ?2",
+    )?;
+    let entries = stmt
+        .query_map(rusqlite::params![limit, offset], |row| {
+            Ok(MemoryEntry {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                tags: row.get(2)?,
+                stored_by: row.get(3)?,
+                source_tool: row.get(4)?,
+                created_at: row.get(5)?,
+                importance: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(entries)
+}
+
+/// Full-text search memories with explicit pagination.
+///
+/// Unlike `search_memories` (hardcoded LIMIT 50 for MCP), this function
+/// accepts operator-controlled limit/offset for CLI pagination.
+/// FTS5 BM25 ranking applies. FTS5 query syntax errors surface as MemoryError::Sqlite.
+pub fn search_memories_paged(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.content, m.tags, m.stored_by, m.source_tool, m.created_at, m.importance \
+         FROM memories m \
+         JOIN memories_fts f ON m.id = f.rowid \
+         WHERE memories_fts MATCH ?1 \
+           AND m.deleted_at IS NULL \
+         ORDER BY bm25(memories_fts) \
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let entries = stmt
+        .query_map(rusqlite::params![query, limit, offset], |row| {
+            Ok(MemoryEntry {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                tags: row.get(2)?,
+                stored_by: row.get(3)?,
+                source_tool: row.get(4)?,
+                created_at: row.get(5)?,
+                importance: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(entries)
+}
+
 /// Soft-delete a memory by ID.
 ///
 /// - Sets `deleted_at = datetime('now')` on the memory row.

@@ -1,6 +1,6 @@
 use crate::memory::{
     open_connection,
-    store::{forget_memory, recall_memories, search_memories, store_memory},
+    store::{forget_memory, list_memories, recall_memories, search_memories, search_memories_paged, store_memory},
     MemoryError,
 };
 use tempfile::TempDir;
@@ -238,4 +238,92 @@ fn forget_memory_then_search_excludes_entry() {
     forget_memory(&conn, id, None).unwrap();
     let entries = search_memories(&conn, "searchable").unwrap();
     assert!(entries.is_empty());
+}
+
+// --- list_memories tests ---
+
+#[test]
+fn list_memories_returns_all_non_deleted_ordered_desc() {
+    let (_dir, conn) = setup_db();
+    store_memory(&conn, "first entry", None, None, None).unwrap();
+    store_memory(&conn, "second entry", None, None, None).unwrap();
+    store_memory(&conn, "third entry", None, None, None).unwrap();
+    let entries = list_memories(&conn, 10, 0).unwrap();
+    assert_eq!(entries.len(), 3, "all three entries should be returned");
+    // Most recently created should be first (DESC order)
+    assert_eq!(
+        entries[0].content, "third entry",
+        "newest entry should be first"
+    );
+}
+
+#[test]
+fn list_memories_excludes_soft_deleted() {
+    let (_dir, conn) = setup_db();
+    store_memory(&conn, "keep me", None, None, None).unwrap();
+    let id = store_memory(&conn, "delete me", None, None, None).unwrap();
+    forget_memory(&conn, id, None).unwrap();
+    let entries = list_memories(&conn, 10, 0).unwrap();
+    assert_eq!(entries.len(), 1, "only the non-deleted entry should appear");
+    assert_eq!(entries[0].content, "keep me");
+}
+
+#[test]
+fn list_memories_respects_limit() {
+    let (_dir, conn) = setup_db();
+    for i in 0..5 {
+        store_memory(&conn, &format!("entry {i}"), None, None, None).unwrap();
+    }
+    let entries = list_memories(&conn, 2, 0).unwrap();
+    assert_eq!(entries.len(), 2, "limit=2 should return exactly 2 entries");
+}
+
+#[test]
+fn list_memories_respects_offset() {
+    let (_dir, conn) = setup_db();
+    store_memory(&conn, "oldest", None, None, None).unwrap();
+    store_memory(&conn, "middle", None, None, None).unwrap();
+    store_memory(&conn, "newest", None, None, None).unwrap();
+    // offset=2 skips the 2 newest, so only the oldest remains
+    let entries = list_memories(&conn, 10, 2).unwrap();
+    assert_eq!(entries.len(), 1, "offset=2 should skip 2 entries");
+    assert_eq!(entries[0].content, "oldest");
+}
+
+// --- search_memories_paged tests ---
+
+#[test]
+fn search_memories_paged_returns_fts_results_with_limit() {
+    let (_dir, conn) = setup_db();
+    store_memory(&conn, "quick brown fox leaps", None, None, None).unwrap();
+    store_memory(&conn, "quick brown fox runs", None, None, None).unwrap();
+    store_memory(&conn, "quick brown fox jumps", None, None, None).unwrap();
+    let entries = search_memories_paged(&conn, "fox", 2, 0).unwrap();
+    assert_eq!(entries.len(), 2, "limit=2 should return exactly 2 FTS results");
+}
+
+#[test]
+fn search_memories_paged_respects_offset() {
+    let (_dir, conn) = setup_db();
+    store_memory(&conn, "quick brown fox leaps", None, None, None).unwrap();
+    store_memory(&conn, "quick brown fox runs", None, None, None).unwrap();
+    store_memory(&conn, "quick brown fox jumps", None, None, None).unwrap();
+    let entries = search_memories_paged(&conn, "fox", 10, 2).unwrap();
+    assert_eq!(
+        entries.len(),
+        1,
+        "offset=2 should skip first 2 results, leaving 1"
+    );
+}
+
+#[test]
+fn search_memories_paged_excludes_soft_deleted() {
+    let (_dir, conn) = setup_db();
+    let id = store_memory(&conn, "quick brown fox", None, None, None).unwrap();
+    forget_memory(&conn, id, None).unwrap();
+    let entries = search_memories_paged(&conn, "fox", 10, 0).unwrap();
+    assert!(
+        entries.is_empty(),
+        "soft-deleted entry should not appear in paged search"
+    );
 }
