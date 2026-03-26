@@ -6,4 +6,10 @@ pub enum MemoryError {
 
     #[error("migration error: {0}")]
     Migration(#[from] rusqlite_migration::Error),
+
+    #[error("content rejected: possible prompt injection detected")]
+    InjectionDetected,
+
+    #[error("memory not found: id {0}")]
+    NotFound(i64),
 }
