@@ -126,20 +126,13 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**Phase 15 complete** (2026-03-26). v2.2 cleanup — `requirements-completed` frontmatter added to 11-01 and 13-01 SUMMARY files; stale `.claude/skills/skills/` removal added to `cmd_up` with two unit tests. All 18 v2.2 requirements now fully traced and verified.
-
-**Phase 14 complete** (2026-03-26). `/skills` skill renamed to `/rightskills` — source dir `skills/rightskills/`, SKILL.md frontmatter `name: rightskills`, H1 heading updated, Rust constant `SKILL_RIGHTSKILLS`, `include_str!` path and install path tuple updated, all test assertions in `skills.rs`, `init.rs`, `main.rs` updated. RS-01 through RS-04 validated.
-
-**Phase 13 complete** (2026-03-26). Policy gate rework — `skills/skills/SKILL.md` Step 3 fully rewritten: reads `compatibility` prose field, BLOCKs on network/filesystem sandbox mismatches, WARNs on missing bins/env vars. Pre-install domain check in Step 2. New `/skill-doctor` command audits all installed skills with 6-column table. Both GATE-01 and GATE-02 requirements validated.
-
-**Phase 12 complete** (2026-03-26). Skills registry rename — `/clawhub` replaced by `/skills` (skills.sh primary), `SKILL_CLAWHUB` → `SKILL_SKILLS`, stale dir cleanup in `cmd_up`. All 5 SKILLS requirements validated.
-
-**v2.1 shipped** (2026-03-25). Headless Agent Isolation complete — agents run fully autonomous with no interactive TUI prompts. Per-agent HOME isolation, credential symlinks, pre-populated .claude/ scaffold, managed-settings doctor check. 154 lib tests, 20 integration tests.
+**v2.2 shipped** (2026-03-26). Skills Registry complete — ClawHub removed, `/rightskills` (skills.sh) installed as built-in, per-agent env var injection via `agent.yaml`, CC-native policy gate with BLOCK/WARN two-tier checking, `/skill-doctor` audit command. 18/18 requirements satisfied across 5 phases. [Full archive](milestones/v2.2-ROADMAP.md)
 
 **Shipped versions:**
 - v1.0 (2026-03-23): Core runtime — CLI, process-compose, OpenShell sandbox, Telegram, skills, RightCron
 - v2.0 (2026-03-24): Native sandbox — replaced OpenShell with CC sandbox (bubblewrap/Seatbelt), per-agent settings.json, SandboxOverrides in agent.yaml, doctor AppArmor smoke test
 - v2.1 (2026-03-25): Headless agent isolation — per-agent HOME override + credential symlinks + git/SSH forwarding, pre-populated .claude/ scaffold (settings.json, settings.local.json, skills/), git init, Telegram channel copy, managed-settings doctor check
+- v2.2 (2026-03-26): Skills registry — ClawHub removed, `/rightskills` (skills.sh) as built-in, per-agent env var injection, CC-native policy gate, `/skill-doctor` command
 
 **Known limitations:**
 - SEED-002: BOOTSTRAP.md onboarding doesn't trigger via Telegram
@@ -147,15 +140,14 @@ This document evolves at phase transitions and milestone boundaries.
 - `test_status_no_running_instance` integration test fails (pre-existing)
 - Tech debt: git absence warning in `verify_dependencies()` (called by `rightclaw up`) but not surfaced by `rightclaw doctor`
 
-## Current Milestone: v2.2 Skills Registry
+## Current Milestone: v2.3
 
-**Goal:** Replace ClawHub with skills.sh as primary registry, ship `/skills` skill manager, add per-agent env var injection.
+_Not yet defined. Run `/gsd:new-milestone` to start v2.3 requirements definition._
 
-**Target features:**
-- Drop `/clawhub`, ship `/skills` — skills.sh (Vercel) as primary (200+ curated, agentskills.io format)
-- ClawHub as secondary/fallback for OpenClaw ecosystem compat
-- Policy gate reworked for CC-native sandbox (drop OpenShell/policy.yaml refs)
-- `env:` section in `agent.yaml` — per-agent env var injection via shell wrapper
+**Deferred from v2.2 (candidate features):**
+- Secretspec / vault integration for sensitive env vars (`env:` is plaintext only)
+- `/rightskills` policy gate: programmatic Rust enforcement (currently instruction-based SKILL.md)
+- Skill version pinning or lockfile
 
 ---
-*Last updated: 2026-03-26 — Phase 15 complete (v2.2-cleanup) — all 18 v2.2 requirements verified*
+*Last updated: 2026-03-26 — v2.2 shipped — Skills Registry milestone complete*
