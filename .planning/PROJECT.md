@@ -54,7 +54,7 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `/skills` skill replaces `/clawhub` — skills.sh (Vercel) as primary registry; ClawHub removed completely — v2.2 Phase 12
 - ✓ `rightclaw up` removes stale `.claude/skills/clawhub/` from existing agent dirs — v2.2 Phase 12
 - ✓ `SKILL_CLAWHUB` renamed to `SKILL_SKILLS`; init/up installs `skills/SKILL.md` — v2.2 Phase 12
-- [ ] Policy gate reworked — drop OpenShell/policy.yaml refs, check CC-native sandbox capabilities
+- ✓ Policy gate reworked — reads `compatibility` prose, BLOCKs on sandbox mismatches, WARNs on missing bins/env; `/skill-doctor` command added — v2.2 Phase 13
 - ✓ `env:` section in `agent.yaml` — per-agent env var injection (single-quoted, no expansion) — v2.2 Phase 11
 - ✓ Shell wrapper exports `env:` vars after identity captures, before `export HOME=` — v2.2 Phase 11
 - ✓ `install_builtin_skills()` uses create-if-absent for `installed.json` — survives restarts — v2.2 Phase 11
@@ -124,6 +124,8 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**Phase 13 complete** (2026-03-26). Policy gate rework — `skills/skills/SKILL.md` Step 3 fully rewritten: reads `compatibility` prose field, BLOCKs on network/filesystem sandbox mismatches, WARNs on missing bins/env vars. Pre-install domain check in Step 2. New `/skill-doctor` command audits all installed skills with 6-column table. Both GATE-01 and GATE-02 requirements validated.
+
 **Phase 12 complete** (2026-03-26). Skills registry rename — `/clawhub` replaced by `/skills` (skills.sh primary), `SKILL_CLAWHUB` → `SKILL_SKILLS`, stale dir cleanup in `cmd_up`. All 5 SKILLS requirements validated.
 
 **v2.1 shipped** (2026-03-25). Headless Agent Isolation complete — agents run fully autonomous with no interactive TUI prompts. Per-agent HOME isolation, credential symlinks, pre-populated .claude/ scaffold, managed-settings doctor check. 154 lib tests, 20 integration tests.
@@ -150,4 +152,4 @@ This document evolves at phase transitions and milestone boundaries.
 - `env:` section in `agent.yaml` — per-agent env var injection via shell wrapper
 
 ---
-*Last updated: 2026-03-26 — Phase 12 complete (skills-registry-rename)*
+*Last updated: 2026-03-26 — Phase 13 complete (policy-gate-rework)*
