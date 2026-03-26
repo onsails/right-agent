@@ -32,6 +32,7 @@
 - [x] **Phase 11: Env Var Injection** - Per-agent env vars declared in agent.yaml, shell-quoted and injected before `exec claude` (completed 2026-03-25)
 - [x] **Phase 12: Skills Registry Rename** - `/clawhub` replaced by `/skills` (skills.sh primary, ClawHub removed completely), stale dirs cleaned (completed 2026-03-26)
 - [x] **Phase 13: Policy Gate Rework** - `/skills` SKILL.md policy gate rewritten for CC-native sandbox; drops all OpenShell/policy.yaml references (completed 2026-03-26)
+- [ ] **Phase 14: rightskills Rename** - Rename `/skills` skill to `/rightskills` — directory, Rust constant, SKILL.md name field, stale dir cleanup for existing agent dirs
 
 ## Phase Details
 
@@ -74,12 +75,21 @@ Plans:
 Plans:
 - [x] 13-01-PLAN.md — rewrite Step 3 policy gate, add Step 2 domain pre-check, add skill-doctor command, update frontmatter compatibility field (GATE-01, GATE-02)
 
+### Phase 14: rightskills Rename
+**Goal**: Rename the `/skills` skill to `/rightskills` — the directory on disk, the Rust constant, and the SKILL.md name field — so agent invocation uses `/rightskills` instead of `/skills`; stale `skills/` dirs are cleaned from existing agent dirs on upgrade
+**Depends on**: Phase 13
+**Requirements**: TBD
+**Success Criteria** (what must be TRUE):
+  1. TBD (to be captured in discuss-phase)
+**Plans:** TBD
+
 ## Progress
 
-**Execution Order:** 11 → 12 → 13
+**Execution Order:** 11 → 12 → 13 → 14
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 11. Env Var Injection | v2.2 | 2/2 | Complete    | 2026-03-25 |
 | 12. Skills Registry Rename | v2.2 | 1/1 | Complete    | 2026-03-26 |
 | 13. Policy Gate Rework | v2.2 | 1/1 | Complete    | 2026-03-26 |
+| 14. rightskills Rename | v2.2 | TBD | Pending     | |
