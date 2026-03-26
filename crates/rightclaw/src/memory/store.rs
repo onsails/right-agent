@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension};
 use super::{guard, MemoryError};
 
 /// A memory entry returned from the store.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct MemoryEntry {
     pub id: i64,
     pub content: String,
@@ -170,6 +170,31 @@ pub fn search_memories_paged(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(entries)
+}
+
+/// Hard-delete a memory entry by ID (operator bypass of soft-delete).
+///
+/// Removes the `memories` row entirely. `memory_events` rows are preserved
+/// (the `memories_ad` trigger fires and removes the FTS index entry — this is correct).
+///
+/// Unlike `forget_memory`, this succeeds even if the row is already soft-deleted
+/// (`deleted_at IS NOT NULL`) — operators can hard-delete any existing row.
+///
+/// Returns `Err(MemoryError::NotFound(id))` if no row exists with that id.
+pub fn hard_delete_memory(conn: &Connection, id: i64) -> Result<(), MemoryError> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM memories WHERE id = ?1",
+            [id],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !exists {
+        return Err(MemoryError::NotFound(id));
+    }
+    conn.execute("DELETE FROM memories WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 /// Soft-delete a memory by ID.

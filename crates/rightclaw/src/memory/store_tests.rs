@@ -1,6 +1,9 @@
 use crate::memory::{
     open_connection,
-    store::{forget_memory, list_memories, recall_memories, search_memories, search_memories_paged, store_memory},
+    store::{
+        forget_memory, hard_delete_memory, list_memories, recall_memories, search_memories,
+        search_memories_paged, store_memory,
+    },
     MemoryError,
 };
 use tempfile::TempDir;
@@ -325,5 +328,92 @@ fn search_memories_paged_excludes_soft_deleted() {
     assert!(
         entries.is_empty(),
         "soft-deleted entry should not appear in paged search"
+    );
+}
+
+// --- hard_delete_memory tests ---
+
+#[test]
+fn hard_delete_memory_removes_row() {
+    let (_dir, conn) = setup_db();
+    let id = store_memory(&conn, "to be hard deleted", None, None, None).unwrap();
+    hard_delete_memory(&conn, id).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM memories WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "hard_delete_memory should remove the row entirely");
+}
+
+#[test]
+fn hard_delete_memory_returns_not_found_on_missing_id() {
+    let (_dir, conn) = setup_db();
+    let result = hard_delete_memory(&conn, 9999);
+    assert!(
+        matches!(result, Err(MemoryError::NotFound(9999))),
+        "expected NotFound(9999), got {result:?}"
+    );
+}
+
+#[test]
+fn hard_delete_memory_removes_soft_deleted_row() {
+    let (_dir, conn) = setup_db();
+    let id = store_memory(&conn, "soft then hard", None, None, None).unwrap();
+    forget_memory(&conn, id, None).unwrap();
+    // Should succeed even though the row is already soft-deleted
+    let result = hard_delete_memory(&conn, id);
+    assert!(
+        result.is_ok(),
+        "hard_delete should succeed on soft-deleted rows, got {result:?}"
+    );
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM memories WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "row should be fully removed after hard delete");
+}
+
+#[test]
+fn hard_delete_memory_preserves_memory_events() {
+    let (_dir, conn) = setup_db();
+    let id = store_memory(&conn, "event preserved", None, Some("actor"), None).unwrap();
+    hard_delete_memory(&conn, id).unwrap();
+    // memory_events rows have ON DELETE CASCADE or are insert-only — check they still exist
+    let count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM memory_events WHERE memory_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "memory_events should be preserved after hard_delete_memory"
+    );
+}
+
+// --- MemoryEntry Serialize test ---
+
+#[test]
+fn memory_entry_serializes_to_json() {
+    let (_dir, conn) = setup_db();
+    store_memory(&conn, "serializable content", Some("tag1"), Some("agent"), None).unwrap();
+    let entries = list_memories(&conn, 1, 0).unwrap();
+    assert_eq!(entries.len(), 1);
+    let json = serde_json::to_string(&entries[0]);
+    assert!(
+        json.is_ok(),
+        "MemoryEntry should serialize to JSON, got error: {json:?}"
+    );
+    let json_str = json.unwrap();
+    assert!(
+        json_str.contains("serializable content"),
+        "JSON should contain the content field"
     );
 }
