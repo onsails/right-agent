@@ -23,8 +23,8 @@
 
 ### Policy Gate
 
-- [ ] **GATE-01**: `/skills` SKILL.md policy gate drops all references to OpenShell `policy.yaml` and `metadata.openclaw.requires` fields
-- [ ] **GATE-02**: `/skills` SKILL.md policy gate instructs the agent to check `settings.json` `allowedDomains` and `allowWrite` against skill requirements before activating
+- [x] **GATE-01**: `/skills` SKILL.md policy gate drops all references to OpenShell `policy.yaml` and `metadata.openclaw.requires` fields
+- [x] **GATE-02**: `/skills` SKILL.md policy gate instructs the agent to check `settings.json` `allowedDomains` and `allowWrite` against skill requirements before activating
 
 ## Future Requirements (Deferred)
 
@@ -52,5 +52,5 @@
 | SKILLS-03 | Phase 12 | Complete |
 | SKILLS-04 | Phase 12 | Complete |
 | SKILLS-05 | Phase 12 | Complete |
-| GATE-01 | Phase 13 | Pending |
-| GATE-02 | Phase 13 | Pending |
+| GATE-01 | Phase 13 | Complete |
+| GATE-02 | Phase 13 | Complete |

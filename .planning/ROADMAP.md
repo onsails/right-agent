@@ -31,7 +31,7 @@
 
 - [x] **Phase 11: Env Var Injection** - Per-agent env vars declared in agent.yaml, shell-quoted and injected before `exec claude` (completed 2026-03-25)
 - [x] **Phase 12: Skills Registry Rename** - `/clawhub` replaced by `/skills` (skills.sh primary, ClawHub removed completely), stale dirs cleaned (completed 2026-03-26)
-- [ ] **Phase 13: Policy Gate Rework** - `/skills` SKILL.md policy gate rewritten for CC-native sandbox; drops all OpenShell/policy.yaml references
+- [x] **Phase 13: Policy Gate Rework** - `/skills` SKILL.md policy gate rewritten for CC-native sandbox; drops all OpenShell/policy.yaml references (completed 2026-03-26)
 
 ## Phase Details
 
@@ -70,9 +70,9 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. `/skills` SKILL.md contains no references to `policy.yaml`, `metadata.openclaw.requires`, or OpenShell
   2. `/skills` SKILL.md instructs the agent to read `settings.json` `allowedDomains` and `allowWrite` and verify skill network/filesystem requirements are satisfied before activation
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 Plans:
-- [ ] 13-01-PLAN.md — rewrite Step 3 policy gate, add Step 2 domain pre-check, add skill-doctor command, update frontmatter compatibility field (GATE-01, GATE-02)
+- [x] 13-01-PLAN.md — rewrite Step 3 policy gate, add Step 2 domain pre-check, add skill-doctor command, update frontmatter compatibility field (GATE-01, GATE-02)
 
 ## Progress
 
@@ -82,4 +82,4 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 11. Env Var Injection | v2.2 | 2/2 | Complete    | 2026-03-25 |
 | 12. Skills Registry Rename | v2.2 | 1/1 | Complete    | 2026-03-26 |
-| 13. Policy Gate Rework | v2.2 | 0/1 | Not started | - |
+| 13. Policy Gate Rework | v2.2 | 1/1 | Complete   | 2026-03-26 |
