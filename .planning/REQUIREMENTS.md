@@ -18,7 +18,7 @@
 - [x] **SKILL-02**: Agent can look up memories via `/recall` — tag/keyword lookup
 - [x] **SKILL-03**: Agent can full-text search memories via `/search` — FTS5 BM25 ranking
 - [x] **SKILL-04**: Agent can soft-delete a memory via `/forget` — entry excluded from recall/search; audit row preserved
-- [ ] **SKILL-05**: `rightmemory` skill installed as built-in by `install_builtin_skills()` on every `rightclaw up`
+- [x] **SKILL-05**: `rightmemory` skill installed as built-in by `install_builtin_skills()` on every `rightclaw up`
 
 ### CLI Inspection
 
@@ -72,7 +72,7 @@
 | SKILL-02 | Phase 17 | Complete |
 | SKILL-03 | Phase 17 | Complete |
 | SKILL-04 | Phase 17 | Complete |
-| SKILL-05 | Phase 17 | Pending |
+| SKILL-05 | Phase 17 | Complete |
 | SEC-01 | Phase 17 | Complete |
 | CLI-01 | Phase 18 | Pending |
 | CLI-02 | Phase 18 | Pending |
