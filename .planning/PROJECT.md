@@ -59,6 +59,7 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ Shell wrapper exports `env:` vars after identity captures, before `export HOME=` — v2.2 Phase 11
 - ✓ `install_builtin_skills()` uses create-if-absent for `installed.json` — survives restarts — v2.2 Phase 11
 - ✓ `/skills` skill renamed to `/rightskills`; source dir `skills/rightskills/`, constant `SKILL_RIGHTSKILLS`, install path `rightskills/SKILL.md` — v2.2 Phase 14
+- ✓ `cmd_up` removes stale `.claude/skills/skills/` dir on upgrade; SUMMARY.md frontmatter gaps resolved — v2.2 Phase 15
 
 ### Out of Scope
 
@@ -125,6 +126,8 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**Phase 15 complete** (2026-03-26). v2.2 cleanup — `requirements-completed` frontmatter added to 11-01 and 13-01 SUMMARY files; stale `.claude/skills/skills/` removal added to `cmd_up` with two unit tests. All 18 v2.2 requirements now fully traced and verified.
+
 **Phase 14 complete** (2026-03-26). `/skills` skill renamed to `/rightskills` — source dir `skills/rightskills/`, SKILL.md frontmatter `name: rightskills`, H1 heading updated, Rust constant `SKILL_RIGHTSKILLS`, `include_str!` path and install path tuple updated, all test assertions in `skills.rs`, `init.rs`, `main.rs` updated. RS-01 through RS-04 validated.
 
 **Phase 13 complete** (2026-03-26). Policy gate rework — `skills/skills/SKILL.md` Step 3 fully rewritten: reads `compatibility` prose field, BLOCKs on network/filesystem sandbox mismatches, WARNs on missing bins/env vars. Pre-install domain check in Step 2. New `/skill-doctor` command audits all installed skills with 6-column table. Both GATE-01 and GATE-02 requirements validated.
@@ -155,4 +158,4 @@ This document evolves at phase transitions and milestone boundaries.
 - `env:` section in `agent.yaml` — per-agent env var injection via shell wrapper
 
 ---
-*Last updated: 2026-03-26 — Phase 14 complete (rightskills-rename)*
+*Last updated: 2026-03-26 — Phase 15 complete (v2.2-cleanup) — all 18 v2.2 requirements verified*
