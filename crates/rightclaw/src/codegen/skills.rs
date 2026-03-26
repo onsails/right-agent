@@ -1,16 +1,16 @@
 use std::path::Path;
 
-const SKILL_CLAWHUB: &str = include_str!("../../../../skills/clawhub/SKILL.md");
+const SKILL_SKILLS: &str = include_str!("../../../../skills/skills/SKILL.md");
 const SKILL_RIGHTCRON: &str = include_str!("../../../../skills/cronsync/SKILL.md");
 
 /// Install RightClaw built-in skills into an agent's `.claude/skills/` directory.
 ///
-/// Writes `clawhub/SKILL.md`, `rightcron/SKILL.md`, and `installed.json`.
+/// Writes `skills/SKILL.md`, `rightcron/SKILL.md`, and `installed.json`.
 /// Always overwrites — ensures agents get the latest built-in skill content after upgrades.
 /// Only writes to named built-in paths; other directories under `.claude/skills/` are untouched.
 pub fn install_builtin_skills(agent_path: &Path) -> miette::Result<()> {
     let built_in_skills: &[(&str, &str)] = &[
-        ("clawhub/SKILL.md", SKILL_CLAWHUB),
+        ("skills/SKILL.md", SKILL_SKILLS),
         ("rightcron/SKILL.md", SKILL_RIGHTCRON),
     ];
     let claude_skills_dir = agent_path.join(".claude").join("skills");
@@ -36,12 +36,12 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn installs_clawhub_skill() {
+    fn installs_skills_skill() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path()).unwrap();
         assert!(
-            dir.path().join(".claude/skills/clawhub/SKILL.md").exists(),
-            "clawhub/SKILL.md should exist"
+            dir.path().join(".claude/skills/skills/SKILL.md").exists(),
+            "skills/SKILL.md should exist"
         );
     }
 
@@ -70,7 +70,7 @@ mod tests {
         install_builtin_skills(dir.path()).unwrap();
         // Second call must not error
         install_builtin_skills(dir.path()).unwrap();
-        assert!(dir.path().join(".claude/skills/clawhub/SKILL.md").exists());
+        assert!(dir.path().join(".claude/skills/skills/SKILL.md").exists());
         assert!(dir.path().join(".claude/skills/rightcron/SKILL.md").exists());
     }
 
