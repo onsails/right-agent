@@ -30,8 +30,8 @@
 ### Security
 
 - [ ] **SEC-01**: `/remember` scans entry for prompt injection patterns before writing; rejects on match
-- [ ] **SEC-02**: No code path writes to `MEMORY.md` from skill or CLI — strict separation enforced
-- [ ] **SEC-03**: Memory recall is always on-demand — never auto-injected into system prompt
+- [x] **SEC-02**: No code path writes to `MEMORY.md` from skill or CLI — strict separation enforced
+- [x] **SEC-03**: Memory recall is always on-demand — never auto-injected into system prompt
 
 ### Doctor
 
@@ -65,8 +65,8 @@
 | DB-02 | Phase 16 | Pending |
 | DB-03 | Phase 16 | Pending |
 | DB-04 | Phase 16 | Pending |
-| SEC-02 | Phase 16 | Pending |
-| SEC-03 | Phase 16 | Pending |
+| SEC-02 | Phase 16 | Complete |
+| SEC-03 | Phase 16 | Complete |
 | DOCTOR-01 | Phase 16 | Pending |
 | SKILL-01 | Phase 17 | Pending |
 | SKILL-02 | Phase 17 | Pending |

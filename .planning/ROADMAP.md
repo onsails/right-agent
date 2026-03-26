@@ -61,8 +61,8 @@ See [milestones/v2.2-ROADMAP.md](milestones/v2.2-ROADMAP.md)
 **Plans**: 3 plans
 
 Plans:
-- [ ] 16-01-PLAN.md — memory module: rusqlite deps, error type, V1 SQL schema, open_db(), 9 unit tests
-- [ ] 16-02-PLAN.md — dead code removal: memory_path from AgentDef, MEMORY.md scan, stale default start_prompt
+- [x] 16-01-PLAN.md — memory module: rusqlite deps, error type, V1 SQL schema, open_db(), 9 unit tests
+- [x] 16-02-PLAN.md — dead code removal: memory_path from AgentDef, MEMORY.md scan, stale default start_prompt
 - [ ] 16-03-PLAN.md — integration: open_db wired into cmd_up step 10, sqlite3 Warn check in doctor
 
 ### Phase 17: Memory Skill
@@ -94,6 +94,6 @@ Phases execute in numeric order: 16 → 17 → 18
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 16. DB Foundation | v2.3 | 0/3 | Not started | - |
+| 16. DB Foundation | v2.3 | 2/3 | In Progress|  |
 | 17. Memory Skill | v2.3 | 0/? | Not started | - |
 | 18. CLI Inspection | v2.3 | 0/? | Not started | - |
