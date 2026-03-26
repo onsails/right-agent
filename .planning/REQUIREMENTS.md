@@ -15,11 +15,11 @@
 
 ### Skills Registry
 
-- [ ] **SKILLS-01**: `/clawhub` skill and `skills/clawhub/` directory are removed from the codebase; `SKILL_CLAWHUB` constant in Rust is renamed to `SKILL_SKILLS`
-- [ ] **SKILLS-02**: `rightclaw init` and `rightclaw up` install `/skills` skill (from `skills/skills/SKILL.md`) into each agent's `.claude/skills/` instead of `/clawhub`
-- [ ] **SKILLS-03**: `/skills` skill uses skills.sh (Vercel) as primary registry: `npx skills find <query>` for search, `npx skills add <owner>/<repo> -a claude` for install
-- [ ] **SKILLS-04**: `/skills` skill has no ClawHub fallback — ClawHub is removed completely (not deferred, not opt-in)
-- [ ] **SKILLS-05**: `rightclaw up` removes stale `.claude/skills/clawhub/` directory from existing agent dirs on first run after upgrade
+- [x] **SKILLS-01**: `/clawhub` skill and `skills/clawhub/` directory are removed from the codebase; `SKILL_CLAWHUB` constant in Rust is renamed to `SKILL_SKILLS`
+- [x] **SKILLS-02**: `rightclaw init` and `rightclaw up` install `/skills` skill (from `skills/skills/SKILL.md`) into each agent's `.claude/skills/` instead of `/clawhub`
+- [x] **SKILLS-03**: `/skills` skill uses skills.sh (Vercel) as primary registry: `npx skills find <query>` for search, `npx skills add <owner>/<repo> -a claude` for install
+- [x] **SKILLS-04**: `/skills` skill has no ClawHub fallback — ClawHub is removed completely (not deferred, not opt-in)
+- [x] **SKILLS-05**: `rightclaw up` removes stale `.claude/skills/clawhub/` directory from existing agent dirs on first run after upgrade
 
 ### Policy Gate
 
@@ -47,10 +47,10 @@
 | ENV-03 | Phase 11 | Complete |
 | ENV-04 | Phase 11 | Complete |
 | ENV-05 | Phase 11 | Complete |
-| SKILLS-01 | Phase 12 | Pending |
-| SKILLS-02 | Phase 12 | Pending |
-| SKILLS-03 | Phase 12 | Pending |
-| SKILLS-04 | Phase 12 | Pending |
-| SKILLS-05 | Phase 12 | Pending |
+| SKILLS-01 | Phase 12 | Complete |
+| SKILLS-02 | Phase 12 | Complete |
+| SKILLS-03 | Phase 12 | Complete |
+| SKILLS-04 | Phase 12 | Complete |
+| SKILLS-05 | Phase 12 | Complete |
 | GATE-01 | Phase 13 | Pending |
 | GATE-02 | Phase 13 | Pending |
