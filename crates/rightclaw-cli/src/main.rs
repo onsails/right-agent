@@ -419,6 +419,10 @@ async fn cmd_up(
         rightclaw::memory::open_db(&agent.path)
             .map_err(|e| miette::miette!("failed to open memory database for '{}': {e:#}", agent.name))?;
         tracing::debug!(agent = %agent.name, "memory.db initialized");
+
+        // 11. Generate .mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
+        rightclaw::codegen::generate_mcp_config(&agent.path)?;
+        tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
     // Generate process-compose.yaml.
