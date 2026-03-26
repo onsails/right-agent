@@ -92,7 +92,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 18-01-PLAN.md — store layer: list_memories, search_memories_paged, hard_delete_memory, Serialize on MemoryEntry, mod.rs re-exports
+- [x] 18-01-PLAN.md — store layer: list_memories, search_memories_paged, hard_delete_memory, Serialize on MemoryEntry, mod.rs re-exports
 - [ ] 18-02-PLAN.md — CLI layer: MemoryCommands enum, resolve_agent_db, cmd_memory_{list,search,delete,stats} in main.rs
 
 ## Progress
@@ -104,4 +104,4 @@ Phases execute in numeric order: 16 → 17 → 18
 |-------|-----------|----------------|--------|-----------|
 | 16. DB Foundation | v2.3 | 3/3 | Complete    | 2026-03-26 |
 | 17. Memory Skill | v2.3 | 2/2 | Complete    | 2026-03-26 |
-| 18. CLI Inspection | v2.3 | 0/2 | Not started | - |
+| 18. CLI Inspection | v2.3 | 1/2 | In Progress|  |
