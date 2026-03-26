@@ -51,14 +51,13 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 ### Active
 
-- [ ] `/skills` skill replaces `/clawhub` — skills.sh (Vercel) as primary registry
-- [ ] `/skills search`, `install`, `remove`, `list` via skills.sh API
-- [ ] ClawHub kept as secondary/fallback for OpenClaw backward compatibility
+- ✓ `/skills` skill replaces `/clawhub` — skills.sh (Vercel) as primary registry; ClawHub removed completely — v2.2 Phase 12
+- ✓ `rightclaw up` removes stale `.claude/skills/clawhub/` from existing agent dirs — v2.2 Phase 12
+- ✓ `SKILL_CLAWHUB` renamed to `SKILL_SKILLS`; init/up installs `skills/SKILL.md` — v2.2 Phase 12
 - [ ] Policy gate reworked — drop OpenShell/policy.yaml refs, check CC-native sandbox capabilities
 - ✓ `env:` section in `agent.yaml` — per-agent env var injection (single-quoted, no expansion) — v2.2 Phase 11
 - ✓ Shell wrapper exports `env:` vars after identity captures, before `export HOME=` — v2.2 Phase 11
 - ✓ `install_builtin_skills()` uses create-if-absent for `installed.json` — survives restarts — v2.2 Phase 11
-- [ ] `SKILL_CLAWHUB` renamed in Rust codebase; init.rs installs `/skills` instead
 
 ### Out of Scope
 
@@ -125,6 +124,8 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**Phase 12 complete** (2026-03-26). Skills registry rename — `/clawhub` replaced by `/skills` (skills.sh primary), `SKILL_CLAWHUB` → `SKILL_SKILLS`, stale dir cleanup in `cmd_up`. All 5 SKILLS requirements validated.
+
 **v2.1 shipped** (2026-03-25). Headless Agent Isolation complete — agents run fully autonomous with no interactive TUI prompts. Per-agent HOME isolation, credential symlinks, pre-populated .claude/ scaffold, managed-settings doctor check. 154 lib tests, 20 integration tests.
 
 **Shipped versions:**
@@ -149,4 +150,4 @@ This document evolves at phase transitions and milestone boundaries.
 - `env:` section in `agent.yaml` — per-agent env var injection via shell wrapper
 
 ---
-*Last updated: 2026-03-25 — Phase 11 complete (env-var-injection)*
+*Last updated: 2026-03-26 — Phase 12 complete (skills-registry-rename)*
