@@ -140,14 +140,15 @@ This document evolves at phase transitions and milestone boundaries.
 - `test_status_no_running_instance` integration test fails (pre-existing)
 - Tech debt: git absence warning in `verify_dependencies()` (called by `rightclaw up`) but not surfaced by `rightclaw doctor`
 
-## Current Milestone: v2.3
+## Current Milestone: v2.3 Memory System
 
-_Not yet defined. Run `/gsd:new-milestone` to start v2.3 requirements definition._
+**Goal:** Give each agent a per-agent SQLite-backed memory store — persistent across restarts, queryable via a built-in skill, and inspectable from the CLI.
 
-**Deferred from v2.2 (candidate features):**
-- Secretspec / vault integration for sensitive env vars (`env:` is plaintext only)
-- `/rightskills` policy gate: programmatic Rust enforcement (currently instruction-based SKILL.md)
-- Skill version pinning or lockfile
+**Target features:**
+- Per-agent SQLite database (lives in agent HOME dir, no cross-agent sharing)
+- Built-in memory skill: store, recall, search, forget operations
+- `rightclaw memory` CLI subcommand: list, search, delete
+- Full audit trail: timestamps + provenance on every entry
 
 ---
-*Last updated: 2026-03-26 — v2.2 shipped — Skills Registry milestone complete*
+*Last updated: 2026-03-26 — v2.3 started — Memory System milestone*
