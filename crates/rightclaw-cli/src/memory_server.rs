@@ -183,7 +183,13 @@ pub async fn run_memory_server() -> miette::Result<()> {
     let conn = rightclaw::memory::open_connection(&home)
         .map_err(|e| miette::miette!("failed to open memory database: {e:#}"))?;
 
-    let agent_name = std::env::var("RC_AGENT_NAME").unwrap_or_else(|_| "unknown".to_string());
+    let agent_name = match std::env::var("RC_AGENT_NAME") {
+        Ok(name) if !name.is_empty() => name,
+        _ => {
+            tracing::warn!("RC_AGENT_NAME not set — memories will record stored_by as 'unknown'");
+            "unknown".to_string()
+        }
+    };
 
     let server = MemoryServer::new(conn, agent_name);
     let service = server

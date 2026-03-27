@@ -18,7 +18,6 @@ fn make_agent_at(path: std::path::PathBuf) -> AgentDef {
             telegram_user_id: None,
             env: std::collections::HashMap::new(),
         }),
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,

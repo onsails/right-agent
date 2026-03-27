@@ -62,19 +62,26 @@ pub fn init_rightclaw_home(
 
     // Generate .claude/settings.json via codegen (D-17, D-18).
     // Build a synthetic AgentDef for the default "right" agent.
-    // Note: .mcp.json doesn't exist on disk yet at this point, but
-    // generate_settings() only checks mcp_config_path.is_some(), never reads the file.
     {
+        // Build synthetic AgentDef for generate_settings with telegram config if token provided.
+        // Telegram plugin detection reads agent.config (D-01).
+        let settings_config = telegram_token.map(|tok| crate::agent::AgentConfig {
+            restart: crate::agent::RestartPolicy::OnFailure,
+            max_restarts: 3,
+            backoff_seconds: 5,
+            start_prompt: None,
+            model: None,
+            sandbox: None,
+            telegram_token: Some(tok.to_string()),
+            telegram_token_file: None,
+            telegram_user_id: None,
+            env: std::collections::HashMap::new(),
+        });
         let agent_def = crate::agent::AgentDef {
             name: "right".to_string(),
             path: agents_dir.clone(),
             identity_path: agents_dir.join("IDENTITY.md"),
-            config: None,
-            mcp_config_path: if telegram_token.is_some() {
-                Some(agents_dir.join(".mcp.json"))
-            } else {
-                None
-            },
+            config: settings_config,
             soul_path: None,
             user_path: None,
             agents_path: None,
@@ -117,17 +124,6 @@ pub fn init_rightclaw_home(
             miette::miette!("Failed to write telegram .env: {}", e)
         })?;
 
-        // Create .mcp.json marker so the shell wrapper detects Telegram and adds --channels flag.
-        // The file content doesn't matter for the plugin (it's loaded via settings.json),
-        // but the wrapper uses .mcp.json existence to decide whether to pass --channels.
-        std::fs::write(
-            agents_dir.join(".mcp.json"),
-            r#"{"telegram": true}"#,
-        )
-        .map_err(|e| {
-            miette::miette!("Failed to write .mcp.json: {}", e)
-        })?;
-
         // Pre-pair Telegram user via access.json so no interactive pairing is needed.
         // The Telegram plugin re-reads this file on every inbound message.
         if let Some(user_id) = telegram_user_id {
@@ -148,7 +144,6 @@ pub fn init_rightclaw_home(
         path: agents_dir.clone(),
         identity_path: agents_dir.join("IDENTITY.md"),
         config: None,
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,

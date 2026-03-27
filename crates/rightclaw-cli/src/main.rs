@@ -304,7 +304,7 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
         println!("Discovered {} agent(s):", agents.len());
         for agent in &agents {
             let config_status = if agent.config.is_some() { "yes" } else { "no" };
-            let mcp_status = if agent.mcp_config_path.is_some() {
+            let mcp_status = if agent.path.join(".mcp.json").exists() {
                 "yes"
             } else {
                 "no"
@@ -494,7 +494,7 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "memory.db initialized");
 
         // 11. Generate .mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
-        rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe)?;
+        rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name)?;
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
@@ -937,7 +937,6 @@ mod tests {
             path: agent_dir.clone(),
             identity_path: agent_dir.join("IDENTITY.md"),
             config: None,
-            mcp_config_path: None,
             soul_path: None,
             user_path: None,
             agents_path: None,

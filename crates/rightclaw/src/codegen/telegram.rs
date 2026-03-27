@@ -6,8 +6,6 @@ use crate::agent::AgentDef;
 ///   - `.env` with `TELEGRAM_BOT_TOKEN=<token>` (always overwritten)
 ///   - `access.json` with allowlist (only if `telegram_user_id` set)
 ///
-/// Creates `.mcp.json` at agent root only if not already present.
-///
 /// No-ops silently if neither `telegram_token` nor `telegram_token_file` is set.
 pub fn generate_telegram_channel_config(agent: &AgentDef) -> miette::Result<()> {
     let token = match resolve_telegram_token(agent)? {
@@ -31,13 +29,6 @@ pub fn generate_telegram_channel_config(agent: &AgentDef) -> miette::Result<()> 
         // Always overwrite access.json (D-08)
         std::fs::write(channel_dir.join("access.json"), access_json)
             .map_err(|e| miette::miette!("failed to write access.json: {e:#}"))?;
-    }
-
-    // Create .mcp.json marker only if absent (shell wrapper checks existence for --channels flag)
-    let mcp_json = agent.path.join(".mcp.json");
-    if !mcp_json.exists() {
-        std::fs::write(&mcp_json, r#"{"telegram": true}"#)
-            .map_err(|e| miette::miette!("failed to write .mcp.json: {e:#}"))?;
     }
 
     tracing::debug!(agent = %agent.name, "wrote telegram channel config");
@@ -82,7 +73,6 @@ mod tests {
             path: dir.to_path_buf(),
             identity_path: dir.join("IDENTITY.md"),
             config,
-            mcp_config_path: None,
             soul_path: None,
             user_path: None,
             agents_path: None,
@@ -233,42 +223,6 @@ mod tests {
         assert!(
             !content.contains("INLINE_TOKEN"),
             "inline token should be ignored"
-        );
-    }
-
-    #[test]
-    fn creates_mcp_json_if_absent() {
-        let dir = tempdir().unwrap();
-        let config = AgentConfig {
-            telegram_token: Some("123:abc".to_string()),
-            ..base_config()
-        };
-        let agent = make_agent(dir.path(), Some(config));
-        generate_telegram_channel_config(&agent).unwrap();
-
-        assert!(
-            dir.path().join(".mcp.json").exists(),
-            ".mcp.json should be created when absent"
-        );
-    }
-
-    #[test]
-    fn does_not_overwrite_existing_mcp_json() {
-        let dir = tempdir().unwrap();
-        let mcp_path = dir.path().join(".mcp.json");
-        std::fs::write(&mcp_path, r#"{"existing": true}"#).unwrap();
-
-        let config = AgentConfig {
-            telegram_token: Some("123:abc".to_string()),
-            ..base_config()
-        };
-        let agent = make_agent(dir.path(), Some(config));
-        generate_telegram_channel_config(&agent).unwrap();
-
-        let content = std::fs::read_to_string(&mcp_path).unwrap();
-        assert_eq!(
-            content, r#"{"existing": true}"#,
-            ".mcp.json should not be overwritten"
         );
     }
 

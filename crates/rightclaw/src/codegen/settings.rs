@@ -92,8 +92,13 @@ pub fn generate_settings(
         settings["sandbox"]["excludedCommands"] = serde_json::json!(excluded_commands);
     }
 
-    // Telegram plugin (D-05) -- conditional on .mcp.json presence.
-    if agent.mcp_config_path.is_some() {
+    // Telegram plugin (D-05) -- conditional on telegram config presence (D-01).
+    if agent
+        .config
+        .as_ref()
+        .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
+        .unwrap_or(false)
+    {
         settings["enabledPlugins"] = serde_json::json!({
             "telegram@claude-plugins-official": true
         });

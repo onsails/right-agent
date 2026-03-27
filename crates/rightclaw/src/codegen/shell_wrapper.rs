@@ -26,8 +26,13 @@ pub fn generate_wrapper(
         .map_err(|e| miette::miette!("template parse error: {e:#}"))?;
     let tmpl = env.get_template("wrapper").expect("template just added");
 
-    // Detect Telegram channel configuration.
-    let channels: Option<&str> = if agent.mcp_config_path.is_some() {
+    // Detect Telegram channel configuration via agent.config (D-01).
+    let channels: Option<&str> = if agent
+        .config
+        .as_ref()
+        .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
+        .unwrap_or(false)
+    {
         Some("plugin:telegram@claude-plugins-official")
     } else {
         None

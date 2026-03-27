@@ -99,8 +99,6 @@ pub struct AgentDef {
     pub identity_path: PathBuf,
     /// Parsed agent.yaml if present.
     pub config: Option<AgentConfig>,
-    /// Path to .mcp.json if present.
-    pub mcp_config_path: Option<PathBuf>,
     /// Path to SOUL.md if present.
     pub soul_path: Option<PathBuf>,
     /// Path to USER.md if present.

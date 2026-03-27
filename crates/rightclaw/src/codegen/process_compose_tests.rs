@@ -24,7 +24,6 @@ fn make_agent(name: &str, restart: RestartPolicy) -> AgentDef {
         )),
 
         config,
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,
@@ -43,7 +42,6 @@ fn make_agent_no_config(name: &str) -> AgentDef {
         )),
 
         config: None,
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,

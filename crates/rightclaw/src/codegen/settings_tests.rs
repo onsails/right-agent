@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentConfig, AgentDef, RestartPolicy, SandboxOverrides};
@@ -11,7 +12,6 @@ fn make_test_agent(name: &str, config: Option<AgentConfig>) -> AgentDef {
             "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
         )),
         config,
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,
@@ -157,26 +157,37 @@ fn excluded_commands_omitted_when_empty() {
 }
 
 #[test]
-fn includes_telegram_plugin_when_mcp_present() {
-    let mut agent = make_test_agent("test-agent", None);
-    agent.mcp_config_path = Some(PathBuf::from("/fake/.mcp.json"));
+fn includes_telegram_plugin_when_telegram_config_present() {
+    let config = AgentConfig {
+        restart: RestartPolicy::OnFailure,
+        max_restarts: 3,
+        backoff_seconds: 5,
+        start_prompt: None,
+        model: None,
+        sandbox: None,
+        telegram_token_file: None,
+        telegram_token: Some("tok".to_string()),
+        telegram_user_id: None,
+        env: HashMap::new(),
+    };
+    let agent = make_test_agent("test-agent", Some(config));
     let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     assert_eq!(
         settings["enabledPlugins"]["telegram@claude-plugins-official"],
         true,
-        "expected telegram plugin enabled"
+        "expected telegram plugin enabled when telegram config present"
     );
 }
 
 #[test]
-fn omits_telegram_plugin_when_no_mcp() {
+fn omits_telegram_plugin_when_no_telegram_config() {
     let agent = make_test_agent("test-agent", None);
     let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
 
     assert!(
         settings.get("enabledPlugins").is_none(),
-        "enabledPlugins should be omitted without mcp_config_path"
+        "enabledPlugins should be omitted without telegram config"
     );
 }
 

@@ -24,7 +24,6 @@ fn make_agent(name: &str, start_prompt: Option<&str>) -> AgentDef {
             "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
         )),
         config,
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,
@@ -35,11 +34,9 @@ fn make_agent(name: &str, start_prompt: Option<&str>) -> AgentDef {
 }
 
 fn make_agent_with_mcp(name: &str, start_prompt: Option<&str>) -> AgentDef {
-    let mut agent = make_agent(name, start_prompt);
-    agent.mcp_config_path = Some(PathBuf::from(format!(
-        "/home/user/.rightclaw/agents/{name}/.mcp.json"
-    )));
-    agent
+    // Creates agent with .mcp.json present but NO telegram config — used to test
+    // that mcp.json existence alone does NOT trigger --channels.
+    make_agent(name, start_prompt)
 }
 
 fn make_agent_no_config(name: &str) -> AgentDef {
@@ -50,7 +47,6 @@ fn make_agent_no_config(name: &str) -> AgentDef {
             "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
         )),
         config: None,
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,
@@ -123,13 +119,18 @@ fn wrapper_no_config_agent_still_renders() {
 }
 
 #[test]
-fn wrapper_with_mcp_includes_channels_flag() {
-    let agent = make_agent_with_mcp("testbot", Some("Go"));
+fn wrapper_with_telegram_config_includes_channels_flag() {
+    let config = Some(AgentConfig {
+        telegram_token: Some("123:abc".to_string()),
+        ..make_agent("x", None).config.unwrap()
+    });
+    let mut agent = make_agent("testbot", Some("Go"));
+    agent.config = config;
     let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
 
     assert!(
         output.contains("--channels plugin:telegram@claude-plugins-official"),
-        "expected --channels flag:\n{output}"
+        "expected --channels flag when telegram_token configured:\n{output}"
     );
 }
 
@@ -140,7 +141,7 @@ fn wrapper_without_mcp_omits_channels_flag() {
 
     assert!(
         !output.contains("--channels"),
-        "should NOT contain --channels without mcp_config_path:\n{output}"
+        "should NOT contain --channels without telegram config:\n{output}"
     );
 }
 
@@ -292,7 +293,6 @@ fn make_agent_with_env(name: &str, env: HashMap<String, String>) -> AgentDef {
             "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
         )),
         config,
-        mcp_config_path: None,
         soul_path: None,
         user_path: None,
         agents_path: None,

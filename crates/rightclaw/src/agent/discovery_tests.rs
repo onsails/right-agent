@@ -171,7 +171,7 @@ fn discover_detects_mcp_json() {
 
     let agents = discover_agents(dir.path()).unwrap();
     assert_eq!(agents.len(), 1);
-    assert!(agents[0].mcp_config_path.is_some());
+    assert!(agents[0].path.join(".mcp.json").exists());
 }
 
 #[test]

@@ -117,7 +117,6 @@ pub fn discover_agents(agents_dir: &Path) -> miette::Result<Vec<AgentDef>> {
             name,
             identity_path,
             config,
-            mcp_config_path: optional_file(&path, ".mcp.json"),
             soul_path: optional_file(&path, "SOUL.md"),
             user_path: optional_file(&path, "USER.md"),
             agents_path: optional_file(&path, "AGENTS.md"),
