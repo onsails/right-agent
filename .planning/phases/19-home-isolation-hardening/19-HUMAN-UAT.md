@@ -144,18 +144,21 @@ rm -rf ~/.rightclaw && \
 **Expected:**
 - Wrapper script contains `--channels plugin:telegram@claude-plugins-official`
 - `.claude/channels/telegram/.env` contains `TELEGRAM_BOT_TOKEN=8643877926:AAElSkP3vO7JJtNmZCauvb3LDiUCj1xlE9A`
+- Agent CC session shows "Listening for channel messages" WITHOUT "plugin not installed" error
+- Agent's `.claude/plugins` is a symlink to `~/.claude/plugins` (shared with host)
 
 **Pass criteria:**
 ```sh
-# Should print the --channels line
-grep -- '--channels' ~/.rightclaw/agents/right/.claude/channels/telegram/.env 2>/dev/null || true
+# Token file exists with correct content
 cat ~/.rightclaw/agents/right/.claude/channels/telegram/.env
 
-# Check wrapper (adjust path based on where rightclaw writes run artifacts)
-grep -- '--channels' ~/.rightclaw/run/*/right-wrapper.sh 2>/dev/null || \
-  grep -- '--channels' /tmp/rightclaw-*/right-wrapper.sh 2>/dev/null
+# plugins is a symlink to host's plugins dir
+ls -la ~/.rightclaw/agents/right/.claude/plugins
+
+# CC shows "Listening for channel messages" — observe in process-compose TUI
+# (no "plugin not installed" line should appear)
 ```
-grep finds `--channels plugin:telegram@claude-plugins-official`; `.env` contains the bot token.
+`.env` contains the bot token; `plugins` is a symlink; agent connects to Telegram without errors.
 
 ---
 
