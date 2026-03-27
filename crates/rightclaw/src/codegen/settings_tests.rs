@@ -31,6 +31,7 @@ fn generates_sandbox_enabled_by_default() {
     assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
     assert_eq!(settings["spinnerTipsEnabled"], false);
     assert_eq!(settings["prefersReducedMotion"], true);
+    assert_eq!(settings["autoMemoryEnabled"], false);
 }
 
 #[test]
