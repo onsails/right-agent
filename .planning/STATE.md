@@ -92,6 +92,7 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260326-us1 | Replace is_tty with is_interactive in process-compose template | 2026-03-26 | 427f5e1 | [260326-us1-replace-is-tty-with-is-interactive-in-pr](./quick/260326-us1-replace-is-tty-with-is-interactive-in-pr/) |
+| 260327-04d | Fix rightmemory MCP binary path — use absolute path from current_exe() | 2026-03-27 | fb5972e | [260327-04d-fix-rightmemory-mcp-binary-path-use-abso](./quick/260327-04d-fix-rightmemory-mcp-binary-path-use-abso/) |
 
 ## Session Continuity
 
