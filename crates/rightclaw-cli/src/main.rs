@@ -432,6 +432,9 @@ async fn cmd_up(
         let claude_dir = agent.path.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
+        // Pre-create shell-snapshots dir so CC Bash tool doesn't error on first run.
+        std::fs::create_dir_all(claude_dir.join("shell-snapshots"))
+            .map_err(|e| miette::miette!("failed to create shell-snapshots dir for '{}': {e:#}", agent.name))?;
         std::fs::write(
             claude_dir.join("settings.json"),
             serde_json::to_string_pretty(&settings)
