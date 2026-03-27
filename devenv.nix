@@ -4,8 +4,9 @@
   packages = [
     pkgs.git
     pkgs.process-compose
-    pkgs.bubblewrap
     pkgs.socat
+  ] ++ lib.optionals pkgs.stdenv.isLinux [
+    pkgs.bubblewrap
   ];
 
   languages.rust.enable = true;
