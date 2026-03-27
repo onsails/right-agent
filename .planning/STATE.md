@@ -78,6 +78,10 @@ Recent decisions relevant to v2.3:
 - [Phase 18-cli-inspection]: cmd_memory_delete fetches entry preview via direct SQL including soft-deleted rows — operators see what they are hard-deleting
 - [Phase 18-cli-inspection]: resolve_agent_db centralizes agent-dir and memory.db validation for all cmd_memory_* functions
 
+### Roadmap Evolution
+
+- Phase 19 added: HOME Isolation Hardening — plugin sharing, shell snapshot cleanup, fresh-init UAT
+
 ### Pending Todos
 
 None yet.

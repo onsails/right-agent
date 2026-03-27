@@ -6,7 +6,7 @@
 - ✅ **v2.0 Native Sandbox** - Phases 5-7 (shipped 2026-03-24)
 - ✅ **v2.1 Headless Agent Isolation** - Phases 8-10 (shipped 2026-03-25)
 - ✅ **v2.2 Skills Registry** - Phases 11-15 (shipped 2026-03-26)
-- 🚧 **v2.3 Memory System** - Phases 16-18 (in progress)
+- 🚧 **v2.3 Memory System** - Phases 16-19 (in progress)
 
 ## Phases
 
@@ -105,3 +105,13 @@ Phases execute in numeric order: 16 → 17 → 18
 | 16. DB Foundation | v2.3 | 3/3 | Complete    | 2026-03-26 |
 | 17. Memory Skill | v2.3 | 2/2 | Complete    | 2026-03-26 |
 | 18. CLI Inspection | v2.3 | 2/2 | Complete   | 2026-03-26 |
+
+### Phase 19: HOME Isolation Hardening
+
+**Goal:** Fix HOME override gaps — plugin state sharing, shell snapshot cleanup, and comprehensive fresh-init UAT
+**Requirements**: TBD
+**Depends on:** Phase 18
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 19 to break down)
