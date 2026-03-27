@@ -39,12 +39,12 @@
 
 ### HOME Isolation Hardening
 
-- [ ] **HOME-01**: Agents without telegram config do NOT get `--channels` flag or `enabledPlugins` in settings.json
-- [ ] **HOME-02**: `generate_mcp_config` injects `RC_AGENT_NAME` into `.mcp.json` env section
-- [ ] **HOME-03**: `mcp_config_path` field removed from `AgentDef` — Telegram detection uses `agent.config`
-- [ ] **HOME-04**: `generate_telegram_channel_config` does NOT write `{"telegram": true}` marker to `.mcp.json`
-- [ ] **HOME-05**: Memory server warns on stderr when `RC_AGENT_NAME` is absent or empty
-- [ ] **HOME-06**: Comprehensive fresh-init UAT with 7 test cases covering all v2.3 capabilities
+- [x] **HOME-01**: Agents without telegram config do NOT get `--channels` flag or `enabledPlugins` in settings.json
+- [x] **HOME-02**: `generate_mcp_config` injects `RC_AGENT_NAME` into `.mcp.json` env section
+- [x] **HOME-03**: `mcp_config_path` field removed from `AgentDef` — Telegram detection uses `agent.config`
+- [x] **HOME-04**: `generate_telegram_channel_config` does NOT write `{"telegram": true}` marker to `.mcp.json`
+- [x] **HOME-05**: Memory server warns on stderr when `RC_AGENT_NAME` is absent or empty
+- [x] **HOME-06**: Comprehensive fresh-init UAT with 7 test cases covering all v2.3 capabilities
 
 ## Future Requirements
 
@@ -87,12 +87,12 @@
 | CLI-02 | Phase 18 | Complete |
 | CLI-03 | Phase 18 | Complete |
 | CLI-04 | Phase 18 | Complete |
-| HOME-01 | Phase 19 | Planned |
-| HOME-02 | Phase 19 | Planned |
-| HOME-03 | Phase 19 | Planned |
-| HOME-04 | Phase 19 | Planned |
-| HOME-05 | Phase 19 | Planned |
-| HOME-06 | Phase 19 | Planned |
+| HOME-01 | Phase 19 | Complete |
+| HOME-02 | Phase 19 | Complete |
+| HOME-03 | Phase 19 | Complete |
+| HOME-04 | Phase 19 | Complete |
+| HOME-05 | Phase 19 | Complete |
+| HOME-06 | Phase 19 | Complete |
 
 **Coverage:**
 - v2.3 requirements: 23 total
