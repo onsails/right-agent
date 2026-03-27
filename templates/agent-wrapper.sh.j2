@@ -41,7 +41,6 @@ exec "$CLAUDE_BIN" \
   {% if model %}--model {{ model }} \
   {% endif %}{% if debug %}--debug-file "{{ debug_log_path }}" \
   {% endif %}{% if channels %}--channels {{ channels }} \
-  --dangerously-load-development-channels {{ channels }} \
   {% endif %}{% if startup_prompt %}-- "{{ startup_prompt }}"
   {% else %}
   {% endif %}

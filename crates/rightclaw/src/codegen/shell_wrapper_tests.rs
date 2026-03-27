@@ -132,10 +132,6 @@ fn wrapper_with_telegram_config_includes_channels_flag() {
         output.contains("--channels plugin:telegram@claude-plugins-official"),
         "expected --channels flag when telegram_token configured:\n{output}"
     );
-    assert!(
-        output.contains("--dangerously-load-development-channels plugin:telegram@claude-plugins-official"),
-        "expected --dangerously-load-development-channels flag when channels configured:\n{output}"
-    );
 }
 
 #[test]
@@ -146,10 +142,6 @@ fn wrapper_without_mcp_omits_channels_flag() {
     assert!(
         !output.contains("--channels"),
         "should NOT contain --channels without telegram config:\n{output}"
-    );
-    assert!(
-        !output.contains("--dangerously-load-development-channels"),
-        "should NOT contain --dangerously-load-development-channels without telegram config:\n{output}"
     );
 }
 

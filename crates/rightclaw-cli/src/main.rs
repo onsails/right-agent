@@ -394,6 +394,20 @@ async fn cmd_up(
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
+    // Pre-install Telegram plugin if any agent has Telegram configured.
+    // Uses `claude plugin` CLI commands — idempotent, no-ops if already installed.
+    // Must run before per-agent loop so the shared ~/.claude/plugins/ has the plugin
+    // before symlinks are created.
+    let any_telegram = agents.iter().any(|a| {
+        a.config
+            .as_ref()
+            .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
+            .unwrap_or(false)
+    });
+    if any_telegram {
+        rightclaw::codegen::ensure_telegram_plugin_installed()?;
+    }
+
     // Generate shell wrappers for each agent.
     for agent in &agents {
         // Generate combined prompt (identity + start prompt + optional rightcron).
