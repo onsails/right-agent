@@ -205,4 +205,18 @@ mod tests {
             "command must be the absolute path passed in, not a hardcoded name"
         );
     }
+
+    #[test]
+    fn mcp_config_env_contains_agent_name() {
+        let dir = tempdir().unwrap();
+        // NOTE: uses current 2-arg signature — will be updated to 3-arg in Task 2
+        generate_mcp_config(dir.path(), Path::new("rightclaw")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed["mcpServers"]["rightmemory"]["env"]["RC_AGENT_NAME"],
+            "myagent",
+            "RC_AGENT_NAME must be injected into env"
+        );
+    }
 }

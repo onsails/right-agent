@@ -145,6 +145,16 @@ fn wrapper_without_mcp_omits_channels_flag() {
 }
 
 #[test]
+fn wrapper_without_telegram_omits_channels_when_mcp_json_exists() {
+    let agent = make_agent_with_mcp("testbot", Some("Go"));
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+    assert!(
+        !output.contains("--channels"),
+        "should NOT contain --channels when no telegram config, even if .mcp.json exists:\n{output}"
+    );
+}
+
+#[test]
 fn wrapper_has_exactly_one_append_system_prompt_file() {
     let agent = make_agent("testbot", Some("Go"));
     let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
