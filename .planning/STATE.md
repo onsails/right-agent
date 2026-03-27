@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v2.3
 milestone_name: Memory System
 status: verifying
-stopped_at: Completed 18-cli-inspection-02-PLAN.md
-last_updated: "2026-03-26T23:21:14.822Z"
-last_activity: 2026-03-26
+stopped_at: Completed 19-home-isolation-hardening-01-PLAN.md
+last_updated: "2026-03-27T11:16:48.320Z"
+last_activity: 2026-03-27
 progress:
-  total_phases: 3
+  total_phases: 4
   completed_phases: 3
   total_plans: 7
   completed_plans: 7
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 Phase: 18 (cli-inspection) — EXECUTING
 Plan: 2 of 2
 Status: Phase complete — ready for verification
-Last activity: 2026-03-26
+Last activity: 2026-03-27
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -50,6 +50,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 17 P02 | 455 | 2 tasks | 8 files |
 | Phase 18-cli-inspection P01 | 4 | 2 tasks | 3 files |
 | Phase 18-cli-inspection P02 | 3 | 2 tasks | 1 files |
+| Phase 19-home-isolation-hardening P01 | 7 | 2 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,8 @@ Recent decisions relevant to v2.3:
 - [Phase 18-cli-inspection]: search_memories unchanged (LIMIT 50); search_memories_paged is separate function for CLI pagination
 - [Phase 18-cli-inspection]: cmd_memory_delete fetches entry preview via direct SQL including soft-deleted rows — operators see what they are hard-deleting
 - [Phase 18-cli-inspection]: resolve_agent_db centralizes agent-dir and memory.db validation for all cmd_memory_* functions
+- [Phase 19-home-isolation-hardening]: Telegram detection reads agent.config.telegram_token/telegram_token_file; mcp_config_path removed as unreliable proxy
+- [Phase 19-home-isolation-hardening]: generate_mcp_config gains agent_name param; RC_AGENT_NAME injected into rightmemory env section for memory provenance
 
 ### Roadmap Evolution
 
@@ -100,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T23:21:14.819Z
-Stopped at: Completed 18-cli-inspection-02-PLAN.md
+Last session: 2026-03-27T11:16:48.317Z
+Stopped at: Completed 19-home-isolation-hardening-01-PLAN.md
 Resume file: None
