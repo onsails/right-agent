@@ -405,6 +405,7 @@ async fn cmd_up(
             .unwrap_or(false)
     });
     if any_telegram {
+        rightclaw::codegen::ensure_bun_installed()?;
         rightclaw::codegen::ensure_telegram_plugin_installed()?;
     }
 
