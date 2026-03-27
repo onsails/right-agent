@@ -1,5 +1,22 @@
 # Milestones
 
+## v2.3 Memory System (Shipped: 2026-03-27)
+
+**Phases completed:** 4 phases, 9 plans, 16 tasks
+
+**Key accomplishments:**
+
+- SQLite memory module with WAL mode, FTS5 virtual table, append-only audit log via ABORT triggers, and rusqlite_migration 2.5 schema versioning — 9 tests all passing
+- Removed memory_path from AgentDef and all struct literal sites (11 files), and confirmed default start_prompt is already "You are starting." — SEC-02 enforced architecturally
+- Task 1:
+- Injection-guarded SQLite CRUD layer (store/recall/search/forget) with FTS5 BM25 search, soft-delete audit trail, and 44 passing tests against real SQLite
+- rmcp 1.3 stdio MCP server with 4 tools (store/recall/search/forget) wired to Phase 17 SQLite layer, per-agent .mcp.json codegen, and default start_prompt updated with tool references
+- Three CLI-facing store functions (list_memories, search_memories_paged, hard_delete_memory) + serde::Serialize on MemoryEntry + full mod.rs re-exports — data layer ready for CLI inspection commands
+- `rightclaw memory` subcommand group with list/search/delete/stats — operators can inspect any agent's SQLite memory database from the terminal without entering an agent session
+- D-01 — Telegram detection fix (shell_wrapper.rs + settings.rs):
+
+---
+
 ## v2.1 Headless Agent Isolation (Shipped: 2026-03-25)
 
 **Phases completed:** 3 phases, 5 plans, 10 tasks

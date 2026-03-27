@@ -54,18 +54,16 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `rightclaw memory-server` subcommand: rmcp 1.3 stdio MCP server exposing store/recall/search/forget tools backed by per-agent SQLite — v2.3 Phase 17 (SKILL-01..04)
 - ✓ `cmd_up` generates per-agent `.mcp.json` with `mcpServers.rightmemory` entry on every `rightclaw up` — v2.3 Phase 17 (SKILL-05)
 - ✓ `store_memory` rejects content matching 15 OWASP-derived injection patterns via `guard::has_injection` — v2.3 Phase 17 (SEC-01)
+- ✓ `rightclaw memory list/search/delete/stats <agent>` CLI subcommands for operator inspection — v2.3 Phase 18 (CLI-01..04)
+- ✓ Telegram detection uses `agent.config.telegram_token/telegram_token_file` (not `.mcp.json` presence); `mcp_config_path` removed from `AgentDef` — v2.3 Phase 19 (HOME-01..04)
+- ✓ `RC_AGENT_NAME` injected into `.mcp.json` env; memory server warns when absent — v2.3 Phase 19 (HOME-02, HOME-05)
+- ✓ Plugin symlink `agent/.claude/plugins → ~/.claude/plugins` for HOME-isolated agents — v2.3 Phase 19
+- ✓ `rightclaw init --telegram-token` writes to agent-level `.claude/channels/telegram/` + records `telegram_token_file` in agent.yaml — v2.3 Phase 19
+- ✓ Fresh-init UAT: 7 test cases validated end-to-end — v2.3 Phase 19 (HOME-06)
 
 ### Active
 
-- ✓ `/skills` skill replaces `/clawhub` — skills.sh (Vercel) as primary registry; ClawHub removed completely — v2.2 Phase 12
-- ✓ `rightclaw up` removes stale `.claude/skills/clawhub/` from existing agent dirs — v2.2 Phase 12
-- ✓ `SKILL_CLAWHUB` renamed to `SKILL_SKILLS`; init/up installs `skills/SKILL.md` — v2.2 Phase 12
-- ✓ Policy gate reworked — reads `compatibility` prose, BLOCKs on sandbox mismatches, WARNs on missing bins/env; `/skill-doctor` command added — v2.2 Phase 13
-- ✓ `env:` section in `agent.yaml` — per-agent env var injection (single-quoted, no expansion) — v2.2 Phase 11
-- ✓ Shell wrapper exports `env:` vars after identity captures, before `export HOME=` — v2.2 Phase 11
-- ✓ `install_builtin_skills()` uses create-if-absent for `installed.json` — survives restarts — v2.2 Phase 11
-- ✓ `/skills` skill renamed to `/rightskills`; source dir `skills/rightskills/`, constant `SKILL_RIGHTSKILLS`, install path `rightskills/SKILL.md` — v2.2 Phase 14
-- ✓ `cmd_up` removes stale `.claude/skills/skills/` dir on upgrade; SUMMARY.md frontmatter gaps resolved — v2.2 Phase 15
+(No active requirements — next milestone will define new ones via `/gsd:new-milestone`)
 
 ### Out of Scope
 
@@ -132,7 +130,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v2.3 Phase 19 complete** (2026-03-27). HOME isolation hardening: Telegram false-positive detection fixed, RC_AGENT_NAME injected into .mcp.json, plugin symlink for isolated HOMEs, fresh-init UAT passed (7/7 tests). This is the last phase of v2.3 Memory System milestone.
+**v2.3 shipped** (2026-03-27). Memory System milestone complete — per-agent SQLite memory (WAL, FTS5, append-only audit), MCP server with store/recall/search/forget, CLI inspection commands, HOME isolation hardening with Telegram fixes and fresh-init UAT. 4 phases, 9 plans, 23 requirements satisfied.
 
 **v2.2 shipped** (2026-03-26). Skills Registry complete — ClawHub removed, `/rightskills` (skills.sh) installed as built-in, per-agent env var injection via `agent.yaml`, CC-native policy gate with BLOCK/WARN two-tier checking, `/skill-doctor` audit command. 18/18 requirements satisfied across 5 phases. [Full archive](milestones/v2.2-ROADMAP.md)
 
@@ -159,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Full audit trail: timestamps + provenance on every entry
 
 ---
-*Last updated: 2026-03-27 — v2.3 Phase 19 complete — HOME isolation hardening: Telegram detection fixed, RC_AGENT_NAME injection, plugin symlink, fresh-init UAT passed*
+*Last updated: 2026-03-27 after v2.3 milestone — Memory System shipped*
