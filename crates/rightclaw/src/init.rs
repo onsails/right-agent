@@ -103,15 +103,19 @@ pub fn init_rightclaw_home(
         .map_err(|e| miette::miette!("Failed to write settings.json: {}", e))?;
     }
 
-    // Write Telegram bot token to .env if provided.
+    // Write Telegram bot token into the agent's channel dir and record it in agent.yaml.
+    //
+    // The token is stored at `AGENT_DIR/.claude/channels/telegram/.env` — which is where
+    // CC reads it when the agent runs with HOME override. The token is NOT written inline
+    // into agent.yaml (it's a secret); instead `telegram_token_file` points to the .env.
+    // `telegram_user_id` is not secret and goes directly into agent.yaml for `rightclaw up`
+    // to use when regenerating channel config.
+    //
+    // `telegram_env_dir` override is kept for tests only.
     if let Some(token) = telegram_token {
         let env_dir = match telegram_env_dir {
             Some(dir) => dir.to_path_buf(),
-            None => {
-                let home_dir = dirs::home_dir()
-                    .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
-                home_dir.join(".claude").join("channels").join("telegram")
-            }
+            None => agents_dir.join(".claude").join("channels").join("telegram"),
         };
         std::fs::create_dir_all(&env_dir).map_err(|e| {
             miette::miette!("Failed to create {}: {}", env_dir.display(), e)
@@ -120,20 +124,29 @@ pub fn init_rightclaw_home(
             env_dir.join(".env"),
             format!("TELEGRAM_BOT_TOKEN={token}\n"),
         )
-        .map_err(|e| {
-            miette::miette!("Failed to write telegram .env: {}", e)
-        })?;
+        .map_err(|e| miette::miette!("Failed to write telegram .env: {}", e))?;
 
         // Pre-pair Telegram user via access.json so no interactive pairing is needed.
-        // The Telegram plugin re-reads this file on every inbound message.
         if let Some(user_id) = telegram_user_id {
             let access_json = format!(
                 r#"{{"dmPolicy":"allowlist","allowFrom":["{user_id}"],"pending":{{}},"groups":{{}}}}"#
             );
-            std::fs::write(env_dir.join("access.json"), access_json).map_err(|e| {
-                miette::miette!("Failed to write access.json: {}", e)
-            })?;
+            std::fs::write(env_dir.join("access.json"), access_json)
+                .map_err(|e| miette::miette!("Failed to write access.json: {}", e))?;
         }
+
+        // Append telegram fields to agent.yaml so `rightclaw up` detects the token
+        // and generates wrapper/settings/channel-config correctly on each launch.
+        // telegram_token_file uses a relative path (relative to agent dir), not absolute.
+        let agent_yaml_path = agents_dir.join("agent.yaml");
+        let mut yaml = std::fs::read_to_string(&agent_yaml_path)
+            .map_err(|e| miette::miette!("Failed to read agent.yaml: {}", e))?;
+        yaml.push_str("\ntelegram_token_file: .claude/channels/telegram/.env\n");
+        if let Some(user_id) = telegram_user_id {
+            yaml.push_str(&format!("telegram_user_id: \"{user_id}\"\n"));
+        }
+        std::fs::write(&agent_yaml_path, yaml)
+            .map_err(|e| miette::miette!("Failed to update agent.yaml: {}", e))?;
     }
 
     // Pre-trust the agent directory in the agent-local .claude.json (D-06).
@@ -429,6 +442,71 @@ mod tests {
         assert!(
             !content.contains("enabledPlugins"),
             "settings.json should NOT contain enabledPlugins without telegram"
+        );
+    }
+
+    #[test]
+    fn init_with_telegram_writes_env_to_agent_channels_dir() {
+        // Default path (no telegram_env_dir override) must write to AGENT dir.
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), None, None).unwrap();
+
+        let env_path = dir
+            .path()
+            .join("agents/right/.claude/channels/telegram/.env");
+        assert!(env_path.exists(), ".env should be written to agent channels dir");
+        let content = std::fs::read_to_string(&env_path).unwrap();
+        assert_eq!(content, "TELEGRAM_BOT_TOKEN=123456:ABCdef\n");
+    }
+
+    #[test]
+    fn init_with_telegram_writes_access_json_to_agent_channels_dir() {
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), Some("85743491"), None).unwrap();
+
+        let access_path = dir
+            .path()
+            .join("agents/right/.claude/channels/telegram/access.json");
+        assert!(access_path.exists(), "access.json should be in agent channels dir");
+        let content = std::fs::read_to_string(&access_path).unwrap();
+        assert!(content.contains("85743491"));
+        assert!(content.contains("allowlist"));
+    }
+
+    #[test]
+    fn init_with_telegram_sets_token_file_in_agent_yaml() {
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), Some("85743491"), None).unwrap();
+
+        let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
+        assert!(
+            yaml.contains("telegram_token_file: .claude/channels/telegram/.env"),
+            "agent.yaml must contain telegram_token_file reference, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("telegram_user_id: \"85743491\""),
+            "agent.yaml must contain telegram_user_id, got:\n{yaml}"
+        );
+        // Token itself must NOT appear in agent.yaml
+        assert!(
+            !yaml.contains("123456:ABCdef"),
+            "raw token must NOT appear in agent.yaml"
+        );
+    }
+
+    #[test]
+    fn init_with_telegram_no_user_id_does_not_write_user_id_to_yaml() {
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), None, None).unwrap();
+
+        let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
+        assert!(
+            yaml.contains("telegram_token_file"),
+            "telegram_token_file must be set"
+        );
+        assert!(
+            !yaml.contains("telegram_user_id"),
+            "telegram_user_id must not appear when not provided"
         );
     }
 }
