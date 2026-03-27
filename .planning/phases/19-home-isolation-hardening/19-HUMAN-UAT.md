@@ -3,7 +3,7 @@
 **Date:** 2026-03-27
 **Tester:** (fill in)
 **Build:** (commit hash of Plan 01 completion — run `git log --oneline -1` in project root)
-**Prerequisites:** rightclaw binary built from latest (`cargo build --workspace`), process-compose installed, sqlite3 in PATH
+**Prerequisites:** project built (`cargo build --workspace --release`), process-compose installed, sqlite3 in PATH. Run all commands from the project root. Use `cargo run --release --bin rightclaw --` instead of `rightclaw` if the binary isn't on PATH.
 
 ---
 
@@ -15,8 +15,7 @@
 
 **Commands:**
 ```sh
-rm -rf ~/.rightclaw
-rightclaw init
+rm -rf ~/.rightclaw && cargo run --release --bin rightclaw -- init
 ```
 
 **Expected:**
@@ -40,7 +39,7 @@ Both commands exit 0.
 
 **Commands:**
 ```sh
-rightclaw up
+cargo run --release --bin rightclaw -- up --debug
 # Wait until agents are running (process-compose TUI shows them up), then Ctrl+C
 ```
 
@@ -131,24 +130,32 @@ Both greps return empty; python3 assertion prints PASS.
 
 **Purpose:** Verify a telegram-configured agent gets `--channels` and the bot token is stored.
 
-**Setup:**
-1. Add `telegram_token: "TEST:faketoken"` to an agent's `agent.yaml` (e.g., create a second agent or modify `right` temporarily)
-2. Run `rightclaw up` again
+**Setup:** Fresh init with telegram flags (re-uses your real token):
+
+```sh
+rm -rf ~/.rightclaw && \
+  cargo run --release --bin rightclaw -- init \
+    --telegram-token 8643877926:AAElSkP3vO7JJtNmZCauvb3LDiUCj1xlE9A \
+    --telegram-user-id 85743491 && \
+  cargo run --release --bin rightclaw -- up --debug
+# Ctrl+C once agents are running
+```
 
 **Expected:**
 - Wrapper script contains `--channels plugin:telegram@claude-plugins-official`
-- `.claude/channels/telegram/.env` contains `TELEGRAM_BOT_TOKEN=TEST:faketoken`
+- `.claude/channels/telegram/.env` contains `TELEGRAM_BOT_TOKEN=8643877926:AAElSkP3vO7JJtNmZCauvb3LDiUCj1xlE9A`
 
 **Pass criteria:**
 ```sh
 # Should print the --channels line
-grep -- '--channels' /tmp/rightclaw-run/*/<AGENT>-wrapper.sh 2>/dev/null || \
-grep -- '--channels' ~/.rightclaw/run/*/<AGENT>-wrapper.sh 2>/dev/null
+grep -- '--channels' ~/.rightclaw/agents/right/.claude/channels/telegram/.env 2>/dev/null || true
+cat ~/.rightclaw/agents/right/.claude/channels/telegram/.env
 
-# Should print the token line
-cat ~/.rightclaw/agents/<AGENT>/.claude/channels/telegram/.env
+# Check wrapper (adjust path based on where rightclaw writes run artifacts)
+grep -- '--channels' ~/.rightclaw/run/*/right-wrapper.sh 2>/dev/null || \
+  grep -- '--channels' /tmp/rightclaw-*/right-wrapper.sh 2>/dev/null
 ```
-grep finds `--channels plugin:telegram@claude-plugins-official`; `.env` contains `TELEGRAM_BOT_TOKEN=TEST:faketoken`.
+grep finds `--channels plugin:telegram@claude-plugins-official`; `.env` contains the bot token.
 
 ---
 
@@ -182,7 +189,7 @@ rightclaw memory list right
 
 **Commands:**
 ```sh
-rightclaw doctor
+cargo run --release --bin rightclaw -- doctor
 ```
 
 **Expected:**
@@ -191,7 +198,7 @@ rightclaw doctor
 
 **Pass criteria:**
 ```sh
-rightclaw doctor; echo "Exit code: $?"
+cargo run --release --bin rightclaw -- doctor; echo "Exit code: $?"
 ```
 Exit code 0; no lines containing `FAIL` in output.
 
