@@ -69,6 +69,7 @@ pub fn generate_settings(
         "skipDangerousModePermissionPrompt": true,
         "spinnerTipsEnabled": false,
         "prefersReducedMotion": true,
+        "autoMemoryEnabled": false,
 
         // Sandbox configuration (D-01, D-12).
         "sandbox": {
