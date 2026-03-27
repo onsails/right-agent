@@ -132,6 +132,8 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**v2.3 Phase 19 complete** (2026-03-27). HOME isolation hardening: Telegram false-positive detection fixed, RC_AGENT_NAME injected into .mcp.json, plugin symlink for isolated HOMEs, fresh-init UAT passed (7/7 tests). This is the last phase of v2.3 Memory System milestone.
+
 **v2.2 shipped** (2026-03-26). Skills Registry complete — ClawHub removed, `/rightskills` (skills.sh) installed as built-in, per-agent env var injection via `agent.yaml`, CC-native policy gate with BLOCK/WARN two-tier checking, `/skill-doctor` audit command. 18/18 requirements satisfied across 5 phases. [Full archive](milestones/v2.2-ROADMAP.md)
 
 **Shipped versions:**
@@ -157,4 +159,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Full audit trail: timestamps + provenance on every entry
 
 ---
-*Last updated: 2026-03-26 — v2.3 Phase 17 complete — Memory Skill shipped (MCP store/recall/search/forget, injection guard, .mcp.json codegen)*
+*Last updated: 2026-03-27 — v2.3 Phase 19 complete — HOME isolation hardening: Telegram detection fixed, RC_AGENT_NAME injection, plugin symlink, fresh-init UAT passed*
