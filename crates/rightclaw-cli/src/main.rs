@@ -449,6 +449,10 @@ async fn cmd_up(
         // Create credential symlink for OAuth under HOME override (Phase 8, HOME-03).
         rightclaw::codegen::create_credential_symlink(agent, &host_home)?;
 
+        // Symlink host ~/.claude/plugins/ so agents share installed plugins (e.g. telegram).
+        // Without this, CC starts with an empty plugin registry in the isolated HOME.
+        rightclaw::codegen::create_plugins_symlink(agent, &host_home)?;
+
         // 6. git init if .git/ missing (Phase 9, AENV-01).
         // Non-fatal: log warning and continue if git binary absent.
         if !agent.path.join(".git").exists() {

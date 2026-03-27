@@ -113,6 +113,47 @@ pub fn create_credential_symlink(agent: &AgentDef, host_home: &Path) -> miette::
     Ok(())
 }
 
+/// Symlink agent `.claude/plugins/` to the host's global CC plugins directory.
+///
+/// CC isolates its plugin state per-HOME. Without this symlink, agents running under a
+/// HOME override start with an empty plugin registry and cannot use installed plugins
+/// (e.g. `--channels plugin:telegram@claude-plugins-official` fails with "plugin not installed").
+///
+/// `host_home` MUST be resolved via `dirs::home_dir()` BEFORE any HOME env var manipulation.
+/// No-ops silently if `~/.claude/plugins/` does not exist on the host.
+/// Idempotent: replaces any existing directory or stale symlink.
+pub fn create_plugins_symlink(agent: &AgentDef, host_home: &Path) -> miette::Result<()> {
+    use std::os::unix::fs as unix_fs;
+
+    let host_plugins = host_home.join(".claude").join("plugins");
+    if !host_plugins.exists() {
+        tracing::debug!(agent = %agent.name, "no global ~/.claude/plugins — skipping plugins symlink");
+        return Ok(());
+    }
+
+    let agent_claude_dir = agent.path.join(".claude");
+    std::fs::create_dir_all(&agent_claude_dir).map_err(|e| {
+        miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name)
+    })?;
+
+    let agent_plugins = agent_claude_dir.join("plugins");
+
+    // Remove existing entry (idempotent on re-runs).
+    if agent_plugins.is_symlink() {
+        std::fs::remove_file(&agent_plugins)
+            .map_err(|e| miette::miette!("failed to remove stale plugins symlink for '{}': {e:#}", agent.name))?;
+    } else if agent_plugins.is_dir() {
+        std::fs::remove_dir_all(&agent_plugins)
+            .map_err(|e| miette::miette!("failed to remove agent plugins dir for '{}': {e:#}", agent.name))?;
+    }
+
+    unix_fs::symlink(&host_plugins, &agent_plugins).map_err(|e| {
+        miette::miette!("failed to create plugins symlink for '{}': {e:#}", agent.name)
+    })?;
+    tracing::debug!(agent = %agent.name, "plugins symlink created → {}", host_plugins.display());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -380,6 +421,78 @@ mod tests {
         assert_ne!(
             agent_path, host_home,
             "agent path should not equal host home"
+        );
+    }
+
+    #[test]
+    fn test_plugins_symlink_created() {
+        let agent_dir = tempdir().unwrap();
+        let host_home = tempdir().unwrap();
+        let agent = make_test_agent(agent_dir.path(), "testbot");
+
+        // Create host plugins dir with a marker file.
+        let host_plugins = host_home.path().join(".claude").join("plugins");
+        std::fs::create_dir_all(&host_plugins).unwrap();
+        std::fs::write(host_plugins.join("installed_plugins.json"), r#"{"version":2,"plugins":{}}"#).unwrap();
+
+        create_plugins_symlink(&agent, host_home.path()).unwrap();
+
+        let symlink = agent_dir.path().join(".claude").join("plugins");
+        assert!(symlink.exists(), "plugins symlink should exist");
+        let target = std::fs::read_link(&symlink).unwrap();
+        assert_eq!(target, host_plugins, "symlink should point to host plugins");
+    }
+
+    #[test]
+    fn test_plugins_symlink_idempotent() {
+        let agent_dir = tempdir().unwrap();
+        let host_home = tempdir().unwrap();
+        let agent = make_test_agent(agent_dir.path(), "testbot");
+
+        let host_plugins = host_home.path().join(".claude").join("plugins");
+        std::fs::create_dir_all(&host_plugins).unwrap();
+
+        // Call twice — must not error.
+        create_plugins_symlink(&agent, host_home.path()).unwrap();
+        create_plugins_symlink(&agent, host_home.path()).unwrap();
+
+        assert!(
+            agent_dir.path().join(".claude").join("plugins").exists(),
+            "plugins symlink should survive second call"
+        );
+    }
+
+    #[test]
+    fn test_plugins_symlink_replaces_existing_dir() {
+        let agent_dir = tempdir().unwrap();
+        let host_home = tempdir().unwrap();
+        let agent = make_test_agent(agent_dir.path(), "testbot");
+
+        let host_plugins = host_home.path().join(".claude").join("plugins");
+        std::fs::create_dir_all(&host_plugins).unwrap();
+
+        // Pre-create a real directory at the symlink target location (simulates CC creating it).
+        let agent_plugins = agent_dir.path().join(".claude").join("plugins");
+        std::fs::create_dir_all(&agent_plugins).unwrap();
+
+        create_plugins_symlink(&agent, host_home.path()).unwrap();
+
+        let target = std::fs::read_link(&agent_plugins).unwrap();
+        assert_eq!(target, host_plugins, "dir should be replaced by symlink");
+    }
+
+    #[test]
+    fn test_plugins_symlink_noop_when_no_host_plugins() {
+        let agent_dir = tempdir().unwrap();
+        let host_home = tempdir().unwrap(); // empty — no .claude/plugins
+        let agent = make_test_agent(agent_dir.path(), "testbot");
+
+        // Must return Ok (silent noop).
+        create_plugins_symlink(&agent, host_home.path()).unwrap();
+
+        assert!(
+            !agent_dir.path().join(".claude").join("plugins").exists(),
+            "no symlink should be created when host plugins absent"
         );
     }
 }
