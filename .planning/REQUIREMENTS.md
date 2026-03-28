@@ -8,9 +8,9 @@ Diagnose and fix why CC sandbox blocks Telegram message processing, so agents re
 
 ### Diagnosis
 
-- [ ] **DIAG-01**: Developer can identify why CC stops processing Telegram events when sandbox is enabled by analyzing right-debug.log
-- [ ] **DIAG-02**: Root cause is confirmed as sandbox-specific (log comparison: sandbox on vs --no-sandbox)
-- [ ] **DIAG-03**: Specific config element responsible is identified (bwrap network rules, socat relay, or settings.json network/filesystem section)
+- [x] **DIAG-01**: Developer can identify why CC stops processing Telegram events when sandbox is enabled by analyzing right-debug.log
+- [x] **DIAG-02**: Root cause is confirmed as sandbox-specific (log comparison: sandbox on vs --no-sandbox)
+- [x] **DIAG-03**: Specific config element responsible is identified (bwrap network rules, socat relay, or settings.json network/filesystem section)
 
 ### Fix
 

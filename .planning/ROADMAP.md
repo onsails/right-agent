@@ -50,7 +50,7 @@ See [milestones/v2.3-ROADMAP.md](milestones/v2.3-ROADMAP.md)
 
 ## v2.4 Sandbox Telegram Fix
 
-- [ ] **Phase 20: Diagnosis** — Identify root cause of Telegram silence under CC sandbox
+- [x] **Phase 20: Diagnosis** — Identify root cause of Telegram silence under CC sandbox (completed 2026-03-28)
 - [ ] **Phase 21: Fix & Verification** — Implement fix and confirm end-to-end Telegram works with sandbox on
 
 ---
@@ -68,7 +68,7 @@ See [milestones/v2.3-ROADMAP.md](milestones/v2.3-ROADMAP.md)
   4. A written diagnosis note exists summarizing root cause and proposed fix approach
 **Plans**: 1 plan
 Plans:
-- [ ] 20-01-PLAN.md — Write DIAGNOSIS.md synthesizing all evidence into root cause and fix proposal
+- [x] 20-01-PLAN.md — Write DIAGNOSIS.md synthesizing all evidence into root cause and fix proposal
 
 ### Phase 21: Fix & Verification
 **Goal**: Telegram commands receive agent responses when CC sandbox is enabled, without regressing existing behavior
@@ -87,5 +87,5 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 20. Diagnosis | 0/1 | Not started | - |
+| 20. Diagnosis | 1/1 | Complete   | 2026-03-28 |
 | 21. Fix & Verification | 0/1 | Not started | - |
