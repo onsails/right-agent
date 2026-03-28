@@ -79,7 +79,10 @@ Plans:
   2. `rightclaw up --no-sandbox` behavior is unchanged — agent still responds to Telegram
   3. Existing test suite passes with no new failures after the fix
   4. The fix targets the specific config element identified in Phase 20 (no shotgun changes)
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 21-01-PLAN.md — TDD: write failing test + fix startup_prompt to run rightcron in main thread (FIX-01, FIX-02)
+- [ ] 21-02-PLAN.md — Document iv6/M6 gotcha + manual Telegram end-to-end verification (VERIFY-01)
 
 ---
 
@@ -88,4 +91,4 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 20. Diagnosis | 1/1 | Complete    | 2026-03-28 |
-| 21. Fix & Verification | 0/1 | Not started | - |
+| 21. Fix & Verification | 0/2 | Not started | - |
