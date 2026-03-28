@@ -35,8 +35,8 @@ Make rightcron's cron reconciler actually work — fix the bootstrap so it can c
 
 | Requirement | Phase | Plan |
 |-------------|-------|------|
-| BOOT-01 | TBD | TBD |
-| BOOT-02 | TBD | TBD |
-| RECON-01 | TBD | TBD |
-| RECON-02 | TBD | TBD |
-| VER-01 | TBD | TBD |
+| BOOT-01 | Phase 21 | TBD |
+| BOOT-02 | Phase 21 | TBD |
+| RECON-01 | Phase 21 | TBD |
+| RECON-02 | Phase 21 | TBD |
+| VER-01 | Phase 22 | TBD |

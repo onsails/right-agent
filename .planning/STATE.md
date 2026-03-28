@@ -7,7 +7,7 @@ stopped_at: ""
 last_updated: "2026-03-28T00:00:00.000Z"
 last_activity: 2026-03-28
 progress:
-  total_phases: 0
+  total_phases: 2
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** v2.5 — Defining requirements
+**Current focus:** v2.5 — Roadmap ready, Phase 21 next
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: Not started (roadmap complete)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-03-28 — Milestone v2.5 started
+Status: Ready to plan Phase 21
+Last activity: 2026-03-28 — Roadmap created (Phases 21-22)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -89,6 +89,7 @@ Recent decisions relevant to v2.3:
 
 - Phase 19 added: HOME Isolation Hardening — plugin sharing, shell snapshot cleanup, fresh-init UAT
 - v2.4 phases 20-21 added: Sandbox Telegram Fix (diagnosis + fix/verification)
+- v2.5 phases 21-22 added: RightCron Reliability (bootstrap fix + reconciler redesign + verification)
 
 ### Pending Todos
 
