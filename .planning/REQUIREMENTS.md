@@ -1,43 +1,42 @@
-# Requirements: v2.4 Sandbox Telegram Fix
+# Requirements: v2.5 RightCron Reliability
 
 ## Milestone Goal
 
-Diagnose and fix why CC sandbox blocks Telegram message processing, so agents respond to Telegram commands whether sandbox is enabled or not.
+Make rightcron's cron reconciler actually work — fix the bootstrap so it can create the reconciler job, and redesign the skill so reconciliation is deterministic regardless of context.
 
 ## Active Requirements
 
-### Diagnosis
+### Bootstrap Fix
 
-- [x] **DIAG-01**: Developer can identify why CC stops processing Telegram events when sandbox is enabled by analyzing right-debug.log
-- [x] **DIAG-02**: Root cause is confirmed as sandbox-specific (log comparison: sandbox on vs --no-sandbox)
-- [x] **DIAG-03**: Specific config element responsible is identified (bwrap network rules, socat relay, or settings.json network/filesystem section)
+- [ ] **BOOT-01**: `rightclaw up` results in a `*/5 * * * *` reconciler cron job existing in the agent session (CronList confirms it)
+- [ ] **BOOT-02**: `startup_prompt` does not delegate to a background Agent tool — rightcron runs inline in the main thread
 
-### Fix
+### Reconciler Redesign
 
-- [ ] **FIX-01**: Telegram commands receive responses from agent when sandbox is enabled (Linux/bwrap)
-- [ ] **FIX-02**: Fix does not regress --no-sandbox behavior or existing test suite
+- [ ] **RECON-01**: rightcron skill separates reconciler into CHECK (read-only, outputs structured diff — no CronCreate/CronDelete calls) and RECONCILE (direct CronCreate/CronDelete in main thread based on diff)
+- [ ] **RECON-02**: After cron fires, jobs defined in `crons/*.yaml` are created/updated/deleted correctly without any Agent tool delegation
 
 ### Verification
 
-- [ ] **VERIFY-01**: Manual end-to-end test: send Telegram message → agent responds with sandbox on
+- [ ] **VER-01**: Manual end-to-end test — create a `crons/*.yaml` spec, wait for reconciler to fire (or trigger manually), confirm job is scheduled via CronList
 
 ## Future Requirements
 
-- Automated regression test for sandbox + Telegram (deferred — manual verification sufficient for v2.4)
+- Automated test for cron reconciler cycle (deferred — requires live CC session)
+- Multi-agent cron isolation (deferred — all agents share session-scoped crons today)
 
 ## Out of Scope
 
-- macOS Seatbelt Telegram behavior (not known to be broken)
-- Windows support
-- Fixing rightcron background agent session hang (separate issue, different root cause)
+- Fixing CC iv6/M6 channels bug (waiting for CC upstream)
+- Changing cron reconciler interval (stays `*/5 * * * *`)
+- rightcron conversational job creation/removal (no changes to non-reconciler flows)
 
 ## Traceability
 
 | Requirement | Phase | Plan |
 |-------------|-------|------|
-| DIAG-01 | Phase 20 | TBD |
-| DIAG-02 | Phase 20 | TBD |
-| DIAG-03 | Phase 20 | TBD |
-| FIX-01 | Phase 21 | TBD |
-| FIX-02 | Phase 21 | TBD |
-| VERIFY-01 | Phase 21 | TBD |
+| BOOT-01 | TBD | TBD |
+| BOOT-02 | TBD | TBD |
+| RECON-01 | TBD | TBD |
+| RECON-02 | TBD | TBD |
+| VER-01 | TBD | TBD |
