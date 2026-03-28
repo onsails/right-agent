@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v2.4
 milestone_name: Sandbox Telegram Fix
-status: planning
-stopped_at: ""
-last_updated: "2026-03-28T00:00:00.000Z"
+status: verifying
+stopped_at: Completed 20-diagnosis 20-01-PLAN.md
+last_updated: "2026-03-28T21:54:31.192Z"
 last_activity: 2026-03-28
 progress:
   total_phases: 2
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
   percent: 0
 ---
 
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 
 ## Current Position
 
-Phase: 20 — Diagnosis
-Plan: —
-Status: Ready to plan
-Last activity: 2026-03-28 — Roadmap created for v2.4
+Phase: 20 (Diagnosis) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-03-28
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -51,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 18-cli-inspection P01 | 4 | 2 tasks | 3 files |
 | Phase 18-cli-inspection P02 | 3 | 2 tasks | 1 files |
 | Phase 19-home-isolation-hardening P01 | 7 | 2 tasks | 15 files |
+| Phase 20-diagnosis P01 | 2 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,9 @@ Recent decisions relevant to v2.3:
 - [Phase 18-cli-inspection]: resolve_agent_db centralizes agent-dir and memory.db validation for all cmd_memory_* functions
 - [Phase 19-home-isolation-hardening]: Telegram detection reads agent.config.telegram_token/telegram_token_file; mcp_config_path removed as unreliable proxy
 - [Phase 19-home-isolation-hardening]: generate_mcp_config gains agent_name param; RC_AGENT_NAME injected into rightmemory env section for memory provenance
+- [Phase 20-diagnosis]: Hypothesis B (socat TCP timeout) eliminated — plugin runs outside bwrap, direct TCP to api.telegram.org, socat cannot affect it
+- [Phase 20-diagnosis]: Root cause confirmed: CC iv6() callback does not call M6() when Z===null (idle) — channel messages queue in hz with no drain mechanism after SubagentStop
+- [Phase 20-diagnosis]: Phase 21 fix: Option A (persistent background agent / rightcron watch mode) — keeps M6() step cycle running, guarantees channel message drain
 
 ### Roadmap Evolution
 
@@ -104,6 +108,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T00:00:00.000Z
-Stopped at: Roadmap created for v2.4 — ready to plan Phase 20
+Last session: 2026-03-28T21:54:31.189Z
+Stopped at: Completed 20-diagnosis 20-01-PLAN.md
 Resume file: None
