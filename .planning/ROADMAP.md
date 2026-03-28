@@ -66,7 +66,9 @@ See [milestones/v2.3-ROADMAP.md](milestones/v2.3-ROADMAP.md)
   2. A log comparison between sandbox-on and --no-sandbox runs exists that confirms the failure is sandbox-specific
   3. The specific config element responsible is named (bwrap network rule, socat relay gap, or settings.json network/filesystem section)
   4. A written diagnosis note exists summarizing root cause and proposed fix approach
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 20-01-PLAN.md — Write DIAGNOSIS.md synthesizing all evidence into root cause and fix proposal
 
 ### Phase 21: Fix & Verification
 **Goal**: Telegram commands receive agent responses when CC sandbox is enabled, without regressing existing behavior
