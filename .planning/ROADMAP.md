@@ -87,5 +87,5 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 20. Diagnosis | 1/1 | Complete   | 2026-03-28 |
+| 20. Diagnosis | 1/1 | Complete    | 2026-03-28 |
 | 21. Fix & Verification | 0/1 | Not started | - |
