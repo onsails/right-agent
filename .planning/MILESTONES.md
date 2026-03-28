@@ -1,5 +1,18 @@
 # Milestones
 
+## v2.4 Sandbox Telegram Fix (Shipped: 2026-03-28)
+
+**Phases completed:** 1 phases, 1 plans, 1 tasks
+
+**Key accomplishments:**
+
+- CC event loop stall diagnosed: iv6() callback never calls M6() when Z===null after SubagentStop, leaving Telegram channel messages queued in hz indefinitely
+
+**Known Gaps (deferred to CC fix):**
+- FIX-01, FIX-02, VERIFY-01: Fix and verify Telegram response — deferred pending CC upstream fix for iv6/M6 channels bug. SEED-011 tracks the workaround.
+
+---
+
 ## v2.3 Memory System (Shipped: 2026-03-27)
 
 **Phases completed:** 4 phases, 9 plans, 16 tasks
