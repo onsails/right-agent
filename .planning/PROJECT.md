@@ -63,7 +63,7 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 ### Active
 
-(Defined in v2.4 REQUIREMENTS.md)
+(No active requirements — next milestone will define new ones via `/gsd:new-milestone`)
 
 ### Out of Scope
 
@@ -130,7 +130,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v2.4 in progress** (2026-03-28). Phase 20 complete — root cause diagnosed: CC's `iv6`/`M6()` event loop gap causes Telegram channel notifications to stall in the `hz` queue after SubagentStop. socat hypothesis eliminated. Fix approach: keep rightcron alive as a persistent background presence to maintain the step cycle. Phase 21 (fix + verification) next.
+**v2.4 shipped** (2026-03-28). Telegram freeze diagnosed — CC's `iv6`/`M6()` event loop gap causes channel notifications to stall in `hz` after SubagentStop. socat hypothesis eliminated via live process topology. Root cause documented in DIAGNOSIS.md. Fix deferred pending CC upstream fix; SEED-011 tracks workaround. [Full archive](milestones/v2.4-ROADMAP.md)
 
 **v2.3 shipped** (2026-03-27). Memory System milestone complete — per-agent SQLite memory (WAL, FTS5, append-only audit), MCP server with store/recall/search/forget, CLI inspection commands, HOME isolation hardening with Telegram fixes and fresh-init UAT. 4 phases, 9 plans, 23 requirements satisfied.
 
@@ -144,6 +144,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 **Known limitations:**
 - SEED-002: BOOTSTRAP.md onboarding doesn't trigger via Telegram
+- SEED-011: CC channels bug (iv6/M6 gap) — Telegram stops responding after SubagentStop; fix documented in Phase 20 DIAGNOSIS.md, waiting for CC upstream fix
 - `rightclaw restart` status unknown — changed `is_tty` to `is_interactive` (correct field name); restart may now work
 - `test_status_no_running_instance` integration test fails (pre-existing)
 - Tech debt: git absence warning in `verify_dependencies()` (called by `rightclaw up`) but not surfaced by `rightclaw doctor`
@@ -158,4 +159,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Regression test or verification step to confirm the fix holds
 
 ---
-*Last updated: 2026-03-28 — Phase 20 complete, root cause diagnosed*
+*Last updated: 2026-03-28 after v2.4 milestone — Telegram freeze diagnosed, fix deferred to CC*
