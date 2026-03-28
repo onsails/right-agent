@@ -130,6 +130,8 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**v2.4 in progress** (2026-03-28). Phase 20 complete — root cause diagnosed: CC's `iv6`/`M6()` event loop gap causes Telegram channel notifications to stall in the `hz` queue after SubagentStop. socat hypothesis eliminated. Fix approach: keep rightcron alive as a persistent background presence to maintain the step cycle. Phase 21 (fix + verification) next.
+
 **v2.3 shipped** (2026-03-27). Memory System milestone complete — per-agent SQLite memory (WAL, FTS5, append-only audit), MCP server with store/recall/search/forget, CLI inspection commands, HOME isolation hardening with Telegram fixes and fresh-init UAT. 4 phases, 9 plans, 23 requirements satisfied.
 
 **v2.2 shipped** (2026-03-26). Skills Registry complete — ClawHub removed, `/rightskills` (skills.sh) installed as built-in, per-agent env var injection via `agent.yaml`, CC-native policy gate with BLOCK/WARN two-tier checking, `/skill-doctor` audit command. 18/18 requirements satisfied across 5 phases. [Full archive](milestones/v2.2-ROADMAP.md)
@@ -156,4 +158,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Regression test or verification step to confirm the fix holds
 
 ---
-*Last updated: 2026-03-28 — v2.4 Sandbox Telegram Fix started*
+*Last updated: 2026-03-28 — Phase 20 complete, root cause diagnosed*
