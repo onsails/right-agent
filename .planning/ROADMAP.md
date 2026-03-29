@@ -58,7 +58,7 @@ See [milestones/v2.4-ROADMAP.md](milestones/v2.4-ROADMAP.md)
 
 ## v2.5 RightCron Reliability
 
-- [ ] **Phase 21: Bootstrap Fix + Reconciler Redesign** — Remove Agent tool delegation from startup_prompt; redesign rightcron SKILL.md with CHECK/RECONCILE split
+- [x] **Phase 21: Bootstrap Fix + Reconciler Redesign** — Remove Agent tool delegation from startup_prompt; redesign rightcron SKILL.md with CHECK/RECONCILE split (completed 2026-03-29)
 - [ ] **Phase 22: End-to-End Verification** — Manual test confirming reconciler boots, fires, and manages jobs correctly
 
 ## Phase Details
@@ -91,5 +91,5 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 21. Bootstrap Fix + Reconciler Redesign | 0/2 | Not started | - |
+| 21. Bootstrap Fix + Reconciler Redesign | 0/2 | Complete    | 2026-03-29 |
 | 22. End-to-End Verification | 0/1 | Not started | - |

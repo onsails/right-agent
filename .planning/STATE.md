@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v2.5
 milestone_name: RightCron Reliability
 status: planning
-stopped_at: ""
-last_updated: "2026-03-28T00:00:00.000Z"
-last_activity: 2026-03-28
+stopped_at: Completed 20-diagnosis 20-01-PLAN.md
+last_updated: "2026-03-29T00:17:12.760Z"
+last_activity: 2026-03-29
 progress:
   total_phases: 2
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  completed_phases: 1
+  total_plans: 2
+  completed_plans: 2
   percent: 0
 ---
 
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 
 ## Current Position
 
-Phase: Not started (roadmap complete)
-Plan: —
+Phase: 22
+Plan: Not started
 Status: Ready to plan Phase 21
-Last activity: 2026-03-28 — Roadmap created (Phases 21-22)
+Last activity: 2026-03-29
 
 Progress: [░░░░░░░░░░] 0%
 
