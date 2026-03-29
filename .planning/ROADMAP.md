@@ -72,7 +72,10 @@ See [milestones/v2.4-ROADMAP.md](milestones/v2.4-ROADMAP.md)
   2. After `rightclaw up`, `CronList` confirms a `*/5 * * * *` reconciler job exists in the agent session
   3. rightcron SKILL.md has distinct CHECK and RECONCILE commands — CHECK outputs a structured diff with no side effects, RECONCILE calls CronCreate/CronDelete directly in the main thread
   4. Neither CHECK nor RECONCILE delegates to a background Agent tool at any point
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 21-01-PLAN.md — TDD fix: startup_prompt regression tests + inline bootstrap constant (BOOT-01, BOOT-02)
+- [ ] 21-02-PLAN.md — SKILL.md restructure: CRITICAL guard + CHECK/RECONCILE split + workspace rebuild (RECON-01, RECON-02)
 
 ### Phase 22: End-to-End Verification
 **Goal**: Confirmed working — reconciler job boots, fires, and correctly manages user-defined cron specs
@@ -88,5 +91,5 @@ See [milestones/v2.4-ROADMAP.md](milestones/v2.4-ROADMAP.md)
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 21. Bootstrap Fix + Reconciler Redesign | 0/? | Not started | - |
+| 21. Bootstrap Fix + Reconciler Redesign | 0/2 | Not started | - |
 | 22. End-to-End Verification | 0/1 | Not started | - |
