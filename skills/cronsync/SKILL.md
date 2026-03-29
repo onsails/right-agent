@@ -29,6 +29,7 @@ On EVERY session start, regardless of whether `crons/` exists:
    - Schedule: `*/5 * * * *` (every 5 minutes)
    - Prompt: `Run /rightcron reconcile` (this triggers the reconciliation algorithm below)
    - This job is session-scoped (auto-expires after 3 days) but RightCron re-creates it on every startup
+   > Call CronCreate directly in this turn — do NOT use the Agent tool.
 3. **Run initial reconciliation** — execute the reconciliation algorithm (Steps 1-6) to recover any persisted jobs from `crons/*.yaml`
 4. Report silently — do NOT message the user about bootstrap unless there were recovered jobs
 
@@ -89,9 +90,18 @@ prompt: "Gather open PRs, failing tests, pending reviews. Post summary to Slack.
 
 ## Reconciliation Algorithm
 
+> **CRITICAL: NEVER use the Agent tool for CronCreate, CronDelete, or CronList calls. These
+> tools are only available in the main conversation thread. Any delegation to a background
+> agent will silently fail — CronCreate will not be found by the background agent's ToolSearch.
+> All cron tool calls MUST happen directly in this conversation turn.**
+
 Run the following steps in order. This algorithm is idempotent -- safe to run multiple times.
 
-### Step 1: Read desired state
+### Step A: Compute diff (CHECK)
+
+Read all inputs and compute what needs to change. No CronCreate or CronDelete calls in this step.
+
+#### Step 1: Read desired state
 
 Read all `crons/*.yaml` files. Parse each into a map keyed by job name (filename without `.yaml`):
 
@@ -104,11 +114,11 @@ desired = {
 
 If `crons/` does not exist or contains no `.yaml` files, report "No cron specs found" and stop.
 
-### Step 2: Read actual state
+#### Step 2: Read actual state
 
-Call `CronList` to get all live cron jobs. This returns job IDs, schedules, and prompts for every active task.
+Call `CronList` to get all live cron jobs. This returns job IDs, schedules, and prompts for every active task. Note: CronList is a READ-ONLY call, allowed in CHECK.
 
-### Step 3: Read tracked state
+#### Step 3: Read tracked state
 
 Read `crons/state.json`. If the file does not exist, start with an empty map `{}`.
 
@@ -134,7 +144,20 @@ The `prompt_hash` is a SHA-256 hash of the full prompt text (including the lock 
 echo -n "<prompt_text>" | sha256sum | awk '{print $1}'
 ```
 
-### Step 4: Reconcile
+#### Diff computation
+
+After reading all three states, compute the diff:
+- **New jobs**: in desired state, not in tracked state
+- **Changed jobs**: in tracked state but schedule or prompt_hash differs from desired state
+- **Unchanged jobs**: in tracked state, values match desired state
+- **Orphaned jobs**: in tracked state, not in desired state
+
+### Step B: Apply changes (RECONCILE)
+
+Based on the diff computed in Step A, make the changes. All CronCreate and CronDelete calls happen
+here, directly in this conversation turn.
+
+#### Step 4: Reconcile
 
 **Check task count first.** Before creating any new jobs, count existing tasks from CronList. Claude Code has a hard limit of 50 tasks per session. If the total (existing + new) would exceed 50, warn the user and stop.
 
@@ -166,11 +189,11 @@ For each entry in **tracked state** NOT in desired state:
    - Remove the entry from state.json
    - Delete the lock file at `crons/.locks/<name>.json` if it exists
 
-### Step 5: Write updated state.json
+#### Step 5: Write updated state.json
 
 Write the reconciled state map back to `crons/state.json` as formatted JSON.
 
-### Step 6: Report
+#### Step 6: Report
 
 Summarize the actions taken:
 
