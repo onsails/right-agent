@@ -390,3 +390,25 @@ fn wrapper_env_empty_value() {
         "expected export EMPTY='' in:\n{output}"
     );
 }
+
+// Phase 21: startup_prompt regression tests (D-01)
+
+#[test]
+fn startup_prompt_does_not_use_agent_tool() {
+    let agent = make_agent("testbot", None);
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+    assert!(
+        !output.contains("Agent tool"),
+        "startup_prompt must NOT delegate to Agent tool:\n{output}"
+    );
+}
+
+#[test]
+fn startup_prompt_invokes_rightcron() {
+    let agent = make_agent("testbot", None);
+    let output = generate_wrapper(&agent, DUMMY_PROMPT_PATH, None).unwrap();
+    assert!(
+        output.contains("/rightcron"),
+        "startup_prompt must invoke /rightcron:\n{output}"
+    );
+}
