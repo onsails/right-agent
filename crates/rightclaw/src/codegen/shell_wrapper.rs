@@ -51,7 +51,7 @@ pub fn generate_wrapper(
         .collect();
 
     // Startup prompt — executed as first message (positional arg, stays interactive).
-    let startup_prompt = "Use the Agent tool to run this in the background: Run /rightcron to bootstrap the cron reconciler. Create crons/ directory if missing, schedule the reconciler job, and recover any persisted cron specs. Do this silently without messaging the user. IMPORTANT: run this as a background agent so the main thread stays free for incoming messages.";
+    let startup_prompt = "Run /rightcron to bootstrap the cron reconciler. Create crons/ directory if missing, schedule the reconciler job, and recover any persisted cron specs. Do this silently without messaging the user.";
 
     tmpl.render(context! {
         agent_name => agent.name,
