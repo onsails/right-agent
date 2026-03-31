@@ -2,6 +2,7 @@ use std::path::Path;
 
 const DEFAULT_IDENTITY: &str = include_str!("../../../templates/right/IDENTITY.md");
 const DEFAULT_SOUL: &str = include_str!("../../../templates/right/SOUL.md");
+const DEFAULT_USER: &str = include_str!("../../../templates/right/USER.md");
 const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/AGENTS.md");
 const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/BOOTSTRAP.md");
 const DEFAULT_AGENT_YAML: &str = include_str!("../../../templates/right/agent.yaml");
@@ -41,6 +42,7 @@ pub fn init_rightclaw_home(
     let files: &[(&str, &str)] = &[
         ("IDENTITY.md", DEFAULT_IDENTITY),
         ("SOUL.md", DEFAULT_SOUL),
+        ("USER.md", DEFAULT_USER),
         ("AGENTS.md", DEFAULT_AGENTS),
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
         ("agent.yaml", DEFAULT_AGENT_YAML),
@@ -174,6 +176,7 @@ pub fn init_rightclaw_home(
     println!("Created RightClaw home at {}", home.display());
     println!("  agents/right/IDENTITY.md");
     println!("  agents/right/SOUL.md");
+    println!("  agents/right/USER.md");
     println!("  agents/right/AGENTS.md");
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/agent.yaml");
@@ -243,6 +246,7 @@ mod tests {
         let agents_dir = dir.path().join("agents").join("right");
         assert!(agents_dir.join("IDENTITY.md").exists());
         assert!(agents_dir.join("SOUL.md").exists());
+        assert!(agents_dir.join("USER.md").exists(), "USER.md should be created");
         assert!(agents_dir.join("AGENTS.md").exists());
         assert!(!agents_dir.join("policy.yaml").exists(), "policy.yaml should NOT be created");
         assert!(
