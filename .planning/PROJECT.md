@@ -8,6 +8,17 @@ RightClaw is a multi-agent runtime for Claude Code. Each agent runs as an indepe
 
 Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, each with its own sandbox configuration and identity, orchestrated by a single CLI command.
 
+## Current Milestone: v3.0 Teloxide Bot Runtime
+
+**Goal:** Заменить Claude Code channels на per-agent Rust Telegram бот (teloxide), перенести крон в Rust runtime, и дать каждому агенту полный контроль над system prompt.
+
+**Target features:**
+- Per-agent teloxide бот процесс управляется через process-compose
+- Telegram threads → независимые Claude сессии (thread_id → session_uuid в memory.db)
+- `claude -p --session-id / --resume` для stateless взаимодействия с continuity
+- System prompt compose из SOUL.md + USER.md + AGENTS.md → `agent/.claude/system-prompt.txt`
+- Cron runtime в Rust (tokio task + file watcher), cronsync SKILL.md только для управления файлами
+
 ## Requirements
 
 ### Validated
@@ -65,7 +76,12 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 ### Active
 
-(No active requirements — next milestone will define new ones via `/gsd:new-milestone`)
+- [ ] Per-agent teloxide Telegram bot process (replaces Claude Code channels)
+- [ ] Thread → session mapping in memory.db (new `telegram_sessions` table)
+- [ ] `claude -p --session-id / --resume` session continuity per Telegram thread
+- [ ] System prompt composition from SOUL.md + USER.md + AGENTS.md on `rightclaw up`
+- [ ] Cron scheduling/execution in Rust runtime (tokio task, file watcher)
+- [ ] Cronsync SKILL.md reduced to file management only (create/edit/delete YAML specs)
 
 ### Out of Scope
 
@@ -154,4 +170,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Tech debt: git absence warning in `verify_dependencies()` but not surfaced by `rightclaw doctor`
 
 ---
-*Last updated: 2026-03-31 after v2.5 milestone — RightCron bootstrap fix + reconciler redesign shipped*
+*Last updated: 2026-03-31 — Milestone v3.0 started: Teloxide Bot Runtime*

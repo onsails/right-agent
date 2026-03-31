@@ -1,8 +1,8 @@
 ---
 gsd_state_version: 1.0
-milestone: null
-milestone_name: null
-status: between_milestones
+milestone: "v3.0"
+milestone_name: "Teloxide Bot Runtime"
+status: defining_requirements
 stopped_at: null
 last_updated: "2026-03-31"
 last_activity: 2026-03-31
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-03-31)
 
 ## Current Position
 
-Phase: None
-Plan: None
-Status: Between milestones (v2.5 shipped 2026-03-31)
-Last activity: 2026-03-31
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-03-31 — Milestone v3.0 started
 
 ## Accumulated Context
 
