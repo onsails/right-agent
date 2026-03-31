@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: "v3.0"
-milestone_name: "Teloxide Bot Runtime"
-status: ready_to_plan
-stopped_at: null
-last_updated: "2026-03-31"
+milestone: v3.0
+milestone_name: Teloxide Bot Runtime
+status: verifying
+stopped_at: Completed 22-01-PLAN.md
+last_updated: "2026-03-31T19:25:38.996Z"
 last_activity: 2026-03-31
 progress:
   total_phases: 7
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
   percent: 0
 ---
 
@@ -21,20 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-31)
 
 **Core value:** Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 22 — DB Schema (v3.0 start)
+**Current focus:** Phase 22 — db-schema
 
 ## Current Position
 
-Phase: 22 of 28 (DB Schema)
-Plan: — (not yet planned)
-Status: Ready to plan
-Last activity: 2026-03-31 — Roadmap created for v3.0 Teloxide Bot Runtime
+Phase: 22 (db-schema) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-03-31
 
 Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 0 (this milestone)
 - Average duration: —
 - Total execution time: —
@@ -47,6 +48,8 @@ Progress: [░░░░░░░░░░] 0%
 
 ## Accumulated Context
 
+| Phase 22-db-schema P01 | 2 | 2 tasks | 3 files |
+
 ### Decisions
 
 Decisions are logged in PROJECT.md Key Decisions table.
@@ -56,6 +59,9 @@ Recent decisions affecting current work:
 - v2.5: CRITICAL guard + CHECK/RECONCILE split in cronsync SKILL.md
 - v3.0: Replace CC channels entirely — no parallel Telegram infrastructure; atomic cutover in Phase 26
 - v3.0: Per-session mpsc queue is architectural requirement (not optimization) — CC session JSONL corruption if concurrent
+- [Phase 22-db-schema]: root_session_id is NOT NULL TEXT — stores first-call session UUID only; Phase 25 CRUD must never UPDATE this on resume (CC bug #8069)
+- [Phase 22-db-schema]: thread_id INT NOT NULL DEFAULT 0 — application-layer normalization only, no CHECK constraint
+- [Phase 22-db-schema]: last_used_at bare TEXT with no DEFAULT and no NOT NULL — NULL means created-but-never-resumed
 
 ### Pending Todos
 
@@ -78,6 +84,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-03-31
-Stopped at: v3.0 roadmap created — ready to plan Phase 22
+Last session: 2026-03-31T19:25:38.993Z
+Stopped at: Completed 22-01-PLAN.md
 Resume file: None

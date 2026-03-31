@@ -66,7 +66,7 @@ See [milestones/v2.5-ROADMAP.md](milestones/v2.5-ROADMAP.md)
 
 **Milestone Goal:** Replace Claude Code Telegram channels with a per-agent Rust teloxide bot, move cron execution into a Rust runtime, and give each agent full control over its system prompt.
 
-- [ ] **Phase 22: DB Schema** - Add telegram_sessions V2 migration to memory.db
+- [x] **Phase 22: DB Schema** - Add telegram_sessions V2 migration to memory.db (completed 2026-03-31)
 - [ ] **Phase 23: Bot Skeleton** - rightclaw bot subcommand with env loading, DB open, and no-op teloxide dispatcher
 - [ ] **Phase 24: System Prompt Codegen** - Compose SOUL.md + USER.md + AGENTS.md into system-prompt.txt on rightclaw up; remove shell wrapper codegen
 - [ ] **Phase 25: Telegram Handler + CC Dispatch** - Full message dispatch loop with session continuity, per-thread mpsc queue, and CC subprocess invocation
@@ -88,7 +88,7 @@ See [milestones/v2.5-ROADMAP.md](milestones/v2.5-ROADMAP.md)
 **Plans**: 1 plan
 
 Plans:
-- [ ] 22-01-PLAN.md — V2 migration: SQL file + migrations.rs registration + tests (TDD)
+- [x] 22-01-PLAN.md — V2 migration: SQL file + migrations.rs registration + tests (TDD)
 
 ### Phase 23: Bot Skeleton
 **Goal**: rightclaw bot --agent runs as a process, reads agent config, and starts a teloxide dispatcher (even with no-op handlers)
@@ -165,7 +165,7 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 22. DB Schema | v3.0 | 0/1 | Not started | - |
+| 22. DB Schema | v3.0 | 1/1 | Complete   | 2026-03-31 |
 | 23. Bot Skeleton | v3.0 | 0/? | Not started | - |
 | 24. System Prompt Codegen | v3.0 | 0/? | Not started | - |
 | 25. Telegram Handler + CC Dispatch | v3.0 | 0/? | Not started | - |

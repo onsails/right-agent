@@ -17,7 +17,7 @@
 
 ## SESSION — Conversation Session Management
 
-- [ ] **SES-01**: `telegram_sessions` V2 migration added to memory.db: `(chat_id INT, thread_id INT NOT NULL DEFAULT 0, root_session_id TEXT NOT NULL, created_at, last_used_at, UNIQUE(chat_id, thread_id))`
+- [x] **SES-01**: `telegram_sessions` V2 migration added to memory.db: `(chat_id INT, thread_id INT NOT NULL DEFAULT 0, root_session_id TEXT NOT NULL, created_at, last_used_at, UNIQUE(chat_id, thread_id))`
 - [ ] **SES-02**: First message in a thread: bot generates a UUID, runs `claude -p --session-id <uuid>`, stores `(chat_id, effective_thread_id) → uuid` in telegram_sessions
 - [ ] **SES-03**: Subsequent messages: bot runs `claude -p --resume <root_session_id>` — root_session_id is NEVER updated on resume (guards against CC bug #8069)
 - [ ] **SES-04**: `effective_thread_id()` helper normalises Telegram General topic: `thread_id = Some(1)` → `0`; this normalised value is used for both session keying and reply routing
@@ -86,7 +86,7 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| SES-01 | Phase 22 | Pending |
+| SES-01 | Phase 22 | Complete |
 | BOT-01 | Phase 23 | Pending |
 | BOT-03 | Phase 23 | Pending |
 | BOT-04 | Phase 23 | Pending |
