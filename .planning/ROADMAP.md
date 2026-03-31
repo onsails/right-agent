@@ -115,7 +115,12 @@ Plans:
   1. `rightclaw up` writes `agent_dir/.claude/system-prompt.txt` by concatenating whichever of SOUL.md, USER.md, AGENTS.md exist; absent files are skipped without error
   2. Shell wrapper files are no longer written to disk on `rightclaw up`; codegen/shell_wrapper.rs is removed from the codebase
   3. claude -p invocations pass `--system-prompt-file agent_dir/.claude/system-prompt.txt` on first-message calls
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 24-01-PLAN.md — Rewrite generate_system_prompt, delete shell_wrapper, remove start_prompt field (Wave 1)
+- [ ] 24-02-PLAN.md — Update cmd_up loop and cmd_replay call site in main.rs (Wave 2)
+- [ ] 24-03-PLAN.md — Create USER.md template, update AGENTS.md, update init.rs (Wave 1, parallel with 24-01)
 
 ### Phase 25: Telegram Handler + CC Dispatch
 **Goal**: Bot receives Telegram messages, maps them to Claude sessions, invokes claude -p serially per thread, and replies correctly
@@ -172,7 +177,7 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 |-------|-----------|----------------|--------|-----------|
 | 22. DB Schema | v3.0 | 1/1 | Complete   | 2026-03-31 |
 | 23. Bot Skeleton | v3.0 | 3/3 | Complete    | 2026-03-31 |
-| 24. System Prompt Codegen | v3.0 | 0/? | Not started | - |
+| 24. System Prompt Codegen | v3.0 | 0/3 | Not started | - |
 | 25. Telegram Handler + CC Dispatch | v3.0 | 0/? | Not started | - |
 | 26. PC Cutover | v3.0 | 0/? | Not started | - |
 | 27. Cron Runtime | v3.0 | 0/? | Not started | - |
