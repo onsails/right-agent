@@ -135,6 +135,12 @@ pub enum Commands {
     },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
+    /// Run the per-agent Telegram bot (long-polling, teloxide)
+    Bot {
+        /// Agent name (resolves to $RIGHTCLAW_HOME/agents/<name>/)
+        #[arg(long)]
+        agent: String,
+    },
 }
 
 #[tokio::main]
@@ -197,6 +203,13 @@ async fn main() -> miette::Result<()> {
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
+        Commands::Bot { agent } => {
+            rightclaw_bot::run(rightclaw_bot::BotArgs {
+                agent,
+                home: cli.home,
+            })
+            .await
+        }
     }
 }
 
