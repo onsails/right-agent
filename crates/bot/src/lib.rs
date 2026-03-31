@@ -16,12 +16,12 @@ pub struct BotArgs {
 ///
 /// Resolves agent directory, opens memory.db, resolves token, and starts
 /// the teloxide long-polling dispatcher with graceful shutdown wiring.
-pub fn run(args: BotArgs) -> miette::Result<()> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| miette::miette!("tokio runtime: {e}"))?
-        .block_on(run_async(args))
+///
+/// This is an async function. The caller (rightclaw-cli) runs inside a
+/// `#[tokio::main]` runtime and simply `.await`s this call. No nested
+/// runtime construction needed.
+pub async fn run(args: BotArgs) -> miette::Result<()> {
+    run_async(args).await
 }
 
 async fn run_async(args: BotArgs) -> miette::Result<()> {
