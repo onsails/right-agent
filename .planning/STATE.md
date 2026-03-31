@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: "v3.0"
 milestone_name: "Teloxide Bot Runtime"
-status: defining_requirements
+status: ready_to_plan
 stopped_at: null
 last_updated: "2026-03-31"
 last_activity: 2026-03-31
 progress:
-  total_phases: 0
+  total_phases: 7
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -21,33 +21,53 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-31)
 
 **Core value:** Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Between milestones — v2.5 shipped, next milestone TBD
+**Current focus:** Phase 22 — DB Schema (v3.0 start)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-03-31 — Milestone v3.0 started
+Phase: 22 of 28 (DB Schema)
+Plan: — (not yet planned)
+Status: Ready to plan
+Last activity: 2026-03-31 — Roadmap created for v3.0 Teloxide Bot Runtime
+
+Progress: [░░░░░░░░░░] 0%
+
+## Performance Metrics
+
+**Velocity:**
+- Total plans completed: 0 (this milestone)
+- Average duration: —
+- Total execution time: —
+
+**By Phase:**
+
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| - | - | - | - |
 
 ## Accumulated Context
 
 ### Decisions
 
 Decisions are logged in PROJECT.md Key Decisions table.
+Recent decisions affecting current work:
 
-### Roadmap Evolution
-
-- v1.0 through v2.5 shipped (Phases 1-22)
-- Next milestone will be defined via `/gsd:new-milestone`
+- v2.5: Inline bootstrap on main thread (CronCreate is main-thread-only)
+- v2.5: CRITICAL guard + CHECK/RECONCILE split in cronsync SKILL.md
+- v3.0: Replace CC channels entirely — no parallel Telegram infrastructure; atomic cutover in Phase 26
+- v3.0: Per-session mpsc queue is architectural requirement (not optimization) — CC session JSONL corruption if concurrent
 
 ### Pending Todos
 
 - Document CC gotcha: Telegram messages dropped during streaming
+- Validate `--resume` behavior on deployed CC binary before Phase 25 (CC bug #1967 regression status MEDIUM confidence)
+- Validate CacheMe<Throttle<Bot>> ordering mitigation experimentally before Phase 25 ships
 
 ### Blockers/Concerns
 
 - OAuth broken under HOME override on Linux — ANTHROPIC_API_KEY required for headless (carry-over)
+- CC bug #8069 (resume returns new session_id): schema MUST store only root_session_id, never update on resume — must be validated in Phase 22
+- CC bug #16103 (--resume ignores CLAUDE_CONFIG_DIR): HOME=$AGENT_DIR isolation is the only correct approach
 
 ### Quick Tasks Completed
 
@@ -59,5 +79,5 @@ Decisions are logged in PROJECT.md Key Decisions table.
 ## Session Continuity
 
 Last session: 2026-03-31
-Stopped at: Milestone v2.5 completed
+Stopped at: v3.0 roadmap created — ready to plan Phase 22
 Resume file: None
