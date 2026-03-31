@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
 status: verifying
-stopped_at: Completed 23-02-PLAN.md
-last_updated: "2026-03-31T21:19:22.702Z"
-last_activity: 2026-03-27
+stopped_at: Completed 23-03-PLAN.md
+last_updated: "2026-03-31T21:30:00.000Z"
+last_activity: 2026-03-31
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 4
-  completed_plans: 3
-  percent: 0
+  completed_plans: 4
+  percent: 14
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 
 ## Current Position
 
-Phase: 19
-Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-03-27
+Phase: 23
+Plan: 03 (complete)
+Status: Phase 23 complete — all plans done
+Last activity: 2026-03-31
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [█░░░░░░░░░] 14%
 
 ## Performance Metrics
 
@@ -85,6 +85,7 @@ Recent decisions relevant to v2.3:
 - [Phase 23-bot-skeleton]: allowed_chat_ids: Vec<i64> uses serde(default) — empty vec is secure default (blocks all messages), not Option
 - [Phase 23-bot-skeleton]: teloxide features=[macros, throttle, cache-me] — default-features=false to avoid ctrlc_handler (Phase 23 owns signal handling)
 - [Phase 23-bot-skeleton]: AgentConfig no Default impl — parse_agent_config None uses explicit struct literal fallback
+- [Phase 23-03]: bot::run() converted to pub async fn — avoids nested tokio runtime collision with #[tokio::main] CLI main; callers .await it directly
 
 ### Roadmap Evolution
 
