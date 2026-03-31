@@ -86,10 +86,38 @@
 
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
-| BOT-01..06 | TBD | — |
-| SES-01..06 | TBD | — |
-| DIS-01..06 | TBD | — |
-| PROMPT-01..03 | TBD | — |
-| PC-01..05 | TBD | — |
-| CRON-01..06 | TBD | — |
-| SKILL-01..03 | TBD | — |
+| SES-01 | Phase 22 | Pending |
+| BOT-01 | Phase 23 | Pending |
+| BOT-03 | Phase 23 | Pending |
+| BOT-04 | Phase 23 | Pending |
+| BOT-05 | Phase 23 | Pending |
+| PROMPT-01 | Phase 24 | Pending |
+| PROMPT-02 | Phase 24 | Pending |
+| PROMPT-03 | Phase 24 | Pending |
+| BOT-02 | Phase 25 | Pending |
+| BOT-06 | Phase 25 | Pending |
+| SES-02 | Phase 25 | Pending |
+| SES-03 | Phase 25 | Pending |
+| SES-04 | Phase 25 | Pending |
+| SES-05 | Phase 25 | Pending |
+| SES-06 | Phase 25 | Pending |
+| DIS-01 | Phase 25 | Pending |
+| DIS-02 | Phase 25 | Pending |
+| DIS-03 | Phase 25 | Pending |
+| DIS-04 | Phase 25 | Pending |
+| DIS-05 | Phase 25 | Pending |
+| DIS-06 | Phase 25 | Pending |
+| PC-01 | Phase 26 | Pending |
+| PC-02 | Phase 26 | Pending |
+| PC-03 | Phase 26 | Pending |
+| PC-04 | Phase 26 | Pending |
+| PC-05 | Phase 26 | Pending |
+| CRON-01 | Phase 27 | Pending |
+| CRON-02 | Phase 27 | Pending |
+| CRON-03 | Phase 27 | Pending |
+| CRON-04 | Phase 27 | Pending |
+| CRON-05 | Phase 27 | Pending |
+| CRON-06 | Phase 27 | Pending |
+| SKILL-01 | Phase 28 | Pending |
+| SKILL-02 | Phase 28 | Pending |
+| SKILL-03 | Phase 28 | Pending |
