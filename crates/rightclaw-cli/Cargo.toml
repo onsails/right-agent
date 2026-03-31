@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 rightclaw = { path = "../rightclaw" }
+rightclaw-bot = { path = "../bot" }
 clap = { workspace = true }
 dirs = { workspace = true }
 miette = { workspace = true }
