@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v2.3
-milestone_name: Memory System
+milestone: v1.0
+milestone_name: milestone
 status: verifying
-stopped_at: Completed 19-home-isolation-hardening-01-PLAN.md
-last_updated: "2026-03-27T12:39:44.319Z"
+stopped_at: Completed 23-01-PLAN.md
+last_updated: "2026-03-31T21:11:20.273Z"
 last_activity: 2026-03-27
 progress:
-  total_phases: 4
-  completed_phases: 4
-  total_plans: 9
-  completed_plans: 9
+  total_phases: 18
+  completed_phases: 17
+  total_plans: 30
+  completed_plans: 31
   percent: 0
 ---
 
@@ -51,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 18-cli-inspection P01 | 4 | 2 tasks | 3 files |
 | Phase 18-cli-inspection P02 | 3 | 2 tasks | 1 files |
 | Phase 19-home-isolation-hardening P01 | 7 | 2 tasks | 15 files |
+| Phase 23-bot-skeleton P01 | 12 | 1 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,7 @@ Recent decisions relevant to v2.3:
 - [Phase 18-cli-inspection]: resolve_agent_db centralizes agent-dir and memory.db validation for all cmd_memory_* functions
 - [Phase 19-home-isolation-hardening]: Telegram detection reads agent.config.telegram_token/telegram_token_file; mcp_config_path removed as unreliable proxy
 - [Phase 19-home-isolation-hardening]: generate_mcp_config gains agent_name param; RC_AGENT_NAME injected into rightmemory env section for memory provenance
+- [Phase 23-bot-skeleton]: allowed_chat_ids: Vec<i64> uses serde(default) — empty vec is secure default (blocks all messages), not Option
 
 ### Roadmap Evolution
 
@@ -103,6 +105,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-27T11:16:48.317Z
-Stopped at: Completed 19-home-isolation-hardening-01-PLAN.md
+Last session: 2026-03-31T21:11:20.270Z
+Stopped at: Completed 23-01-PLAN.md
 Resume file: None
