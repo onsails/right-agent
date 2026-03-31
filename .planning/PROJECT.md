@@ -73,13 +73,14 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ Fresh-init UAT: 7 test cases validated end-to-end — v2.3 Phase 19 (HOME-06)
 - ✓ `startup_prompt` runs rightcron inline on main thread without Agent tool delegation — v2.5 Phase 21 (BOOT-01, BOOT-02)
 - ✓ cronsync SKILL.md CHECK/RECONCILE split with CRITICAL guard against Agent tool delegation — v2.5 Phase 21 (RECON-01, RECON-02)
+- ✓ `generate_system_prompt` replaces combined-prompt + shell-wrapper pipeline; writes IDENTITY→SOUL→USER→AGENTS concat to `agent/.claude/system-prompt.txt`; `start_prompt` removed from `AgentConfig`; `USER.md` template + AGENTS.md operational guidance delivered — v3.0 Phase 24 (PROMPT-01..03)
 
 ### Active
 
 - [ ] Per-agent teloxide Telegram bot process (replaces Claude Code channels)
 - [ ] Thread → session mapping in memory.db (new `telegram_sessions` table)
 - [ ] `claude -p --session-id / --resume` session continuity per Telegram thread
-- [ ] System prompt composition from SOUL.md + USER.md + AGENTS.md on `rightclaw up`
+- ~~System prompt composition from SOUL.md + USER.md + AGENTS.md on `rightclaw up`~~ — Validated in Phase 24
 - [ ] Cron scheduling/execution in Rust runtime (tokio task, file watcher)
 - [ ] Cronsync SKILL.md reduced to file management only (create/edit/delete YAML specs)
 
