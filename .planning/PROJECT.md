@@ -60,6 +60,8 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ Plugin symlink `agent/.claude/plugins → ~/.claude/plugins` for HOME-isolated agents — v2.3 Phase 19
 - ✓ `rightclaw init --telegram-token` writes to agent-level `.claude/channels/telegram/` + records `telegram_token_file` in agent.yaml — v2.3 Phase 19
 - ✓ Fresh-init UAT: 7 test cases validated end-to-end — v2.3 Phase 19 (HOME-06)
+- ✓ `startup_prompt` runs rightcron inline on main thread without Agent tool delegation — v2.5 Phase 21 (BOOT-01, BOOT-02)
+- ✓ cronsync SKILL.md CHECK/RECONCILE split with CRITICAL guard against Agent tool delegation — v2.5 Phase 21 (RECON-01, RECON-02)
 
 ### Active
 
@@ -110,6 +112,8 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 | System-level tool (~/.rightclaw/) | No project-path argument, agents are global | ✓ Good |
 | Agent dir as cwd | CC reads SOUL.md/AGENTS.md naturally from cwd | ✓ Good |
 | Generated system prompt for CronSync | Non-editable, regenerated on each `up` | ✓ Good |
+| Inline bootstrap on main thread (v2.5) | CronCreate is main-thread-only; subagents can't call it | ✓ Good |
+| CRITICAL guard + CHECK/RECONCILE split (v2.5) | Structural prevention of Agent tool delegation in reconciler | ✓ Good |
 
 ## Evolution
 
@@ -130,33 +134,24 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v2.4 shipped** (2026-03-28). Telegram freeze diagnosed — CC's `iv6`/`M6()` event loop gap causes channel notifications to stall in `hz` after SubagentStop. socat hypothesis eliminated via live process topology. Root cause documented in DIAGNOSIS.md. Fix deferred pending CC upstream fix; SEED-011 tracks workaround. [Full archive](milestones/v2.4-ROADMAP.md)
-
-**v2.3 shipped** (2026-03-27). Memory System milestone complete — per-agent SQLite memory (WAL, FTS5, append-only audit), MCP server with store/recall/search/forget, CLI inspection commands, HOME isolation hardening with Telegram fixes and fresh-init UAT. 4 phases, 9 plans, 23 requirements satisfied.
-
-**v2.2 shipped** (2026-03-26). Skills Registry complete — ClawHub removed, `/rightskills` (skills.sh) installed as built-in, per-agent env var injection via `agent.yaml`, CC-native policy gate with BLOCK/WARN two-tier checking, `/skill-doctor` audit command. 18/18 requirements satisfied across 5 phases. [Full archive](milestones/v2.2-ROADMAP.md)
+**v2.5 shipped** (2026-03-31). RightCron Reliability — fixed startup_prompt Agent tool delegation (bootstrap now runs inline on main thread with CronCreate access), restructured cronsync SKILL.md with CRITICAL guard and CHECK/RECONCILE phase split. Phase 22 (E2E verification) cancelled — user chose new milestone approach. [Full archive](milestones/v2.5-ROADMAP.md)
 
 **Shipped versions:**
 - v1.0 (2026-03-23): Core runtime — CLI, process-compose, OpenShell sandbox, Telegram, skills, RightCron
-- v2.0 (2026-03-24): Native sandbox — replaced OpenShell with CC sandbox (bubblewrap/Seatbelt), per-agent settings.json, SandboxOverrides in agent.yaml, doctor AppArmor smoke test
-- v2.1 (2026-03-25): Headless agent isolation — per-agent HOME override + credential symlinks + git/SSH forwarding, pre-populated .claude/ scaffold (settings.json, settings.local.json, skills/), git init, Telegram channel copy, managed-settings doctor check
-- v2.2 (2026-03-26): Skills registry — ClawHub removed, `/rightskills` (skills.sh) as built-in, per-agent env var injection, CC-native policy gate, `/skill-doctor` command
+- v2.0 (2026-03-24): Native sandbox — replaced OpenShell with CC sandbox (bubblewrap/Seatbelt)
+- v2.1 (2026-03-25): Headless agent isolation — per-agent HOME override + credential symlinks
+- v2.2 (2026-03-26): Skills registry — ClawHub removed, `/rightskills` (skills.sh) as built-in
+- v2.3 (2026-03-27): Memory system — per-agent SQLite, MCP server, CLI inspection
+- v2.4 (2026-03-28): Telegram diagnosis — iv6/M6 gap identified, fix deferred to CC upstream
+- v2.5 (2026-03-31): RightCron reliability — inline bootstrap + CHECK/RECONCILE skill redesign
 
 **Known limitations:**
 - SEED-002: BOOTSTRAP.md onboarding doesn't trigger via Telegram
-- SEED-011: CC channels bug (iv6/M6 gap) — Telegram stops responding after SubagentStop; fix documented in Phase 20 DIAGNOSIS.md, waiting for CC upstream fix
-- `rightclaw restart` status unknown — changed `is_tty` to `is_interactive` (correct field name); restart may now work
+- SEED-011: CC channels bug (iv6/M6 gap) — Telegram stops responding after SubagentStop; waiting for CC upstream fix
+- VER-01 (rightcron E2E verification) not yet validated — cancelled from v2.5, may be addressed in next milestone
+- `rightclaw restart` status unknown — changed `is_tty` to `is_interactive`; restart may now work
 - `test_status_no_running_instance` integration test fails (pre-existing)
-- Tech debt: git absence warning in `verify_dependencies()` (called by `rightclaw up`) but not surfaced by `rightclaw doctor`
-
-## Current Milestone: v2.5 RightCron Reliability
-
-**Goal:** Make rightcron's cron reconciler actually work — fix the bootstrap so it can create the reconciler job, and redesign the skill so reconciliation is deterministic regardless of context.
-
-**Target features:**
-- `startup_prompt` fix in `shell_wrapper.rs`: remove Agent tool delegation so bootstrap runs inline with CronCreate access
-- rightcron `SKILL.md` redesign: split reconciler into CHECK (lightweight, read-only diff output) + RECONCILE (main thread CronCreate/CronDelete calls)
-- End-to-end verification: bootstrap creates reconciler job, cron fires every 5 min, user jobs managed correctly
+- Tech debt: git absence warning in `verify_dependencies()` but not surfaced by `rightclaw doctor`
 
 ---
-*Last updated: 2026-03-29 after Phase 21 — startup_prompt fix + SKILL.md CHECK/RECONCILE redesign shipped*
+*Last updated: 2026-03-31 after v2.5 milestone — RightCron bootstrap fix + reconciler redesign shipped*
