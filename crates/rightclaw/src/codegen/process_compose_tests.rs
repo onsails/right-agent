@@ -8,7 +8,6 @@ fn make_agent(name: &str, restart: RestartPolicy) -> AgentDef {
         restart,
         max_restarts: 5,
         backoff_seconds: 10,
-        start_prompt: Some("Go".to_owned()),
         model: None,
         sandbox: None,
         telegram_token_file: None,

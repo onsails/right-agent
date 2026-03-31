@@ -71,7 +71,6 @@ pub fn init_rightclaw_home(
             restart: crate::agent::RestartPolicy::OnFailure,
             max_restarts: 3,
             backoff_seconds: 5,
-            start_prompt: None,
             model: None,
             sandbox: None,
             telegram_token: Some(tok.to_string()),

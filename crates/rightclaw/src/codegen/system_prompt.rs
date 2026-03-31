@@ -1,57 +1,43 @@
 use crate::agent::AgentDef;
 
-/// Generate a combined system prompt file content for an agent.
+/// Generate a system prompt for an agent by concatenating present identity files.
 ///
-/// Concatenates: identity file content + start prompt + optional RightCron bootstrap.
-/// Claude Code only allows one `--append-system-prompt-file`, so everything
-/// must be merged into a single file.
-pub fn generate_combined_prompt(agent: &AgentDef) -> miette::Result<String> {
-    let identity_content = std::fs::read_to_string(&agent.identity_path)
-        .map_err(|e| miette::miette!("Failed to read {}: {}", agent.identity_path.display(), e))?;
+/// Canonical file order: IDENTITY.md → SOUL.md → USER.md → AGENTS.md.
+/// Absent files (None path or file does not exist) are silently skipped.
+/// IDENTITY.md is treated as required — returns Err if the file cannot be read.
+///
+/// Sections are separated by "\n\n---\n\n".
+/// The caller writes the returned string to `agent_dir/.claude/system-prompt.txt`.
+/// The `.claude/` directory must already exist before calling (created by cmd_up).
+pub fn generate_system_prompt(agent: &AgentDef) -> miette::Result<String> {
+    // IDENTITY.md is required — error if missing or unreadable.
+    let identity_content = std::fs::read_to_string(&agent.identity_path).map_err(|e| {
+        miette::miette!(
+            "failed to read {}: {e}",
+            agent.identity_path.display()
+        )
+    })?;
 
-    let start_prompt = agent
-        .config
-        .as_ref()
-        .and_then(|c| c.start_prompt.as_deref())
-        .unwrap_or("You are starting. Use mcp__rightmemory__store/recall/search/forget to manage persistent memory.");
+    let mut sections = vec![identity_content];
 
-    let mut content = identity_content;
-    content.push_str("\n\n---\n\n## Startup Instructions\n\n");
-
-    // Check for BOOTSTRAP.md — first-run onboarding takes priority
-    let bootstrap_path = agent.path.join("BOOTSTRAP.md");
-    if bootstrap_path.exists() {
-        content.push_str(
-            "**IMPORTANT: First-run onboarding required.**\n\n\
-             Read `BOOTSTRAP.md` in your agent directory and follow its instructions \
-             before doing anything else. The onboarding will ask for the user's name, \
-             personality preferences, and create your identity files. After completing \
-             onboarding, delete BOOTSTRAP.md as instructed.\n\n",
-        );
+    // Optional files: silently skip if path is None or file does not exist on disk.
+    let optional: [Option<&std::path::PathBuf>; 3] = [
+        agent.soul_path.as_ref(),
+        agent.user_path.as_ref(),
+        agent.agents_path.as_ref(),
+    ];
+    for path_opt in optional {
+        if let Some(path) = path_opt {
+            if path.exists() {
+                let content = std::fs::read_to_string(path).map_err(|e| {
+                    miette::miette!("failed to read {}: {e}", path.display())
+                })?;
+                sections.push(content);
+            }
+        }
     }
 
-    content.push_str(start_prompt);
-    content.push('\n');
-
-    // Always communicate via remote channel (Telegram/Discord), not console.
-    content.push_str(
-        "\n## Communication\n\n\
-         You are running as a daemon with no terminal access. \
-         ALWAYS use the remote channel (reply MCP tool) to communicate with the user. \
-         Never output to console — the user cannot see it.\n",
-    );
-
-    // RightCron: startup trigger + routing.
-    content.push_str(
-        "\n## Cron Management (RightCron)\n\n\
-         **On startup:** Run `/rightcron` immediately. It will bootstrap the reconciler \
-         and recover any persisted jobs. Do this before responding to the user.\n\n\
-         **For user requests:** When the user wants to manage cron jobs, scheduled tasks, \
-         or recurring tasks, ALWAYS use the /rightcron skill. NEVER call CronCreate \
-         directly — always write a YAML spec first, then reconcile.\n",
-    );
-
-    Ok(content)
+    Ok(sections.join("\n\n---\n\n"))
 }
 
 #[cfg(test)]
