@@ -68,7 +68,7 @@ See [milestones/v2.5-ROADMAP.md](milestones/v2.5-ROADMAP.md)
 
 - [x] **Phase 22: DB Schema** - Add telegram_sessions V2 migration to memory.db (completed 2026-03-31)
 - [x] **Phase 23: Bot Skeleton** - rightclaw bot subcommand with env loading, DB open, and no-op teloxide dispatcher (completed 2026-03-31)
-- [ ] **Phase 24: System Prompt Codegen** - Compose SOUL.md + USER.md + AGENTS.md into system-prompt.txt on rightclaw up; remove shell wrapper codegen
+- [x] **Phase 24: System Prompt Codegen** - Compose SOUL.md + USER.md + AGENTS.md into system-prompt.txt on rightclaw up; remove shell wrapper codegen (completed 2026-03-31)
 - [ ] **Phase 25: Telegram Handler + CC Dispatch** - Full message dispatch loop with session continuity, per-thread mpsc queue, and CC subprocess invocation
 - [ ] **Phase 26: PC Cutover** - Wire bot into rightclaw up lifecycle; atomic cutover removes CC channels flag and starts teloxide
 - [ ] **Phase 27: Cron Runtime** - tokio cron task loop reading crons/*.yaml and executing claude -p subprocesses
@@ -118,8 +118,8 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 24-01-PLAN.md — Rewrite generate_system_prompt, delete shell_wrapper, remove start_prompt field (Wave 1)
-- [ ] 24-02-PLAN.md — Update cmd_up loop and cmd_replay call site in main.rs (Wave 2)
+- [x] 24-01-PLAN.md — Rewrite generate_system_prompt, delete shell_wrapper, remove start_prompt field (Wave 1)
+- [x] 24-02-PLAN.md — Update cmd_up loop and cmd_replay call site in main.rs (Wave 2)
 - [x] 24-03-PLAN.md — Create USER.md template, update AGENTS.md, update init.rs (Wave 1, parallel with 24-01)
 
 ### Phase 25: Telegram Handler + CC Dispatch
@@ -177,7 +177,7 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 |-------|-----------|----------------|--------|-----------|
 | 22. DB Schema | v3.0 | 1/1 | Complete   | 2026-03-31 |
 | 23. Bot Skeleton | v3.0 | 3/3 | Complete    | 2026-03-31 |
-| 24. System Prompt Codegen | v3.0 | 1/3 | In Progress|  |
+| 24. System Prompt Codegen | v3.0 | 3/3 | Complete   | 2026-03-31 |
 | 25. Telegram Handler + CC Dispatch | v3.0 | 0/? | Not started | - |
 | 26. PC Cutover | v3.0 | 0/? | Not started | - |
 | 27. Cron Runtime | v3.0 | 0/? | Not started | - |

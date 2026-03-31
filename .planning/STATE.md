@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
 status: executing
-stopped_at: Completed 24-system-prompt-codegen-03-PLAN.md
-last_updated: "2026-03-31T22:35:36.044Z"
+stopped_at: Completed 24-system-prompt-codegen-02-PLAN.md
+last_updated: "2026-03-31T22:44:17.370Z"
 last_activity: 2026-03-31
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 7
-  completed_plans: 5
+  completed_plans: 7
   percent: 14
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 ## Current Position
 
 Phase: 24 (system-prompt-codegen) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-03-31
 
@@ -54,6 +54,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 23-bot-skeleton P01 | 12 | 1 tasks | 8 files |
 | Phase 23-bot-skeleton P02 | 4 | 2 tasks | 9 files |
 | Phase 24-system-prompt-codegen P03 | 7 | 2 tasks | 3 files |
+| Phase 24-system-prompt-codegen P02 | 155 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,8 @@ Recent decisions relevant to v2.3:
 - [Phase 23-03]: bot::run() converted to pub async fn — avoids nested tokio runtime collision with #[tokio::main] CLI main; callers .await it directly
 - [Phase 24-system-prompt-codegen]: D-13: USER.md is a minimal placeholder — agent fills it through interaction
 - [Phase 24-system-prompt-codegen]: D-06: Communication and Cron Management sections moved from hardcoded codegen to AGENTS.md template
+- [Phase 24-system-prompt-codegen]: D-10/D-11: cmd_up writes agent_dir/.claude/system-prompt.txt via generate_system_prompt; no run/<agent>-prompt.md or shell wrapper written
+- [Phase 24-system-prompt-codegen]: cmd_pair writes system-prompt.txt itself before exec for standalone correctness
 
 ### Roadmap Evolution
 
@@ -112,6 +115,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-31T22:35:36.041Z
-Stopped at: Completed 24-system-prompt-codegen-03-PLAN.md
+Last session: 2026-03-31T22:44:13.822Z
+Stopped at: Completed 24-system-prompt-codegen-02-PLAN.md
 Resume file: None
