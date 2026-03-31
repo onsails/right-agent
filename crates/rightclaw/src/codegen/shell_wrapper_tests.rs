@@ -15,6 +15,7 @@ fn make_agent(name: &str, start_prompt: Option<&str>) -> AgentDef {
         telegram_token_file: None,
         telegram_token: None,
         telegram_user_id: None,
+        allowed_chat_ids: vec![],
         env: HashMap::new(),
     });
     AgentDef {
@@ -284,6 +285,7 @@ fn make_agent_with_env(name: &str, env: HashMap<String, String>) -> AgentDef {
         telegram_token_file: None,
         telegram_token: None,
         telegram_user_id: None,
+        allowed_chat_ids: vec![],
         env,
     });
     AgentDef {
