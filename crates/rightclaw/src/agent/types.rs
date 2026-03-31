@@ -81,6 +81,12 @@ pub struct AgentConfig {
     #[serde(default)]
     pub telegram_user_id: Option<String>,
 
+    /// Telegram chat IDs permitted to interact with this agent's bot.
+    /// Empty vec = block all incoming messages (secure default). Bot emits
+    /// `tracing::warn!` at startup when empty — see D-05.
+    #[serde(default)]
+    pub allowed_chat_ids: Vec<i64>,
+
     /// Per-agent environment variables injected into the shell wrapper before `exec claude`.
     /// Values are stored as-is (plaintext). Single-quoted in the generated wrapper — no
     /// shell expansion, no host variable forwarding. See D-01 in phase 11 context.
@@ -306,5 +312,37 @@ sandbox:
             err.contains("unknown field"),
             "expected 'unknown field' in error: {err}"
         );
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_deserializes_list() {
+        let yaml = "allowed_chat_ids:\n  - 123456789\n  - -1001234567890";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            config.allowed_chat_ids,
+            vec![123456789_i64, -1001234567890_i64]
+        );
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_defaults_to_empty() {
+        let yaml = "{}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(config.allowed_chat_ids.is_empty());
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_absent_does_not_reject() {
+        let yaml = "restart: never\nmax_restarts: 5";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().allowed_chat_ids.is_empty());
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_negative_values() {
+        let yaml = "allowed_chat_ids:\n  - -100";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.allowed_chat_ids, vec![-100_i64]);
     }
 }

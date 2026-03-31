@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v3.0
-milestone_name: Teloxide Bot Runtime
+milestone: v1.0
+milestone_name: milestone
 status: verifying
-stopped_at: Completed 22-01-PLAN.md
-last_updated: "2026-03-31T19:25:38.996Z"
-last_activity: 2026-03-31
+stopped_at: Completed 23-01-PLAN.md
+last_updated: "2026-03-31T21:11:20.273Z"
+last_activity: 2026-03-27
 progress:
-  total_phases: 7
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  total_phases: 18
+  completed_phases: 17
+  total_plans: 30
+  completed_plans: 31
   percent: 0
 ---
 
@@ -18,62 +18,83 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-31)
+See: .planning/PROJECT.md (updated 2026-03-26)
 
-**Core value:** Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 22 — db-schema
+**Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
+**Current focus:** Phase 18 — cli-inspection
 
 ## Current Position
 
-Phase: 22 (db-schema) — EXECUTING
-Plan: 1 of 1
+Phase: 19
+Plan: Not started
 Status: Phase complete — ready for verification
-Last activity: 2026-03-31
+Last activity: 2026-03-27
 
 Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
-**Velocity:**
-
-- Total plans completed: 0 (this milestone)
-- Average duration: —
-- Total execution time: —
-
-**By Phase:**
+*Carried from v2.2 for reference:*
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| Phase 11 | 2 | ~18min | ~9min |
+| Phase 12 | 1 | — | — |
+| Phase 13 | 1 | — | — |
+| Phase 14 | 1 | — | — |
+| Phase 15 | 1 | — | — |
+| Phase 16-db-foundation P02 | 5 | 2 tasks | 11 files |
+| Phase 16-db-foundation P01 | 3 | 2 tasks | 9 files |
+| Phase 16 P03 | 90 | 2 tasks | 2 files |
+| Phase 17 P01 | 4 | 2 tasks | 5 files |
+| Phase 17 P02 | 455 | 2 tasks | 8 files |
+| Phase 18-cli-inspection P01 | 4 | 2 tasks | 3 files |
+| Phase 18-cli-inspection P02 | 3 | 2 tasks | 1 files |
+| Phase 19-home-isolation-hardening P01 | 7 | 2 tasks | 15 files |
+| Phase 23-bot-skeleton P01 | 12 | 1 tasks | 8 files |
 
 ## Accumulated Context
-
-| Phase 22-db-schema P01 | 2 | 2 tasks | 3 files |
 
 ### Decisions
 
 Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting current work:
+Recent decisions relevant to v2.3:
 
-- v2.5: Inline bootstrap on main thread (CronCreate is main-thread-only)
-- v2.5: CRITICAL guard + CHECK/RECONCILE split in cronsync SKILL.md
-- v3.0: Replace CC channels entirely — no parallel Telegram infrastructure; atomic cutover in Phase 26
-- v3.0: Per-session mpsc queue is architectural requirement (not optimization) — CC session JSONL corruption if concurrent
-- [Phase 22-db-schema]: root_session_id is NOT NULL TEXT — stores first-call session UUID only; Phase 25 CRUD must never UPDATE this on resume (CC bug #8069)
-- [Phase 22-db-schema]: thread_id INT NOT NULL DEFAULT 0 — application-layer normalization only, no CHECK constraint
-- [Phase 22-db-schema]: last_used_at bare TEXT with no DEFAULT and no NOT NULL — NULL means created-but-never-resumed
+- [v2.3 research]: Use rusqlite 0.39 + rusqlite_migration 2.5 (sync-only; tokio-rusqlite rejected)
+- [v2.3 research]: FTS5 virtual table in V1 schema even if skill uses LIKE in v2.3 — avoids costly retrofit
+- [v2.3 research]: memory.db lives in agent root (not .claude/), never referenced by MEMORY.md
+- [v2.3 research]: Injection scanning deferred to Phase 17 with dedicated research before implementation
+- [Phase 16-02]: SEC-02 enforced by removing memory_path from AgentDef struct entirely — no MEMORY.md connection at type level
+- [Phase 16-02]: Task 2 system_prompt default was pre-completed by plan 16-01 (commit e11f9ff)
+- [Phase 16-db-foundation]: rusqlite 0.39 bundled + rusqlite_migration 2.5 for per-agent SQLite memory; WAL mode + FTS5 + ABORT triggers in V1 schema
+- [Phase 16]: sqlite3 check uses inline Warn override pattern — matches RESEARCH.md Pattern 5
+- [Phase 17]: Use str::contains() on lowercased input over 15-pattern list — no regex crate, matches SEC-01 research
+- [Phase 17]: open_connection() returns live Connection for store ops; open_db() retained for cmd_up callers
+- [Phase 17]: Injection guard is first line of store_memory() — structural guarantee cannot be bypassed
+- [Phase 17]: Use ServerInfo::new().with_instructions() — InitializeResult is #[non_exhaustive] in rmcp 1.3
+- [Phase 17]: run_memory_server() returns miette::Result — no anyhow in CLI crate, miette is project standard
+- [Phase 17]: cargo update required before build — rmcp-macros 1.3.0 not in stale local crates.io index
+- [Phase 18-cli-inspection]: list_memories uses ORDER BY created_at DESC, id DESC for deterministic pagination when timestamps tie
+- [Phase 18-cli-inspection]: hard_delete_memory checks existence without deleted_at filter — operators can hard-delete soft-deleted rows
+- [Phase 18-cli-inspection]: search_memories unchanged (LIMIT 50); search_memories_paged is separate function for CLI pagination
+- [Phase 18-cli-inspection]: cmd_memory_delete fetches entry preview via direct SQL including soft-deleted rows — operators see what they are hard-deleting
+- [Phase 18-cli-inspection]: resolve_agent_db centralizes agent-dir and memory.db validation for all cmd_memory_* functions
+- [Phase 19-home-isolation-hardening]: Telegram detection reads agent.config.telegram_token/telegram_token_file; mcp_config_path removed as unreliable proxy
+- [Phase 19-home-isolation-hardening]: generate_mcp_config gains agent_name param; RC_AGENT_NAME injected into rightmemory env section for memory provenance
+- [Phase 23-bot-skeleton]: allowed_chat_ids: Vec<i64> uses serde(default) — empty vec is secure default (blocks all messages), not Option
+
+### Roadmap Evolution
+
+- Phase 19 added: HOME Isolation Hardening — plugin sharing, shell snapshot cleanup, fresh-init UAT
 
 ### Pending Todos
 
-- Document CC gotcha: Telegram messages dropped during streaming
-- Validate `--resume` behavior on deployed CC binary before Phase 25 (CC bug #1967 regression status MEDIUM confidence)
-- Validate CacheMe<Throttle<Bot>> ordering mitigation experimentally before Phase 25 ships
+None yet.
 
 ### Blockers/Concerns
 
-- OAuth broken under HOME override on Linux — ANTHROPIC_API_KEY required for headless (carry-over)
-- CC bug #8069 (resume returns new session_id): schema MUST store only root_session_id, never update on resume — must be validated in Phase 22
-- CC bug #16103 (--resume ignores CLAUDE_CONFIG_DIR): HOME=$AGENT_DIR isolation is the only correct approach
+- Phase 17 (injection scanning): Practical Rust implementation patterns sparse — needs research pass before coding SEC-01
+- OAuth broken under HOME override on Linux -- ANTHROPIC_API_KEY required for headless (carry-over from v2.2)
 
 ### Quick Tasks Completed
 
@@ -84,6 +105,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-03-31T19:25:38.993Z
-Stopped at: Completed 22-01-PLAN.md
+Last session: 2026-03-31T21:11:20.270Z
+Stopped at: Completed 23-01-PLAN.md
 Resume file: None
