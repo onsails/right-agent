@@ -1,48 +1,142 @@
-# Stack Research: v2.3 Memory System
+# Stack Research: v3.0 Teloxide Bot Runtime
 
-**Domain:** Per-agent SQLite-backed persistent memory in Rust async CLI
-**Researched:** 2026-03-26
-**Confidence:** HIGH
+**Domain:** Rust Telegram bot + cron runtime + claude -p session management
+**Researched:** 2026-03-31
+**Confidence:** HIGH (all versions confirmed via crates.io)
 
 ## Scope
 
-Delta-research for the v2.3 Memory System milestone. Covers ONLY the new SQLite memory store capability. Validated v2.2 stack (tokio, serde, reqwest, minijinja, etc.) is not re-evaluated.
+Delta-research for the v3.0 milestone. Covers ONLY the four new capability areas:
+1. teloxide Telegram bot (replaces CC channels)
+2. `claude -p --resume` session management
+3. File watching on `crons/` directory
+4. Cron schedule parsing and execution
+
+Validated existing stack (tokio, serde, reqwest, rusqlite, minijinja, etc.) is NOT re-evaluated.
 
 ---
 
-## Recommended Stack
+## New Dependencies
 
-### Core Technologies
+### 1. Telegram Bot — teloxide
 
-| Technology | Version | Purpose | Why Recommended |
-|------------|---------|---------|-----------------|
-| rusqlite | 0.38 | SQLite driver | The canonical Rust SQLite binding. Thin wrapper over libsqlite3. Zero-overhead, battle-tested, 10M+ downloads. For a single-agent embedded store this is the right primitive — no ORM overhead, raw SQL, full control. SQLx adds async complexity with no SQLite benefit (SQLite is not actually concurrent). |
-| tokio-rusqlite | 0.7 | Async bridge for rusqlite | Runs blocking rusqlite calls on a dedicated background thread via crossbeam channel, exposing async `.call()` / `.call_unwrap()`. Required because the rightclaw CLI is tokio-native; blocking on SQLite in an async task would starve the executor. 100% safe Rust (`#![forbid(unsafe_code)]`). |
-| rusqlite_migration | 2.4 | Schema migrations | Simple, embedded, no CLI required. Uses SQLite `user_version` pragma (single integer at fixed offset) instead of a migration table — faster than any table-based approach. Migrations are SQL strings in Rust code. `to_latest()` is idempotent, safe to call on every startup. Plays well with tokio-rusqlite via `call_unwrap(|conn| MIGRATIONS.to_latest(conn))`. |
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| teloxide | 0.17 | Telegram bot framework | Dominant Rust Telegram bot library. 173K downloads. Long polling is built-in (no webhook infra needed). Handler model is tokio-native filter chains — maps cleanly to "dispatch message to agent session" pattern. Active maintenance: 0.17.0 released July 2025 with Telegram Bot API 9.1 support. Minimum features `["macros"]` — no storage or webhook features needed. |
 
-### Supporting Libraries
+```toml
+teloxide = { version = "0.17", features = ["macros"] }
+```
 
-| Library | Version | Purpose | When to Use |
-|---------|---------|---------|-------------|
-| rusqlite (features = ["bundled"]) | 0.38 | Bundle SQLite 3.51.1 | Use `bundled` feature to embed SQLite into the binary. Eliminates system SQLite version variability across Linux distros and macOS. RightClaw ships as a single binary — bundled is the right call. Adds ~1 MB to binary. |
+**Features to use:** `macros` only. Do NOT enable `sqlite-storage`, `redis-storage`, or `webhooks-axum` — all unnecessary for this use case. Session mapping is in the existing `memory.db` via a new `telegram_sessions` table.
+
+**Long polling pattern:** `Dispatcher::builder(bot, schema).build().dispatch().await` runs the update loop natively on the tokio runtime. Each bot process is a separate process-compose entry, one per agent.
+
+**Breaking changes in 0.17.0 to know about:** `TransactionPartnerUser` restructured with `kind` field, `ChatFullInfoPublicKind::Supergroup` now boxed. Not relevant to basic message handling — these are Telegram API types that don't affect the `Message → text → dispatch to claude` flow.
 
 ---
 
-## Rejected Alternative: sqlx
+### 2. claude -p Session Management
 
-**Do not use sqlx for this milestone.**
+No new Rust crate needed. This is a `std::process::Command` invocation pattern.
 
-sqlx 0.8.6 is the current version. It provides async SQLite via `SqlitePool`. The reasons to reject it here are concrete:
+**Exact flags (verified against official Claude Code docs):**
 
-1. **Conflict hazard.** sqlx and rusqlite both link `libsqlite3-sys`. Using them in the same workspace is a semver hazard requiring pinned versions on both and lockstep upgrades. The workspace already uses rusqlite (transitively through other crates or directly — confirm before adding sqlx).
+```bash
+# First invocation — capture session ID
+claude -p "prompt" \
+  --output-format json \
+  --append-system-prompt-file /path/to/system-prompt.txt \
+  --allowedTools "Bash,Read,Edit,Write" \
+  | jq -r '.session_id'
 
-2. **Compile-time query checking requires a live database or offline `.sqlx/` cache checked into git.** For a per-agent database at `~/.rightclaw/agents/<name>/memory.db`, the path is runtime-dynamic. The `query!()` macro's safety benefit evaporates — you'd use `query()` (dynamic) anyway.
+# Resume session
+claude -p "follow-up prompt" \
+  --resume "$session_id" \
+  --output-format json \
+  --allowedTools "Bash,Read,Edit,Write"
+```
 
-3. **SQLite is not concurrently accessed.** sqlx's primary benefit is async connection pooling for PostgreSQL where many queries run truly in parallel. Per-agent SQLite databases are single-writer-per-agent; the blocking-on-background-thread model of tokio-rusqlite is sufficient and carries none of sqlx's complexity.
+**Key behavioral facts (HIGH confidence, from official docs):**
 
-4. **Migration embedding.** sqlx `migrate!()` requires timestamped `.sql` files in `./migrations/` and `sqlx-cli` for dev workflow. rusqlite_migration embeds SQL as string literals directly in Rust code — fewer moving parts, no external tool dependency.
+- `--output-format json` returns a JSON object with `session_id` field at top level
+- `--resume <session_id>` continues a specific conversation by ID
+- `--continue` resumes the most recent session (risky in concurrent multi-agent context — avoid)
+- `--bare` skips auto-discovery of hooks/skills/MCP/CLAUDE.md — use for deterministic scripted calls. Official docs state it will become the default `-p` mode in a future release. **Recommendation: add `--bare` to cron executions** to avoid agent's local CLAUDE.md interfering with scheduled task invocations.
+- `--append-system-prompt-file` works in `-p` mode — use for system-prompt.txt composed from SOUL.md + USER.md + AGENTS.md
 
-sqlx is the right choice for web servers with PostgreSQL or MySQL. It is wrong for this use case.
+**Session ID storage:** Store `(telegram_thread_id, session_id)` in `memory.db` `telegram_sessions` table. Look up on each incoming message; create new session (first invocation without `--resume`) if none exists.
+
+**Known issue:** CC `--resume` bug (GitHub issue #15837) where context is not fully restored. This is a CC upstream issue; design the system to be tolerant — if session context is lost, agents should be able to reconstruct from SOUL.md + USER.md + AGENTS.md system prompt. The stateless `-p` model means each call is independently valid even if history is unavailable.
+
+---
+
+### 3. File Watching — notify + notify-debouncer-full
+
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| notify | 8.2 | Cross-platform filesystem events | Latest stable (8.2.0 released 2025-08-03). Uses inotify on Linux, FSEvents on macOS. `recommended_watcher()` picks the best backend automatically. Breaking change in 8.0: MSRV raised to 1.77, `notify-types` dependency updated to 2.0. |
+| notify-debouncer-full | 0.7 | Debounce rapid file events | Wraps notify 8.2 (^8.2.0 dep). Required because editors write YAML files as multiple rapid events (create, modify, close). Without debouncing, the cron loader fires 3-5 times per save. 9M+ downloads. |
+
+```toml
+notify = "8.2"
+notify-debouncer-full = "0.7"
+```
+
+**Integration pattern with tokio:** notify uses a synchronous channel internally. Bridge to tokio via `tokio::sync::mpsc` + a spawned blocking task:
+
+```rust
+let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+let mut debouncer = new_debouncer(Duration::from_millis(500), None, move |res| {
+    let _ = tx.blocking_send(res);
+})?;
+debouncer.watcher().watch(&crons_dir, RecursiveMode::NonRecursive)?;
+
+tokio::spawn(async move {
+    while let Some(events) = rx.recv().await {
+        // reload cron specs
+    }
+});
+```
+
+**Watch mode:** `RecursiveMode::NonRecursive` on the `crons/` directory. No subdirectory recursion needed — cron specs are flat YAML files directly in `crons/`.
+
+**Do NOT use notify-debouncer-mini:** It is the older, simpler debouncer. `notify-debouncer-full` provides richer event information (file path, event kind) needed to distinguish create/modify/delete for cron reconciliation.
+
+---
+
+### 4. Cron Schedule Parsing
+
+| Technology | Version | Purpose | Why |
+|------------|---------|---------|-----|
+| cron | 0.16 | Parse cron expressions, compute next run time | Lightweight, focused, no async overhead. 7,740 downloads (latest 0.16.0 published 2026-03-25). Supports standard 7-field format: `sec min hour day-of-month month day-of-week year`. Returns `chrono::DateTime<Utc>` for next execution. No background runtime — pure computation. |
+
+```toml
+cron = "0.16"
+```
+
+**Why `cron` instead of `tokio-cron-scheduler`:**
+
+`tokio-cron-scheduler` (0.15.1) is a heavier framework that embeds its own background scheduler loop, optional Postgres/NATS persistence, and manages job state. RightClaw already has a cron runtime design (tokio tasks + file watcher); it needs **only schedule parsing** — not a second scheduler framework competing with the existing runtime.
+
+The `cron` crate is the right primitive: parse an expression string → get next `DateTime<Utc>` → `tokio::time::sleep_until(next.into())`. Full control, no hidden state, no framework to fight.
+
+**Usage pattern:**
+
+```rust
+use cron::Schedule;
+use std::str::FromStr;
+use chrono::Utc;
+
+let schedule = Schedule::from_str("0 30 9 * * Mon-Fri *")?;
+let next = schedule.upcoming(Utc).next()
+    .ok_or_else(|| anyhow!("no upcoming execution"))?;
+
+tokio::time::sleep_until(next.into()).await;
+// invoke claude -p
+```
+
+**chrono dependency:** `cron` 0.16 depends on `chrono`. Likely already in workspace transitively (via teloxide or other deps). If not, add `chrono = "0.4"` to the crate that drives scheduling.
 
 ---
 
@@ -50,126 +144,69 @@ sqlx is the right choice for web servers with PostgreSQL or MySQL. It is wrong f
 
 | Avoid | Why | Use Instead |
 |-------|-----|-------------|
-| `sqlx` | Conflict hazard with libsqlite3-sys, compile-time checks broken for dynamic paths, connection pool overhead irrelevant for SQLite | `rusqlite` + `tokio-rusqlite` |
-| `diesel` | ORM overhead, code generation, migration CLI, massive compile time — all wrong for a simple key-value/FTS memory store | Raw SQL via rusqlite |
-| `sea-orm` | Same problems as diesel, async but built on sqlx | rusqlite + tokio-rusqlite |
-| `sqlite` crate | Low adoption, thin wrapper with poor error handling, not actively maintained | rusqlite |
-| `refinery` | Migration CLI dependency, heavier than rusqlite_migration, SQL files on disk | rusqlite_migration |
-| FTS5 extension | Built into SQLite already — no extra crate needed. Enable via `PRAGMA` and use `CREATE VIRTUAL TABLE ... USING fts5(...)` | SQLite built-in FTS5 |
-
----
-
-## Architecture Fit
-
-### Per-agent database location
-
-```
-~/.rightclaw/agents/<name>/memory.db
-```
-
-One database per agent. Path constructed from agent HOME dir (already known at `rightclaw up` time). No shared state between agents — matches the isolation model.
-
-### tokio-rusqlite async pattern
-
-```rust
-// Open
-let conn = tokio_rusqlite::Connection::open(&db_path).await?;
-
-// Migrate (runs sync migration logic in background thread)
-conn.call_unwrap(|conn| MIGRATIONS.to_latest(conn)).await?;
-
-// Query
-let results = conn.call(|conn| {
-    let mut stmt = conn.prepare("SELECT * FROM memory WHERE ...")?;
-    // ... map rows
-    Ok(results)
-}).await?;
-```
-
-`call_unwrap` is safe here — the connection is opened at agent startup and held for the process lifetime. Prefer `call_unwrap` for ergonomics; use `call` only where explicit `ConnectionClosed` handling is needed.
-
-### WAL mode
-
-Enable WAL mode on every new database open:
-
-```rust
-conn.call_unwrap(|conn| {
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
-    Ok(())
-}).await?;
-```
-
-WAL enables concurrent readers + one writer without blocking. `synchronous = NORMAL` is safe with WAL and improves write throughput. Set before running migrations.
-
-### Schema design
-
-```sql
-CREATE TABLE memory (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    key     TEXT NOT NULL,
-    value   TEXT NOT NULL,
-    source  TEXT NOT NULL DEFAULT 'agent',   -- provenance
-    created_at INTEGER NOT NULL,             -- unix timestamp
-    updated_at INTEGER NOT NULL
-);
-
-CREATE INDEX memory_key_idx ON memory(key);
-
--- FTS5 for full-text search (built-in SQLite feature, no extension)
-CREATE VIRTUAL TABLE memory_fts USING fts5(
-    key, value,
-    content='memory', content_rowid='id'
-);
-```
-
-FTS5 is part of SQLite — no extension loading, no extra crate. Query with `SELECT * FROM memory WHERE rowid IN (SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?)`.
-
----
-
-## IronClaw Memory Reference
-
-IronClaw (nearai/ironclaw) is a competing Rust agent framework. Its primary memory backend is **PostgreSQL + pgvector** (hybrid FTS + vector search via RRF). A community fork (JoasASantos/ironclaw) adds a configurable SQLite backend with `encrypt_at_rest` option.
-
-The official nearai implementation is not relevant as a direct technical reference — it targets server deployments, not local multi-agent CLI tools. The dual PostgreSQL/libSQL backend confirms that vector search is the direction for production memory systems, but that is out of scope for v2.3. v2.3 targets simple key-value + FTS search via SQLite FTS5, which is the right MVP scope.
-
----
-
-## Version Compatibility Matrix
-
-| rusqlite | tokio-rusqlite | rusqlite_migration | Notes |
-|----------|---------------|-------------------|-------|
-| 0.38 | 0.7.0 | 2.4.x | All three compatible. rusqlite 0.38 breaks `rusqlite_migration` 2.3.x (statement caching change). Use 2.4.1. |
-| 0.37 | 0.6.1 | 2.3.x | Prior stable set — do not use, 0.38 is current. |
-
-SQLite version bundled with rusqlite 0.38: **SQLite 3.51.1**
+| `tokio-cron-scheduler` | Framework overhead — embeds own scheduler loop, Postgres/NATS storage, job UUID management. RightClaw owns the cron runtime; needs only expression parsing. | `cron` crate (pure parsing) + custom tokio task loop |
+| `notify-debouncer-mini` | Older/simpler API, less event detail | `notify-debouncer-full` |
+| `notify` 9.x rc | Release candidate, not stable | `notify` 8.2 (stable) |
+| `teloxide` storage features (`sqlite-storage`, `redis-storage`) | Teloxide dialogue storage is for multi-step bot conversations. Session mapping belongs in existing `memory.db`. | `telegram_sessions` table in rusqlite |
+| `teloxide` `webhooks-axum` feature | Requires running an HTTP server and public URL. Long polling is simpler and sufficient for per-agent bots. | Default long polling via `dispatch()` |
+| `axum` / `tower` | No HTTP server needed — bot uses long polling | Not needed |
+| `pretty_env_logger` | Already using `tracing-subscriber` | Existing tracing setup |
 
 ---
 
 ## Cargo.toml Delta
 
+Add to the crate that hosts the bot and cron runtime (likely a new `rightclaw-bot` subcrate or added to `rightclaw` crate):
+
 ```toml
 [dependencies]
-rusqlite = { version = "0.38", features = ["bundled"] }
-tokio-rusqlite = "0.7"
-rusqlite_migration = "2.4"
+teloxide = { version = "0.17", features = ["macros"] }
+notify = "8.2"
+notify-debouncer-full = "0.7"
+cron = "0.16"
+# chrono is a transitive dep of cron; add explicitly if not already present:
+# chrono = "0.4"
 ```
 
-No dev dependencies needed — rusqlite_migration has a `.validate()` method usable in tests without a separate test crate.
+No dev dependencies needed for these additions.
+
+---
+
+## Architecture Notes
+
+**teloxide bot process model:** One `rightclaw-bot` binary per agent. process-compose entry per agent. Each bot process:
+1. Reads `TELEGRAM_BOT_TOKEN` from env (set by rightclaw up via agent.yaml)
+2. Reads `RC_AGENT_NAME` to know which agent dir / memory.db to use
+3. On message: looks up `thread_id → session_id` in `telegram_sessions` table
+4. Invokes `claude -p <message> [--resume <session_id>] --output-format json --bare`
+5. Stores new `session_id` if first message in thread
+6. Replies to Telegram with the text response from JSON output
+
+**Cron runtime model:** Same binary (or separate tokio task in `rightclaw-bot`):
+1. File watcher on `~/.rightclaw/agents/<name>/crons/` via notify-debouncer-full
+2. In-memory cron registry (HashMap of spec-file-name → Schedule + last-run)
+3. `tokio::time::interval`-based tick loop (e.g. every 30s): check which jobs are due
+4. For each due job: invoke `claude -p <cron-prompt> --bare --allowedTools "Bash,Read,Edit,Write"`
+5. On file-change event: reload changed spec files, update registry
+
+**System prompt composition** (no new crates needed): Read SOUL.md + USER.md + AGENTS.md from agent dir, concatenate with separators, write to `agent/.claude/system-prompt.txt` on `rightclaw up`. `claude -p` call uses `--append-system-prompt-file` pointing to that file.
 
 ---
 
 ## Sources
 
-- [rusqlite 0.38.0 on crates.io](https://crates.io/crates/rusqlite) — version confirmed 2026-03-26 (published 2025-12-20, bundles SQLite 3.51.1)
-- [tokio-rusqlite 0.7.0 on docs.rs](https://docs.rs/crate/tokio-rusqlite/latest) — version confirmed 2026-03-26 (published 2025-11-16), exposes all 42 rusqlite feature flags
-- [rusqlite_migration 2.4.1 on docs.rs](https://docs.rs/crate/rusqlite_migration/latest) — version confirmed 2026-03-26, updated for rusqlite 0.38 compatibility
-- [sqlx 0.8.6 on crates.io](https://crates.io/crates/sqlx) — current version confirmed 2026-03-26
-- [sqlx + rusqlite semver hazard — sqlx GitHub issue #3926](https://github.com/launchbadge/sqlx/issues/3926) — confirmed libsqlite3-sys conflict
-- [Rust ORMs in 2026: Diesel vs SQLx vs SeaORM vs Rusqlite](https://aarambhdevhub.medium.com/rust-orms-in-2026-diesel-vs-sqlx-vs-seaorm-vs-rusqlite-which-one-should-you-actually-use-706d0fe912f3) — MEDIUM confidence (WebSearch, Feb 2026)
-- [rusqlite_migration async example](https://github.com/cljoly/rusqlite_migration/blob/master/examples/async/src/main.rs) — `call_unwrap` pattern confirmed
-- [nearai/ironclaw CLAUDE.md](https://github.com/nearai/ironclaw/blob/main/CLAUDE.md) — PostgreSQL + libSQL dual backend, no SQLite for production memory
+- [teloxide 0.17.0 on crates.io](https://crates.io/crates/teloxide) — version confirmed 2026-03-31
+- [teloxide README on GitHub](https://github.com/teloxide/teloxide/blob/master/README.md) — minimal feature config
+- [teloxide 0.17.0 CHANGELOG](https://github.com/teloxide/teloxide/blob/master/CHANGELOG.md) — breaking changes reviewed
+- [notify 8.2.0 on crates.io](https://crates.io/crates/notify) — version confirmed 2026-03-31, latest stable
+- [notify 8.2.0 docs.rs](https://docs.rs/notify/8.2.0/notify/) — API and tokio integration pattern
+- [notify-debouncer-full 0.7.0 on crates.io](https://crates.io/crates/notify-debouncer-full) — version confirmed 2026-03-31, requires notify ^8.2.0
+- [cron 0.16.0 on crates.io](https://crates.io/crates/cron) — version confirmed 2026-03-31 (published 2026-03-25)
+- [tokio-cron-scheduler 0.15.1 on crates.io](https://crates.io/crates/tokio-cron-scheduler) — reviewed and rejected
+- [Claude Code headless/CLI docs](https://code.claude.com/docs/en/headless) — --resume, --output-format json, --bare flags confirmed HIGH confidence
+- [Claude Code session management (DeepWiki)](https://deepwiki.com/anthropics/claude-code/3.3-session-and-conversation-management) — session storage path `~/.claude/sessions/`
+- [CC --resume bug GitHub #15837](https://github.com/anthropics/claude-code/issues/15837) — context restoration issue known upstream
 
 ---
-*Stack research for: RightClaw v2.3 Memory System*
-*Researched: 2026-03-26*
+*Stack research for: RightClaw v3.0 Teloxide Bot Runtime*
+*Researched: 2026-03-31*

@@ -1,206 +1,200 @@
 # Project Research Summary
 
-**Project:** RightClaw v2.3 Memory System
-**Domain:** Per-agent SQLite-backed persistent memory in Rust async CLI
-**Researched:** 2026-03-26
+**Project:** RightClaw v3.0 — Teloxide Bot Runtime
+**Domain:** Per-agent Rust Telegram bot + claude -p session management + Rust cron runtime
+**Researched:** 2026-03-31
 **Confidence:** HIGH
 
 ## Executive Summary
 
-RightClaw v2.3 adds structured, queryable memory to each agent as a complement to the existing flat `MEMORY.md` file. The key insight from research: these are two strictly separate systems serving different purposes — `MEMORY.md` is human-authored and auto-injected into the CC system prompt; SQLite is agent-managed episodic memory accessed only via explicit skill calls. This boundary is not just good design — it is a security requirement. The MINJA attack (NeurIPS 2025) demonstrated 95%+ injection success rates against memory-backed agents by poisoning the retrieval path. Collapsing the boundary (writing SQLite entries into MEMORY.md, or auto-injecting recall at session start) directly enables this attack class. IronClaw chose PostgreSQL for vector search at scale; that choice confirms SQLite is correct for RightClaw's per-agent, local-first, zero-ops model — they explicitly rejected SQLite via GitHub issue #19.
+RightClaw v3.0 replaces broken Claude Code Telegram channels (SEED-011, iv6/M6 gap) with a per-agent Rust teloxide binary that owns the full Telegram conversation loop. The recommended approach: one `rightclaw bot --agent <name>` subcommand (same binary, new subcommand) launched as a process-compose entry per agent alongside the existing CC session process. This bot handles long polling, maps `(chat_id, thread_id)` to Claude session UUIDs in `memory.db`, and invokes `claude -p --resume` as subprocesses. The architecture is a clean replacement, not a parallel system — the old `--channels` flag and shell wrapper generation are removed entirely in the same `rightclaw up` release.
 
-The recommended stack is a synchronous `MemoryStore` in `rightclaw-core` backed by `rusqlite 0.39` with the `bundled` feature and `rusqlite_migration 2.5` for schema versioning via SQLite `user_version` pragma. The skill pattern is a SKILL.md instructing Claude Code to call `sqlite3` bash commands directly — no MCP, no custom binary, consistent with `rightskills` and `rightcron`. `tokio-rusqlite` was evaluated and rejected: `cmd_memory` is a synchronous CLI operation and the `cmd_up` scaffold loop is already effectively sync; async bridging overhead adds complexity with no benefit for a single-writer embedded database. `sqlx` is rejected due to `libsqlite3-sys` semver conflict and compile-time query checking being broken for runtime-dynamic paths.
+The core risks are concentrated in two areas: CC session continuity bugs and the telegram_sessions schema design. Three confirmed CC upstream bugs (issue #16103, #8069, #1967) interact: `--resume` ignores `CLAUDE_CONFIG_DIR` (use HOME isolation instead), resumed sessions return a new session_id in JSON output (store only the root ID, never update on resume), and `--resume` has known regression in some CC versions (have a fallback strategy). All three must be designed around from day one — they are not fixable upstream. The second major risk area is message concurrency: concurrent `claude -p` invocations on the same session corrupt the JSONL file, requiring a per-session message queue (mpsc channel) as a fundamental architectural choice, not an afterthought.
 
-The critical risks resolve to two rules enforced from day one: (1) append-only schema with `BEFORE UPDATE` and `BEFORE DELETE` triggers set to `RAISE(ABORT, ...)` on the events table, plus WAL mode + `busy_timeout=5000ms` on every connection open; (2) the memory skill NEVER writes to `MEMORY.md`. Every other pitfall — migration lock-in, cross-agent leakage, silent write failure — is a configuration error on one of these two axes.
+The cron runtime (also v3.0) is lower risk: it replaces CC-native CronCreate tools with a tokio task loop reading `crons/*.yaml`. This eliminates the v2.5 BOOT-01/BOOT-02/CRITICAL guard complexity entirely, since all of that was a workaround for CC's main-thread restriction on CronCreate. The main pitfalls are using `notify-debouncer-full` (not mini) with crossbeam disabled, and making the reconciler fully idempotent.
 
 ## Key Findings
 
 ### Recommended Stack
 
-The SQLite driver stack is `rusqlite 0.39` (bundles SQLite 3.51.1) + `rusqlite_migration 2.5`. Note: STACK.md recommended `rusqlite 0.38` + `rusqlite_migration 2.4` + `tokio-rusqlite 0.7`. ARCHITECTURE.md (written from direct codebase inspection, same date) supersedes this with `0.39` + `2.5` + sync-only. ARCHITECTURE.md is authoritative.
+The v3.0 delta adds exactly four new dependencies to the workspace. All are well-validated and the versions are confirmed stable as of 2026-03-31. `teloxide 0.17` (macros feature only) is the only serious Rust Telegram framework; its dptree dispatcher maps cleanly to the "message → dispatch to agent session" pattern. File watching uses `notify 8.2` + `notify-debouncer-full 0.7` — the full debouncer is required for rename-stitching (editors write via temp+rename). Schedule parsing uses `cron 0.16` as a pure computation primitive; the heavier `tokio-cron-scheduler` is explicitly rejected because RightClaw owns the scheduler loop. No new HTTP server, no webhook infrastructure, no teloxide storage backends.
 
-**Core technologies:**
-- `rusqlite 0.39` (features = ["bundled"]): SQLite driver — canonical Rust binding, thin wrapper, full control; bundled feature eliminates system SQLite version variability; correct for a single-binary system tool that ships via `install.sh`
-- `rusqlite_migration 2.5`: Schema migrations — `user_version` pragma tracking (no extra table), embedded SQL strings in Rust, idempotent `to_latest()` safe to call on every startup; 2.5 required for rusqlite 0.39 compatibility (2.4.x breaks on 0.38 statement caching change)
-- `sqlite3` (system binary, accessed from skill): Skill-facing access — SKILL.md instructs CC to run `sqlite3 "$HOME/memory.db"` bash commands directly; `$HOME` resolves to agent dir because shell wrapper already sets `export HOME=<agent_path>`
+**Core new technologies:**
+- `teloxide 0.17` (macros only): Telegram bot framework — dominant in Rust, tokio-native, long polling built-in, dptree filter chains
+- `notify 8.2` + `notify-debouncer-full 0.7`: Cross-platform file watching for `crons/` directory — debouncer required for editor write patterns (rename-into-place)
+- `cron 0.16`: Pure cron expression parsing → `chrono::DateTime<Utc>` — no scheduler framework, just the primitive for next-run computation
+- No new HTTP client: existing `reqwest` + `tokio::process::Command` from stdlib handle everything else
 
-**Do not add:**
-- `sqlx`: Conflict hazard with `libsqlite3-sys` (both link the same C library), compile-time query checks broken for dynamic runtime paths, async connection pool irrelevant for SQLite
-- `tokio-rusqlite`: Unnecessary — `MemoryStore` is sync; no executor starvation risk when DB calls live in the scaffold loop outside async task tree
-- `diesel`, `sea-orm`: ORM overhead wrong for a simple K/V + search store
-- `refinery`: heavier than needed; rusqlite_migration is lighter and SQLite-only
+**Existing stack confirmed unchanged:** tokio, serde, rusqlite, minijinja, reqwest, thiserror, miette, tracing — not re-evaluated.
+
+**What NOT to add:** `tokio-cron-scheduler` (embeds competing scheduler loop), `notify-debouncer-mini` (older, less event detail), teloxide `sqlite-storage`/`redis-storage`/`webhooks-axum` features (all unnecessary), `axum`/`tower` (no HTTP server needed — long polling).
 
 ### Expected Features
 
-The field has converged on four core memory primitives. Every production system implements these; missing any results in an incomplete system.
+**Must have (table stakes) — v3.0:**
+- Per-agent teloxide process entry in PC config (conditional on `telegram_token` in agent.yaml)
+- `telegram_sessions` table: `(chat_id, thread_id NOT NULL DEFAULT 0)` → root session UUID
+- Session continuity via `claude -p --resume <root_id>` or `--session-id <root_id>` fallback
+- Thread routing: `message_thread_id` passed back to `SendMessage`; General topic (thread_id=1) normalized to 0
+- System prompt composed from SOUL.md + USER.md + AGENTS.md → `system-prompt.txt` on `rightclaw up`
+- Per-session mpsc message queue — serialize concurrent messages to same thread (architectural requirement)
+- `/reset` command to clear session row for current thread
+- Error forwarding: subprocess failure → informative Telegram message (not silence)
+- Response splitting: Telegram 4096-char limit
+- Cron runtime: tokio tasks + `crons/*.yaml` reading + lock file check + `claude -p` execution
 
-**Must have (table stakes):**
-- `store` — write a named memory entry (key + value + provenance); slash command `/remember key value`; upsert on same key via `ON CONFLICT(key) DO UPDATE` tracking `updated_at`
-- `recall` — read by exact key; slash command `/recall key`; returns row including timestamps and provenance
-- `search` — full-text query across key, value, tags; slash command `/search query`; `LIKE '%query%'` in v2.3 (FTS5 in v2.4)
-- `forget` — soft-delete by key; slash command `/forget key`; inserts a forget event in `memory_events`, NEVER hard-deletes
-- Timestamps + provenance on every entry: `created_at`, `updated_at`, `stored_by` (from `RC_AGENT_NAME`, already set by shell wrapper), `source_tool`
-- Per-agent isolation: DB at `~/.rightclaw/agents/<name>/memory.db`, no shared state
-- `rightclaw memory list|search|delete|vacuum` CLI subcommands for operator inspection
-- Soft-delete semantics: agent queries filter `WHERE deleted_at IS NULL`; CLI `--all` flag shows deleted entries
+**Should have (differentiators) — v3.1:**
+- Real-time streaming response (edit-in-place via `--output-format stream-json` + `editMessageText`)
+- `allowed_chat_ids` enforcement in agent.yaml
+- `/fast` prefix for `--bare` mode (faster, no MCP tools)
+- `notify` file watcher hot-reload for cron specs (60s polling acceptable for v3.0)
 
-**Should have (competitive):**
-- `tags` column for categorical recall
-- `rightclaw memory export` — JSON/markdown dump
-- `rightclaw memory stats` — entry count, DB size, oldest/newest (makes bloat visible)
-- WAL mode by default — concurrent CLI reads while agent session is active
-- Append-only audit trail from day 1 (see pitfalls — this is a must-have by v2.3, not a differentiator)
+**Defer (v3.x+):**
+- Webhook support (zero ops value for developer-machine deployments)
+- File/image handling from Telegram (significant attack surface, text-only for v3.0)
 
-**Defer (v2.4+):**
-- FTS5 virtual table + sync triggers — schema should include them in V1 (retrofitting is expensive), but skill can use LIKE in v2.3
-- Vector/semantic search — requires embedding model, defeats zero-ops goal
-- SQLCipher encryption — sandbox already provides isolation
-- LLM-driven consolidation (Mem0 pattern) — adds API call latency on every store
-- Cross-agent MCP memory server — explicit PROJECT.md future item
-- `expires_at`/`importance` eviction logic — columns should exist in V1 schema, logic in v2.4
-
-**Critical anti-feature:** MEMORY.md is not part of the memory system. The skill must never write to it.
+**Anti-features to avoid:**
+- In-process Anthropic API calls — no tools, no memory, no sandbox; CC subprocess IS the agent
+- Stateful in-process CC — CC doesn't support stdin piping for external control
+- Teloxide dialogue FSM — CC session is the state machine; don't duplicate
+- Broadcasting/scheduled messages from bot — cron runtime handles scheduled tasks separately
 
 ### Architecture Approach
 
-The new `memory/` module lives in `rightclaw-core` because both `cmd_up` (scaffold loop) and `rightclaw-cli` (memory subcommand) need the DB layer — putting it in `rightclaw-cli` would create a wrong-direction dependency. The module is four files (`mod.rs`, `migrations.rs`, `store.rs`, `error.rs`). The skill is installed as a built-in alongside `rightskills` and `rightcron` via `include_str!` at compile time. DB creation is step 10 in `cmd_up`'s per-agent scaffold loop (after `install_builtin_skills`), idempotent on every `rightclaw up`.
+The teloxide bot runs as `rightclaw bot --agent <name>` — a new subcommand in the existing binary using `current_exe()` as the binary path in PC config (same pattern as `memory-server`). No separate crate required unless the existing binary grows too large. The bot process runs two concurrent tokio tasks: (1) teloxide long-polling dispatcher for Telegram messages, and (2) cron runtime loop watching `crons/` and evaluating schedules. CC subprocesses are invoked via `tokio::process::Command` with `HOME=$AGENT_DIR`, `cwd=$AGENT_DIR`, `wait_with_output()` (never `wait()`), `kill_on_drop(true)`, and separate stdout/stderr pipes.
 
-**Major components:**
-1. `rightclaw-core/src/memory/` — DB open/init, WAL pragma, migrations, synchronous `MemoryStore` struct with insert/list/search/delete/vacuum
-2. `skills/rightmemory/SKILL.md` — embedded skill; instructs CC to call `sqlite3 "$HOME/memory.db"` for store/recall/search/forget; compiled in via `include_str!`; NEVER writes to MEMORY.md
-3. `rightclaw-cli: Commands::Memory` + `cmd_memory()` — `rightclaw memory list|search|delete|vacuum [--agent name]`; synchronous; uses `MemoryStore` from core
-4. `cmd_up` scaffold loop step 10 — calls `memory::open_db(&agent.path)` idempotently on every `rightclaw up`
+The process-compose template changes significantly: shell wrapper generation is removed, `is_interactive` is removed (bots don't need TTY), and an `environment:` block with `RC_AGENT_DIR`/`RC_AGENT_NAME`/`RC_TELEGRAM_TOKEN` is added. The cutover is atomic — CC channels flag and shell wrapper codegen are removed in the same `rightclaw up` that starts teloxide processes.
 
-**DB location:** `~/.rightclaw/agents/<name>/memory.db` — flat in agent root, not inside `.claude/` (scaffold-managed directory that settings.json regenerates on every `up`).
+**Major components and changes:**
+1. `rightclaw bot` subcommand (NEW) — teloxide dispatcher + CC subprocess invocation + cron runtime as concurrent tokio tasks
+2. `memory/` V2 migration — adds `telegram_sessions(chat_id, thread_id NOT NULL DEFAULT 0, root_session_id, ...)`
+3. `codegen/process_compose.rs` — PC YAML with bot binary + env block; `wrapper_path` replaced by `bot_binary_path`
+4. `codegen/system_prompt.rs` — compose SOUL+USER+AGENTS → `system-prompt.txt` (new step in `rightclaw up`)
+5. `codegen/shell_wrapper.rs` — REMOVED (shell wrappers gone entirely)
+6. `cronsync SKILL.md` — reduced to file management only; execution logic moves to Rust runtime
 
-**Schema note:** Two tables — `memories` (current state, key is UNIQUE) and `memory_events` (append-only event log). `forget` inserts a forget event; it never DELETEs from `memories`. Plain `LIKE '%query%'` for search in v2.3; FTS5 virtual table should be in V1 schema even if unused in v2.3 to avoid a costly later migration.
+**Data flow:** Telegram update → teloxide dispatcher → per-session mpsc queue → lookup `(chat_id, thread_id)` in memory.db → spawn `claude -p [--resume <root_id>]` with `HOME=$AGENT_DIR` → `wait_with_output()` → `bot.send_message(chat_id, response)`.
 
 ### Critical Pitfalls
 
-1. **Memory entries injected into system prompt via MEMORY.md** — The skill must never write to `MEMORY.md`; `rightclaw up` must never read SQLite and append to `MEMORY.md`. NeurIPS 2025 MINJA attack: 95%+ injection success via poisoned memory retrieval. Enforce in code, document in SKILL.md. Run `store` 10 times and verify `MEMORY.md` is unchanged.
+1. **`--resume` ignores CLAUDE_CONFIG_DIR (CC bug #16103, closed "not planned")** — Use `HOME=$AGENT_DIR` isolation for per-agent CC invocations, never `CLAUDE_CONFIG_DIR`. Sessions stored under `$HOME/.claude/projects/` are correctly found by `--resume` with HOME override.
 
-2. **Mutable audit trail** — A schema with `updated_at` and hard-delete `forget` has no real audit trail. Use an append-only `memory_events` table with `BEFORE UPDATE` and `BEFORE DELETE` triggers that `RAISE(ABORT, 'memory_events is append-only')`. `forget` inserts an event row with `event_type='forget'`, never DELETEs.
+2. **Resume returns a new session_id in JSON output (CC bug #8069, unfixed)** — Store ONLY the root session_id from the first `claude -p` call for a thread. Never update `telegram_sessions` with the session_id returned from a `--resume` call. Schema needs explicit `root_session_id` column semantics.
 
-3. **Missing WAL + busy_timeout** — Default `busy_timeout=0` means `SQLITE_BUSY` on any contention — and the skill fails silently (CC may interpret non-zero exit as "nothing found"). Set `PRAGMA journal_mode=WAL` and `PRAGMA busy_timeout=5000` on every connection open. Treat `SQLITE_BUSY` after timeout as a hard error with user-visible message.
+3. **Concurrent messages on same thread corrupt session JSONL** — `claude -p` has no file-level locking. Implement a per-`(chat_id, thread_id)` mpsc channel; process messages serially per thread. This is the fundamental dispatch architecture — not an optimization added later.
 
-4. **No migration strategy from day one** — First schema is always wrong; there is always a v2.4 (FTS5 queries, eviction logic, embedding column). Use `rusqlite_migration` from the first commit; every connection open calls `MIGRATIONS.to_latest(&mut conn)`. Once a migration is shipped, it is immutable — new changes are new migration entries.
+4. **stdout pipe deadlock at 64KB** — `claude -p` output easily exceeds Linux's default 64KB pipe buffer on code generation tasks. Always use `child.wait_with_output()` (tokio), never `child.wait()`. Set `stdin(Stdio::null())`.
 
-5. **Cross-agent DB path derivation** — If DB path defaults to `~/.rightclaw/memory.db` instead of `~/.rightclaw/agents/<name>/memory.db`, all agents share one store — complete isolation failure. DB path must always be `agent_dir.join("memory.db")`. Skill uses `$HOME/memory.db` which is correct because `$HOME` is remapped to agent dir by the shell wrapper.
+5. **Telegram General topic (thread_id=1) rejects `message_thread_id` in Bot API** — Normalize `thread_id = Some(1)` to `None`/0 for both session keying and reply routing. Use an `effective_thread_id()` helper. Cannot be caught in unit tests — requires a real forum supergroup.
+
+6. **teloxide `Throttle` adaptor deadlock (issue #516, confirmed unfixed)** — Use `CacheMe<Throttle<Bot>>` ordering (Throttle innermost). Add process-compose `restart: on-failure` with backoff. Per-process isolation means one deadlock doesn't cascade to other agents.
 
 ## Implications for Roadmap
 
-Three implementation phases, each a prerequisite for the next.
+The ARCHITECTURE.md build order (A→B→C→D→E→F→G) is the correct sequencing. Session schema design must happen first because CC bugs dictate schema semantics. Telegram handler dispatch architecture (per-session queue) must be decided before writing a single message handler. Suggested phases:
 
-### Phase 1: DB Foundation + Skill
+### Phase 1: DB Schema + Session Design
+**Rationale:** The `telegram_sessions` schema is the foundational constraint. CC bugs (#16103, #8069) dictate schema semantics before any handler code exists. Getting column semantics wrong (nullable thread_id, updating session_id on resume) is a correctness bug that compounds across all later phases.
+**Delivers:** V2 rusqlite_migration; `telegram_sessions(chat_id INT, thread_id INT NOT NULL DEFAULT 0, root_session_id TEXT, created_at, last_used_at, UNIQUE(chat_id, thread_id))`; documented session continuity strategy (HOME isolation, root-ID-only storage policy)
+**Addresses:** Session continuity (table stakes)
+**Avoids:** Pitfalls 1+2 (schema design bugs that are architectural mistakes if discovered late)
 
-**Rationale:** Everything depends on the DB module. Schema decisions (append-only audit, eviction columns, FTS5 virtual table presence) are extremely costly to change after data exists in production agent DBs. Get schema right first. Security requirements (MEMORY.md boundary, append-only triggers, WAL + busy_timeout) must be in this phase, not added later.
+### Phase 2: `rightclaw bot` Subcommand Skeleton + Agent Dir Loading
+**Rationale:** Establish the binary entry point, env var reading, DB connection, and system-prompt.txt loading before writing any dispatch logic. Gives a runnable binary other phases can extend.
+**Delivers:** `rightclaw bot --agent <name>` subcommand; reads RC_AGENT_DIR/RC_AGENT_NAME/RC_TELEGRAM_TOKEN[_FILE]; opens memory.db; loads system-prompt.txt; compiles and starts teloxide dispatcher (no-op handlers)
+**Uses:** teloxide 0.17 (bot construction only), existing rusqlite, existing tracing setup
+**Implements:** Bot process architecture component
 
-**Delivers:** `rightclaw-core/src/memory/` module (4 files); schema with `memories` + `memory_events` (append-only) + FTS5 virtual table + sync triggers + immutability triggers + `expires_at`/`importance` eviction columns; `open_db()` called from `cmd_up` scaffold loop; `skills/rightmemory/SKILL.md` installed as built-in; WAL + busy_timeout on every connection open.
+### Phase 3: System Prompt Composition in `rightclaw up`
+**Rationale:** Parallel with Phase 2. `rightclaw up` must generate `system-prompt.txt` before the bot can pass useful context to CC. Also removes shell wrapper generation — this is the right phase since both changes are in `cmd_up` codegen.
+**Delivers:** `codegen/system_prompt.rs` generates `agent_dir/.claude/system-prompt.txt` from present SOUL.md + USER.md + AGENTS.md; `codegen/shell_wrapper.rs` removed; PC template updated with env block and `is_interactive` removed
 
-**Addresses from FEATURES.md:** store, recall, search, forget slash commands; timestamps + provenance; soft-delete semantics; per-agent isolation; MEMORY.md boundary enforced in code.
+### Phase 4: Telegram Message Handler + CC Subprocess Invocation
+**Rationale:** Core of the milestone. With schema, binary skeleton, and system prompt in place, implement the full message dispatch loop. Concurrency architecture (per-session mpsc queue) must be the design, not a retrofit.
+**Delivers:** Functional bot receiving messages, mapping to sessions via `root_session_id`, invoking `claude -p [--resume]` serially per thread, replying to correct thread; `/reset` command; error forwarding; response splitting at 4096 chars; graceful shutdown with `kill_on_drop(true)`
+**Uses:** teloxide dptree handler chain, `distribution_function` on `(chat_id, thread_id)`, `tokio::sync::mpsc` per session, `tokio::process::Command` with `wait_with_output()`
+**Avoids:** Pitfalls 3 (concurrent messages), 4 (pipe deadlock), 5 (General topic normalization), 9 (zombie processes)
 
-**Avoids from PITFALLS.md:** Pitfalls #1 (MEMORY.md injection), #2 (no migrations), #3 (file locking/WAL), #5 (dual-truth MEMORY.md/SQLite), #6 (mutable audit trail), #7 (silent write failure), #9 (cross-agent path derivation).
+### Phase 5: process-compose Template + `rightclaw up` Wiring
+**Rationale:** Wire the bot into the full `rightclaw up` lifecycle. This is the atomic cutover: CC channels flag removed, teloxide started, doctor check added.
+**Delivers:** PC config entry for `<agent>-bot` conditional on telegram_token; CC channels flag removed from all code paths; `deleteWebhook` call on startup to clear any prior webhook; doctor check for active webhooks on configured tokens; `restart: on-failure` + backoff in PC entry
+**Avoids:** Pitfall 12 (polling + CC channels conflict — hard cutover required)
 
-**Research flag:** Standard patterns — rusqlite migration setup, WAL pragma, append-only schema with triggers all have well-documented precedents. No research phase needed.
+### Phase 6: Cron Runtime
+**Rationale:** Independent of Telegram functionality. Depends only on Phase 2 skeleton. Lower risk than bot dispatch. Eliminates v2.5 CC-native cron complexity entirely.
+**Delivers:** tokio task loop reading `crons/*.yaml`; `cron 0.16` schedule parsing → `tokio::time::sleep_until`; lock file check before execution; `claude -p --system-prompt-file ... -- "<job prompt>"` subprocess; deterministic UUID per job (uuid5 of agent+job name); 60s polling fallback (notify watcher deferred to v3.1)
+**Uses:** cron 0.16, notify 8.2, notify-debouncer-full 0.7 (or 60s poll for v3.0)
+**Avoids:** Pitfalls 10 (crossbeam disabled), 11 (idempotent reconciler, 500ms debounce)
 
-**Must pass before Phase 2:**
-- WAL + busy_timeout verified via PRAGMA queries in tests
-- Per-agent isolation test: two agents, unique memories, no cross-read
-- MEMORY.md untouched after 10 skill `store` calls
-- `UPDATE memory_events SET content='x'` raises ABORT (trigger test)
-- Migration idempotency: two `rightclaw up` calls on fresh agent, `user_version` correct, no re-apply
-
-### Phase 2: CLI Inspection Commands
-
-**Rationale:** CLI (`rightclaw memory list/search/delete/vacuum`) depends on the DB module from Phase 1. CLI write operations (delete, vacuum) can contend with running agents — contention behavior must be designed against a working DB with real WAL behavior.
-
-**Delivers:** `Commands::Memory` in `rightclaw-cli`; `cmd_memory()` synchronous function; table output for list/search; hard-delete with confirmation prompt; vacuum; `--agent name` flag; `rightclaw memory stats` showing entry count + DB size on disk.
-
-**Uses from STACK.md:** `rusqlite` via `rightclaw-core`; no new dependencies.
-
-**Implements from FEATURES.md:** `rightclaw memory list/search/delete` (P1 operators), `stats` (P2), `export` (P2 — can defer to v2.3.x).
-
-**Avoids from PITFALLS.md:** Pitfall #8 (CLI vs. agent contention) — CLI uses `BEGIN IMMEDIATE` short transactions; fails after busy_timeout with clear message "Agent is currently writing memory. Try again in a moment."
-
-**Research flag:** Standard patterns — clap derive subcommand, table printing. No research needed.
-
-### Phase 3: Doctor Integration + Injection Scanning
-
-**Rationale:** Operational checks and injection scanning are additive hardening on top of a working memory system. Doctor checks depend on Phase 1 (DB layer); injection scanning requires a working `store` path from Phase 1.
-
-**Delivers:** `rightclaw doctor` checks for DB existence + schema version + WAL file cleanup + `memory.db` file permissions (0600); injection scanning on `store` (scan for imperative injection patterns before write, reject with error message on match); `rightclaw memory stats` DB size warning at configurable threshold.
-
-**Addresses from FEATURES.md:** eviction column logic wire-up (columns from Phase 1 schema get logic here); `rightclaw memory stats` size warning.
-
-**Avoids from PITFALLS.md:** Pitfalls #1 (injection scanning), #4 (memory bloat visibility), #10 (migration checksum mismatch detection in doctor).
-
-**Research flag:** Injection scanning pattern needs research before implementing — practical Rust implementation (what regex patterns, Unicode homoglyph handling, false-positive thresholds) is sparse in existing research. Run `/gsd:research-phase` for injection scanning before Phase 3.
+### Phase 7: Cronsync SKILL.md Rewrite
+**Rationale:** File-management-only reduction. All CC-native CronCreate tools and BOOT-01/BOOT-02/CRITICAL guard logic are removed. Must ship after Phase 6 runtime is stable and validated.
+**Delivers:** Simplified cronsync SKILL.md that only creates/edits/deletes YAML spec files in `crons/`; removes all inline bootstrap and CHECK/RECONCILE/CRITICAL guard logic
+**Implements:** Clean skill-runtime separation; reduces SKILL.md complexity by ~60%
 
 ### Phase Ordering Rationale
 
-- Schema decisions are irreversible once production data exists. Phase 1 nails the schema — append-only events, FTS5 virtual table presence, eviction columns — even if the logic using those columns ships later.
-- Skill (Phase 1) and CLI (Phase 2) share the same `MemoryStore` — no circular dependency, clean build order.
-- Doctor integration (Phase 3) is additive and non-blocking — agents function without it, but operators are blind without it.
-- This order directly mirrors the dependency graph in FEATURES.md: `[DB module] → [skill + CLI] → [hardening]`.
+- Schema must precede handler code because CC session bugs dictate semantics — wrong schema discovered after v3.0 ships means migration under live session data.
+- Phase 2 (binary skeleton) and Phase 3 (system prompt codegen) can develop in parallel — no interdependency, both must complete before Phase 4.
+- The cutover (Phase 5) must be atomic — no intermediate state where CC channels and teloxide both poll the same token. Define and test the cutover procedure before writing any bot handler code.
+- Cron runtime (Phase 6) is independent of Telegram dispatch and can develop in parallel with Phases 4-5, but wiring into `rightclaw up` happens after Phase 5 is stable.
+- Cronsync SKILL.md rewrite (Phase 7) is last — simplifies existing code, cannot regress if the runtime is not yet fully stable.
 
 ### Research Flags
 
-Needs research before implementation:
-- **Phase 3 (injection scanning):** What patterns to detect, false-positive rate, whether to reject-on-match or sanitize-and-store. MINJA NeurIPS 2025 paper identifies the attack class but practical Rust implementation patterns are not documented in current research.
+Phases needing deeper investigation during planning:
+- **Phase 4 (Telegram handler):** Verify `--resume` behavior on the deployed CC version before building session continuity. Bug #1967 regression status is MEDIUM confidence (single community source). Test `claude -p --resume <uuid> "prompt"` and verify it (a) finds the session and (b) returns the same session_id. Have the `--session-id` fallback (stateless per call) tested and ready before committing to `--resume`.
+- **Phase 4 (Throttle deadlock):** Teloxide issue #516 has no upstream fix. Validate `CacheMe<Throttle<Bot>>` ordering mitigation experimentally with message bursts before shipping. Do not assume the workaround fully prevents the deadlock.
 
-Standard patterns (skip research phase):
-- **Phase 1:** rusqlite migrations, WAL setup, append-only schema with triggers — all well-documented with official sources
-- **Phase 2:** CLI subcommand with clap derive, table output — established codebase pattern
+Standard patterns (skip research-phase):
+- **Phase 1:** SQLite migration via rusqlite_migration is an established project pattern — already used in v2.3 memory system.
+- **Phase 2:** `current_exe()` subcommand pattern already used for `memory-server`.
+- **Phase 3:** File concatenation with graceful missing-file handling — no research needed.
+- **Phase 5:** `deleteWebhook` API call is one-liner; doctor check patterns established.
+- **Phase 6:** `cron` crate + tokio sleep loop is well-documented; pitfalls are fully addressed in research.
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | rusqlite 0.39 + rusqlite_migration 2.5 versions confirmed from crates.io 2026-03-26 (direct codebase inspection); sqlx rejection rationale confirmed via GitHub issue #3926; bundled feature behavior documented |
-| Features | HIGH | Four core operations from cross-competitor analysis (IronClaw, OpenClaw, Anthropic memory tool, Agent Zero); IronClaw PostgreSQL-vs-SQLite decision confirmed via primary source (GitHub issue #19) |
-| Architecture | HIGH | Direct codebase inspection of /home/wb/dev/rightclaw/crates/; component boundaries follow existing patterns (rightskills, rightcron); skill pattern confirmed via system-skill-pattern source |
-| Pitfalls | HIGH | MINJA NeurIPS 2025 is primary published research; SQLite WAL/locking from official SQLite docs; OpenClaw issue #26949 is a live bug report; append-only trigger pattern from Instant-SQLite-Audit-Trail |
+| Stack | HIGH | All 4 new crate versions confirmed on crates.io 2026-03-31; rejections rationale sourced from official docs and crate comparisons |
+| Features | HIGH | Feature set derived from existing architecture constraints + official teloxide 0.17 / CC CLI docs; anti-features grounded in confirmed bugs |
+| Architecture | HIGH | Build order validated against existing codebase; component boundaries follow established project patterns (current_exe, memory-server subcommand) |
+| Pitfalls | HIGH (CC bugs, Throttle, General topic) / MEDIUM (notify patterns) | CC session bugs are confirmed GitHub issues; Throttle deadlock confirmed; notify crossbeam pattern from forum posts |
 
 **Overall confidence:** HIGH
 
 ### Gaps to Address
 
-- **FTS5 vs. LIKE decision:** ARCHITECTURE.md chose plain `LIKE` for v2.3 to reduce complexity. STACK.md and FEATURES.md assumed FTS5 from day one. Resolution: include FTS5 virtual table and sync triggers in V1 schema (to avoid costly retrofitting), but have the skill use LIKE queries in v2.3. Skill switches to FTS5 queries in v2.4 without a schema migration.
-
-- **Stack version discrepancy:** STACK.md recommends rusqlite 0.38 + rusqlite_migration 2.4 + tokio-rusqlite 0.7. ARCHITECTURE.md (direct codebase inspection, same date) recommends 0.39 + 2.5 + no tokio-rusqlite. Use ARCHITECTURE.md versions. Verify compatibility matrix before first Cargo.toml edit.
-
-- **Eviction columns in V1 schema:** PITFALLS.md flags unbounded growth as a critical pitfall and recommends `expires_at` + `importance` columns in V1 schema. ARCHITECTURE.md schema does not include them. Resolution: add these columns to V1 schema during Phase 1 even if eviction logic ships in v2.4.
-
-- **Injection scanning implementation:** Research identifies the attack class (MINJA, Unit 42, OWASP ASI06) but practical Rust implementation is not documented. Defer to Phase 3 with a dedicated research pass.
-
-- **`sqlite3` binary availability in sandbox:** The skill calls `sqlite3` via bash. The default sandbox config does not exclude it. Doctor check should verify `sqlite3` is on PATH before agents start. Behavior on macOS (built-in) vs. Linux (package manager) differs — add to doctor checks.
+- **`--resume` regression status:** CC issue #1967 closed but regression reported in v1.0.51+. Validate against the exact CC binary deployed before Phase 4 implementation. If broken, fallback to `--session-id <deterministic-uuid>` with stateless prompts — viable but loses conversation history. This fallback must be implemented regardless.
+- **Throttle deadlock mitigation:** Issue #516 is confirmed unfixed. The `CacheMe<Throttle<Bot>>` ordering fix is from a GitHub issue comment (#649), not official docs. Validate experimentally before shipping Phase 4.
+- **notify crate version discrepancy:** ARCHITECTURE.md references notify v7.x while STACK.md specifies 8.2. Use 8.2 — current stable. The sync→async bridge pattern (`blocking_send` into tokio mpsc) is version-independent.
+- **`--bare` vs MCP tools tradeoff:** Explicitly decide in Phase 4 whether bot invocations use `--bare` (faster, no rightmemory MCP tool) or load `.mcp.json` (slower, memory tools available). FEATURES.md defers `/fast` prefix to v3.1 but the default for all bot invocations must be chosen at Phase 4 and documented.
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- Direct codebase inspection: `/home/wb/dev/rightclaw/crates/` (2026-03-26)
-- [rusqlite 0.39.0 on crates.io](https://crates.io/crates/rusqlite) — version, bundled feature, FTS5 support confirmed 2026-03-26
-- [rusqlite_migration 2.5.0 on crates.io](https://crates.io/crates/rusqlite_migration) — version, rusqlite 0.39 compatibility confirmed 2026-03-26
-- [MINJA: Memory INJection Attack — NeurIPS 2025](https://openreview.net/forum?id=QVX6hcJ2um) — 95%+ injection success rate via query-only memory poisoning
-- [SQLite WAL Mode](https://www.sqlite.org/wal.html) — WAL mode, checkpoint behavior, recovery on restart
-- [SQLite File Locking and Concurrency V3](https://sqlite.org/lockingv3.html) — SQLITE_BUSY behavior, busy_timeout
-- [Anthropic Memory Tool docs](https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool) — official memory_20250818 tool API
-- [IronClaw "Why Postgres?" issue #19](https://github.com/nearai/ironclaw/issues/19) — confirms PostgreSQL vs. SQLite decision
-- [sqlx + rusqlite semver hazard — sqlx GitHub issue #3926](https://github.com/launchbadge/sqlx/issues/3926) — libsqlite3-sys conflict confirmed
+- [teloxide 0.17.0 on crates.io / docs.rs](https://docs.rs/teloxide/latest/teloxide/) — dispatcher, dptree, distribution_function, message types, Throttle adaptor
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) — `-p`, `--resume`, `--session-id`, `--system-prompt-file`, `--output-format`, `--bare` flags
+- [tokio::process::Child docs](https://docs.rs/tokio/latest/tokio/process/struct.Child.html) — `wait_with_output()`, `kill_on_drop()`
+- [cron 0.16.0 on crates.io](https://crates.io/crates/cron) — schedule parsing API, chrono dependency
+- [notify 8.2.0 on crates.io / docs.rs](https://crates.io/crates/notify) — `recommended_watcher`, tokio integration pattern
+- [notify-debouncer-full 0.7.0 on crates.io](https://crates.io/crates/notify-debouncer-full) — rename stitching, crossbeam feature flag
+- [Telegram Bot API Reference](https://core.telegram.org/bots/api) — message_thread_id, forum_topic, General topic behavior
 
 ### Secondary (MEDIUM confidence)
-- [deepwiki.com/nearai/ironclaw](https://deepwiki.com/nearai/ironclaw) — memory system architecture
-- [Memory & Search OpenClaw deepwiki](https://deepwiki.com/openclaw/openclaw/3.4.3-memory-and-search) — SQLite FTS5 + sqlite-vec pattern
-- [OpenClaw Issue #26949](https://github.com/openclaw/openclaw/issues/26949) — MEMORY.md double injection live bug
-- [The System Skill Pattern](https://www.shruggingface.com/blog/the-system-skill-pattern) — SKILL.md + sqlite3 bash approach
-- [Palo Alto Unit 42: Indirect Prompt Injection](https://unit42.paloaltonetworks.com/indirect-prompt-injection-poisons-ai-longterm-memory/) — session summarization exploit via injected memory
-- [Instant SQLite Audit Trail](https://github.com/simon-weber/Instant-SQLite-Audit-Trail) — trigger-based immutability pattern
-- [rusqlite_migration async example](https://github.com/cljoly/rusqlite_migration/blob/master/examples/async/src/main.rs) — call_unwrap pattern
+- [CC issue #16103: --resume ignores CLAUDE_CONFIG_DIR](https://github.com/anthropics/claude-code/issues/16103) — closed "not planned" Feb 2026
+- [CC issue #8069: resume returns different session_id](https://github.com/anthropics/claude-code/issues/8069) — confirmed unfixed
+- [teloxide issue #516: Throttle deadlock](https://github.com/teloxide/teloxide/issues/516) — confirmed, no fix
+- [teloxide issue #649: Throttle+CacheMe ordering](https://github.com/teloxide/teloxide/issues/649) — ordering requirement documented in issue only
+- [tdlib/telegram-bot-api issue #447: General topic spurious thread_id](https://github.com/tdlib/telegram-bot-api/issues/447) — confirmed Bot API bug
+- [grammY Flood Control Guide](https://grammy.dev/advanced/flood) — rate limits (30 msg/sec global, 20 msg/min group)
+- [tokio issue #2685: zombie processes when Child dropped](https://github.com/tokio-rs/tokio/issues/2685) — confirmed behavior
 
 ### Tertiary (LOW confidence)
-- [Rust ORMs in 2026 comparison](https://aarambhdevhub.medium.com/rust-orms-in-2026-diesel-vs-sqlx-vs-seaorm-vs-rusqlite-which-one-should-you-actually-use-706d0fe912f3) — single blog source, context only
-- [OpenClaw vs IronClaw comparison](https://clawchemy.xyz/blog/openclaw-vs-ironclaw-which-ai-agent-framework-is-best) — feature matrix context
+- [CC issue #1967: --resume broken in print mode](https://github.com/anthropics/claude-code/issues/1967) — fix merged but regression reported; needs live validation
+- [CC subprocess guard (CC 2.1.39)](https://x.com/dani_avila7/status/2021786412861862036) — single source; relevant only for subprocess-of-subprocess (not v3.0 pattern)
+- [notify forum: duplicate events under load](https://users.rust-lang.org/t/problem-with-notify-crate-v6-1/99877) — crossbeam pattern validation
 
 ---
-*Research completed: 2026-03-26*
+*Research completed: 2026-03-31*
 *Ready for roadmap: yes*
