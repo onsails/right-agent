@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_1() {
+    fn user_version_is_2() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
@@ -133,7 +133,39 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1, "user_version should be 1 after V1 migration");
+        assert_eq!(version, 2, "user_version should be 2 after V2 migration");
+    }
+
+    #[test]
+    fn schema_has_telegram_sessions_table() {
+        let dir = tempdir().unwrap();
+        open_db(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='telegram_sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "telegram_sessions table should exist after V2 migration");
+    }
+
+    #[test]
+    fn telegram_sessions_unique_chat_thread() {
+        let dir = tempdir().unwrap();
+        open_db(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        conn.execute(
+            "INSERT INTO telegram_sessions (chat_id, thread_id, root_session_id) VALUES (42, 0, 'uuid-1')",
+            [],
+        )
+        .unwrap();
+        let result = conn.execute(
+            "INSERT INTO telegram_sessions (chat_id, thread_id, root_session_id) VALUES (42, 0, 'uuid-2')",
+            [],
+        );
+        assert!(result.is_err(), "UNIQUE(chat_id, thread_id) should reject duplicate insert");
     }
 
     #[test]
