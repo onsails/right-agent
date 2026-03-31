@@ -85,7 +85,10 @@ See [milestones/v2.5-ROADMAP.md](milestones/v2.5-ROADMAP.md)
   2. telegram_sessions schema has `thread_id INT NOT NULL DEFAULT 0` (non-nullable — guards against thread_id=1 normalization bug)
   3. `UNIQUE(chat_id, thread_id)` constraint prevents duplicate session rows for the same conversation thread
   4. root_session_id column is present with semantics documented: stores only the first-call session UUID, never updated on resume
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 22-01-PLAN.md — V2 migration: SQL file + migrations.rs registration + tests (TDD)
 
 ### Phase 23: Bot Skeleton
 **Goal**: rightclaw bot --agent runs as a process, reads agent config, and starts a teloxide dispatcher (even with no-op handlers)
@@ -162,7 +165,7 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 22. DB Schema | v3.0 | 0/? | Not started | - |
+| 22. DB Schema | v3.0 | 0/1 | Not started | - |
 | 23. Bot Skeleton | v3.0 | 0/? | Not started | - |
 | 24. System Prompt Codegen | v3.0 | 0/? | Not started | - |
 | 25. Telegram Handler + CC Dispatch | v3.0 | 0/? | Not started | - |
