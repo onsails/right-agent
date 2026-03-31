@@ -14,6 +14,7 @@ fn make_agent(name: &str, restart: RestartPolicy) -> AgentDef {
         telegram_token_file: None,
         telegram_token: None,
         telegram_user_id: None,
+        allowed_chat_ids: vec![],
         env: std::collections::HashMap::new(),
     });
     AgentDef {
