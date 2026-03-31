@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -339,7 +338,7 @@ async fn cmd_up(
     agents_filter: Option<Vec<String>>,
     detach: bool,
     no_sandbox: bool,
-    debug: bool,
+    _debug: bool,
 ) -> miette::Result<()> {
     // Fail fast if required tools are missing.
     rightclaw::runtime::verify_dependencies()?;
@@ -422,44 +421,25 @@ async fn cmd_up(
         rightclaw::codegen::ensure_telegram_plugin_installed()?;
     }
 
-    // Generate shell wrappers for each agent.
+    // Write system-prompt.txt and settings.json for each agent.
     for agent in &agents {
-        // Generate combined prompt (identity + start prompt + optional rightcron).
-        let combined_content = rightclaw::codegen::generate_combined_prompt(agent)?;
-        let prompt_path = run_dir.join(format!("{}-prompt.md", agent.name));
-        std::fs::write(&prompt_path, &combined_content).map_err(|e| {
-            miette::miette!(
-                "failed to write combined prompt for '{}': {e:#}",
-                agent.name
-            )
-        })?;
-        tracing::debug!(agent = %agent.name, "wrote combined prompt: {}", prompt_path.display());
-
-        let prompt_path_str = prompt_path.display().to_string();
-        let debug_log = if debug {
-            Some(run_dir.join(format!("{}-debug.log", agent.name)).display().to_string())
-        } else {
-            None
-        };
-        let wrapper_content = rightclaw::codegen::generate_wrapper(
-            agent,
-            &prompt_path_str,
-            debug_log.as_deref(),
-        )?;
-        let wrapper_path = run_dir.join(format!("{}.sh", agent.name));
-        std::fs::write(&wrapper_path, &wrapper_content)
-            .map_err(|e| miette::miette!("failed to write wrapper for '{}': {e:#}", agent.name))?;
-        std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| {
-                miette::miette!("failed to set wrapper permissions for '{}': {e:#}", agent.name)
-            })?;
-        tracing::debug!(agent = %agent.name, "wrote wrapper: {}", wrapper_path.display());
-
         // Generate .claude/settings.json with sandbox config (Phase 6).
         let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home)?;
         let claude_dir = agent.path.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
+
+        // Generate system-prompt.txt from present identity files (D-10, PROMPT-01).
+        // wrapper_path in process-compose remains stale until Phase 26 (D-12).
+        let prompt_content = rightclaw::codegen::generate_system_prompt(agent)?;
+        let system_prompt_path = claude_dir.join("system-prompt.txt");
+        std::fs::write(&system_prompt_path, &prompt_content).map_err(|e| {
+            miette::miette!(
+                "failed to write system-prompt.txt for '{}': {e:#}",
+                agent.name
+            )
+        })?;
+        tracing::debug!(agent = %agent.name, "wrote system-prompt.txt");
         // Pre-create shell-snapshots dir so CC Bash tool doesn't error on first run.
         std::fs::create_dir_all(claude_dir.join("shell-snapshots"))
             .map_err(|e| miette::miette!("failed to create shell-snapshots dir for '{}': {e:#}", agent.name))?;
@@ -1352,15 +1332,15 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
             )
         })?;
 
-    let run_dir = home.join("run");
-    std::fs::create_dir_all(&run_dir)
-        .map_err(|e| miette::miette!("failed to create run directory: {e:#}"))?;
-
-    let combined_content = rightclaw::codegen::generate_combined_prompt(agent)?;
-    let prompt_path = run_dir.join(format!("{agent_name}-prompt.md"));
-    std::fs::write(&prompt_path, &combined_content).map_err(|e| {
+    // Write system-prompt.txt before exec (function may run without prior cmd_up).
+    let claude_dir = agent.path.join(".claude");
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent_name))?;
+    let prompt_content = rightclaw::codegen::generate_system_prompt(agent)?;
+    let system_prompt_path = claude_dir.join("system-prompt.txt");
+    std::fs::write(&system_prompt_path, &prompt_content).map_err(|e| {
         miette::miette!(
-            "failed to write combined prompt for '{}': {e:#}",
+            "failed to write system-prompt.txt for '{}': {e:#}",
             agent_name
         )
     })?;
@@ -1373,8 +1353,8 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
 
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(claude_bin)
-        .arg("--append-system-prompt-file")
-        .arg(&prompt_path)
+        .arg("--system-prompt-file")
+        .arg(&system_prompt_path)
         .arg("--dangerously-skip-permissions")
         .arg("-p")
         .arg(&agent.path)
