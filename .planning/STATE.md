@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
+milestone: v3.0
+milestone_name: Teloxide Bot Runtime
 status: verifying
-stopped_at: Completed 23-01-PLAN.md
-last_updated: "2026-03-31T21:11:20.273Z"
+stopped_at: Completed 23-02-PLAN.md
+last_updated: "2026-03-31T21:19:22.702Z"
 last_activity: 2026-03-27
 progress:
-  total_phases: 18
-  completed_phases: 17
-  total_plans: 30
-  completed_plans: 31
+  total_phases: 7
+  completed_phases: 1
+  total_plans: 4
+  completed_plans: 3
   percent: 0
 ---
 
@@ -52,6 +52,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 18-cli-inspection P02 | 3 | 2 tasks | 1 files |
 | Phase 19-home-isolation-hardening P01 | 7 | 2 tasks | 15 files |
 | Phase 23-bot-skeleton P01 | 12 | 1 tasks | 8 files |
+| Phase 23-bot-skeleton P02 | 4 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,8 @@ Recent decisions relevant to v2.3:
 - [Phase 19-home-isolation-hardening]: Telegram detection reads agent.config.telegram_token/telegram_token_file; mcp_config_path removed as unreliable proxy
 - [Phase 19-home-isolation-hardening]: generate_mcp_config gains agent_name param; RC_AGENT_NAME injected into rightmemory env section for memory provenance
 - [Phase 23-bot-skeleton]: allowed_chat_ids: Vec<i64> uses serde(default) — empty vec is secure default (blocks all messages), not Option
+- [Phase 23-bot-skeleton]: teloxide features=[macros, throttle, cache-me] — default-features=false to avoid ctrlc_handler (Phase 23 owns signal handling)
+- [Phase 23-bot-skeleton]: AgentConfig no Default impl — parse_agent_config None uses explicit struct literal fallback
 
 ### Roadmap Evolution
 
@@ -105,6 +108,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-31T21:11:20.270Z
-Stopped at: Completed 23-01-PLAN.md
+Last session: 2026-03-31T21:19:22.698Z
+Stopped at: Completed 23-02-PLAN.md
 Resume file: None

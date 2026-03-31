@@ -8,10 +8,10 @@
 
 ## BOT — Per-agent Telegram Bot
 
-- [ ] **BOT-01**: `rightclaw bot --agent <name>` subcommand runs a teloxide long-polling bot for the given agent
+- [x] **BOT-01**: `rightclaw bot --agent <name>` subcommand runs a teloxide long-polling bot for the given agent
 - [ ] **BOT-02**: Bot process is launched per-agent in process-compose, conditional on `telegram_token` being set in agent.yaml
-- [ ] **BOT-03**: Bot uses `CacheMe<Throttle<Bot>>` adaptor ordering to prevent Throttle deadlock (teloxide issue #516)
-- [ ] **BOT-04**: Bot gracefully shuts down on SIGTERM — all in-flight claude -p subprocesses are killed (`kill_on_drop(true)`) before exit
+- [x] **BOT-03**: Bot uses `CacheMe<Throttle<Bot>>` adaptor ordering to prevent Throttle deadlock (teloxide issue #516)
+- [x] **BOT-04**: Bot gracefully shuts down on SIGTERM — all in-flight claude -p subprocesses are killed (`kill_on_drop(true)`) before exit
 - [ ] **BOT-05**: `allowed_chat_ids` field in agent.yaml — messages from unlisted chat IDs are silently ignored
 - [ ] **BOT-06**: Bot sends `ChatAction::Typing` indicator while claude -p subprocess is running
 
@@ -87,9 +87,9 @@
 | REQ-ID | Phase | Status |
 |--------|-------|--------|
 | SES-01 | Phase 22 | Complete |
-| BOT-01 | Phase 23 | Pending |
-| BOT-03 | Phase 23 | Pending |
-| BOT-04 | Phase 23 | Pending |
+| BOT-01 | Phase 23 | Complete |
+| BOT-03 | Phase 23 | Complete |
+| BOT-04 | Phase 23 | Complete |
 | BOT-05 | Phase 23 | Pending |
 | PROMPT-01 | Phase 24 | Pending |
 | PROMPT-02 | Phase 24 | Pending |

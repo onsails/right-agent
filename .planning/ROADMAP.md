@@ -103,8 +103,8 @@ Plans:
 **UI hint**: no
 
 Plans:
-- [ ] 23-01-PLAN.md — Add allowed_chat_ids: Vec<i64> to AgentConfig (TDD)
-- [ ] 23-02-PLAN.md — Create crates/bot workspace crate with teloxide skeleton, adaptor ordering, signal shutdown
+- [x] 23-01-PLAN.md — Add allowed_chat_ids: Vec<i64> to AgentConfig (TDD)
+- [x] 23-02-PLAN.md — Create crates/bot workspace crate with teloxide skeleton, adaptor ordering, signal shutdown
 - [ ] 23-03-PLAN.md — Wire Commands::Bot into rightclaw-cli; smoke test CLI
 
 ### Phase 24: System Prompt Codegen
@@ -171,7 +171,7 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 22. DB Schema | v3.0 | 1/1 | Complete   | 2026-03-31 |
-| 23. Bot Skeleton | v3.0 | 0/3 | Not started | - |
+| 23. Bot Skeleton | v3.0 | 2/3 | In Progress|  |
 | 24. System Prompt Codegen | v3.0 | 0/? | Not started | - |
 | 25. Telegram Handler + CC Dispatch | v3.0 | 0/? | Not started | - |
 | 26. PC Cutover | v3.0 | 0/? | Not started | - |
