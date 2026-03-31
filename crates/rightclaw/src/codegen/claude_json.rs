@@ -172,7 +172,6 @@ mod tests {
                 restart: RestartPolicy::OnFailure,
                 max_restarts: 3,
                 backoff_seconds: 5,
-                start_prompt: None,
                 model: None,
                 sandbox: None,
                 telegram_token_file: None,
