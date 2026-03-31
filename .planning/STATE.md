@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
-status: completed
-stopped_at: Completed 23-02-PLAN.md
-last_updated: "2026-03-31T21:28:49.018Z"
+status: executing
+stopped_at: Completed 24-system-prompt-codegen-03-PLAN.md
+last_updated: "2026-03-31T22:35:36.044Z"
 last_activity: 2026-03-31
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 4
-  completed_plans: 4
+  total_plans: 7
+  completed_plans: 5
   percent: 14
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 18 — cli-inspection
+**Current focus:** Phase 24 — system-prompt-codegen
 
 ## Current Position
 
-Phase: 24
-Plan: Not started
-Status: Phase 23 complete — all plans done
+Phase: 24 (system-prompt-codegen) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-03-31
 
 Progress: [█░░░░░░░░░] 14%
@@ -53,6 +53,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 19-home-isolation-hardening P01 | 7 | 2 tasks | 15 files |
 | Phase 23-bot-skeleton P01 | 12 | 1 tasks | 8 files |
 | Phase 23-bot-skeleton P02 | 4 | 2 tasks | 9 files |
+| Phase 24-system-prompt-codegen P03 | 7 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,8 @@ Recent decisions relevant to v2.3:
 - [Phase 23-bot-skeleton]: teloxide features=[macros, throttle, cache-me] — default-features=false to avoid ctrlc_handler (Phase 23 owns signal handling)
 - [Phase 23-bot-skeleton]: AgentConfig no Default impl — parse_agent_config None uses explicit struct literal fallback
 - [Phase 23-03]: bot::run() converted to pub async fn — avoids nested tokio runtime collision with #[tokio::main] CLI main; callers .await it directly
+- [Phase 24-system-prompt-codegen]: D-13: USER.md is a minimal placeholder — agent fills it through interaction
+- [Phase 24-system-prompt-codegen]: D-06: Communication and Cron Management sections moved from hardcoded codegen to AGENTS.md template
 
 ### Roadmap Evolution
 
@@ -109,6 +112,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-31T21:19:22.698Z
-Stopped at: Completed 23-02-PLAN.md
+Last session: 2026-03-31T22:35:36.041Z
+Stopped at: Completed 24-system-prompt-codegen-03-PLAN.md
 Resume file: None
