@@ -421,7 +421,7 @@ async fn cmd_up(
         rightclaw::codegen::ensure_telegram_plugin_installed()?;
     }
 
-    // Write system-prompt.txt and settings.json for each agent.
+    // Write agent definition, reply-schema.json, and settings.json for each agent.
     for agent in &agents {
         // Generate .claude/settings.json with sandbox config (Phase 6).
         let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home)?;
@@ -429,17 +429,19 @@ async fn cmd_up(
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
 
-        // Generate system-prompt.txt from present identity files (D-10, PROMPT-01).
-        // wrapper_path in process-compose remains stale until Phase 26 (D-12).
-        let prompt_content = rightclaw::codegen::generate_system_prompt(agent)?;
-        let system_prompt_path = claude_dir.join("system-prompt.txt");
-        std::fs::write(&system_prompt_path, &prompt_content).map_err(|e| {
-            miette::miette!(
-                "failed to write system-prompt.txt for '{}': {e:#}",
-                agent.name
-            )
-        })?;
-        tracing::debug!(agent = %agent.name, "wrote system-prompt.txt");
+        // Generate agent definition .md from present identity files (AGDEF-01).
+        let agent_def_content = rightclaw::codegen::generate_agent_definition(agent)?;
+        let agents_dir = claude_dir.join("agents");
+        std::fs::create_dir_all(&agents_dir)
+            .map_err(|e| miette::miette!("failed to create .claude/agents dir for '{}': {e:#}", agent.name))?;
+        std::fs::write(agents_dir.join(format!("{}.md", agent.name)), &agent_def_content)
+            .map_err(|e| miette::miette!("failed to write agent definition for '{}': {e:#}", agent.name))?;
+
+        // Write reply-schema.json (D-01).
+        std::fs::write(claude_dir.join("reply-schema.json"), rightclaw::codegen::REPLY_SCHEMA_JSON)
+            .map_err(|e| miette::miette!("failed to write reply-schema.json for '{}': {e:#}", agent.name))?;
+
+        tracing::debug!(agent = %agent.name, "wrote agent definition + reply-schema.json");
         // Pre-create shell-snapshots dir so CC Bash tool doesn't error on first run.
         std::fs::create_dir_all(claude_dir.join("shell-snapshots"))
             .map_err(|e| miette::miette!("failed to create shell-snapshots dir for '{}': {e:#}", agent.name))?;
@@ -1332,18 +1334,20 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
             )
         })?;
 
-    // Write system-prompt.txt before exec (function may run without prior cmd_up).
+    // Generate agent definition .md before exec (function may run without prior cmd_up).
     let claude_dir = agent.path.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent_name))?;
-    let prompt_content = rightclaw::codegen::generate_system_prompt(agent)?;
-    let system_prompt_path = claude_dir.join("system-prompt.txt");
-    std::fs::write(&system_prompt_path, &prompt_content).map_err(|e| {
-        miette::miette!(
-            "failed to write system-prompt.txt for '{}': {e:#}",
-            agent_name
-        )
-    })?;
+    let agent_def_content = rightclaw::codegen::generate_agent_definition(agent)?;
+    let agents_dir = claude_dir.join("agents");
+    std::fs::create_dir_all(&agents_dir)
+        .map_err(|e| miette::miette!("failed to create .claude/agents dir for '{}': {e:#}", agent_name))?;
+    std::fs::write(agents_dir.join(format!("{}.md", agent.name)), &agent_def_content)
+        .map_err(|e| miette::miette!("failed to write agent definition for '{}': {e:#}", agent_name))?;
+
+    // Write reply-schema.json (D-01).
+    std::fs::write(claude_dir.join("reply-schema.json"), rightclaw::codegen::REPLY_SCHEMA_JSON)
+        .map_err(|e| miette::miette!("failed to write reply-schema.json for '{}': {e:#}", agent_name))?;
 
     let claude_bin = which::which("claude")
         .or_else(|_| which::which("claude-bun"))
@@ -1353,8 +1357,8 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
 
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(claude_bin)
-        .arg("--system-prompt-file")
-        .arg(&system_prompt_path)
+        .arg("--agent")
+        .arg(&agent.name)
         .arg("--dangerously-skip-permissions")
         .arg("-p")
         .arg(&agent.path)
