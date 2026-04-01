@@ -2,9 +2,14 @@ pub mod bot;
 pub mod dispatch;
 pub mod filter;
 pub mod session;
+pub mod worker;
 
 pub use dispatch::run_telegram;
 pub use session::effective_thread_id;
+
+/// Bot adaptor type alias used by WorkerContext and dispatch logic.
+/// Ordering: CacheMe<Throttle<Bot>> per BOT-03 (Throttle inner, CacheMe outer).
+pub type BotType = teloxide::adaptors::CacheMe<teloxide::adaptors::throttle::Throttle<teloxide::Bot>>;
 
 use std::path::Path;
 use rightclaw::agent::types::AgentConfig;
