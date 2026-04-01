@@ -66,9 +66,9 @@
 
 ## CRONSYNC SKILL — Simplification
 
-- [ ] **SKILL-01**: cronsync SKILL.md rewritten to file-management-only: create/edit/delete YAML spec files in `crons/` directory
-- [ ] **SKILL-02**: All CHECK/RECONCILE/CRITICAL guard logic removed from SKILL.md — execution is now the Rust runtime's responsibility
-- [ ] **SKILL-03**: BOOT-01/BOOT-02 startup bootstrap references removed — no longer needed
+- [x] **SKILL-01**: cronsync SKILL.md rewritten to file-management-only: create/edit/delete YAML spec files in `crons/` directory
+- [x] **SKILL-02**: All CHECK/RECONCILE/CRITICAL guard logic removed from SKILL.md — execution is now the Rust runtime's responsibility
+- [x] **SKILL-03**: BOOT-01/BOOT-02 startup bootstrap references removed — no longer needed
 
 ---
 
@@ -131,6 +131,6 @@
 | CRON-04 | Phase 27 | Complete |
 | CRON-05 | Phase 27 | Complete |
 | CRON-06 | Phase 27 | Complete |
-| SKILL-01 | Phase 28 | Pending |
-| SKILL-02 | Phase 28 | Pending |
-| SKILL-03 | Phase 28 | Pending |
+| SKILL-01 | Phase 28 | Complete |
+| SKILL-02 | Phase 28 | Complete |
+| SKILL-03 | Phase 28 | Complete |
