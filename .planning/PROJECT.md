@@ -16,7 +16,7 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - Per-agent teloxide бот процесс управляется через process-compose
 - Telegram threads → независимые Claude сессии (thread_id → session_uuid в memory.db)
 - `claude -p --session-id / --resume` для stateless взаимодействия с continuity
-- System prompt compose из SOUL.md + USER.md + AGENTS.md → `agent/.claude/system-prompt.txt`
+- Agent definition file per agent: `agent/.claude/agents/<name>.md` (YAML frontmatter + IDENTITY→SOUL→USER→AGENTS body) — replaces `system-prompt.txt`
 - Cron runtime в Rust (tokio task + file watcher), cronsync SKILL.md только для управления файлами
 
 ## Requirements
@@ -151,7 +151,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v3.0 in progress** (2026-04-01). Teloxide Bot Runtime — Phase 25 complete: Telegram handler + CC dispatch. session.rs CRUD, worker.rs (debounce + CC subprocess), handler.rs + dispatch.rs (DashMap worker map, BotCommand, SIGTERM shutdown).
+**v3.0 in progress** (2026-04-01). Teloxide Bot Runtime — Phase 25.5 complete: Agent definition codegen. `rightclaw up` now writes `.claude/agents/<name>.md` + `reply-schema.json` per agent; `worker.rs` migrated to `--agent`/`--json-schema` structured output; `system_prompt.rs` deleted. Phase 25 complete: Telegram handler + CC dispatch. session.rs CRUD, worker.rs (debounce + CC subprocess), handler.rs + dispatch.rs (DashMap worker map, BotCommand, SIGTERM shutdown).
 
 **v2.5 shipped** (2026-03-31). RightCron Reliability — fixed startup_prompt Agent tool delegation (bootstrap now runs inline on main thread with CronCreate access), restructured cronsync SKILL.md with CRITICAL guard and CHECK/RECONCILE phase split. Phase 22 (E2E verification) cancelled — user chose new milestone approach. [Full archive](milestones/v2.5-ROADMAP.md)
 
@@ -173,4 +173,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Tech debt: git absence warning in `verify_dependencies()` but not surfaced by `rightclaw doctor`
 
 ---
-*Last updated: 2026-04-01 — Phase 25 complete: Telegram handler + CC dispatch*
+*Last updated: 2026-04-01 — Phase 25.5 complete: agent definition codegen + bot migration to --agent/--json-schema*
