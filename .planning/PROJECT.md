@@ -81,8 +81,8 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ~~Thread → session mapping in memory.db (new `telegram_sessions` table)~~ — Validated in Phase 25
 - [ ] `claude -p --session-id / --resume` session continuity per Telegram thread
 - ~~System prompt composition from SOUL.md + USER.md + AGENTS.md on `rightclaw up`~~ — Validated in Phase 24
-- [ ] Cron scheduling/execution in Rust runtime (tokio task, file watcher)
-- [ ] Cronsync SKILL.md reduced to file management only (create/edit/delete YAML specs)
+- ~~Cron scheduling/execution in Rust runtime (tokio task, file watcher)~~ — Validated in Phase 27
+- ~~Cronsync SKILL.md reduced to file management only (create/edit/delete YAML specs)~~ — Validated in Phase 28
 
 ### Out of Scope
 
@@ -151,7 +151,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v3.0 in progress** (2026-04-01). Teloxide Bot Runtime — Phase 27 complete: Cron runtime. `cron.rs` tokio task polls `crons/*.yaml` every 60s, runs `claude -p --agent` subprocesses on schedule, records run history in `cron_runs` table (V3 migration). Lock files prevent duplicate runs; stale locks auto-cleared. MCP server renamed to "rightclaw" with `cron_list_runs`/`cron_show_run` tools. CRON-01–CRON-06 validated. Phase 26 complete: PC cutover. `rightclaw up` now generates bot-only process-compose.yaml (BotProcessAgent, no CC channels, no is_interactive). deleteWebhook called on bot startup (fatal if fails). Doctor warns on active webhooks. PC-01–PC-05 validated. Phase 25.5 complete: Agent definition codegen. `rightclaw up` now writes `.claude/agents/<name>.md` + `reply-schema.json` per agent; `worker.rs` migrated to `--agent`/`--json-schema` structured output; `system_prompt.rs` deleted. Phase 25 complete: Telegram handler + CC dispatch. session.rs CRUD, worker.rs (debounce + CC subprocess), handler.rs + dispatch.rs (DashMap worker map, BotCommand, SIGTERM shutdown).
+**v3.0 in progress** (2026-04-01). Teloxide Bot Runtime — Phase 28 complete: cronsync skill rewrite. `skills/cronsync/SKILL.md` rewritten from 295-line reconciler to 117-line file-management skill. All CronCreate/CronDelete/CronList references, bootstrap, reconciliation, state.json, and lock guard wrapper removed. Added `## Checking Run History` section documenting `cron_list_runs`/`cron_show_run` MCP tools. SKILL-01–SKILL-03 validated. Phase 27 complete: Cron runtime. `cron.rs` tokio task polls `crons/*.yaml` every 60s, runs `claude -p --agent` subprocesses on schedule, records run history in `cron_runs` table (V3 migration). Lock files prevent duplicate runs; stale locks auto-cleared. MCP server renamed to "rightclaw" with `cron_list_runs`/`cron_show_run` tools. CRON-01–CRON-06 validated. Phase 26 complete: PC cutover. `rightclaw up` now generates bot-only process-compose.yaml (BotProcessAgent, no CC channels, no is_interactive). deleteWebhook called on bot startup (fatal if fails). Doctor warns on active webhooks. PC-01–PC-05 validated. Phase 25.5 complete: Agent definition codegen. `rightclaw up` now writes `.claude/agents/<name>.md` + `reply-schema.json` per agent; `worker.rs` migrated to `--agent`/`--json-schema` structured output; `system_prompt.rs` deleted. Phase 25 complete: Telegram handler + CC dispatch. session.rs CRUD, worker.rs (debounce + CC subprocess), handler.rs + dispatch.rs (DashMap worker map, BotCommand, SIGTERM shutdown).
 
 **v2.5 shipped** (2026-03-31). RightCron Reliability — fixed startup_prompt Agent tool delegation (bootstrap now runs inline on main thread with CronCreate access), restructured cronsync SKILL.md with CRITICAL guard and CHECK/RECONCILE phase split. Phase 22 (E2E verification) cancelled — user chose new milestone approach. [Full archive](milestones/v2.5-ROADMAP.md)
 
@@ -173,4 +173,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Tech debt: git absence warning in `verify_dependencies()` but not surfaced by `rightclaw doctor`
 
 ---
-*Last updated: 2026-04-01 — Phase 27 complete: Cron runtime — cron.rs scheduling engine, cron_runs V3 migration, MCP rename + cron observability tools*
+*Last updated: 2026-04-01 — Phase 28 complete: cronsync skill rewrite — file-management-only SKILL.md, MCP observability section (cron_list_runs/cron_show_run), all v3.0 Teloxide Bot Runtime phases done*
