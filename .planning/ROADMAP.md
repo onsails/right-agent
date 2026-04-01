@@ -185,8 +185,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 25.5-01-PLAN.md — agent_def.rs codegen module + cmd_up/cmd_pair wiring + system_prompt.rs deletion
-- [ ] 25.5-02-PLAN.md — worker.rs invoke_cc rewrite + parse_reply_output + test updates
+- [ ] 27-01-PLAN.md — cron.rs scheduling engine + V3 migration + lib.rs spawn site
+- [ ] 27-02-PLAN.md — MCP server rename to 'rightclaw' + cron_list_runs + cron_show_run tools
 
 ### Phase 28: Cronsync SKILL Rewrite
 **Goal**: cronsync SKILL.md manages only cron spec files in crons/ directory; all execution logic is handled by the Rust runtime
@@ -199,8 +199,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 25.5-01-PLAN.md — agent_def.rs codegen module + cmd_up/cmd_pair wiring + system_prompt.rs deletion
-- [ ] 25.5-02-PLAN.md — worker.rs invoke_cc rewrite + parse_reply_output + test updates
+- [ ] 28-01-PLAN.md — Rewrite cronsync SKILL.md to file management only
+- [ ] 28-02-PLAN.md — Remove BOOT references and execution guard logic
 
 ## Progress
 
