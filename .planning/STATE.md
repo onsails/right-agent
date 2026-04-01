@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
-status: executing
-stopped_at: Completed 26-02-PLAN.md
-last_updated: "2026-04-01T14:42:05.586Z"
+status: verifying
+stopped_at: Completed 26-pc-cutover-01-PLAN.md
+last_updated: "2026-04-01T14:43:29.053Z"
 last_activity: 2026-04-01
 progress:
   total_phases: 8
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 14
-  completed_plans: 13
+  completed_plans: 14
   percent: 14
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 
 Phase: 26 (pc-cutover) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-01
 
 Progress: [█░░░░░░░░░] 14%
@@ -61,6 +61,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 25.5-agent-definition-codegen P01 | 212 | 2 tasks | 6 files |
 | Phase 25.5-agent-definition-codegen P02 | 3 | 1 tasks | 2 files |
 | Phase 26-pc-cutover P02 | 460 | 2 tasks | 2 files |
+| Phase 26-pc-cutover P01 | 15 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,8 @@ Recent decisions relevant to v2.3:
 - [Phase 25.5-agent-definition-codegen]: No tools: field in frontmatter per D-05 — CC infers tools from sandbox settings
 - [Phase 25.5-agent-definition-codegen]: [Phase 25.5-02]: --agent first call only (AGDEF-02/03); --json-schema both calls (D-01); ReplyOutput gains Debug+Deserialize; agent_name from agent_dir.file_name() at WorkerContext construction
 - [Phase 26-pc-cutover]: Use teloxide::requests::Requester as _ in scoped block for delete_webhook; inline token resolver in doctor.rs with TODO for Plan 01 pub(crate) migration
+- [Phase 26-pc-cutover]: BotProcessAgent replaces ProcessAgent: token_inline/token_file mutually exclusive; token_file resolved to abs path at codegen time
+- [Phase 26-pc-cutover]: generate_process_compose filters out non-telegram agents entirely; early-exit in cmd_up when no bot agents
 
 ### Roadmap Evolution
 
@@ -132,6 +135,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T14:42:05.583Z
-Stopped at: Completed 26-02-PLAN.md
+Last session: 2026-04-01T14:43:29.049Z
+Stopped at: Completed 26-pc-cutover-01-PLAN.md
 Resume file: None
