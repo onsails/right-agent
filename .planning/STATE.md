@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
-status: verifying
-stopped_at: Completed 28-cronsync-skill-rewrite-01-PLAN.md
-last_updated: "2026-04-01T20:32:05.580Z"
+status: executing
+stopped_at: Completed 28.2-01-PLAN.md
+last_updated: "2026-04-01T21:54:55.705Z"
 last_activity: 2026-04-01
 progress:
   total_phases: 8
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 28 — cronsync-skill-rewrite
+**Current focus:** Phase 28.2 — v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime
 
 ## Current Position
 
-Phase: 28
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 28.2 (v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-01
 
 Progress: [█░░░░░░░░░] 14%
@@ -65,6 +65,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 27-cron-runtime P01 | 222 | 2 tasks | 7 files |
 | Phase 27-cron-runtime P02 | 3 | 1 tasks | 1 files |
 | Phase 28-cronsync-skill-rewrite P01 | 2 | 2 tasks | 1 files |
+| Phase 28.2 P01 | 5 | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -120,6 +121,7 @@ Recent decisions relevant to v2.3:
 - [Phase 27-cron-runtime]: Implementation::new('rightclaw', CARGO_PKG_VERSION) for MCP server rename — cleaner than struct update syntax
 - [Phase 27-cron-runtime]: server_info is non-Optional in rmcp 1.3 InitializeResult — direct field access in tests
 - [Phase 28-cronsync-skill-rewrite]: cronsync SKILL.md: reactive-only activation (no bootstrap), MCP observability section added, UTC timezone correction, all CC tool refs removed
+- [Phase 28.2]: Use rustls instead of native-tls for teloxide — OpenSSL absent from devenv PKG_CONFIG_PATH; rustls is pure-Rust and already used by workspace reqwest dep
 
 ### Roadmap Evolution
 
@@ -145,6 +147,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T20:27:43.320Z
-Stopped at: Completed 28-cronsync-skill-rewrite-01-PLAN.md
+Last session: 2026-04-01T21:54:55.701Z
+Stopped at: Completed 28.2-01-PLAN.md
 Resume file: None
