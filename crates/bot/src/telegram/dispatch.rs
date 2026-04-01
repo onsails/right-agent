@@ -52,6 +52,7 @@ pub async fn run_telegram(
     let bot = build_bot(token);
 
     let allowed: HashSet<i64> = allowed_chat_ids.into_iter().collect();
+    tracing::info!(allowed_chat_ids = ?allowed, "chat ID allow-list loaded");
     let filter = make_chat_id_filter(allowed);
 
     // Shared state
@@ -70,7 +71,11 @@ pub async fn run_telegram(
         .branch(command_handler)
         .endpoint(handle_message);
 
-    let schema = dptree::entry().branch(message_handler);
+    let schema = dptree::entry()
+        .inspect(|upd: Update| {
+            tracing::info!(update_id = upd.id.0, "update received");
+        })
+        .branch(message_handler);
 
     let mut dispatcher = Dispatcher::builder(bot.clone(), schema)
         .dependencies(dptree::deps![Arc::clone(&worker_map), Arc::clone(&agent_dir_arc), Arc::clone(&debug_arc)])
