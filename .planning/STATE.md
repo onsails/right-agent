@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
-status: executing
-stopped_at: Completed 25-telegram-handler-cc-dispatch-02-PLAN.md
-last_updated: "2026-04-01T09:51:21.327Z"
+status: verifying
+stopped_at: Completed 25-telegram-handler-cc-dispatch-03-PLAN.md
+last_updated: "2026-04-01T09:57:20.658Z"
 last_activity: 2026-04-01
 progress:
   total_phases: 7
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 10
-  completed_plans: 9
+  completed_plans: 10
   percent: 14
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 
 Phase: 25 (telegram-handler-cc-dispatch) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-01
 
 Progress: [█░░░░░░░░░] 14%
@@ -57,6 +57,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 24-system-prompt-codegen P02 | 155 | 2 tasks | 2 files |
 | Phase 25-telegram-handler-cc-dispatch P01 | 25 | 2 tasks | 4 files |
 | Phase 25-telegram-handler-cc-dispatch P02 | 7 | 2 tasks | 4 files |
+| Phase 25-telegram-handler-cc-dispatch P03 | 228 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,8 @@ Recent decisions relevant to v2.3:
 - [Phase 25-telegram-handler-cc-dispatch]: Use 'y' not 'x' in stderr truncation test — 'exit' contains 'x' causing collision
 - [Phase 25-telegram-handler-cc-dispatch]: parse_reply_tool uses serde_json::Value directly, no typed CcOutput struct needed
 - [Phase 25-telegram-handler-cc-dispatch]: teloxide 0.13 reply uses ReplyParameters not reply_to_message_id method
+- [Phase 25-03]: DashMap guard released before .await in handle_message — sender cloned out before send
+- [Phase 25-03]: kill_on_drop(true) in invoke_cc sufficient for BOT-04 — no children registry needed
 
 ### Roadmap Evolution
 
@@ -122,6 +125,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T09:51:21.323Z
-Stopped at: Completed 25-telegram-handler-cc-dispatch-02-PLAN.md
+Last session: 2026-04-01T09:57:20.654Z
+Stopped at: Completed 25-telegram-handler-cc-dispatch-03-PLAN.md
 Resume file: None
