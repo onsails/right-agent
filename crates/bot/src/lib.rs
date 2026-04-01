@@ -1,3 +1,4 @@
+pub mod cron;
 pub mod error;
 pub mod telegram;
 
@@ -98,6 +99,13 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             "allowed_chat_ids is empty — all incoming messages will be dropped"
         );
     }
+
+    // CRON-01: spawn cron task alongside Telegram dispatcher
+    let cron_agent_dir = agent_dir.clone();
+    let cron_agent_name = args.agent.clone();
+    tokio::spawn(async move {
+        cron::run_cron_task(cron_agent_dir, cron_agent_name).await;
+    });
 
     // Start Telegram dispatcher
     telegram::run_telegram(token, config.allowed_chat_ids, agent_dir).await
