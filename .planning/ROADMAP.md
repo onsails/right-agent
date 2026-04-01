@@ -74,6 +74,8 @@ See [milestones/v2.5-ROADMAP.md](milestones/v2.5-ROADMAP.md)
 - [x] **Phase 26: PC Cutover** - Wire bot into rightclaw up lifecycle; atomic cutover removes CC channels flag and starts teloxide (completed 2026-04-01)
 - [x] **Phase 27: Cron Runtime** - tokio cron task loop reading crons/*.yaml and executing claude -p subprocesses (completed 2026-04-01)
 - [x] **Phase 28: Cronsync SKILL Rewrite** - Reduce cronsync SKILL.md to file management only; remove all execution logic (completed 2026-04-01)
+- [ ] **Phase 28.1: v3.0 UAT** - Manual end-to-end testing of Teloxide bot, cron runtime, and rightclaw up flow (INSERTED)
+- [ ] **Phase 28.2: v3.0 UAT Fix** - Fix teloxide missing native-tls (bot restart loop) and doctor nested tokio runtime panic (INSERTED)
 
 ## Phase Details
 
@@ -215,3 +217,23 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 | 26. PC Cutover | v3.0 | 2/2 | Complete    | 2026-04-01 |
 | 27. Cron Runtime | v3.0 | 2/2 | Complete    | 2026-04-01 |
 | 28. Cronsync SKILL Rewrite | v3.0 | 1/1 | Complete    | 2026-04-01 |
+
+### Phase 28.1: v3.0 UAT: manual end-to-end testing of Teloxide bot, cron runtime, and rightclaw up flow (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 28
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 28.1 to break down)
+
+### Phase 28.2: v3.0 UAT Fix: teloxide native-tls and doctor async runtime (INSERTED)
+
+**Goal:** Fix two bugs found in v3.0 UAT — bot cannot start due to missing TLS support, and rightclaw doctor panics with nested tokio runtime.
+**Requirements**: TBD
+**Depends on:** Phase 28.1
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd:plan-phase 28.2 to break down)

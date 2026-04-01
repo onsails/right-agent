@@ -124,6 +124,8 @@ Recent decisions relevant to v2.3:
 ### Roadmap Evolution
 
 - Phase 19 added: HOME Isolation Hardening — plugin sharing, shell snapshot cleanup, fresh-init UAT
+- Phase 28.1 inserted after Phase 28: v3.0 UAT — manual end-to-end testing of Teloxide bot, cron runtime, and rightclaw up flow (URGENT)
+- Phase 28.2 inserted after Phase 28.1: v3.0 UAT Fix — teloxide missing native-tls (bot restart loop) and doctor nested tokio runtime panic (URGENT)
 
 ### Pending Todos
 
