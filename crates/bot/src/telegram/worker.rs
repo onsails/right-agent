@@ -24,11 +24,6 @@ pub type SessionKey = (i64, i64);
 /// Fixed 500ms debounce window (D-01).
 const DEBOUNCE_MS: u64 = 500;
 
-/// Reply tool definition injected on every CC invocation (D-03).
-///
-/// CC must call the `reply` tool — plain text responses fail `parse_reply_tool`.
-/// `--append-system-prompt` (inline string) works alongside `--system-prompt-file`.
-const REPLY_TOOL_JSON: &str = r#"{"name":"reply","description":"Send a reply to the user or stay silent","input_schema":{"type":"object","properties":{"content":{"type":["string","null"],"description":"Message text. null = silent (no Telegram reply)"},"reply_to_message_id":{"type":["integer","null"],"description":"Telegram message_id to reply to. null = reply to thread only"},"media_paths":{"type":["array","null"],"items":{"type":"string"},"description":"STUB: Phase 25 logs warning, does not send"}},"required":["content"]}}"#;
 
 /// A single Telegram message queued into the debounce channel.
 #[derive(Clone)]
@@ -44,12 +39,15 @@ pub struct WorkerContext {
     pub chat_id: teloxide::types::ChatId,
     pub effective_thread_id: i64,
     pub agent_dir: PathBuf,
+    /// Agent name for --agent flag on first CC invocation (AGDEF-02).
+    pub agent_name: String,
     pub bot: super::BotType,
     /// agent_dir — passed separately so worker opens its own Connection
     pub db_path: PathBuf,
 }
 
-/// Parsed output from the `reply` tool call in CC JSON response.
+/// Parsed output from CC structured JSON response (`result` field per D-03).
+#[derive(Debug, serde::Deserialize)]
 pub struct ReplyOutput {
     pub content: Option<String>,
     pub reply_to_message_id: Option<i32>,
@@ -126,13 +124,12 @@ pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
     format!("⚠️ Agent error (exit {exit_code}):\n```\n{truncated}\n```")
 }
 
-/// Parse the `reply` tool call from CC JSON output (D-04, D-05).
+/// Parse CC structured JSON output (D-03, D-04).
 ///
-/// Returns `Ok((ReplyOutput, Option<session_id>))` if the reply tool was called.
-/// Returns `Err(String)` if no tool call found (triggers error reply per D-05).
-/// Returns `Ok((ReplyOutput { content: None, .. }, _))` if content=null (silent response).
-pub fn parse_reply_tool(raw_json: &str) -> Result<(ReplyOutput, Option<String>), String> {
-    // Log raw output at DEBUG level for format verification (Open Question #1)
+/// Returns `Ok((ReplyOutput, Option<session_id>))` on success.
+/// Returns `Err(String)` if JSON is malformed or the `result` field is missing.
+/// Returns `Ok((ReplyOutput { content: None, .. }, _))` if content=null (silent response per D-04).
+pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>), String> {
     tracing::debug!("CC raw JSON output: {}", raw_json);
 
     let parsed: serde_json::Value =
@@ -141,48 +138,22 @@ pub fn parse_reply_tool(raw_json: &str) -> Result<(ReplyOutput, Option<String>),
     let session_id = parsed
         .get("session_id")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+        .map(str::to_string);
 
-    // Search for reply tool_use block in both result array and content array
-    let tool_input = find_reply_tool_input(&parsed)
-        .ok_or_else(|| "CC did not call the reply tool".to_string())?;
+    let result_val = parsed
+        .get("result")
+        .ok_or_else(|| "CC response missing 'result' field".to_string())?;
 
-    let content = tool_input.get("content").and_then(|v| {
-        if v.is_null() {
-            None
-        } else {
-            v.as_str().map(|s| s.to_string())
-        }
-    });
+    let output: ReplyOutput = serde_json::from_value(result_val.clone())
+        .map_err(|e| format!("failed to deserialize result: {e}"))?;
 
-    let reply_to_message_id = tool_input
-        .get("reply_to_message_id")
-        .and_then(|v| v.as_i64())
-        .map(|n| n as i32);
-
-    let media_paths = tool_input
-        .get("media_paths")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        });
-
-    if let Some(ref paths) = media_paths {
+    if let Some(ref paths) = output.media_paths {
         if !paths.is_empty() {
-            tracing::warn!("media_paths returned but not yet implemented — skipping");
+            tracing::warn!("media_paths returned but not yet implemented -- skipping");
         }
     }
 
-    Ok((
-        ReplyOutput {
-            content,
-            reply_to_message_id,
-            media_paths,
-        },
-        session_id,
-    ))
+    Ok((output, session_id))
 }
 
 // ── Async worker ─────────────────────────────────────────────────────────────
@@ -299,7 +270,7 @@ pub fn spawn_worker(
                     // content: None → silent (D-05)
                 }
                 Ok(None) => {
-                    // Should not happen (parse_reply_tool returns Err when no tool call)
+                    // Should not happen (parse_reply_output returns Err on missing result)
                     tracing::warn!(?key, "unexpected Ok(None) from invoke_cc");
                 }
                 Err(err_msg) => {
@@ -361,13 +332,8 @@ async fn invoke_cc(
         }
     };
 
-    let system_prompt_append = format!(
-        "You MUST respond exclusively by calling the `reply` tool. NEVER output plain text.\nTool definition:\n{}",
-        REPLY_TOOL_JSON
-    );
-
-    // Build command (DIS-01, DIS-02, DIS-03, D-03, D-13, D-14)
-    let system_prompt_path = ctx.agent_dir.join(".claude").join("system-prompt.txt");
+    // Build command (AGDEF-02, AGDEF-03, D-01, D-13, D-14)
+    let reply_schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
     let mut cmd = tokio::process::Command::new(&cc_bin);
     cmd.arg("-p");
     for arg in &cmd_args {
@@ -375,13 +341,13 @@ async fn invoke_cc(
     }
     cmd.arg("--output-format").arg("json");
 
-    // --system-prompt-file only on first call (Phase 24 decision)
-    if is_first_call && system_prompt_path.exists() {
-        cmd.arg("--system-prompt-file").arg(&system_prompt_path);
+    // --agent only on first call (AGDEF-02); resume inherits from session (AGDEF-03)
+    if is_first_call {
+        cmd.arg("--agent").arg(&ctx.agent_name);
     }
 
-    // D-03: inject reply tool definition on every call (first and resume)
-    cmd.arg("--append-system-prompt").arg(&system_prompt_append);
+    // --json-schema on BOTH first and resume calls (D-01, Pitfall 4)
+    cmd.arg("--json-schema").arg(&reply_schema_path);
 
     cmd.arg("--").arg(xml);
     cmd.env("HOME", &ctx.agent_dir);
@@ -418,7 +384,7 @@ async fn invoke_cc(
     let raw = String::from_utf8_lossy(&output.stdout);
 
     // DIS-04: parse session_id for debug verification (D-15: mismatch only warns)
-    match parse_reply_tool(&raw) {
+    match parse_reply_output(&raw) {
         Ok((reply_output, session_id_from_cc)) => {
             // D-15: verify session_id at debug level only
             if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call) {
@@ -440,40 +406,14 @@ async fn invoke_cc(
             Ok(Some(reply_output))
         }
         Err(reason) => {
-            // D-05: no reply tool call → error reply
-            tracing::warn!(?chat_id, reason, "CC did not call reply tool");
+            // D-05: parse failure → error reply
+            tracing::warn!(?chat_id, reason, "CC response parse failed");
             Err(format!(
                 "⚠️ Agent error: {reason}\nRaw output (truncated): {}",
                 &raw.chars().take(200).collect::<String>()
             ))
         }
     }
-}
-
-// ── Private helpers ───────────────────────────────────────────────────────────
-
-fn find_reply_tool_input(v: &serde_json::Value) -> Option<&serde_json::Value> {
-    // Search in `result` array (CC --output-format json format)
-    if let Some(arr) = v.get("result").and_then(|r| r.as_array()) {
-        for item in arr {
-            if item.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                && item.get("name").and_then(|n| n.as_str()) == Some("reply")
-            {
-                return item.get("input");
-            }
-        }
-    }
-    // Also check top-level content array (alternate CC output format)
-    if let Some(arr) = v.get("content").and_then(|r| r.as_array()) {
-        for item in arr {
-            if item.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-                && item.get("name").and_then(|n| n.as_str()) == Some("reply")
-            {
-                return item.get("input");
-            }
-        }
-    }
-    None
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -607,7 +547,8 @@ mod tests {
     fn parse_reply_output_media_paths() {
         let json = r#"{"result":{"content":"hi","reply_to_message_id":null,"media_paths":["a.png"]}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
-        assert_eq!(output.media_paths.as_deref(), Some(["a.png"].as_slice()));
+        let paths = output.media_paths.unwrap();
+        assert_eq!(paths, vec!["a.png".to_string()]);
     }
 
     #[test]
