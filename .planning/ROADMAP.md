@@ -75,7 +75,7 @@ See [milestones/v2.5-ROADMAP.md](milestones/v2.5-ROADMAP.md)
 - [x] **Phase 27: Cron Runtime** - tokio cron task loop reading crons/*.yaml and executing claude -p subprocesses (completed 2026-04-01)
 - [x] **Phase 28: Cronsync SKILL Rewrite** - Reduce cronsync SKILL.md to file management only; remove all execution logic (completed 2026-04-01)
 - [ ] **Phase 28.1: v3.0 UAT** - Manual end-to-end testing of Teloxide bot, cron runtime, and rightclaw up flow (INSERTED)
-- [ ] **Phase 28.2: v3.0 UAT Fix** - Fix teloxide missing native-tls (bot restart loop) and doctor nested tokio runtime panic (INSERTED)
+- [x] **Phase 28.2: v3.0 UAT Fix** - Fix teloxide missing native-tls (bot restart loop) and doctor nested tokio runtime panic (INSERTED) (completed 2026-04-01)
 
 ## Phase Details
 
@@ -233,8 +233,8 @@ Plans:
 **Goal:** Fix two bugs found in v3.0 UAT — bot cannot start due to missing TLS support, and rightclaw doctor panics with nested tokio runtime.
 **Requirements**: UAT-FIX-01, UAT-FIX-02
 **Depends on:** Phase 28.1
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 28.2-01-PLAN.md — Add native-tls feature to teloxide workspace dependency in Cargo.toml
-- [ ] 28.2-02-PLAN.md — Fix fetch_webhook_url nested tokio runtime panic using block_in_place (TDD)
+- [x] 28.2-02-PLAN.md — Fix fetch_webhook_url nested tokio runtime panic using block_in_place (TDD)
