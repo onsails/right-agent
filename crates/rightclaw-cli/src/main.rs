@@ -406,21 +406,6 @@ async fn cmd_up(
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    // Pre-install Telegram plugin if any agent has Telegram configured.
-    // Uses `claude plugin` CLI commands — idempotent, no-ops if already installed.
-    // Must run before per-agent loop so the shared ~/.claude/plugins/ has the plugin
-    // before symlinks are created.
-    let any_telegram = agents.iter().any(|a| {
-        a.config
-            .as_ref()
-            .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
-            .unwrap_or(false)
-    });
-    if any_telegram {
-        rightclaw::codegen::ensure_bun_installed()?;
-        rightclaw::codegen::ensure_telegram_plugin_installed()?;
-    }
-
     // Write agent definition, reply-schema.json, and settings.json for each agent.
     for agent in &agents {
         // Generate .claude/settings.json with sandbox config (Phase 6).
@@ -483,8 +468,7 @@ async fn cmd_up(
             }
         }
 
-        // 7. Telegram channel config (Phase 9, AENV-02, PERM-03).
-        rightclaw::codegen::generate_telegram_channel_config(agent)?;
+        // 7. (removed) Telegram channel config removed in Phase 26 — CC channels replaced by bot process.
 
         // 8. Reinstall built-in skills (Phase 9, AENV-03).
         // Always overwrites built-in skill dirs; user skill dirs untouched (D-10).
@@ -512,8 +496,18 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
-    // Generate process-compose.yaml.
-    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &run_dir)?;
+    // Generate process-compose.yaml (bot-only entries, Phase 26).
+    let has_bot_agents = agents.iter().any(|a| {
+        a.config
+            .as_ref()
+            .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
+            .unwrap_or(false)
+    });
+    if !has_bot_agents {
+        eprintln!("rightclaw: no agents have Telegram tokens configured — nothing to start");
+        return Err(miette::miette!("no agents have Telegram tokens configured"));
+    }
+    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &self_exe)?;
     let config_path = run_dir.join("process-compose.yaml");
     std::fs::write(&config_path, &pc_config)
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
@@ -936,37 +930,6 @@ mod tests {
 
         let after = fs::read_to_string(&settings_local).unwrap();
         assert_eq!(after, original_content, "pre-existing content must not be overwritten");
-    }
-
-    // ---- telegram channel config tests ----
-
-    #[test]
-    fn telegram_config_not_created_when_no_telegram_fields() {
-        let tmp = TempDir::new().unwrap();
-        let agent_dir = make_agent_dir(&tmp, "agent-no-telegram");
-
-        // Build an AgentDef with no telegram config.
-        let agent = rightclaw::agent::AgentDef {
-            name: "agent-no-telegram".to_string(),
-            path: agent_dir.clone(),
-            identity_path: agent_dir.join("IDENTITY.md"),
-            config: None,
-            soul_path: None,
-            user_path: None,
-            agents_path: None,
-            tools_path: None,
-            bootstrap_path: None,
-            heartbeat_path: None,
-        };
-
-        rightclaw::codegen::generate_telegram_channel_config(&agent)
-            .expect("should not fail when no telegram config");
-
-        let telegram_dir = agent_dir.join(".claude").join("channels").join("telegram");
-        assert!(
-            !telegram_dir.exists(),
-            ".claude/channels/telegram/ should NOT be created when no config"
-        );
     }
 
     // ---- skills install tests ----
