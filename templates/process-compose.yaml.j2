@@ -4,10 +4,17 @@ is_strict: true
 
 processes:
 {% for agent in agents %}
-  {{ agent.name }}:
-    command: "{{ agent.wrapper_path }}"
+  {{ agent.name }}-bot:
+    command: "{{ agent.exe_path }} bot --agent {{ agent.agent_name }}"
     working_dir: "{{ agent.working_dir }}"
-    is_interactive: true
+    environment:
+      - RC_AGENT_DIR={{ agent.working_dir }}
+      - RC_AGENT_NAME={{ agent.agent_name }}
+{% if agent.token_inline %}
+      - RC_TELEGRAM_TOKEN={{ agent.token_inline }}
+{% else %}
+      - RC_TELEGRAM_TOKEN_FILE={{ agent.token_file }}
+{% endif %}
     availability:
       restart: "{{ agent.restart_policy }}"
       backoff_seconds: {{ agent.backoff_seconds }}

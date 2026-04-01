@@ -39,7 +39,7 @@ pub fn generate_telegram_channel_config(agent: &AgentDef) -> miette::Result<()> 
 ///
 /// Precedence: `telegram_token_file` > `telegram_token` > `None`.
 /// `telegram_token_file` path is resolved relative to `agent.path`.
-fn resolve_telegram_token(agent: &AgentDef) -> miette::Result<Option<String>> {
+pub(crate) fn resolve_telegram_token(agent: &AgentDef) -> miette::Result<Option<String>> {
     let config = match agent.config.as_ref() {
         Some(c) => c,
         None => return Ok(None),
