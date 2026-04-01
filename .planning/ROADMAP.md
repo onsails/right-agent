@@ -196,11 +196,10 @@ Plans:
   1. cronsync SKILL.md contains only file-management instructions: create, edit, delete YAML spec files in `crons/`
   2. All CHECK/RECONCILE/CRITICAL guard logic is absent from SKILL.md — no reference to CronCreate, CronList, CronDelete, or Agent tool invocation
   3. BOOT-01/BOOT-02 startup bootstrap references are absent from SKILL.md
-**Plans**: 2 plans
+**Plans**: 1 plan
 
 Plans:
-- [ ] 28-01-PLAN.md — Rewrite cronsync SKILL.md to file management only
-- [ ] 28-02-PLAN.md — Remove BOOT references and execution guard logic
+- [ ] 28-01-PLAN.md — Rewrite SKILL.md to file-management-only + MCP observability + format audit
 
 ## Progress
 
@@ -215,4 +214,4 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 | 25. Telegram Handler + CC Dispatch | v3.0 | 3/3 | Complete    | 2026-04-01 |
 | 26. PC Cutover | v3.0 | 2/2 | Complete    | 2026-04-01 |
 | 27. Cron Runtime | v3.0 | 2/2 | Complete    | 2026-04-01 |
-| 28. Cronsync SKILL Rewrite | v3.0 | 0/? | Not started | - |
+| 28. Cronsync SKILL Rewrite | v3.0 | 0/1 | Not started | - |
