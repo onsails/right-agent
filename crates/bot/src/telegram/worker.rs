@@ -27,7 +27,6 @@ const DEBOUNCE_MS: u64 = 500;
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 120;
 
-
 /// A single Telegram message queued into the debounce channel.
 #[derive(Clone)]
 pub struct DebounceMsg {
@@ -165,9 +164,10 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
 
 /// Wait for a child process to complete, killing it if `timeout_secs` elapses.
 ///
-/// On timeout the future is dropped, which triggers `kill_on_drop(true)` and
-/// kills the subprocess.  Returns the formatted error string on both timeout
-/// and OS-level wait failure so callers can forward it straight to Telegram.
+/// On timeout, `tokio::time::timeout` cancels the inner `wait_with_output` future.
+/// When that future is dropped it drops the `Child`, and `kill_on_drop(true)` issues
+/// the OS-level kill.  Returns a formatted error string on both timeout and wait
+/// failure so callers can forward it straight to Telegram.
 async fn wait_with_timeout(
     child: tokio::process::Child,
     timeout_secs: u64,

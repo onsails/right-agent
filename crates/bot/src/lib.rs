@@ -99,7 +99,9 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
                 bot_username = %me.username(),
                 "deleteWebhook succeeded — bot identity confirmed"
             ),
-            Err(e) => tracing::warn!(agent = %args.agent, "deleteWebhook succeeded but getMe failed: {e:#}"),
+            // getMe is diagnostic-only; a transient API failure here does not block operation.
+            // Intentional FAIL FAST exception — deleteWebhook already confirmed connectivity.
+            Err(e) => tracing::warn!(agent = %args.agent, "getMe failed (non-fatal, bot identity unknown): {e:#}"),
         }
     }
 
