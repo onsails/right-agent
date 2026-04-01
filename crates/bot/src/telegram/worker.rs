@@ -4,8 +4,31 @@
 //! live infrastructure and are covered by code review pattern only.
 
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
+use teloxide::prelude::*;
+use teloxide::types::{ChatAction, MessageId, ReplyParameters, ThreadId};
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use super::session::{create_session, get_session, touch_session};
+
+/// Session key: `(chat_id, effective_thread_id)`.
+type SessionKey = (i64, i64);
+
+/// Fixed 500ms debounce window (D-01).
+const DEBOUNCE_MS: u64 = 500;
+
+/// Reply tool definition injected on every CC invocation (D-03).
+///
+/// CC must call the `reply` tool — plain text responses fail `parse_reply_tool`.
+/// `--append-system-prompt` (inline string) works alongside `--system-prompt-file`.
+const REPLY_TOOL_JSON: &str = r#"{"name":"reply","description":"Send a reply to the user or stay silent","input_schema":{"type":"object","properties":{"content":{"type":["string","null"],"description":"Message text. null = silent (no Telegram reply)"},"reply_to_message_id":{"type":["integer","null"],"description":"Telegram message_id to reply to. null = reply to thread only"},"media_paths":{"type":["array","null"],"items":{"type":"string"},"description":"STUB: Phase 25 logs warning, does not send"}},"required":["content"]}}"#;
 
 /// A single Telegram message queued into the debounce channel.
 pub struct DebounceMsg {
@@ -102,15 +125,6 @@ pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
     format!("⚠️ Agent error (exit {exit_code}):\n```\n{truncated}\n```")
 }
 
-#[derive(serde::Deserialize)]
-struct CcOutput {
-    #[serde(default)]
-    session_id: Option<String>,
-    result: Option<serde_json::Value>,
-    #[serde(default)]
-    content: Vec<serde_json::Value>,
-}
-
 /// Parse the `reply` tool call from CC JSON output (D-04, D-05).
 ///
 /// Returns `Ok((ReplyOutput, Option<session_id>))` if the reply tool was called.
@@ -169,6 +183,273 @@ pub fn parse_reply_tool(raw_json: &str) -> Result<(ReplyOutput, Option<String>),
         session_id,
     ))
 }
+
+// ── Async worker ─────────────────────────────────────────────────────────────
+
+/// Spawn a per-session worker task.
+///
+/// Called by the message handler when no sender exists for the session key.
+/// Returns the `Sender` to store in the DashMap. The worker task:
+///   1. Waits for the first message.
+///   2. Collects additional messages within the 500ms debounce window (D-01).
+///   3. Batches them as XML (D-02).
+///   4. Invokes `claude -p` (D-13, D-14).
+///   5. Parses the `reply` tool call (D-03, D-04, D-05).
+///   6. Sends the Telegram reply.
+///   7. Loops back to step 1.
+///
+/// On channel close (DashMap entry removed on `/reset`), the task exits.
+/// On worker task panic, Sender in DashMap becomes stale; handler detects
+/// `SendError` and removes the entry + respawns (Pitfall 7 mitigation).
+pub fn spawn_worker(
+    key: SessionKey,
+    ctx: WorkerContext,
+    worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
+) -> mpsc::Sender<DebounceMsg> {
+    let (tx, mut rx) = mpsc::channel::<DebounceMsg>(32); // bounded — safe for debounce
+
+    let tx_for_map = tx.clone();
+    tokio::spawn(async move {
+        let window = Duration::from_millis(DEBOUNCE_MS);
+        let (chat_id, eff_thread_id) = key;
+        let tg_chat_id = ctx.chat_id;
+
+        loop {
+            // Wait for first message in this debounce cycle
+            let Some(first) = rx.recv().await else {
+                tracing::debug!(?key, "worker channel closed — exiting");
+                break;
+            };
+            let mut batch = vec![first];
+
+            // Collect additional messages within debounce window (D-01)
+            loop {
+                tokio::select! {
+                    biased;
+                    msg = rx.recv() => {
+                        match msg {
+                            Some(m) => batch.push(m),
+                            None => break,
+                        }
+                    }
+                    _ = sleep(window) => break,
+                }
+            }
+
+            // Build XML batch (D-02)
+            let xml = format_batch_xml(&batch);
+
+            // Typing indicator: spawn task, cancel after subprocess completes (D-10)
+            let cancel_token = CancellationToken::new();
+            let cancel_clone = cancel_token.clone();
+            let bot_clone = ctx.bot.clone();
+            let typing_task = tokio::spawn(async move {
+                loop {
+                    let mut action =
+                        bot_clone.send_chat_action(tg_chat_id, ChatAction::Typing);
+                    if eff_thread_id != 0 {
+                        action =
+                            action.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+                    }
+                    action.await.ok(); // best-effort; ignore errors
+                    tokio::select! {
+                        _ = cancel_clone.cancelled() => break,
+                        _ = sleep(Duration::from_secs(4)) => {}
+                    }
+                }
+            });
+
+            // Invoke claude -p (D-13, D-14)
+            let reply_result = invoke_cc(&xml, chat_id, eff_thread_id, &ctx).await;
+
+            // Cancel typing indicator
+            cancel_token.cancel();
+            typing_task.await.ok();
+
+            // Send reply (D-04, D-05, DIS-05, DIS-06)
+            match reply_result {
+                Ok(Some(output)) => {
+                    if let Some(content) = output.content {
+                        // Split long responses (DIS-05)
+                        let parts = split_message(&content);
+                        for part in parts {
+                            let mut send = ctx.bot.send_message(tg_chat_id, &part);
+                            if eff_thread_id != 0 {
+                                send = send.message_thread_id(ThreadId(MessageId(
+                                    eff_thread_id as i32,
+                                )));
+                            }
+                            if let Some(ref_id) = output.reply_to_message_id {
+                                send = send.reply_parameters(ReplyParameters {
+                                    message_id: MessageId(ref_id),
+                                    ..Default::default()
+                                });
+                            }
+                            // No parse_mode — send as plain text (Pitfall 6)
+                            if let Err(e) = send.await {
+                                tracing::error!(
+                                    ?key,
+                                    "failed to send Telegram reply: {:#}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    // content: None → silent (D-05)
+                }
+                Ok(None) => {
+                    // Should not happen (parse_reply_tool returns Err when no tool call)
+                    tracing::warn!(?key, "unexpected Ok(None) from invoke_cc");
+                }
+                Err(err_msg) => {
+                    // DIS-06: error reply
+                    let mut send = ctx.bot.send_message(tg_chat_id, &err_msg);
+                    if eff_thread_id != 0 {
+                        send = send
+                            .message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+                    }
+                    if let Err(e) = send.await {
+                        tracing::error!(?key, "failed to send error reply: {:#}", e);
+                    }
+                }
+            }
+        }
+
+        // Worker exiting — remove DashMap entry to prevent stale sender (Pitfall 3)
+        worker_map.remove(&key);
+        tracing::debug!(?key, "worker task exited, DashMap entry removed");
+    });
+
+    tx_for_map
+}
+
+/// Invoke `claude -p` and parse the reply tool call from its JSON output.
+///
+/// Returns `Ok(Some(ReplyOutput))` on success,
+/// `Err(error_message_for_telegram)` on subprocess failure or missing reply tool.
+async fn invoke_cc(
+    xml: &str,
+    chat_id: i64,
+    eff_thread_id: i64,
+    ctx: &WorkerContext,
+) -> Result<Option<ReplyOutput>, String> {
+    // Resolve CC binary (D-12)
+    let cc_bin = which::which("claude")
+        .or_else(|_| which::which("claude-bun"))
+        .map_err(|_| "⚠️ Agent error: claude binary not found in PATH".to_string())?;
+
+    // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
+    let conn = rightclaw::memory::open_connection(&ctx.agent_dir)
+        .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
+
+    // Session lookup / create (SES-02, SES-03)
+    let (cmd_args, is_first_call) = match get_session(&conn, chat_id, eff_thread_id) {
+        Ok(Some(root_id)) => {
+            // Resume: --resume <root_session_id>
+            (vec!["--resume".to_string(), root_id], false)
+        }
+        Ok(None) => {
+            // First message: generate UUID, --session-id <uuid>
+            let new_uuid = Uuid::new_v4().to_string();
+            create_session(&conn, chat_id, eff_thread_id, &new_uuid)
+                .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
+            (vec!["--session-id".to_string(), new_uuid], true)
+        }
+        Err(e) => {
+            return Err(format!("⚠️ Agent error: session lookup failed: {:#}", e));
+        }
+    };
+
+    let system_prompt_append = format!(
+        "You MUST respond exclusively by calling the `reply` tool. NEVER output plain text.\nTool definition:\n{}",
+        REPLY_TOOL_JSON
+    );
+
+    // Build command (DIS-01, DIS-02, DIS-03, D-03, D-13, D-14)
+    let system_prompt_path = ctx.agent_dir.join(".claude").join("system-prompt.txt");
+    let mut cmd = tokio::process::Command::new(&cc_bin);
+    cmd.arg("-p");
+    for arg in &cmd_args {
+        cmd.arg(arg);
+    }
+    cmd.arg("--output-format").arg("json");
+
+    // --system-prompt-file only on first call (Phase 24 decision)
+    if is_first_call && system_prompt_path.exists() {
+        cmd.arg("--system-prompt-file").arg(&system_prompt_path);
+    }
+
+    // D-03: inject reply tool definition on every call (first and resume)
+    cmd.arg("--append-system-prompt").arg(&system_prompt_append);
+
+    cmd.arg("--").arg(xml);
+    cmd.env("HOME", &ctx.agent_dir);
+    cmd.current_dir(&ctx.agent_dir);
+    cmd.stdin(Stdio::null()); // DIS-02: prevent pipe deadlock
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true); // BOT-04: killed on SIGTERM
+
+    tracing::info!(
+        ?chat_id,
+        ?eff_thread_id,
+        is_first_call,
+        "invoking claude -p"
+    );
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
+
+    // DIS-02: always wait_with_output, never .wait()
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format_error_reply(-1, &format!("wait failed: {:#}", e)))?;
+
+    // DIS-06: non-zero exit or non-empty stderr → error reply
+    if !output.status.success() {
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format_error_reply(exit_code, &stderr));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+
+    // DIS-04: parse session_id for debug verification (D-15: mismatch only warns)
+    match parse_reply_tool(&raw) {
+        Ok((reply_output, session_id_from_cc)) => {
+            // D-15: verify session_id at debug level only
+            if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call) {
+                if let Ok(Some(stored)) = get_session(&conn, chat_id, eff_thread_id) {
+                    if cc_sid != stored {
+                        tracing::warn!(
+                            ?chat_id,
+                            cc_session_id = %cc_sid,
+                            stored_session_id = %stored,
+                            "session_id mismatch between CC and stored — not blocking"
+                        );
+                    }
+                }
+            }
+            // Update last_used_at (non-fatal: log error but do not fail the reply)
+            touch_session(&conn, chat_id, eff_thread_id)
+                .map_err(|e| tracing::error!(?chat_id, "touch_session failed: {:#}", e))
+                .ok();
+            Ok(Some(reply_output))
+        }
+        Err(reason) => {
+            // D-05: no reply tool call → error reply
+            tracing::warn!(?chat_id, reason, "CC did not call reply tool");
+            Err(format!(
+                "⚠️ Agent error: {reason}\nRaw output (truncated): {}",
+                &raw.chars().take(200).collect::<String>()
+            ))
+        }
+    }
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
 
 fn find_reply_tool_input(v: &serde_json::Value) -> Option<&serde_json::Value> {
     // Search in `result` array (CC --output-format json format)
