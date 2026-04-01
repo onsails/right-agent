@@ -79,6 +79,18 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     // Resolve Telegram token
     let token = telegram::resolve_token(&agent_dir, &config)?;
 
+    // PC-04: Clear any prior Telegram webhook before starting long-polling.
+    // Fatal if this fails — competing with an active webhook causes silent message drops.
+    {
+        use teloxide::requests::Requester as _;
+        let webhook_bot = teloxide::Bot::new(token.clone());
+        webhook_bot
+            .delete_webhook()
+            .await
+            .map_err(|e| miette::miette!("deleteWebhook failed — long polling would compete with active webhook: {e:#}"))?;
+    }
+    tracing::info!(agent = %args.agent, "deleteWebhook succeeded");
+
     // Warn if allowed_chat_ids is empty (D-05)
     if config.allowed_chat_ids.is_empty() {
         tracing::warn!(
