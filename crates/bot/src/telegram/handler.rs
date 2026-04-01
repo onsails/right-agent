@@ -69,10 +69,16 @@ pub async fn handle_message(
             },
             None => {
                 // No sender yet — spawn a new worker task
+                let agent_name = agent_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
                 let ctx = WorkerContext {
                     chat_id,
                     effective_thread_id: eff_thread_id,
                     agent_dir: (*agent_dir).clone(),
+                    agent_name,
                     bot: bot.clone(),
                     db_path: (*agent_dir).clone(),
                 };
