@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
-status: verifying
-stopped_at: Completed 26-pc-cutover-01-PLAN.md
-last_updated: "2026-04-01T14:46:47.726Z"
+status: executing
+stopped_at: Completed 27-cron-runtime-01-PLAN.md
+last_updated: "2026-04-01T19:03:28.087Z"
 last_activity: 2026-04-01
 progress:
   total_phases: 8
   completed_phases: 6
-  total_plans: 14
-  completed_plans: 14
+  total_plans: 16
+  completed_plans: 15
   percent: 14
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 26 — pc-cutover
+**Current focus:** Phase 27 — cron-runtime
 
 ## Current Position
 
-Phase: 27
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 27 (cron-runtime) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-01
 
 Progress: [█░░░░░░░░░] 14%
@@ -62,6 +62,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 25.5-agent-definition-codegen P02 | 3 | 1 tasks | 2 files |
 | Phase 26-pc-cutover P02 | 460 | 2 tasks | 2 files |
 | Phase 26-pc-cutover P01 | 15 | 2 tasks | 6 files |
+| Phase 27-cron-runtime P01 | 222 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,8 @@ Recent decisions relevant to v2.3:
 - [Phase 26-pc-cutover]: Use teloxide::requests::Requester as _ in scoped block for delete_webhook; inline token resolver in doctor.rs with TODO for Plan 01 pub(crate) migration
 - [Phase 26-pc-cutover]: BotProcessAgent replaces ProcessAgent: token_inline/token_file mutually exclusive; token_file resolved to abs path at codegen time
 - [Phase 26-pc-cutover]: generate_process_compose filters out non-telegram agents entirely; early-exit in cmd_up when no bot agents
+- [Phase 27-cron-runtime]: D-01: --agent <name> invocation style for cron jobs (not --system-prompt-file) — matches AGDEF-02
+- [Phase 27-cron-runtime]: D-04: cron_runs V3 migration in memory.db + log files at crons/logs/; rusqlite::Connection opened per-job (not passed from lib.rs)
 
 ### Roadmap Evolution
 
@@ -135,6 +138,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T14:43:29.049Z
-Stopped at: Completed 26-pc-cutover-01-PLAN.md
+Last session: 2026-04-01T19:03:28.084Z
+Stopped at: Completed 27-cron-runtime-01-PLAN.md
 Resume file: None

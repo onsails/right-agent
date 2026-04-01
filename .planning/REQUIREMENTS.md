@@ -57,12 +57,12 @@
 
 ## CRON — Rust Cron Runtime
 
-- [ ] **CRON-01**: Cron runtime runs as a tokio task inside `rightclaw bot` process, alongside the Telegram dispatcher
-- [ ] **CRON-02**: Runtime reads `agent_dir/crons/*.yaml` on startup and every 60 seconds (polling fallback)
-- [ ] **CRON-03**: Schedule parsed via `cron 0.16` → `chrono::DateTime<Utc>` for next-run computation
-- [ ] **CRON-04**: Lock file check before executing each job — skips execution if lock exists and heartbeat is fresh
-- [ ] **CRON-05**: Job executed as `claude -p --system-prompt-file ... -- "<job prompt>"` subprocess with same HOME/$cwd as bot dispatch
-- [ ] **CRON-06**: Reconciler is idempotent — re-reading cron files after change doesn't duplicate scheduled jobs
+- [x] **CRON-01**: Cron runtime runs as a tokio task inside `rightclaw bot` process, alongside the Telegram dispatcher
+- [x] **CRON-02**: Runtime reads `agent_dir/crons/*.yaml` on startup and every 60 seconds (polling fallback)
+- [x] **CRON-03**: Schedule parsed via `cron 0.16` → `chrono::DateTime<Utc>` for next-run computation
+- [x] **CRON-04**: Lock file check before executing each job — skips execution if lock exists and heartbeat is fresh
+- [x] **CRON-05**: Job executed as `claude -p --system-prompt-file ... -- "<job prompt>"` subprocess with same HOME/$cwd as bot dispatch
+- [x] **CRON-06**: Reconciler is idempotent — re-reading cron files after change doesn't duplicate scheduled jobs
 
 ## CRONSYNC SKILL — Simplification
 
@@ -125,12 +125,12 @@
 | PC-03 | Phase 26 | Complete |
 | PC-04 | Phase 26 | Complete |
 | PC-05 | Phase 26 | Complete |
-| CRON-01 | Phase 27 | Pending |
-| CRON-02 | Phase 27 | Pending |
-| CRON-03 | Phase 27 | Pending |
-| CRON-04 | Phase 27 | Pending |
-| CRON-05 | Phase 27 | Pending |
-| CRON-06 | Phase 27 | Pending |
+| CRON-01 | Phase 27 | Complete |
+| CRON-02 | Phase 27 | Complete |
+| CRON-03 | Phase 27 | Complete |
+| CRON-04 | Phase 27 | Complete |
+| CRON-05 | Phase 27 | Complete |
+| CRON-06 | Phase 27 | Complete |
 | SKILL-01 | Phase 28 | Pending |
 | SKILL-02 | Phase 28 | Pending |
 | SKILL-03 | Phase 28 | Pending |
