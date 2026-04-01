@@ -15,6 +15,7 @@ pub fn make_chat_id_filter(
         if allowed.contains(&chat_id) {
             Some(msg)
         } else {
+            tracing::warn!(chat_id, allowed = ?allowed, "message dropped: chat_id not in allow-list");
             None
         }
     }
