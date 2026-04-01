@@ -1,8 +1,10 @@
 pub mod bot;
 pub mod dispatch;
 pub mod filter;
+pub mod session;
 
 pub use dispatch::run_telegram;
+pub use session::effective_thread_id;
 
 use std::path::Path;
 use rightclaw::agent::types::AgentConfig;
