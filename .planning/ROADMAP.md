@@ -231,9 +231,10 @@ Plans:
 ### Phase 28.2: v3.0 UAT Fix: teloxide native-tls and doctor async runtime (INSERTED)
 
 **Goal:** Fix two bugs found in v3.0 UAT — bot cannot start due to missing TLS support, and rightclaw doctor panics with nested tokio runtime.
-**Requirements**: TBD
+**Requirements**: UAT-FIX-01, UAT-FIX-02
 **Depends on:** Phase 28.1
-**Plans:** 0 plans
+**Plans:** 2 plans
 
 Plans:
-- [ ] TBD (run /gsd:plan-phase 28.2 to break down)
+- [ ] 28.2-01-PLAN.md — Add native-tls feature to teloxide workspace dependency in Cargo.toml
+- [ ] 28.2-02-PLAN.md — Fix fetch_webhook_url nested tokio runtime panic using block_in_place (TDD)
