@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
-status: verifying
-stopped_at: Completed 25-telegram-handler-cc-dispatch-03-PLAN.md
-last_updated: "2026-04-01T10:01:35.698Z"
+status: executing
+stopped_at: Completed 25.5-agent-definition-codegen-01-PLAN.md
+last_updated: "2026-04-01T13:30:43.986Z"
 last_activity: 2026-04-01
 progress:
-  total_phases: 7
+  total_phases: 8
   completed_phases: 4
-  total_plans: 10
-  completed_plans: 10
+  total_plans: 12
+  completed_plans: 11
   percent: 14
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 25 — telegram-handler-cc-dispatch
+**Current focus:** Phase 25.5 — agent-definition-codegen
 
 ## Current Position
 
-Phase: 26
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 25.5 (agent-definition-codegen) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-01
 
 Progress: [█░░░░░░░░░] 14%
@@ -58,6 +58,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 25-telegram-handler-cc-dispatch P01 | 25 | 2 tasks | 4 files |
 | Phase 25-telegram-handler-cc-dispatch P02 | 7 | 2 tasks | 4 files |
 | Phase 25-telegram-handler-cc-dispatch P03 | 228 | 2 tasks | 5 files |
+| Phase 25.5-agent-definition-codegen P01 | 212 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -102,6 +103,8 @@ Recent decisions relevant to v2.3:
 - [Phase 25-telegram-handler-cc-dispatch]: teloxide 0.13 reply uses ReplyParameters not reply_to_message_id method
 - [Phase 25-03]: DashMap guard released before .await in handle_message — sender cloned out before send
 - [Phase 25-03]: kill_on_drop(true) in invoke_cc sufficient for BOT-04 — no children registry needed
+- [Phase 25.5-agent-definition-codegen]: agent_def.rs model field uses 'inherit' when AgentConfig.model is None — matches CC native agent convention
+- [Phase 25.5-agent-definition-codegen]: No tools: field in frontmatter per D-05 — CC infers tools from sandbox settings
 
 ### Roadmap Evolution
 
@@ -125,6 +128,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T09:57:20.654Z
-Stopped at: Completed 25-telegram-handler-cc-dispatch-03-PLAN.md
+Last session: 2026-04-01T13:30:43.983Z
+Stopped at: Completed 25.5-agent-definition-codegen-01-PLAN.md
 Resume file: None

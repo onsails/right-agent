@@ -155,7 +155,7 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [ ] 25.5-01-PLAN.md — agent_def.rs codegen module + cmd_up/cmd_pair wiring + system_prompt.rs deletion
+- [x] 25.5-01-PLAN.md — agent_def.rs codegen module + cmd_up/cmd_pair wiring + system_prompt.rs deletion
 - [ ] 25.5-02-PLAN.md — worker.rs invoke_cc rewrite + parse_reply_output + test updates
 
 ### Phase 26: PC Cutover
