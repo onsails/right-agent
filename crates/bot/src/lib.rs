@@ -88,5 +88,5 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     }
 
     // Start Telegram dispatcher
-    telegram::run_telegram(token, config.allowed_chat_ids).await
+    telegram::run_telegram(token, config.allowed_chat_ids, agent_dir).await
 }

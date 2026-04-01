@@ -1,44 +1,83 @@
+//! Teloxide long-polling dispatcher with:
+//! - DashMap per-session worker map (SES-05, D-11)
+//! - BotCommand schema for /reset (SES-06)
+//! - ChatId allow-list filter (BOT-05, via filter.rs)
+//! - SIGTERM + SIGINT graceful shutdown (BOT-04)
+//! - BOT-04 subprocess cleanup via kill_on_drop(true) in each worker (no children registry)
+//!
+//! GOTCHA: queued messages in a worker channel are lost on worker task panic.
+//! When the worker is respawned (Pitfall 7), the in-progress batch is discarded.
+//! This is an accepted trade-off — retrying arbitrary messages is not safe.
+
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use teloxide::prelude::*;
+
+use dashmap::DashMap;
 use teloxide::dispatching::UpdateFilterExt;
+use teloxide::prelude::*;
+use teloxide::utils::command::BotCommands;
+use tokio::sync::mpsc;
 
-use super::{bot::build_bot, filter::make_chat_id_filter};
+use super::bot::build_bot;
+use super::filter::make_chat_id_filter;
+use super::handler::{handle_message, handle_reset};
+use super::worker::{DebounceMsg, SessionKey};
 
-/// Run the teloxide long-polling dispatcher with:
-/// - CacheMe<Throttle<Bot>> adaptor ordering (BOT-03)
-/// - chat_id allow-list filtering (BOT-05)
-/// - SIGTERM + SIGINT graceful shutdown (BOT-04)
-/// - Arc<Mutex<Vec<tokio::process::Child>>> for in-flight subprocess tracking (D-07)
-///   (Vec is empty in Phase 23; Phase 25 populates it)
+#[derive(BotCommands, Clone)]
+#[command(rename_rule = "lowercase")]
+enum BotCommand {
+    #[command(description = "Reset conversation session for this thread")]
+    Reset,
+}
+
+/// Run the teloxide long-polling dispatcher.
 ///
-/// Does NOT call enable_ctrlc_handler() — Phase 23 owns signal handling (anti-pattern #2).
-pub async fn run_telegram(token: String, allowed_chat_ids: Vec<i64>) -> miette::Result<()> {
+/// - Accepts agent_dir for session DB access and CC subprocess invocation.
+/// - Creates a DashMap<SessionKey, Sender<DebounceMsg>> for per-session workers.
+/// - Schema: filter by chat_id → branch /reset command → dispatch text messages.
+/// - SIGTERM/SIGINT: kill in-flight subprocesses, shutdown dispatcher.
+///
+/// BOT-04 subprocess cleanup strategy: use kill_on_drop(true) on each Child in invoke_cc.
+/// When a worker task exits (channel closed, panic, or /reset), the Child is dropped, which
+/// kills the subprocess. No explicit children registry is needed or maintained.
+/// Rationale: Arc<Mutex<Vec<Child>>> was rejected because invoke_cc never added children
+/// to the registry, making the kill loop dead code. kill_on_drop is sufficient.
+pub async fn run_telegram(
+    token: String,
+    allowed_chat_ids: Vec<i64>,
+    agent_dir: PathBuf,
+) -> miette::Result<()> {
     let bot = build_bot(token);
 
     let allowed: HashSet<i64> = allowed_chat_ids.into_iter().collect();
     let filter = make_chat_id_filter(allowed);
 
-    // No-op message schema for Phase 23.
-    // Phase 25 replaces the endpoint with real dispatch logic.
-    let schema = Update::filter_message()
-        .filter_map(filter)
-        .endpoint(|_msg: Message| async { respond(()) });
+    // Shared state
+    let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
+        Arc::new(DashMap::new());
+    let agent_dir_arc: Arc<PathBuf> = Arc::new(agent_dir);
 
-    let mut dispatcher = Dispatcher::builder(bot, schema).build();
+    // Dispatch schema (RESEARCH.md Pattern 1)
+    let command_handler = dptree::entry()
+        .filter_command::<BotCommand>()
+        .endpoint(handle_reset);
+
+    let message_handler = Update::filter_message()
+        .filter_map(filter)
+        .branch(command_handler)
+        .endpoint(handle_message);
+
+    let schema = dptree::entry().branch(message_handler);
+
+    let mut dispatcher = Dispatcher::builder(bot.clone(), schema)
+        .dependencies(dptree::deps![Arc::clone(&worker_map), Arc::clone(&agent_dir_arc)])
+        .build();
+
     let shutdown_token = dispatcher.shutdown_token();
 
-    // Shared subprocess tracking (empty in Phase 23, populated in Phase 25).
-    // Arc<Mutex<Vec<Child>>> defined here so Phase 25 can extend without restructuring.
-    let children: Arc<Mutex<Vec<tokio::process::Child>>> = Arc::new(Mutex::new(Vec::new()));
-
-    // Signal handler task: handles SIGTERM and SIGINT.
-    // D-08: both signals trigger the same shutdown path.
-    // D-09: sequence: kill children → shutdown dispatcher → process exits.
-    let children_clone = Arc::clone(&children);
+    // Signal handler task
     tokio::spawn(async move {
-        // Register SIGTERM (process-compose sends this on `rightclaw down`)
         let mut sigterm = tokio::signal::unix::signal(
             tokio::signal::unix::SignalKind::terminate(),
         )
@@ -55,19 +94,8 @@ pub async fn run_telegram(token: String, allowed_chat_ids: Vec<i64>) -> miette::
             }
         }
 
-        // Kill all in-flight claude -p subprocesses (Phase 23: vec is empty).
-        {
-            let mut locked = children_clone.lock().await;
-            for child in locked.iter_mut() {
-                if let Err(e) = child.kill().await {
-                    tracing::error!("failed to kill subprocess: {:#}", e);
-                }
-            }
-        }
-        tracing::info!("in-flight subprocesses terminated");
-
-        // Shut down teloxide dispatcher.
-        // IdleShutdownError means dispatcher not yet started — treat as already stopped.
+        // Shutdown dispatcher — worker tasks drain their mpsc channels and exit.
+        // In-flight CC subprocesses are killed by kill_on_drop(true) when workers are dropped.
         match shutdown_token.shutdown() {
             Ok(fut) => {
                 fut.await;
@@ -78,6 +106,9 @@ pub async fn run_telegram(token: String, allowed_chat_ids: Vec<i64>) -> miette::
             }
         }
     });
+
+    // Register /reset command with Telegram Bot API (best-effort, non-fatal)
+    bot.set_my_commands(BotCommand::bot_commands()).await.ok();
 
     tracing::info!("teloxide dispatcher starting (long-polling)");
     dispatcher.dispatch().await;
