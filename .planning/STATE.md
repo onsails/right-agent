@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Teloxide Bot Runtime
-status: executing
-stopped_at: Completed 28.2-01-PLAN.md
-last_updated: "2026-04-01T21:54:55.705Z"
+status: verifying
+stopped_at: Completed 28.2-02-PLAN.md
+last_updated: "2026-04-01T21:56:02.095Z"
 last_activity: 2026-04-01
 progress:
   total_phases: 8
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-03-26)
 
 Phase: 28.2 (v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-01
 
 Progress: [█░░░░░░░░░] 14%
@@ -66,6 +66,7 @@ Progress: [█░░░░░░░░░] 14%
 | Phase 27-cron-runtime P02 | 3 | 1 tasks | 1 files |
 | Phase 28-cronsync-skill-rewrite P01 | 2 | 2 tasks | 1 files |
 | Phase 28.2 P01 | 5 | 1 tasks | 2 files |
+| Phase 28.2-v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime P02 | 2 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,8 @@ Recent decisions relevant to v2.3:
 - [Phase 27-cron-runtime]: server_info is non-Optional in rmcp 1.3 InitializeResult — direct field access in tests
 - [Phase 28-cronsync-skill-rewrite]: cronsync SKILL.md: reactive-only activation (no bootstrap), MCP observability section added, UTC timezone correction, all CC tool refs removed
 - [Phase 28.2]: Use rustls instead of native-tls for teloxide — OpenSSL absent from devenv PKG_CONFIG_PATH; rustls is pure-Rust and already used by workspace reqwest dep
+- [Phase 28.2-02]: Use tokio::task::block_in_place + Builder::new_current_thread for sync functions called from async multi-thread context
+- [Phase 28.2-02]: Telegram API returns 200 OK with empty result.url for invalid tokens — regression test uses no-panic pattern not is_err()
 
 ### Roadmap Evolution
 
@@ -147,6 +150,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T21:54:55.701Z
-Stopped at: Completed 28.2-01-PLAN.md
+Last session: 2026-04-01T21:56:02.092Z
+Stopped at: Completed 28.2-02-PLAN.md
 Resume file: None
