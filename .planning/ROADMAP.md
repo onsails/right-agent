@@ -170,8 +170,8 @@ Plans:
 **Plans**: 2 plans
 
 Plans:
-- [x] 25.5-01-PLAN.md — agent_def.rs codegen module + cmd_up/cmd_pair wiring + system_prompt.rs deletion
-- [ ] 25.5-02-PLAN.md — worker.rs invoke_cc rewrite + parse_reply_output + test updates
+- [ ] 26-01-PLAN.md — process_compose.rs BotProcessAgent + template rewrite + cmd_up channels cleanup
+- [ ] 26-02-PLAN.md — deleteWebhook in bot/src/lib.rs + doctor webhook check
 
 ### Phase 27: Cron Runtime
 **Goal**: Cron jobs defined in crons/*.yaml are scheduled and executed by a Rust tokio task inside the bot process
@@ -213,6 +213,6 @@ Phases execute in order: 22 → 23 (parallel with 24) → 25 → 26, 27 (paralle
 | 23. Bot Skeleton | v3.0 | 3/3 | Complete    | 2026-03-31 |
 | 24. System Prompt Codegen | v3.0 | 3/3 | Complete    | 2026-03-31 |
 | 25. Telegram Handler + CC Dispatch | v3.0 | 3/3 | Complete    | 2026-04-01 |
-| 26. PC Cutover | v3.0 | 0/? | Not started | - |
+| 26. PC Cutover | v3.0 | 0/2 | Not started | - |
 | 27. Cron Runtime | v3.0 | 0/? | Not started | - |
 | 28. Cronsync SKILL Rewrite | v3.0 | 0/? | Not started | - |
