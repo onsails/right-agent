@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.1
 milestone_name: Sandbox Fix & Verification
-status: completed
-stopped_at: Phase 30 context gathered
-last_updated: "2026-04-02T20:48:24.318Z"
+status: verifying
+stopped_at: Completed 30-01-PLAN.md
+last_updated: "2026-04-02T21:19:17.712Z"
 last_activity: 2026-04-02
 progress:
   total_phases: 3
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  completed_phases: 2
+  total_plans: 2
+  completed_plans: 2
   percent: 33
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-02)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 29 — sandbox dependency fix (plan 01 complete)
+**Current focus:** Phase 30 — doctor-diagnostics
 
 ## Current Position
 
-Phase: 30
-Plan: Not started
-Status: Phase 29 plan 01 complete
+Phase: 30 (doctor-diagnostics) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
 Last activity: 2026-04-02
 
 Progress: [███░░░░░░░] 33%
@@ -67,6 +67,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 28-cronsync-skill-rewrite P01 | 2 | 2 tasks | 1 files |
 | Phase 28.2 P01 | 5 | 1 tasks | 2 files |
 | Phase 28.2-v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime P02 | 2 | 2 tasks | 1 files |
+| Phase 30-doctor-diagnostics P01 | 4 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,8 @@ Recent decisions relevant to v2.3:
 - [Phase 28.2-02]: Telegram API returns 200 OK with empty result.url for invalid tokens — regression test uses no-panic pattern not is_err()
 - [Phase 29-01]: generate_settings gains rg_path: Option<PathBuf> — keeps settings.rs pure (no IO); failIfUnavailable: true unconditional even with --no-sandbox
 - [Phase 29-01]: All 4 fix sites (settings.rs, worker.rs, cron.rs, devenv.nix) committed atomically per D-08
+- [Phase 30-01]: check_rg_in_path uses same Warn override pattern as sqlite3 (check_binary + DoctorCheck struct update)
+- [Phase 30-01]: check_ripgrep_in_settings is cross-platform (not Linux-gated) per DOC-02 requirement
 
 ### Roadmap Evolution
 
@@ -155,6 +158,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-02T20:48:24.315Z
-Stopped at: Phase 30 context gathered
-Resume file: .planning/phases/30-doctor-diagnostics/30-CONTEXT.md
+Last session: 2026-04-02T21:19:17.708Z
+Stopped at: Completed 30-01-PLAN.md
+Resume file: None
