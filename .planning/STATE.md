@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v3.1
 milestone_name: Sandbox Fix & Verification
 status: completed
-stopped_at: Phase 30 context gathered
-last_updated: "2026-04-02T20:48:24.318Z"
+stopped_at: Completed 31-01-PLAN.md
+last_updated: "2026-04-02T22:16:53.827Z"
 last_activity: 2026-04-02
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 1
-  completed_plans: 1
+  completed_plans: 2
   percent: 33
 ---
 
@@ -67,6 +67,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 28-cronsync-skill-rewrite P01 | 2 | 2 tasks | 1 files |
 | Phase 28.2 P01 | 5 | 1 tasks | 2 files |
 | Phase 28.2-v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime P02 | 2 | 2 tasks | 1 files |
+| Phase 31-e2e-verification P01 | 2 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,8 @@ Recent decisions relevant to v2.3:
 - [Phase 28.2-02]: Telegram API returns 200 OK with empty result.url for invalid tokens — regression test uses no-panic pattern not is_err()
 - [Phase 29-01]: generate_settings gains rg_path: Option<PathBuf> — keeps settings.rs pure (no IO); failIfUnavailable: true unconditional even with --no-sandbox
 - [Phase 29-01]: All 4 fix sites (settings.rs, worker.rs, cron.rs, devenv.nix) committed atomically per D-08
+- [Phase 31-e2e-verification]: Tasks 1+2 collapsed: subshell cwd written directly in initial implementation
+- [Phase 31-e2e-verification]: Sandbox proof via exit code under failIfUnavailable:true (not brittle stderr parsing)
 
 ### Roadmap Evolution
 
@@ -155,6 +158,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-02T20:48:24.315Z
-Stopped at: Phase 30 context gathered
-Resume file: .planning/phases/30-doctor-diagnostics/30-CONTEXT.md
+Last session: 2026-04-02T22:16:53.824Z
+Stopped at: Completed 31-01-PLAN.md
+Resume file: None

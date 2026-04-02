@@ -21,9 +21,9 @@
 
 ## VER — E2E Verification
 
-- [ ] **VER-01**: Bot subprocess (teloxide → `claude -p`) runs with sandbox enabled — CC stderr shows no sandbox warning
-- [ ] **VER-02**: Cron subprocess (`claude -p --agent`) runs with sandbox enabled — CC stderr shows no sandbox warning
-- [ ] **VER-03**: Repeatable verification script checks rg + socat + bwrap availability in agent launch environment
+- [x] **VER-01**: Bot subprocess (teloxide → `claude -p`) runs with sandbox enabled — CC stderr shows no sandbox warning
+- [x] **VER-02**: Cron subprocess (`claude -p --agent`) runs with sandbox enabled — CC stderr shows no sandbox warning
+- [x] **VER-03**: Repeatable verification script checks rg + socat + bwrap availability in agent launch environment
 
 ---
 
@@ -54,9 +54,9 @@
 | SBOX-04 | Phase 29 | Complete |
 | DOC-01 | Phase 30 | Pending |
 | DOC-02 | Phase 30 | Pending |
-| VER-01 | Phase 31 | Pending |
-| VER-02 | Phase 31 | Pending |
-| VER-03 | Phase 31 | Pending |
+| VER-01 | Phase 31 | Complete |
+| VER-02 | Phase 31 | Complete |
+| VER-03 | Phase 31 | Complete |
 
 **Coverage:**
 - v3.1 requirements: 9 total
