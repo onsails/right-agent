@@ -16,8 +16,8 @@
 
 ## DOC — Doctor Diagnostics
 
-- [ ] **DOC-01**: `rightclaw doctor` checks ripgrep availability in the PATH that agent processes will inherit (not just the developer's shell PATH)
-- [ ] **DOC-02**: `rightclaw doctor` validates that generated settings.json contains correct `sandbox.ripgrep.command` pointing to an existing executable
+- [x] **DOC-01**: `rightclaw doctor` checks ripgrep availability in the PATH that agent processes will inherit (not just the developer's shell PATH)
+- [x] **DOC-02**: `rightclaw doctor` validates that generated settings.json contains correct `sandbox.ripgrep.command` pointing to an existing executable
 
 ## VER — E2E Verification
 
@@ -52,8 +52,8 @@
 | SBOX-02 | Phase 29 | Complete |
 | SBOX-03 | Phase 29 | Complete |
 | SBOX-04 | Phase 29 | Complete |
-| DOC-01 | Phase 30 | Pending |
-| DOC-02 | Phase 30 | Pending |
+| DOC-01 | Phase 30 | Complete |
+| DOC-02 | Phase 30 | Complete |
 | VER-01 | Phase 31 | Pending |
 | VER-02 | Phase 31 | Pending |
 | VER-03 | Phase 31 | Pending |
