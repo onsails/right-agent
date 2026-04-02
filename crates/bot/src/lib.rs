@@ -113,11 +113,14 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         );
     }
 
-    // CRON-01: spawn cron task alongside Telegram dispatcher
+    // CRON-01: spawn cron task alongside Telegram dispatcher.
+    // Build bot here so cron can send replies; run_telegram builds its own independent instance.
+    let cron_bot = telegram::bot::build_bot(token.clone());
     let cron_agent_dir = agent_dir.clone();
     let cron_agent_name = args.agent.clone();
+    let cron_chat_ids = config.allowed_chat_ids.clone();
     tokio::spawn(async move {
-        cron::run_cron_task(cron_agent_dir, cron_agent_name).await;
+        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_bot, cron_chat_ids).await;
     });
 
     // Start Telegram dispatcher
