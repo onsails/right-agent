@@ -21,12 +21,14 @@ use tokio::sync::mpsc;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_message, handle_reset, DebugFlag};
+use super::handler::{handle_message, handle_reset, handle_start, DebugFlag};
 use super::worker::{DebounceMsg, SessionKey};
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
 enum BotCommand {
+    #[command(description = "Start interacting with this agent")]
+    Start,
     #[command(description = "Reset conversation session for this thread")]
     Reset,
 }
@@ -64,7 +66,12 @@ pub async fn run_telegram(
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
         .filter_command::<BotCommand>()
-        .endpoint(handle_reset);
+        .branch(
+            dptree::case![BotCommand::Start].endpoint(handle_start),
+        )
+        .branch(
+            dptree::case![BotCommand::Reset].endpoint(handle_reset),
+        );
 
     let message_handler = Update::filter_message()
         .inspect(|msg: Message| {
@@ -113,8 +120,17 @@ pub async fn run_telegram(
         }
     });
 
-    // Register /reset command with Telegram Bot API (best-effort, non-fatal)
-    bot.set_my_commands(BotCommand::bot_commands()).await.ok();
+    // Register /reset command with Telegram Bot API.
+    // First delete all existing commands to clear any leftover commands from other clients
+    // (e.g., CC Telegram plugin sets /status /help /start — these must be cleared).
+    match bot.delete_my_commands().await {
+        Ok(_) => tracing::info!("delete_my_commands succeeded"),
+        Err(e) => tracing::warn!("delete_my_commands failed (non-fatal): {e:#}"),
+    }
+    match bot.set_my_commands(BotCommand::bot_commands()).await {
+        Ok(_) => tracing::info!("set_my_commands succeeded — /reset registered"),
+        Err(e) => tracing::warn!("set_my_commands failed (non-fatal): {e:#}"),
+    }
 
     tracing::info!("teloxide dispatcher starting (long-polling)");
     dispatcher.dispatch().await;
