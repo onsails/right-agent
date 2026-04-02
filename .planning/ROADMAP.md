@@ -216,7 +216,7 @@ Plans:
 **Milestone Goal:** Fix CC sandbox dependency detection for nix environments and verify all rightclaw functionality end-to-end with sandbox actually enabled.
 
 - [x] **Phase 29: Sandbox Dependency Fix** - Inject system rg path into settings.json, fix USE_BUILTIN_RIPGREP env var, add failIfUnavailable, add ripgrep to devenv.nix (completed 2026-04-02)
-- [ ] **Phase 30: Doctor Diagnostics** - Doctor checks ripgrep availability for agent process PATH and validates generated settings.json sandbox config
+- [x] **Phase 30: Doctor Diagnostics** - Doctor checks ripgrep availability for agent process PATH and validates generated settings.json sandbox config (completed 2026-04-02)
 - [ ] **Phase 31: E2E Verification** - Full flow verification (rightclaw up → doctor green → sandbox ON → Telegram → cron) with repeatable checklist
 
 ## Phase Details
@@ -245,7 +245,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 30-01-PLAN.md — Add rg PATH check (DOC-01) and settings.json ripgrep.command validation (DOC-02) to doctor
+- [x] 30-01-PLAN.md — Add rg PATH check (DOC-01) and settings.json ripgrep.command validation (DOC-02) to doctor
 
 ### Phase 31: E2E Verification
 **Goal**: Full rightclaw up → doctor green → CC sandbox ON → Telegram → cron flow is verified with all three sandbox dependencies (rg, socat, bwrap) explicitly confirmed
@@ -275,5 +275,5 @@ Phases execute in order: 29 → 30 → 31
 | 28.1. v3.0 UAT | v3.0 | 0/0 | Complete | 2026-04-01 |
 | 28.2. v3.0 UAT Fix | v3.0 | 2/2 | Complete | 2026-04-01 |
 | 29. Sandbox Dependency Fix | v3.1 | 1/1 | Complete    | 2026-04-02 |
-| 30. Doctor Diagnostics | v3.1 | 0/1 | Not started | - |
+| 30. Doctor Diagnostics | v3.1 | 1/1 | Complete   | 2026-04-02 |
 | 31. E2E Verification | v3.1 | 0/TBD | Not started | - |
