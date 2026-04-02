@@ -104,6 +104,18 @@ pub async fn handle_message(
     Ok(())
 }
 
+/// Handle the /start command.
+///
+/// Sends a greeting without invoking CC. Cron runtime starts automatically
+/// alongside the bot — no explicit bootstrap needed.
+pub async fn handle_start(
+    bot: BotType,
+    msg: Message,
+) -> ResponseResult<()> {
+    bot.send_message(msg.chat.id, "👋 Agent is running. Send a message to start.").await?;
+    Ok(())
+}
+
 /// Handle the /reset command.
 ///
 /// Deletes the telegram_sessions row for the current (chat_id, effective_thread_id).

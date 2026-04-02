@@ -362,6 +362,7 @@ async fn invoke_cc(
     let reply_schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
     let mut cmd = tokio::process::Command::new(&cc_bin);
     cmd.arg("-p");
+    cmd.arg("--dangerously-skip-permissions");
     if ctx.debug {
         cmd.arg("--verbose");
     }
@@ -383,6 +384,8 @@ async fn invoke_cc(
 
     cmd.arg("--").arg(xml);
     cmd.env("HOME", &ctx.agent_dir);
+    // Use system rg instead of CC's bundled vendor binary (nix store rg lacks execute bit).
+    cmd.env("USE_BUILTIN_RIPGREP", "1");
     cmd.current_dir(&ctx.agent_dir);
     cmd.stdin(Stdio::null()); // DIS-02: prevent pipe deadlock
     cmd.stdout(Stdio::piped());

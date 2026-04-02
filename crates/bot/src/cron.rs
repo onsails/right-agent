@@ -191,12 +191,15 @@ async fn execute_job(
     // Build command (D-01: --agent <name>, no session, no JSON output)
     let mut cmd = tokio::process::Command::new(&cc_bin);
     cmd.arg("-p");
+    cmd.arg("--dangerously-skip-permissions");
     cmd.arg("--agent").arg(agent_name);
     if let Some(max_turns) = spec.max_turns {
         cmd.arg("--max-turns").arg(max_turns.to_string());
     }
     cmd.arg("--").arg(&spec.prompt);
     cmd.env("HOME", agent_dir);
+    // Use system rg instead of CC's bundled vendor binary (nix store rg lacks execute bit).
+    cmd.env("USE_BUILTIN_RIPGREP", "1");
     cmd.current_dir(agent_dir);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -276,6 +279,7 @@ fn update_run_record(
 ///
 /// Signature expected by lib.rs spawn site (CRON-01, CRON-02, CRON-06).
 pub async fn run_cron_task(agent_dir: std::path::PathBuf, agent_name: String) {
+    tracing::info!(agent = %agent_name, "cron task started");
     let mut handles: HashMap<String, (CronSpec, JoinHandle<()>)> = HashMap::new();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     interval.tick().await; // consume immediate first tick
