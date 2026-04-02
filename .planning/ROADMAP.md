@@ -242,7 +242,10 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. `rightclaw doctor` reports a Warn (Linux) when `rg` is not reachable in the PATH that process-compose agent processes inherit
   2. `rightclaw doctor` reads each agent's generated settings.json and reports Warn when `sandbox.ripgrep.command` is absent or points to a non-executable path
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 30-01-PLAN.md — Add rg PATH check (DOC-01) and settings.json ripgrep.command validation (DOC-02) to doctor
 
 ### Phase 31: E2E Verification
 **Goal**: Full rightclaw up → doctor green → CC sandbox ON → Telegram → cron flow is verified with all three sandbox dependencies (rg, socat, bwrap) explicitly confirmed
@@ -272,5 +275,5 @@ Phases execute in order: 29 → 30 → 31
 | 28.1. v3.0 UAT | v3.0 | 0/0 | Complete | 2026-04-01 |
 | 28.2. v3.0 UAT Fix | v3.0 | 2/2 | Complete | 2026-04-01 |
 | 29. Sandbox Dependency Fix | v3.1 | 1/1 | Complete    | 2026-04-02 |
-| 30. Doctor Diagnostics | v3.1 | 0/TBD | Not started | - |
+| 30. Doctor Diagnostics | v3.1 | 0/1 | Not started | - |
 | 31. E2E Verification | v3.1 | 0/TBD | Not started | - |
