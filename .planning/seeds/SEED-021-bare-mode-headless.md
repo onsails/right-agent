@@ -35,17 +35,39 @@ should be doing anyway (declarative, reproducible, no surprises).
 
 ## Critical Gotcha: API Key
 
-**`--bare` skips OAuth and keychain reads.** Currently agents inherit the user's API key
-via keychain. In bare mode, `ANTHROPIC_API_KEY` must be injected explicitly.
+**`--bare` skips OAuth and keychain reads.** This is a known bug (anthropics/claude-code#38022,
+OPEN, no official fix). Currently agents use OAuth (claude.ai login) — no `ANTHROPIC_API_KEY`.
 
-Options:
-1. `ANTHROPIC_API_KEY` env var in process-compose.yaml (read from keychain at `rightclaw up` time, inject as env var — similar to `RC_TELEGRAM_TOKEN` pattern)
-2. `--settings '{"apiKey":"..."}'` — but this embeds key in process args (visible in `ps`)
-3. `--settings /path/to/settings.json` with `apiKeyHelper` field — cleanest option
+**Known workaround (macOS):** read OAuth token from keychain, pass via `apiKeyHelper`:
+```bash
+TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w \
+  | python3 -c "import sys,json; print(json.loads(sys.stdin.read())['claudeAiOauth']['accessToken'])")
+echo "{\"apiKeyHelper\": \"echo $TOKEN\"}" > /tmp/agent-settings.json
+claude --bare --settings /tmp/agent-settings.json -p "..."
+```
 
-The `apiKeyHelper` approach: generate a per-agent `settings.json` that includes
-`"apiKeyHelper": "cat /run/secrets/anthropic_key"` or reads from a file path. rightclaw
-already generates `settings.json` per agent — just add the key source there.
+**Linux equivalent:** same approach but read from `~/.rightclaw/agents/right/.claude.json`
+(OAuth token may be stored there) or via `secret-tool` if using GNOME Keyring.
+
+`rightclaw up` could generate the `apiKeyHelper` command into the per-agent `settings.json`
+at launch time (reads real keychain once, embeds the echo command). Tokens rotate — needs
+refresh logic or re-run `rightclaw up` to refresh.
+
+## Simpler Alternative: --strict-mcp-config (no bare needed)
+
+From CLI reference: `--strict-mcp-config` — Only use MCP servers from `--mcp-config`,
+ignoring **all other MCP configurations** (including cloud/account MCP servers).
+
+Combined with `ENABLE_CLAUDEAI_MCP_SERVERS=false` (already shipped), this gives near-bare
+MCP isolation WITHOUT breaking OAuth:
+
+```bash
+claude -p "$PROMPT" \
+  --strict-mcp-config \
+  --mcp-config /path/to/agent/.mcp.json
+```
+
+This may already be sufficient — evaluate before attempting full `--bare` migration.
 
 ## What to Pass Explicitly
 
