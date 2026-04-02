@@ -271,6 +271,6 @@ Phases execute in order: 29 → 30 → 31
 | 28. Cronsync SKILL Rewrite | v3.0 | 1/1 | Complete | 2026-04-01 |
 | 28.1. v3.0 UAT | v3.0 | 0/0 | Complete | 2026-04-01 |
 | 28.2. v3.0 UAT Fix | v3.0 | 2/2 | Complete | 2026-04-01 |
-| 29. Sandbox Dependency Fix | v3.1 | 1/1 | Complete   | 2026-04-02 |
+| 29. Sandbox Dependency Fix | v3.1 | 1/1 | Complete    | 2026-04-02 |
 | 30. Doctor Diagnostics | v3.1 | 0/TBD | Not started | - |
 | 31. E2E Verification | v3.1 | 0/TBD | Not started | - |
