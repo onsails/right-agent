@@ -38,9 +38,10 @@ impl fmt::Display for DoctorCheck {
 /// Run all doctor checks against the given RightClaw home directory.
 ///
 /// Checks 3 core binaries in PATH (rightclaw, process-compose, claude),
-/// adds Linux-only sandbox dependency checks (bwrap, socat, bwrap smoke test),
-/// and validates agent directory structure. Unlike `verify_dependencies()`,
-/// doctor runs ALL checks and collects results -- never short-circuits.
+/// adds Linux-only sandbox dependency checks (bwrap, socat, bwrap smoke test,
+/// ripgrep PATH check), and validates agent directory structure.
+/// Unlike `verify_dependencies()`, doctor runs ALL checks and collects results
+/// -- never short-circuits.
 pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     let mut checks = vec![
         check_binary(
@@ -75,6 +76,9 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
         if bwrap_found {
             checks.push(check_bwrap_sandbox());
         }
+
+        // DOC-01: ripgrep PATH check (sandbox dependency)
+        checks.push(check_rg_in_path());
     }
 
     // Agent structure checks
@@ -102,6 +106,9 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     if let Some(check) = check_managed_settings(MANAGED_SETTINGS_PATH) {
         checks.push(check);
     }
+
+    // DOC-02: per-agent settings.json ripgrep.command validation (cross-platform)
+    checks.extend(check_ripgrep_in_settings(home));
 
     checks
 }
@@ -137,6 +144,139 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
         detail: "not found in PATH".to_string(),
         fix: fix_hint.map(|s| s.to_string()),
     }
+}
+
+/// Check if ripgrep (`rg`) is available in PATH. (DOC-01)
+///
+/// Uses Warn (not Fail) when absent — ripgrep is a sandbox dependency but its
+/// absence is recoverable by reinstalling and running `rightclaw up` again.
+fn check_rg_in_path() -> DoctorCheck {
+    let raw = check_binary(
+        "rg",
+        Some("Install ripgrep: nix profile install nixpkgs#ripgrep / apt install ripgrep / brew install ripgrep"),
+    );
+    DoctorCheck {
+        status: if raw.status == CheckStatus::Pass {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        ..raw
+    }
+}
+
+/// Validate per-agent settings.json sandbox.ripgrep.command. (DOC-02)
+///
+/// For each agent directory under `home/agents/`, checks that:
+/// - `.claude/settings.json` exists
+/// - The JSON is valid
+/// - `sandbox.ripgrep.command` key is present
+/// - The path it points to exists as a file on disk
+///
+/// Cross-platform — not gated to Linux.
+/// Returns an empty Vec when the agents directory does not exist.
+fn check_ripgrep_in_settings(home: &Path) -> Vec<DoctorCheck> {
+    let agents_dir = home.join("agents");
+    if !agents_dir.exists() {
+        return vec![];
+    }
+
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut checks = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        let check_name = format!("sandbox-rg/{name}");
+        let settings_path = path.join(".claude").join("settings.json");
+
+        if !settings_path.exists() {
+            checks.push(DoctorCheck {
+                name: check_name,
+                status: CheckStatus::Warn,
+                detail: "settings.json not found".to_string(),
+                fix: Some("Run `rightclaw up` to generate agent settings".to_string()),
+            });
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&settings_path) {
+            Ok(c) => c,
+            Err(e) => {
+                checks.push(DoctorCheck {
+                    name: check_name,
+                    status: CheckStatus::Warn,
+                    detail: format!("cannot read settings.json: {e}"),
+                    fix: None,
+                });
+                continue;
+            }
+        };
+
+        let parsed: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => {
+                checks.push(DoctorCheck {
+                    name: check_name,
+                    status: CheckStatus::Warn,
+                    detail: "settings.json is not valid JSON".to_string(),
+                    fix: Some("Run `rightclaw up` to regenerate settings".to_string()),
+                });
+                continue;
+            }
+        };
+
+        match parsed["sandbox"]["ripgrep"]["command"].as_str() {
+            None => {
+                checks.push(DoctorCheck {
+                    name: check_name,
+                    status: CheckStatus::Warn,
+                    detail: "sandbox.ripgrep.command absent -- CC sandbox will fail at launch"
+                        .to_string(),
+                    fix: Some(
+                        "Ensure ripgrep is installed, then run `rightclaw up` to regenerate settings"
+                            .to_string(),
+                    ),
+                });
+            }
+            Some(cmd) => {
+                if std::path::Path::new(cmd).is_file() {
+                    checks.push(DoctorCheck {
+                        name: check_name,
+                        status: CheckStatus::Pass,
+                        detail: cmd.to_string(),
+                        fix: None,
+                    });
+                } else {
+                    checks.push(DoctorCheck {
+                        name: check_name,
+                        status: CheckStatus::Warn,
+                        detail: format!(
+                            "sandbox.ripgrep.command points to non-existent path: {cmd}"
+                        ),
+                        fix: Some(
+                            "Reinstall ripgrep and run `rightclaw up` to regenerate settings"
+                                .to_string(),
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    checks
 }
 
 /// Validate agent directory structure.
@@ -486,472 +626,5 @@ See: https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespace
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn check_binary_returns_fail_for_missing_binary() {
-        let check = check_binary("rightclaw-absolutely-nonexistent-binary-xyz", None);
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert!(check.detail.contains("not found"));
-    }
-
-    #[test]
-    fn check_binary_returns_pass_for_present_binary() {
-        // "sh" is always present on Unix
-        let check = check_binary("sh", None);
-        assert_eq!(check.status, CheckStatus::Pass);
-        assert!(!check.detail.contains("not found"));
-    }
-
-    #[test]
-    fn check_binary_includes_fix_hint_on_failure() {
-        let check = check_binary(
-            "rightclaw-nonexistent-xyz",
-            Some("https://example.com/install"),
-        );
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert_eq!(
-            check.fix.as_deref(),
-            Some("https://example.com/install")
-        );
-    }
-
-    #[test]
-    fn check_binary_no_fix_on_success() {
-        let check = check_binary("sh", Some("should not appear"));
-        assert_eq!(check.status, CheckStatus::Pass);
-        assert!(check.fix.is_none());
-    }
-
-    #[test]
-    fn run_doctor_with_empty_agents_dir_reports_fail() {
-        let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("agents")).unwrap();
-
-        let checks = run_doctor(dir.path());
-
-        let agent_checks: Vec<_> = checks
-            .iter()
-            .filter(|c| c.name.starts_with("agents/") && c.detail.contains("no valid agents"))
-            .collect();
-        assert!(
-            !agent_checks.is_empty(),
-            "should report no valid agents found"
-        );
-        assert_eq!(agent_checks[0].status, CheckStatus::Fail);
-    }
-
-    #[test]
-    fn run_doctor_with_valid_agent_reports_pass() {
-        let dir = tempdir().unwrap();
-        let agent_dir = dir.path().join("agents").join("right");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("IDENTITY.md"), "# Right").unwrap();
-
-        let checks = run_doctor(dir.path());
-
-        let agent_check = checks
-            .iter()
-            .find(|c| c.name.contains("agents/right/"))
-            .expect("should have a check for agents/right/");
-        assert_eq!(agent_check.status, CheckStatus::Pass);
-        assert!(agent_check.detail.contains("valid agent"));
-    }
-
-    #[test]
-    fn run_doctor_with_missing_agents_dir_reports_fail() {
-        let dir = tempdir().unwrap();
-        // No agents/ directory at all
-
-        let checks = run_doctor(dir.path());
-
-        let agent_check = checks
-            .iter()
-            .find(|c| c.name == "agents/" && c.status == CheckStatus::Fail)
-            .expect("should report missing agents directory");
-        assert!(agent_check.detail.contains("not found"));
-    }
-
-    #[test]
-    fn run_doctor_reports_bootstrap_pending() {
-        let dir = tempdir().unwrap();
-        let agent_dir = dir.path().join("agents").join("right");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::write(agent_dir.join("IDENTITY.md"), "# Right").unwrap();
-        std::fs::write(agent_dir.join("BOOTSTRAP.md"), "# Onboarding").unwrap();
-
-        let checks = run_doctor(dir.path());
-
-        let bootstrap_check = checks
-            .iter()
-            .find(|c| c.name.contains("BOOTSTRAP.md"))
-            .expect("should have a BOOTSTRAP.md check");
-        assert_eq!(bootstrap_check.status, CheckStatus::Warn);
-        assert!(bootstrap_check.detail.contains("onboarding pending"));
-    }
-
-    #[test]
-    fn run_doctor_reports_missing_identity() {
-        let dir = tempdir().unwrap();
-        let agent_dir = dir.path().join("agents").join("broken");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        // No IDENTITY.md
-        std::fs::write(agent_dir.join("agent.yaml"), "{}").unwrap();
-
-        let checks = run_doctor(dir.path());
-
-        let agent_check = checks
-            .iter()
-            .find(|c| c.name.contains("agents/broken/"))
-            .expect("should have a check for agents/broken/");
-        assert_eq!(agent_check.status, CheckStatus::Fail);
-        assert!(agent_check.detail.contains("IDENTITY.md"));
-    }
-
-    #[test]
-    fn doctor_check_display_shows_name_status_detail() {
-        let check = DoctorCheck {
-            name: "test-binary".to_string(),
-            status: CheckStatus::Pass,
-            detail: "/usr/bin/test-binary".to_string(),
-            fix: None,
-        };
-        let display = format!("{check}");
-        assert!(display.contains("test-binary"));
-        assert!(display.contains("ok"));
-        assert!(display.contains("/usr/bin/test-binary"));
-    }
-
-    #[test]
-    fn doctor_check_display_shows_fix_on_failure() {
-        let check = DoctorCheck {
-            name: "missing".to_string(),
-            status: CheckStatus::Fail,
-            detail: "not found".to_string(),
-            fix: Some("install it".to_string()),
-        };
-        let display = format!("{check}");
-        assert!(display.contains("FAIL"));
-        assert!(display.contains("fix: install it"));
-    }
-
-    #[test]
-    fn run_doctor_always_checks_all_three_binaries() {
-        let dir = tempdir().unwrap();
-        let checks = run_doctor(dir.path());
-
-        let binary_names: Vec<&str> = checks
-            .iter()
-            .filter(|c| !c.name.starts_with("agents"))
-            .map(|c| c.name.as_str())
-            .collect();
-
-        assert!(binary_names.contains(&"rightclaw"), "missing rightclaw check");
-        assert!(binary_names.contains(&"process-compose"), "missing process-compose check");
-        assert!(binary_names.contains(&"claude"), "missing claude check");
-        assert!(!binary_names.contains(&"openshell"), "openshell should not be checked");
-    }
-
-    #[test]
-    fn check_bwrap_sandbox_returns_doctor_check() {
-        // Call the function directly -- will pass or fail depending on host,
-        // but must not panic and must return correct shape.
-        let check = check_bwrap_sandbox();
-        assert_eq!(check.name, "bwrap-sandbox");
-        // Status is either Pass or Fail depending on system -- just verify it's set
-        assert!(
-            check.status == CheckStatus::Pass || check.status == CheckStatus::Fail,
-            "status must be Pass or Fail, got: {:?}",
-            check.status
-        );
-    }
-
-    #[test]
-    fn bwrap_fix_guidance_contains_apparmor_profile() {
-        let guidance = bwrap_fix_guidance();
-        assert!(
-            guidance.contains("apparmor_parser"),
-            "fix guidance must mention apparmor_parser"
-        );
-        assert!(
-            guidance.contains("/etc/apparmor.d/bwrap"),
-            "fix guidance must include AppArmor profile path"
-        );
-        assert!(
-            guidance.contains("sysctl"),
-            "fix guidance must mention sysctl workaround"
-        );
-        assert!(
-            guidance.contains("https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces"),
-            "fix guidance must include Ubuntu docs link"
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn run_doctor_includes_bwrap_socat_on_linux() {
-        let dir = tempdir().unwrap();
-        let checks = run_doctor(dir.path());
-
-        let check_names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
-        assert!(
-            check_names.contains(&"bwrap"),
-            "Linux doctor must check for bwrap"
-        );
-        assert!(
-            check_names.contains(&"socat"),
-            "Linux doctor must check for socat"
-        );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn run_doctor_skips_bwrap_socat_on_non_linux() {
-        let dir = tempdir().unwrap();
-        let checks = run_doctor(dir.path());
-
-        let check_names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
-        assert!(
-            !check_names.contains(&"bwrap"),
-            "non-Linux doctor must not check for bwrap"
-        );
-        assert!(
-            !check_names.contains(&"socat"),
-            "non-Linux doctor must not check for socat"
-        );
-    }
-
-    // ---- check_managed_settings tests ----
-
-    #[test]
-    fn check_managed_settings_returns_none_when_file_absent() {
-        let result = check_managed_settings("/nonexistent-rightclaw-test/managed-settings.json");
-        assert!(result.is_none(), "should return None when file does not exist");
-    }
-
-    #[test]
-    fn check_managed_settings_returns_warn_with_strict_message_when_flag_true() {
-        let tmp = tempdir().unwrap();
-        let path = tmp.path().join("managed-settings.json");
-        std::fs::write(&path, "{\"allowManagedDomainsOnly\": true}\n").unwrap();
-
-        let result = check_managed_settings(path.to_str().unwrap());
-        let check = result.expect("should return Some when file exists");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.detail.contains("allowManagedDomainsOnly:true"),
-            "detail must mention allowManagedDomainsOnly:true, got: {}",
-            check.detail
-        );
-        let fix = check.fix.expect("should have fix hint");
-        assert!(
-            fix.contains("sudo rightclaw config strict-sandbox"),
-            "fix must contain sudo command, got: {fix}"
-        );
-    }
-
-    #[test]
-    fn check_managed_settings_returns_warn_with_generic_message_when_flag_false() {
-        let tmp = tempdir().unwrap();
-        let path = tmp.path().join("managed-settings.json");
-        std::fs::write(&path, "{\"allowManagedDomainsOnly\": false}").unwrap();
-
-        let result = check_managed_settings(path.to_str().unwrap());
-        let check = result.expect("should return Some when file exists");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.detail.contains("content may affect"),
-            "detail must use generic message when flag is false, got: {}",
-            check.detail
-        );
-    }
-
-    #[test]
-    fn check_managed_settings_returns_warn_with_generic_message_for_invalid_json() {
-        let tmp = tempdir().unwrap();
-        let path = tmp.path().join("managed-settings.json");
-        std::fs::write(&path, "not valid json at all!!!").unwrap();
-
-        let result = check_managed_settings(path.to_str().unwrap());
-        let check = result.expect("should return Some when file exists");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.detail.contains("content may affect"),
-            "detail must use generic message for invalid JSON, got: {}",
-            check.detail
-        );
-    }
-
-    #[test]
-    fn check_managed_settings_returns_warn_with_generic_message_when_key_absent() {
-        let tmp = tempdir().unwrap();
-        let path = tmp.path().join("managed-settings.json");
-        std::fs::write(&path, "{\"someOtherKey\": true}").unwrap();
-
-        let result = check_managed_settings(path.to_str().unwrap());
-        let check = result.expect("should return Some when file exists");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.detail.contains("content may affect"),
-            "detail must use generic message when key is absent, got: {}",
-            check.detail
-        );
-    }
-
-    #[test]
-    fn check_managed_settings_fix_hint_contains_sudo_command_when_flag_true() {
-        let tmp = tempdir().unwrap();
-        let path = tmp.path().join("managed-settings.json");
-        std::fs::write(&path, "{\"allowManagedDomainsOnly\": true}").unwrap();
-
-        let check = check_managed_settings(path.to_str().unwrap()).unwrap();
-        let fix = check.fix.unwrap();
-        assert!(
-            fix.contains("sudo rightclaw config strict-sandbox"),
-            "fix hint must include the sudo command, got: {fix}"
-        );
-    }
-
-    #[test]
-    fn run_doctor_includes_sqlite3_check() {
-        let dir = tempdir().unwrap();
-        // Need agents/ dir to avoid unrelated Fail masking the check
-        std::fs::create_dir_all(dir.path().join("agents")).unwrap();
-        let checks = run_doctor(dir.path());
-        let sqlite3_check = checks
-            .iter()
-            .find(|c| c.name == "sqlite3")
-            .expect("run_doctor must include sqlite3 check");
-        // Status is Pass or Warn (never Fail) — DOCTOR-01 requires non-fatal
-        assert!(
-            sqlite3_check.status == CheckStatus::Pass || sqlite3_check.status == CheckStatus::Warn,
-            "sqlite3 check must be Pass or Warn, got: {:?}",
-            sqlite3_check.status
-        );
-        // No fix suggestion — sqlite3 is available on all standard installs
-        assert!(
-            sqlite3_check.fix.is_none(),
-            "sqlite3 check must have no fix hint"
-        );
-    }
-
-    #[test]
-    fn sqlite3_check_is_warn_not_fail_when_absent() {
-        // Simulate missing binary by calling check_binary with a guaranteed-absent name,
-        // then verify the status override logic produces Warn.
-        let raw = check_binary("rightclaw-absolutely-nonexistent-sqlite3-xyz", None);
-        assert_eq!(
-            raw.status,
-            CheckStatus::Fail,
-            "raw check_binary returns Fail for absent binary"
-        );
-
-        // The override logic from run_doctor:
-        let overridden_status = if raw.status == CheckStatus::Pass {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Warn
-        };
-        assert_eq!(
-            overridden_status,
-            CheckStatus::Warn,
-            "absent binary must map to Warn, not Fail"
-        );
-    }
-
-    // ---- make_webhook_check tests ----
-
-    #[test]
-    fn make_webhook_check_pass_when_url_empty() {
-        let check = make_webhook_check("mybot", Ok(String::new()));
-        assert_eq!(check.name, "telegram-webhook/mybot");
-        assert_eq!(check.status, CheckStatus::Pass);
-        assert!(
-            check.detail.contains("no active webhook"),
-            "expected 'no active webhook', got: {}",
-            check.detail
-        );
-        assert!(check.fix.is_none());
-    }
-
-    #[test]
-    fn make_webhook_check_warn_when_url_nonempty() {
-        let check = make_webhook_check("mybot", Ok("https://example.com/webhook".to_string()));
-        assert_eq!(check.name, "telegram-webhook/mybot");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.detail.contains("active webhook found"),
-            "expected 'active webhook found', got: {}",
-            check.detail
-        );
-        assert!(
-            check.detail.contains("https://example.com/webhook"),
-            "detail must include the webhook URL"
-        );
-        let fix = check.fix.expect("Warn with URL must have fix hint");
-        assert!(
-            fix.contains("mybot"),
-            "fix must mention the agent name, got: {fix}"
-        );
-    }
-
-    #[test]
-    fn make_webhook_check_warn_when_http_error() {
-        let check = make_webhook_check("mybot", Err("HTTP error: connection refused".to_string()));
-        assert_eq!(check.name, "telegram-webhook/mybot");
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check.detail.contains("webhook check skipped"),
-            "expected 'webhook check skipped', got: {}",
-            check.detail
-        );
-        assert!(check.fix.is_none());
-    }
-
-    /// Regression test: fetch_webhook_url must not panic when called from within
-    /// an existing tokio multi-thread runtime context (UAT-FIX-02).
-    ///
-    /// Before the fix: Runtime::new().block_on() panics with
-    /// "Cannot start a runtime from within a runtime".
-    /// After the fix: returns a Result (Ok or Err) without panicking — the
-    /// Telegram API returns 200 with empty result for invalid tokens, so Ok("")
-    /// is a valid non-panic outcome.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn fetch_webhook_url_does_not_panic_in_async_context() {
-        // An invalid token is used — the exact result depends on network and
-        // Telegram API behavior. The critical invariant is: no panic.
-        // Before the fix this test PANICKED with "Cannot start a runtime from
-        // within a runtime". After the fix it returns Ok("") or Err(...).
-        let _result = fetch_webhook_url("invalid-token-for-test");
-        // If we reach here without panicking, the fix works.
-        // The Telegram API returns 200 OK with empty result for invalid tokens,
-        // so we cannot assert is_err() — Ok("") is also a valid outcome.
-    }
-
-    #[test]
-    fn check_webhook_info_for_agents_skips_agents_without_token() {
-        let dir = tempdir().unwrap();
-        let agent_dir = dir.path().join("agents").join("mybot");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        // Write agent.yaml with no telegram token
-        std::fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
-        std::fs::write(agent_dir.join("IDENTITY.md"), "# MyBot\n").unwrap();
-
-        let checks = check_webhook_info_for_agents(dir.path());
-        assert!(
-            checks.is_empty(),
-            "agent without telegram token must produce no webhook checks, got: {:?}",
-            checks.iter().map(|c| &c.name).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn check_webhook_info_for_agents_skips_when_no_agents_dir() {
-        let dir = tempdir().unwrap();
-        // No agents/ directory
-        let checks = check_webhook_info_for_agents(dir.path());
-        assert!(checks.is_empty(), "missing agents dir must produce no checks");
-    }
-}
+#[path = "doctor_tests.rs"]
+mod tests;
