@@ -80,6 +80,9 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // Agent structure checks
     checks.extend(check_agent_structure(home));
 
+    // Telegram webhook checks — warn when active webhook would conflict with long-polling (PC-05).
+    checks.extend(check_webhook_info_for_agents(home));
+
     // sqlite3 binary check — Warn (non-fatal): bundled SQLite in rightclaw binary makes
     // sqlite3 optional. Present on all standard macOS/Linux installs. (Phase 16, DOCTOR-01).
     {
@@ -313,6 +316,140 @@ fn check_managed_settings(path: &str) -> Option<DoctorCheck> {
         status: CheckStatus::Warn,
         detail,
         fix,
+    })
+}
+
+/// Check Telegram webhook status for all agents that have a configured token.
+///
+/// For each agent with a telegram_token or telegram_token_file, calls the
+/// Telegram getWebhookInfo API. Emits:
+/// - Pass when no webhook is active (result.url is empty)
+/// - Warn when an active webhook is found (would compete with long-polling)
+/// - Warn when the HTTP check fails (skipped gracefully)
+///
+/// Agents without a telegram token produce no check (silent skip, PC-05).
+fn check_webhook_info_for_agents(home: &Path) -> Vec<DoctorCheck> {
+    let agents_dir = home.join("agents");
+    if !agents_dir.exists() {
+        return vec![];
+    }
+
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut checks = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        // Parse agent.yaml — skip agents we can't read
+        let config = match crate::agent::discovery::parse_agent_config(&path) {
+            Ok(Some(c)) => c,
+            Ok(None) | Err(_) => continue,
+        };
+
+        // Resolve telegram token inline.
+        // TODO: use crate::codegen::telegram::resolve_telegram_token after Plan 01 merges
+        // (resolve_telegram_token will be pub(crate) after Plan 01).
+        let token = resolve_token_from_config(&path, &config);
+        let token = match token {
+            Some(t) => t,
+            None => continue, // No telegram token configured — skip silently
+        };
+
+        checks.push(make_webhook_check(&name, fetch_webhook_url(&token)));
+    }
+
+    checks
+}
+
+/// Inline token resolver for doctor.rs.
+///
+/// Duplicates the logic from codegen::telegram::resolve_telegram_token.
+/// TODO: replace with `crate::codegen::telegram::resolve_telegram_token` after Plan 01 makes it pub(crate).
+fn resolve_token_from_config(
+    agent_path: &Path,
+    config: &crate::agent::types::AgentConfig,
+) -> Option<String> {
+    if let Some(ref file_path) = config.telegram_token_file {
+        let abs = agent_path.join(file_path);
+        let content = std::fs::read_to_string(&abs).ok()?;
+        let trimmed = content.trim();
+        let token = trimmed
+            .strip_prefix("TELEGRAM_BOT_TOKEN=")
+            .unwrap_or(trimmed);
+        return Some(token.to_string());
+    }
+
+    config.telegram_token.clone()
+}
+
+/// Build a DoctorCheck from a webhook URL fetch result.
+///
+/// Extracted for testability — callers can pass any Ok/Err result
+/// to verify the check construction logic without network calls.
+fn make_webhook_check(agent_name: &str, webhook_url_result: Result<String, String>) -> DoctorCheck {
+    match webhook_url_result {
+        Ok(url) if url.is_empty() => DoctorCheck {
+            name: format!("telegram-webhook/{agent_name}"),
+            status: CheckStatus::Pass,
+            detail: "no active webhook".to_string(),
+            fix: None,
+        },
+        Ok(url) => DoctorCheck {
+            name: format!("telegram-webhook/{agent_name}"),
+            status: CheckStatus::Warn,
+            detail: format!("active webhook found: {url}"),
+            fix: Some(format!(
+                "Run rightclaw bot --agent {agent_name} to clear the webhook, or call deleteWebhook manually"
+            )),
+        },
+        Err(e) => DoctorCheck {
+            name: format!("telegram-webhook/{agent_name}"),
+            status: CheckStatus::Warn,
+            detail: format!("webhook check skipped: {e}"),
+            fix: None,
+        },
+    }
+}
+
+/// Fetch the active webhook URL for a Telegram bot token.
+///
+/// Returns Ok("") when no webhook is active, Ok(url) when one is set,
+/// Err(description) when the HTTP call fails.
+fn fetch_webhook_url(token: &str) -> Result<String, String> {
+    tokio::task::block_in_place(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("failed to create runtime: {e}"))?;
+        rt.block_on(async {
+            let url = format!("https://api.telegram.org/bot{token}/getWebhookInfo");
+            let resp = reqwest::Client::new()
+                .get(&url)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|e| format!("HTTP error: {e}"))?;
+            let body: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("JSON parse error: {e}"))?;
+            Ok(body["result"]["url"]
+                .as_str()
+                .unwrap_or("")
+                .to_string())
+        })
     })
 }
 
@@ -722,5 +859,99 @@ mod tests {
             CheckStatus::Warn,
             "absent binary must map to Warn, not Fail"
         );
+    }
+
+    // ---- make_webhook_check tests ----
+
+    #[test]
+    fn make_webhook_check_pass_when_url_empty() {
+        let check = make_webhook_check("mybot", Ok(String::new()));
+        assert_eq!(check.name, "telegram-webhook/mybot");
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(
+            check.detail.contains("no active webhook"),
+            "expected 'no active webhook', got: {}",
+            check.detail
+        );
+        assert!(check.fix.is_none());
+    }
+
+    #[test]
+    fn make_webhook_check_warn_when_url_nonempty() {
+        let check = make_webhook_check("mybot", Ok("https://example.com/webhook".to_string()));
+        assert_eq!(check.name, "telegram-webhook/mybot");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("active webhook found"),
+            "expected 'active webhook found', got: {}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("https://example.com/webhook"),
+            "detail must include the webhook URL"
+        );
+        let fix = check.fix.expect("Warn with URL must have fix hint");
+        assert!(
+            fix.contains("mybot"),
+            "fix must mention the agent name, got: {fix}"
+        );
+    }
+
+    #[test]
+    fn make_webhook_check_warn_when_http_error() {
+        let check = make_webhook_check("mybot", Err("HTTP error: connection refused".to_string()));
+        assert_eq!(check.name, "telegram-webhook/mybot");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(
+            check.detail.contains("webhook check skipped"),
+            "expected 'webhook check skipped', got: {}",
+            check.detail
+        );
+        assert!(check.fix.is_none());
+    }
+
+    /// Regression test: fetch_webhook_url must not panic when called from within
+    /// an existing tokio multi-thread runtime context (UAT-FIX-02).
+    ///
+    /// Before the fix: Runtime::new().block_on() panics with
+    /// "Cannot start a runtime from within a runtime".
+    /// After the fix: returns a Result (Ok or Err) without panicking — the
+    /// Telegram API returns 200 with empty result for invalid tokens, so Ok("")
+    /// is a valid non-panic outcome.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fetch_webhook_url_does_not_panic_in_async_context() {
+        // An invalid token is used — the exact result depends on network and
+        // Telegram API behavior. The critical invariant is: no panic.
+        // Before the fix this test PANICKED with "Cannot start a runtime from
+        // within a runtime". After the fix it returns Ok("") or Err(...).
+        let _result = fetch_webhook_url("invalid-token-for-test");
+        // If we reach here without panicking, the fix works.
+        // The Telegram API returns 200 OK with empty result for invalid tokens,
+        // so we cannot assert is_err() — Ok("") is also a valid outcome.
+    }
+
+    #[test]
+    fn check_webhook_info_for_agents_skips_agents_without_token() {
+        let dir = tempdir().unwrap();
+        let agent_dir = dir.path().join("agents").join("mybot");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // Write agent.yaml with no telegram token
+        std::fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# MyBot\n").unwrap();
+
+        let checks = check_webhook_info_for_agents(dir.path());
+        assert!(
+            checks.is_empty(),
+            "agent without telegram token must produce no webhook checks, got: {:?}",
+            checks.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn check_webhook_info_for_agents_skips_when_no_agents_dir() {
+        let dir = tempdir().unwrap();
+        // No agents/ directory
+        let checks = check_webhook_info_for_agents(dir.path());
+        assert!(checks.is_empty(), "missing agents dir must produce no checks");
     }
 }

@@ -144,7 +144,12 @@ fn test_init_with_telegram_token() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "--telegram-token", "123456:ABCdef", "--telegram-user-id", "999999"])
+        .args([
+            "--home", home,
+            "init",
+            "--telegram-token", "123456:ABCdef",
+            "--telegram-allowed-chat-ids", "85743491,100200300",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Telegram"));
@@ -152,6 +157,13 @@ fn test_init_with_telegram_token() {
     // Verify agent was created (policy.yaml no longer created).
     assert!(dir.path().join("agents/right/IDENTITY.md").exists());
     assert!(!dir.path().join("agents/right/policy.yaml").exists(), "policy.yaml should NOT be created");
+
+    // Verify allowed_chat_ids written to agent.yaml
+    let yaml = fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
+    assert!(
+        yaml.contains("allowed_chat_ids:"),
+        "agent.yaml must contain allowed_chat_ids section, got:\n{yaml}"
+    );
 }
 
 #[test]

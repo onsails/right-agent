@@ -92,17 +92,11 @@ pub fn generate_settings(
         settings["sandbox"]["excludedCommands"] = serde_json::json!(excluded_commands);
     }
 
-    // Telegram plugin (D-05) -- conditional on telegram config presence (D-01).
-    if agent
-        .config
-        .as_ref()
-        .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
-        .unwrap_or(false)
-    {
-        settings["enabledPlugins"] = serde_json::json!({
-            "telegram@claude-plugins-official": true
-        });
-    }
+    // NOTE: enabledPlugins / telegram@claude-plugins-official is intentionally NOT set.
+    // The Telegram integration is handled by the native Rust bot (teloxide). CC is invoked
+    // via `claude -p` (print mode) to process messages. If CC also starts the Telegram plugin,
+    // it races with the native bot for getUpdates on the same token, causing intermittent
+    // message drops. The CC plugin is neither needed nor safe to enable here.
 
     Ok(settings)
 }

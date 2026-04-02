@@ -1,19 +1,20 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
 use crate::codegen::generate_process_compose;
 
-fn make_agent(name: &str, restart: RestartPolicy) -> AgentDef {
+const EXE_PATH: &str = "/usr/bin/rightclaw";
+
+fn make_bot_agent(name: &str, token: &str) -> AgentDef {
     let config = Some(AgentConfig {
-        restart,
-        max_restarts: 5,
-        backoff_seconds: 10,
-        start_prompt: Some("Go".to_owned()),
+        restart: RestartPolicy::OnFailure,
+        max_restarts: 3,
+        backoff_seconds: 5,
         model: None,
         sandbox: None,
+        telegram_token: Some(token.to_string()),
         telegram_token_file: None,
-        telegram_token: None,
-        telegram_user_id: None,
+        allowed_chat_ids: vec![],
         env: std::collections::HashMap::new(),
     });
     AgentDef {
@@ -22,7 +23,34 @@ fn make_agent(name: &str, restart: RestartPolicy) -> AgentDef {
         identity_path: PathBuf::from(format!(
             "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
         )),
+        config,
+        soul_path: None,
+        user_path: None,
+        agents_path: None,
+        tools_path: None,
+        bootstrap_path: None,
+        heartbeat_path: None,
+    }
+}
 
+fn make_agent_no_token(name: &str) -> AgentDef {
+    let config = Some(AgentConfig {
+        restart: RestartPolicy::OnFailure,
+        max_restarts: 3,
+        backoff_seconds: 5,
+        model: None,
+        sandbox: None,
+        telegram_token: None,
+        telegram_token_file: None,
+        allowed_chat_ids: vec![],
+        env: std::collections::HashMap::new(),
+    });
+    AgentDef {
+        name: name.to_owned(),
+        path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
+        identity_path: PathBuf::from(format!(
+            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
+        )),
         config,
         soul_path: None,
         user_path: None,
@@ -40,7 +68,6 @@ fn make_agent_no_config(name: &str) -> AgentDef {
         identity_path: PathBuf::from(format!(
             "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
         )),
-
         config: None,
         soul_path: None,
         user_path: None,
@@ -51,45 +78,230 @@ fn make_agent_no_config(name: &str) -> AgentDef {
     }
 }
 
-#[test]
-fn single_agent_contains_name_and_paths() {
-    let agents = vec![make_agent("watchdog", RestartPolicy::OnFailure)];
-    let run_dir = PathBuf::from("/home/user/.rightclaw/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
+fn make_agent_token_file(name: &str, file: &str) -> AgentDef {
+    let config = Some(AgentConfig {
+        restart: RestartPolicy::OnFailure,
+        max_restarts: 3,
+        backoff_seconds: 5,
+        model: None,
+        sandbox: None,
+        telegram_token: None,
+        telegram_token_file: Some(file.to_string()),
+        allowed_chat_ids: vec![],
+        env: std::collections::HashMap::new(),
+    });
+    AgentDef {
+        name: name.to_owned(),
+        path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
+        identity_path: PathBuf::from(format!(
+            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
+        )),
+        config,
+        soul_path: None,
+        user_path: None,
+        agents_path: None,
+        tools_path: None,
+        bootstrap_path: None,
+        heartbeat_path: None,
+    }
+}
 
+fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> AgentDef {
+    let config = Some(AgentConfig {
+        restart,
+        max_restarts: 5,
+        backoff_seconds: 10,
+        model: None,
+        sandbox: None,
+        telegram_token: Some(token.to_string()),
+        telegram_token_file: None,
+        allowed_chat_ids: vec![],
+        env: std::collections::HashMap::new(),
+    });
+    AgentDef {
+        name: name.to_owned(),
+        path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
+        identity_path: PathBuf::from(format!(
+            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
+        )),
+        config,
+        soul_path: None,
+        user_path: None,
+        agents_path: None,
+        tools_path: None,
+        bootstrap_path: None,
+        heartbeat_path: None,
+    }
+}
+
+// ── Bot process key ─────────────────────────────────────────────────────────
+
+#[test]
+fn bot_agent_process_key_contains_name_bot() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
     assert!(
-        output.contains("watchdog:"),
-        "expected agent name as process key in:\n{output}"
-    );
-    assert!(
-        output.contains("/home/user/.rightclaw/run/watchdog.sh"),
-        "expected wrapper path in:\n{output}"
-    );
-    assert!(
-        output.contains("/home/user/.rightclaw/agents/watchdog"),
-        "expected working dir in:\n{output}"
+        output.contains("myagent-bot:"),
+        "expected '<name>-bot:' process key in:\n{output}"
     );
 }
 
 #[test]
-fn multiple_agents_all_present() {
+fn bot_agent_command_contains_rightclaw_bot_agent() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("rightclaw bot --agent myagent"),
+        "expected 'rightclaw bot --agent myagent' in:\n{output}"
+    );
+}
+
+#[test]
+fn bot_agent_env_contains_rc_agent_dir() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("RC_AGENT_DIR=/home/user/.rightclaw/agents/myagent"),
+        "expected RC_AGENT_DIR in:\n{output}"
+    );
+}
+
+#[test]
+fn bot_agent_env_contains_rc_agent_name() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("RC_AGENT_NAME=myagent"),
+        "expected RC_AGENT_NAME=myagent in:\n{output}"
+    );
+}
+
+#[test]
+fn inline_token_uses_rc_telegram_token() {
+    let agents = vec![make_bot_agent("myagent", "999:mytoken")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("RC_TELEGRAM_TOKEN=999:mytoken"),
+        "expected RC_TELEGRAM_TOKEN in:\n{output}"
+    );
+}
+
+#[test]
+fn token_file_uses_rc_telegram_token_file_with_abs_path() {
+    let agents = vec![make_agent_token_file("myagent", ".telegram.env")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    // Should resolve relative path to absolute: agent.path + file
+    let expected = "RC_TELEGRAM_TOKEN_FILE=/home/user/.rightclaw/agents/myagent/.telegram.env";
+    assert!(
+        output.contains(expected),
+        "expected absolute RC_TELEGRAM_TOKEN_FILE in:\n{output}"
+    );
+}
+
+// ── Non-telegram agents absent from output ──────────────────────────────────
+
+#[test]
+fn agent_without_telegram_token_absent_from_output() {
     let agents = vec![
-        make_agent("alpha", RestartPolicy::Always),
-        make_agent("beta", RestartPolicy::Never),
+        make_bot_agent("with-token", "123:tok"),
+        make_agent_no_token("no-token"),
     ];
-    let run_dir = PathBuf::from("/tmp/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
-
-    assert!(output.contains("alpha:"), "expected alpha in:\n{output}");
-    assert!(output.contains("beta:"), "expected beta in:\n{output}");
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        !output.contains("no-token"),
+        "agent without token must be absent from output:\n{output}"
+    );
 }
+
+#[test]
+fn agent_without_config_absent_from_output() {
+    let agents = vec![
+        make_bot_agent("with-token", "123:tok"),
+        make_agent_no_config("no-config"),
+    ];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        !output.contains("no-config"),
+        "agent without config must be absent from output:\n{output}"
+    );
+}
+
+// ── No is_interactive anywhere ───────────────────────────────────────────────
+
+#[test]
+fn output_does_not_contain_is_interactive() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        !output.contains("is_interactive"),
+        "is_interactive must not appear in output:\n{output}"
+    );
+}
+
+// ── MCP env vars ────────────────────────────────────────────────────────────
+
+#[test]
+fn env_contains_enable_claudeai_mcp_servers_false() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("ENABLE_CLAUDEAI_MCP_SERVERS=false"),
+        "expected ENABLE_CLAUDEAI_MCP_SERVERS=false in:\n{output}"
+    );
+}
+
+#[test]
+fn env_contains_mcp_connection_nonblocking() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("MCP_CONNECTION_NONBLOCKING=1"),
+        "expected MCP_CONNECTION_NONBLOCKING=1 in:\n{output}"
+    );
+}
+
+// ── Header and version ───────────────────────────────────────────────────────
+
+#[test]
+fn output_starts_with_generated_comment() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.starts_with("# Generated by rightclaw"),
+        "expected '# Generated by rightclaw' at start of:\n{output}"
+    );
+}
+
+#[test]
+fn output_contains_is_strict_true() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("is_strict: true"),
+        "expected is_strict: true in:\n{output}"
+    );
+}
+
+// ── Restart policies ─────────────────────────────────────────────────────────
 
 #[test]
 fn restart_policy_on_failure_maps_correctly() {
-    let agents = vec![make_agent("bot", RestartPolicy::OnFailure)];
-    let run_dir = PathBuf::from("/tmp/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
-
+    let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::OnFailure)];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
     assert!(
         output.contains("restart: \"on_failure\""),
         "expected on_failure policy in:\n{output}"
@@ -98,10 +310,9 @@ fn restart_policy_on_failure_maps_correctly() {
 
 #[test]
 fn restart_policy_always_maps_correctly() {
-    let agents = vec![make_agent("bot", RestartPolicy::Always)];
-    let run_dir = PathBuf::from("/tmp/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
-
+    let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::Always)];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
     assert!(
         output.contains("restart: \"always\""),
         "expected always policy in:\n{output}"
@@ -110,10 +321,9 @@ fn restart_policy_always_maps_correctly() {
 
 #[test]
 fn restart_policy_never_maps_to_no() {
-    let agents = vec![make_agent("bot", RestartPolicy::Never)];
-    let run_dir = PathBuf::from("/tmp/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
-
+    let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::Never)];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
     assert!(
         output.contains("restart: \"no\""),
         "expected 'no' for Never policy in:\n{output}"
@@ -121,49 +331,14 @@ fn restart_policy_never_maps_to_no() {
 }
 
 #[test]
-fn defaults_when_no_config() {
+fn defaults_when_no_config_not_in_output() {
+    // Agent with no config has no telegram token, so should not appear in output at all
     let agents = vec![make_agent_no_config("plain")];
-    let run_dir = PathBuf::from("/tmp/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
-
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    // No bot agents => the processes section should be empty (no plain: entry)
     assert!(
-        output.contains("restart: \"on_failure\""),
-        "expected default on_failure in:\n{output}"
-    );
-    assert!(
-        output.contains("backoff_seconds: 5"),
-        "expected default backoff 5 in:\n{output}"
-    );
-    assert!(
-        output.contains("max_restarts: 3"),
-        "expected default max_restarts 3 in:\n{output}"
-    );
-}
-
-#[test]
-fn output_starts_with_generated_comment() {
-    let agents = vec![make_agent("bot", RestartPolicy::OnFailure)];
-    let run_dir = PathBuf::from("/tmp/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
-
-    assert!(
-        output.starts_with("# Generated by rightclaw"),
-        "expected generated comment at start of:\n{output}"
-    );
-}
-
-#[test]
-fn output_contains_version_and_strict() {
-    let agents = vec![make_agent("bot", RestartPolicy::OnFailure)];
-    let run_dir = PathBuf::from("/tmp/run");
-    let output = generate_process_compose(&agents, &run_dir).unwrap();
-
-    assert!(
-        output.contains("version:"),
-        "expected version in:\n{output}"
-    );
-    assert!(
-        output.contains("is_strict: true"),
-        "expected is_strict in:\n{output}"
+        !output.contains("plain"),
+        "agent without config (no token) must not appear in output:\n{output}"
     );
 }

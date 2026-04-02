@@ -4,7 +4,6 @@ use crate::agent::AgentDef;
 ///
 /// Writes to `$AGENT_DIR/.claude/channels/telegram/`:
 ///   - `.env` with `TELEGRAM_BOT_TOKEN=<token>` (always overwritten)
-///   - `access.json` with allowlist (only if `telegram_user_id` set)
 ///
 /// No-ops silently if neither `telegram_token` nor `telegram_token_file` is set.
 pub fn generate_telegram_channel_config(agent: &AgentDef) -> miette::Result<()> {
@@ -21,16 +20,6 @@ pub fn generate_telegram_channel_config(agent: &AgentDef) -> miette::Result<()> 
     std::fs::write(channel_dir.join(".env"), format!("TELEGRAM_BOT_TOKEN={token}\n"))
         .map_err(|e| miette::miette!("failed to write telegram .env: {e:#}"))?;
 
-    // access.json only if user_id set
-    if let Some(user_id) = agent.config.as_ref().and_then(|c| c.telegram_user_id.as_deref()) {
-        let access_json = format!(
-            r#"{{"dmPolicy":"allowlist","allowFrom":["{user_id}"],"pending":{{}},"groups":{{}}}}"#
-        );
-        // Always overwrite access.json (D-08)
-        std::fs::write(channel_dir.join("access.json"), access_json)
-            .map_err(|e| miette::miette!("failed to write access.json: {e:#}"))?;
-    }
-
     tracing::debug!(agent = %agent.name, "wrote telegram channel config");
     Ok(())
 }
@@ -39,7 +28,7 @@ pub fn generate_telegram_channel_config(agent: &AgentDef) -> miette::Result<()> 
 ///
 /// Precedence: `telegram_token_file` > `telegram_token` > `None`.
 /// `telegram_token_file` path is resolved relative to `agent.path`.
-fn resolve_telegram_token(agent: &AgentDef) -> miette::Result<Option<String>> {
+pub(crate) fn resolve_telegram_token(agent: &AgentDef) -> miette::Result<Option<String>> {
     let config = match agent.config.as_ref() {
         Some(c) => c,
         None => return Ok(None),
@@ -94,12 +83,11 @@ mod tests {
             restart: RestartPolicy::OnFailure,
             max_restarts: 3,
             backoff_seconds: 5,
-            start_prompt: None,
             model: None,
             sandbox: None,
             telegram_token_file: None,
             telegram_token: None,
-            telegram_user_id: None,
+            allowed_chat_ids: vec![],
             env: std::collections::HashMap::new(),
         }
     }
@@ -148,25 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn token_and_user_id_writes_access_json() {
-        let dir = tempdir().unwrap();
-        let config = AgentConfig {
-            telegram_token: Some("123:abc".to_string()),
-            telegram_user_id: Some("987654321".to_string()),
-            ..base_config()
-        };
-        let agent = make_agent(dir.path(), Some(config));
-        generate_telegram_channel_config(&agent).unwrap();
-
-        let access =
-            std::fs::read_to_string(dir.path().join(".claude/channels/telegram/access.json"))
-                .unwrap();
-        assert!(access.contains("allowlist"), "dmPolicy should be allowlist");
-        assert!(access.contains("987654321"), "user_id should be in allowFrom");
-    }
-
-    #[test]
-    fn token_without_user_id_does_not_write_access_json() {
+    fn token_does_not_write_access_json() {
         let dir = tempdir().unwrap();
         let config = AgentConfig {
             telegram_token: Some("123:abc".to_string()),
@@ -179,7 +149,7 @@ mod tests {
             !dir.path()
                 .join(".claude/channels/telegram/access.json")
                 .exists(),
-            "access.json should not be written without user_id"
+            "access.json should not be written (access is managed by the bot, not codegen)"
         );
     }
 
@@ -234,11 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn called_twice_overwrites_env_and_access_json() {
+    fn called_twice_overwrites_env() {
         let dir = tempdir().unwrap();
         let config = AgentConfig {
             telegram_token: Some("TOKEN_V1".to_string()),
-            telegram_user_id: Some("111".to_string()),
             ..base_config()
         };
         let agent = make_agent(dir.path(), Some(config));
@@ -246,7 +215,6 @@ mod tests {
 
         let config2 = AgentConfig {
             telegram_token: Some("TOKEN_V2".to_string()),
-            telegram_user_id: Some("222".to_string()),
             ..base_config()
         };
         let agent2 = make_agent(dir.path(), Some(config2));
@@ -257,12 +225,6 @@ mod tests {
         )
         .unwrap();
         assert!(env_content.contains("TOKEN_V2"), ".env should be overwritten");
-
-        let access_content = std::fs::read_to_string(
-            dir.path().join(".claude/channels/telegram/access.json"),
-        )
-        .unwrap();
-        assert!(access_content.contains("222"), "access.json should be overwritten");
     }
 
     #[test]

@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -84,9 +83,10 @@ pub enum Commands {
         /// Telegram bot token for channel setup (skip with Enter if interactive)
         #[arg(long)]
         telegram_token: Option<String>,
-        /// Telegram numeric user ID for auto-pairing (get from @userinfobot)
-        #[arg(long)]
-        telegram_user_id: Option<String>,
+        /// Comma-separated list of Telegram chat IDs allowed to use this bot
+        /// (e.g. --telegram-allowed-chat-ids 85743491,100200300)
+        #[arg(long, value_delimiter = ',')]
+        telegram_allowed_chat_ids: Vec<i64>,
     },
     /// List discovered agents and their status
     List,
@@ -135,6 +135,15 @@ pub enum Commands {
     },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
+    /// Run the per-agent Telegram bot (long-polling, teloxide)
+    Bot {
+        /// Agent name (resolves to $RIGHTCLAW_HOME/agents/<name>/)
+        #[arg(long)]
+        agent: String,
+        /// Pass --verbose to CC subprocess and log CC stderr at debug level
+        #[arg(long)]
+        debug: bool,
+    },
 }
 
 #[tokio::main]
@@ -168,7 +177,7 @@ async fn main() -> miette::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Init { telegram_token, telegram_user_id } => cmd_init(&home, telegram_token.as_deref(), telegram_user_id.as_deref()),
+        Commands::Init { telegram_token, telegram_allowed_chat_ids } => cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids),
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home),
         Commands::Up {
@@ -197,12 +206,20 @@ async fn main() -> miette::Result<()> {
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
+        Commands::Bot { agent, debug } => {
+            rightclaw_bot::run(rightclaw_bot::BotArgs {
+                agent,
+                home: cli.home,
+                debug,
+            })
+            .await
+        }
     }
 }
 
-fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_user_id: Option<&str>) -> miette::Result<()> {
+fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_allowed_chat_ids: &[i64]) -> miette::Result<()> {
     // If --telegram-token flag provided, validate it upfront.
-    // Otherwise prompt interactively (per D-06, D-07).
+    // Otherwise prompt interactively.
     let token = match telegram_token {
         Some(t) => {
             rightclaw::init::validate_telegram_token(t)?;
@@ -211,23 +228,7 @@ fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_user_id: Option<
         None => rightclaw::init::prompt_telegram_token()?,
     };
 
-    // Telegram user ID is required when token is provided (needed for auto-pairing).
-    let user_id = match telegram_user_id {
-        Some(id) => Some(id.to_string()),
-        None if token.is_some() => {
-            let id = prompt_telegram_user_id()?;
-            if id.is_none() {
-                return Err(miette::miette!(
-                    help = "Get your numeric user ID from @userinfobot on Telegram",
-                    "Telegram user ID is required for auto-pairing. Use --telegram-user-id or enter it when prompted."
-                ));
-            }
-            id
-        }
-        None => None,
-    };
-
-    rightclaw::init::init_rightclaw_home(home, token.as_deref(), user_id.as_deref(), None)?;
+    rightclaw::init::init_rightclaw_home(home, token.as_deref(), telegram_allowed_chat_ids, None)?;
 
     println!("Initialized RightClaw at {}", home.display());
     println!(
@@ -236,32 +237,11 @@ fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_user_id: Option<
     );
     if token.is_some() {
         println!("Telegram channel configured and plugin auto-enabled.");
-        if user_id.is_some() {
-            println!("Telegram user pre-paired (no pairing step needed).");
-        }
+    }
+    if !telegram_allowed_chat_ids.is_empty() {
+        println!("Telegram chat ID allowlist configured.");
     }
     Ok(())
-}
-
-fn prompt_telegram_user_id() -> miette::Result<Option<String>> {
-    use std::io::{self, Write};
-    print!("Telegram numeric user ID for auto-pairing (get from @userinfobot, or Enter to skip): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
-    let id = input.trim();
-    if id.is_empty() {
-        return Ok(None);
-    }
-    if !id.chars().all(|c| c.is_ascii_digit()) {
-        return Err(miette::miette!(
-            help = "Get your numeric user ID from @userinfobot on Telegram",
-            "Invalid Telegram user ID — must be numeric"
-        ));
-    }
-    Ok(Some(id.to_string()))
 }
 
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
@@ -394,59 +374,27 @@ async fn cmd_up(
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    // Pre-install Telegram plugin if any agent has Telegram configured.
-    // Uses `claude plugin` CLI commands — idempotent, no-ops if already installed.
-    // Must run before per-agent loop so the shared ~/.claude/plugins/ has the plugin
-    // before symlinks are created.
-    let any_telegram = agents.iter().any(|a| {
-        a.config
-            .as_ref()
-            .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
-            .unwrap_or(false)
-    });
-    if any_telegram {
-        rightclaw::codegen::ensure_bun_installed()?;
-        rightclaw::codegen::ensure_telegram_plugin_installed()?;
-    }
-
-    // Generate shell wrappers for each agent.
+    // Write agent definition, reply-schema.json, and settings.json for each agent.
     for agent in &agents {
-        // Generate combined prompt (identity + start prompt + optional rightcron).
-        let combined_content = rightclaw::codegen::generate_combined_prompt(agent)?;
-        let prompt_path = run_dir.join(format!("{}-prompt.md", agent.name));
-        std::fs::write(&prompt_path, &combined_content).map_err(|e| {
-            miette::miette!(
-                "failed to write combined prompt for '{}': {e:#}",
-                agent.name
-            )
-        })?;
-        tracing::debug!(agent = %agent.name, "wrote combined prompt: {}", prompt_path.display());
-
-        let prompt_path_str = prompt_path.display().to_string();
-        let debug_log = if debug {
-            Some(run_dir.join(format!("{}-debug.log", agent.name)).display().to_string())
-        } else {
-            None
-        };
-        let wrapper_content = rightclaw::codegen::generate_wrapper(
-            agent,
-            &prompt_path_str,
-            debug_log.as_deref(),
-        )?;
-        let wrapper_path = run_dir.join(format!("{}.sh", agent.name));
-        std::fs::write(&wrapper_path, &wrapper_content)
-            .map_err(|e| miette::miette!("failed to write wrapper for '{}': {e:#}", agent.name))?;
-        std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| {
-                miette::miette!("failed to set wrapper permissions for '{}': {e:#}", agent.name)
-            })?;
-        tracing::debug!(agent = %agent.name, "wrote wrapper: {}", wrapper_path.display());
-
         // Generate .claude/settings.json with sandbox config (Phase 6).
         let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home)?;
         let claude_dir = agent.path.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
+
+        // Generate agent definition .md from present identity files (AGDEF-01).
+        let agent_def_content = rightclaw::codegen::generate_agent_definition(agent)?;
+        let agents_dir = claude_dir.join("agents");
+        std::fs::create_dir_all(&agents_dir)
+            .map_err(|e| miette::miette!("failed to create .claude/agents dir for '{}': {e:#}", agent.name))?;
+        std::fs::write(agents_dir.join(format!("{}.md", agent.name)), &agent_def_content)
+            .map_err(|e| miette::miette!("failed to write agent definition for '{}': {e:#}", agent.name))?;
+
+        // Write reply-schema.json (D-01).
+        std::fs::write(claude_dir.join("reply-schema.json"), rightclaw::codegen::REPLY_SCHEMA_JSON)
+            .map_err(|e| miette::miette!("failed to write reply-schema.json for '{}': {e:#}", agent.name))?;
+
+        tracing::debug!(agent = %agent.name, "wrote agent definition + reply-schema.json");
         // Pre-create shell-snapshots dir so CC Bash tool doesn't error on first run.
         std::fs::create_dir_all(claude_dir.join("shell-snapshots"))
             .map_err(|e| miette::miette!("failed to create shell-snapshots dir for '{}': {e:#}", agent.name))?;
@@ -488,8 +436,7 @@ async fn cmd_up(
             }
         }
 
-        // 7. Telegram channel config (Phase 9, AENV-02, PERM-03).
-        rightclaw::codegen::generate_telegram_channel_config(agent)?;
+        // 7. (removed) Telegram channel config removed in Phase 26 — CC channels replaced by bot process.
 
         // 8. Reinstall built-in skills (Phase 9, AENV-03).
         // Always overwrites built-in skill dirs; user skill dirs untouched (D-10).
@@ -517,8 +464,18 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
-    // Generate process-compose.yaml.
-    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &run_dir)?;
+    // Generate process-compose.yaml (bot-only entries, Phase 26).
+    let has_bot_agents = agents.iter().any(|a| {
+        a.config
+            .as_ref()
+            .map(|c| c.telegram_token.is_some() || c.telegram_token_file.is_some())
+            .unwrap_or(false)
+    });
+    if !has_bot_agents {
+        eprintln!("rightclaw: no agents have Telegram tokens configured — nothing to start");
+        return Err(miette::miette!("no agents have Telegram tokens configured"));
+    }
+    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &self_exe, debug)?;
     let config_path = run_dir.join("process-compose.yaml");
     std::fs::write(&config_path, &pc_config)
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
@@ -943,37 +900,6 @@ mod tests {
         assert_eq!(after, original_content, "pre-existing content must not be overwritten");
     }
 
-    // ---- telegram channel config tests ----
-
-    #[test]
-    fn telegram_config_not_created_when_no_telegram_fields() {
-        let tmp = TempDir::new().unwrap();
-        let agent_dir = make_agent_dir(&tmp, "agent-no-telegram");
-
-        // Build an AgentDef with no telegram config.
-        let agent = rightclaw::agent::AgentDef {
-            name: "agent-no-telegram".to_string(),
-            path: agent_dir.clone(),
-            identity_path: agent_dir.join("IDENTITY.md"),
-            config: None,
-            soul_path: None,
-            user_path: None,
-            agents_path: None,
-            tools_path: None,
-            bootstrap_path: None,
-            heartbeat_path: None,
-        };
-
-        rightclaw::codegen::generate_telegram_channel_config(&agent)
-            .expect("should not fail when no telegram config");
-
-        let telegram_dir = agent_dir.join(".claude").join("channels").join("telegram");
-        assert!(
-            !telegram_dir.exists(),
-            ".claude/channels/telegram/ should NOT be created when no config"
-        );
-    }
-
     // ---- skills install tests ----
 
     #[test]
@@ -1143,7 +1069,7 @@ fn cmd_memory_list(
         return Ok(());
     }
 
-    println!("{:<6} {:<61} {:<20} {}", "ID", "CONTENT", "STORED_BY", "CREATED_AT");
+    println!("{:<6} {:<61} {:<20} CREATED_AT", "ID", "CONTENT", "STORED_BY");
     for entry in &entries {
         let truncated = truncate_content(&entry.content, 60);
         let stored_by = entry.stored_by.as_deref().unwrap_or("(unknown)");
@@ -1247,7 +1173,7 @@ fn cmd_memory_search(
         return Ok(());
     }
 
-    println!("{:<6} {:<61} {:<20} {}", "ID", "CONTENT", "STORED_BY", "CREATED_AT");
+    println!("{:<6} {:<61} {:<20} CREATED_AT", "ID", "CONTENT", "STORED_BY");
     for entry in &entries {
         let truncated = truncate_content(&entry.content, 60);
         let stored_by = entry.stored_by.as_deref().unwrap_or("(unknown)");
@@ -1339,18 +1265,20 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
             )
         })?;
 
-    let run_dir = home.join("run");
-    std::fs::create_dir_all(&run_dir)
-        .map_err(|e| miette::miette!("failed to create run directory: {e:#}"))?;
+    // Generate agent definition .md before exec (function may run without prior cmd_up).
+    let claude_dir = agent.path.join(".claude");
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent_name))?;
+    let agent_def_content = rightclaw::codegen::generate_agent_definition(agent)?;
+    let agents_dir = claude_dir.join("agents");
+    std::fs::create_dir_all(&agents_dir)
+        .map_err(|e| miette::miette!("failed to create .claude/agents dir for '{}': {e:#}", agent_name))?;
+    std::fs::write(agents_dir.join(format!("{}.md", agent.name)), &agent_def_content)
+        .map_err(|e| miette::miette!("failed to write agent definition for '{}': {e:#}", agent_name))?;
 
-    let combined_content = rightclaw::codegen::generate_combined_prompt(agent)?;
-    let prompt_path = run_dir.join(format!("{agent_name}-prompt.md"));
-    std::fs::write(&prompt_path, &combined_content).map_err(|e| {
-        miette::miette!(
-            "failed to write combined prompt for '{}': {e:#}",
-            agent_name
-        )
-    })?;
+    // Write reply-schema.json (D-01).
+    std::fs::write(claude_dir.join("reply-schema.json"), rightclaw::codegen::REPLY_SCHEMA_JSON)
+        .map_err(|e| miette::miette!("failed to write reply-schema.json for '{}': {e:#}", agent_name))?;
 
     let claude_bin = which::which("claude")
         .or_else(|_| which::which("claude-bun"))
@@ -1360,8 +1288,8 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
 
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(claude_bin)
-        .arg("--append-system-prompt-file")
-        .arg(&prompt_path)
+        .arg("--agent")
+        .arg(&agent.name)
         .arg("--dangerously-skip-permissions")
         .arg("-p")
         .arg(&agent.path)

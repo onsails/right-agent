@@ -57,8 +57,6 @@ pub struct AgentConfig {
     #[serde(default = "default_backoff_seconds")]
     pub backoff_seconds: u32,
 
-    pub start_prompt: Option<String>,
-
     /// Claude model to use (e.g. "sonnet", "opus", "haiku")
     pub model: Option<String>,
 
@@ -76,10 +74,11 @@ pub struct AgentConfig {
     #[serde(default)]
     pub telegram_token: Option<String>,
 
-    /// Numeric Telegram user ID for access.json pre-pairing.
-    /// If absent, access.json is not written; user must pair interactively.
+    /// Telegram chat IDs permitted to interact with this agent's bot.
+    /// Empty vec = block all incoming messages (secure default). Bot emits
+    /// `tracing::warn!` at startup when empty — see D-05.
     #[serde(default)]
-    pub telegram_user_id: Option<String>,
+    pub allowed_chat_ids: Vec<i64>,
 
     /// Per-agent environment variables injected into the shell wrapper before `exec claude`.
     /// Values are stored as-is (plaintext). Single-quoted in the generated wrapper — no
@@ -123,7 +122,6 @@ mod tests {
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.telegram_token_file.as_deref(), Some(".telegram.env"));
         assert_eq!(config.telegram_token, None);
-        assert_eq!(config.telegram_user_id, None);
     }
 
     #[test]
@@ -132,16 +130,6 @@ mod tests {
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.telegram_token.as_deref(), Some("123:abc"));
         assert_eq!(config.telegram_token_file, None);
-        assert_eq!(config.telegram_user_id, None);
-    }
-
-    #[test]
-    fn agent_config_telegram_user_id_field() {
-        let yaml = r#"telegram_user_id: "987654321""#;
-        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert_eq!(config.telegram_user_id.as_deref(), Some("987654321"));
-        assert_eq!(config.telegram_token_file, None);
-        assert_eq!(config.telegram_token, None);
     }
 
     #[test]
@@ -150,7 +138,6 @@ mod tests {
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.telegram_token_file, None);
         assert_eq!(config.telegram_token, None);
-        assert_eq!(config.telegram_user_id, None);
     }
 
     #[test]
@@ -158,12 +145,10 @@ mod tests {
         let yaml = r#"
 telegram_token_file: ".telegram.env"
 telegram_token: "123:abc"
-telegram_user_id: "987654321"
 "#;
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.telegram_token_file.as_deref(), Some(".telegram.env"));
         assert_eq!(config.telegram_token.as_deref(), Some("123:abc"));
-        assert_eq!(config.telegram_user_id.as_deref(), Some("987654321"));
     }
 
     #[test]
@@ -172,16 +157,11 @@ telegram_user_id: "987654321"
 restart: always
 max_restarts: 10
 backoff_seconds: 30
-start_prompt: "You are a helpful agent"
 "#;
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.restart, RestartPolicy::Always);
         assert_eq!(config.max_restarts, 10);
         assert_eq!(config.backoff_seconds, 30);
-        assert_eq!(
-            config.start_prompt.as_deref(),
-            Some("You are a helpful agent")
-        );
     }
 
     #[test]
@@ -191,7 +171,6 @@ start_prompt: "You are a helpful agent"
         assert_eq!(config.restart, RestartPolicy::OnFailure);
         assert_eq!(config.max_restarts, 3);
         assert_eq!(config.backoff_seconds, 5);
-        assert_eq!(config.start_prompt, None);
     }
 
     #[test]
@@ -306,5 +285,37 @@ sandbox:
             err.contains("unknown field"),
             "expected 'unknown field' in error: {err}"
         );
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_deserializes_list() {
+        let yaml = "allowed_chat_ids:\n  - 123456789\n  - -1001234567890";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(
+            config.allowed_chat_ids,
+            vec![123456789_i64, -1001234567890_i64]
+        );
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_defaults_to_empty() {
+        let yaml = "{}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(config.allowed_chat_ids.is_empty());
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_absent_does_not_reject() {
+        let yaml = "restart: never\nmax_restarts: 5";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_ok());
+        assert!(result.unwrap().allowed_chat_ids.is_empty());
+    }
+
+    #[test]
+    fn agent_config_allowed_chat_ids_negative_values() {
+        let yaml = "allowed_chat_ids:\n  - -100";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.allowed_chat_ids, vec![-100_i64]);
     }
 }

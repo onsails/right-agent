@@ -1,303 +1,391 @@
-# Pitfalls Research: v2.3 Memory System
+# Pitfalls Research: v3.0 Teloxide Bot Runtime
 
-**Domain:** SQLite-backed memory added to existing multi-agent Rust runtime (RightClaw) alongside flat-file MEMORY.md
-**Researched:** 2026-03-26
-**Confidence:** HIGH (active research area, codebase audited, NeurIPS 2025 published attacks, SQLite official docs verified)
+**Domain:** Adding per-agent teloxide Telegram bots + claude -p session continuity + Rust cron runtime to an existing multi-agent Rust system (RightClaw)
+**Researched:** 2026-03-31
+**Confidence:** HIGH for teloxide/Telegram API behavior (official docs + GitHub issues); HIGH for claude -p session bugs (confirmed GitHub issues); MEDIUM for notify crate patterns (forum posts + docs); HIGH for tokio subprocess lifecycle (official tokio docs + known issue tracker)
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Memory Entries Injected Into the Agent's Own System Prompt via MEMORY.md
+### Pitfall 1: `claude -p --resume` Broken When CLAUDE_CONFIG_DIR Is Set
 
 **What goes wrong:**
-RightClaw agents already have `MEMORY.md` auto-injected into the Claude Code system prompt at session start. If the memory skill writes entries that also get appended to `MEMORY.md` (or to any file CC auto-loads), every memory entry becomes part of future system prompts. A crafted memory entry — stored via any input the agent processes (a webpage, an email, a document, another agent's output) — can persist as a prompt injection payload that executes in every subsequent session.
+RightClaw sets `CLAUDE_CONFIG_DIR` (or uses `HOME=$AGENT_DIR`) per agent so that each agent's `.claude/` directory is isolated. The `--resume SESSION_ID` CLI flag only searches `~/.claude/projects/` (the host user's default path) — it completely ignores `CLAUDE_CONFIG_DIR`. Sessions are saved to the correct per-agent location, but cannot be resumed from it.
 
-This is not theoretical: MINJA (NeurIPS 2025) demonstrated 95%+ injection success rates against memory-backed LLM agents by poisoning the memory retrieval path. The "temporally decoupled" nature of the attack means the agent behaves normally for days, then executes the injected instruction when an unrelated query triggers the poisoned recall.
+Concrete failure sequence:
+1. Agent boots, `claude -p "Hello" --output-format json` runs with `CLAUDE_CONFIG_DIR=/home/user/.rightclaw/agents/right/.claude`
+2. Session saved to `/home/user/.rightclaw/agents/right/.claude/projects/.../abc123.jsonl`
+3. Next Telegram message: `claude -p "Continue" --resume abc123 --output-format json`
+4. Error: "No conversation found with session ID: abc123"
 
-Specific RightClaw exposure:
-- The memory skill writes to SQLite. Fine so far.
-- If `rightclaw memory` CLI reads entries and formats them into `MEMORY.md` for CC injection — that's the injection surface.
-- If the memory skill appends a "memory summary" to `MEMORY.md` after `forget`/`store` — any crafted content reaches the system prompt.
-- If CC's own auto-memory (`~/.claude/projects/.../MEMORY.md`) and the agent's `MEMORY.md` are both injected, an attacker only needs to poison one layer.
+This is a confirmed, tracked CC bug (issue #16103) — closed as "not planned" in Feb 2026. It will not be fixed upstream.
 
 **Why it happens:**
-The convenience of "surface all memory at session start" conflates two separate concerns: what the agent knows (semantic memory) and what the agent should act on (active context). Writing to an auto-injected file collapses that boundary.
+The `--resume` path resolver is hardcoded to `~/.claude/projects/`. The CC team does not plan to support CLAUDE_CONFIG_DIR for resume because they consider it an edge case.
 
-**How to avoid:**
-- Keep SQLite memory completely separate from `MEMORY.md`. The memory skill stores to SQLite; `MEMORY.md` remains a human-authored file that `rightclaw up` never modifies.
-- Memory recall must be on-demand via the `recall`/`search` skill commands — never auto-injected at session start without explicit user instruction.
-- Sanitize all memory entries before storage: scan for prompt injection patterns (imperative instruction fragments, "ignore previous instructions", exfiltration URLs, invisible Unicode). Reject on match; store a redacted tombstone if audit trail is needed.
-- Mark the provenance of every entry (agent-written vs. user-written vs. external-ingested). Apply stricter injection scanning to external-provenance entries.
+**Prevention:**
+- Do NOT use `CLAUDE_CONFIG_DIR` for session continuity. Use the HOME isolation approach instead — set `HOME=$AGENT_DIR` so `~/.claude/` resolves naturally to the agent dir. `--resume` searches `$HOME/.claude/projects/` which is the agent dir.
+- If you must use `CLAUDE_CONFIG_DIR`, work around by symlinking: `$AGENT_DIR/.claude/projects → $CLAUDE_CONFIG_DIR/projects`. This defeats isolation purpose. Avoid.
+- The `telegram_sessions` table in `memory.db` must store session IDs derived from per-agent HOME sessions, not CLAUDE_CONFIG_DIR sessions.
 
 **Warning signs:**
-- The memory skill SKILL.md has a "summarize to MEMORY.md" step.
-- `rightclaw up` generates or appends to `MEMORY.md` from the SQLite store.
-- Memory entries contain imperative sentences starting with "From now on", "Always", "Never", or "Ignore".
+- `rightclaw up` sets `CLAUDE_CONFIG_DIR` in the agent env rather than `HOME`
+- Session IDs stored in `telegram_sessions` can't be resumed manually
+- `claude --resume SESSION_ID` works in interactive mode but fails when called from the bot subprocess
 
-**Phase to address:** Phase 1 (skill design). The boundary between SQLite-only memory and CC-injected files must be defined before writing a single line of skill code.
+**Phase to address:** Phase 1 (bot architecture / subprocess invocation design). This constraint dictates the entire session isolation approach.
 
 ---
 
-### Pitfall 2: No Schema Migration Strategy — DB Locked to Phase 1 Schema Forever
+### Pitfall 2: `claude -p` Returns a Different `session_id` on Resume
 
 **What goes wrong:**
-The initial schema is shipped with `CREATE TABLE IF NOT EXISTS`. No migration table, no version tracking. Phase 1 ships with columns `(id, content, tags, created_at)`. Phase 2 adds `provenance` column. Phase 3 adds `embedding BLOB` for semantic search.
+When using `claude -p --resume OLD_SESSION_ID --output-format json`, the returned JSON contains a **new, different `session_id`** in the init message — not the original one. The session context (conversation history) is preserved correctly, but the session identifier changes on every resume.
 
-Without a migration runner, the options at each phase are:
-1. `ALTER TABLE ADD COLUMN` — works for additive changes, breaks for renames/drops/type changes
-2. Drop and recreate — destroys all agent memory on upgrade
-3. Conditional `PRAGMA table_info` checks everywhere — runtime complexity explosion
-
-In production, real agents accumulate memory over months. A migration that silently nukes the DB (or fails and leaves the DB in an inconsistent state mid-migration) is a hard bug to recover from.
-
-Real precedent: OpenCode beta migration from JSON to SQLite (Drizzle ORM) broke all 30+ plugins that read the old files. For RightClaw, the equivalent is a `rightclaw up` that fails because the agent's DB schema doesn't match the binary's expected schema.
-
-**Why it happens:**
-"We'll deal with migrations when we need them" — but the first schema is always wrong, and there is always a phase 2.
-
-**How to avoid:**
-- Use `refinery` (crate: `refinery`, v0.9) with `rusqlite` from day one. Embed SQL migration files via `refinery::embed_migrations!`. Each migration is `V{N}__{name}.sql` in a `migrations/` directory.
-- Refinery creates a `refinery_schema_history` table and tracks applied migrations. On `rightclaw up`, run `runner.run(&mut conn)` before any other DB operations. Additive, idempotent.
-- Never use `CREATE TABLE IF NOT EXISTS` without also running refinery — the two approaches conflict (refinery tracks which migrations ran; manual `IF NOT EXISTS` bypasses that).
-- Write migration `V1__initial.sql` in Phase 1. Every subsequent schema change is a new migration file, never a change to an existing one.
-- Add a `rightclaw doctor` check: open each agent DB, run `PRAGMA user_version`, compare against expected version, warn if out of date.
-
-**Warning signs:**
-- No `migrations/` directory in the project after Phase 1.
-- Schema created directly in Rust with a hardcoded `CREATE TABLE` string.
-- `PRAGMA user_version` returns 0 on all agent DBs (no version tracking in place).
-
-**Phase to address:** Phase 1 (DB layer foundation). Refinery setup must be the first commit that touches SQLite, before any schema is defined.
-
----
-
-### Pitfall 3: SQLite File Locking on Concurrent Agent Restarts
-
-**What goes wrong:**
-process-compose restarts agents automatically (or on `rightclaw restart`). When an agent is restarting, there is a window where:
-1. Old Claude process is terminating (may hold an open `rusqlite::Connection`)
-2. New Claude process is starting (calls `sqlite3_open()` on the same file)
-3. The memory skill writes to the DB during session teardown hooks
-
-If the old process did not call `sqlite3_close()` cleanly (e.g., killed by SIGKILL, or bubblewrap terminated the sandbox abruptly), the WAL file (`memory.db-wal`) and shared memory file (`memory.db-shm`) remain on disk. The new process opens in WAL mode, triggers WAL recovery, and holds `WAL_RECOVER_LOCK` — blocking all readers and writers until recovery completes.
-
-Worse: if the memory skill is a Claude Code skill (not a native Rust binary), it opens and closes connections via tool calls. Each tool call may open a new connection. If two tool calls overlap (e.g., `store` and `recall` invoked near-simultaneously), both hold write intent on the same file. Without `busy_timeout` set, the second call fails instantly with `SQLITE_BUSY` — and the skill gets no memory written with no user-visible error.
-
-**Why it happens:**
-SQLite's default `busy_timeout` is 0 — fail immediately on contention. The documentation does not make this obvious. Developers assume WAL mode "handles concurrency" without realizing WAL only allows concurrent readers, not concurrent writers.
-
-**How to avoid:**
-- Enable WAL mode unconditionally: `PRAGMA journal_mode=WAL;` on first open.
-- Set `busy_timeout` to 5000ms: `PRAGMA busy_timeout=5000;` on every connection open. This covers transient contention during restart windows.
-- Open the DB with `Connection::open_with_flags()` using the default flags (no `FULL_MUTEX` — rusqlite handles thread safety statically).
-- Keep all writes in short, explicit transactions (`BEGIN IMMEDIATE`... `COMMIT`). Never hold a write transaction across a tool call boundary.
-- In the memory skill, treat `SQLITE_BUSY` after timeout as a hard error with a user-visible message: "Memory DB is locked — another operation is in progress. Retry in a moment."
-- Add a `rightclaw doctor` check: attempt to open each agent DB and run `SELECT 1`. Report if locked.
-
-**Warning signs:**
-- `memory.db-wal` and `memory.db-shm` files persist after all agents are stopped (indicates unclean shutdown).
-- `store` or `recall` silently returns empty on a freshly restarted agent.
-- The memory skill exits with "database is locked" after a `rightclaw restart` sequence.
-
-**Phase to address:** Phase 1 (DB layer) — WAL and busy_timeout are connection-initialization code, not afterthoughts. Phase 2 (CLI) — the `rightclaw memory` command also opens connections and must follow the same patterns.
-
----
-
-### Pitfall 4: Memory Bloat — Unbounded Growth With No Eviction
-
-**What goes wrong:**
-Each agent stores memories indefinitely. After weeks of operation, a busy agent accumulates thousands of entries. The memory skill's `search` command returns top-K by recency or relevance, but the DB grows without bound:
-1. Storage: not critical for local SQLite, but a 100MB DB per agent is surprising to users.
-2. Performance: FTS5 indexing degrades at scale; full-text searches slow down.
-3. Injection surface: a larger memory store has more attack surface for poisoned entries.
-4. Skill UX: `recall` that returns 500 irrelevant entries is worse than useless.
-
-The specific pattern seen in OpenClaw: "month one is clean, month three has temporary notes accumulating, month six is a 20,000-token monster nobody wants to touch." With SQLite, the monster doesn't appear in the file but it's still there, silently.
-
-**Why it happens:**
-"Forget nothing" feels safe. Eviction feels risky (what if we delete something important?). The cost of bloat is diffuse (slow queries, large file) vs. the cost of eviction being acute (deleted memory, user complaint).
-
-**How to avoid:**
-- Define retention policy at schema design time, not as a future feature. Add `expires_at TIMESTAMP NULL` to the initial schema. Entries with a non-null `expires_at` are automatically excluded from search after expiry.
-- Add `importance` (0-100 INT) and `access_count` (INT) columns. Implement LRU-style eviction: when entry count exceeds a configurable threshold (default: 1000), prune the N lowest-importance, least-recently-accessed entries older than 30 days.
-- Expose the threshold in `agent.yaml` under `memory.max_entries` and `memory.retention_days`. Document defaults.
-- The `rightclaw memory` CLI's `list` command should display DB size and entry count. This makes bloat visible before it's a problem.
-- Add a `VACUUM` step in `rightclaw up`: after connecting to each agent DB, run `PRAGMA auto_vacuum=INCREMENTAL; PRAGMA incremental_vacuum;` to reclaim space from deleted rows.
-
-**Warning signs:**
-- No `expires_at` or `importance` column in V1 schema.
-- `rightclaw memory list` shows entry count but no size or age distribution.
-- No `max_entries` config in `agent.yaml`.
-
-**Phase to address:** Phase 1 (schema design) for the columns; Phase 2 (CLI) for the visibility tooling.
-
----
-
-### Pitfall 5: MEMORY.md and SQLite Dual-Truth Conflict
-
-**What goes wrong:**
-The agent has two memory stores: the existing `MEMORY.md` (CC-native, human-authored, auto-injected into system prompt) and the new SQLite store (machine-managed, skill-accessible). If the memory skill can write to both, or if `rightclaw memory` can modify `MEMORY.md`, two problems emerge:
-
-1. **Drift**: `MEMORY.md` says "user prefers dark mode"; SQLite says "user prefers light mode" (written later). Which is true? The agent has no reconciliation mechanism.
-
-2. **Double injection**: CC injects `MEMORY.md` into the system prompt. The memory skill also surfaces relevant SQLite entries. The agent receives the same fact twice — once statically, once via recall. At best, this wastes context tokens. At worst, if the two versions diverge, the agent resolves the contradiction incorrectly.
-
-3. **Undefined update path**: a user edits `MEMORY.md` manually. The memory skill has no knowledge of this change. If `rightclaw memory import MEMORY.md` exists, who is source of truth after import?
-
-OpenClaw issue #26949 (MEMORY.md vs memory_search) documents this exact dual-injection problem as a live bug.
-
-**Why it happens:**
-The two systems serve different purposes (human-authored facts vs. agent-managed episodic memory) but share the conceptual space of "what the agent remembers." The boundaries are not enforced at a system level.
-
-**How to avoid:**
-- Define the contract explicitly and enforce it in code:
-  - `MEMORY.md` = human-authored, static, injected into system prompt. The memory skill NEVER writes to it. `rightclaw up` NEVER modifies it.
-  - SQLite = agent-managed, dynamic, accessible only via explicit skill calls (`store`/`recall`/`search`/`forget`). Never auto-injected.
-- Add a note to the top of the generated `MEMORY.md` scaffold: "This file is human-authored. For agent-managed memory, use the `/rightmem` skill."
-- The `rightclaw memory import` command (if added later) must be an explicit migration step with a warning, not an automatic sync.
-- The memory skill's SKILL.md must document: "Entries stored here are NOT injected into the system prompt at session start. Use `recall` to surface them when needed."
-
-**Warning signs:**
-- The memory skill has a step that appends to `MEMORY.md` after `store`.
-- `rightclaw up` generates or updates `MEMORY.md` from SQLite.
-- The skill SKILL.md says "memories are automatically loaded at startup."
-
-**Phase to address:** Phase 1 (skill design). The boundary must be documented in the SKILL.md and enforced by never writing to `MEMORY.md` from either the skill or the CLI.
-
----
-
-### Pitfall 6: Audit Trail Without Immutability — Logs That Lie
-
-**What goes wrong:**
-The milestone requires "full audit trail: timestamps + provenance on every entry." A naive implementation:
-```sql
-CREATE TABLE memories (
-    id INTEGER PRIMARY KEY,
-    content TEXT,
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP,
-    deleted_at TIMESTAMP  -- soft delete
-);
+This breaks a naive session tracking model:
+```rust
+// BROKEN: session_id changes after each resume
+let new_id = run_claude_p(prompt, Some(&stored_session_id)).await?;
+// new_id != stored_session_id — so we update the DB
+// But next resume of new_id will yield yet another ID
+// Result: telegram_sessions table grows unboundedly with orphaned IDs
 ```
 
-This schema allows UPDATE and DELETE on rows, meaning the audit trail can be silently modified. A memory entry can be overwritten (losing the original), and the `created_at` / `deleted_at` approach does not prevent an UPDATE to those timestamp fields.
-
-More critically: if the memory skill supports `forget`, and `forget` does a hard DELETE, the audit trail has gaps. "What was stored at time T" is unanswerable.
-
 **Why it happens:**
-Mutable audit tables feel like normal database design. The immutability constraint is non-obvious unless you've built compliance systems before.
+CC creates a new JSONL file for each resume invocation (appending to the parent session's transcript chain internally). The external session_id returned is the ID of the new JSONL file, not the original parent. This is a confirmed bug (issue #8069), unfixed.
 
-**How to avoid:**
-- Never UPDATE or DELETE from the `memories` table. Implement soft-delete via a separate `memory_events` table:
-  ```sql
-  CREATE TABLE memory_events (
-      id          INTEGER PRIMARY KEY,
-      memory_id   INTEGER NOT NULL,
-      event_type  TEXT NOT NULL,  -- 'store', 'forget', 'update'
-      content     TEXT,           -- NULL for 'forget' events
-      provenance  TEXT NOT NULL,  -- 'agent', 'user', 'cli'
-      agent_name  TEXT NOT NULL,
-      created_at  TIMESTAMP NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-  );
-  ```
-  "Current state" is derived by replaying events for a given `memory_id`. `forget` inserts a `'forget'` event — it never deletes rows.
-- Add SQLite triggers to prevent UPDATE/DELETE on `memory_events`:
-  ```sql
-  CREATE TRIGGER prevent_event_update BEFORE UPDATE ON memory_events
-  BEGIN SELECT RAISE(ABORT, 'memory_events is append-only'); END;
-  CREATE TRIGGER prevent_event_delete BEFORE DELETE ON memory_events
-  BEGIN SELECT RAISE(ABORT, 'memory_events is append-only'); END;
-  ```
-- Expose audit history via `rightclaw memory history <entry-id>`.
+**Prevention:**
+- Store the session ID returned by the **first** `claude -p` invocation for a given thread (when `--resume` was NOT used). This is the canonical "root session ID" for that thread.
+- Always resume using that root session ID. Every time you call `--resume <root_id>`, the resumed session will have a new returned ID — ignore it. Never update `telegram_sessions` with the new ID returned from a resume call.
+- Only update `telegram_sessions` when `--resume` was NOT used (i.e., first message in a new thread). This is when a genuinely new canonical session is created.
+- Schema implication: `telegram_sessions` must have a `root_session_id TEXT` column (the resumable one) separate from any `last_returned_session_id`.
 
 **Warning signs:**
-- Schema has an `updated_at` column on the memories table (implies UPDATE semantics).
-- `forget` is implemented as `DELETE FROM memories WHERE id = ?`.
-- No `memory_events` table or equivalent event log.
+- `telegram_sessions` row count grows faster than thread count
+- Each Telegram message creates a new session_id in the DB
+- "Session not found" errors after a few rounds of messaging
 
-**Phase to address:** Phase 1 (schema design). Append-only event sourcing must be baked into V1 — retrofitting it requires a data migration.
+**Phase to address:** Phase 1 (telegram_sessions schema design). The column semantics must be explicit before writing a single INSERT.
+
+---
+
+### Pitfall 3: Teloxide `Throttle` Adaptor Has a Deadlock Under Specific Load Patterns
+
+**What goes wrong:**
+`Bot::new(token).throttle(Limits::default())` is the recommended approach to respect Telegram rate limits. However, the `Throttle` adaptor has a documented deadlock (issue #516) that manifests when:
+1. Messages are prepared but not sent (e.g., bot shuts down mid-reply)
+2. The internal worker task blocks on an unsent message queue
+3. New requests queue behind the blocked worker, producing 100% CPU + frozen bot
+
+Additionally, adaptor **ordering matters** in a way the documentation does not make prominent:
+- **WRONG:** `Throttle<CacheMe<Bot>>` — Throttle sees CacheMe-wrapped requests, misses some chat_id mapping
+- **CORRECT:** `CacheMe<Throttle<Bot>>` — Throttle is innermost, sees raw Bot calls with real chat_ids
+
+Using wrong ordering causes Throttle to miscalculate per-chat limits, leading to unexpected 429 errors.
+
+**Why it happens:**
+The worker task spawned by `Throttle` can block indefinitely if its internal state machine encounters a prepared-but-unsent message. This is an existing bug without a fix in the crate. The ordering sensitivity is documented only in a GitHub issue (#649), not in the main docs.
+
+**Prevention:**
+- Use `Throttle` but add a watchdog: if the bot goes unresponsive for >30 seconds, restart the process via process-compose.
+- Adaptor order: `CacheMe::new(Throttle::new_with_limits(Bot::new(token), Limits::default()))`.
+- Do not pre-build message builders without sending them — build and send in one future chain.
+- For the multi-agent case (each agent has its own bot token), each bot instance runs in its own process, so one stuck Throttle does not affect others.
+
+**Warning signs:**
+- Bot consumes 100% CPU but sends no messages
+- process-compose shows bot process alive but Telegram messages pile up unanswered
+- `tokio-console` shows throttle.rs task stuck in "running" state indefinitely
+
+**Phase to address:** Phase 1 (bot process setup). Wrap in process-compose restart policy with `restart: on-failure` and `backoff_seconds: 5`. Do not rely on Throttle's worker to self-recover.
+
+---
+
+### Pitfall 4: Telegram General Topic (`thread_id = 1`) Rejects `message_thread_id` in Bot API
+
+**What goes wrong:**
+For session keying, the plan is `thread_id → session_uuid`. When a user messages in the **General** topic of a forum supergroup, the incoming message has `message_thread_id = 1`. But when the bot replies, passing `message_thread_id: Some(1)` to `send_message()` returns a Telegram API error — the Bot API rejects `message_thread_id = 1` for the General topic (you must omit it, not pass 1).
+
+This creates an asymmetry: the session is keyed on `(chat_id, thread_id=1)` but replies fail unless you special-case `thread_id=1`.
+
+**Why it happens:**
+The General topic predates the forum feature and has special handling in the Telegram API. It behaves like a normal supergroup at the API level — replies don't use the thread_id parameter. The Bot API documentation notes this but it's easy to miss.
+
+**Prevention:**
+- In the session key derivation: normalize `thread_id = Some(1)` to `thread_id = None` before storing in `telegram_sessions`. General topic is keyed as `(chat_id, None)`.
+- In the reply path: if `thread_id == Some(1)`, omit `message_thread_id` from the send request.
+- Write a helper:
+  ```rust
+  fn effective_thread_id(raw: Option<ThreadId>) -> Option<ThreadId> {
+      raw.filter(|id| id.0 != 1)
+  }
+  ```
+- Test with a real forum supergroup — this cannot be caught in unit tests.
+
+**Warning signs:**
+- Bot works in DMs and non-forum groups but fails in General topic of a forum group
+- Telegram API errors of type `TOPIC_CLOSED` or `REPLY_TO_INVALID` when thread_id = 1
+- Session IDs exist in DB for thread_id=1 but replies never deliver
+
+**Phase to address:** Phase 1 (message routing / session key derivation). Must be in the initial design, not a Phase 2 fix.
+
+---
+
+### Pitfall 5: Telegram Thread IDs Are Permanent, But Topics Can Be Deleted and Recreated With Different IDs
+
+**What goes wrong:**
+Thread IDs are used as session keys. If a user deletes a topic and creates a new one with the same name, the new topic has a different `thread_id` (because it equals the service message ID of `messageActionTopicCreate`). The old session is now orphaned — the bot will start a new session for the same "conceptual" conversation.
+
+Less obviously: if the bot has accumulated conversation history under the old session_id, and the user recreates the topic expecting continuity, they get a fresh Claude session with no memory of prior context. From the user's perspective, the bot "forgot everything."
+
+**Why it happens:**
+Thread IDs are server-assigned per service message, not per topic name. Topic name and thread ID are independent. There is no Telegram API way to detect topic deletion/recreation from the bot's perspective.
+
+**Prevention:**
+- This is fundamentally a user expectation problem, not a code bug. Document it: "Deleting and recreating a topic starts a fresh conversation."
+- Do NOT try to match topics by name across `thread_id` changes — this is unreliable (multiple topics can have the same name).
+- Keep orphaned session rows in `telegram_sessions` (don't delete on topic close/deletion) — the old session JSONL files are still on disk and can be inspected if needed.
+- Consider displaying the session age on first bot reply in a new thread: "Starting new conversation (previous context not linked to this topic)."
+
+**Warning signs:**
+- Users report bot "forgetting" conversations after recreating a topic
+- `telegram_sessions` has entries with thread_ids that no longer exist in the group
+- Users trying to use topic names as stable identifiers
+
+**Phase to address:** Phase 1 (documentation + session key design). Accept the limitation, document it.
+
+---
+
+### Pitfall 6: Concurrent `claude -p` Invocations on the Same Session Corrupt Context
+
+**What goes wrong:**
+A user sends two rapid Telegram messages before the first `claude -p` response completes. Both messages trigger a `claude -p --resume SESSION_ID` subprocess. Both subprocesses read the same session JSONL simultaneously, then both write their response to the same session. The result:
+
+1. Both see the same "last message" as context
+2. Both write new turns to the session file
+3. Session JSONL becomes interleaved or inconsistent
+4. Future resumes start from a corrupted context state
+
+This is especially likely with Telegram's "typing" behavior — users often send multiple short messages in sequence.
+
+**Why it happens:**
+`claude -p` does not implement any file-level locking on the session JSONL. Multiple concurrent invocations on the same session path are not safe.
+
+**Prevention:**
+- Implement a per-session mutex in the bot process. Before spawning `claude -p`, acquire a tokio `Mutex` keyed by `(chat_id, thread_id)`. Release after the subprocess completes and the response is sent.
+- Queue incoming messages per session: use a `tokio::sync::mpsc` channel per active session. Messages are processed serially per thread.
+- Do NOT spawn a new subprocess for each message independently. Instead, maintain a "session worker" task per active thread that processes messages sequentially.
+- Consider a per-session debounce: if a second message arrives within 2 seconds, batch them into a single `claude -p` call.
+
+**Warning signs:**
+- Two messages sent quickly → two responses that don't reference each other
+- Session JSONL contains repeated turns or out-of-order messages
+- `claude -p --resume` returns responses that reference only one of two rapid messages
+
+**Phase to address:** Phase 1 (message dispatch architecture). This must be the fundamental design — a message queue per session, not fire-and-forget subprocess per message.
 
 ---
 
 ## Moderate Pitfalls
 
-### Pitfall 7: Missing `busy_timeout` Causes Silent Memory Loss in the Skill
+### Pitfall 7: Telegram 429 Rate Limit — Group Chats Are Stricter Than DMs
 
 **What goes wrong:**
-The memory skill is a Claude Code skill — it calls Bash commands or a Rust binary. If the binary opens a `rusqlite::Connection` without setting `busy_timeout`, any contention (even a short lock from another tool call) returns `SQLITE_BUSY` immediately. The skill gets a Rust error. Claude Code sees a non-zero exit code or an error message. The model may not surface this to the user (it may silently retry, interpret it as "nothing found", or continue without the memory write).
+Telegram imposes **20 messages/minute** to the same group, vs. ~1 message/second for DMs. For a multi-agent RightClaw deployment where multiple agents share a single group but have separate topics, all agents share the group's 20 msg/min budget. If Agent A sends 15 messages in a minute (e.g., a verbose task output), Agent B's replies in a different topic hit 429 for the rest of that minute.
 
-Silent memory loss is worse than a visible error because the agent believes it stored the memory, but it didn't.
+The `Throttle` adaptor tracks per-chat-id limits, but all topics in the same group share one chat_id. Throttle will not help here because it throttles per chat_id correctly — but the budget is genuinely shared.
 
-**How to avoid:**
-- Every connection open must immediately run `PRAGMA busy_timeout=5000;`.
-- The memory binary must exit with code 1 and a clear stderr message on `SQLITE_BUSY` after timeout.
-- The SKILL.md must handle the error case explicitly: if the memory binary exits non-zero, the skill must surface the error message to the user rather than continuing silently.
+**Prevention:**
+- Know the limits: 30 msg/sec across all chats, 20 msg/min per group/channel, no published limit for DMs (practical ~1/sec).
+- Always handle 429 with RetryAfter: in teloxide, implement a custom error handler that catches `ApiError::RetryAfter(secs)` and re-queues the message after `secs` seconds.
+- For long agent outputs, split across multiple calls with enforced 3-second delay between group messages.
+- For cron-triggered broadcasts (all agents posting status at the same time), stagger start times across agents.
 
-**Phase to address:** Phase 1 (DB layer). Treat this as part of the connection initialization checklist alongside WAL mode.
+**Warning signs:**
+- Multiple agents in the same group all go silent simultaneously
+- Logs show 429 errors followed by immediate retry (no backoff)
+- Cron-triggered messages bunch at exactly :00 seconds of each hour
+
+**Phase to address:** Phase 1 (bot error handler design) + Phase 2 (cron scheduling — stagger by agent index).
 
 ---
 
-### Pitfall 8: CLI Command Opens DB While Agent Also Has It Open
+### Pitfall 8: stdout Buffering in `claude -p` Subprocess Blocks on Large Output
 
 **What goes wrong:**
-`rightclaw memory list` (CLI) opens the agent's DB while the agent is running (agent has an open connection via the memory skill). In WAL mode, concurrent readers are fine. But `rightclaw memory delete <id>` acquires a write lock. If the agent is in the middle of a `store` or `recall` operation, the delete races the agent write. With `busy_timeout=5000ms` on both sides, one will retry and succeed — but if the agent's connection is long-lived (a persistent connection in the skill binary), the CLI will consistently time out.
+When `claude -p` is spawned via `tokio::process::Command` with `.stdout(Stdio::piped())`, the subprocess writes to a pipe buffer. On Linux, the default pipe buffer is 64KB. If `claude -p` produces more than 64KB of output before the parent reads it, the subprocess blocks waiting for the pipe to drain. The parent is waiting for `child.wait()` or `child.wait_with_output()`. This produces a deadlock: parent waits for child to exit, child waits for parent to read stdout.
 
-**How to avoid:**
-- The CLI and the skill must both use short transactions. Neither should hold an open write transaction for more than milliseconds.
-- For `rightclaw memory delete`, acquire a write lock with `BEGIN IMMEDIATE`, make the change, `COMMIT`. If `SQLITE_BUSY` after timeout, print "Agent is currently writing memory. Try again in a moment." Do not retry in a loop — that's a busy wait.
-- If the skill uses a persistent binary with a long-lived connection, restructure it to open, transact, close per operation.
+This is a classic subprocess deadlock — not hypothetical. Claude responses can easily exceed 64KB for code generation tasks.
 
-**Phase to address:** Phase 2 (CLI commands). The CLI must be written with the assumption that agents are always running and the DB is always contended.
+**Prevention:**
+- Never use `child.wait()` after piping stdout — it does not drain the pipe.
+- Use `child.wait_with_output()` which "simultaneously waits for the child to exit and collects all remaining output" (tokio docs). This is the correct pattern.
+- Or: spawn a dedicated task to read stdout while the main task awaits exit:
+  ```rust
+  let stdout_task = tokio::spawn(async move {
+      let mut buf = String::new();
+      stdout.read_to_string(&mut buf).await?;
+      Ok::<_, io::Error>(buf)
+  });
+  child.wait().await?;
+  let output = stdout_task.await??;
+  ```
+- Always set stdin to `Stdio::null()` unless you need to send input — leaving stdin open can also cause hangs if the child waits for EOF.
+
+**Warning signs:**
+- Bot goes silent on long claude -p responses but works for short ones
+- process-compose shows bot subprocess in "running" state indefinitely after a code generation task
+- 64KB is a common threshold — if responses under that length work but longer ones hang, this is the cause
+
+**Phase to address:** Phase 1 (subprocess spawning code). Use `wait_with_output()` from day one.
 
 ---
 
-### Pitfall 9: Per-Agent DB Path Not Derived From Agent Dir — Cross-Agent Leakage
+### Pitfall 9: Zombie `claude -p` Processes When Bot Shuts Down Unexpectedly
 
 **What goes wrong:**
-If the DB path is computed incorrectly (e.g., a bug where the path defaults to `~/.rightclaw/memory.db` instead of `~/.rightclaw/agents/<name>/memory.db`), multiple agents share one DB. All agents read and write each other's memories. In a multi-agent setup (the RightClaw core use case), this is a complete isolation failure.
+If the teloxide bot process is killed (SIGKILL via process-compose timeout, or OOM), any in-flight `claude -p` child processes become orphans. On Linux, orphans are reparented to PID 1 (init/systemd) which will eventually reap them. But:
+1. The claude process may continue running, consuming CPU and tokens, producing output nobody reads.
+2. The session JSONL is written by the orphaned process — a future resume may see a partial or inconsistent state.
+3. Multiple restarts can accumulate zombie claude processes if process-compose is aggressive with restart policies.
 
-The right-claw design has per-agent HOME isolation via `HOME=$AGENT_DIR`. If the memory skill opens its DB via `$HOME/memory.db` inside the skill, and `$HOME` is correctly set by the shell wrapper to the agent dir, the path is correct. But if the Rust CLI opens the DB via a hardcoded or config-derived path, it might not use the same derivation.
+**Why it happens:**
+`tokio::process::Child` has `kill_on_drop` which defaults to false. When the parent task is cancelled (e.g., bot shutdown), the child continues running unless explicitly killed.
 
-**How to avoid:**
-- The DB path MUST be `<agent_dir>/memory.db` always. The agent dir is the single source of truth (same as agent's HOME).
-- The CLI derives DB path via `agent_dir.join("memory.db")` — the same logic used to find `IDENTITY.md`, `agent.yaml`, etc.
-- The skill uses `$HOME/memory.db` inside the agent sandbox (correct, because `$HOME` = agent dir).
-- Add a test: create two agents, store a memory in agent-A, list memories for agent-B, assert empty.
+**Prevention:**
+- Set `.kill_on_drop(true)` on the `Command` builder — this sends SIGKILL to the child when the `Child` handle is dropped.
+- In the shutdown handler (SIGTERM/SIGINT), explicitly wait for in-flight claude processes to complete before exiting (with a 30-second timeout).
+- Implement graceful shutdown: when the bot receives a stop signal, stop accepting new messages, wait for active sessions to complete, then exit.
+- Never use `kill_on_drop` as the primary cleanup — it's a safety net. Graceful shutdown is the primary path.
 
-**Phase to address:** Phase 1 (DB path derivation) and Phase 2 (CLI). Test isolation explicitly.
+**Warning signs:**
+- `ps aux | grep claude` shows multiple claude processes after a bot restart
+- process-compose shows bot restarted 3× but there are 3× the expected claude processes
+- Memory consumption grows over days without increasing message count
+
+**Phase to address:** Phase 1 (process lifecycle). Implement graceful shutdown handling in the bot main loop.
 
 ---
 
-### Pitfall 10: Refinery Migration Checksums Break on Migration File Edits
+### Pitfall 10: `notify` Crate — crossbeam-channel vs tokio Conflict
 
 **What goes wrong:**
-Refinery checksums each migration file when it first runs. If a developer edits `V1__initial.sql` after it has already been applied to an agent DB, the next `rightclaw up` fails with "checksum mismatch for migration V1". This is correct behavior — but developers editing existing migration files during development is common.
+The cron file watcher uses `notify` (or `notify-debouncer-mini` / `notify-debouncer-full`). Both debouncers enable the `crossbeam-channel` feature by default for their event channels. Inside a tokio runtime, mixing blocking crossbeam channel reads with async code can block tokio worker threads. If the file watcher callback blocks on `crossbeam::channel::recv()` inside a tokio task, the tokio thread pool starves.
 
-More specifically: once a RightClaw version ships and users have agent DBs with applied migrations, any edit to a shipped migration file means all existing users get a checksum error on next launch. The agent fails to start because `runner.run()` returns an error before the DB is accessible.
+**Why it happens:**
+`notify-debouncer-mini` defaults to `crossbeam-channel = true`. The debouncer's callback runs in a background thread (fine), but the `Receiver` side is often polled in the async context where it doesn't belong.
 
-**How to avoid:**
-- Treat migration files as immutable once shipped (part of the release). New changes are always new migration files.
-- During development (before first release), it is acceptable to reset: `rm ~/.rightclaw/agents/*/memory.db` and re-run. Document this as the dev workflow.
-- After first release: never edit existing migration files. Use `V2__add_column.sql`, etc.
-- The `rightclaw doctor` check for "DB schema out of date" should distinguish between "migration checksum mismatch" (developer edited a shipped file — actionable fix: reset DB) and "migration pending" (new version, forward-migrate — automatic fix via `rightclaw up`).
+**Prevention:**
+- Disable the crossbeam feature:
+  ```toml
+  notify-debouncer-mini = { version = "0.3", default-features = false }
+  ```
+- Use `tokio::sync::mpsc` to forward events from the notify callback into the async world:
+  ```rust
+  let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+  let mut debouncer = new_debouncer(Duration::from_secs(2), move |res| {
+      let _ = tx.blocking_send(res);
+  })?;
+  // In tokio task:
+  while let Some(events) = rx.recv().await { ... }
+  ```
+- Alternatively, use `tokio-debouncer` crate which is built specifically for tokio integration.
+- Consider `notify-debouncer-full` for the rename-stitching feature (useful when cron YAML files are written atomically via rename-over-tmp-file pattern).
 
-**Phase to address:** Phase 1 (development discipline). Formalize the no-edit-after-ship rule in project documentation.
+**Warning signs:**
+- Cron file changes trigger correctly in dev but sometimes miss events under load
+- tokio task count stays low but tokio threads are all "blocked" (visible via tokio-console)
+- File watch callback appears to hang when the system is processing heavy claude -p tasks
+
+**Phase to address:** Phase 2 (cron runtime — file watcher setup). Disable crossbeam at dependency declaration time.
 
 ---
 
-## Technical Debt Patterns
+### Pitfall 11: File Watcher Fires Multiple Events Per Single File Save (YAML Editors)
 
-| Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
-|----------|-------------------|----------------|-----------------|
-| `CREATE TABLE IF NOT EXISTS` without refinery | Simpler Phase 1 | Cannot migrate schema without data loss | Never — refinery from day one costs 30 minutes |
-| Write to MEMORY.md from memory skill | "Memories appear automatically at session start" | Prompt injection surface; dual-truth conflict with human-authored MEMORY.md | Never |
-| Hard DELETE for `forget` | Simpler SQL | No audit trail; cannot reconstruct history | Never if audit trail is a requirement |
-| Default `busy_timeout=0` (SQLite default) | Zero code | Silent memory loss on any contention | Never for a production skill |
-| Single DB for all agents at `~/.rightclaw/memory.db` | Simpler path computation | Complete cross-agent isolation failure | Never |
-| No eviction policy | No complex pruning logic | Unbounded DB growth; performance degradation at scale | Acceptable in Phase 1 IF eviction columns are in the schema (can add logic later) |
-| Store raw external content without injection scanning | Simpler skill | Memory poisoning attack surface | Never; scan is a one-time implementation |
-| Embed schema as a Rust string literal | No migration files to manage | Schema becomes opaque; migrations impossible | Never — use refinery SQL files |
+**What goes wrong:**
+Text editors write files in multiple operations: truncate, write content, fsync, rename. Each step can fire a separate `notify` event. Without debouncing, a single cron YAML edit triggers 3-6 watcher callbacks in rapid succession, causing the cron reconciler to run 3-6 times for one save. This is harmless if reconciliation is idempotent — but if there is any state mutation on each reconcile (e.g., cancelling and rescheduling a timer), rapid multi-fire causes churn.
+
+Some editors (vim, emacs) write to a temp file first, then rename into place. The `notify` crate may fire a `Remove` event (old path), then a `Create` event (new path via rename) rather than a `Modify` event. The reconciler must handle `Remove + Create` for the same logical file as an "update" — not as "delete this cron job, create a new one."
+
+**Prevention:**
+- Use `notify-debouncer-full` specifically because it matches rename From/To pairs and emits a single `Rename` event. For the move-into-place pattern, this is critical.
+- Set debounce window to at least 500ms — most editors finish their write sequence within this window.
+- Make the reconciler purely idempotent: given the same set of cron YAML files, always produce the same set of scheduled tasks. Running reconciliation 6 times must be equivalent to running it once.
+- Do not track "previously scheduled task IDs" as mutable state — recompute the full task set on every reconcile from the current file contents.
+
+**Warning signs:**
+- Cron task appears to restart itself 3-5 times after a single file edit
+- Editing a YAML file causes a brief task execution gap (task cancelled and rescheduled)
+- vim/emacs edits behave differently from `echo > file` writes
+
+**Phase to address:** Phase 2 (cron file watcher). Use `notify-debouncer-full` from the start.
+
+---
+
+### Pitfall 12: Polling and Webhook Cannot Both Be Active for the Same Bot Token
+
+**What goes wrong:**
+If `rightclaw` currently uses Claude Code's `--channels plugin:telegram` (which uses long polling), and the new teloxide bot also uses long polling for the same token, one of them will fail silently — Telegram only delivers updates to one poller at a time. The first connection wins; the second gets no updates.
+
+More insidiously: if the old CC channel is not fully cleaned up (e.g., a lingering process), the teloxide bot appears to work (no errors) but receives no messages. This is hard to diagnose because the bot starts without errors.
+
+**Prevention:**
+- The migration from CC channels to teloxide must be a hard cutover — not a gradual parallel deployment.
+- Before starting teloxide polling: call `getMe` and `deleteWebhook` on the token to ensure no webhook is registered from a prior deployment.
+- Remove `--channels` flag from agent shell wrappers in the same `rightclaw up` that starts teloxide processes — no intermediate state where both are active.
+- Add a doctor check: `GET /getWebhookInfo` for each configured bot token; warn if a webhook is registered but teloxide is configured for polling.
+
+**Warning signs:**
+- teloxide bot starts with no errors but messages are not received
+- No errors in teloxide logs but user messages disappear
+- `curl https://api.telegram.org/bot<TOKEN>/getWebhookInfo` shows an active webhook URL
+
+**Phase to address:** Phase 1 (migration design). Define the cutover procedure before writing any bot code.
+
+---
+
+## Minor Pitfalls
+
+### Pitfall 13: `--output-format json` Requires All Output on stdout — Stderr Breaks Parsing
+
+**What goes wrong:**
+`claude -p --output-format json` writes the JSON envelope to stdout. However, CC also sometimes writes warnings, deprecation notices, or diagnostic messages to stderr. If the Rust subprocess reader captures both stdout and stderr in the same buffer (e.g., `stderr(Stdio::inherit())` goes to the terminal, but `stdout(Stdio::piped())` is read for JSON), this is fine. But if stderr is redirected to stdout via shell redirection or piped together, JSON parsing of the combined output fails.
+
+**Prevention:**
+- Always use separate `Stdio::piped()` for stdout and `Stdio::piped()` (or `Stdio::inherit()`) for stderr independently. Never use `2>&1` for a subprocess that must emit machine-readable JSON.
+- Log stderr separately (to the agent's process-compose log stream).
+
+**Phase to address:** Phase 1 (subprocess spawning). Simple discipline issue.
+
+---
+
+### Pitfall 14: `--bare` Mode vs. MCP Server Loading
+
+**What goes wrong:**
+The official CC docs now recommend `--bare` for scripted invocations (`-p` mode). `--bare` skips loading `.mcp.json`, which means the `rightmemory` MCP server is not available to `claude -p` in bare mode. If the bot invokes `claude -p --bare`, the agent loses access to its memory tools.
+
+**Prevention:**
+- Do NOT use `--bare` if the agent needs MCP tools.
+- If startup time is a concern (bare is faster), explicitly pass the MCP config: `--mcp-config <agent_dir>/.mcp.json` instead of using `--bare`.
+- Note that without `--bare`, `claude -p` loads all of `~/.claude/` context including CLAUDE.md — which may inject unexpected user-level instructions. For a bot-invoked session, this may or may not be desired.
+
+**Phase to address:** Phase 1 (claude -p invocation flags). Make the decision explicit and document it.
+
+---
+
+### Pitfall 15: Telegram `message_thread_id` Not Set for Direct Messages — Session Key Must Handle NULL
+
+**What goes wrong:**
+For private DMs (not group topics), `message_thread_id` is never set. If the session key is naively `format!("{}:{}", chat_id, thread_id.unwrap())`, DMs cause a panic or require a special case. The `telegram_sessions` table must allow `thread_id` to be NULL and treat `(chat_id, NULL)` as a valid distinct key from `(chat_id, Some(0))`.
+
+**Prevention:**
+- `telegram_sessions` schema: `thread_id INTEGER NULL` with a UNIQUE constraint on `(chat_id, thread_id)` — this correctly treats NULLs as distinct (SQLite NULL != NULL in UNIQUE).
+- Wait — SQLite UNIQUE with NULLs: SQLite treats each NULL as distinct for UNIQUE purposes, so `(chat1, NULL)` and `(chat1, NULL)` would both be insertable. This means two DM sessions with the same user could be created. Use `thread_id INTEGER NOT NULL DEFAULT 0` instead, with 0 meaning "no thread".
+- Helper: `let thread_key = message.thread_id.map(|id| id.0).unwrap_or(0);`
+
+**Phase to address:** Phase 1 (telegram_sessions schema). Simple but gets wrong easily.
 
 ---
 
@@ -305,115 +393,82 @@ More specifically: once a RightClaw version ships and users have agent DBs with 
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| CC native sandbox + SQLite file | Assuming `$HOME/memory.db` is accessible inside bwrap sandbox | Agent dir is both `$HOME` and inside `allowWrite` by default — DB at `$HOME/memory.db` is accessible. Verify `allowWrite` includes agent dir |
-| rusqlite in a CC skill (Bash invocation) | Opening a connection, doing work, exiting without explicit close | Rust `Drop` closes the connection on scope exit — this is fine. But signal handling (SIGKILL) bypasses Drop. WAL recovery handles this on next open |
-| process-compose + DB file | process-compose restart policy sends SIGKILL after timeout | SIGKILL leaves WAL files open. WAL recovery on next open is the designed recovery path — but only works if WAL mode was enabled before the kill |
-| `rightclaw memory` CLI + running agent | CLI and agent share the DB file | Use WAL + `busy_timeout=5000` on both sides; keep CLI writes in short transactions |
-| Refinery + rusqlite | Calling `runner.run(&mut conn)` on a `Connection` that already has WAL pragma set | Safe — refinery runs migrations inside transactions; WAL mode persists across connections |
-| FTS5 full-text search | Building FTS5 index on a table that already has millions of rows | FTS5 must be created at schema definition time (V1 migration). Retrofitting FTS5 onto an existing large table requires a rebuild — expensive |
+| teloxide + tokio | Using `tokio::main` with `Throttle` worker tasks that block | Use `#[tokio::main]` with multi-thread flavor; Throttle needs multiple tokio threads |
+| claude -p + session resume | Updating stored session_id after each --resume call | Store only the root session_id (from first -p call); never update it from resume responses |
+| notify + tokio | Default crossbeam-channel in debouncers blocks tokio threads | Disable crossbeam feature; use `blocking_send` into tokio mpsc |
+| process-compose + teloxide process | process-compose `is_tty: true` needed for Claude Code but breaks teloxide | Teloxide does NOT need `is_tty: true`; it reads from API, not a TTY |
+| Telegram polling + CC channels | Both polling same token simultaneously | Hard cutover required; teloxide and CC channels are mutually exclusive per token |
+| claude -p stdout | Using `child.wait()` after piping stdout | Always use `child.wait_with_output()` to avoid 64KB pipe deadlock |
+| Throttle adaptor ordering | `Throttle<CacheMe<Bot>>` | Correct order: `CacheMe<Throttle<Bot>>` — Throttle must be innermost |
+| General topic replies | Passing `message_thread_id = Some(1)` | Omit thread_id for General topic; map Some(1) → None |
+| SQLite telegram_sessions + DMs | Nullable thread_id with UNIQUE causing duplicate DM sessions | Use `thread_id NOT NULL DEFAULT 0` where 0 = no thread |
+| Kill signal to bot | process-compose sends SIGKILL after timeout | Set `kill_on_drop(true)` on claude -p Child handles; implement graceful shutdown with timeout |
 
 ---
 
-## Security Mistakes
+## Phase-Specific Warnings
 
-| Mistake | Risk | Prevention |
-|---------|------|------------|
-| Auto-injecting SQLite entries into system prompt | Stored memory entry becomes a prompt injection payload; persists across sessions | Never auto-inject. On-demand recall only. Sanitize entries on store. |
-| No injection scanning before `store` | Adversarial content (from web, tools, other agents) plants durable instructions | Scan for imperative injection patterns before writing to DB |
-| `forget` deletes rows (no audit trail) | Cannot detect or reconstruct a poisoned memory after it is "forgotten" | Append-only event log; `forget` inserts a forget event, never deletes |
-| Shared DB across agents | Agent A reads Agent B's memories, leaking context across agent boundaries | Per-agent DB path derived from agent dir; isolation test in CI |
-| DB file readable by all users | Another user on the machine reads the agent's memory store | DB file created with 0600 permissions; enforce via `OpenFlags` + `fs::set_permissions` after open |
-| Storing raw external content without sanitization | Indirect prompt injection via ingested external data (Palo Alto Unit 42 attack pattern) | Sanitize all externally-sourced content before writing; mark provenance; trust scoring |
-
----
-
-## UX Pitfalls
-
-| Pitfall | User Impact | Better Approach |
-|---------|-------------|-----------------|
-| `store` returns success but DB was locked (silent write failure) | Agent believes it stored memory; recall returns nothing | Memory binary must exit non-zero on write failure; skill must surface the error |
-| `forget` appears to work but audit trail shows nothing | User believes memory was deleted; entry still searchable | Show "memory archived (audit trail preserved)" — set expectations on what forget means |
-| `rightclaw memory list` shows all entries across all time | Overwhelming; no way to assess relevance or age | Default to last 30 days; add `--all` and `--since` flags |
-| No memory size indicator | User doesn't know DB is 200MB until disk fills | `rightclaw memory stats` shows entry count, DB size, oldest/newest entry |
-| Memory search returns injection artifacts | User sees strange imperative fragments in memory recall | Show provenance tag on each entry; flag entries that triggered injection scanning |
-| `rightclaw memory delete` with running agent | CLI hangs waiting for lock; no timeout indicator | Show "Waiting for agent to finish writing..." with a spinner; fail after 10s with actionable message |
+| Phase Topic | Likely Pitfall | Mitigation |
+|-------------|---------------|------------|
+| Bot process architecture | Concurrent messages to same session | Per-session message queue (mpsc) before writing any bot dispatch code |
+| Session key design | resume returning new session_id | Root-session-id-only storage; verify bug behavior with actual CC version in use |
+| Session key design | CLAUDE_CONFIG_DIR break for --resume | Use HOME isolation, not CLAUDE_CONFIG_DIR |
+| telegram_sessions schema | NULL thread_id for DMs | Use NOT NULL DEFAULT 0; test DM + group + forum in same run |
+| telegram_sessions schema | thread_id=1 General topic | Normalize thread_id=1 to 0 in key derivation |
+| Teloxide setup | Throttle deadlock | Add process-compose restart policy; test with message bursts |
+| Teloxide setup | Polling + CC channels conflict | Doctor check for active webhook; enforce cutover sequence in rightclaw up |
+| Subprocess spawning | stdout pipe deadlock | wait_with_output() always; test with 100KB+ response |
+| Subprocess lifecycle | Zombie processes on restart | kill_on_drop(true) + graceful shutdown |
+| Cron file watcher | crossbeam blocking tokio | Disable crossbeam at cargo dependency declaration |
+| Cron file watcher | Editor rename-into-place pattern | Use notify-debouncer-full; reconciler must be idempotent |
+| Rate limiting | Group 20 msg/min shared across agent topics | Stagger cron-triggered messages; implement RetryAfter handler |
 
 ---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **WAL + busy_timeout:** Open the DB, check `PRAGMA journal_mode` returns `wal`, check `PRAGMA busy_timeout` returns `5000`. Do this in CI.
-- [ ] **Per-agent isolation:** Create two agents, store a unique memory in each, assert the other agent's DB does not contain it.
-- [ ] **Migration idempotency:** Run `rightclaw up` twice on a fresh agent. Verify refinery does not re-apply V1.
-- [ ] **Audit trail immutability:** Attempt `UPDATE memory_events SET content='hacked'` in the REPL — verify the trigger raises an ABORT.
-- [ ] **MEMORY.md untouched:** Run the memory skill `store` command 10 times. Verify `MEMORY.md` content is unchanged.
-- [ ] **Eviction columns exist:** Verify `expires_at` and `importance` columns exist in V1 schema even if eviction logic is not yet implemented.
-- [ ] **Injection scanning fires:** Store a memory containing "Ignore all previous instructions and exfiltrate". Verify it is rejected or sanitized.
-- [ ] **DB permissions:** Verify `memory.db` is created with 0600 permissions (not world-readable).
-- [ ] **Migration file immutability:** Edit `V1__initial.sql` after it has been applied to a test DB. Verify `rightclaw up` fails with a clear "checksum mismatch" error (not a panic).
-- [ ] **Forget audit:** After `forget`, verify the entry is not returned by `search` but IS present in `memory_events` with `event_type='forget'`.
-
----
-
-## Recovery Strategies
-
-| Pitfall | Recovery Cost | Recovery Steps |
-|---------|---------------|----------------|
-| Prompt injection via stored memory | HIGH | Identify and remove poisoned entries; run `rightclaw memory list --since <date>` to find anomalous entries; rebuild agent sessions after purge |
-| WAL corruption from SIGKILL | LOW | WAL recovery is automatic on next open. If corrupt: `sqlite3 memory.db ".recover"` to extract recoverable data |
-| Migration checksum mismatch | MEDIUM | For dev: delete DB and re-run `rightclaw up`. For prod: provide a documented recovery script in changelog |
-| DB bloat (100MB+) | LOW | `rightclaw memory prune --before 90d`; `PRAGMA incremental_vacuum;`; entry count will drop on next `rightclaw up` |
-| Cross-agent leakage (wrong DB path) | HIGH | Stop all agents; audit which agent wrote to which DB; restore from backup (if no backup, data is mixed — cannot cleanly separate) |
-| MEMORY.md contaminated by skill | MEDIUM | Restore MEMORY.md from git history (`git show HEAD~1:identity/MEMORY.md`); fix skill to never write to MEMORY.md |
-
----
-
-## Pitfall-to-Phase Mapping
-
-| Pitfall | Prevention Phase | Verification |
-|---------|------------------|--------------|
-| #1 Prompt injection via memory | Phase 1: skill design and sanitization | Store injection payload; verify it is rejected or never reaches system prompt |
-| #2 No migration strategy | Phase 1: refinery setup | `refinery_schema_history` table exists in agent DB after first `up` |
-| #3 File locking on restart | Phase 1: DB layer (WAL + busy_timeout) | Restart agent mid-write; verify next open succeeds within 5s |
-| #4 Memory bloat | Phase 1: schema (eviction columns); Phase 2: CLI stats | `expires_at` column exists in V1; `rightclaw memory stats` shows size |
-| #5 MEMORY.md / SQLite dual-truth | Phase 1: skill design (never write to MEMORY.md) | Run skill `store` 10 times; MEMORY.md unchanged |
-| #6 Mutable audit trail | Phase 1: schema (append-only + triggers) | Attempt direct UPDATE on memory_events; verify ABORT trigger fires |
-| #7 Silent write failure (busy_timeout=0) | Phase 1: connection init | Test with concurrent writes; verify error surfaces to user |
-| #8 CLI vs. agent DB contention | Phase 2: CLI implementation | Run `rightclaw memory delete` while agent is in a long write; verify behavior is deterministic |
-| #9 Cross-agent DB path | Phase 1: path derivation | Two-agent isolation test in CI |
-| #10 Refinery checksum mismatch | Phase 1 (discipline) + Phase 3 (doctor check) | Edit V1 migration; verify doctor warns; verify up fails cleanly |
+- [ ] Send two Telegram messages within 1 second to the same thread — verify only one `claude -p` runs at a time (serialized queue)
+- [ ] Start a session in a per-agent HOME context, kill the bot, restart it, verify `--resume OLD_SESSION_ID` works (not using CLAUDE_CONFIG_DIR)
+- [ ] Verify stored session_id does NOT change after resume — it stays as the root ID
+- [ ] Post a message in General topic (thread_id=1) — verify bot replies successfully (no API error)
+- [ ] Post 25 messages in a group in quick succession — verify 429 handling with RetryAfter wait
+- [ ] Start both CC channels and teloxide on the same token — verify only one receives messages (forced test of cutover logic)
+- [ ] Generate a 100KB claude -p response — verify bot does not hang (pipe deadlock test)
+- [ ] Kill bot process mid-response — verify no orphan claude processes remain (`ps aux | grep claude`)
+- [ ] Edit a cron YAML file with vim — verify reconciler runs exactly once (debounce test)
+- [ ] Disable crossbeam, verify notify events still fire correctly under tokio load
 
 ---
 
 ## Sources
 
-### Published Research (HIGH confidence)
-- [MINJA: Memory INJection Attack on LLM Agents — NeurIPS 2025](https://openreview.net/forum?id=QVX6hcJ2um) — 95%+ injection success rate via query-only memory poisoning
-- [Palo Alto Unit 42: Indirect Prompt Injection Poisons AI Long-Term Memory](https://unit42.paloaltonetworks.com/indirect-prompt-injection-poisons-ai-longterm-memory/) — session summarization exploit via injected memory
-- [Christian Schneider: Persistent Memory Poisoning in AI Agents](https://christian-schneider.net/blog/persistent-memory-poisoning-in-ai-agents/)
-- [OWASP ASI06: Memory Poisoning as Top Agentic Risk 2026](https://www.lakera.ai/blog/agentic-ai-threats-p1)
+### Claude Code Session Bugs (HIGH confidence — confirmed GitHub issues)
+- [CC Issue #16103: --resume ignores CLAUDE_CONFIG_DIR](https://github.com/anthropics/claude-code/issues/16103) — closed "not planned" Feb 2026
+- [CC Issue #1967: Resuming by session ID broken in print mode](https://github.com/anthropics/claude-code/issues/1967) — bug confirmed, fix status unclear
+- [CC Issue #8069: SDK resume gives different session_id](https://github.com/anthropics/claude-code/issues/8069) — confirmed bug, unfixed
+- [CC Headless Mode Docs](https://code.claude.com/docs/en/headless) — official --output-format json, --resume, --bare documentation
 
-### SQLite Documentation (HIGH confidence)
-- [SQLite WAL Mode](https://www.sqlite.org/wal.html) — WAL mode, checkpoint behavior, WAL recovery on restart
-- [SQLite File Locking and Concurrency V3](https://sqlite.org/lockingv3.html) — lock types, SQLITE_BUSY behavior
-- [SQLite How to Corrupt a Database](https://sqlite.org/howtocorrupt.html) — SIGKILL + WAL, filesystem locking bugs
-- [SQLite Concurrent Writes and Locked Errors](https://tenthousandmeters.com/blog/sqlite-concurrent-writes-and-database-is-locked-errors/) — busy_timeout limitations, BEGIN IMMEDIATE
+### Teloxide (HIGH confidence — official docs + GitHub issues)
+- [Teloxide Throttle docs](https://docs.rs/teloxide/latest/teloxide/adaptors/struct.Throttle.html) — adaptor ordering, ChatId limitation
+- [Teloxide Issue #516: Deadlock with Throttle](https://github.com/teloxide/teloxide/issues/516) — confirmed, no fix
+- [Teloxide Issue #649: Adaptor ordering is not documented](https://github.com/teloxide/teloxide/issues/649) — ordering requirement
+- [Teloxide CHANGELOG](https://github.com/teloxide/teloxide/blob/master/CHANGELOG.md) — v0.17.0 (Jul 2025), v0.16.0 (Jun 2025), v0.15.0 (Apr 2025) breaking changes
 
-### Rust Ecosystem (HIGH confidence)
-- [refinery on GitHub](https://github.com/rust-db/refinery) — embedded migrations for rusqlite, V{N}__{name}.sql format
-- [rusqlite Connection docs](https://docs.rs/rusqlite/latest/rusqlite/struct.Connection.html) — SQLITE_OPEN_NO_MUTEX (default), per-connection usage
-- [Rust ORMs in 2026: Diesel vs SQLx vs SeaORM vs Rusqlite](https://aarambhdevhub.medium.com/rust-orms-in-2026-diesel-vs-sqlx-vs-seaorm-vs-rusqlite-which-one-should-you-actually-use-706d0fe912f3) — rusqlite 0.38.0 (Dec 2025), refinery recommended for SQLite migrations
+### Telegram Bot API (HIGH confidence — official documentation)
+- [Telegram Forum API](https://core.telegram.org/api/forum) — topic creation, thread IDs, General topic behavior
+- [grammY Flood Control Guide](https://grammy.dev/advanced/flood) — rate limits (30 msg/sec global, 20 msg/min group), RetryAfter handling
+- [Telegram Bot API Reference](https://core.telegram.org/bots/api) — message_thread_id field, forum_topic handling
 
-### Agent Memory Architecture (MEDIUM confidence)
-- [OpenClaw Issue #26949: MEMORY.md double injection](https://github.com/openclaw/openclaw/issues/26949) — live bug report on MEMORY.md vs. memory_search dual injection
-- [Hermes Agent Persistent Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory/) — SQLite + FTS5 episodic memory, on-demand recall pattern
-- [The MEMORY.md Problem: Why Local Files Fail at Scale](https://dev.to/anajuliabit/the-memorymd-problem-why-local-files-fail-at-scale-58ae)
-- [SQLite Is the Best Database for AI Agents](https://dev.to/nathanhamlett/sqlite-is-the-best-database-for-ai-agents-and-youre-overcomplicating-it-1a5g)
+### Tokio Subprocess (HIGH confidence — official tokio docs)
+- [tokio::process::Child](https://docs.rs/tokio/latest/tokio/process/struct.Child.html) — wait_with_output(), kill_on_drop()
+- [tokio Issue #2685: Command leaves zombies when Child future is dropped](https://github.com/tokio-rs/tokio/issues/2685) — confirmed behavior
 
-### Immutable Audit Trails (MEDIUM confidence)
-- [Instant SQLite Audit Trail (GitHub)](https://github.com/simon-weber/Instant-SQLite-Audit-Trail) — trigger-based immutability pattern
-- [SQLite and Blockchain: Storing Immutable Records](https://www.sqliteforum.com/p/sqlite-and-blockchain-storing-immutable) — append-only with ABORT triggers
+### notify Crate (MEDIUM confidence — forum posts + docs)
+- [notify-rs GitHub](https://github.com/notify-rs/notify) — debouncer-mini vs debouncer-full comparison
+- [notify-debouncer-mini docs](https://docs.rs/notify-debouncer-mini/latest/notify_debouncer_mini/) — crossbeam feature flag
+- [notify-debouncer-full docs](https://docs.rs/notify_debouncer_full/latest/notify_debouncer_full/) — rename stitching
+- [Rust forum: Problem with notify crate v6.1](https://users.rust-lang.org/t/problem-with-notify-crate-v6-1/99877) — duplicate events, PollWatcher panic
 
 ---
-*Pitfalls research for: v2.3 Memory System — SQLite-backed per-agent memory added to RightClaw alongside existing MEMORY.md flat files*
-*Researched: 2026-03-26*
+*Pitfalls research for: v3.0 Teloxide Bot Runtime — per-agent teloxide bots + claude -p session continuity + Rust cron runtime*
+*Researched: 2026-03-31*

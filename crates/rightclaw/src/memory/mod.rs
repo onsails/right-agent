@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_1() {
+    fn user_version_is_3() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
@@ -133,7 +133,98 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1, "user_version should be 1 after V1 migration");
+        assert_eq!(version, 3, "user_version should be 3 after V3 migration");
+    }
+
+    #[test]
+    fn schema_has_cron_runs_table() {
+        let dir = tempdir().unwrap();
+        open_db(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cron_runs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "cron_runs table should exist after V3 migration");
+    }
+
+    #[test]
+    fn cron_runs_insert_and_update() {
+        let dir = tempdir().unwrap();
+        open_db(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+
+        // Insert a running job
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path) VALUES ('run-1', 'deploy-check', '2026-04-01T00:00:00Z', 'running', '/tmp/deploy-check-run-1.txt')",
+            [],
+        )
+        .unwrap();
+
+        // Verify finished_at and exit_code are NULL while running
+        let (finished_at, exit_code, status): (Option<String>, Option<i32>, String) = conn
+            .query_row(
+                "SELECT finished_at, exit_code, status FROM cron_runs WHERE id='run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(finished_at.is_none(), "finished_at should be NULL while running");
+        assert!(exit_code.is_none(), "exit_code should be NULL while running");
+        assert_eq!(status, "running");
+
+        // Update to success
+        conn.execute(
+            "UPDATE cron_runs SET finished_at='2026-04-01T00:01:00Z', exit_code=0, status='success' WHERE id='run-1'",
+            [],
+        )
+        .unwrap();
+
+        let (finished_at, exit_code, status): (Option<String>, Option<i32>, String) = conn
+            .query_row(
+                "SELECT finished_at, exit_code, status FROM cron_runs WHERE id='run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(finished_at.as_deref(), Some("2026-04-01T00:01:00Z"));
+        assert_eq!(exit_code, Some(0));
+        assert_eq!(status, "success");
+    }
+
+    #[test]
+    fn schema_has_telegram_sessions_table() {
+        let dir = tempdir().unwrap();
+        open_db(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='telegram_sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "telegram_sessions table should exist after V2 migration");
+    }
+
+    #[test]
+    fn telegram_sessions_unique_chat_thread() {
+        let dir = tempdir().unwrap();
+        open_db(dir.path()).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        conn.execute(
+            "INSERT INTO telegram_sessions (chat_id, thread_id, root_session_id) VALUES (42, 0, 'uuid-1')",
+            [],
+        )
+        .unwrap();
+        let result = conn.execute(
+            "INSERT INTO telegram_sessions (chat_id, thread_id, root_session_id) VALUES (42, 0, 'uuid-2')",
+            [],
+        );
+        assert!(result.is_err(), "UNIQUE(chat_id, thread_id) should reject duplicate insert");
     }
 
     #[test]

@@ -102,12 +102,11 @@ fn merges_user_overrides_with_defaults() {
         restart: RestartPolicy::OnFailure,
         max_restarts: 3,
         backoff_seconds: 5,
-        start_prompt: None,
         model: None,
         sandbox: Some(overrides),
         telegram_token_file: None,
         telegram_token: None,
-        telegram_user_id: None,
+        allowed_chat_ids: vec![],
         env: std::collections::HashMap::new(),
     };
     let agent = make_test_agent("test-agent", Some(config));
@@ -156,35 +155,33 @@ fn excluded_commands_omitted_when_empty() {
     );
 }
 
+/// Telegram plugin must NOT be enabled regardless of telegram config.
+/// The native Rust bot (teloxide) owns Telegram; enabling CC's plugin creates a
+/// getUpdates race on the same token, causing intermittent message drops.
 #[test]
-fn includes_telegram_plugin_when_telegram_config_present() {
+fn never_enables_telegram_plugin_in_settings() {
+    // With telegram config
     let config = AgentConfig {
         restart: RestartPolicy::OnFailure,
         max_restarts: 3,
         backoff_seconds: 5,
-        start_prompt: None,
         model: None,
         sandbox: None,
         telegram_token_file: None,
         telegram_token: Some("tok".to_string()),
-        telegram_user_id: None,
+        allowed_chat_ids: vec![],
         env: HashMap::new(),
     };
-    let agent = make_test_agent("test-agent", Some(config));
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
-
-    assert_eq!(
-        settings["enabledPlugins"]["telegram@claude-plugins-official"],
-        true,
-        "expected telegram plugin enabled when telegram config present"
+    let agent_with_tg = make_test_agent("test-agent", Some(config));
+    let settings = generate_settings(&agent_with_tg, false, Path::new("/home/user")).unwrap();
+    assert!(
+        settings.get("enabledPlugins").is_none(),
+        "enabledPlugins must be absent even when telegram token is configured — CC plugin races with native bot"
     );
-}
 
-#[test]
-fn omits_telegram_plugin_when_no_telegram_config() {
-    let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
-
+    // Without telegram config
+    let agent_no_tg = make_test_agent("test-agent", None);
+    let settings = generate_settings(&agent_no_tg, false, Path::new("/home/user")).unwrap();
     assert!(
         settings.get("enabledPlugins").is_none(),
         "enabledPlugins should be omitted without telegram config"
@@ -254,12 +251,11 @@ fn merges_user_allow_read_overrides() {
         restart: RestartPolicy::OnFailure,
         max_restarts: 3,
         backoff_seconds: 5,
-        start_prompt: None,
         model: None,
         sandbox: Some(overrides),
         telegram_token_file: None,
         telegram_token: None,
-        telegram_user_id: None,
+        allowed_chat_ids: vec![],
         env: std::collections::HashMap::new(),
     };
     let agent = make_test_agent("test-agent", Some(config));

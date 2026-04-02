@@ -1,0 +1,26 @@
+[package]
+name = "rightclaw-bot"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rightclaw = { path = "../rightclaw" }
+teloxide = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+miette = { workspace = true }
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+which = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+walkdir = { workspace = true }
+cron = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
