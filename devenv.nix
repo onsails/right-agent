@@ -5,6 +5,7 @@
     pkgs.git
     pkgs.process-compose
     pkgs.socat
+    pkgs.ripgrep          # SBOX-04: CC sandbox rg check; must be in agent launch PATH
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];

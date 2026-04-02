@@ -374,10 +374,26 @@ async fn cmd_up(
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
+    // Resolve system rg path once — passed to each agent's settings generation (D-01, SBOX-01).
+    // When absent: warn, pass None; agents will fail at CC sandbox check (failIfUnavailable: true, D-02).
+    let rg_path = match which::which("rg") {
+        Ok(p) => {
+            tracing::debug!(rg = %p.display(), "system ripgrep found");
+            Some(p)
+        }
+        Err(_) => {
+            tracing::warn!(
+                "ripgrep (rg) not found in PATH — CC sandbox will fail to initialize. \
+                 Install ripgrep: nix profile install nixpkgs#ripgrep / apt install ripgrep / brew install ripgrep"
+            );
+            None
+        }
+    };
+
     // Write agent definition, reply-schema.json, and settings.json for each agent.
     for agent in &agents {
         // Generate .claude/settings.json with sandbox config (Phase 6).
-        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home)?;
+        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home, rg_path.clone())?;
         let claude_dir = agent.path.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;

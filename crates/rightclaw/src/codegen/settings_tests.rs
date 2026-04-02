@@ -24,7 +24,7 @@ fn make_test_agent(name: &str, config: Option<AgentConfig>) -> AgentDef {
 #[test]
 fn generates_sandbox_enabled_by_default() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
     assert_eq!(settings["sandbox"]["enabled"], true);
     assert_eq!(settings["sandbox"]["autoAllowBashIfSandboxed"], true);
     assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
@@ -37,7 +37,7 @@ fn generates_sandbox_enabled_by_default() {
 #[test]
 fn includes_default_allow_write() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
 
     let allow_write = settings["sandbox"]["filesystem"]["allowWrite"]
         .as_array()
@@ -53,7 +53,7 @@ fn includes_default_allow_write() {
 #[test]
 fn includes_default_allowed_domains() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
 
     let domains = settings["sandbox"]["network"]["allowedDomains"]
         .as_array()
@@ -79,7 +79,7 @@ fn includes_default_allowed_domains() {
 #[test]
 fn no_sandbox_disables_sandbox_only() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, true, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, true, Path::new("/home/user"), None).unwrap();
 
     assert_eq!(settings["sandbox"]["enabled"], false);
     // Other settings still present
@@ -110,7 +110,7 @@ fn merges_user_overrides_with_defaults() {
         env: std::collections::HashMap::new(),
     };
     let agent = make_test_agent("test-agent", Some(config));
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
 
     let allow_write = settings["sandbox"]["filesystem"]["allowWrite"]
         .as_array()
@@ -146,7 +146,7 @@ fn merges_user_overrides_with_defaults() {
 #[test]
 fn excluded_commands_omitted_when_empty() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
 
     assert!(
         settings["sandbox"].get("excludedCommands").is_none(),
@@ -173,7 +173,7 @@ fn never_enables_telegram_plugin_in_settings() {
         env: HashMap::new(),
     };
     let agent_with_tg = make_test_agent("test-agent", Some(config));
-    let settings = generate_settings(&agent_with_tg, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent_with_tg, false, Path::new("/home/user"), None).unwrap();
     assert!(
         settings.get("enabledPlugins").is_none(),
         "enabledPlugins must be absent even when telegram token is configured — CC plugin races with native bot"
@@ -181,7 +181,7 @@ fn never_enables_telegram_plugin_in_settings() {
 
     // Without telegram config
     let agent_no_tg = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent_no_tg, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent_no_tg, false, Path::new("/home/user"), None).unwrap();
     assert!(
         settings.get("enabledPlugins").is_none(),
         "enabledPlugins should be omitted without telegram config"
@@ -191,7 +191,7 @@ fn never_enables_telegram_plugin_in_settings() {
 #[test]
 fn includes_deny_read_security_defaults() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
 
     let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
         .as_array()
@@ -215,7 +215,7 @@ fn includes_deny_read_security_defaults() {
 #[test]
 fn deny_read_uses_absolute_paths_not_tilde() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
     let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
         .as_array()
         .unwrap();
@@ -229,7 +229,7 @@ fn deny_read_uses_absolute_paths_not_tilde() {
 #[test]
 fn includes_allow_read_with_agent_path() {
     let agent = make_test_agent("test-agent", None);
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
     let allow_read = settings["sandbox"]["filesystem"]["allowRead"]
         .as_array()
         .expect("allowRead should be an array");
@@ -259,10 +259,58 @@ fn merges_user_allow_read_overrides() {
         env: std::collections::HashMap::new(),
     };
     let agent = make_test_agent("test-agent", Some(config));
-    let settings = generate_settings(&agent, false, Path::new("/home/user")).unwrap();
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
     let allow_read = settings["sandbox"]["filesystem"]["allowRead"]
         .as_array()
         .unwrap();
     assert!(allow_read.iter().any(|v| v == "/data/shared"));
     assert!(allow_read.iter().any(|v| v == "/home/user/.rightclaw/agents/test-agent"));
+}
+
+#[test]
+fn includes_fail_if_unavailable_unconditionally() {
+    let agent = make_test_agent("test-agent", None);
+
+    // With sandbox enabled
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
+    assert_eq!(
+        settings["sandbox"]["failIfUnavailable"], true,
+        "failIfUnavailable must be true when sandbox is enabled"
+    );
+
+    // With sandbox disabled (--no-sandbox) — still present
+    let settings = generate_settings(&agent, true, Path::new("/home/user"), None).unwrap();
+    assert_eq!(
+        settings["sandbox"]["failIfUnavailable"], true,
+        "failIfUnavailable must be true even when sandbox is disabled"
+    );
+}
+
+#[test]
+fn injects_ripgrep_command_when_path_provided() {
+    let agent = make_test_agent("test-agent", None);
+    let rg = Some(PathBuf::from("/usr/bin/rg"));
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), rg).unwrap();
+
+    assert_eq!(
+        settings["sandbox"]["ripgrep"]["command"], "/usr/bin/rg",
+        "ripgrep.command must be the absolute rg path"
+    );
+    assert_eq!(
+        settings["sandbox"]["ripgrep"]["args"],
+        serde_json::json!([]),
+        "ripgrep.args must be an empty array"
+    );
+}
+
+#[test]
+fn omits_ripgrep_when_path_not_provided() {
+    let agent = make_test_agent("test-agent", None);
+    let settings = generate_settings(&agent, false, Path::new("/home/user"), None).unwrap();
+
+    assert!(
+        settings["sandbox"].get("ripgrep").is_none(),
+        "ripgrep field must be absent when rg_path is None, got: {:?}",
+        settings["sandbox"].get("ripgrep")
+    );
 }

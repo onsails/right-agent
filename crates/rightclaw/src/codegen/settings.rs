@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::agent::AgentDef;
 
@@ -28,6 +28,7 @@ pub fn generate_settings(
     agent: &AgentDef,
     no_sandbox: bool,
     host_home: &Path,
+    rg_path: Option<PathBuf>,
 ) -> miette::Result<serde_json::Value> {
     // Base filesystem allowWrite: agent's own directory (absolute path, D-02).
     let mut allow_write = vec![agent.path.display().to_string()];
@@ -74,6 +75,7 @@ pub fn generate_settings(
         // Sandbox configuration (D-01, D-12).
         "sandbox": {
             "enabled": !no_sandbox,
+            "failIfUnavailable": true,
             "autoAllowBashIfSandboxed": true,
             "allowUnsandboxedCommands": false,
             "filesystem": {
@@ -90,6 +92,15 @@ pub fn generate_settings(
     // Add excludedCommands only if non-empty (cleaner output).
     if !excluded_commands.is_empty() {
         settings["sandbox"]["excludedCommands"] = serde_json::json!(excluded_commands);
+    }
+
+    // Inject system ripgrep path when available (D-01, D-03, SBOX-01).
+    // When None: omit field; CC fails at sandbox check because failIfUnavailable: true.
+    if let Some(ref rg) = rg_path {
+        settings["sandbox"]["ripgrep"] = serde_json::json!({
+            "command": rg.display().to_string(),
+            "args": []
+        });
     }
 
     // NOTE: enabledPlugins / telegram@claude-plugins-official is intentionally NOT set.

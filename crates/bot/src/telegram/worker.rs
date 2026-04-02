@@ -395,8 +395,12 @@ async fn invoke_cc(
 
     cmd.arg("--").arg(xml);
     cmd.env("HOME", &ctx.agent_dir);
-    // Use system rg instead of CC's bundled vendor binary (nix store rg lacks execute bit).
-    cmd.env("USE_BUILTIN_RIPGREP", "1");
+    // CC internal env var — "0" = skip bundled rg, use system rg from PATH (D-05, D-06, SBOX-02).
+    // Counterintuitive: A_("0")=true means "builtin disabled" -> falls through to system rg.
+    // "1" = use CC's vendored rg (default; broken in nix — vendor binary lacks execute bit).
+    // UNDOCUMENTED: re-verify after CC version bumps.
+    // See: https://github.com/anthropics/claude-code/issues/6415
+    cmd.env("USE_BUILTIN_RIPGREP", "0");
     cmd.current_dir(&ctx.agent_dir);
     cmd.stdin(Stdio::null()); // DIS-02: prevent pipe deadlock
     cmd.stdout(Stdio::piped());
