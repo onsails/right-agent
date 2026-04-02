@@ -9,10 +9,10 @@
 
 ## SBOX — Sandbox Dependency Fix
 
-- [ ] **SBOX-01**: `rightclaw up` injects `sandbox.ripgrep.command` with resolved system rg path into per-agent settings.json (works in any environment — nix, apt, brew, etc.)
-- [ ] **SBOX-02**: `USE_BUILTIN_RIPGREP` env var corrected from `"1"` to `"0"` in worker.rs and cron.rs CC subprocess invocations
-- [ ] **SBOX-03**: `sandbox.failIfUnavailable: true` added to generated settings.json — sandbox failures become fatal instead of silent degradation
-- [ ] **SBOX-04**: devenv.nix includes `pkgs.ripgrep` in packages list for development environment
+- [x] **SBOX-01**: `rightclaw up` injects `sandbox.ripgrep.command` with resolved system rg path into per-agent settings.json (works in any environment — nix, apt, brew, etc.)
+- [x] **SBOX-02**: `USE_BUILTIN_RIPGREP` env var corrected from `"1"` to `"0"` in worker.rs and cron.rs CC subprocess invocations
+- [x] **SBOX-03**: `sandbox.failIfUnavailable: true` added to generated settings.json — sandbox failures become fatal instead of silent degradation
+- [x] **SBOX-04**: devenv.nix includes `pkgs.ripgrep` in packages list for development environment
 
 ## DOC — Doctor Diagnostics
 
@@ -48,10 +48,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SBOX-01 | Phase 29 | Pending |
-| SBOX-02 | Phase 29 | Pending |
-| SBOX-03 | Phase 29 | Pending |
-| SBOX-04 | Phase 29 | Pending |
+| SBOX-01 | Phase 29 | Complete |
+| SBOX-02 | Phase 29 | Complete |
+| SBOX-03 | Phase 29 | Complete |
+| SBOX-04 | Phase 29 | Complete |
 | DOC-01 | Phase 30 | Pending |
 | DOC-02 | Phase 30 | Pending |
 | VER-01 | Phase 31 | Pending |

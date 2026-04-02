@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.1
 milestone_name: Sandbox Fix & Verification
-status: completed
-stopped_at: Phase 29 context gathered
-last_updated: "2026-04-02T17:01:56.348Z"
-last_activity: 2026-04-02 — Roadmap created for v3.1
+status: executing
+stopped_at: Completed 29-01-PLAN.md
+last_updated: "2026-04-02T19:49:20Z"
+last_activity: 2026-04-02
 progress:
   total_phases: 3
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
+  percent: 33
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-02)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** v3.1 Sandbox Fix & Verification — roadmap defined, ready for planning
+**Current focus:** Phase 29 — sandbox dependency fix (plan 01 complete)
 
 ## Current Position
 
-Phase: 29 (next to execute)
-Plan: —
-Status: Roadmap complete, awaiting plan-phase
-Last activity: 2026-04-02 — Roadmap created for v3.1
+Phase: 29
+Plan: 01 of 1 complete
+Status: Phase 29 plan 01 complete
+Last activity: 2026-04-02
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
@@ -125,6 +125,8 @@ Recent decisions relevant to v2.3:
 - [Phase 28.2]: Use rustls instead of native-tls for teloxide — OpenSSL absent from devenv PKG_CONFIG_PATH; rustls is pure-Rust and already used by workspace reqwest dep
 - [Phase 28.2-02]: Use tokio::task::block_in_place + Builder::new_current_thread for sync functions called from async multi-thread context
 - [Phase 28.2-02]: Telegram API returns 200 OK with empty result.url for invalid tokens — regression test uses no-panic pattern not is_err()
+- [Phase 29-01]: generate_settings gains rg_path: Option<PathBuf> — keeps settings.rs pure (no IO); failIfUnavailable: true unconditional even with --no-sandbox
+- [Phase 29-01]: All 4 fix sites (settings.rs, worker.rs, cron.rs, devenv.nix) committed atomically per D-08
 
 ### Roadmap Evolution
 
@@ -153,6 +155,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-02T17:01:56.345Z
-Stopped at: Phase 29 context gathered
-Resume file: .planning/phases/29-sandbox-dependency-fix/29-CONTEXT.md
+Last session: 2026-04-02T19:49:20Z
+Stopped at: Completed 29-01-PLAN.md
+Resume file: None
