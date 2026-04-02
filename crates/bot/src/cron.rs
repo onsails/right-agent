@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use teloxide::prelude::Requester as _;
 use tokio::task::JoinHandle;
+
+use crate::telegram::{worker::parse_reply_output, BotType};
 
 /// Deserialized from crons/*.yaml
 #[derive(Debug, Clone, serde::Deserialize, PartialEq)]
@@ -118,11 +121,14 @@ pub fn load_specs(agent_dir: &std::path::Path) -> HashMap<String, CronSpec> {
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
+/// If CC exits successfully and produces a reply tool call, the content is sent to all notify_chat_ids.
 async fn execute_job(
     job_name: &str,
     spec: &CronSpec,
     agent_dir: &std::path::Path,
     agent_name: &str,
+    bot: &BotType,
+    notify_chat_ids: &[i64],
 ) {
     use std::process::Stdio;
 
@@ -188,13 +194,29 @@ async fn execute_job(
         }
     };
 
-    // Build command (D-01: --agent <name>, no session, no JSON output)
+    // Read reply schema — same schema as Telegram worker uses (D-01 / CRON-reply).
+    // If missing, cron still runs but CC output won't be parsed or sent to Telegram.
+    let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
+    let reply_schema = std::fs::read_to_string(&reply_schema_path).ok();
+    if reply_schema.is_none() {
+        tracing::warn!(
+            job = %job_name,
+            path = %reply_schema_path.display(),
+            "reply-schema.json not found — cron output will NOT be delivered to Telegram"
+        );
+    }
+
+    // Build command (D-01: --agent <name>, --output-format json for structured reply parsing)
     let mut cmd = tokio::process::Command::new(&cc_bin);
     cmd.arg("-p");
     cmd.arg("--dangerously-skip-permissions");
     cmd.arg("--agent").arg(agent_name);
     if let Some(max_turns) = spec.max_turns {
         cmd.arg("--max-turns").arg(max_turns.to_string());
+    }
+    cmd.arg("--output-format").arg("json");
+    if let Some(ref schema) = reply_schema {
+        cmd.arg("--json-schema").arg(schema);
     }
     cmd.arg("--").arg(&spec.prompt);
     cmd.env("HOME", agent_dir);
@@ -258,6 +280,43 @@ async fn execute_job(
     std::fs::remove_file(&lock_path).ok();
 
     tracing::info!(job = %job_name, run_id = %run_id, %status, "cron job completed");
+
+    // CRON-reply: parse CC structured output and send to Telegram if content is non-null.
+    // Only on success — non-zero exit means no valid structured JSON to parse.
+    // Silent by default: content:null → no message sent. Failures are silent too.
+    if output.status.success() {
+        if let Some(ref _schema) = reply_schema {
+            if !notify_chat_ids.is_empty() {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                match parse_reply_output(&raw) {
+                    Ok((reply_output, _)) => {
+                        if let Some(content) = reply_output.content {
+                            for &chat_id in notify_chat_ids {
+                                if let Err(e) = bot
+                                    .send_message(teloxide::types::ChatId(chat_id), &content)
+                                    .await
+                                {
+                                    tracing::error!(
+                                        job = %job_name,
+                                        chat_id,
+                                        "failed to send cron reply to Telegram: {e:#}"
+                                    );
+                                }
+                            }
+                        }
+                        // content: None → silent (expected for most cron jobs)
+                    }
+                    Err(reason) => {
+                        tracing::warn!(
+                            job = %job_name,
+                            reason,
+                            "CC output parse failed — no Telegram notification sent"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn update_run_record(
@@ -278,18 +337,23 @@ fn update_run_record(
 /// Main reconciler loop. Polls `crons/*.yaml` every 60s, spawning per-job loops.
 ///
 /// Signature expected by lib.rs spawn site (CRON-01, CRON-02, CRON-06).
-pub async fn run_cron_task(agent_dir: std::path::PathBuf, agent_name: String) {
+pub async fn run_cron_task(
+    agent_dir: std::path::PathBuf,
+    agent_name: String,
+    bot: BotType,
+    notify_chat_ids: Vec<i64>,
+) {
     tracing::info!(agent = %agent_name, "cron task started");
     let mut handles: HashMap<String, (CronSpec, JoinHandle<()>)> = HashMap::new();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &agent_dir, &agent_name).await;
+    reconcile_jobs(&mut handles, &agent_dir, &agent_name, &bot, &notify_chat_ids).await;
 
     loop {
         interval.tick().await;
-        reconcile_jobs(&mut handles, &agent_dir, &agent_name).await;
+        reconcile_jobs(&mut handles, &agent_dir, &agent_name, &bot, &notify_chat_ids).await;
     }
 }
 
@@ -297,15 +361,15 @@ async fn reconcile_jobs(
     handles: &mut HashMap<String, (CronSpec, JoinHandle<()>)>,
     agent_dir: &std::path::Path,
     agent_name: &str,
+    bot: &BotType,
+    notify_chat_ids: &[i64],
 ) {
     let new_specs = load_specs(agent_dir);
 
     // Abort handles for removed or changed jobs (CRON-06)
     let to_remove: Vec<String> = handles
         .iter()
-        .filter(|(name, (old_spec, _))| {
-            new_specs.get(*name) != Some(old_spec)
-        })
+        .filter(|(name, (old_spec, _))| new_specs.get(*name) != Some(old_spec))
         .map(|(name, _)| name.clone())
         .collect();
 
@@ -325,9 +389,12 @@ async fn reconcile_jobs(
         let job_spec = spec.clone();
         let job_agent_dir = agent_dir.to_path_buf();
         let job_agent_name = agent_name.to_string();
+        let job_bot = bot.clone();
+        let job_chat_ids = notify_chat_ids.to_vec();
 
         let handle = tokio::spawn(async move {
-            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name).await;
+            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_bot, job_chat_ids)
+                .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
         tracing::info!(job = %name, schedule = %spec.schedule, "cron job scheduled");
@@ -340,6 +407,8 @@ async fn run_job_loop(
     spec: CronSpec,
     agent_dir: std::path::PathBuf,
     agent_name: String,
+    bot: BotType,
+    notify_chat_ids: Vec<i64>,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -366,8 +435,17 @@ async fn run_job_loop(
 
         tokio::time::sleep(delay).await;
 
-        // D-03: no drift check — if we woke late, still execute once and loop
-        execute_job(&job_name, &spec, &agent_dir, &agent_name).await;
+        // Spawn execution so the loop continues counting ticks while the job runs.
+        // The lock in execute_job prevents concurrent executions of the same job.
+        let jn = job_name.clone();
+        let sp = spec.clone();
+        let ad = agent_dir.clone();
+        let an = agent_name.clone();
+        let bt = bot.clone();
+        let nc = notify_chat_ids.clone();
+        tokio::spawn(async move {
+            execute_job(&jn, &sp, &ad, &an, &bt, &nc).await;
+        });
     }
 }
 
