@@ -416,7 +416,7 @@ async fn invoke_cc(
     if ctx.debug {
         let stderr_str = String::from_utf8_lossy(&output.stderr);
         if !stderr_str.is_empty() {
-            tracing::debug!(?chat_id, stderr = %stderr_str, "CC stderr");
+            tracing::info!(?chat_id, stderr = %stderr_str, "CC stderr");
         }
     }
 
