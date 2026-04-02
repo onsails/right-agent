@@ -230,7 +230,10 @@ Plans:
   2. `sandbox.failIfUnavailable: true` is present in every generated settings.json — sandbox failure is fatal, not silent
   3. `USE_BUILTIN_RIPGREP` is set to `"0"` in CC subprocess invocations (worker.rs and cron.rs) — forces system rg, not the non-executable vendored binary
   4. `devenv.nix` lists `pkgs.ripgrep` in packages — system rg is present in PATH for all development sessions
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 29-01-PLAN.md — Atomic sandbox fix: rg path injection + failIfUnavailable + USE_BUILTIN_RIPGREP polarity + devenv.nix ripgrep
 
 ### Phase 30: Doctor Diagnostics
 **Goal**: `rightclaw doctor` accurately surfaces sandbox dependency state before agents launch, reflecting what agent processes will inherit — not just the developer shell
@@ -268,6 +271,6 @@ Phases execute in order: 29 → 30 → 31
 | 28. Cronsync SKILL Rewrite | v3.0 | 1/1 | Complete | 2026-04-01 |
 | 28.1. v3.0 UAT | v3.0 | 0/0 | Complete | 2026-04-01 |
 | 28.2. v3.0 UAT Fix | v3.0 | 2/2 | Complete | 2026-04-01 |
-| 29. Sandbox Dependency Fix | v3.1 | 0/TBD | Not started | - |
+| 29. Sandbox Dependency Fix | v3.1 | 0/1 | Not started | - |
 | 30. Doctor Diagnostics | v3.1 | 0/TBD | Not started | - |
 | 31. E2E Verification | v3.1 | 0/TBD | Not started | - |
