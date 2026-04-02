@@ -247,6 +247,30 @@ fn output_does_not_contain_is_interactive() {
     );
 }
 
+// ── MCP env vars ────────────────────────────────────────────────────────────
+
+#[test]
+fn env_contains_enable_claudeai_mcp_servers_false() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("ENABLE_CLAUDEAI_MCP_SERVERS=false"),
+        "expected ENABLE_CLAUDEAI_MCP_SERVERS=false in:\n{output}"
+    );
+}
+
+#[test]
+fn env_contains_mcp_connection_nonblocking() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, false).unwrap();
+    assert!(
+        output.contains("MCP_CONNECTION_NONBLOCKING=1"),
+        "expected MCP_CONNECTION_NONBLOCKING=1 in:\n{output}"
+    );
+}
+
 // ── Header and version ───────────────────────────────────────────────────────
 
 #[test]

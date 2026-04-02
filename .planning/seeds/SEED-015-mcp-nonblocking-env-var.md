@@ -1,6 +1,6 @@
 ---
 id: SEED-015
-status: dormant
+status: resolved
 planted: 2026-04-02
 planted_during: v3.0 Teloxide Bot Runtime (phase 28.2 UAT)
 trigger_when: Next milestone — any work touching process-compose codegen or agent startup
