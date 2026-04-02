@@ -52,14 +52,12 @@ pub fn generate_agent_definition(agent: &AgentDef) -> miette::Result<String> {
         agent.user_path.as_ref(),
         agent.agents_path.as_ref(),
     ];
-    for path_opt in optional {
-        if let Some(path) = path_opt {
-            if path.exists() {
-                let content = std::fs::read_to_string(path).map_err(|e| {
-                    miette::miette!("failed to read {}: {e}", path.display())
-                })?;
-                sections.push(content);
-            }
+    for path in optional.into_iter().flatten() {
+        if path.exists() {
+            let content = std::fs::read_to_string(path).map_err(|e| {
+                miette::miette!("failed to read {}: {e}", path.display())
+            })?;
+            sections.push(content);
         }
     }
 

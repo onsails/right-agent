@@ -153,10 +153,10 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
     let output: ReplyOutput = serde_json::from_value(result_val.clone())
         .map_err(|e| format!("failed to deserialize result: {e}"))?;
 
-    if let Some(ref paths) = output.media_paths {
-        if !paths.is_empty() {
-            tracing::warn!("media_paths returned but not yet implemented -- skipping");
-        }
+    if let Some(ref paths) = output.media_paths
+        && !paths.is_empty()
+    {
+        tracing::warn!("media_paths returned but not yet implemented -- skipping");
     }
 
     Ok((output, session_id))
@@ -426,17 +426,16 @@ async fn invoke_cc(
     match parse_reply_output(&raw) {
         Ok((reply_output, session_id_from_cc)) => {
             // D-15: verify session_id at debug level only
-            if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call) {
-                if let Ok(Some(stored)) = get_session(&conn, chat_id, eff_thread_id) {
-                    if cc_sid != stored {
-                        tracing::warn!(
-                            ?chat_id,
-                            cc_session_id = %cc_sid,
-                            stored_session_id = %stored,
-                            "session_id mismatch between CC and stored — not blocking"
-                        );
-                    }
-                }
+            if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call)
+                && let Ok(Some(stored)) = get_session(&conn, chat_id, eff_thread_id)
+                && cc_sid != stored
+            {
+                tracing::warn!(
+                    ?chat_id,
+                    cc_session_id = %cc_sid,
+                    stored_session_id = %stored,
+                    "session_id mismatch between CC and stored — not blocking"
+                );
             }
             // Update last_used_at (non-fatal: log error but do not fail the reply)
             touch_session(&conn, chat_id, eff_thread_id)

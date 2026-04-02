@@ -20,7 +20,9 @@ use rightclaw::agent::types::AgentConfig;
 /// 2. RC_TELEGRAM_TOKEN_FILE env var (read file contents)
 /// 3. agent.yaml telegram_token_file field
 /// 4. agent.yaml telegram_token field
+///
 /// Returns Err if no non-empty value found.
+///
 /// Extract token value from file contents.
 /// Handles both raw token and `KEY=VALUE` env-file format (written by `rightclaw init`).
 /// Splits on the first `=` if present; returns trimmed value. Falls back to full trimmed content.
@@ -35,10 +37,10 @@ fn token_from_file_content(content: &str) -> String {
 
 pub fn resolve_token(agent_dir: &Path, config: &AgentConfig) -> miette::Result<String> {
     // 1. RC_TELEGRAM_TOKEN env var
-    if let Ok(token) = std::env::var("RC_TELEGRAM_TOKEN") {
-        if !token.is_empty() {
-            return Ok(token);
-        }
+    if let Ok(token) = std::env::var("RC_TELEGRAM_TOKEN")
+        && !token.is_empty()
+    {
+        return Ok(token);
     }
     // 2. RC_TELEGRAM_TOKEN_FILE env var
     if let Ok(path) = std::env::var("RC_TELEGRAM_TOKEN_FILE") {
@@ -53,10 +55,10 @@ pub fn resolve_token(agent_dir: &Path, config: &AgentConfig) -> miette::Result<S
             .map_err(|e| miette::miette!("telegram_token_file read error: {e}"));
     }
     // 4. agent.yaml telegram_token
-    if let Some(token) = &config.telegram_token {
-        if !token.is_empty() {
-            return Ok(token.clone());
-        }
+    if let Some(token) = &config.telegram_token
+        && !token.is_empty()
+    {
+        return Ok(token.clone());
     }
     Err(miette::miette!(
         help = "Set RC_TELEGRAM_TOKEN env var or add telegram_token/telegram_token_file to agent.yaml",

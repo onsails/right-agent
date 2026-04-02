@@ -5,7 +5,7 @@ is_strict: true
 processes:
 {% for agent in agents %}
   {{ agent.name }}-bot:
-    command: "{{ agent.exe_path }} bot --agent {{ agent.agent_name }}"
+    command: "{{ agent.exe_path }} bot --agent {{ agent.agent_name }}{% if agent.debug %} --debug{% endif %}"
     working_dir: "{{ agent.working_dir }}"
     environment:
       - RC_AGENT_DIR={{ agent.working_dir }}

@@ -25,6 +25,8 @@ struct BotProcessAgent {
     restart_policy: String,
     backoff_seconds: u32,
     max_restarts: u32,
+    /// When true, passes `--debug` to `rightclaw bot` so CC stderr is logged at debug level.
+    debug: bool,
 }
 
 /// Map `RestartPolicy` to process-compose's expected string values.
@@ -43,7 +45,7 @@ fn restart_policy_str(policy: &RestartPolicy) -> &'static str {
 ///
 /// Each entry runs `<exe_path> bot --agent <name>` with env vars for the agent
 /// directory, name, and Telegram token.
-pub fn generate_process_compose(agents: &[AgentDef], exe_path: &Path) -> miette::Result<String> {
+pub fn generate_process_compose(agents: &[AgentDef], exe_path: &Path, debug: bool) -> miette::Result<String> {
     let bot_agents: Vec<BotProcessAgent> = agents
         .iter()
         .filter_map(|agent| {
@@ -77,6 +79,7 @@ pub fn generate_process_compose(agents: &[AgentDef], exe_path: &Path) -> miette:
                 restart_policy: restart.to_owned(),
                 backoff_seconds: backoff,
                 max_restarts: max,
+                debug,
             })
         })
         .collect();

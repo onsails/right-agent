@@ -304,9 +304,7 @@ async fn reconcile_jobs(
     let to_remove: Vec<String> = handles
         .iter()
         .filter(|(name, (old_spec, _))| {
-            new_specs
-                .get(*name)
-                .map_or(true, |new_spec| new_spec != old_spec)
+            new_specs.get(*name) != Some(old_spec)
         })
         .map(|(name, _)| name.clone())
         .collect();

@@ -306,7 +306,7 @@ async fn cmd_up(
     agents_filter: Option<Vec<String>>,
     detach: bool,
     no_sandbox: bool,
-    _debug: bool,
+    debug: bool,
 ) -> miette::Result<()> {
     // Fail fast if required tools are missing.
     rightclaw::runtime::verify_dependencies()?;
@@ -475,7 +475,7 @@ async fn cmd_up(
         eprintln!("rightclaw: no agents have Telegram tokens configured — nothing to start");
         return Err(miette::miette!("no agents have Telegram tokens configured"));
     }
-    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &self_exe)?;
+    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &self_exe, debug)?;
     let config_path = run_dir.join("process-compose.yaml");
     std::fs::write(&config_path, &pc_config)
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
@@ -1069,7 +1069,7 @@ fn cmd_memory_list(
         return Ok(());
     }
 
-    println!("{:<6} {:<61} {:<20} {}", "ID", "CONTENT", "STORED_BY", "CREATED_AT");
+    println!("{:<6} {:<61} {:<20} CREATED_AT", "ID", "CONTENT", "STORED_BY");
     for entry in &entries {
         let truncated = truncate_content(&entry.content, 60);
         let stored_by = entry.stored_by.as_deref().unwrap_or("(unknown)");
@@ -1173,7 +1173,7 @@ fn cmd_memory_search(
         return Ok(());
     }
 
-    println!("{:<6} {:<61} {:<20} {}", "ID", "CONTENT", "STORED_BY", "CREATED_AT");
+    println!("{:<6} {:<61} {:<20} CREATED_AT", "ID", "CONTENT", "STORED_BY");
     for entry in &entries {
         let truncated = truncate_content(&entry.content, 60);
         let stored_by = entry.stored_by.as_deref().unwrap_or("(unknown)");
