@@ -1,331 +1,381 @@
-# Architecture: Teloxide Bot Runtime Integration
+# Architecture Research
 
-**Project:** RightClaw v3.0
-**Researched:** 2026-03-31
-**Milestone:** Teloxide Bot Runtime — replacing CC channels with per-agent Rust bots
+**Domain:** CC sandbox fix and end-to-end verification for nix environments
+**Researched:** 2026-04-02
+**Confidence:** HIGH (direct codebase inspection + CC cli.js source analysis)
 
----
+## Standard Architecture
 
-## Questions Answered
+### System Overview
 
-1. What changes to process-compose.yaml template (bot process instead of claude session)?
-2. How does the bot process know which agent dir to use (env var injection)?
-3. How does `claude -p --resume` work with sandbox settings.json (does it re-apply)?
-4. Cron file watcher integration with tokio runtime?
-5. Build order — what must ship first?
+```
+rightclaw up
+    │
+    ├── runtime/deps.rs → verify_dependencies()
+    │     checks: process-compose, claude/claude-bun
+    │     NEW: warn if rg absent AND CC vendor rg not executable
+    │
+    ├── for each agent:
+    │     codegen/settings.rs → generate_settings()
+    │         writes agent/.claude/settings.json
+    │         existing: sandbox.enabled, filesystem, network
+    │         NEW: sandbox.ripgrep.command → absolute system rg path
+    │
+    └── codegen/process_compose.rs → generate_process_compose()
+          no changes — bot-only template already complete
 
----
+doctor.rs → run_doctor()
+    existing: bwrap, socat, bwrap-sandbox checks
+    NEW: check_sandbox_ripgrep() DoctorCheck
 
-## 1. process-compose.yaml Template Changes
-
-### What Changes
-
-The current template (`templates/process-compose.yaml.j2`) runs a shell wrapper per agent:
-
-```yaml
-processes:
-  {{ agent.name }}:
-    command: "{{ agent.wrapper_path }}"      # shell script → exec claude
-    working_dir: "{{ agent.working_dir }}"
-    is_interactive: true                     # REQUIRED for CC interactive mode
+process-compose (bot processes)
+    └── crates/bot/ → rightclaw bot --agent <name>
+          ├── telegram/worker.rs → invoke_cc()
+          │     USE_BUILTIN_RIPGREP=1  (already set — belt-and-suspenders)
+          │     HOME=agent_dir
+          │     spawns: claude-bun -p --dangerously-skip-permissions ...
+          │         CC reads agent/.claude/settings.json
+          │         sandbox.ripgrep.command tells CC which rg to use
+          │         CC's bwrap wraps the subprocess
+          │
+          └── cron.rs → execute_job()
+                USE_BUILTIN_RIPGREP=1  (already set — belt-and-suspenders)
+                HOME=agent_dir
+                spawns: claude-bun -p --dangerously-skip-permissions ...
+                    same settings.json read path
 ```
 
-The new template runs the teloxide bot binary directly:
+### Root Cause: CC Vendor rg Has No Execute Bit in Nix Store
 
-```yaml
-processes:
-  {{ agent.name }}:
-    command: "{{ agent.bot_binary_path }}"
-    working_dir: "{{ agent.working_dir }}"
-    # is_interactive: NOT needed — bot is not a TTY process
-    environment:
-      - "RC_AGENT_DIR={{ agent.working_dir }}"
-      - "RC_AGENT_NAME={{ agent.name }}"
-      - "RC_TELEGRAM_TOKEN={{ agent.telegram_token }}"
-    availability:
-      restart: "{{ agent.restart_policy }}"
-      backoff_seconds: {{ agent.backoff_seconds }}
-      max_restarts: {{ agent.max_restarts }}
-    shutdown:
-      signal: 15
-      timeout_seconds: 30
+CC resolves its rg binary in this order (from `cli.js` `$aA` lazy value):
+
+1. `USE_BUILTIN_RIPGREP` set → find system `rg` via `findActualExecutable("rg", [])`
+2. bun embedded mode → use `process.execPath --ripgrep`
+3. default fallback → `vendor/ripgrep/<arch>-<platform>/rg` (absolute nix store path)
+
+The vendored rg in the current CC nix package has mode `.r--r--r--` — **no execute bit**:
+```
+.r--r--r-- 5.6M root  1 Jan  1970
+  /nix/store/hhydcyh1z6h2fyznlqagb1p66l07yhp6-claude-code-bun-2.1.89/
+  lib/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/x64-linux/rg
+```
+Confirmed: attempting to execute it gives `permission denied`.
+
+`USE_BUILTIN_RIPGREP=1` is already set in `worker.rs` and `cron.rs`. This tells CC
+to prefer system `rg` via PATH lookup. However, CC's `checkDependencies` function
+(`zT8` in cli.js) runs the resolved rg binary to verify it works. If that test fails
+(e.g., system rg not in the subprocess PATH, or resolved to vendor path which has
+no execute bit), CC sets `SandboxUnavailableReason` and **silently degrades** to
+unsandboxed mode — no error exit, no diagnostic output visible to rightclaw.
+
+**`failIfUnavailable`** (a `settings.json` flag) defaults to `false`, so the silent
+degradation happens with no observable failure. Agents keep running, but unsandboxed.
+
+### The Fix: sandbox.ripgrep in settings.json
+
+CC's `settings.json` schema supports an explicit `sandbox.ripgrep` override:
+```json
+"sandbox": {
+  "ripgrep": {
+    "command": "/nix/store/.../bin/rg",
+    "args": []
+  }
+}
 ```
 
-### What Is Removed
+This field is documented in the CC settings schema (confirmed in `cli.js` Zod schema):
+```
+sandbox.ripgrep: {command: string, args?: string[]}
+  "Custom ripgrep configuration for bundled ripgrep"
+```
 
-- `is_interactive: true` — only needed for CC's TTY requirement; bot processes are daemons
-- Shell wrapper file generation (`run/<agent>.sh`) — no longer needed
-- `combined_prompt_path` / `--append-system-prompt-file` CLI arg injection — the bot composes system prompt from `agent_dir/.claude/system-prompt.txt`
+When `sandbox.ripgrep.command` is set, CC's `oO6()` function returns it directly
+instead of running `$aA()` (the path that falls through to the vendor binary).
+The `checkDependencies` call uses this path for its executable test — if it points
+to a working system `rg`, the sandbox check passes.
 
-### What Is Added
+**Implementation:** In `generate_settings()`, resolve `which::which("rg")` to get
+the absolute system rg path, then inject it into the sandbox JSON. This is done
+at `rightclaw up` time so the path is always current (no hardcoded nix store hash).
 
-- `environment:` block in process-compose template with RC_ env vars
-- `RC_AGENT_DIR` — absolute path to agent directory (bot's source of truth)
-- `RC_AGENT_NAME` — agent name (for memory DB lookup, logging)
-- `RC_TELEGRAM_TOKEN` — resolved token value (or `RC_TELEGRAM_TOKEN_FILE` pointing to file path)
+## Component Responsibilities
 
-### The `ProcessAgent` Rust Struct Change
+| Component | Responsibility | Change |
+|-----------|----------------|--------|
+| `codegen/settings.rs` | Generate `settings.json` per agent | **MODIFY** |
+| `codegen/settings_tests.rs` | Unit tests for settings generation | **MODIFY** |
+| `runtime/deps.rs` | Pre-flight dependency check in `rightclaw up` | **MODIFY** |
+| `doctor.rs` | Comprehensive diagnostics | **MODIFY** |
+| `telegram/worker.rs` | Spawn CC for Telegram messages | unchanged (already has `USE_BUILTIN_RIPGREP=1`) |
+| `cron.rs` | Spawn CC for cron jobs | unchanged (already has `USE_BUILTIN_RIPGREP=1`) |
+| `codegen/process_compose.rs` | Bot process PC config | unchanged |
+| `agent/types.rs` | `SandboxOverrides` struct | unchanged |
+| `templates/process-compose.yaml.j2` | Bot process template | unchanged |
 
-`codegen/process_compose.rs` currently populates `ProcessAgent { name, wrapper_path, working_dir, ... }`.
+## Recommended Project Structure
 
-`wrapper_path` is replaced by `bot_binary_path`. Recommendation: use `rightclaw bot --agent <name>` as a subcommand (same binary). `bot_binary_path` = result of `current_exe()`, same pattern already used for `.mcp.json` MCP server entry. No separate install step.
+No new files. All changes in existing files:
 
----
+```
+crates/rightclaw/src/
+├── codegen/
+│   ├── settings.rs          ← MODIFY: add sandbox.ripgrep to JSON output
+│   └── settings_tests.rs    ← MODIFY: add tests for ripgrep field presence
+├── runtime/
+│   └── deps.rs              ← MODIFY: add rg warning (non-fatal)
+└── doctor.rs                ← MODIFY: add check_sandbox_ripgrep() DoctorCheck
+```
 
-## 2. Env Var Injection: How the Bot Finds Its Agent Dir
+### Structure Rationale
 
-### The Pattern
+- **settings.rs** is the natural home for the rg path injection — it already builds
+  the complete `settings.json` JSON value. No new abstraction needed.
+- **deps.rs** is the `verify_dependencies()` fast-fail path. Adding an rg warning
+  here surfaces the issue before any process starts, not after agents fail silently.
+- **doctor.rs** provides post-hoc diagnostics via `rightclaw doctor`. Adding a
+  `check_sandbox_ripgrep()` here lets users debug without running `rightclaw up`.
 
-process-compose injects `RC_AGENT_DIR` as a process-level environment variable. The bot reads it at startup:
+## Architectural Patterns
 
+### Pattern 1: Inject sandbox.ripgrep at settings.json Generation Time
+
+**What:** Resolve `which::which("rg")` in `generate_settings()` and embed the
+absolute path into the `sandbox.ripgrep` field.
+
+**When to use:** Always — even when `USE_BUILTIN_RIPGREP=1` is set, the
+`checkDependencies` path in CC needs a working rg to enable the sandbox.
+
+**Trade-offs:**
+- Pro: CC uses this path for both `checkDependencies` and runtime operations
+- Pro: Absolute path survives HOME override (no relative PATH lookup needed)
+- Pro: Officially supported settings.json field — not a hack
+- Pro: Settings regenerated on every `rightclaw up` — always current path
+- Con: If system rg absent: field omitted, sandbox degrades, must warn caller
+
+**Example:**
 ```rust
-let agent_dir = std::env::var("RC_AGENT_DIR")
-    .map(PathBuf::from)
-    .expect("RC_AGENT_DIR must be set by process-compose");
+// In generate_settings(), after building the sandbox block:
+if let Ok(rg_path) = which::which("rg") {
+    settings["sandbox"]["ripgrep"] = serde_json::json!({
+        "command": rg_path.display().to_string(),
+        "args": []
+    });
+    // If rg not found: omit field; deps.rs/doctor.rs warn separately
+}
 ```
 
-From `RC_AGENT_DIR` the bot resolves everything:
-- `agent_dir/SOUL.md` — personality
-- `agent_dir/USER.md` — user context (optional)
-- `agent_dir/AGENTS.md` — operational framework
-- `agent_dir/.claude/system-prompt.txt` — pre-composed system prompt (written by `rightclaw up`)
-- `agent_dir/memory.db` — SQLite for session mapping + memories
-- `agent_dir/crons/` — cron spec directory (watched by file watcher)
+### Pattern 2: Non-Fatal rg Warning in verify_dependencies()
 
-### Token Resolution
+**What:** After the claude binary check in `verify_dependencies()`, add a
+non-fatal check: if system rg is absent AND the CC vendor rg is not executable,
+emit a `tracing::warn!` — not an error. Agent launch proceeds; sandbox just
+won't work.
 
-Two paths from `agent.yaml`:
-1. `telegram_token_file` — relative path within agent dir (preferred, no secret visible in PC YAML)
-2. `telegram_token` — inline value injected as `RC_TELEGRAM_TOKEN` env var
+**When to use:** In `cmd_up` fast-fail path — catches the issue before launch
+so the operator sees it in the terminal, not in CC's silent degradation.
 
-`rightclaw up` writes either `RC_TELEGRAM_TOKEN_FILE` or `RC_TELEGRAM_TOKEN` into the process-compose environment block based on which field is configured in `agent.yaml`. The bot reads one of these at startup.
+**Trade-offs:**
+- Pro: Consistent with existing git warning pattern (warn-only, never return Err)
+- Pro: Actionable: user sees the warning before agents start
+- Con: Soft warning is easy to miss — doctor.rs provides the explicit check
 
-**Security note:** Inline tokens in env blocks are visible in the process-compose TUI (`environment:` section). Prefer `telegram_token_file`.
-
----
-
-## 3. `claude -p --resume` with Sandbox settings.json
-
-### How CC Loads settings.json
-
-CC loads settings from these scopes (lowest to highest priority):
-1. User scope: `~/.claude/settings.json` where `~` = `HOME` env var at process startup
-2. Project scope: `<cwd>/.claude/settings.json`
-3. Local scope: `<cwd>/.claude/settings.local.json`
-4. Managed scope: system-level (`/etc/claude-code/managed-settings.json`)
-
-Under the existing HOME override (`HOME=$AGENT_DIR`), the agent's `.claude/settings.json` is loaded as **both** user scope (via `~`) and project scope (via cwd). Both resolve to the same file. This is intentional and already works.
-
-### What Happens with `claude -p --resume <uuid> "message"`
-
-1. Bot sets `HOME=$AGENT_DIR`, `cwd=$AGENT_DIR` before spawning CC subprocess
-2. CC loads `$AGENT_DIR/.claude/settings.json` — sandbox config **is applied**
-3. Session data is loaded from `$AGENT_DIR/.claude/projects/<encoded-cwd>/<uuid>.jsonl`
-4. Sandbox applies in `-p` mode exactly as in interactive mode — no behavioral difference for settings loading
-
-**Critical:** Session storage path is `$HOME/.claude/projects/<encoded-cwd>/`. With `HOME=$AGENT_DIR`, sessions live inside the agent directory — isolated and correct. If the agent directory is renamed, existing sessions are orphaned (same issue exists today for interactive CC).
-
-### Known Bug: `claude -p --resume` (MEDIUM confidence, verify before relying on)
-
-GitHub issue #1967 (marked closed June 2025): `claude -p -r <session_id> "prompt"` fails with "No conversation found with session ID". Fix was merged but community reports regression in v1.0.51+.
-
-**Mitigation options:**
-- Test `claude -p --resume <uuid> "prompt"` with the deployed CC version before building thread continuity on it
-- Fallback: `claude -p --session-id <uuid> "prompt"` — creates a new session with a deterministic UUID. This does NOT resume conversation history, but the UUID can serve as a stable key for the telegram_sessions mapping. Each `claude -p` call is stateless; the bot manages conversational state by injecting history into the prompt.
-- Second fallback: `claude -c -p "prompt"` (continue most recent in cwd) — less precise, only viable for single-thread-per-agent scenarios
-
-### Sandbox in `-p` Mode
-
-Sandbox settings in `settings.json` apply in print mode. The `skipDangerousModePermissionPrompt`, `autoMemoryEnabled: false`, and filesystem restrictions all apply identically. No changes needed to `codegen/settings.rs` — it already generates correct sandbox config that works for both modes.
-
----
-
-## 4. Cron File Watcher: tokio + notify
-
-### Architecture
-
-The teloxide bot process runs two concurrent tokio tasks:
-1. **Bot dispatcher** — handles incoming Telegram updates via long-polling
-2. **Cron runtime** — evaluates schedules, executes jobs at due time, watches spec files for changes
-
-### File Watcher Pattern
-
-`notify` crate (v7.x, current) + `tokio::sync::mpsc` channel as sync→async bridge:
-
+**Example:**
 ```rust
-// sync→async bridge for notify's sync EventHandler callback
-let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::unbounded_channel();
-let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-    let _ = watcher_tx.blocking_send(event);  // blocking_send is correct for sync→async
-})?;
-watcher.watch(&crons_dir, notify::RecursiveMode::NonRecursive)?;
-
-// Cron runtime tokio task
-tokio::spawn(async move {
-    loop {
-        tokio::select! {
-            event = watcher_rx.recv() => {
-                if let Some(Ok(_)) = event {
-                    reload_cron_specs(&crons_dir, &mut scheduler).await;
-                }
-            }
-            _ = scheduler.next_tick() => {
-                execute_due_jobs(&agent_dir).await;
-            }
-        }
+// Non-fatal: sandbox degrades silently without rg; warn the operator.
+let rg_available = which::which("rg").is_ok();
+if !rg_available {
+    // Check CC vendor path as fallback detection
+    let vendor_rg_executable = resolve_cc_vendor_rg()
+        .map(|p| std::fs::metadata(&p)
+            .map(|m| { use std::os::unix::fs::PermissionsExt; m.permissions().mode() & 0o111 != 0 })
+            .unwrap_or(false))
+        .unwrap_or(false);
+    if !vendor_rg_executable {
+        tracing::warn!(
+            "rg not found in PATH and CC vendor ripgrep lacks execute permission — \
+             CC sandbox will be silently disabled. \
+             Install ripgrep: sudo apt install ripgrep (or pacman/dnf)"
+        );
     }
-});
+}
 ```
 
-`notify::recommended_watcher` selects the best OS primitive automatically: inotify on Linux, FSEvents on macOS, poll fallback. `blocking_send` is the correct pattern for sync→async boundary crossing in notify v7.
+### Pattern 3: DoctorCheck for Sandbox ripgrep
 
-### Cron Execution
+**What:** Add `check_sandbox_ripgrep()` in `run_doctor()` — a `DoctorCheck`
+with `Warn` severity when rg is unavailable. Placed in the Linux-only block
+after `check_bwrap_sandbox()`.
 
-Each cron job invokes `claude -p` as a subprocess:
+**When to use:** `rightclaw doctor` diagnostic path. Also acts as documentation
+for operators who need to understand sandbox requirements.
+
+**Trade-offs:**
+- Pro: Follows exact existing DoctorCheck pattern (name, status, detail, fix)
+- Pro: `Warn` severity matches the fact that agents still run (just unsandboxed)
+- Con: Requires resolving CC binary path, which is slightly involved
+
+**Check shape:**
 ```
-claude -p
-  --system-prompt-file $AGENT_DIR/.claude/system-prompt.txt
-  --session-id <deterministic-uuid-from-job-name>
-  --dangerously-skip-permissions
-  -- "<job prompt>"
-```
-
-The deterministic UUID (e.g., `uuid5(NAMESPACE, agent_name + job_name)`) keeps cron calls pseudostateful without requiring session resume reliability.
-
-### Cronsync SKILL.md Changes
-
-In v3.0, Cronsync SKILL.md is reduced to **file management only**: creating, editing, and deleting YAML spec files in `agent_dir/crons/`. The Rust runtime handles parsing, scheduling, file watching, and CC subprocess execution.
-
-The CC-native `CronCreate/CronList/CronDelete` tools are no longer needed. This removes the v2.5 complexity: inline bootstrap on main thread (BOOT-01/BOOT-02), CHECK/RECONCILE split, CRITICAL guard. All of that was a workaround for CC's CronCreate being main-thread-only — it disappears entirely when cron management moves to Rust.
-
----
-
-## 5. Build Order
-
-### Dependency Graph
-
-```
-Phase A: DB schema — telegram_sessions migration
-          ↓
-Phase B: rightclaw-bot crate + agent dir loading
-          |
-          +-→ Phase C: System prompt composition (SOUL+USER+AGENTS → system-prompt.txt)
-          |             [parallel with Phase B skeleton]
-          ↓
-Phase D: Telegram message handler → claude -p invocation + session mapping
-          ↓
-Phase E: process-compose template change + rightclaw up wiring
-          ↓
-Phase F: Cron runtime — tokio task + notify file watcher
-          ↓
-Phase G: Cronsync SKILL.md — file-management-only rewrite
+  sandbox-ripgrep      warn   rg not found in PATH and CC vendor rg not executable
+    fix: Install ripgrep: sudo apt install ripgrep (or dnf/pacman)
 ```
 
-### Phase A Must Ship First: DB Migration (telegram_sessions)
+## Data Flow
 
-New V2 migration on top of existing V1 schema (via `rusqlite_migration`):
-
-```sql
--- V2: telegram session mapping for teloxide bot
-CREATE TABLE IF NOT EXISTS telegram_sessions (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id       TEXT NOT NULL,
-    thread_id     TEXT,             -- NULL for DMs and non-forum group chats
-    session_uuid  TEXT NOT NULL,    -- UUID passed to claude --session-id / --resume
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    last_used_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(chat_id, thread_id)
-);
-```
-
-`UNIQUE(chat_id, thread_id)` with nullable `thread_id` handles all three cases:
-- DM: `(chat_id=user_id, thread_id=NULL)` — unique per user
-- Forum group topic: `(chat_id=group_id, thread_id=topic_id)` — unique per topic
-- Regular group: `(chat_id=group_id, thread_id=NULL)` — shared session for whole group
-
-### Phase B: rightclaw-bot as CLI Subcommand
-
-New subcommand `rightclaw bot --agent <name>` in `rightclaw-cli`. This reuses the existing binary — `bot_binary_path = current_exe()` in process-compose codegen, same pattern as the `memory-server` subcommand.
-
-New crate `crates/rightclaw-bot/` or inline in `rightclaw` lib crate. Responsibilities:
-- Reads `RC_AGENT_DIR`, `RC_AGENT_NAME`, `RC_TELEGRAM_TOKEN[_FILE]`
-- Opens `memory.db` for session mapping
-- Loads `system-prompt.txt`
-- Runs teloxide dispatcher + cron runtime as concurrent tokio tasks
-
-### Phase C: System Prompt Composition
-
-`rightclaw up` gains a new codegen step: compose `agent_dir/.claude/system-prompt.txt` from `SOUL.md` + `USER.md` (if present) + `AGENTS.md` (if present).
-
-`codegen/system_prompt.rs` is modified: `generate_system_prompt_txt(agent)` writes to `agent_dir/.claude/system-prompt.txt`. The old `generate_combined_prompt()` function (which built the `--append-system-prompt-file` content) is removed or repurposed.
-
-The RightCron section of the current combined prompt is removed — cron management moves to Rust runtime.
-
-### Phase E: process-compose Template + rightclaw up Wiring
-
-`templates/process-compose.yaml.j2` updated. `ProcessAgent` struct gains `bot_binary_path`, `telegram_token`, drops `wrapper_path`. Shell wrapper generation loop in `cmd_up` is removed. System-prompt.txt composition is added to the per-agent loop.
-
-### Phases F and G: Cron and Cronsync
-
-These can ship independently of Telegram functionality. The cron runtime in Phase F depends on Phase B (bot process structure) but not on Phase D (Telegram handler). Cronsync SKILL.md Phase G depends on the Rust cron API being stable.
-
----
-
-## Component Boundaries After v3.0
-
-| Component | Responsibility | Status |
-|-----------|---------------|--------|
-| `rightclaw` CLI | Discovery, codegen, up/down/status | Modified |
-| `rightclaw bot` subcommand (NEW) | Telegram dispatcher, CC invocation, cron runtime | New |
-| `codegen/process_compose.rs` | PC YAML with bot binary + env block | Modified |
-| `codegen/system_prompt.rs` | Compose SOUL+USER+AGENTS → system-prompt.txt | Modified |
-| `codegen/shell_wrapper.rs` | Shell wrapper generation | Removed |
-| `memory/` | SQLite store, V2 migration adds telegram_sessions | +migration |
-| `memory_server.rs` (MCP) | MCP stdio server for CC memory tools | Unchanged |
-| process-compose.yaml | Orchestrates bot processes (not CC sessions) | Regenerated |
-
----
-
-## Data Flow: Message Handling
+### cmd_up — Sandbox Fix Flow
 
 ```
-Telegram update
-    ↓ teloxide dispatcher (RC_AGENT_DIR/memory.db)
-    ↓ lookup (chat_id, thread_id) → session_uuid
-    ↓ if new: gen UUID v4, INSERT telegram_sessions
-    ↓ if existing: SELECT session_uuid, UPDATE last_used_at
-    ↓
-    spawn: claude -p
-      --system-prompt-file $AGENT_DIR/.claude/system-prompt.txt
-      --session-id <uuid>      (new thread)  OR
-      --resume <uuid>          (existing, if reliable — verify first)
-      --dangerously-skip-permissions
-      cwd=$AGENT_DIR, HOME=$AGENT_DIR
-      -- "<user message>"
-    ↓
-    read stdout → bot.send_message(chat_id, response)
+cmd_up()
+    │
+    ├── verify_dependencies()  [deps.rs]
+    │     ├── which("process-compose") → ok/fail
+    │     ├── which("claude"/"claude-bun") → ok/fail
+    │     └── NEW: if which("rg").is_err() && vendor_rg_not_executable
+    │               → tracing::warn! (non-fatal, continue)
+    │
+    ├── for each agent:
+    │     generate_settings(agent, no_sandbox, &host_home)  [settings.rs]
+    │         existing: sandbox.enabled, filesystem, network, etc.
+    │         NEW: if which("rg").is_ok()
+    │               → settings["sandbox"]["ripgrep"] = {command: rg_path, args: []}
+    │
+    └── generate_process_compose()  [unchanged]
+          bot processes use USE_BUILTIN_RIPGREP=1 (belt-and-suspenders)
+          but settings.json ripgrep field is the primary fix
 ```
 
----
+### CC Subprocess — Sandbox Enable Flow (after fix)
 
-## Risks
+```
+claude-bun -p --dangerously-skip-permissions ...
+    reads agent/.claude/settings.json
+    sandbox.enabled = true
+    sandbox.ripgrep.command = "/nix/store/.../bin/rg"  ← NEW
+         │
+         oO6() returns {command: "/nix/store/.../bin/rg", args: []}
+         zT8() checkDependencies:
+             bwrap → found ✓
+             socat → found ✓
+             rg (runs command) → /nix/store/.../bin/rg works ✓
+         SandboxUnavailableReason() → undefined (no reason = sandbox enabled)
+         bwrap wraps bash subprocess ✓
+```
 
-| Risk | Severity | Mitigation |
-|------|----------|------------|
-| `claude -p --resume` broken in some CC versions | HIGH | Test on target CC version; fallback to `--session-id` (stateless per call) |
-| Session path changes if agent dir renamed | LOW | Document constraint; not blocking |
-| process-compose env block exposes inline tokens in TUI | MEDIUM | Enforce `telegram_token_file` over `telegram_token` for production |
-| Teloxide version compatibility with tokio 1.50 | LOW | teloxide 0.17.0 requires `tokio ^1.39`; 1.50 satisfies this |
-| notify v7 watcher callback is sync; must not block | MEDIUM | Use `unbounded_channel` + `blocking_send` pattern, never do I/O in callback |
+### doctor — New Check Flow
 
----
+```
+run_doctor(home)
+    ├── check_binary("bwrap")         ← existing
+    ├── check_binary("socat")         ← existing
+    ├── check_bwrap_sandbox()         ← existing
+    └── NEW: check_sandbox_ripgrep()
+              step 1: which("rg") → if found, Pass
+              step 2: else: resolve CC binary → find vendor rg path
+              step 3: check vendor rg mode & 0o111 != 0 → if ok, Pass
+              step 4: else Warn with fix hint
+```
+
+## Integration Points
+
+### External Service: CC settings.json sandbox.ripgrep field
+
+| Field | Schema | Notes |
+|-------|--------|-------|
+| `sandbox.ripgrep.command` | `string` | Absolute path to rg binary |
+| `sandbox.ripgrep.args` | `string[]` optional | Extra rg args (use `[]`) |
+
+This field was confirmed present in CC v2.1.89 cli.js Zod schema. It overrides
+CC's internal `$aA()` path resolution, including the vendor fallback.
+
+**Confidence: HIGH** — confirmed by source inspection of active CC version.
+
+### Internal Boundary: settings.rs ↔ deps.rs
+
+Both independently call `which::which("rg")`. There is no shared state needed —
+settings.rs uses the result to populate JSON, deps.rs uses it to decide whether
+to warn. No refactoring needed; the two calls are independent.
+
+If code reuse becomes desirable in the future, extract a `resolve_system_rg() -> Option<PathBuf>`
+helper in a shared module. Not needed for this milestone.
+
+### Internal Boundary: deps.rs ↔ doctor.rs
+
+Both check rg availability. The doctor check is richer (resolves CC vendor path as
+fallback, emits DoctorCheck struct). The deps.rs check is simpler (just warn).
+Code can be duplicated (small amount) or shared via an `is_rg_available_for_sandbox()`
+helper. Given the existing pattern (doctor.rs is standalone), duplication is fine.
+
+## Scaling Considerations
+
+Not applicable — this is a local CLI tool. The fix affects only per-agent
+`settings.json` generation at `rightclaw up` time.
+
+## Anti-Patterns
+
+### Anti-Pattern 1: Symlinking rg into the Agent Dir
+
+**What people do:** Create a symlink at `agent_dir/.bin/rg` → system rg,
+then add `agent_dir/.bin` to the PATH or `allowWrite`.
+
+**Why it's wrong:** Bubblewrap's `--bind agent_dir agent_dir` is for write
+access, not PATH injection. The CC subprocess inherits PATH from the spawning
+process (rightclaw/process-compose), not from `allowWrite`. The symlink approach
+adds complexity for zero benefit.
+
+**Do this instead:** Set `sandbox.ripgrep.command` in settings.json — CC reads
+this before constructing the bwrap call. Clean, supported, one line.
+
+### Anti-Pattern 2: Hardcoding the Nix Store Hash
+
+**What people do:** Hardcode `/nix/store/<hash>-ripgrep-.../bin/rg` in settings.rs
+or a constant.
+
+**Why it's wrong:** The nix store hash changes on every `rg` version update.
+After a `nix profile upgrade`, the hardcoded path is stale.
+
+**Do this instead:** `which::which("rg")` at `rightclaw up` time always resolves
+to the current nix profile symlink target — automatically correct after upgrades.
+
+### Anti-Pattern 3: Setting failIfUnavailable to Make Problems Visible
+
+**What people do:** Add `"failIfUnavailable": true` to `settings.json` to force
+CC to exit loudly when sandbox can't start, making the problem visible.
+
+**Why it's wrong:** CC exits on startup with an error, the bot process crashes,
+process-compose restarts it, infinite restart loop. The operator only sees the
+restart counter climbing with no useful output. This is for managed enterprise
+deployments, not debugging.
+
+**Do this instead:** Fix the root cause (inject working rg path in settings.json).
+Use `rightclaw doctor` to diagnose before `rightclaw up`.
+
+### Anti-Pattern 4: Adding /nix or /nix/store to allowRead
+
+**What people do:** Add `/nix` or `/nix/store` to `settings.json` `allowRead`,
+assuming sandbox can't read the rg binary.
+
+**Why it's wrong:** The bwrap sandbox already does `--ro-bind / /` — the entire
+filesystem is bind-mounted read-only. The nix store is already readable. The
+problem is the execute bit being absent on the vendored binary, not read access.
+`allowRead` does not affect execute semantics.
+
+**Do this instead:** Point CC to a different rg binary via `sandbox.ripgrep.command`.
 
 ## Sources
 
-- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference) — `--resume`, `--session-id`, `-p`, `--system-prompt-file` flags — HIGH confidence, official docs
-- [Claude Code settings — scope hierarchy](https://code.claude.com/docs/en/settings) — project settings loading under HOME override — HIGH confidence
-- [Bug #1967: Resuming by session ID in print mode](https://github.com/anthropics/claude-code/issues/1967) — MEDIUM confidence, issue closed but regression reported in v1.0.51+
-- [teloxide 0.17.0 on docs.rs](https://docs.rs/teloxide/latest/teloxide/) — tokio ^1.39 dep, dispatcher architecture — HIGH confidence
-- [teloxide Message struct — thread_id field](https://docs.rs/teloxide/latest/teloxide/types/struct.Message.html) — HIGH confidence
-- [notify crate on docs.rs](https://docs.rs/notify) — EventHandler, recommended_watcher — MEDIUM confidence (version not pinned in search)
-- Session storage path encoding pattern — MEDIUM confidence, multiple community sources agree
+- CC source: `/nix/store/hhydcyh1z6h2fyznlqagb1p66l07yhp6-claude-code-bun-2.1.89/lib/node_modules/@anthropic-ai/claude-code/cli.js` (inspected 2026-04-02)
+  - `$aA` lazy: rg resolution order (USE_BUILTIN_RIPGREP → system → vendor)
+  - `zT8` / `checkDependencies`: verifies bwrap + socat + rg at sandbox init
+  - `vx_` / `SandboxUnavailableReason`: returns reason string when sandbox can't start (silent degradation when `failIfUnavailable=false`)
+  - `oO6()`: returns `{rgPath, rgArgs}` — `sandbox.ripgrep` field overrides `$aA()`
+  - `sandbox.ripgrep` Zod schema: `{command: string, args?: string[]}` — confirmed documented field
+  - `failIfUnavailable`: opt-in hard failure (default false)
+  - `z34`: linux dep check function (bwrap + socat only — rg tested separately via `checkDependencies`)
+- UAT failure record: `.planning/phases/28.2-v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime/28.2-UAT.md` lines 101-111
+- Existing fix attempt: `crates/bot/src/telegram/worker.rs:399` + `cron.rs:227` — `USE_BUILTIN_RIPGREP=1` already set (insufficient alone)
+- Vendor rg permissions: mode `.r--r--r--` confirmed via `ls -la` on active CC nix build
+- System rg path: `/nix/store/l327dgzc03fl423swhgkqnrb76ymsd9f-ripgrep-15.1.0/bin/rg` (.r-xr-xr-x — executable)
+
+---
+*Architecture research for: v3.1 CC sandbox nix rg fix*
+*Researched: 2026-04-02*
