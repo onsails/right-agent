@@ -214,6 +214,9 @@ async fn execute_job(
     if let Some(max_turns) = spec.max_turns {
         cmd.arg("--max-turns").arg(max_turns.to_string());
     }
+    // --output-format json is always required: it enables the structured reply parsing path
+    // below. Even when reply-schema.json is absent, JSON mode is needed so parse_reply_output
+    // can attempt to extract a plain-string result field.
     cmd.arg("--output-format").arg("json");
     if let Some(ref schema) = reply_schema {
         cmd.arg("--json-schema").arg(schema);
@@ -284,37 +287,42 @@ async fn execute_job(
     // CRON-reply: parse CC structured output and send to Telegram if content is non-null.
     // Only on success — non-zero exit means no valid structured JSON to parse.
     // Silent by default: content:null → no message sent. Failures are silent too.
-    if output.status.success() {
-        if let Some(ref _schema) = reply_schema {
-            if !notify_chat_ids.is_empty() {
-                let raw = String::from_utf8_lossy(&output.stdout);
-                match parse_reply_output(&raw) {
-                    Ok((reply_output, _)) => {
-                        if let Some(content) = reply_output.content {
-                            for &chat_id in notify_chat_ids {
-                                if let Err(e) = bot
-                                    .send_message(teloxide::types::ChatId(chat_id), &content)
-                                    .await
-                                {
-                                    tracing::error!(
-                                        job = %job_name,
-                                        chat_id,
-                                        "failed to send cron reply to Telegram: {e:#}"
-                                    );
-                                }
-                            }
-                        }
-                        // content: None → silent (expected for most cron jobs)
-                    }
-                    Err(reason) => {
-                        tracing::warn!(
-                            job = %job_name,
-                            reason,
-                            "CC output parse failed — no Telegram notification sent"
-                        );
-                    }
+    if output.status.success() && reply_schema.is_some() && !notify_chat_ids.is_empty() {
+        if let Some(content) = parse_cron_reply_content(&output.stdout, reply_schema.is_some()) {
+            for &chat_id in notify_chat_ids {
+                // best-effort: cron Telegram delivery is fire-and-forget; send failures are
+                // logged but do not change job status (D-02 analogue for the delivery path)
+                if let Err(e) = bot
+                    .send_message(teloxide::types::ChatId(chat_id), &content)
+                    .await
+                {
+                    tracing::error!(
+                        job = %job_name,
+                        chat_id,
+                        "failed to send cron reply to Telegram: {e:#}"
+                    );
                 }
             }
+        }
+    }
+}
+
+/// Extract reply content from CC stdout for Telegram delivery.
+///
+/// Returns `Some(content)` when CC produced a non-empty reply, `None` otherwise.
+/// Called only when `has_schema` is true (gating is the caller's responsibility).
+/// Parses via `parse_reply_output` so both `structured_output` and plain-string `result`
+/// fields are handled (CC does not always comply with `--json-schema` after MCP tool use).
+pub(crate) fn parse_cron_reply_content(stdout: &[u8], has_schema: bool) -> Option<String> {
+    if !has_schema {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(stdout);
+    match parse_reply_output(&raw) {
+        Ok((reply_output, _)) => reply_output.content,
+        Err(reason) => {
+            tracing::warn!(reason, "CC cron output parse failed — no Telegram notification sent");
+            None
         }
     }
 }
@@ -335,6 +343,9 @@ fn update_run_record(
 }
 
 /// Main reconciler loop. Polls `crons/*.yaml` every 60s, spawning per-job loops.
+///
+/// `bot` and `notify_chat_ids` are threaded down to `execute_job` so that CC output
+/// containing a `reply` tool call is delivered to Telegram after each successful run.
 ///
 /// Signature expected by lib.rs spawn site (CRON-01, CRON-02, CRON-06).
 pub async fn run_cron_task(
@@ -437,6 +448,9 @@ async fn run_job_loop(
 
         // Spawn execution so the loop continues counting ticks while the job runs.
         // The lock in execute_job prevents concurrent executions of the same job.
+        // Note: if reconcile_jobs aborts this loop handle (spec changed/removed), any
+        // in-flight execute_job spawn runs to completion as an orphan — this is intentional.
+        // The lock expires naturally and the next reconcile tick picks up the updated spec.
         let jn = job_name.clone();
         let sp = spec.clone();
         let ad = agent_dir.clone();
@@ -546,5 +560,49 @@ max_turns: 10
         assert_eq!(spec.prompt, "Check system health");
         assert_eq!(spec.lock_ttl.as_deref(), Some("1h"));
         assert_eq!(spec.max_turns, Some(10));
+    }
+
+    // parse_cron_reply_content tests — cover gating logic for CRON-reply delivery
+
+    #[test]
+    fn parse_cron_reply_content_no_schema_returns_none() {
+        // Even if stdout has valid CC JSON, no schema → no delivery
+        let json = r#"{"result":{"content":"hello","reply_to_message_id":null,"media_paths":null}}"#;
+        assert!(parse_cron_reply_content(json.as_bytes(), false).is_none());
+    }
+
+    #[test]
+    fn parse_cron_reply_content_with_schema_returns_content() {
+        let json = r#"{"result":{"content":"cron says hi","reply_to_message_id":null,"media_paths":null}}"#;
+        let result = parse_cron_reply_content(json.as_bytes(), true);
+        assert_eq!(result.as_deref(), Some("cron says hi"));
+    }
+
+    #[test]
+    fn parse_cron_reply_content_null_content_returns_none() {
+        // content: null → silent job, nothing sent to Telegram
+        let json = r#"{"result":{"content":null,"reply_to_message_id":null,"media_paths":null}}"#;
+        assert!(parse_cron_reply_content(json.as_bytes(), true).is_none());
+    }
+
+    #[test]
+    fn parse_cron_reply_content_plain_string_result_wrapped() {
+        // CC sometimes returns result as plain string after MCP tool use
+        let json = r#"{"result":"market update: BTC up 2%"}"#;
+        let result = parse_cron_reply_content(json.as_bytes(), true);
+        assert_eq!(result.as_deref(), Some("market update: BTC up 2%"));
+    }
+
+    #[test]
+    fn parse_cron_reply_content_unparseable_json_returns_none() {
+        let result = parse_cron_reply_content(b"not json at all", true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_cron_reply_content_structured_output_preferred_over_result() {
+        let json = r#"{"result":"ignored","structured_output":{"content":"from structured","reply_to_message_id":null,"media_paths":null}}"#;
+        let result = parse_cron_reply_content(json.as_bytes(), true);
+        assert_eq!(result.as_deref(), Some("from structured"));
     }
 }
