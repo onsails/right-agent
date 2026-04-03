@@ -25,3 +25,11 @@ processes:
       signal: 15
       timeout_seconds: 30
 {% endfor %}
+{% if tunnel_token %}
+  cloudflared:
+    command: "cloudflared tunnel --config {{ cloudflared_config_path }} run --token {{ tunnel_token }}"
+    availability:
+      restart: on_failure
+      backoff_seconds: 5
+      max_restarts: 3
+{% endif %}

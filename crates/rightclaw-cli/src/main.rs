@@ -603,6 +603,24 @@ async fn cmd_up(
         }
     }
 
+    // Read global config for optional cloudflared tunnel integration (D-03, D-09).
+    let global_config = rightclaw::config::read_global_config(&home)?;
+    let tunnel = global_config.tunnel.as_ref();
+
+    // Generate cloudflared ingress config if tunnel is configured (D-09).
+    if let Some(tunnel_cfg) = tunnel {
+        let agent_pairs: Vec<(String, std::path::PathBuf)> = agents
+            .iter()
+            .map(|a| (a.name.clone(), a.path.clone()))
+            .collect();
+        let cf_config =
+            rightclaw::codegen::cloudflared::generate_cloudflared_config(&agent_pairs, &tunnel_cfg.url)?;
+        let cf_config_path = home.join("cloudflared-config.yml");
+        std::fs::write(&cf_config_path, &cf_config)
+            .map_err(|e| miette::miette!("write cloudflared config: {e:#}"))?;
+        tracing::info!(path = %cf_config_path.display(), "cloudflared config written");
+    }
+
     // Generate process-compose.yaml (bot-only entries, Phase 26).
     let has_bot_agents = agents.iter().any(|a| {
         a.config
@@ -614,7 +632,15 @@ async fn cmd_up(
         eprintln!("rightclaw: no agents have Telegram tokens configured — nothing to start");
         return Err(miette::miette!("no agents have Telegram tokens configured"));
     }
-    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &self_exe, debug)?;
+    let tunnel_token = tunnel.map(|t| t.token.as_str());
+    let cf_config_path_str = tunnel.map(|_| home.join("cloudflared-config.yml").to_string_lossy().into_owned());
+    let pc_config = rightclaw::codegen::generate_process_compose(
+        &agents,
+        &self_exe,
+        debug,
+        tunnel_token,
+        cf_config_path_str.as_deref(),
+    )?;
     let config_path = run_dir.join("process-compose.yaml");
     std::fs::write(&config_path, &pc_config)
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;

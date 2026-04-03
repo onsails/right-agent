@@ -140,7 +140,7 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
 fn bot_agent_process_key_contains_name_bot() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("myagent-bot:"),
         "expected '<name>-bot:' process key in:\n{output}"
@@ -151,7 +151,7 @@ fn bot_agent_process_key_contains_name_bot() {
 fn bot_agent_command_contains_rightclaw_bot_agent() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("rightclaw bot --agent myagent"),
         "expected 'rightclaw bot --agent myagent' in:\n{output}"
@@ -162,7 +162,7 @@ fn bot_agent_command_contains_rightclaw_bot_agent() {
 fn bot_agent_env_contains_rc_agent_dir() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("RC_AGENT_DIR=/home/user/.rightclaw/agents/myagent"),
         "expected RC_AGENT_DIR in:\n{output}"
@@ -173,7 +173,7 @@ fn bot_agent_env_contains_rc_agent_dir() {
 fn bot_agent_env_contains_rc_agent_name() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("RC_AGENT_NAME=myagent"),
         "expected RC_AGENT_NAME=myagent in:\n{output}"
@@ -184,7 +184,7 @@ fn bot_agent_env_contains_rc_agent_name() {
 fn inline_token_uses_rc_telegram_token() {
     let agents = vec![make_bot_agent("myagent", "999:mytoken")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("RC_TELEGRAM_TOKEN=999:mytoken"),
         "expected RC_TELEGRAM_TOKEN in:\n{output}"
@@ -195,7 +195,7 @@ fn inline_token_uses_rc_telegram_token() {
 fn token_file_uses_rc_telegram_token_file_with_abs_path() {
     let agents = vec![make_agent_token_file("myagent", ".telegram.env")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     // Should resolve relative path to absolute: agent.path + file
     let expected = "RC_TELEGRAM_TOKEN_FILE=/home/user/.rightclaw/agents/myagent/.telegram.env";
     assert!(
@@ -213,7 +213,7 @@ fn agent_without_telegram_token_absent_from_output() {
         make_agent_no_token("no-token"),
     ];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         !output.contains("no-token"),
         "agent without token must be absent from output:\n{output}"
@@ -227,7 +227,7 @@ fn agent_without_config_absent_from_output() {
         make_agent_no_config("no-config"),
     ];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         !output.contains("no-config"),
         "agent without config must be absent from output:\n{output}"
@@ -240,7 +240,7 @@ fn agent_without_config_absent_from_output() {
 fn output_does_not_contain_is_interactive() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         !output.contains("is_interactive"),
         "is_interactive must not appear in output:\n{output}"
@@ -253,7 +253,7 @@ fn output_does_not_contain_is_interactive() {
 fn env_contains_enable_claudeai_mcp_servers_false() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("ENABLE_CLAUDEAI_MCP_SERVERS=false"),
         "expected ENABLE_CLAUDEAI_MCP_SERVERS=false in:\n{output}"
@@ -264,7 +264,7 @@ fn env_contains_enable_claudeai_mcp_servers_false() {
 fn env_contains_mcp_connection_nonblocking() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("MCP_CONNECTION_NONBLOCKING=1"),
         "expected MCP_CONNECTION_NONBLOCKING=1 in:\n{output}"
@@ -277,7 +277,7 @@ fn env_contains_mcp_connection_nonblocking() {
 fn output_starts_with_generated_comment() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.starts_with("# Generated by rightclaw"),
         "expected '# Generated by rightclaw' at start of:\n{output}"
@@ -288,7 +288,7 @@ fn output_starts_with_generated_comment() {
 fn output_contains_is_strict_true() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("is_strict: true"),
         "expected is_strict: true in:\n{output}"
@@ -301,7 +301,7 @@ fn output_contains_is_strict_true() {
 fn restart_policy_on_failure_maps_correctly() {
     let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::OnFailure)];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("restart: \"on_failure\""),
         "expected on_failure policy in:\n{output}"
@@ -312,7 +312,7 @@ fn restart_policy_on_failure_maps_correctly() {
 fn restart_policy_always_maps_correctly() {
     let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::Always)];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("restart: \"always\""),
         "expected always policy in:\n{output}"
@@ -323,7 +323,7 @@ fn restart_policy_always_maps_correctly() {
 fn restart_policy_never_maps_to_no() {
     let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::Never)];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     assert!(
         output.contains("restart: \"no\""),
         "expected 'no' for Never policy in:\n{output}"
@@ -335,7 +335,7 @@ fn defaults_when_no_config_not_in_output() {
     // Agent with no config has no telegram token, so should not appear in output at all
     let agents = vec![make_agent_no_config("plain")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, false).unwrap();
+    let output = generate_process_compose(&agents, exe, false, None, None).unwrap();
     // No bot agents => the processes section should be empty (no plain: entry)
     assert!(
         !output.contains("plain"),

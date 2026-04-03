@@ -110,6 +110,12 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // DOC-02: per-agent settings.json ripgrep.command validation (cross-platform)
     checks.extend(check_ripgrep_in_settings(home));
 
+    // cloudflared binary check — Warn severity (D-03, OAUTH-04)
+    checks.push(check_cloudflared_binary());
+
+    // Tunnel config presence check — Warn severity (D-03)
+    checks.push(check_tunnel_config(home));
+
     checks
 }
 
@@ -591,6 +597,55 @@ fn fetch_webhook_url(token: &str) -> Result<String, String> {
                 .to_string())
         })
     })
+}
+
+/// Check if `cloudflared` binary is available in PATH. (D-03, OAUTH-04)
+///
+/// Warn severity — cloudflared is optional for non-OAuth deployments.
+/// Absence only becomes critical when OAuth callbacks via named tunnel are needed.
+fn check_cloudflared_binary() -> DoctorCheck {
+    let raw = check_binary(
+        "cloudflared",
+        Some("install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"),
+    );
+    DoctorCheck {
+        status: if raw.status == CheckStatus::Pass {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        ..raw
+    }
+}
+
+/// Check whether a cloudflare tunnel is configured in `<home>/config.yaml`. (D-03)
+///
+/// Warn severity — tunnel is optional for bots that don't use MCP OAuth.
+/// When tunnel is absent, `/mcp auth` will fail at runtime but other commands work.
+fn check_tunnel_config(home: &Path) -> DoctorCheck {
+    match crate::config::read_global_config(home) {
+        Ok(cfg) if cfg.tunnel.is_some() => DoctorCheck {
+            name: "tunnel-config".to_string(),
+            status: CheckStatus::Pass,
+            detail: "tunnel configured in config.yaml".to_string(),
+            fix: None,
+        },
+        Ok(_) => DoctorCheck {
+            name: "tunnel-config".to_string(),
+            status: CheckStatus::Warn,
+            detail: "no tunnel configured — MCP OAuth callbacks will not work".to_string(),
+            fix: Some(
+                "run `rightclaw init --tunnel-token TOKEN --tunnel-url URL` to configure tunnel"
+                    .to_string(),
+            ),
+        },
+        Err(e) => DoctorCheck {
+            name: "tunnel-config".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!("failed to read config.yaml: {e:#}"),
+            fix: None,
+        },
+    }
 }
 
 /// Generate fix guidance for bubblewrap sandbox failures.
