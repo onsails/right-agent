@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: MCP OAuth
-status: verifying
-stopped_at: Completed 34-04-PLAN.md
-last_updated: "2026-04-03T23:06:27.324Z"
+status: executing
+stopped_at: Completed 35-01-PLAN.md
+last_updated: "2026-04-03T23:51:27.162Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 6
-  completed_plans: 6
+  total_plans: 9
+  completed_plans: 7
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 34 — core-oauth-flow
+**Current focus:** Phase 35 — token-refresh
 
 ## Current Position
 
-Phase: 35
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 35 (token-refresh) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-04-03
 
 Progress: [░░░░░░░░░░] 0%
@@ -47,6 +47,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 34-core-oauth-flow P02 | 4m | 2 tasks | 3 files |
 | Phase 34 P03 | 6m | 2 tasks | 9 files |
 | Phase 34 P04 | 12min | 4 tasks | 6 files |
+| Phase 35 P01 | 4m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,7 @@ Recent decisions relevant to v3.2:
 - [Phase 34]: catch-all http_status:404 is always emitted regardless of agent count — cloudflared rejects configs without it
 - [Phase 34]: write_credential takes (path, server_name, server_url, token) and derives key internally; plan interface mismatch auto-corrected
 - [Phase 34]: exchange_token arg order: (client, endpoint, code, redirect_uri, client_id, secret, verifier) — not as documented in plan
+- [Phase 35]: client_id stored as Some(String) always — PendingAuth.client_id is non-optional (DCR or static fallback guarantees it); client_secret is Option to handle public/confidential clients
 
 ### Pending Todos
 
@@ -88,6 +90,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-03T23:01:48.914Z
-Stopped at: Completed 34-04-PLAN.md
+Last session: 2026-04-03T23:51:27.158Z
+Stopped at: Completed 35-01-PLAN.md
 Resume file: None
