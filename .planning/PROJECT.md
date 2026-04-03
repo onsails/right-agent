@@ -83,12 +83,13 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `rightclaw doctor` checks rg in PATH + validates settings.json ripgrep.command (cross-platform) — v3.1 Phase 30 (DOC-01, DOC-02)
 - ✓ `tests/e2e/verify-sandbox.sh` — repeatable 4-stage script proving sandbox engagement via exit-code strategy under `failIfUnavailable:true`; live-run confirmed 2026-04-03 — v3.1 Phase 31 (VER-01..03)
 - ✓ `mcp::credentials` module — `mcp_oauth_key` deterministic key derivation (Notion test vector locked), `write_credential` atomic tmp+rename with 5-slot backup rotation, `read_credential`; CRED-01, CRED-02 — v3.2 Phase 32
+- ✓ `mcp::detect` module — `AuthState` enum (present/missing/expired), `mcp_auth_status` reads .mcp.json + credentials.json; `rightclaw mcp status [--agent NAME]` CLI; `rightclaw up` pre-launch warn; DETECT-01, DETECT-02 — v3.2 Phase 33
 
 ### Active
 
-- MCP authentication detection — detect unauthenticated MCP servers in .mcp.json
 - OAuth callback server — local HTTP to receive OAuth redirect
-- Tunnel integration — ngrok/Cloudflare for external redirect URL
+- OAuth callback server — local HTTP to receive OAuth redirect
+- Tunnel integration — cloudflared for external redirect URL
 - Token refresh — automatic refresh or prompt on expiry
 
 ### Out of Scope
@@ -161,7 +162,7 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v3.1 shipped** (2026-04-03). Sandbox Fix & Verification complete.
+**v3.2 Phase 33 shipped** (2026-04-03). MCP auth detection complete.
 
 - System `rg` path injected into CC sandbox settings.json via `which::which("rg")` at `rightclaw up` time; `USE_BUILTIN_RIPGREP` polarity fixed to `"0"`; `failIfUnavailable: true` added unconditionally
 - `rightclaw doctor` now surfaces ripgrep PATH availability (Linux, Warn) and validates settings.json sandbox.ripgrep.command per-agent (cross-platform, Warn)
@@ -188,4 +189,4 @@ This document evolves at phase transitions and milestone boundaries.
 - VER-01 description in verify-sandbox.sh slightly overclaims — matches cron.rs pattern, not worker.rs `--resume` path (sandbox correctness unaffected)
 
 ---
-*Last updated: 2026-04-03 — Phase 32 complete (credential-foundation)*
+*Last updated: 2026-04-03 — Phase 33 complete (auth-detection)*
