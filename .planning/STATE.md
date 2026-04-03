@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v3.1
-milestone_name: Sandbox Fix & Verification
-status: complete
-stopped_at: v3.1 milestone archived
-last_updated: "2026-04-03T11:00:00.000Z"
+milestone: v3.2
+milestone_name: MCP OAuth
+status: planning
+stopped_at: defining requirements
+last_updated: "2026-04-03T12:00:00.000Z"
 last_activity: 2026-04-03
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 ## Current Position
 
-Phase: v3.1 complete — planning next milestone
+Phase: Not started (defining requirements)
 Plan: —
-Status: Milestone v3.1 archived 2026-04-03
-Last activity: 2026-04-03
+Status: Defining requirements
+Last activity: 2026-04-03 — Milestone v3.2 MCP OAuth started
 
-Progress: [██████████] 100%
+Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 

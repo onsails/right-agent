@@ -8,14 +8,16 @@ RightClaw is a multi-agent runtime for Claude Code. Each agent runs as an indepe
 
 Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, each with its own sandbox configuration and identity, orchestrated by a single CLI command.
 
-## Current Milestone: v3.2 (TBD)
+## Current Milestone: v3.2 MCP OAuth
 
-**Goal:** Next milestone — to be defined.
+**Goal:** Automate MCP OAuth authentication for agents — detect unauthenticated servers and complete the OAuth flow without requiring interactive `/mcp` inside Claude Code.
 
 **Target features:**
-- Fix sandbox so CC finds its dependencies when launched from rightclaw (nix vendored ripgrep path issue)
-- End-to-end verification of rightclaw up → bot → Telegram → cron flow with sandbox enabled
-- Doctor diagnostics detect and report sandbox dependency issues before launch
+- MCP authentication detection — check which servers in .mcp.json need OAuth
+- OAuth callback server — local HTTP server to receive redirect from OAuth provider
+- Tunnel integration — ngrok or Cloudflare tunnel to expose callback URL externally
+- Credential storage — write tokens to Claude's internal MCP OAuth credential files
+- Token refresh — detect expiry and refresh automatically (or prompt when needed)
 
 ## Requirements
 
@@ -83,7 +85,11 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 ### Active
 
-None — v3.1 milestone complete.
+- MCP authentication detection — detect unauthenticated MCP servers in .mcp.json
+- OAuth callback server — local HTTP to receive OAuth redirect
+- Tunnel integration — ngrok/Cloudflare for external redirect URL
+- Credential storage — write OAuth tokens to CC's internal MCP credential files
+- Token refresh — automatic refresh or prompt on expiry
 
 ### Out of Scope
 
@@ -182,4 +188,4 @@ This document evolves at phase transitions and milestone boundaries.
 - VER-01 description in verify-sandbox.sh slightly overclaims — matches cron.rs pattern, not worker.rs `--resume` path (sandbox correctness unaffected)
 
 ---
-*Last updated: 2026-04-03 after v3.1 milestone*
+*Last updated: 2026-04-03 — v3.2 milestone started*
