@@ -1,8 +1,8 @@
 ---
 phase: 31-e2e-verification
 verified: 2026-04-02T22:30:00Z
-status: human_needed
-score: 1/3 must-haves verified (3rd programmatically verified; 1st and 2nd need live agent)
+status: passed
+score: 3/3 must-haves verified (live run confirmed 2026-04-03)
 re_verification: false
 human_verification:
   - test: "Bot subprocess sandbox confirmation (VER-01)"

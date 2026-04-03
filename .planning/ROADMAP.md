@@ -217,7 +217,7 @@ Plans:
 
 - [x] **Phase 29: Sandbox Dependency Fix** - Inject system rg path into settings.json, fix USE_BUILTIN_RIPGREP env var, add failIfUnavailable, add ripgrep to devenv.nix (completed 2026-04-02)
 - [x] **Phase 30: Doctor Diagnostics** - Doctor checks ripgrep availability for agent process PATH and validates generated settings.json sandbox config (completed 2026-04-02)
-- [ ] **Phase 31: E2E Verification** - Full flow verification (rightclaw up → doctor green → sandbox ON → Telegram → cron) with repeatable checklist
+- [x] **Phase 31: E2E Verification** - Full flow verification (rightclaw up → doctor green → sandbox ON → Telegram → cron) with repeatable checklist (completed 2026-04-03)
 
 ## Phase Details
 
@@ -276,4 +276,4 @@ Phases execute in order: 29 → 30 → 31
 | 28.2. v3.0 UAT Fix | v3.0 | 2/2 | Complete | 2026-04-01 |
 | 29. Sandbox Dependency Fix | v3.1 | 1/1 | Complete    | 2026-04-02 |
 | 30. Doctor Diagnostics | v3.1 | 1/1 | Complete    | 2026-04-02 |
-| 31. E2E Verification | v3.1 | 0/TBD | Not started | - |
+| 31. E2E Verification | v3.1 | 0/TBD | Complete    | 2026-04-03 |
