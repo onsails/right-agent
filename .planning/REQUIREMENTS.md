@@ -7,8 +7,8 @@
 
 ### CRED — Credential Foundation
 
-- [ ] **CRED-01**: Operator can trust that MCP OAuth tokens are written under the exact key CC expects — `serverName|sha256({"type":"...","url":"...","headers":{}}, no whitespace)[:16]` — verified by unit test against live Notion entry (`notion|eac663db915250e7`)
-- [ ] **CRED-02**: Operator can trust concurrent `rightclaw` invocations never corrupt `.credentials.json` — write is atomic (tmp + POSIX rename) with backup before modification; never clobbers unrelated keys (`claudeAiOauth`, etc.)
+- [x] **CRED-01**: Operator can trust that MCP OAuth tokens are written under the exact key CC expects — `serverName|sha256({"type":"...","url":"...","headers":{}}, no whitespace)[:16]` — verified by unit test against live Notion entry (`notion|eac663db915250e7`)
+- [x] **CRED-02**: Operator can trust concurrent `rightclaw` invocations never corrupt `.credentials.json` — write is atomic (tmp + POSIX rename) with backup before modification; never clobbers unrelated keys (`claudeAiOauth`, etc.)
 
 ### DETECT — Auth Detection
 
@@ -66,8 +66,8 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CRED-01 | Phase 32 | Pending |
-| CRED-02 | Phase 32 | Pending |
+| CRED-01 | Phase 32 | Complete |
+| CRED-02 | Phase 32 | Complete |
 | DETECT-01 | Phase 33 | Pending |
 | DETECT-02 | Phase 33 | Pending |
 | OAUTH-01 | Phase 34 | Pending |

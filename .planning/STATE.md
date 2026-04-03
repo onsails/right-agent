@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: MCP OAuth
-status: planning
-stopped_at: roadmap created
-last_updated: "2026-04-03T12:00:00.000Z"
+status: verifying
+stopped_at: Completed 32-01-PLAN.md
+last_updated: "2026-04-03T13:17:18.622Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 5
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 32 — Credential Foundation (v3.2 MCP OAuth)
+**Current focus:** Phase 32 — credential-foundation
 
 ## Current Position
 
-Phase: 32 of 36 (Credential Foundation)
-Plan: —
-Status: Ready to plan
-Last activity: 2026-04-03 — v3.2 roadmap created (Phases 32-36)
+Phase: 32 (credential-foundation) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-04-03
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -41,6 +41,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 29-01 | 1 | — | — |
 | Phase 30-01 | 1 | — | — |
 | Phase 31-01 | 1 | — | — |
+| Phase 32-credential-foundation P01 | 5 | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -57,6 +58,8 @@ Recent decisions relevant to v3.2:
 - [v3.2 research]: axum 0.8 + oauth2 5.0 + open 5.3 + sha2 0.10 added as new workspace deps
 - [v3.2 research]: expiresAt=0 means non-expiring (Linear); must skip in refresh loop
 - [v3.2 research]: Agent must be restarted after OAuth — CC MCP client does not reconnect in-process (issue #10250)
+- [Phase 32-credential-foundation]: serde_json::json! sorts keys alphabetically — build compact JSON manually to guarantee type->url->headers field order for CC credential key formula
+- [Phase 32-credential-foundation]: Backup rotation slot shift must iterate ascending to avoid overwriting slots; concurrent ENOENT on rename is benign (TOCTOU)
 
 ### Pending Todos
 
@@ -70,6 +73,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-03
-Stopped at: v3.2 roadmap created
+Last session: 2026-04-03T13:17:18.619Z
+Stopped at: Completed 32-01-PLAN.md
 Resume file: None

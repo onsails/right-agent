@@ -82,7 +82,7 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
 
 **Milestone Goal:** Automate MCP OAuth authentication for agents — detect unauthenticated servers, complete the full OAuth 2.1 + PKCE flow, write tokens to CC's credential store, refresh on expiry, and expose the full workflow via Telegram bot commands.
 
-- [ ] **Phase 32: Credential Foundation** - Correct key formula + atomic credential writes
+- [x] **Phase 32: Credential Foundation** - Correct key formula + atomic credential writes (completed 2026-04-03)
 - [ ] **Phase 33: Auth Detection** - Per-agent MCP auth status surface and pre-flight warning
 - [ ] **Phase 34: Core OAuth Flow** - Full OAuth 2.1 + PKCE with cloudflared tunnel + agent restart
 - [ ] **Phase 35: Token Refresh** - On-demand refresh, pre-flight refresh, doctor integration
@@ -100,7 +100,7 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
   3. Writing an MCP token never removes or modifies `claudeAiOauth` or other unrelated keys already in the file
 **Plans**: 1 plan
 Plans:
-- [ ] 32-01-PLAN.md — mcp/credentials module: key derivation + atomic write with backup rotation
+- [x] 32-01-PLAN.md — mcp/credentials module: key derivation + atomic write with backup rotation
 
 ### Phase 33: Auth Detection
 **Goal**: Operators can see which MCP servers need OAuth and get warned before launching agents with unauthenticated servers
@@ -164,7 +164,7 @@ Plans:
 | 29. Sandbox Dependency Fix | v3.1 | 1/1 | Complete | 2026-04-02 |
 | 30. Doctor Diagnostics | v3.1 | 1/1 | Complete | 2026-04-02 |
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
-| 32. Credential Foundation | v3.2 | 0/1 | Not started | - |
+| 32. Credential Foundation | v3.2 | 1/1 | Complete   | 2026-04-03 |
 | 33. Auth Detection | v3.2 | 0/? | Not started | - |
 | 34. Core OAuth Flow | v3.2 | 0/? | Not started | - |
 | 35. Token Refresh | v3.2 | 0/? | Not started | - |
