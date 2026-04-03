@@ -21,7 +21,8 @@ use tokio::sync::mpsc;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_message, handle_reset, handle_start, DebugFlag};
+use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, DebugFlag};
+use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
 #[derive(BotCommands, Clone)]
@@ -31,6 +32,10 @@ enum BotCommand {
     Start,
     #[command(description = "Reset conversation session for this thread")]
     Reset,
+    #[command(description = "MCP server management (list/auth/add/remove)")]
+    Mcp(String),
+    #[command(description = "Run diagnostics")]
+    Doctor,
 }
 
 /// Run the teloxide long-polling dispatcher.
@@ -50,6 +55,8 @@ pub async fn run_telegram(
     allowed_chat_ids: Vec<i64>,
     agent_dir: PathBuf,
     debug: bool,
+    pending_auth: PendingAuthMap,
+    home: PathBuf,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
@@ -62,6 +69,8 @@ pub async fn run_telegram(
         Arc::new(DashMap::new());
     let agent_dir_arc: Arc<PathBuf> = Arc::new(agent_dir);
     let debug_arc: Arc<DebugFlag> = Arc::new(DebugFlag(debug));
+    let home_arc: Arc<PathBuf> = Arc::new(home);
+    let pending_auth_arc: PendingAuthMap = pending_auth;
 
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
@@ -71,6 +80,12 @@ pub async fn run_telegram(
         )
         .branch(
             dptree::case![BotCommand::Reset].endpoint(handle_reset),
+        )
+        .branch(
+            dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp),
+        )
+        .branch(
+            dptree::case![BotCommand::Doctor].endpoint(handle_doctor),
         );
 
     let message_handler = Update::filter_message()
@@ -84,7 +99,13 @@ pub async fn run_telegram(
     let schema = dptree::entry().branch(message_handler);
 
     let mut dispatcher = Dispatcher::builder(bot.clone(), schema)
-        .dependencies(dptree::deps![Arc::clone(&worker_map), Arc::clone(&agent_dir_arc), Arc::clone(&debug_arc)])
+        .dependencies(dptree::deps![
+            Arc::clone(&worker_map),
+            Arc::clone(&agent_dir_arc),
+            Arc::clone(&debug_arc),
+            pending_auth_arc,
+            Arc::clone(&home_arc)
+        ])
         .build();
 
     let shutdown_token = dispatcher.shutdown_token();
