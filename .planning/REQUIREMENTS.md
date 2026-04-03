@@ -88,10 +88,10 @@
 | BOT-05 | Phase 36 | Pending |
 
 **Coverage:**
-- v3.2 requirements: 19 total
-- Mapped to phases: 19
+- v3.2 requirements: 20 total (CRED×2 + DETECT×2 + OAUTH×7 + REFRESH×4 + BOT×5)
+- Mapped to phases: 20
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-04-03*
-*Last updated: 2026-04-03 — initial v3.2 definition*
+*Last updated: 2026-04-03 — roadmap created, coverage count corrected to 20*
