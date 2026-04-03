@@ -161,5 +161,5 @@ Plans:
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
 | 32. Credential Foundation | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 33. Auth Detection | v3.2 | 1/1 | Complete    | 2026-04-03 |
-| 34. Core OAuth Flow + Bot | v3.2 | 4/4 | Complete   | 2026-04-03 |
+| 34. Core OAuth Flow + Bot | v3.2 | 4/4 | Complete    | 2026-04-03 |
 | 35. Token Refresh | v3.2 | 0/? | Not started | - |
