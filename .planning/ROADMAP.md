@@ -164,7 +164,7 @@ Plans:
 | 29. Sandbox Dependency Fix | v3.1 | 1/1 | Complete | 2026-04-02 |
 | 30. Doctor Diagnostics | v3.1 | 1/1 | Complete | 2026-04-02 |
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
-| 32. Credential Foundation | v3.2 | 1/1 | Complete   | 2026-04-03 |
+| 32. Credential Foundation | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 33. Auth Detection | v3.2 | 0/? | Not started | - |
 | 34. Core OAuth Flow | v3.2 | 0/? | Not started | - |
 | 35. Token Refresh | v3.2 | 0/? | Not started | - |
