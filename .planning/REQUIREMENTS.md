@@ -12,8 +12,8 @@
 
 ### DETECT — Auth Detection
 
-- [ ] **DETECT-01**: Operator can run `rightclaw mcp status [--agent <name>]` and see a table of MCP servers with auth state per agent (present / missing / expired)
-- [ ] **DETECT-02**: Operator sees a non-fatal Warn during `rightclaw up` when any agent has MCP servers with missing or expired OAuth tokens
+- [x] **DETECT-01**: Operator can run `rightclaw mcp status [--agent <name>]` and see a table of MCP servers with auth state per agent (present / missing / expired)
+- [x] **DETECT-02**: Operator sees a non-fatal Warn during `rightclaw up` when any agent has MCP servers with missing or expired OAuth tokens
 
 ### OAUTH — Core OAuth Flow
 
@@ -68,8 +68,8 @@
 |-------------|-------|--------|
 | CRED-01 | Phase 32 | Complete |
 | CRED-02 | Phase 32 | Complete |
-| DETECT-01 | Phase 33 | Pending |
-| DETECT-02 | Phase 33 | Pending |
+| DETECT-01 | Phase 33 | Complete |
+| DETECT-02 | Phase 33 | Complete |
 | OAUTH-01 | Phase 34 | Pending |
 | OAUTH-02 | Phase 34 | Pending |
 | OAUTH-03 | Phase 34 | Pending |

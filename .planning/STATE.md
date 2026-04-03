@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: MCP OAuth
 status: verifying
-stopped_at: Completed 32-01-PLAN.md
-last_updated: "2026-04-03T13:19:42.244Z"
+stopped_at: Completed 33-01-PLAN.md
+last_updated: "2026-04-03T15:11:20.567Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 5
-  completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  completed_phases: 2
+  total_plans: 2
+  completed_plans: 2
   percent: 0
 ---
 
@@ -21,12 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 32 — credential-foundation
+**Current focus:** Phase 33 — auth-detection
 
 ## Current Position
 
-Phase: 33
-Plan: Not started
+Phase: 33 (auth-detection) — EXECUTING
+Plan: 1 of 1
 Status: Phase complete — ready for verification
 Last activity: 2026-04-03
 
@@ -42,6 +42,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 30-01 | 1 | — | — |
 | Phase 31-01 | 1 | — | — |
 | Phase 32-credential-foundation P01 | 5 | 2 tasks | 7 files |
+| Phase 33-auth-detection P01 | 8 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -60,6 +61,8 @@ Recent decisions relevant to v3.2:
 - [v3.2 research]: Agent must be restarted after OAuth — CC MCP client does not reconnect in-process (issue #10250)
 - [Phase 32-credential-foundation]: serde_json::json! sorts keys alphabetically — build compact JSON manually to guarantee type->url->headers field order for CC credential key formula
 - [Phase 32-credential-foundation]: Backup rotation slot shift must iterate ascending to avoid overwriting slots; concurrent ENOENT on rename is benign (TOCTOU)
+- [Phase 33-auth-detection]: expires_at=0 treated as Present (non-expiring), not Expired — Linear case
+- [Phase 33-auth-detection]: Stdio servers (no url field) silently skipped — url presence is the OAuth candidate boundary
 
 ### Pending Todos
 
@@ -73,6 +76,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-03T13:17:18.619Z
-Stopped at: Completed 32-01-PLAN.md
+Last session: 2026-04-03T15:11:20.564Z
+Stopped at: Completed 33-01-PLAN.md
 Resume file: None
