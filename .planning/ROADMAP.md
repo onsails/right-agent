@@ -83,7 +83,7 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
 **Milestone Goal:** Automate MCP OAuth authentication for agents — detect unauthenticated servers, complete the full OAuth 2.1 + PKCE flow, write tokens to CC's credential store, refresh on expiry, and expose the full workflow via Telegram bot commands.
 
 - [x] **Phase 32: Credential Foundation** - Correct key formula + atomic credential writes (completed 2026-04-03)
-- [ ] **Phase 33: Auth Detection** - Per-agent MCP auth status surface and pre-flight warning
+- [x] **Phase 33: Auth Detection** - Per-agent MCP auth status surface and pre-flight warning (completed 2026-04-03)
 - [ ] **Phase 34: Core OAuth Flow** - Full OAuth 2.1 + PKCE with cloudflared tunnel + agent restart
 - [ ] **Phase 35: Token Refresh** - On-demand refresh, pre-flight refresh, doctor integration
 - [ ] **Phase 36: Telegram Bot MCP Commands** - /mcp and /doctor commands via Teloxide bot
@@ -112,7 +112,7 @@ Plans:
   3. `rightclaw up` prints a non-fatal Warn (does not abort launch) when any agent has MCP servers with missing or expired OAuth tokens
 **Plans**: 1 plan
 Plans:
-- [ ] 33-01-PLAN.md — mcp::detect module + CLI wiring for mcp status + cmd_up warn
+- [x] 33-01-PLAN.md — mcp::detect module + CLI wiring for mcp status + cmd_up warn
 
 ### Phase 34: Core OAuth Flow
 **Goal**: Operators can complete a full OAuth 2.1 + PKCE flow for any named MCP server via `rightclaw mcp auth`, with tokens written to CC's credential store and the agent restarted automatically
@@ -167,7 +167,7 @@ Plans:
 | 30. Doctor Diagnostics | v3.1 | 1/1 | Complete | 2026-04-02 |
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
 | 32. Credential Foundation | v3.2 | 1/1 | Complete    | 2026-04-03 |
-| 33. Auth Detection | v3.2 | 0/? | Not started | - |
+| 33. Auth Detection | v3.2 | 1/1 | Complete   | 2026-04-03 |
 | 34. Core OAuth Flow | v3.2 | 0/? | Not started | - |
 | 35. Token Refresh | v3.2 | 0/? | Not started | - |
 | 36. Telegram Bot MCP Commands | v3.2 | 0/? | Not started | - |
