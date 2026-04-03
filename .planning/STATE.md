@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: MCP OAuth
 status: executing
-stopped_at: Completed 34-01-PLAN.md
-last_updated: "2026-04-03T22:43:43.621Z"
+stopped_at: Completed 34-02-PLAN.md
+last_updated: "2026-04-03T22:49:32.054Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 6
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 ## Current Position
 
 Phase: 34 (core-oauth-flow) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-03
 
@@ -44,6 +44,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 32-credential-foundation P01 | 5 | 2 tasks | 7 files |
 | Phase 33-auth-detection P01 | 8 | 2 tasks | 3 files |
 | Phase 34 P01 | 7m35s | 3 tasks | 8 files |
+| Phase 34-core-oauth-flow P02 | 4m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -66,6 +67,8 @@ Recent decisions relevant to v3.2:
 - [Phase 33-auth-detection]: Stdio servers (no url field) silently skipped — url presence is the OAuth candidate boundary
 - [Phase 34]: rand 0.10 uses RngExt trait for fill() on ThreadRng (not Rng or RngCore)
 - [Phase 34]: GlobalConfig YAML write is manual (serde-saphyr deserialize-only); schema is 2 fields so manual formatting is sufficient
+- [Phase 34-core-oauth-flow]: reqwest form feature added to workspace — exchange_token requires application/x-www-form-urlencoded POST
+- [Phase 34-core-oauth-flow]: discovery_urls helper extracts URL construction for pure unit tests without HTTP
 
 ### Pending Todos
 
@@ -79,6 +82,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-03T22:43:43.618Z
-Stopped at: Completed 34-01-PLAN.md
+Last session: 2026-04-03T22:49:32.051Z
+Stopped at: Completed 34-02-PLAN.md
 Resume file: None

@@ -129,7 +129,7 @@ Plans:
 **Plans**: 4 plans
 Plans:
 - [x] 34-01-PLAN.md — Foundation: workspace deps, OAuth types, GlobalConfig, init --tunnel-token/--tunnel-url
-- [ ] 34-02-PLAN.md — OAuth engine: AS discovery, DCR, PKCE, token exchange
+- [x] 34-02-PLAN.md — OAuth engine: AS discovery, DCR, PKCE, token exchange
 - [ ] 34-03-PLAN.md — cloudflared integration: config generation, process-compose entry, doctor checks
 - [ ] 34-04-PLAN.md — Bot integration: axum UDS callback server, /mcp and /doctor commands
 
@@ -161,5 +161,5 @@ Plans:
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
 | 32. Credential Foundation | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 33. Auth Detection | v3.2 | 1/1 | Complete    | 2026-04-03 |
-| 34. Core OAuth Flow + Bot | v3.2 | 1/4 | In Progress|  |
+| 34. Core OAuth Flow + Bot | v3.2 | 2/4 | In Progress|  |
 | 35. Token Refresh | v3.2 | 0/? | Not started | - |
