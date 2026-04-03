@@ -77,12 +77,13 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `claude -p --agent` structured output with reply-schema.json — v3.0 Phase 25.5
 - ✓ Cron scheduling/execution in Rust runtime (tokio task, file watcher, cron_runs table) — v3.0 Phase 27
 - ✓ Cronsync SKILL.md reduced to file management only — v3.0 Phase 28
+- ✓ `sandbox.ripgrep.command` injected into per-agent settings.json with resolved system rg path; `USE_BUILTIN_RIPGREP=0` corrected in worker.rs + cron.rs; `failIfUnavailable:true` set — v3.1 Phase 29 (SBOX-01..04)
+- ✓ `rightclaw doctor` checks rg in PATH + validates settings.json ripgrep.command (cross-platform) — v3.1 Phase 30 (DOC-01, DOC-02)
+- ✓ `tests/e2e/verify-sandbox.sh` — repeatable 4-stage script proving sandbox engagement via exit-code strategy under `failIfUnavailable:true`; live-run confirmed 2026-04-03 — v3.1 Phase 31 (VER-01..03)
 
 ### Active
 
-- [ ] CC sandbox works in nix environments (vendored ripgrep path resolution)
-- [ ] End-to-end verification: rightclaw up → bot → Telegram → cron with sandbox enabled
-- [ ] Doctor detects sandbox dependency issues before launch
+None — v3.1 milestone complete.
 
 ### Out of Scope
 
@@ -175,4 +176,4 @@ This document evolves at phase transitions and milestone boundaries.
 - Tech debt: git absence warning in `verify_dependencies()` but not surfaced by `rightclaw doctor`
 
 ---
-*Last updated: 2026-04-02 after phase 29 complete — Sandbox Dependency Fix*
+*Last updated: 2026-04-03
