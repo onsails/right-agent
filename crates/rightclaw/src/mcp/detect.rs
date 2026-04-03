@@ -123,6 +123,8 @@ mod tests {
             token_type: Some("Bearer".to_string()),
             scope: None,
             expires_at,
+            client_id: None,
+            client_secret: None,
         }
     }
 

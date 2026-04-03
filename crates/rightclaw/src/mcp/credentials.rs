@@ -30,6 +30,14 @@ pub struct CredentialToken {
     /// Unix timestamp seconds. 0 = non-expiring (e.g. Linear).
     #[serde(rename = "expiresAt")]
     pub expires_at: u64,
+    /// OAuth client_id used to obtain this token — stored for refresh grant.
+    /// Absent in credentials written before Phase 35 (deserializes as None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// OAuth client_secret (confidential clients only). None for public clients.
+    /// Absent in credentials written before Phase 35 (deserializes as None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
 }
 
 impl std::fmt::Debug for CredentialToken {
@@ -40,6 +48,8 @@ impl std::fmt::Debug for CredentialToken {
             .field("token_type", &self.token_type)
             .field("scope", &self.scope)
             .field("expires_at", &self.expires_at)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &self.client_secret.as_deref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -221,7 +231,58 @@ mod tests {
             token_type: Some("Bearer".to_string()),
             scope: None,
             expires_at: 0,
+            client_id: None,
+            client_secret: None,
         }
+    }
+
+    // --- REFRESH-04: client_id / client_secret field tests ---
+
+    #[test]
+    fn client_id_none_not_serialized() {
+        let token = make_token("tok");
+        // client_id is None — skip_serializing_if = "Option::is_none" must suppress it
+        let json_str = serde_json::to_string(&token).unwrap();
+        assert!(!json_str.contains("client_id"), "client_id=None must NOT appear in JSON");
+    }
+
+    #[test]
+    fn client_id_some_serialized() {
+        let token = CredentialToken {
+            client_id: Some("cli-abc".to_string()),
+            ..make_token("tok")
+        };
+        let json_str = serde_json::to_string(&token).unwrap();
+        assert!(
+            json_str.contains(r#""client_id":"cli-abc""#),
+            "client_id=Some must appear in JSON; got: {json_str}"
+        );
+    }
+
+    #[test]
+    fn old_json_round_trips_without_client_id() {
+        // Simulate a credential written before Phase 35 (no client_id/client_secret fields)
+        let json = r#"{"access_token":"t","expiresAt":0}"#;
+        let token: CredentialToken = serde_json::from_str(json).unwrap();
+        assert!(token.client_id.is_none(), "client_id must be None when absent in JSON");
+        assert!(token.client_secret.is_none(), "client_secret must be None when absent in JSON");
+    }
+
+    #[test]
+    fn debug_redacts_client_secret() {
+        let token = CredentialToken {
+            client_secret: Some("s3cr3t".to_string()),
+            ..make_token("tok")
+        };
+        let debug_str = format!("{:?}", token);
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "Debug must contain [REDACTED] for client_secret"
+        );
+        assert!(
+            !debug_str.contains("s3cr3t"),
+            "Debug must NOT expose actual client_secret value"
+        );
     }
 
     // --- CRED-01: key formula tests ---
