@@ -222,6 +222,8 @@ async fn complete_oauth_flow(
         token_type: token_resp.token_type,
         scope: token_resp.scope,
         expires_at,
+        client_id: Some(pending.client_id.clone()),
+        client_secret: pending.client_secret.clone(),
     };
 
     // Write credential (atomic, backup rotation)
