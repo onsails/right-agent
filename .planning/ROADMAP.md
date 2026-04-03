@@ -117,6 +117,7 @@ Plans:
 **Goal**: Operators can complete a full OAuth 2.1 + PKCE flow for any named MCP server via Telegram bot `/mcp auth`, with tokens written to CC's credential store and the agent restarted automatically. All MCP management commands (/mcp list, /mcp auth, /mcp add, /mcp remove, /doctor) are available in Telegram. cloudflared named tunnel provides stable callback URL.
 **Depends on**: Phase 33
 **Requirements**: OAUTH-01, OAUTH-02, OAUTH-03, OAUTH-04, OAUTH-05, OAUTH-06, OAUTH-07, BOT-01, BOT-02, BOT-03, BOT-04, BOT-05, TUNL-01
+**Note**: Phase 36 (former Telegram Bot MCP Commands) merged into this phase per D-10
 **Success Criteria** (what must be TRUE):
   1. `/mcp auth <server>` via Telegram completes the full flow end-to-end: AS discovery -> DCR (or static client fallback) -> PKCE auth URL -> cloudflared tunnel -> callback -> token write -> agent restart
   2. AS discovery tries RFC 9728 (resource metadata) first, then RFC 8414 (AS metadata), then OIDC well-known — visible in debug output and confirmed by unit test
