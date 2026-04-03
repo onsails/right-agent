@@ -20,8 +20,8 @@
 - [ ] **OAUTH-01**: Operator can send `/mcp auth <server>` via Telegram bot to complete a full OAuth 2.1 + PKCE flow for a named MCP server (per D-01: no CLI command — bot is the only entrypoint)
 - [x] **OAUTH-02**: OAuth flow performs AS discovery in priority order: RFC 9728 (resource metadata) → RFC 8414 (AS metadata) → OIDC `.well-known/openid-configuration` fallback
 - [x] **OAUTH-03**: OAuth flow performs Dynamic Client Registration (RFC 7591) with automatic fallback to static `clientId` from `.mcp.json` when server lacks a `registration_endpoint`
-- [ ] **OAUTH-04**: OAuth flow requires cloudflared named tunnel as redirect URI — if `cloudflared` binary is absent, bot replies with a clear error before the flow starts (no partial state left behind)
-- [ ] **OAUTH-05**: OAuth flow verifies tunnel is reachable via explicit HTTP request before presenting auth URL to operator — aborts with error if tunnel healthcheck fails (named tunnel, not quick tunnel)
+- [x] **OAUTH-04**: OAuth flow requires cloudflared named tunnel as redirect URI — if `cloudflared` binary is absent, bot replies with a clear error before the flow starts (no partial state left behind)
+- [x] **OAUTH-05**: OAuth flow verifies tunnel is reachable via explicit HTTP request before presenting auth URL to operator — aborts with error if tunnel healthcheck fails (named tunnel, not quick tunnel)
 - [x] **OAUTH-06**: OAuth flow persists PKCE state to file before opening browser; axum callback server on random loopback port receives the redirect through the tunnel
 - [ ] **OAUTH-07**: OAuth flow writes completed token to `~/.claude/.credentials.json` via atomic CRED write; agent is restarted via process-compose REST API after successful token storage
 
@@ -42,7 +42,7 @@
 
 ### TUNL — Tunnel Integration
 
-- [ ] **TUNL-01**: Operator can configure cloudflared named tunnel via `rightclaw init --tunnel-token <TOKEN> --tunnel-url <URL>` — config stored in `~/.rightclaw/config.yaml`; `rightclaw up` spawns cloudflared as a persistent process-compose entry; `rightclaw doctor` checks cloudflared binary and tunnel config (Warn severity). Stable URL across restarts — required for bot-initiated OAuth (TUNL-02 merged here).
+- [x] **TUNL-01**: Operator can configure cloudflared named tunnel via `rightclaw init --tunnel-token <TOKEN> --tunnel-url <URL>` — config stored in `~/.rightclaw/config.yaml`; `rightclaw up` spawns cloudflared as a persistent process-compose entry; `rightclaw doctor` checks cloudflared binary and tunnel config (Warn severity). Stable URL across restarts — required for bot-initiated OAuth (TUNL-02 merged here).
 
 ## Future Requirements
 
@@ -76,8 +76,8 @@
 | OAUTH-01 | Phase 34 | Pending |
 | OAUTH-02 | Phase 34 | Complete |
 | OAUTH-03 | Phase 34 | Complete |
-| OAUTH-04 | Phase 34 | Pending |
-| OAUTH-05 | Phase 34 | Pending |
+| OAUTH-04 | Phase 34 | Complete |
+| OAUTH-05 | Phase 34 | Complete |
 | OAUTH-06 | Phase 34 | Complete |
 | OAUTH-07 | Phase 34 | Pending |
 | REFRESH-01 | Phase 35 | Pending |
@@ -89,7 +89,7 @@
 | BOT-03 | Phase 34 | Pending |
 | BOT-04 | Phase 34 | Pending |
 | BOT-05 | Phase 34 | Pending |
-| TUNL-01 | Phase 34 | Pending |
+| TUNL-01 | Phase 34 | Complete |
 
 **Coverage:**
 - v3.2 requirements: 21 total (CRED×2 + DETECT×2 + OAUTH×7 + REFRESH×4 + BOT×5 + TUNL×1)
