@@ -85,7 +85,7 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
 - [x] **Phase 32: Credential Foundation** - Correct key formula + atomic credential writes (completed 2026-04-03)
 - [x] **Phase 33: Auth Detection** - Per-agent MCP auth status surface and pre-flight warning (completed 2026-04-03)
 - [x] **Phase 34: Core OAuth Flow + Bot MCP Commands** - Full OAuth 2.1 + PKCE with cloudflared named tunnel + bot commands (merged with former Phase 36) (completed 2026-04-03)
-- [ ] **Phase 35: Token Refresh** - Automatic bot-owned refresh scheduler + doctor integration
+- [x] **Phase 35: Token Refresh** - Automatic bot-owned refresh scheduler + doctor integration (completed 2026-04-03)
 
 ## Phase Details
 
@@ -147,7 +147,7 @@ Plans:
 Plans:
 - [x] 35-01-PLAN.md — Extend CredentialToken with client_id/client_secret; backfill OAuth callback
 - [x] 35-02-PLAN.md — mcp::refresh module: scheduler, per-token loop, refresh grant POST
-- [ ] 35-03-PLAN.md — Bot integration: spawn scheduler; doctor check_mcp_tokens
+- [x] 35-03-PLAN.md — Bot integration: spawn scheduler; doctor check_mcp_tokens
 
 ## Progress
 
@@ -167,4 +167,4 @@ Plans:
 | 32. Credential Foundation | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 33. Auth Detection | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 34. Core OAuth Flow + Bot | v3.2 | 4/4 | Complete    | 2026-04-03 |
-| 35. Token Refresh | v3.2 | 2/3 | In Progress|  |
+| 35. Token Refresh | v3.2 | 3/3 | Complete   | 2026-04-03 |

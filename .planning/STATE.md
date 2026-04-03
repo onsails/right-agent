@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: MCP OAuth
-status: executing
-stopped_at: Completed 35-02-PLAN.md
-last_updated: "2026-04-03T23:55:17.717Z"
+status: verifying
+stopped_at: Completed 35-03-PLAN.md
+last_updated: "2026-04-03T23:59:38.937Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 Phase: 35 (token-refresh) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-03
 
 Progress: [░░░░░░░░░░] 0%
@@ -49,6 +49,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 34 P04 | 12min | 4 tasks | 6 files |
 | Phase 35 P01 | 4m | 2 tasks | 3 files |
 | Phase 35 P02 | 3m | 1 tasks | 2 files |
+| Phase 35 P03 | 5m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -80,6 +81,7 @@ Recent decisions relevant to v3.2:
 - [Phase 35]: client_id stored as Some(String) always — PendingAuth.client_id is non-optional (DCR or static fallback guarantees it); client_secret is Option to handle public/confidential clients
 - [Phase 35]: deadline_from_unix returns None for expires_at=0 (REFRESH-04), underflow guard, and within-buffer — all mean refresh immediately or never
 - [Phase 35]: refresh_token fallback: keep old token if provider doesn't return new one — handles both rotating and non-rotating providers
+- [Phase 35]: check_mcp_tokens uses _with_creds inner function for testability — tests inject credentials path; wrapper resolves host path
 
 ### Pending Todos
 
@@ -93,6 +95,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-03T23:55:17.714Z
-Stopped at: Completed 35-02-PLAN.md
+Last session: 2026-04-03T23:59:38.934Z
+Stopped at: Completed 35-03-PLAN.md
 Resume file: None
