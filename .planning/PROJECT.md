@@ -84,12 +84,10 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `tests/e2e/verify-sandbox.sh` — repeatable 4-stage script proving sandbox engagement via exit-code strategy under `failIfUnavailable:true`; live-run confirmed 2026-04-03 — v3.1 Phase 31 (VER-01..03)
 - ✓ `mcp::credentials` module — `mcp_oauth_key` deterministic key derivation (Notion test vector locked), `write_credential` atomic tmp+rename with 5-slot backup rotation, `read_credential`; CRED-01, CRED-02 — v3.2 Phase 32
 - ✓ `mcp::detect` module — `AuthState` enum (present/missing/expired), `mcp_auth_status` reads .mcp.json + credentials.json; `rightclaw mcp status [--agent NAME]` CLI; `rightclaw up` pre-launch warn; DETECT-01, DETECT-02 — v3.2 Phase 33
+- ✓ MCP OAuth 2.1 engine — AS discovery (RFC 9728→8414→OIDC), DCR with static clientId fallback, PKCE S256, token exchange; cloudflared named tunnel integration with ingress codegen; Telegram bot commands /mcp list/auth/add/remove + /doctor; PendingAuth one-shot state with 10-min cleanup; post-auth credential write + agent restart — v3.2 Phase 34
 
 ### Active
 
-- OAuth callback server — local HTTP to receive OAuth redirect
-- OAuth callback server — local HTTP to receive OAuth redirect
-- Tunnel integration — cloudflared for external redirect URL
 - Token refresh — automatic refresh or prompt on expiry
 
 ### Out of Scope
