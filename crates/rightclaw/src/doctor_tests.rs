@@ -681,3 +681,136 @@ fn run_doctor_includes_sandbox_rg_checks_when_agent_has_settings() {
     );
     assert_eq!(sandbox_rg_checks[0].name, "sandbox-rg/testagent");
 }
+
+// ---- check_mcp_tokens tests (REFRESH-03, REFRESH-04) ----
+
+/// Helper: write a minimal .mcp.json with one HTTP server entry.
+fn write_mcp_json_for_doctor(agent_dir: &std::path::Path, server_name: &str, server_url: &str) {
+    let content = format!(
+        r#"{{"mcpServers": {{"{server_name}": {{"url": "{server_url}"}}}}}}"#,
+    );
+    std::fs::write(agent_dir.join(".mcp.json"), content).unwrap();
+}
+
+/// Helper: write a credential with given expires_at to a creds file.
+fn write_credential_for_doctor(
+    creds_path: &std::path::Path,
+    server_name: &str,
+    server_url: &str,
+    expires_at: u64,
+) {
+    use crate::mcp::credentials::{write_credential, CredentialToken};
+    let token = CredentialToken {
+        access_token: "test-token".to_string(),
+        refresh_token: None,
+        token_type: Some("Bearer".to_string()),
+        scope: None,
+        expires_at,
+        client_id: None,
+        client_secret: None,
+    };
+    write_credential(creds_path, server_name, server_url, &token).unwrap();
+}
+
+#[test]
+fn check_mcp_tokens_pass_no_agents_dir() {
+    // No agents/ dir at all — should Pass with "all present"
+    let dir = tempdir().unwrap();
+    // Do NOT create agents/ subdir
+
+    let result = check_mcp_tokens_with_creds(
+        dir.path(),
+        &dir.path().join("nonexistent-creds.json"),
+    );
+    assert_eq!(result.status, CheckStatus::Pass);
+    assert_eq!(result.name, "mcp-tokens");
+    assert!(
+        result.detail.contains("all present"),
+        "detail must be 'all present', got: {}",
+        result.detail
+    );
+}
+
+#[test]
+fn check_mcp_tokens_pass_when_all_present() {
+    // Agent with a valid non-expired credential — Pass
+    let dir = tempdir().unwrap();
+    let agent_dir = dir.path().join("agents").join("agent1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let server_url = "https://mcp.notion.com/mcp";
+    write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
+
+    let creds_path = dir.path().join("creds.json");
+    // Far-future expiry → Present
+    write_credential_for_doctor(&creds_path, "notion", server_url, 9_999_999_999);
+
+    let result = check_mcp_tokens_with_creds(dir.path(), &creds_path);
+    assert_eq!(result.status, CheckStatus::Pass);
+    assert_eq!(result.name, "mcp-tokens");
+}
+
+#[test]
+fn check_mcp_tokens_warn_on_missing_token() {
+    // Agent with .mcp.json but no credential → Missing → Warn listing agent1/notion
+    let dir = tempdir().unwrap();
+    let agent_dir = dir.path().join("agents").join("agent1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let server_url = "https://mcp.notion.com/mcp";
+    write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
+
+    // Use a nonexistent creds file → Missing state
+    let creds_path = dir.path().join("nonexistent-creds.json");
+
+    let result = check_mcp_tokens_with_creds(dir.path(), &creds_path);
+    assert_eq!(result.status, CheckStatus::Warn);
+    assert_eq!(result.name, "mcp-tokens");
+    assert!(
+        result.detail.contains("agent1/notion"),
+        "detail must contain 'agent1/notion', got: {}",
+        result.detail
+    );
+    assert!(result.fix.is_some(), "Warn must have a fix hint");
+}
+
+#[test]
+fn check_mcp_tokens_warn_on_expired_token() {
+    // Agent with an expired credential → Expired → Warn listing agent1/notion
+    let dir = tempdir().unwrap();
+    let agent_dir = dir.path().join("agents").join("agent1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let server_url = "https://mcp.notion.com/mcp";
+    write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
+
+    let creds_path = dir.path().join("creds.json");
+    // expires_at = 1 → far past → Expired
+    write_credential_for_doctor(&creds_path, "notion", server_url, 1);
+
+    let result = check_mcp_tokens_with_creds(dir.path(), &creds_path);
+    assert_eq!(result.status, CheckStatus::Warn);
+    assert!(
+        result.detail.contains("agent1/notion"),
+        "detail must contain 'agent1/notion', got: {}",
+        result.detail
+    );
+}
+
+#[test]
+fn check_mcp_tokens_nonexpiring_is_ok() {
+    // expires_at=0 (non-expiring, REFRESH-04) → Present → Pass
+    let dir = tempdir().unwrap();
+    let agent_dir = dir.path().join("agents").join("agent1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let server_url = "https://mcp.linear.app/mcp";
+    write_mcp_json_for_doctor(&agent_dir, "linear", server_url);
+
+    let creds_path = dir.path().join("creds.json");
+    write_credential_for_doctor(&creds_path, "linear", server_url, 0); // non-expiring
+
+    let result = check_mcp_tokens_with_creds(dir.path(), &creds_path);
+    assert_eq!(result.status, CheckStatus::Pass, "expires_at=0 must be Pass");
+    assert_eq!(result.name, "mcp-tokens");
+}
