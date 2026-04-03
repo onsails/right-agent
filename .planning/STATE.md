@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.2
 milestone_name: MCP OAuth
-status: executing
-stopped_at: Completed 34-03-PLAN.md
-last_updated: "2026-04-03T22:50:05.393Z"
+status: verifying
+stopped_at: Completed 34-04-PLAN.md
+last_updated: "2026-04-03T23:01:48.917Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 Phase: 34 (core-oauth-flow) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-03
 
 Progress: [░░░░░░░░░░] 0%
@@ -46,6 +46,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 34 P01 | 7m35s | 3 tasks | 8 files |
 | Phase 34-core-oauth-flow P02 | 4m | 2 tasks | 3 files |
 | Phase 34 P03 | 6m | 2 tasks | 9 files |
+| Phase 34 P04 | 12min | 4 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,8 @@ Recent decisions relevant to v3.2:
 - [Phase 34-core-oauth-flow]: discovery_urls helper extracts URL construction for pure unit tests without HTTP
 - [Phase 34]: cloudflared process in PC config is conditional on tunnel_token — bots without tunnel work unchanged
 - [Phase 34]: catch-all http_status:404 is always emitted regardless of agent count — cloudflared rejects configs without it
+- [Phase 34]: write_credential takes (path, server_name, server_url, token) and derives key internally; plan interface mismatch auto-corrected
+- [Phase 34]: exchange_token arg order: (client, endpoint, code, redirect_uri, client_id, secret, verifier) — not as documented in plan
 
 ### Pending Todos
 
@@ -85,6 +88,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-03T22:50:05.390Z
-Stopped at: Completed 34-03-PLAN.md
+Last session: 2026-04-03T23:01:48.914Z
+Stopped at: Completed 34-04-PLAN.md
 Resume file: None

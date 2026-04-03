@@ -17,13 +17,13 @@
 
 ### OAUTH — Core OAuth Flow
 
-- [ ] **OAUTH-01**: Operator can send `/mcp auth <server>` via Telegram bot to complete a full OAuth 2.1 + PKCE flow for a named MCP server (per D-01: no CLI command — bot is the only entrypoint)
+- [x] **OAUTH-01**: Operator can send `/mcp auth <server>` via Telegram bot to complete a full OAuth 2.1 + PKCE flow for a named MCP server (per D-01: no CLI command — bot is the only entrypoint)
 - [x] **OAUTH-02**: OAuth flow performs AS discovery in priority order: RFC 9728 (resource metadata) → RFC 8414 (AS metadata) → OIDC `.well-known/openid-configuration` fallback
 - [x] **OAUTH-03**: OAuth flow performs Dynamic Client Registration (RFC 7591) with automatic fallback to static `clientId` from `.mcp.json` when server lacks a `registration_endpoint`
 - [x] **OAUTH-04**: OAuth flow requires cloudflared named tunnel as redirect URI — if `cloudflared` binary is absent, bot replies with a clear error before the flow starts (no partial state left behind)
 - [x] **OAUTH-05**: OAuth flow verifies tunnel is reachable via explicit HTTP request before presenting auth URL to operator — aborts with error if tunnel healthcheck fails (named tunnel, not quick tunnel)
 - [x] **OAUTH-06**: OAuth flow persists PKCE state to file before opening browser; axum callback server on random loopback port receives the redirect through the tunnel
-- [ ] **OAUTH-07**: OAuth flow writes completed token to `~/.claude/.credentials.json` via atomic CRED write; agent is restarted via process-compose REST API after successful token storage
+- [x] **OAUTH-07**: OAuth flow writes completed token to `~/.claude/.credentials.json` via atomic CRED write; agent is restarted via process-compose REST API after successful token storage
 
 ### REFRESH — Token Refresh
 
@@ -34,11 +34,11 @@
 
 ### BOT — Telegram Bot MCP Commands
 
-- [ ] **BOT-01**: User can send `/mcp` in Telegram to receive a list of MCP servers configured for the agent with their auth status (present / missing / expired)
-- [ ] **BOT-02**: User can send `/mcp auth <server>` in Telegram to trigger the OAuth flow — bot replies with the auth URL; after user completes auth, bot confirms success or reports tunnel/auth error
-- [ ] **BOT-03**: User can send `/mcp add <config>` in Telegram to add a new MCP server to the agent's `.mcp.json` (syntax mirrors `claude mcp add`)
-- [ ] **BOT-04**: User can send `/mcp remove <server>` in Telegram to remove an MCP server from the agent's `.mcp.json`
-- [ ] **BOT-05**: User can send `/doctor` in Telegram to run `rightclaw doctor` and receive the results in chat (including tunnel availability and MCP auth status per server)
+- [x] **BOT-01**: User can send `/mcp` in Telegram to receive a list of MCP servers configured for the agent with their auth status (present / missing / expired)
+- [x] **BOT-02**: User can send `/mcp auth <server>` in Telegram to trigger the OAuth flow — bot replies with the auth URL; after user completes auth, bot confirms success or reports tunnel/auth error
+- [x] **BOT-03**: User can send `/mcp add <config>` in Telegram to add a new MCP server to the agent's `.mcp.json` (syntax mirrors `claude mcp add`)
+- [x] **BOT-04**: User can send `/mcp remove <server>` in Telegram to remove an MCP server from the agent's `.mcp.json`
+- [x] **BOT-05**: User can send `/doctor` in Telegram to run `rightclaw doctor` and receive the results in chat (including tunnel availability and MCP auth status per server)
 
 ### TUNL — Tunnel Integration
 
@@ -73,22 +73,22 @@
 | CRED-02 | Phase 32 | Complete |
 | DETECT-01 | Phase 33 | Complete |
 | DETECT-02 | Phase 33 | Complete |
-| OAUTH-01 | Phase 34 | Pending |
+| OAUTH-01 | Phase 34 | Complete |
 | OAUTH-02 | Phase 34 | Complete |
 | OAUTH-03 | Phase 34 | Complete |
 | OAUTH-04 | Phase 34 | Complete |
 | OAUTH-05 | Phase 34 | Complete |
 | OAUTH-06 | Phase 34 | Complete |
-| OAUTH-07 | Phase 34 | Pending |
+| OAUTH-07 | Phase 34 | Complete |
 | REFRESH-01 | Phase 35 | Pending |
 | REFRESH-02 | Phase 35 | Pending |
 | REFRESH-03 | Phase 35 | Pending |
 | REFRESH-04 | Phase 35 | Pending |
-| BOT-01 | Phase 34 | Pending |
-| BOT-02 | Phase 34 | Pending |
-| BOT-03 | Phase 34 | Pending |
-| BOT-04 | Phase 34 | Pending |
-| BOT-05 | Phase 34 | Pending |
+| BOT-01 | Phase 34 | Complete |
+| BOT-02 | Phase 34 | Complete |
+| BOT-03 | Phase 34 | Complete |
+| BOT-04 | Phase 34 | Complete |
+| BOT-05 | Phase 34 | Complete |
 | TUNL-01 | Phase 34 | Complete |
 
 **Coverage:**

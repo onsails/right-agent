@@ -84,7 +84,7 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
 
 - [x] **Phase 32: Credential Foundation** - Correct key formula + atomic credential writes (completed 2026-04-03)
 - [x] **Phase 33: Auth Detection** - Per-agent MCP auth status surface and pre-flight warning (completed 2026-04-03)
-- [ ] **Phase 34: Core OAuth Flow + Bot MCP Commands** - Full OAuth 2.1 + PKCE with cloudflared named tunnel + bot commands (merged with former Phase 36)
+- [x] **Phase 34: Core OAuth Flow + Bot MCP Commands** - Full OAuth 2.1 + PKCE with cloudflared named tunnel + bot commands (merged with former Phase 36) (completed 2026-04-03)
 - [ ] **Phase 35: Token Refresh** - On-demand refresh, pre-flight refresh, doctor integration
 
 ## Phase Details
@@ -131,7 +131,7 @@ Plans:
 - [x] 34-01-PLAN.md — Foundation: workspace deps, OAuth types, GlobalConfig, init --tunnel-token/--tunnel-url
 - [x] 34-02-PLAN.md — OAuth engine: AS discovery, DCR, PKCE, token exchange
 - [x] 34-03-PLAN.md — cloudflared integration: config generation, process-compose entry, doctor checks
-- [ ] 34-04-PLAN.md — Bot integration: axum UDS callback server, /mcp and /doctor commands
+- [x] 34-04-PLAN.md — Bot integration: axum UDS callback server, /mcp and /doctor commands
 
 ### Phase 35: Token Refresh
 **Goal**: Operators can refresh MCP OAuth tokens without re-authenticating, and `rightclaw up` proactively refreshes expired tokens before launching agents
@@ -161,5 +161,5 @@ Plans:
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
 | 32. Credential Foundation | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 33. Auth Detection | v3.2 | 1/1 | Complete    | 2026-04-03 |
-| 34. Core OAuth Flow + Bot | v3.2 | 3/4 | In Progress|  |
+| 34. Core OAuth Flow + Bot | v3.2 | 4/4 | Complete   | 2026-04-03 |
 | 35. Token Refresh | v3.2 | 0/? | Not started | - |
