@@ -149,6 +149,21 @@ echo "  model:   haiku"
 echo "  log:     $LOG_FILE"
 echo ""
 
+# Resolve CC binary — mirrors worker.rs: which("claude").or_else(|_| which("claude-bun"))
+CC_BIN=""
+if command -v claude > /dev/null 2>&1; then
+  CC_BIN="$(command -v claude)"
+elif command -v claude-bun > /dev/null 2>&1; then
+  CC_BIN="$(command -v claude-bun)"
+else
+  fail "claude (or claude-bun) not found in PATH — CC binary required"
+  echo ""
+  echo "=== Summary ==="
+  echo -e "${RED}FAILED${NC}: CC binary not found. Install Claude Code CLI and re-run."
+  exit 1
+fi
+pass "CC binary: $CC_BIN"
+
 REPLY_SCHEMA="$(cat "$REPLY_SCHEMA_FILE")"
 PROMPT="Reply with a single word: ok"
 
@@ -159,7 +174,7 @@ CC_OUTPUT=$(
   cd "$AGENT_DIR" && \
   HOME="$AGENT_DIR" \
   USE_BUILTIN_RIPGREP=0 \
-  claude -p \
+  "$CC_BIN" -p \
     --dangerously-skip-permissions \
     --output-format json \
     --agent "$AGENT_NAME" \
