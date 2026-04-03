@@ -145,6 +145,22 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         .join(".claude")
         .join(".credentials.json");
 
+    // Clone for refresh scheduler before credentials_path is moved into OAuthCallbackState (line 152)
+    let refresh_credentials_path = credentials_path.clone();
+
+    // Spawn refresh scheduler — proactively refreshes MCP OAuth tokens before expiry (Phase 35)
+    let refresh_agent_dir = agent_dir.clone();
+    let refresh_creds = refresh_credentials_path;
+    let refresh_http_client = reqwest::Client::new();
+    tokio::spawn(async move {
+        rightclaw::mcp::refresh::run_refresh_scheduler(
+            refresh_agent_dir,
+            refresh_creds,
+            refresh_http_client,
+        )
+        .await;
+    });
+
     let notify_bot = teloxide::Bot::new(token.clone());
     let notify_chat_ids = config.allowed_chat_ids.clone();
     let agent_name = args.agent.clone();
