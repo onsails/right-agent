@@ -1,172 +1,213 @@
 # Project Research Summary
 
-**Project:** RightClaw v3.1 — Sandbox Fix & E2E Verification
-**Domain:** CC native sandbox dependency detection in nix/devenv environments
-**Researched:** 2026-04-02
+**Project:** RightClaw v3.2 — MCP OAuth Automation
+**Domain:** OAuth 2.1 automation for headless multi-agent Claude Code runtime
+**Researched:** 2026-04-03
 **Confidence:** HIGH
 
 ## Executive Summary
 
-RightClaw v3.0 shipped with CC native sandbox enabled per-agent via `settings.json`, but sandbox silently degrades to disabled in nix/devenv environments. The root cause is confirmed by direct CC source inspection: `checkDependencies()` calls `Bun.which()` on the vendored ripgrep binary, which has mode `r--r--r--` (444) in the nix store — no execute bit. `Bun.which()` returns null for non-executable files, CC pushes "ripgrep not found" to its errors array, and sandbox silently disables because `failIfUnavailable` defaults to false. There is also an existing bug in the codebase: `worker.rs` and `cron.rs` already set `USE_BUILTIN_RIPGREP=1`, which is the wrong value — `"1"` means "use bundled CC rg" (the broken one), `"0"` means "use system rg."
+RightClaw v3.2 solves a concrete, confirmed bug in Claude Code: HTTP MCP servers that require OAuth never trigger the browser auth flow, even in interactive mode (CC issues #11585, #36307, still open April 2026). Headless agents compound this — there is no terminal for the user, no `/mcp` TUI, and no path to authenticate. The v3.2 milestone implements a fully external OAuth 2.1 Authorization Code + PKCE flow owned by rightclaw, writing tokens directly into CC's internal credential store so agents pick them up without any CC involvement in the auth dance.
 
-The fix has three complementary parts. First, change `USE_BUILTIN_RIPGREP` to `"0"` in worker.rs and cron.rs. Second, add `pkgs.ripgrep` to `devenv.nix` so a working system `rg` is in PATH. Third, inject the resolved system `rg` path into each agent's `settings.json` via the officially-supported `sandbox.ripgrep.command` field — this overrides CC's internal path resolution entirely, bypassing the vendored binary fallback. The architecture research confirms `sandbox.ripgrep.command` is present in CC v2.1.89's Zod schema and is the cleanest authoritative fix, not a workaround.
+The recommended approach is: (1) detect auth-needing servers by reading agent `.mcp.json` and checking `~/.claude/.credentials.json` for missing/expired tokens, (2) run a standard OAuth 2.1 + PKCE flow using `axum` for the callback server and `oauth2` crate for PKCE/token types, (3) write the completed token into `~/.claude/.credentials.json` under the exact key CC expects — `serverName|sha256({"type":"...","url":"...","headers":{}}, no whitespace)[:16]` — and (4) restart the agent so CC picks up the new token (live connection injection does not work, confirmed from CC source + issue #10250). The credential symlink established in v2.1 means one OAuth flow covers all agents sharing a given MCP server.
 
-The primary risk is incomplete validation masquerading as a complete fix. Two failure modes to guard against: (1) fixing only ripgrep while leaving socat and bwrap unverified — sandbox may still be non-functional for network calls; (2) doctor checks passing because they run in the devenv shell while agent processes inherit a different PATH from process-compose and fail silently. The v3.1 milestone must address the fix, the diagnostics, and a full E2E verification pass that explicitly covers all three sandbox dependencies and uses a repeatable checklist (not a one-time manual run).
+Key risks are: (a) writing credentials under a wrong key format that CC silently ignores — the key hash formula was reverse-engineered from CC v2.1.89 source and verified against live data, requiring a unit test before any integration work; (b) CC's token refresh being unreliable in headless mode (confirmed bugs #28262, #29718) — rightclaw must own proactive refresh, not delegate to CC; (c) concurrent credential writes corrupting `.credentials.json` — atomic write (tmp + rename) is mandatory from day one, not a hardening step.
+
+---
 
 ## Key Findings
 
 ### Recommended Stack
 
-No new Rust crates are required. All changes use stdlib (`std::fs::metadata`, `std::os::unix::fs::PermissionsExt`) and `which::which()` already in the workspace. The `sandbox.ripgrep.command` field in `settings.json` is an officially-supported CC schema field confirmed in CC v2.1.89 cli.js Zod schema. The `devenv.nix` change is one line: `pkgs.ripgrep`.
+Three new crates are needed; all existing workspace deps (tokio, reqwest, serde_json, thiserror, miette) cover the rest of the flow. `axum 0.8` handles the one-shot OAuth callback HTTP server (tokio-native, single route, oneshot channel — clean lifecycle). `oauth2 5.0` provides strongly-typed PKCE generation and token exchange (35M+ downloads, reqwest backend already in workspace). `open 5.3` launches the browser cross-platform with a terminal URL fallback.
 
-**Change sites (no new files, no new crates):**
-- `codegen/settings.rs`: inject `sandbox.ripgrep.command` via `which::which("rg")` + add `failIfUnavailable: true`
-- `codegen/settings_tests.rs`: add tests for ripgrep field presence when rg found vs. not found
-- `telegram/worker.rs` + `cron.rs`: change `USE_BUILTIN_RIPGREP` from `"1"` to `"0"`
-- `doctor.rs`: add `check_sandbox_ripgrep()` DoctorCheck (Warn severity, Linux-only block)
-- `runtime/deps.rs`: add non-fatal rg warning (matches existing git-warning pattern)
-- `devenv.nix`: add `pkgs.ripgrep` to packages list
+Tunnel integration (cloudflared quick tunnels, no account required) is implemented by shelling out to the `cloudflared` binary — there is no Rust SDK, and the ngrok crate requires a registered authtoken which is unsuitable as a default. Most MCP providers (Notion, Linear, Google Workspace) accept RFC 8252 loopback redirect URIs (`http://127.0.0.1:<random_port>/callback`), making tunnels optional rather than mandatory.
+
+**Core new technologies:**
+- `axum 0.8`: OAuth callback HTTP server — tokio-native, oneshot channel pattern, clean lifecycle
+- `oauth2 5.0`: PKCE (S256), token exchange, refresh — typed API, reqwest backend already in workspace
+- `open 5.3`: Cross-platform browser launch with fallback URL printing
+- `cloudflared` (subprocess, optional): Tunnel for providers rejecting localhost — no account required, parse URL from stderr
+- `reqwest` (existing): MCP server probing (401 detection), metadata discovery, DCR, token exchange HTTP calls
+
+**Version additions to workspace Cargo.toml:**
+```toml
+axum = "0.8"
+oauth2 = "5.0"
+open = "5.3"
+```
+
+Note: `sha2` crate will also be needed for the credential key hash formula — add to workspace deps in Phase 1.
 
 ### Expected Features
 
-**Must have (table stakes) for v3.1:**
-- `devenv.nix` ripgrep addition — sandbox cannot start without system rg in PATH
-- `USE_BUILTIN_RIPGREP=0` fix in worker.rs and cron.rs — current value actively forces the broken vendored binary
-- `sandbox.ripgrep.command` injection in `generate_settings()` — official field, cleanest fix
-- `sandbox.failIfUnavailable: true` in generated settings.json — turns silent degradation into visible hard failure
-- Doctor `rg` check with Fail severity on Linux — same pattern as existing bwrap/socat checks
-- E2E validation pass: full flow (rightclaw up → doctor green → sandbox ON → Telegram → cron) with all three deps verified
+**Must have (table stakes) — v3.2 launch:**
+- Auth detection: cross-reference agent `.mcp.json` with `.credentials.json` for missing/expired tokens
+- Authorization Server discovery: RFC 9728 (resource metadata) + RFC 8414 (AS metadata) + OIDC fallback, all three endpoints tried in priority order
+- Dynamic Client Registration (RFC 7591) with static `clientId` fallback — DCR is "SHOULD" not "MUST" in spec; Slack, enterprise providers don't support it
+- PKCE S256 code challenge/verifier generation
+- Local callback HTTP server: axum on random loopback port, one request, then shut down
+- Browser opener via `open` crate with terminal URL fallback
+- Token exchange with PKCE verifier and `resource` parameter (RFC 8707)
+- Write tokens to `~/.claude/.credentials.json` under correct key with merge (never clobber `claudeAiOauth` or other keys)
+- `rightclaw mcp auth <server> [--agent <name>]` subcommand
+- Pre-flight warning in `rightclaw up` — non-fatal warn if servers have missing/expired tokens
+- Restart-after-auth: `mcp auth` must restart the agent via process-compose after writing tokens
 
-**Should have (differentiators) — add if E2E exposes issues:**
-- Doctor `sandbox-config/<agent>` check — reads generated settings.json, verifies `sandbox.enabled: true` per agent
-- Doctor warns when system rg is reachable only via devenv shell but not agent process PATH
-- E2E test script in `tests/e2e/` as a repeatable checklist, not a one-time document
+**Should have — v3.2.x after validation:**
+- `rightclaw mcp refresh [<server>]` — on-demand proactive token refresh (CC's headless refresh is buggy)
+- `rightclaw mcp status` — table of server auth state per agent
+- `rightclaw doctor` MCP token check — Warn severity for missing/expired tokens per agent
+- PKCE state file persistence to `~/.rightclaw/oauth-pending/<server>.json` before browser opens
 
-**Defer to v3.2+:**
-- Automated CI E2E integration (manual UAT sufficient for v3.1)
-- Per-agent HOME isolation (SEED-004, deferred for edge cases with trust files and git/SSH)
-- `--check-agent-env` doctor flag to simulate agent launch environment exactly
+**Defer to v3.3+:**
+- Tunnel integration (cloudflared) — only needed for providers rejecting localhost; most don't
+- Per-agent OAuth tokens — all agents share tokens via credential symlink; per-agent isolation deferred (SEED-004 territory)
+- Automated background refresh daemon — no long-lived rightclaw process to host it
 
 **Anti-features to avoid:**
-- `sandbox.failIfUnavailable: true` added before the rg fix — causes infinite restart loop in process-compose if rg still missing; both changes must land together
-- `USE_BUILTIN_RIPGREP=0` in `settings.json` env section instead of `cmd.env()` — settings.json env section may not propagate to sandbox-runtime; set directly via process env
-- Any `/nix/store/<hash>/` path hardcoded anywhere — rots on every CC update
+- Device Flow (RFC 8628) — not in MCP spec, no production server supports it
+- Storing tokens outside `~/.claude/.credentials.json` — CC reads only its own file
+- Tunnel as default — most providers accept loopback; tunnel adds ephemeral URL instability
+- Relying on CC's internal headless refresh — confirmed broken in multiple CC issues
 
 ### Architecture Approach
 
-The fix is surgical: four existing files modified, no new files, no new crates. The `settings.rs` change is the primary fix (injects `sandbox.ripgrep.command` as an absolute path). The env var fix in worker.rs/cron.rs is belt-and-suspenders. Doctor and deps.rs changes provide pre-flight and post-hoc diagnostics. The architecture research confirms `sandbox.ripgrep.command` overrides CC's `oO6()` function which is exactly the path that `checkDependencies` consults — making this the authoritative fix, not a workaround.
+The architecture is a new `mcp/` module in `crates/rightclaw/src/` with clean sub-module separation. Each component handles exactly one concern: `detect.rs` reads `.mcp.json` and checks `.credentials.json`; `oauth.rs` runs AS discovery + DCR + PKCE code exchange; `callback.rs` hosts the axum one-shot server; `credentials.rs` handles read-modify-write with atomic swap; `refresh.rs` handles expiry checks and token refresh. The CLI entry point (`cmd_mcp_auth`) orchestrates these sequentially. Integration into `cmd_up` is non-fatal pre-flight only.
 
-**Modified components:**
-1. `codegen/settings.rs` — inject `sandbox.ripgrep.command` + `failIfUnavailable: true`; if rg not found, omit field and rely on deps.rs/doctor.rs to warn
-2. `codegen/settings_tests.rs` — unit tests: field present when `which("rg")` succeeds; field absent when not found
-3. `runtime/deps.rs` — non-fatal tracing::warn when system rg absent and vendor rg also not executable
-4. `doctor.rs` — `check_sandbox_ripgrep()` as a `DoctorCheck` struct in Linux-only block, placed after `check_bwrap_sandbox()`
+Token storage writes to the host `~/.claude/.credentials.json` (not per-agent). The existing v2.1 credential symlink (`$AGENT_DIR/.claude/.credentials.json → ~/.claude/.credentials.json`) means all agents automatically see updated tokens — no per-agent writing needed.
 
-**Data flow after fix (CC subprocess):**
-```
-claude-bun -p ... reads settings.json
-  sandbox.ripgrep.command = "/nix/store/<hash>/bin/rg"  ← injected by generate_settings()
-  oO6() returns {command: "/nix/.../bin/rg", args: []}
-  checkDependencies: rg (runs command) → executable → success
-  SandboxUnavailableReason = undefined → sandbox engages
-  bwrap wraps bash subprocess
-```
+**Major components:**
+1. `mcp/detect.rs` — Parse `.mcp.json`, classify by transport type, check token presence/expiry in `.credentials.json`
+2. `mcp/oauth.rs` — AS discovery (RFC 9728 + 8414 + OIDC), DCR (RFC 7591) with static client fallback, PKCE generation, code exchange
+3. `mcp/callback.rs` — axum local HTTP server, oneshot channel, PKCE state file persistence
+4. `mcp/credentials.rs` — atomic read-modify-write, key formula `serverName|sha256({"type":"...","url":"...","headers":{}})[:16]`
+5. `mcp/refresh.rs` — expiry check, refresh_token exchange, rotation handling, expiresAt=0 skip
+6. `cmd_mcp_auth()` / `McpCommands` enum — CLI orchestration, agent restart via process-compose
+7. `cmd_up()` (modified) — pre-flight MCP auth status check, non-fatal warn
 
 ### Critical Pitfalls
 
-1. **USE_BUILTIN_RIPGREP=1 is the wrong value** — `"1"` means use bundled rg (the broken one); `"0"` means use system rg. The current code has inverted semantics with a comment that says the opposite. This must be the first change — if left in place, all subsequent verification validates the broken state, not the fixed one.
+1. **Wrong credential key hash** — CC's `fM()` function (verified from cli.js v2.1.89) computes `sha256(JSON.stringify({type, url, headers:{}}), no_spaces)[:16]`. The `headers` field must be `{}` even when empty — omitting it changes the hash. Wrong key = CC silently sends unauthenticated requests. **Mitigation:** Unit test `mcp_oauth_key("notion", "http", "https://mcp.notion.com/mcp") == "notion|eac663db915250e7"` before any integration work.
 
-2. **Agent launch PATH diverges from doctor PATH** — Doctor runs in the devenv shell (rg on PATH, all checks pass). Agents launched by process-compose inherit only what rightclaw explicitly sets. The `sandbox.ripgrep.command` field in settings.json solves rg specifically (absolute path, no PATH lookup). But socat and bwrap still depend on the inherited PATH. Doctor checks must validate what agents will see, not what the shell sees.
+2. **mcp-needs-auth-cache.json is per-agent, not host** — Under HOME isolation, CC writes `$AGENT_DIR/.claude/mcp-needs-auth-cache.json`, not `~/.claude/`. The host file only reflects host CC session state. **Mitigation:** Auth detection reads `.mcp.json` + `.credentials.json` directly; use the needs-auth cache only for diagnostics, not detection logic.
 
-3. **Nix store is immutable** — `chmod +x` on `/nix/store/.../rg` fails with EROFS. Symlinking into nix store paths fails. Any hardcoded nix store path rots on every CC update/rebuild. Use `which::which("rg")` dynamically at `rightclaw up` time — it resolves to the current nix profile symlink, always current.
+3. **CC token refresh unreliable in headless mode** — CC's `tokens()` has confirmed bugs (#28262, #29718): proactive refresh fails, tokens from servers omitting `expires_in` get a 1h fallback with no refresh path (issue #26281). **Mitigation:** Rightclaw owns proactive refresh via `mcp refresh`; run as pre-flight in `rightclaw up`.
 
-4. **macOS vs Linux divergence** — bwrap on macOS (installed via Homebrew) triggers the Linux sandbox path which fails on macOS. The `devenv.nix` already scopes bwrap to Linux only — keep it that way. The ripgrep fix applies identically to both platforms. E2E must be verified on both; a Linux-only fix that passes locally may silently break macOS.
+4. **MCP reconnection failure after OAuth** — CC's in-process MCP client does not reconnect when tokens are written post-auth (CC issue #10250). **Mitigation:** `rightclaw mcp auth` must restart the agent after writing tokens — design restart-after-auth as the primary UX, not a workaround.
 
-5. **Partial sandbox fix — only ripgrep verified** — CC sandbox requires rg + socat + bwrap on Linux. Fixing ripgrep alone may leave network calls inside sandbox failing silently (socat) or the sandbox not engaging at all (bwrap). E2E must explicitly test: Grep tool (rg), network call inside sandbox (socat proxy), filesystem write isolation (bwrap bind-mount).
+5. **DCR not universal** — RFC 7591 is "SHOULD" in MCP spec. Slack, Microsoft Entra, Okta don't support it. **Mitigation:** Check `oauth.clientId` in `.mcp.json` before attempting DCR; if AS metadata has no `registration_endpoint`, fall through to static client mode.
 
-6. **USE_BUILTIN_RIPGREP is undocumented** — it is an internal CC env var with no stable API guarantee. Future CC updates can change its semantics without notice. The E2E verification checklist must be designed as repeatable, specifically to catch regressions after CC version bumps.
+6. **Concurrent credential writes corrupt .credentials.json** — Last-write-wins under concurrent OAuth flows. **Mitigation:** Atomic write (tmp file + POSIX rename) from day one; write backup before modification.
 
-7. **failIfUnavailable + missing rg = infinite restart loop** — setting `failIfUnavailable: true` before the rg fix lands causes CC to exit on startup, process-compose restarts it, infinite loop. Both changes must land in the same `rightclaw up` invocation. The fix (settings.rs + devenv.nix) must precede or coincide with failIfUnavailable addition.
+7. **expiresAt=0 treated as expired** — Linear and some providers issue non-expiring tokens; CC stores `expiresAt=0`. **Mitigation:** Skip `expiresAt=0` entries from the refresh loop; treat as non-expiring.
+
+---
 
 ## Implications for Roadmap
 
-Based on research, suggested phase structure:
+Based on research, suggested 4-phase structure:
 
-### Phase 1: Sandbox Dependency Fix
-**Rationale:** Unblocks all subsequent work. The USE_BUILTIN_RIPGREP bug must be corrected before any testing, or verification validates the wrong state. All change sites are small and independent; this can be a single commit.
-**Delivers:** CC sandbox actually engages in nix/devenv; `rightclaw up` generates settings.json with `sandbox.ripgrep.command` pointing to working system rg; `failIfUnavailable: true` in generated settings; devenv.nix includes ripgrep explicitly
-**Addresses:** devenv.nix ripgrep, USE_BUILTIN_RIPGREP=0, sandbox.ripgrep.command injection, failIfUnavailable
-**Avoids:** Pitfall 1 (wrong env var value), Pitfall 3 (nix store immutability), Pitfall 7 (restart loop — both changes land together)
+### Phase 1: Credential Foundation
+**Rationale:** Everything else depends on correctly reading and writing `.credentials.json`. The key hash formula is the highest-risk item in the entire milestone — wrong key = silent invisible failure that passes all integration tests. Validate this first with a unit test against live data.
+**Delivers:** `mcp/credentials.rs` with `mcp_oauth_key()`, atomic read-modify-write, backup before modification; unit tests for key formula against live Notion entry
+**Addresses:** Token storage; credential merge safety
+**Avoids:** Pitfalls 1 (wrong key), 6 (concurrent write corruption)
+**Research flag:** Standard pattern (sha256 + atomic rename). No research phase needed.
 
-### Phase 2: Doctor Diagnostics
-**Rationale:** Doctor must accurately surface sandbox state before launch and reflect what agents will see — not the developer's interactive shell. Must complete before E2E verification so the verification pass can use doctor to confirm pre-conditions.
-**Delivers:** `check_sandbox_ripgrep()` DoctorCheck in Linux block (Warn severity); non-fatal rg warning in deps.rs; sandbox-config check reading generated settings.json per agent
-**Addresses:** Doctor rg check, sandbox-config/agent check, devenv-only dep warning
-**Avoids:** Pitfall 2 (doctor PATH divergence)
+### Phase 2: Auth Detection and Pre-flight
+**Rationale:** Detection logic (`.mcp.json` + `.credentials.json` cross-reference) is low-complexity and enables both pre-flight warnings and the test harness for all subsequent phases. Addresses the needs-auth cache pitfall and HOME isolation scoping up front.
+**Delivers:** `mcp/detect.rs`, `rightclaw mcp status` subcommand, `rightclaw up` pre-flight warning (non-fatal)
+**Addresses:** Auth detection, pre-flight warning, Doctor MCP token check
+**Avoids:** Pitfall 2 (per-agent cache path), Pitfall 8 (HOME isolation scope from ARCHITECTURE.md)
+**Research flag:** Standard pattern. No research phase needed.
 
-### Phase 3: E2E Verification
-**Rationale:** Only valid after Phase 1 (fix) and Phase 2 (diagnostics are accurate). Must validate all three sandbox deps explicitly, not just ripgrep. Must produce a repeatable checklist committed to the repo.
-**Delivers:** Documented UAT pass confirming sandbox-enabled full flow on Linux; repeatable checklist in `tests/e2e/` covering all three deps; macOS verification documented separately
-**Addresses:** Full flow (rightclaw up → doctor green → sandbox ON → Telegram → CC subprocess → cron), all three sandbox deps tested
-**Avoids:** Pitfall 4 (macOS divergence — explicit separate verification), Pitfall 5 (partial sandbox fix), Pitfall 6 (one-time validation)
+### Phase 3: Core OAuth Flow
+**Rationale:** Main implementation phase. Depends on credentials.rs (Phase 1) for storage. Sub-phases must follow dependency order: AS discovery → DCR (with static client fallback) → PKCE → callback server → browser open → code exchange → token write → agent restart. DCR fallback must be in this phase, not deferred.
+**Delivers:** `mcp/oauth.rs`, `mcp/callback.rs`, `rightclaw mcp auth` subcommand with full `McpCommands` enum, PKCE state file persistence, agent restart via process-compose
+**Addresses:** All P1 features from FEATURES.md
+**Avoids:** Pitfalls 4 (tunnel URL instability — loopback default), 5 (PKCE state loss — file before browser opens), 5 (DCR fallback), 9 (reconnection failure — restart-after-auth as primary UX)
+**Research flag:** Needs validation of `discoveryState` field schema during implementation (see Gaps). AS discovery endpoint behavior for Notion and Linear should be tested against live servers early in this phase.
+
+### Phase 4: Token Refresh and Doctor Integration
+**Rationale:** Refresh is P2 priority — high value (CC's headless refresh is broken) but depends on Phase 3 infrastructure. Doctor integration follows existing DoctorCheck pattern. `expiresAt=0` handling is part of this phase.
+**Delivers:** `mcp/refresh.rs`, `rightclaw mcp refresh` subcommand, Doctor `check_mcp_oauth()` DoctorCheck (Warn severity), proactive refresh call in `rightclaw up` pre-flight
+**Addresses:** P2 features from FEATURES.md; token expiry silent failure
+**Avoids:** Pitfall 3 (silent headless refresh failure), Pitfall 7 (expiresAt=0 Linear edge case)
+**Research flag:** Standard pattern. No research phase needed.
 
 ### Phase Ordering Rationale
 
-- Phase 1 must precede Phase 2 and Phase 3: diagnostics and verification are meaningless until the underlying fix is in place
-- Phase 2 must precede Phase 3: doctor is the primary pre-condition check tool during E2E runs
-- Phase 1 is small enough to be a single PR (4-5 files, ~40 lines total change)
-- failIfUnavailable and sandbox.ripgrep.command must land together in Phase 1 to avoid the restart loop pitfall
-- Phase 3 E2E checklist must be committed as a living document and re-run after CC version bumps
+- Phase 1 before everything: wrong key format is invisible at runtime. Unit test against live data is the only way to confirm correctness before integration.
+- Phase 2 before Phase 3: detection logic is needed as a test fixture for OAuth flow tests. Pre-flight warning is low-risk and delivers immediate operator value.
+- Phase 3 is kept monolithic within its scope: OAuth protocol steps have tight sequencing dependencies (DCR must complete before PKCE auth URL is constructed; callback server must start before browser opens). Splitting risks delivering a half-functional flow that cannot be tested end-to-end.
+- Phase 4 last: refresh depends on Phase 3 tokens. Doctor depends on Phase 2 detection. Both are cleanup/hardening, not blockers.
 
 ### Research Flags
 
-All phases have sufficient detail to proceed directly to implementation. No phase requires `/gsd:research-phase`.
+Phases needing deeper research during planning:
+- **Phase 3:** `discoveryState` field internal schema — known fields are `authorizationServerUrl` and `resourceMetadataUrl`; additional fields CC expects are not fully documented. Resolve by running a real OAuth flow and capturing the credential file before and after.
+- **Phase 3:** Live server DCR behavior — Notion DCR is confirmed (live credential entry exists). Linear's server URL producing hash `638130d5ab3558f4` should be verified to confirm the canonical URL CC uses.
 
 Phases with standard patterns (skip research-phase):
-- **Phase 1:** CC source inspected directly. All change sites identified by file + function. No new abstractions.
-- **Phase 2:** Follows exact existing DoctorCheck pattern. No novel patterns needed.
-- **Phase 3:** Manual UAT — execution only, no research needed.
+- **Phase 1:** SHA-256 via `sha2` crate and atomic rename are well-documented Rust patterns.
+- **Phase 2:** File path resolution under HOME isolation is documented in MEMORY.md. No surprises.
+- **Phase 4:** `oauth2` crate `exchange_refresh_token()` documented in crate docs. Doctor follows existing DoctorCheck pattern.
 
-One area requiring live validation during Phase 1 execution:
-- **socat PATH inheritance:** Verify socat is reachable from the env that agent processes inherit from process-compose (not just devenv shell). The `sandbox.ripgrep.command` field handles rg specifically; socat and bwrap still depend on inherited PATH. If not present, explicit PATH injection in `cmd_up` is required.
+---
 
 ## Confidence Assessment
 
 | Area | Confidence | Notes |
 |------|------------|-------|
-| Stack | HIGH | CC source inspected directly (cli.js active build). `sandbox.ripgrep` Zod schema confirmed. No speculation. |
-| Features | HIGH | CC official docs + 5 GitHub issues (42068, 6415, 26282, 32275, 1843) verified. devenv.nix and rightclaw source inspected directly. |
-| Architecture | HIGH | All change sites identified by file + function. Data flow confirmed via CC cli.js source. `sandbox.ripgrep` override path confirmed. |
-| Pitfalls | HIGH | All 7 pitfalls sourced from confirmed CC GitHub issues or verified nix behavior. USE_BUILTIN_RIPGREP semantics confirmed via source + live Bun.which test. |
+| Stack | HIGH | Three new crates verified on crates.io. cloudflared confirmed via official docs. ngrok authtoken requirement confirmed from ngrok official docs. |
+| Features | HIGH | MCP spec read from modelcontextprotocol.io. CC bugs confirmed from GitHub issue tracker with live repros. Live credential file inspected directly. Feature dependency graph complete. |
+| Architecture | HIGH | Module boundaries match existing codebase conventions. Credential symlink architecture confirmed from MEMORY.md and PROJECT.md. Integration points in cmd_up are unambiguous. |
+| Pitfalls | HIGH | Pitfalls 1 and 2 verified against CC v2.1.89 cli.js source. Pitfalls 3, 4, 9 confirmed from GitHub issues with live repros. Pitfall 4 confirmed from ngrok official pricing docs. |
 
 **Overall confidence:** HIGH
 
 ### Gaps to Address
 
-- **socat agent PATH inheritance:** The `sandbox.ripgrep.command` fix handles rg by absolute path. Socat and bwrap still depend on agent process PATH. Confirm socat is in the PATH process-compose agents inherit; if not, add explicit PATH injection in `cmd_up` as part of Phase 1.
-- **macOS E2E:** Linux fix is confirmed. macOS Seatbelt path (no bwrap, sandbox-exec) needs explicit E2E verification in Phase 3. Expected to work identically (same env var fix, same settings.json change) but untested.
-- **CC update stability:** `USE_BUILTIN_RIPGREP` is an undocumented internal env var. After any CC version bump in devenv.lock, the Phase 3 E2E checklist must be re-run. Consider adding a note in `devenv.nix` or a doctor check that triggers when CC version changes.
+- **`discoveryState` internal schema:** Complete field set CC expects inside `discoveryState` is not documented. Known: `authorizationServerUrl`, `resourceMetadataUrl`. Resolution: inspect a live credential entry during Phase 3 by capturing `.credentials.json` before and after a real OAuth flow.
+- **`sha2` crate not in STACK.md new crate list:** The credential key formula requires SHA-256. `sha2 = "0.10"` must be added to workspace deps in Phase 1. Low risk — ecosystem standard.
+- **macOS `.credentials.json` vs Keychain:** All research and verification targets Linux. macOS may store MCP tokens in Keychain (CC issue #19456). v3.2 scope is Linux only; macOS path deferred.
+- **Process-compose restart endpoint for single agent:** Agent restart after OAuth uses process-compose REST API. The exact endpoint and payload were not researched. Resolution: check process-compose API docs during Phase 3 planning (existing codebase uses the REST API for other operations — pattern exists to follow).
+
+---
 
 ## Sources
 
 ### Primary (HIGH confidence)
-- CC cli.js source (inspected 2026-04-02, build 2.1.89): `checkDependencies` (zT8/G34), `USE_BUILTIN_RIPGREP` value semantics (A_/Bv8), `sandbox.ripgrep` Zod schema (oO6), `failIfUnavailable` default false, `SandboxUnavailableReason` silent degradation path
-- [CC Sandboxing docs](https://code.claude.com/docs/en/sandboxing) — dependency requirements (bwrap, socat, rg), failIfUnavailable, sandbox modes
-- [CC Issue #42068](https://github.com/anthropics/claude-code/issues/42068) — vendored rg permissions bug, USE_BUILTIN_RIPGREP=0 workaround documented
-- [CC Issue #6415](https://github.com/anthropics/claude-code/issues/6415) — USE_BUILTIN_RIPGREP value semantics: 0=system rg, 1=bundled rg
-- [CC Issue #26282](https://github.com/anthropics/claude-code/issues/26282) — exact error message for sandbox dep failure
-- [CC Issue #32275](https://github.com/anthropics/claude-code/issues/32275) — bwrap on macOS triggers wrong sandbox path (closed March 2026)
-- [sadjow/claude-code-nix package.nix](https://github.com/sadjow/claude-code-nix) — USE_BUILTIN_RIPGREP=0 + ripgrep in PATH as confirmed nix packaging pattern
-- RightClaw codebase (inspected directly): devenv.nix, doctor.rs, codegen/settings.rs, telegram/worker.rs, cron.rs
-- Live Bun.which test: `Bun.which("/nix/.../vendor/ripgrep/x64-linux/rg")` → null; vendor rg mode confirmed r--r--r-- (444)
+- CC v2.1.89 source `cli.js` — `fM()` key formula, `tokens()` refresh logic, `sD8()` credential path, `RF1()` auth cache path (direct source inspection 2026-04-03)
+- Live `~/.claude/.credentials.json` — `mcpOAuth` structure with Notion (`notion|eac663db915250e7`) and Linear (`plugin:linear:linear|638130d5ab3558f4`) entries confirmed 2026-04-03
+- Live `~/.claude/mcp-needs-auth-cache.json` — `{"notion":{"timestamp":...},...}` format confirmed 2026-04-03
+- [MCP Authorization Specification](https://modelcontextprotocol.io/specification/draft/basic/authorization) — OAuth 2.1, PKCE, discovery, DCR, redirect URI constraints
+- [RFC 8252 — OAuth 2.0 for Native Apps](https://datatracker.ietf.org/doc/html/rfc8252) — loopback redirect URI exemption
+- [RFC 7591 — Dynamic Client Registration](https://datatracker.ietf.org/doc/html/rfc7591)
+- [RFC 8414 — OAuth 2.0 AS Metadata](https://datatracker.ietf.org/doc/html/rfc8414)
+- [RFC 9728 — Protected Resource Metadata](https://datatracker.ietf.org/doc/html/rfc9728)
+- [axum crates.io](https://crates.io/crates/axum) — v0.8.6 current
+- [oauth2-rs docs.rs](https://docs.rs/oauth2/latest/oauth2/) — v5.0, PKCE types confirmed
+- [Cloudflare Quick Tunnels](https://try.cloudflare.com/) — no-account quick tunnel confirmed
 
 ### Secondary (MEDIUM confidence)
-- [CC Issue #1843](https://github.com/anthropics/claude-code/issues/1843) — USE_BUILTIN_RIPGREP controls grep tool vs. sandbox check (separate code paths)
-- [CC Issue #25418](https://github.com/anthropics/claude-code/issues/25418) — CC agent teams shadow binary issue on NixOS; DISABLE_AUTOUPDATER workaround
-- [anthropic-experimental/sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) — confirmed dep chain: bwrap + socat + rg
-- [NixOS Discourse: Packaging Claude Code](https://discourse.nixos.org/t/packaging-claude-code-on-nixos/61072) — nix store immutability, chmod failure patterns
-- [Nix store immutability](https://nixos.org/guides/nix-pills/the-nix-store.html) — content-addressed, read-only by design
+- CC issue #11585, #36307 — HTTP MCP servers never trigger OAuth browser flow (confirmed open April 2026)
+- CC issue #28256, #29718, #35092 — token refresh not triggered proactively in headless mode
+- CC issue #10250 — OAuth succeeds but MCP reconnection fails, requires restart
+- CC issue #30272 — /mcp menu doesn't surface revoked server as needing re-auth
+- CC issue #38813 — OAuth tokens expire silently in headless automation
+- CC issue #26281 — tokens without `expires_in` and `refresh_token` silently expire (1h fallback)
+- claude-plugins-official issue #17 — Slack MCP fails: "does not support dynamic client registration"
+- CC issue #38102 — MCP OAuth "does not support DCR" despite clientId configured
+- [ngrok free plan limits](https://ngrok.com/docs/pricing-limits/free-plan-limits) — 2h session cap, random URLs
+- [axum OAuth example](https://github.com/tokio-rs/axum/blob/main/examples/oauth/src/main.rs) — callback server pattern confirmed
+- RightClaw MEMORY.md — credential symlink architecture confirmed
+
+### Tertiary (LOW confidence)
+- `discoveryState` internal field structure — present in live data as dict, content redacted; full schema not confirmed
+- `expiresAt` milliseconds vs seconds — inferred from ~1.7T values consistent with ms epoch; not confirmed from CC source directly
 
 ---
-*Research completed: 2026-04-02*
+*Research completed: 2026-04-03*
 *Ready for roadmap: yes*

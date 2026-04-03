@@ -1,381 +1,445 @@
 # Architecture Research
 
-**Domain:** CC sandbox fix and end-to-end verification for nix environments
-**Researched:** 2026-04-02
-**Confidence:** HIGH (direct codebase inspection + CC cli.js source analysis)
+**Domain:** MCP OAuth automation for headless multi-agent runtime
+**Researched:** 2026-04-03
+**Confidence:** HIGH (MCP spec + CC credential storage confirmed, protocol flow verified)
 
 ## Standard Architecture
 
 ### System Overview
 
 ```
-rightclaw up
+Operator runs: rightclaw mcp auth <server> [--agent <name>]
     │
-    ├── runtime/deps.rs → verify_dependencies()
-    │     checks: process-compose, claude/claude-bun
-    │     NEW: warn if rg absent AND CC vendor rg not executable
+    ├── 1. MCP Auth Detection
+    │      Read agent .mcp.json → find remote MCP servers
+    │      Probe each: GET /.well-known/oauth-authorization-server
+    │      If 401 → auth required; check ~/.rightclaw/mcp-oauth/<server>.json for token
+    │      Report which servers need auth
     │
-    ├── for each agent:
-    │     codegen/settings.rs → generate_settings()
-    │         writes agent/.claude/settings.json
-    │         existing: sandbox.enabled, filesystem, network
-    │         NEW: sandbox.ripgrep.command → absolute system rg path
+    ├── 2. OAuth Flow (for unauthenticated servers)
+    │      Dynamic client registration (RFC 7591): POST /register
+    │      PKCE: generate code_verifier + code_challenge (SHA-256)
+    │      Spawn local callback HTTP server (axum, random port)
+    │      If server requires external URL: spawn ngrok tunnel
+    │      Open browser with authorization URL + code_challenge + redirect_uri
+    │      Wait for callback → receive auth code
+    │      Exchange code for tokens (access + refresh) at /token
     │
-    └── codegen/process_compose.rs → generate_process_compose()
-          no changes — bot-only template already complete
+    ├── 3. Credential Storage
+    │      Write to ~/.claude/.credentials.json  ← CC's internal credential store
+    │        {"mcpOAuth": {"<server>|*": {accessToken, refreshToken, expiresAt}}}
+    │      This is the HOST ~/.claude path — not per-agent
+    │      Agents inherit via credential symlink (already in place for v2.1+)
+    │
+    └── 4. Token Refresh (rightclaw mcp refresh)
+           Read ~/.rightclaw/mcp-oauth/<server>.json for refresh token + expiry
+           If expired: use refresh_token → POST /token → update credentials
+           On-demand only — no background daemon
 
-doctor.rs → run_doctor()
-    existing: bwrap, socat, bwrap-sandbox checks
-    NEW: check_sandbox_ripgrep() DoctorCheck
-
-process-compose (bot processes)
-    └── crates/bot/ → rightclaw bot --agent <name>
-          ├── telegram/worker.rs → invoke_cc()
-          │     USE_BUILTIN_RIPGREP=1  (already set — belt-and-suspenders)
-          │     HOME=agent_dir
-          │     spawns: claude-bun -p --dangerously-skip-permissions ...
-          │         CC reads agent/.claude/settings.json
-          │         sandbox.ripgrep.command tells CC which rg to use
-          │         CC's bwrap wraps the subprocess
-          │
-          └── cron.rs → execute_job()
-                USE_BUILTIN_RIPGREP=1  (already set — belt-and-suspenders)
-                HOME=agent_dir
-                spawns: claude-bun -p --dangerously-skip-permissions ...
-                    same settings.json read path
+rightclaw up (existing cmd_up, modified)
+    │
+    ├── Existing: generate .mcp.json, settings.json, process-compose config
+    │
+    └── NEW: Pre-flight MCP auth check
+           For each remote MCP server in .mcp.json:
+               Check ~/.claude/.credentials.json for valid, non-expired token
+               If missing or expired: print warning (non-fatal)
+               If --require-auth flag: return Err (fatal)
 ```
 
-### Root Cause: CC Vendor rg Has No Execute Bit in Nix Store
+### Component Responsibilities
 
-CC resolves its rg binary in this order (from `cli.js` `$aA` lazy value):
-
-1. `USE_BUILTIN_RIPGREP` set → find system `rg` via `findActualExecutable("rg", [])`
-2. bun embedded mode → use `process.execPath --ripgrep`
-3. default fallback → `vendor/ripgrep/<arch>-<platform>/rg` (absolute nix store path)
-
-The vendored rg in the current CC nix package has mode `.r--r--r--` — **no execute bit**:
-```
-.r--r--r-- 5.6M root  1 Jan  1970
-  /nix/store/hhydcyh1z6h2fyznlqagb1p66l07yhp6-claude-code-bun-2.1.89/
-  lib/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/x64-linux/rg
-```
-Confirmed: attempting to execute it gives `permission denied`.
-
-`USE_BUILTIN_RIPGREP=1` is already set in `worker.rs` and `cron.rs`. This tells CC
-to prefer system `rg` via PATH lookup. However, CC's `checkDependencies` function
-(`zT8` in cli.js) runs the resolved rg binary to verify it works. If that test fails
-(e.g., system rg not in the subprocess PATH, or resolved to vendor path which has
-no execute bit), CC sets `SandboxUnavailableReason` and **silently degrades** to
-unsandboxed mode — no error exit, no diagnostic output visible to rightclaw.
-
-**`failIfUnavailable`** (a `settings.json` flag) defaults to `false`, so the silent
-degradation happens with no observable failure. Agents keep running, but unsandboxed.
-
-### The Fix: sandbox.ripgrep in settings.json
-
-CC's `settings.json` schema supports an explicit `sandbox.ripgrep` override:
-```json
-"sandbox": {
-  "ripgrep": {
-    "command": "/nix/store/.../bin/rg",
-    "args": []
-  }
-}
-```
-
-This field is documented in the CC settings schema (confirmed in `cli.js` Zod schema):
-```
-sandbox.ripgrep: {command: string, args?: string[]}
-  "Custom ripgrep configuration for bundled ripgrep"
-```
-
-When `sandbox.ripgrep.command` is set, CC's `oO6()` function returns it directly
-instead of running `$aA()` (the path that falls through to the vendor binary).
-The `checkDependencies` call uses this path for its executable test — if it points
-to a working system `rg`, the sandbox check passes.
-
-**Implementation:** In `generate_settings()`, resolve `which::which("rg")` to get
-the absolute system rg path, then inject it into the sandbox JSON. This is done
-at `rightclaw up` time so the path is always current (no hardcoded nix store hash).
-
-## Component Responsibilities
-
-| Component | Responsibility | Change |
-|-----------|----------------|--------|
-| `codegen/settings.rs` | Generate `settings.json` per agent | **MODIFY** |
-| `codegen/settings_tests.rs` | Unit tests for settings generation | **MODIFY** |
-| `runtime/deps.rs` | Pre-flight dependency check in `rightclaw up` | **MODIFY** |
-| `doctor.rs` | Comprehensive diagnostics | **MODIFY** |
-| `telegram/worker.rs` | Spawn CC for Telegram messages | unchanged (already has `USE_BUILTIN_RIPGREP=1`) |
-| `cron.rs` | Spawn CC for cron jobs | unchanged (already has `USE_BUILTIN_RIPGREP=1`) |
-| `codegen/process_compose.rs` | Bot process PC config | unchanged |
-| `agent/types.rs` | `SandboxOverrides` struct | unchanged |
-| `templates/process-compose.yaml.j2` | Bot process template | unchanged |
+| Component | Responsibility | Location |
+|-----------|----------------|----------|
+| `mcp/detect.rs` | Parse .mcp.json, probe servers for 401, classify as local/remote/authed | `crates/rightclaw/src/mcp/` |
+| `mcp/oauth.rs` | Full OAuth 2.1 + PKCE flow: discovery, registration, code exchange | `crates/rightclaw/src/mcp/` |
+| `mcp/callback.rs` | Local axum HTTP server for OAuth redirect capture | `crates/rightclaw/src/mcp/` |
+| `mcp/tunnel.rs` | Spawn ngrok (CLI subprocess) and extract public URL | `crates/rightclaw/src/mcp/` |
+| `mcp/credentials.rs` | Read/write ~/.claude/.credentials.json under mcpOAuth key | `crates/rightclaw/src/mcp/` |
+| `mcp/refresh.rs` | Token expiry check, refresh_token exchange | `crates/rightclaw/src/mcp/` |
+| `cmd_mcp_auth()` | CLI entry point: orchestrates detect → oauth → store | `crates/rightclaw-cli/src/main.rs` |
+| `cmd_up()` (modified) | Pre-flight: warn if remote MCPs have missing/expired tokens | `crates/rightclaw-cli/src/main.rs` |
+| `doctor.rs` (modified) | New DoctorCheck: validates MCP OAuth credential presence | `crates/rightclaw/src/doctor.rs` |
 
 ## Recommended Project Structure
 
-No new files. All changes in existing files:
-
 ```
 crates/rightclaw/src/
-├── codegen/
-│   ├── settings.rs          ← MODIFY: add sandbox.ripgrep to JSON output
-│   └── settings_tests.rs    ← MODIFY: add tests for ripgrep field presence
-├── runtime/
-│   └── deps.rs              ← MODIFY: add rg warning (non-fatal)
-└── doctor.rs                ← MODIFY: add check_sandbox_ripgrep() DoctorCheck
+├── mcp/                      # NEW module — all MCP OAuth logic
+│   ├── mod.rs                # pub use, module declarations
+│   ├── detect.rs             # parse .mcp.json, classify servers, probe for 401
+│   ├── oauth.rs              # RFC 7591 registration + RFC 8414 discovery + PKCE flow
+│   ├── callback.rs           # axum local HTTP server, one-shot receiver
+│   ├── tunnel.rs             # ngrok subprocess spawn, URL extraction
+│   ├── credentials.rs        # ~/.claude/.credentials.json read/write
+│   └── refresh.rs            # token expiry logic, refresh_token exchange
+├── doctor.rs                 # MODIFY: add check_mcp_oauth() DoctorCheck
+└── lib.rs                    # MODIFY: pub mod mcp
+
+crates/rightclaw-cli/src/
+└── main.rs                   # MODIFY: add McpCommands enum, cmd_mcp_auth(),
+                              #         cmd_mcp_refresh(), cmd_mcp_status()
+                              #         modify cmd_up() for pre-flight check
 ```
 
 ### Structure Rationale
 
-- **settings.rs** is the natural home for the rg path injection — it already builds
-  the complete `settings.json` JSON value. No new abstraction needed.
-- **deps.rs** is the `verify_dependencies()` fast-fail path. Adding an rg warning
-  here surfaces the issue before any process starts, not after agents fail silently.
-- **doctor.rs** provides post-hoc diagnostics via `rightclaw doctor`. Adding a
-  `check_sandbox_ripgrep()` here lets users debug without running `rightclaw up`.
+- **mcp/ as dedicated module:** OAuth is complex enough to warrant isolation. It has no circular deps on existing modules (only needs `agent::AgentDef` for path resolution). Clean boundary for testing.
+- **credentials.rs separate from oauth.rs:** Credential I/O is reusable across `mcp auth`, `mcp refresh`, and `rightclaw up` pre-flight. Isolating it avoids duplication.
+- **callback.rs separate from oauth.rs:** The local HTTP server is a self-contained concern. axum brings in a heavyweight dep — isolating the import keeps it contained if future refactoring moves callback to a feature flag.
+- **tunnel.rs separate:** Tunnel is optional (only needed when server won't accept localhost callbacks). Separation makes it easy to skip in tests.
 
 ## Architectural Patterns
 
-### Pattern 1: Inject sandbox.ripgrep at settings.json Generation Time
+### Pattern 1: Credential Storage in ~/.claude/.credentials.json
 
-**What:** Resolve `which::which("rg")` in `generate_settings()` and embed the
-absolute path into the `sandbox.ripgrep` field.
+**What:** Read and write MCP OAuth tokens directly into CC's internal credential file at the host `~/.claude` path — not the per-agent path. Use atomic file write (write to temp, rename).
 
-**When to use:** Always — even when `USE_BUILTIN_RIPGREP=1` is set, the
-`checkDependencies` path in CC needs a working rg to enable the sandbox.
+**When to use:** Always. This is the only location CC itself reads for MCP OAuth tokens. Writing anywhere else (per-agent dir, rightclaw state) would require CC to be patched to read it.
 
 **Trade-offs:**
-- Pro: CC uses this path for both `checkDependencies` and runtime operations
-- Pro: Absolute path survives HOME override (no relative PATH lookup needed)
-- Pro: Officially supported settings.json field — not a hack
-- Pro: Settings regenerated on every `rightclaw up` — always current path
-- Con: If system rg absent: field omitted, sandbox degrades, must warn caller
+- Pro: Agents inherit tokens via the existing `.claude/.credentials.json` credential symlink (established in v2.1 Phase 8).
+- Pro: Single source of truth — no token duplication across N agent dirs.
+- Pro: Token refresh by CC itself (when it eventually works) will update this same file.
+- Con: All agents share the same OAuth token per MCP server. If two agents use the same MCP server as different users, this conflicts — acceptable for v3.2 scope, document as limitation.
+- Con: File format is CC-internal and undocumented. Based on GitHub issue #28256 observation. Could change across CC versions.
 
-**Example:**
-```rust
-// In generate_settings(), after building the sandbox block:
-if let Ok(rg_path) = which::which("rg") {
-    settings["sandbox"]["ripgrep"] = serde_json::json!({
-        "command": rg_path.display().to_string(),
-        "args": []
-    });
-    // If rg not found: omit field; deps.rs/doctor.rs warn separately
-}
-```
-
-### Pattern 2: Non-Fatal rg Warning in verify_dependencies()
-
-**What:** After the claude binary check in `verify_dependencies()`, add a
-non-fatal check: if system rg is absent AND the CC vendor rg is not executable,
-emit a `tracing::warn!` — not an error. Agent launch proceeds; sandbox just
-won't work.
-
-**When to use:** In `cmd_up` fast-fail path — catches the issue before launch
-so the operator sees it in the terminal, not in CC's silent degradation.
-
-**Trade-offs:**
-- Pro: Consistent with existing git warning pattern (warn-only, never return Err)
-- Pro: Actionable: user sees the warning before agents start
-- Con: Soft warning is easy to miss — doctor.rs provides the explicit check
-
-**Example:**
-```rust
-// Non-fatal: sandbox degrades silently without rg; warn the operator.
-let rg_available = which::which("rg").is_ok();
-if !rg_available {
-    // Check CC vendor path as fallback detection
-    let vendor_rg_executable = resolve_cc_vendor_rg()
-        .map(|p| std::fs::metadata(&p)
-            .map(|m| { use std::os::unix::fs::PermissionsExt; m.permissions().mode() & 0o111 != 0 })
-            .unwrap_or(false))
-        .unwrap_or(false);
-    if !vendor_rg_executable {
-        tracing::warn!(
-            "rg not found in PATH and CC vendor ripgrep lacks execute permission — \
-             CC sandbox will be silently disabled. \
-             Install ripgrep: sudo apt install ripgrep (or pacman/dnf)"
-        );
+**Credential file format** (confirmed from issue #28256):
+```json
+{
+  "claudeAiOauth": { ... },
+  "mcpOAuth": {
+    "notion|*": {
+      "accessToken": "...",
+      "refreshToken": "...",
+      "expiresAt": 1735000000000
     }
+  }
 }
 ```
 
-### Pattern 3: DoctorCheck for Sandbox ripgrep
+Key format: `"{serverName}|*"` — literal asterisk, observed from Notion MCP.
 
-**What:** Add `check_sandbox_ripgrep()` in `run_doctor()` — a `DoctorCheck`
-with `Warn` severity when rg is unavailable. Placed in the Linux-only block
-after `check_bwrap_sandbox()`.
+**Implementation:**
+```rust
+// credentials.rs — atomic write pattern
+pub fn write_mcp_token(server_name: &str, token: &McpToken) -> miette::Result<()> {
+    let creds_path = dirs::home_dir()
+        .ok_or_else(|| miette::miette!("cannot determine HOME"))?
+        .join(".claude/.credentials.json");
+    // read-modify-write under mcpOAuth key
+    // write to .credentials.json.tmp, then rename (atomic on Linux/macOS)
+}
+```
 
-**When to use:** `rightclaw doctor` diagnostic path. Also acts as documentation
-for operators who need to understand sandbox requirements.
+### Pattern 2: Local axum Callback Server with One-Shot Channel
+
+**What:** Spawn a temporary `axum` HTTP server on a random loopback port. Pass the port in the `redirect_uri`. When the OAuth callback fires, extract the `?code=` parameter, send it over a `tokio::sync::oneshot` channel, and shut down the server.
+
+**When to use:** Every `rightclaw mcp auth` flow. The callback server lives only for the duration of the auth flow (seconds to minutes).
 
 **Trade-offs:**
-- Pro: Follows exact existing DoctorCheck pattern (name, status, detail, fix)
-- Pro: `Warn` severity matches the fact that agents still run (just unsandboxed)
-- Con: Requires resolving CC binary path, which is slightly involved
+- Pro: No persistent process — clean lifecycle, no port conflicts between runs.
+- Pro: axum is already a transitive dep via reqwest/tokio. Adding it explicitly is low cost.
+- Pro: oneshot channel is the idiomatic Rust approach for "wait for one event then stop."
+- Con: Random port means `redirect_uri` can't be pre-registered with servers that require exact URI registration. For those, the operator must configure the server to allow `http://localhost:*`. Most MCP servers with dynamic registration do allow this.
 
-**Check shape:**
+**Implementation sketch:**
+```rust
+// callback.rs
+pub async fn run_callback_server() -> miette::Result<(u16, oneshot::Receiver<String>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let (tx, rx) = oneshot::channel::<String>();
+    tokio::spawn(async move {
+        // axum router: GET /callback → extract ?code, send via tx, return HTML
+        // server shuts down after one successful callback (or timeout)
+    });
+    Ok((port, rx))
+}
 ```
-  sandbox-ripgrep      warn   rg not found in PATH and CC vendor rg not executable
-    fix: Install ripgrep: sudo apt install ripgrep (or dnf/pacman)
+
+### Pattern 3: Metadata Discovery with Fallback (RFC 8414)
+
+**What:** For each remote MCP server, attempt `GET <server_base>/.well-known/oauth-authorization-server`. If 200, extract `authorization_endpoint`, `token_endpoint`, `registration_endpoint`. If 404 or error, fall back to default paths: `/authorize`, `/token`, `/register`.
+
+**When to use:** Always. The spec requires it. Servers like Notion use non-default paths exposed via metadata.
+
+**Trade-offs:**
+- Pro: Spec-compliant, works with all conformant MCP servers.
+- Pro: Automatic — no per-server hardcoding.
+- Con: One extra HTTP round-trip per auth flow. Acceptable — auth is operator-driven, not on the hot path.
+
+### Pattern 4: ngrok as CLI Subprocess (Not Rust SDK)
+
+**What:** When a server requires a non-localhost redirect URI (because it validates redirect URIs against a whitelist), spawn `ngrok http <port>` as a subprocess and parse the public URL from its stdout or REST API at `localhost:4040/api/tunnels`.
+
+**When to use:** Optional — only when `--tunnel` flag is passed or when `rightclaw mcp auth` detects the server rejects localhost redirect URIs (detect via 400 response on registration with localhost URI).
+
+**Trade-offs:**
+- Pro: No ngrok API key for basic HTTP tunnels in most cases.
+- Pro: ngrok CLI is already installed by many developers. Using subprocess avoids adding the `ngrok` crate as a dependency (it embeds the ngrok agent, which is large).
+- Pro: Same pattern as existing use of `process-compose` as subprocess.
+- Con: ngrok must be in PATH. Doctor check needed.
+- Con: ngrok free tier tunnels have short lifespans and random URLs. The operator must complete auth quickly.
+- Alternative if ngrok absent: print the `redirect_uri` and ask operator to run ngrok manually. This is acceptable UX since tunnel is rare (most MCP servers accept localhost).
+
+**Subprocess pattern:**
+```rust
+// tunnel.rs
+pub fn spawn_ngrok(port: u16) -> miette::Result<NgrokHandle> {
+    // spawn: ngrok http <port> --log=stdout --log-format=json
+    // parse stdout JSON lines for {"msg":"started tunnel","url":"https://..."}
+    // return NgrokHandle with public_url and Child for cleanup
+}
+```
+
+### Pattern 5: Non-Fatal Pre-flight in cmd_up
+
+**What:** After MCP config generation in `cmd_up`, scan each agent's `.mcp.json` for remote servers. For each, check if a non-expired token exists in `~/.claude/.credentials.json`. If missing or expired, emit `tracing::warn!` with the server name and the fix command.
+
+**When to use:** Always in `cmd_up`. Keeps the operator informed before agents start. Non-fatal because agents may work without OAuth for basic operations, and the operator may intentionally defer auth.
+
+**Trade-offs:**
+- Pro: Consistent with existing warning patterns (git, rg).
+- Pro: Surfaces auth issues at launch time rather than when an agent silently fails to call a tool.
+- Con: Warning may be noisy for setups where MCP servers are intentionally unauthenticated.
+
+**Warning output:**
+```
+warn: MCP server 'notion' in agent 'right' needs OAuth authentication.
+      Run: rightclaw mcp auth notion --agent right
 ```
 
 ## Data Flow
 
-### cmd_up — Sandbox Fix Flow
+### rightclaw mcp auth Flow
+
+```
+rightclaw mcp auth notion --agent right
+    │
+    ├── detect: read ~/.rightclaw/agents/right/.mcp.json
+    │     find "notion" server → url: "https://api.notion.com/mcp"
+    │
+    ├── probe: GET https://api.notion.com/.well-known/oauth-authorization-server
+    │     → 200: {authorization_endpoint, token_endpoint, registration_endpoint}
+    │
+    ├── register (RFC 7591): POST https://api.notion.com/register
+    │     body: {redirect_uris: ["http://127.0.0.1:<port>/callback"], client_name: "RightClaw"}
+    │     → {client_id: "..."}  (no client_secret for public clients)
+    │
+    ├── callback server: bind 127.0.0.1:0 → port=XXXXX
+    │     [if --tunnel: spawn ngrok → get public URL, use as redirect_uri instead]
+    │
+    ├── open browser: https://api.notion.com/authorize
+    │     ?response_type=code&client_id=...&redirect_uri=http://127.0.0.1:XXXXX/callback
+    │     &code_challenge=<SHA256(verifier)>&code_challenge_method=S256&state=<random>
+    │
+    ├── user clicks through OAuth in browser
+    │
+    ├── callback received: GET /callback?code=<auth_code>&state=<state>
+    │     validate state (CSRF), send code over oneshot channel
+    │     render "Authentication successful. Return to terminal."
+    │
+    ├── token exchange: POST https://api.notion.com/token
+    │     body: {grant_type: authorization_code, code: <auth_code>,
+    │            redirect_uri: ..., client_id: ..., code_verifier: <verifier>}
+    │     → {access_token, refresh_token, expires_in}
+    │
+    └── write credentials: ~/.claude/.credentials.json
+          mcpOAuth["notion|*"] = {accessToken, refreshToken, expiresAt}
+          atomic write (tmp file + rename)
+          print: "Authenticated notion. Token valid for 1h. Refresh: rightclaw mcp refresh notion"
+```
+
+### rightclaw up Pre-flight MCP Check
 
 ```
 cmd_up()
     │
-    ├── verify_dependencies()  [deps.rs]
-    │     ├── which("process-compose") → ok/fail
-    │     ├── which("claude"/"claude-bun") → ok/fail
-    │     └── NEW: if which("rg").is_err() && vendor_rg_not_executable
-    │               → tracing::warn! (non-fatal, continue)
+    ...existing steps...
     │
     ├── for each agent:
-    │     generate_settings(agent, no_sandbox, &host_home)  [settings.rs]
-    │         existing: sandbox.enabled, filesystem, network, etc.
-    │         NEW: if which("rg").is_ok()
-    │               → settings["sandbox"]["ripgrep"] = {command: rg_path, args: []}
+    │     generate_mcp_config() → .mcp.json  [existing]
+    │     NEW: mcp::detect::check_auth_status(&agent.path)
+    │           for each remote server URL in mcpServers:
+    │               load ~/.claude/.credentials.json
+    │               look up mcpOAuth["{server_name}|*"]
+    │               if absent or expiresAt < now() + 60s:
+    │                   tracing::warn!(...)
     │
-    └── generate_process_compose()  [unchanged]
-          bot processes use USE_BUILTIN_RIPGREP=1 (belt-and-suspenders)
-          but settings.json ripgrep field is the primary fix
+    └── continue with process-compose launch [existing]
 ```
 
-### CC Subprocess — Sandbox Enable Flow (after fix)
+### Token Refresh Flow
 
 ```
-claude-bun -p --dangerously-skip-permissions ...
-    reads agent/.claude/settings.json
-    sandbox.enabled = true
-    sandbox.ripgrep.command = "/nix/store/.../bin/rg"  ← NEW
-         │
-         oO6() returns {command: "/nix/store/.../bin/rg", args: []}
-         zT8() checkDependencies:
-             bwrap → found ✓
-             socat → found ✓
-             rg (runs command) → /nix/store/.../bin/rg works ✓
-         SandboxUnavailableReason() → undefined (no reason = sandbox enabled)
-         bwrap wraps bash subprocess ✓
-```
-
-### doctor — New Check Flow
-
-```
-run_doctor(home)
-    ├── check_binary("bwrap")         ← existing
-    ├── check_binary("socat")         ← existing
-    ├── check_bwrap_sandbox()         ← existing
-    └── NEW: check_sandbox_ripgrep()
-              step 1: which("rg") → if found, Pass
-              step 2: else: resolve CC binary → find vendor rg path
-              step 3: check vendor rg mode & 0o111 != 0 → if ok, Pass
-              step 4: else Warn with fix hint
+rightclaw mcp refresh notion [--agent right]
+    │
+    ├── read ~/.claude/.credentials.json → mcpOAuth["notion|*"]
+    │     if no refreshToken → error: "Re-authenticate: rightclaw mcp auth notion"
+    │
+    ├── probe server for token_endpoint (same discovery as auth flow)
+    │
+    ├── POST token_endpoint
+    │     {grant_type: refresh_token, refresh_token: <stored>, client_id: ...}
+    │     → {access_token, expires_in} (refresh_token may rotate)
+    │
+    └── write updated credentials → ~/.claude/.credentials.json
+          print: "Token refreshed. Valid until <time>."
 ```
 
 ## Integration Points
 
-### External Service: CC settings.json sandbox.ripgrep field
+### Credential Symlink (v2.1 Architecture)
 
-| Field | Schema | Notes |
-|-------|--------|-------|
-| `sandbox.ripgrep.command` | `string` | Absolute path to rg binary |
-| `sandbox.ripgrep.args` | `string[]` optional | Extra rg args (use `[]`) |
+The existing v2.1 credential symlink setup means:
+```
+~/.rightclaw/agents/right/.claude/.credentials.json
+    → (symlink) → ~/.claude/.credentials.json
+```
 
-This field was confirmed present in CC v2.1.89 cli.js Zod schema. It overrides
-CC's internal `$aA()` path resolution, including the vendor fallback.
+When `rightclaw mcp auth` writes tokens to the host `~/.claude/.credentials.json`, all agents automatically see the updated token via their symlink. **No per-agent credential writing needed.**
 
-**Confidence: HIGH** — confirmed by source inspection of active CC version.
+Confidence: HIGH — this symlink is established in v2.1 Phase 8 and is already in place.
 
-### Internal Boundary: settings.rs ↔ deps.rs
+### Per-Agent HOME Isolation Impact
 
-Both independently call `which::which("rg")`. There is no shared state needed —
-settings.rs uses the result to populate JSON, deps.rs uses it to decide whether
-to warn. No refactoring needed; the two calls are independent.
+Agents run with `HOME=$AGENT_DIR`. Claude Code resolves credentials from `$HOME/.claude/.credentials.json`. Since `$HOME/.claude/` is the symlinked agent `.claude/` dir, and `.credentials.json` in that dir symlinks to the host file, agents read the host OAuth tokens. This means:
 
-If code reuse becomes desirable in the future, extract a `resolve_system_rg() -> Option<PathBuf>`
-helper in a shared module. Not needed for this milestone.
+- **Token sharing across agents is by design** — all agents using "notion" get the same OAuth token.
+- **No agent-specific OAuth** in v3.2 — document as limitation, defer per-agent tokens to v3.3 if needed.
+- **`CLAUDE_CONFIG_DIR` alternative** — CC supports this env var to redirect `.claude/` resolution. Could be used for per-agent credential isolation in future, but complicates the flow.
 
-### Internal Boundary: deps.rs ↔ doctor.rs
+Confidence: HIGH — per-agent HOME isolation is documented in MEMORY.md and PROJECT.md.
 
-Both check rg availability. The doctor check is richer (resolves CC vendor path as
-fallback, emits DoctorCheck struct). The deps.rs check is simpler (just warn).
-Code can be duplicated (small amount) or shared via an `is_rg_available_for_sandbox()`
-helper. Given the existing pattern (doctor.rs is standalone), duplication is fine.
+### cmd_up Integration Points
+
+| Integration | Location | Nature |
+|-------------|----------|--------|
+| MCP pre-flight check | `cmd_up()` after `generate_mcp_config()` | NEW: call `mcp::detect::check_auth_status()` per agent, emit warn |
+| No auth-gate on launch | `cmd_up()` | Intentional: non-fatal. Use `--require-mcp-auth` flag if fatal needed |
+| mcp_needs_auth_cache | NOT used in v3.2 | The `~/.claude/mcp-needs-auth-cache.json` CC file is CC-internal, tracks servers that returned 401 to CC. Not written by rightclaw. |
+
+### Doctor Integration
+
+New `check_mcp_oauth()` DoctorCheck for each agent's remote MCP servers:
+
+```
+  mcp-auth-notion    warn   Token missing or expired for agent 'right'
+    fix: rightclaw mcp auth notion --agent right
+```
+
+Severity: `Warn` — agents still launch, but MCP tools will fail at runtime.
+
+## New CLI Subcommand Design
+
+```
+rightclaw mcp auth <server-name> [--agent <name>] [--tunnel]
+    # Complete OAuth flow for a named MCP server
+    # --agent: scope to one agent (default: check all agents for this server)
+    # --tunnel: spawn ngrok for non-localhost redirect_uri
+
+rightclaw mcp refresh [<server-name>] [--agent <name>]
+    # Refresh token using stored refresh_token
+    # No <server-name>: refresh all expired tokens
+
+rightclaw mcp status [--agent <name>]
+    # Show auth status of all remote MCPs per agent
+    # Output: table of server | status | expires_at | agent
+```
+
+**Clap enum:**
+```rust
+#[derive(Subcommand)]
+pub enum McpCommands {
+    Auth {
+        server: String,
+        #[arg(long)] agent: Option<String>,
+        #[arg(long)] tunnel: bool,
+    },
+    Refresh {
+        server: Option<String>,
+        #[arg(long)] agent: Option<String>,
+    },
+    Status {
+        #[arg(long)] agent: Option<String>,
+    },
+}
+```
+
+## New Dependencies Required
+
+| Crate | Version | Purpose | Notes |
+|-------|---------|---------|-------|
+| `axum` | 0.8 | Local callback HTTP server | Already transitive via tokio ecosystem; add explicitly |
+| `oauth2` | 4.x | PKCE generation, token types, type-safe flow | ramosbugs/oauth2-rs — the standard Rust OAuth2 crate |
+| `open` | 5.x | Open browser cross-platform | `open::that(url)` — tiny, cross-platform browser launch |
+
+**No ngrok crate** — spawn CLI subprocess. Avoids embedded agent binary weight.
+
+**reqwest already present** — used for metadata discovery, registration, and token exchange HTTP calls.
 
 ## Scaling Considerations
 
-Not applicable — this is a local CLI tool. The fix affects only per-agent
-`settings.json` generation at `rightclaw up` time.
+Not applicable — local CLI tool. The auth flow runs once per server per operator session, not per agent or per request. Token sharing means N agents = 1 auth flow, not N flows.
 
 ## Anti-Patterns
 
-### Anti-Pattern 1: Symlinking rg into the Agent Dir
+### Anti-Pattern 1: Storing Tokens in Per-Agent Dir Instead of Host ~/.claude
 
-**What people do:** Create a symlink at `agent_dir/.bin/rg` → system rg,
-then add `agent_dir/.bin` to the PATH or `allowWrite`.
+**What people do:** Write `accessToken` to `~/.rightclaw/agents/<name>/.claude/.credentials.json` directly (the agent-local path).
 
-**Why it's wrong:** Bubblewrap's `--bind agent_dir agent_dir` is for write
-access, not PATH injection. The CC subprocess inherits PATH from the spawning
-process (rightclaw/process-compose), not from `allowWrite`. The symlink approach
-adds complexity for zero benefit.
+**Why it's wrong:** The `.claude/` directory in the agent dir is a symlink to the host `~/.claude/`. Writing to the agent-local path writes to the host file. But if the symlink was ever not in place (e.g., before `rightclaw up` runs), you'd write to a stale or nonexistent location. Always write to the resolved host `~/.claude/.credentials.json` — the canonical path.
 
-**Do this instead:** Set `sandbox.ripgrep.command` in settings.json — CC reads
-this before constructing the bwrap call. Clean, supported, one line.
+**Do this instead:** `dirs::home_dir().join(".claude/.credentials.json")` — use the host HOME, not the agent dir.
 
-### Anti-Pattern 2: Hardcoding the Nix Store Hash
+### Anti-Pattern 2: Background Token Refresh Daemon
 
-**What people do:** Hardcode `/nix/store/<hash>-ripgrep-.../bin/rg` in settings.rs
-or a constant.
+**What people do:** Spawn a tokio task that polls token expiry and calls refresh on a timer.
 
-**Why it's wrong:** The nix store hash changes on every `rg` version update.
-After a `nix profile upgrade`, the hardcoded path is stale.
+**Why it's wrong:** (1) `rightclaw up` doesn't run as a persistent background process — it launches process-compose and exits or attaches. There's no long-lived rightclaw process to host the timer. (2) The GitHub issue #28256 shows CC itself has token refresh bugs. Adding a parallel refresh mechanism creates write races on `.credentials.json`. (3) Complexity far exceeds value for a CLI tool where the operator can run `rightclaw mcp refresh`.
 
-**Do this instead:** `which::which("rg")` at `rightclaw up` time always resolves
-to the current nix profile symlink target — automatically correct after upgrades.
+**Do this instead:** On-demand refresh via `rightclaw mcp refresh`, plus a pre-flight warning in `rightclaw up` when a token is close to expiry. If CC fixes its own refresh, rightclaw's role shrinks naturally.
 
-### Anti-Pattern 3: Setting failIfUnavailable to Make Problems Visible
+### Anti-Pattern 3: Launching Browser Inside the Agent Session
 
-**What people do:** Add `"failIfUnavailable": true` to `settings.json` to force
-CC to exit loudly when sandbox can't start, making the problem visible.
+**What people do:** Let the CC agent handle OAuth via its `/mcp` command or by spawning a browser.
 
-**Why it's wrong:** CC exits on startup with an error, the bot process crashes,
-process-compose restarts it, infinite restart loop. The operator only sees the
-restart counter climbing with no useful output. This is for managed enterprise
-deployments, not debugging.
+**Why it's wrong:** Agents run headless inside process-compose with `is_tty: false`. They have no terminal for interactive browser flows. CC's `/mcp auth` command is TUI-only. The entire point of `rightclaw mcp auth` is to move this operator interaction to the CLI side, before agents start.
 
-**Do this instead:** Fix the root cause (inject working rg path in settings.json).
-Use `rightclaw doctor` to diagnose before `rightclaw up`.
+**Do this instead:** `rightclaw mcp auth` is always run by the operator before `rightclaw up`, not inside an agent session.
 
-### Anti-Pattern 4: Adding /nix or /nix/store to allowRead
+### Anti-Pattern 4: Using mcp-needs-auth-cache.json as Auth State
 
-**What people do:** Add `/nix` or `/nix/store` to `settings.json` `allowRead`,
-assuming sandbox can't read the rg binary.
+**What people do:** Read `~/.claude/mcp-needs-auth-cache.json` to detect which servers need auth.
 
-**Why it's wrong:** The bwrap sandbox already does `--ro-bind / /` — the entire
-filesystem is bind-mounted read-only. The nix store is already readable. The
-problem is the execute bit being absent on the vendored binary, not read access.
-`allowRead` does not affect execute semantics.
+**Why it's wrong:** This file is written by CC *after* an agent session fails with a 401. It's a cache of past failures, not a source of truth for current auth state. In a fresh install, it doesn't exist. After a successful auth, CC doesn't always clear the cache immediately. Probing the server directly (detect.rs) is the authoritative approach.
 
-**Do this instead:** Point CC to a different rg binary via `sandbox.ripgrep.command`.
+**Do this instead:** Probe the server with a test request or metadata check in `detect.rs`. Use `.credentials.json` expiry to determine if re-auth is needed.
+
+### Anti-Pattern 5: Hardcoding mcpOAuth Key Format
+
+**What people do:** Hardcode the key as `"{server}|{scope}"` or `"{server}|all"` without checking the observed format.
+
+**Why it's wrong:** The CC credential format is undocumented and observed as `"{serverName}|*"` from issue #28256. If CC changes this format in a future version, hardcoded keys won't match. Rightclaw should use `"{serverName}|*"` consistently (matching what CC expects) and document the CC version this was verified against.
+
+**Do this instead:** Centralize the key format in `credentials.rs` as a constant `fn mcp_oauth_key(server: &str) -> String { format!("{server}|*") }`. Change in one place if CC updates the format.
 
 ## Sources
 
-- CC source: `/nix/store/hhydcyh1z6h2fyznlqagb1p66l07yhp6-claude-code-bun-2.1.89/lib/node_modules/@anthropic-ai/claude-code/cli.js` (inspected 2026-04-02)
-  - `$aA` lazy: rg resolution order (USE_BUILTIN_RIPGREP → system → vendor)
-  - `zT8` / `checkDependencies`: verifies bwrap + socat + rg at sandbox init
-  - `vx_` / `SandboxUnavailableReason`: returns reason string when sandbox can't start (silent degradation when `failIfUnavailable=false`)
-  - `oO6()`: returns `{rgPath, rgArgs}` — `sandbox.ripgrep` field overrides `$aA()`
-  - `sandbox.ripgrep` Zod schema: `{command: string, args?: string[]}` — confirmed documented field
-  - `failIfUnavailable`: opt-in hard failure (default false)
-  - `z34`: linux dep check function (bwrap + socat only — rg tested separately via `checkDependencies`)
-- UAT failure record: `.planning/phases/28.2-v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime/28.2-UAT.md` lines 101-111
-- Existing fix attempt: `crates/bot/src/telegram/worker.rs:399` + `cron.rs:227` — `USE_BUILTIN_RIPGREP=1` already set (insufficient alone)
-- Vendor rg permissions: mode `.r--r--r--` confirmed via `ls -la` on active CC nix build
-- System rg path: `/nix/store/l327dgzc03fl423swhgkqnrb76ymsd9f-ripgrep-15.1.0/bin/rg` (.r-xr-xr-x — executable)
+- [MCP Authorization Specification (2025-03-26)](https://modelcontextprotocol.io/specification/2025-03-26/basic/authorization) — OAuth 2.1, PKCE requirement, dynamic client registration, metadata discovery, redirect URI constraints. HIGH confidence.
+- [GitHub issue #28256: MCP OAuth token refresh not persisting for Notion](https://github.com/anthropics/claude-code/issues/28256) — Confirmed `~/.claude/.credentials.json` file path and `mcpOAuth["{server}|*"]` key format. HIGH confidence.
+- [Claude Code MCP docs](https://code.claude.com/docs/en/mcp) — MCP server configuration, .mcp.json format. HIGH confidence.
+- [ngrok Rust SDK docs](https://ngrok.com/docs/getting-started/rust) — Confirms ngrok-rust crate exists. LOW confidence for using it (subprocess is simpler).
+- [axum OAuth example](https://github.com/tokio-rs/axum/blob/main/examples/oauth/src/main.rs) — Confirms axum 0.8 pattern for OAuth callback server. HIGH confidence.
+- [oauth2-rs crate](https://docs.rs/oauth2/latest/oauth2/) — PKCE support, token types, authorization code grant. HIGH confidence.
+- [MCP spec: RFC 7591 dynamic registration](https://datatracker.ietf.org/doc/html/rfc7591) — Registration endpoint protocol. HIGH confidence.
+- [MCP spec: RFC 8414 server metadata](https://datatracker.ietf.org/doc/html/rfc8414) — `/.well-known/oauth-authorization-server` discovery. HIGH confidence.
+- RightClaw MEMORY.md — confirms credential symlink architecture (`$AGENT_DIR/.claude/.credentials.json → host ~/.claude/.credentials.json`). HIGH confidence.
+- RightClaw PROJECT.md — v2.1 Phase 8 credential symlink established, per-agent HOME isolation. HIGH confidence.
 
 ---
-*Architecture research for: v3.1 CC sandbox nix rg fix*
-*Researched: 2026-04-02*
+*Architecture research for: v3.2 MCP OAuth automation*
+*Researched: 2026-04-03*

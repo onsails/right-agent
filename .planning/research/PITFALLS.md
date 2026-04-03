@@ -1,208 +1,252 @@
 # Pitfalls Research
 
-**Domain:** Fixing CC sandbox dependency detection in nix environments + end-to-end verification of rightclaw sandbox pipeline
-**Researched:** 2026-04-02
-**Confidence:** HIGH for ripgrep/vendor env var behavior (confirmed GitHub issues, official docs); HIGH for nix immutability constraints (nix design docs); MEDIUM for multi-vendor dep gaps (extrapolated from sandbox-runtime source observations); HIGH for macOS/Linux divergence (confirmed CC issues #32275, #19996); MEDIUM for env var env-var-value polarity bug (code inspection + issue #6415)
+**Domain:** MCP OAuth automation for headless multi-agent runtime (RightClaw v3.2)
+**Researched:** 2026-04-03
+**Confidence:** HIGH — verified against CC v2.1.89 source (cli.js) and live credential files
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: USE_BUILTIN_RIPGREP=1 Forces Bundled Binary — The Exact Opposite of the Stated Intent
+### Pitfall 1: Wrong Credential Storage Key Format
 
 **What goes wrong:**
-The current codebase sets `cmd.env("USE_BUILTIN_RIPGREP", "1")` with the comment "Use system rg instead of CC's bundled vendor binary." The comment and value are inverted.
-
-`USE_BUILTIN_RIPGREP=1` means: **use the bundled CC binary** (this is the default — the "1" enables the built-in). Setting it to `"0"` forces CC to use the system `rg` from `PATH`.
-
-So the current code is actively forcing the broken bundled binary, not the system one. The nix store vendor binary lacks the execute bit (reported across Linux and macOS in CC issue #42068), so CC's sandbox silently degrades — skills don't load, grep tool fails — and the code's "fix" is actually reinforcing the failure.
+RightClaw writes OAuth tokens into `.credentials.json` under a key that CC ignores. Agents start, MCP tools are registered, but all calls return 401. No visible error — CC's token lookup returns `undefined` and it sends requests without Authorization headers.
 
 **Why it happens:**
-The naming is counterintuitive. "USE_BUILTIN_RIPGREP" sounds like "if 1, use system builtin rg," but in CC's implementation it means "if 1, use CC's own bundled rg." The bug is easy to introduce when reading the variable name without checking the issue tracker.
+Developers assume the key is `serverName` or `serverName|sha256(url)`. The actual formula (verified from CC v2.1.89 `fM()` function in cli.js):
+
+```
+key = serverName + "|" + sha256(JSON.stringify({type, url, headers:{}}), no_spaces)[0:16]
+```
+
+The `JSON.stringify` call uses no whitespace (`separators=(",",":")` equivalent). The `headers` field must be present as `{}` even when empty — omitting it changes the hash.
+
+Verified with live credentials:
+- Server `notion`, URL `https://mcp.notion.com/mcp`, type `http`
+- Input string: `{"type":"http","url":"https://mcp.notion.com/mcp","headers":{}}`
+- `sha256(input).hex[:16]` = `eac663db915250e7`
+- Stored key: `notion|eac663db915250e7` — matches live `~/.claude/.credentials.json`
 
 **How to avoid:**
-- Set `cmd.env("USE_BUILTIN_RIPGREP", "0")` to force system `rg`.
-- Add system `rg` to `PATH` before spawning `claude -p` (devenv already provides it via `pkgs.ripgrep` through rightclaw's `devenv.nix`, but not necessarily in the agent launch environment).
-- Doctor check: verify `rg` is in the `PATH` that agents will inherit. The `which::which("rg")` call in doctor.rs should validate the exact PATH the agents receive, not the operator's interactive PATH.
+Implement `fn mcp_oauth_key(server_name: &str, server_type: &str, url: &str) -> String` using SHA-256 of the canonical JSON with no whitespace. Add a unit test against a known live entry before integrating with agent startup. Server type is always the `.mcp.json` type field (`"http"` for HTTP MCP servers, `"sse"` for SSE).
 
 **Warning signs:**
-- Skills from `.claude/skills/` silently absent — CC doesn't list or invoke them.
-- Grep tool (Search tool in CC) returns empty results or EACCES error in stderr.
-- `claude --debug` shows `spawn .../vendor/ripgrep/.../rg EACCES` buried in debug output.
-- `USE_BUILTIN_RIPGREP=1` anywhere in the agent environment.
+- Agent starts but MCP tools return auth errors
+- `mcp-needs-auth-cache.json` gets written in agent dir shortly after startup
+- Token entry exists in `.credentials.json` but server still fails
 
-**Phase to address:** Phase 1 (sandbox dependency fix). Single-line fix — change `"1"` to `"0"` — but must be caught before testing or the entire verification effort validates the wrong behavior.
+**Phase to address:**
+Credential storage implementation — unit test the key formula against a known entry before writing token storage code.
 
 ---
 
-### Pitfall 2: Nix Store Paths Are Immutable — Symlinking Into Them Silently Fails or Is Dangerous
+### Pitfall 2: mcp-needs-auth-cache.json Is Per-Agent, Not Shared With Host
 
 **What goes wrong:**
-A naive "fix" for the missing execute bit is to `chmod +x` the vendor ripgrep or symlink a working binary into the nix store path. Both approaches fail:
-
-1. **chmod +x on nix store**: the nix store is mounted read-only. `chmod +x /nix/store/<hash>/...` returns `EROFS: read-only file system`. Even if it were possible, the hash in the store path encodes the file contents and permissions — changing permissions invalidates the store derivation. This is not a valid fix.
-
-2. **Symlinking vendor/ripgrep into nix store path**: the vendor directory lives inside the CC npm package, which lives inside the nix store derivation for `claude-code`. The directory is immutable. You cannot write into it.
-
-3. **Symlinking nix store rg into a mutable path**: this works but creates a fragile dependency on a specific nix store hash. When the nix derivation for ripgrep is garbage collected or updated, the symlink breaks silently without error until the next CC invocation fails.
+RightClaw's auth detection reads the host `~/.claude/mcp-needs-auth-cache.json`. Under HOME isolation (`HOME=$AGENT_DIR`), CC reads and writes `$AGENT_DIR/.claude/mcp-needs-auth-cache.json`. These are separate files. Auth detection misses agent-specific needs-auth state. After OAuth completes, the agent-local cache still shows the server as needing auth until TTL expires (15 minutes).
 
 **Why it happens:**
-Developers familiar with mutable package managers (apt, brew, npm) assume they can patch installed files. Nix's content-addressed, immutable store invalidates this assumption entirely.
+`.credentials.json` is symlinked to host (RightClaw sets this up). `mcp-needs-auth-cache.json` is NOT symlinked and NOT created by rightclaw — CC creates it lazily when it encounters an unauthenticated server. The host file only reflects what the host CC session encountered, not what agents encounter.
+
+Verified: CC source `RF1()` = `r1() + "mcp-needs-auth-cache.json"` where `r1() = CLAUDE_CONFIG_DIR ?? HOME/.claude`. Under HOME isolation this is `$AGENT_DIR/.claude/mcp-needs-auth-cache.json`. Agent `right`'s `.claude/` directory has no `mcp-needs-auth-cache.json` because it has not started yet and encountered unauthenticated servers.
 
 **How to avoid:**
-- Do NOT attempt to symlink into the nix store.
-- Do NOT attempt to chmod files in the nix store.
-- The correct fix is env var: set `USE_BUILTIN_RIPGREP=0` so CC uses `rg` from `PATH`, and ensure `rg` is in the PATH that agents receive at launch time (not just the developer's interactive shell PATH).
-- In `rightclaw up`, explicitly prepend the devenv/nix-provided `rg` to the agent's PATH via `cmd.env("PATH", ...)` if the system `rg` is only available through a devenv shell.
+- Auth detection must scan `$AGENT_DIR/.mcp.json` + check `.credentials.json` for missing/expired tokens — not rely on the needs-auth cache at all
+- The cache is a passive artifact CC writes; use it for diagnostic output in `rightclaw oauth status`, not for detection logic
+- After OAuth completes, optionally delete the entry from `$AGENT_DIR/.claude/mcp-needs-auth-cache.json` to avoid 15-minute stale state
+- Cache TTL is 900,000ms (15 min) — entries expire automatically
 
 **Warning signs:**
-- A "fix" that involves `chmod +x` on a path containing `/nix/store/` — this will silently fail or corrupt the derivation.
-- A symlink from the project directory into `/nix/store/<hash>/...` — works until GC or update.
-- Doctor passes in the developer's devenv shell but fails on a fresh `rightclaw up` from a non-devenv terminal.
+- `rightclaw oauth status` shows servers authenticated but agent still fails
+- Auth detection reports "needs auth" after token was written
 
-**Phase to address:** Phase 1 (sandbox dependency fix). Must explicitly decide "no nix store mutation" before starting implementation, or it will be re-attempted as a quick fix when the env var approach seems more involved.
+**Phase to address:**
+Auth detection phase — base detection on token presence/expiry in `.credentials.json`, not on the needs-auth cache.
 
 ---
 
-### Pitfall 3: Nix Store Hash Changes on Every CC Update — Hardcoded Paths Rot Immediately
+### Pitfall 3: Token Expiry Silently Breaks MCP Tools — CC Headless Refresh Is Unreliable
 
 **What goes wrong:**
-Any path containing a nix store hash is version-specific: `/nix/store/abc123...-claude-code-1.2.3/...`. The hash changes every time the derivation changes — every CC update, every rebuild with different compiler flags, every devenv rebuild.
-
-If the sandbox fix hardcodes a nix store path anywhere (in doctor.rs, in shell wrappers, in test assertions, in any generated configuration), those paths break silently on the next update. The fix appears to work on the current version but regresses without warning on every subsequent CC update.
-
-This is particularly treacherous for doctor checks: if `check_binary("rg", ...)` uses `which::which` with the developer's PATH but the agent launch uses a different PATH (no devenv activation), doctor passes while `rightclaw up` agents fail.
+An agent's MCP token expires mid-session. MCP tool calls start returning 401-equivalent errors that appear to be network or server failures. The agent continues running with broken MCP access. In headless mode, there is no browser prompt and no user-visible error.
 
 **Why it happens:**
-Developers test in their devenv shell where everything is on PATH. The agent processes launched by process-compose inherit a different environment — only what `rightclaw up` explicitly forwards.
+CC's `tokens()` method logic (verified from v2.1.89 source):
+1. If `expiresAt - now < 300s` AND `refreshToken` present → attempts proactive refresh
+2. If expired AND no `refreshToken` → logs "Token expired without refresh token", **returns `undefined`** (silent tool failure)
+3. If refresh fails → logs "Token refresh failed, returning current tokens" (expired token sent — still 401)
+4. If `expiresAt = 0` (no expiry) AND no `refreshToken` → returns token unconditionally (correct for non-expiring tokens like Linear)
+
+Critical bugs confirmed in CC issue tracker:
+- CC does not reliably auto-refresh in unattended/headless mode even with valid `refreshToken` (issue #28262)
+- Tokens from servers that omit `expires_in` get stored as `expiresAt = now + 3600*1000` as fallback — expire after 1 hour with no refresh path (issue #26281)
+- After expiry, `/mcp` menu may not surface the server as needing re-auth (issue #30272)
 
 **How to avoid:**
-- Never hardcode nix store paths in any generated or compiled artifact.
-- Use `which::which("rg")` dynamically at agent launch time, not at build time.
-- The doctor check for `rg` should validate that `rg` is reachable from the environment that agents will actually receive — consider testing with the exact env vars rightclaw sets on agent processes.
-- Add a dedicated doctor check: `sandbox-rg-accessible` — actually spawns a minimal CC command with the same env as agent processes and verifies rg works.
+- RightClaw must own token refresh — do not rely on CC's internal refresh in headless mode
+- Background task: scan `.credentials.json` every 5 minutes, find tokens expiring within 10 minutes, refresh using `POST {authorizationServerUrl}/token` with `grant_type=refresh_token`
+- Use `discoveryState.authorizationServerUrl` stored in the credential entry as the token endpoint base
+- Write refreshed tokens atomically (see Pitfall 7)
+- For tokens with no `refreshToken`: log warning at storage time; schedule operator notification near `expiresAt`
+- For `expiresAt = 0`: treat as non-expiring; skip from refresh loop
 
 **Warning signs:**
-- Any `/nix/store/<hash>/` substring in generated files, doctor output, or runtime config.
-- Doctor passes in devenv shell but not in a fresh login terminal.
-- Tests that assert specific rg paths rather than testing behavior.
+- MCP tool failures starting ~1 hour after agent startup
+- `expiresAt` in `.credentials.json` is past
+- Agent logs show tool errors without explicit "auth" or "401" strings
 
-**Phase to address:** Phase 1 (sandbox dependency fix) + Phase 2 (doctor diagnostics). The doctor check design must account for env divergence.
+**Phase to address:**
+Token refresh phase — implement before shipping OAuth flow; even a polling refresh loop is sufficient.
 
 ---
 
-### Pitfall 4: macOS and Linux Have Different Vendor Dep Chains — Fix One, Break the Other
+### Pitfall 4: Tunnel URL Changes on Restart Break Provider-Registered Redirect URIs
 
 **What goes wrong:**
-CC uses different sandboxing mechanisms per OS:
-- **Linux**: bubblewrap + socat + ripgrep. The CC sandbox-runtime checks for all three.
-- **macOS**: Seatbelt (built-in `sandbox-exec`) + socat + ripgrep. No bwrap needed.
-
-The nix environment pitfalls differ between platforms:
-- On Linux/devenv: `bwrap` from `pkgs.bubblewrap`, `socat` from `pkgs.socat`, `rg` from devenv PATH. These may or may not be in the agent launch PATH.
-- On macOS/devenv: no `bwrap` installed. **But if `bwrap` is installed via Homebrew on macOS (e.g., a Linux developer's laptop), CC detects it on PATH and switches to the Linux sandbox path — which fails on macOS** (confirmed CC issue #32275, locked March 2026).
-
-So the risk cuts both ways: bwrap missing on Linux = fail; bwrap present on macOS = also fail.
+RightClaw's OAuth flow registers a redirect URI with the provider (via RFC 7591 DCR or static registration). The redirect URI contains the ngrok URL. On next `rightclaw up`, ngrok assigns a new random URL. The `redirect_uri` in the authorization request no longer matches the registered URI. OAuth fails with `redirect_uri_mismatch`.
 
 **Why it happens:**
-CC's platform detection checks binary availability before OS type in some code paths. The dev environment (Homebrew on macOS, devenv on Linux) may install binaries that confuse CC's runtime detection.
+ngrok free tier assigns random ephemeral URLs per session. As of early 2026, free sessions cap at 2 hours and URLs change on every restart. Dynamic client registrations often embed redirect URIs in the `client_id` metadata — changing the URI requires re-registration.
 
 **How to avoid:**
-- On macOS: do NOT install bwrap via Homebrew or include it in macOS devenv. The CLAUDE.md `devenv.nix` already scopes bwrap to Linux only (`lib.optionals pkgs.stdenv.isLinux`). This is correct — do not change it.
-- On Linux: ensure socat is reachable from the agent launch PATH, not just the devenv shell. The bwrap smoke test in doctor.rs currently tests with `--unshare-net --dev /dev` — this correctly detects AppArmor restrictions.
-- The `USE_BUILTIN_RIPGREP=0` fix applies identically to both platforms. Verify on both.
-- Doctor checks should emit different checks per platform, not a single cross-platform list.
+Option 1 (preferred): Use RFC 8252 loopback redirect — `http://127.0.0.1:<port>/callback`. Most providers (Google, GitHub, Notion, Linear) exempt loopback URIs from exact URL validation and accept any port. No tunnel needed. Bind callback server to `127.0.0.1` only.
+
+Option 2: Use Cloudflare Tunnel (`cloudflared`) with a named tunnel — provides stable URL on all tiers including free. URL survives restarts.
+
+Option 3: Use ngrok with a free static domain (one per free account) — tunnel always gets the same hostname.
+
+Loopback is strongly preferred for a local CLI tool. Tunnel is only needed if the OAuth provider refuses loopback URIs (rare for modern providers).
 
 **Warning signs:**
-- A macOS developer testing fixes that work locally but break on Linux CI (or vice versa).
-- Any fix that involves `pkgs.bubblewrap` on macOS (wrongly added to non-Linux devenv).
-- `rightclaw doctor` showing "bwrap: pass" on macOS — this means bwrap is installed and may trigger the wrong sandbox path.
+- `error=redirect_uri_mismatch` in callback
+- Flow works on first run, fails on second run after ngrok restart
+- Provider's registered app shows different redirect URI than current tunnel URL
 
-**Phase to address:** Phase 1 (sandbox fix must be tested on both platforms) + Phase 2 (doctor must distinguish macOS vs Linux vendor dep chains).
+**Phase to address:**
+Tunnel integration design phase — decide loopback vs. tunnel before building callback server. The callback server API should support both.
 
 ---
 
-### Pitfall 5: Fixing Ripgrep Misses Other Vendor Dependencies — Sandbox Still Broken
+### Pitfall 5: PKCE State/Verifier Lost if Callback Handler Process Restarts
 
 **What goes wrong:**
-CC's sandbox-runtime checks for multiple dependencies, not just ripgrep. Known deps:
-- `rg` (ripgrep) — for skill/command discovery and Grep tool
-- `socat` — for network proxying inside the bubblewrap sandbox (Linux)
-- `bwrap` (Linux only) — the container runtime itself
-
-If the fix addresses only ripgrep, the sandbox may partially work (skills load) but silently fail on network calls (socat missing) or fail entirely on bwrap invocation. The failure mode differs: missing socat causes network tool calls inside sandbox to fail or hang, not a startup error. Missing bwrap causes sandbox to disable silently (CC falls back to unsandboxed mode without a clear error).
+The operator opens the browser OAuth URL. During the ~2-minute callback window, rightclaw is restarted (or the callback server is on a different process/instance). The callback arrives with `code` and `state`, but `code_verifier` is not found. Token exchange fails.
 
 **Why it happens:**
-The issue that surfaces first (ripgrep, because it blocks skill loading, which is visible immediately) gets fixed, but the subtler dependencies (socat, bwrap) are not validated in the same pass.
+PKCE requires the `code_verifier` to be retained from auth request through callback. If stored only in memory, it's lost on any restart. In multi-agent setups where a central callback server handles callbacks for all agents, the state must survive process restarts.
+
+The `state` parameter (CSRF token) has the same problem — if the validation side is in-memory only, a new process can't validate it.
 
 **How to avoid:**
-- The fix phase must validate ALL sandbox dependencies end-to-end, not just ripgrep.
-- E2E verification must include: a tool call that uses the Grep tool (exercises rg), a Bash command that makes a network call inside sandbox (exercises socat + bwrap network proxy), and a filesystem write to the agent dir (exercises bwrap bind-mount).
-- Doctor must explicitly check all three deps against the agent launch environment, not just the shell PATH.
-- Add a doctor check that actually runs `claude -p "test" --max-turns 1` with sandbox enabled and checks for sandbox-related errors in stderr.
+- Before opening the browser, write `(state, code_verifier, server_name, started_at)` to `~/.rightclaw/oauth-pending/<server_name>.json`
+- Callback server reads this file on arrival, validates `state`, retrieves `code_verifier`
+- Delete the file after exchange (success or error) and after 120s timeout
+- Single callback server process per `rightclaw up` session — not per-agent
+- In-memory storage is acceptable for MVP if restart-during-flow is an edge case; file-based is better long-term
 
 **Warning signs:**
-- "Sandbox fixed" declared after only validating skill loading / grep tool.
-- Telegram bot responds (proving basic CC works) but network tool calls inside agent fail silently.
-- No E2E test that exercises a sandboxed network call.
+- `code_verifier invalid` or `invalid_grant` error from token endpoint
+- `state mismatch` in callback handler
 
-**Phase to address:** Phase 2 (E2E verification). The verification phase must have explicit test cases for each vendor dep, not just smoke tests.
+**Phase to address:**
+OAuth callback server phase — decision on memory vs. file storage should be made upfront; file is safer and the complexity is trivial.
 
 ---
 
-### Pitfall 6: CC Updates Can Silently Revert the Env Var Fix — No Stable Contract
+### Pitfall 6: Dynamic Client Registration Absent — No Static Client Fallback
 
 **What goes wrong:**
-`USE_BUILTIN_RIPGREP` is an undocumented internal env var. It is not part of CC's stable API. Anthropic has historically changed behavior of undocumented env vars without deprecation notices.
-
-Two failure modes:
-1. A future CC update changes the semantics: `USE_BUILTIN_RIPGREP=0` stops working, or the variable is removed, or the variable is renamed.
-2. A future CC update fixes the nix store permission issue (e.g., via a postinstall chmod), making `USE_BUILTIN_RIPGREP=0` redundant — but now the system `rg` version may not match what CC expects (if CC adds a version check).
-
-Neither failure is detectable without running tests after each CC update.
+`rightclaw oauth` attempts DCR on a server that doesn't support RFC 7591. Gets "does not support dynamic client registration". Flow aborts. User cannot authenticate even though the server has a working OAuth flow via pre-configured `clientId`.
 
 **Why it happens:**
-Undocumented env vars are implementation details. CC issue #6415 confirmed the setting worked as of August 2025, but it was not documented in any public API.
+RFC 7591 is "SHOULD" in the MCP spec, not "MUST". Major production providers don't implement it: Slack (confirmed), AWS Cognito, Microsoft Entra ID, Okta in some configurations. They require out-of-band app registration. The operator already has a `clientId` (and sometimes `clientSecret`) from the provider's developer console.
+
+Confirmed: Slack's official MCP plugin has `clientId` pre-configured in `.mcp.json`. CC's own Slack plugin issue #17 hit this exact error when the plugin didn't pass the pre-configured `clientId` through to the OAuth layer.
 
 **How to avoid:**
-- Document the dependency explicitly in the codebase: "CC uses USE_BUILTIN_RIPGREP=0 to skip its bundled rg. This is undocumented. Verify after each CC update."
-- Add a CI-friendly doctor check that validates sandbox is actually engaged (not just that deps are present).
-- The E2E verification phase should be designed as a repeatable test (not a one-time manual check) specifically so it can be re-run after CC updates.
-- Consider wrapping the env var in a named constant in the Rust code with a comment linking to the CC issue.
+- Before attempting DCR, check if `.mcp.json` server config has `oauth.clientId` set
+- If `clientId` is present, skip DCR entirely — proceed directly to PKCE auth code flow using that `clientId`
+- DCR fallback detection: fetch RFC 8414 server metadata; if `registration_endpoint` is absent, DCR unavailable; fall through to static client mode
+- In static client mode, prompt operator for `clientId` if not already in config, optionally `clientSecret`
+- Never require DCR exclusively
 
 **Warning signs:**
-- CC version bumped in devenv.lock but no re-verification run.
-- `USE_BUILTIN_RIPGREP` removed from CC CHANGELOG with no note in rightclaw.
-- Doctor passes but skills silently absent after CC update.
+- "Incompatible auth server: does not support dynamic client registration" (exact CC error message)
+- Server config has `oauth.clientId` in `.mcp.json` but rightclaw ignores it and attempts DCR
 
-**Phase to address:** Phase 2 (E2E verification must be designed as repeatable, not one-time) + ongoing maintenance awareness.
+**Phase to address:**
+OAuth flow implementation — design the auth code path to branch on `clientId` presence before DCR attempt.
 
 ---
 
-### Pitfall 7: Agent Launch PATH Diverges From Doctor PATH — Doctor Lies
+### Pitfall 7: Concurrent Credential Writes Corrupt .credentials.json
 
 **What goes wrong:**
-`rightclaw doctor` runs in the operator's interactive shell (which has devenv activated, so `rg`, `bwrap`, `socat` are all on PATH). Agent processes launched by process-compose inherit a different environment — only what rightclaw explicitly sets.
-
-If rightclaw does not explicitly inject the devenv PATH or the system PATH into agent env, the agent may fail to find `rg` or `socat` even though doctor reports them as present.
-
-Concretely: a developer runs `devenv shell`, then `rightclaw doctor` — all green. They exit the shell and run `rightclaw up` from a regular terminal where devenv PATH is not active. Agents fail to find `rg`. Doctor passed, agents broken.
+Two OAuth flows complete at the same time (e.g., Notion and Slack authenticated back-to-back). Both processes read `.credentials.json`, merge their token entry, write back. The second write overwrites the first. One token entry is lost.
 
 **Why it happens:**
-Doctor uses `which::which` against the current process's PATH. Agent processes inherit only what `std::process::Command` explicitly sets via `.env()`. If PATH is not forwarded, the agent sees the minimal system PATH, not the devenv PATH.
+`.credentials.json` is a read-modify-write operation on a shared symlinked file. No locking = last write wins. Under multi-agent HOME isolation, all agents share the same file via symlink — so any agent writing credentials risks clobbering concurrent writes.
 
 **How to avoid:**
-- In `rightclaw up`, explicitly resolve the paths to `rg`, `socat`, and `bwrap` at launch time and include them in the PATH forwarded to agents.
-- Or: inject the devenv PATH explicitly — detect devenv activation and capture `DEVENV_PROFILE/bin` for injection.
-- Doctor should warn when `rg` is found but is only accessible via a devenv shell (heuristic: path contains `/nix/store/` or `/devenv/`).
-- Consider adding a `--check-agent-env` flag to doctor that simulates agent launch environment.
+- Atomic write pattern: write to `~/.claude/.credentials.json.tmp`, then `rename()` — POSIX `rename` is atomic within same filesystem
+- Advisory file lock via `fcntl` / `flock` before read-modify-write cycle
+- Simpler: serialize all credential writes through the single `rightclaw up` process (agents don't write credentials themselves — only the operator-facing OAuth flow writes them, and the CLI is single-instance)
+- Write a backup to `~/.claude/.credentials.json.bak` before any modification
 
 **Warning signs:**
-- Doctor passes but agents fail immediately after launch.
-- `rg` path in doctor output contains `/nix/store/` or `devenv` — only available in devenv context.
-- Agent stderr contains "rg not found" or "EACCES" despite doctor showing rg present.
+- Intermittent token loss for one server when multiple OAuth flows run simultaneously
+- `.credentials.json` has truncated JSON or missing `mcpOAuth` entries
 
-**Phase to address:** Phase 1 (sandbox fix) — the PATH injection must be part of the fix, not the doctor. Phase 2 (doctor diagnostics) — doctor must detect devenv-only deps.
+**Phase to address:**
+Credential storage implementation — atomic write from the start; add backup creation.
+
+---
+
+### Pitfall 8: HOME Isolation Scopes .mcp.json — Global Server Config Is Invisible
+
+**What goes wrong:**
+The operator adds OAuth-protected servers to `~/.claude/.mcp.json` (global CC config) expecting all agents to pick them up. Under HOME isolation, CC resolves MCP config relative to `r1()` = `$AGENT_DIR/.claude/`. The global `~/.claude/.mcp.json` on the host is not read. Auth detection and OAuth flows on rightclaw's side also don't see these servers.
+
+**Why it happens:**
+RightClaw correctly generates per-agent `.mcp.json` at `$AGENT_DIR/.mcp.json`. But operators who are familiar with CC's global config may add servers there and be confused when agents don't pick them up.
+
+**How to avoid:**
+- Auth detection scans only `$AGENT_DIR/.mcp.json` (project-level MCP config for that agent)
+- Document clearly: under HOME isolation, `~/.claude/.mcp.json` is not visible to agents. Add servers via `agent.yaml` → regenerated into `.mcp.json` on `rightclaw up`
+- `rightclaw doctor` or `rightclaw oauth status` should note if host global `.mcp.json` has servers not present in any agent config
+
+**Warning signs:**
+- Auth detection reports 0 servers when operator has OAuth servers in global config
+- Agent lacks tools that exist in `~/.claude/.mcp.json`
+
+**Phase to address:**
+Auth detection phase — explicitly document and enforce per-agent `.mcp.json` scope.
+
+---
+
+### Pitfall 9: MCP Reconnection Failure After OAuth — Agent Must Restart
+
+**What goes wrong:**
+OAuth completes successfully. Token is stored in `.credentials.json`. The MCP server is still not connected in the running agent session — tools remain unavailable. Confirmed in CC issue #10250: "OAuth Authentication Succeeds but MCP Reconnection Fails - Requires Restart."
+
+**Why it happens:**
+CC's MCP client initializes connections at startup. After tokens are written post-auth, CC does not automatically reconnect the MCP server for an already-running session. The new token is available on disk but the in-process MCP client still has no active connection.
+
+This means rightclaw cannot complete OAuth and immediately resume an agent session seamlessly — the agent process must restart after OAuth.
+
+**How to avoid:**
+- Design the OAuth flow as a stop-the-agent → authenticate → restart-agent cycle, not a live connection injection
+- `rightclaw oauth <agent> <server>` should: pause agent → run OAuth → write token → restart agent via process-compose
+- Alternatively: run OAuth before initial agent startup so the token is present when CC starts (during `rightclaw up`)
+- Do NOT promise seamless live OAuth injection — it doesn't work in current CC versions
+
+**Warning signs:**
+- OAuth completes, rightclaw reports success, but agent still lacks MCP tools
+- "Authentication successful, but server reconnection failed" message from CC
+
+**Phase to address:**
+OAuth flow design phase — restart-after-auth must be part of the UX design, not an afterthought.
 
 ---
 
@@ -210,12 +254,12 @@ Doctor uses `which::which` against the current process's PATH. Agent processes i
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Set USE_BUILTIN_RIPGREP=1 (the current bug) | Looks like a fix, compiles | Forced bundled rg, sandbox broken | Never — correct value is 0 |
-| chmod +x on nix store | Quick unblock | Breaks on rebuild, violates nix invariants | Never |
-| Hardcode nix store path | Avoids dynamic PATH resolution | Rots on every CC update | Never |
-| Test only in devenv shell | Tests pass quickly | Doctor/agent PATH divergence goes undetected | Never for E2E tests |
-| Only fix rg, skip socat/bwrap validation | One failing thing fixed | Partial sandbox — network calls broken | Never for "sandbox verified" claim |
-| USE_BUILTIN_RIPGREP without a constant + comment | Shorter code | Future maintainer won't know what it does | Acceptable if documented with CC issue link |
+| Rely on CC's internal token refresh | No refresh code to write | Silent failures in headless mode (confirmed bug #28262) | Never for headless agents |
+| Use ngrok free tier as default | Easy to set up | URL instability, 2h limit, redirect URI breaks on restart | Never for production; dev-only with static domain |
+| Store PKCE state in memory only | No file I/O during OAuth | Lost on process restart during 2-min flow window | Acceptable for MVP; migrate to file storage before v1 |
+| Skip file locking on credential write | Simpler implementation | Token corruption under concurrent OAuth | Only if OAuth flows are strictly sequential |
+| Write entire .credentials.json on update | Simple serialization | Overwrites entries written by CC between read and write | Never — always merge at key level |
+| Require DCR exclusively | Simpler implementation | Breaks Slack, GitHub Copilot, and most enterprise providers | Never — static clientId fallback required |
 
 ---
 
@@ -223,14 +267,14 @@ Doctor uses `which::which` against the current process's PATH. Agent processes i
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| nix + CC vendor rg | Set USE_BUILTIN_RIPGREP=1 thinking it enables system rg | Set =0 to use system rg; =1 (default) uses bundled |
-| nix store + chmod | chmod +x /nix/store/.../rg | Don't touch nix store; use env var instead |
-| devenv + process-compose | Agent inherits developer's devenv PATH | Explicitly set PATH in agent env during `rightclaw up` |
-| macOS + bwrap | Install bwrap via Homebrew "to match Linux" | Never install bwrap on macOS; CC uses Seatbelt there |
-| doctor + agent env | Doctor uses shell PATH, agents use process PATH | Doctor must check both or warn when deps are devenv-only |
-| CC update + USE_BUILTIN_RIPGREP | Assume env var persists unchanged | Re-verify after CC version bump; env var is undocumented |
-| sandbox verification | Only test that skill loads (rg present) | Also test network call inside sandbox (socat) and write isolation (bwrap) |
-| USE_BUILTIN_RIPGREP in settings.json env section | Setting it in settings.json but not cmd env | Set in the process env directly via `cmd.env()` — settings.json env section may not propagate to sandbox-runtime |
+| CC `.credentials.json` key | `serverName` or `sha256(url)` | `serverName\|sha256({"type":"http","url":"...","headers":{}}, no_spaces)[:16]` |
+| CC `.credentials.json` value | Flat `{accessToken, refreshToken}` | Must include: `serverName`, `serverUrl`, `accessToken`, `expiresAt`, `discoveryState.authorizationServerUrl`; optionally `refreshToken`, `scope`, `clientId`, `clientSecret` |
+| `mcp-needs-auth-cache.json` | Read from `~/.claude/` (host) | Read from `$AGENT_DIR/.claude/` (agent-local); use for diagnostics only, not detection logic |
+| Token refresh | Rely on CC headless refresh | Rightclaw-owned background refresh; POST to `discoveryState.authorizationServerUrl` with `grant_type=refresh_token` |
+| ngrok callback | Assume URL stable across restarts | Use loopback `127.0.0.1` (RFC 8252) or Cloudflare named tunnel |
+| DCR endpoint | Assume all MCP servers support RFC 7591 | Check `registration_endpoint` in server metadata; fall back to `oauth.clientId` from `.mcp.json` |
+| Linear OAuth `expiresAt` | Treat `expiresAt=0` as expired | `expiresAt=0` means no expiry — skip from refresh loop |
+| Post-OAuth agent state | Expect live connection injection | Must restart agent process after token write — live injection doesn't work in CC |
 
 ---
 
@@ -238,25 +282,31 @@ Doctor uses `which::which` against the current process's PATH. Agent processes i
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Disabling sandbox to work around dep issues (`--no-sandbox`) | Agents run with unrestricted filesystem + network access; defeats the security model | Fix deps instead of disabling; `--no-sandbox` should only be a debug flag, never production |
-| Passing `DISABLE_INSTALLATION_CHECKS=1` without `DISABLE_AUTOUPDATER=1` | CC agent teams may still download unpatched binaries to ~/.local/bin/, shadowing nix-managed ones | Pass both env vars together; add doctor check for ~/.local/bin/claude shadow |
-| bwrap AppArmor fix via `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` | Disables protection globally, not just for bwrap | Use targeted AppArmor profile (already in doctor.rs guidance) |
-| Injecting full HOST PATH into agent env | Agent may find and execute host binaries outside allowedDomains | Inject minimal PATH: only dirs containing rg, socat, bwrap, git |
+| Logging token values | Token in terminal history / log files | Log only first 8 chars or `[redacted]`; never log `access_token`, `refresh_token`, `client_secret` |
+| Callback server bound to `0.0.0.0` | Any process on the machine can intercept OAuth callback | Bind only to `127.0.0.1`; RFC 8252 loopback exemption applies only to loopback |
+| PKCE state file not deleted on error | State file with `code_verifier` persists | Always delete state file in callback handler — both success and error paths; TTL cleanup on startup |
+| `client_secret` in URL params | Secret in server logs, browser history, proxy logs | Always POST `client_secret` in request body |
+| Writing tokens before verifying `state` | CSRF — attacker substitutes their authorization code | Validate `state` before calling token endpoint |
+| File permissions on `.credentials.json` | Other users on system can read OAuth tokens | Ensure `chmod 600` after creation; rightclaw writes should not weaken permissions |
+| `clientSecret` in plaintext `.credentials.json` | Token theft if file exfiltrated | CC's design — rightclaw matches CC's format; document as "by design, protect the file" |
 
 ---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **USE_BUILTIN_RIPGREP value**: Is it `"0"` (use system rg) not `"1"` (use bundled)? Check worker.rs and cron.rs.
-- [ ] **System rg in agent PATH**: Not just in devenv shell — verify `which rg` from a non-devenv terminal returns a valid binary, and that rightclaw up injects it into agent env.
-- [ ] **Sandbox actually engaged**: Not just "rg found." Run `claude -p "use bash to run: id" --max-turns 1` inside a sandboxed agent and verify sandbox constraints appear in stderr or behavior.
-- [ ] **Socat validated**: Not just that socat binary exists — verify a network tool call inside an agent sandbox succeeds (exercises socat proxy path).
-- [ ] **macOS verified separately**: A Linux fix that passes on Linux may break macOS (bwrap vs Seatbelt divergence). Test explicitly.
-- [ ] **Doctor uses agent env, not shell env**: Doctor check for rg should reflect what the agent process sees, not the operator's interactive PATH.
-- [ ] **No nix store paths in generated files**: grep for `/nix/store/` in all generated config, doctor output, and test assertions.
-- [ ] **CC update re-verification**: After any claude-code version bump, the sandbox E2E test must be re-run explicitly.
-- [ ] **Sandbox not silently disabled**: Verify `settings.json` still has `"sandbox": {"enabled": true}` after each `rightclaw up`. The `--no-sandbox` flag should not silently persist.
-- [ ] **~/.local/bin/claude shadow**: On NixOS/nix environments, check that CC agent teams has not downloaded an unpatched binary that shadows the nix-managed one.
+- [ ] **Credential key formula verified:** Unit test `mcp_oauth_key("notion", "http", "https://mcp.notion.com/mcp")` == `"notion|eac663db915250e7"`
+- [ ] **Per-agent cache path:** Auth detection reads `$AGENT_DIR/.claude/mcp-needs-auth-cache.json`, not `~/.claude/`
+- [ ] **Atomic credential write:** Uses `rename()` atomic swap; file permissions 0600 preserved after write
+- [ ] **Backup before write:** `~/.claude/.credentials.json.bak` created before modification
+- [ ] **PKCE state persistence:** State file created before browser opens; deleted after callback (both success and error paths)
+- [ ] **Token refresh task:** Does not rely solely on CC's internal refresh; rightclaw-owned proactive refresh runs
+- [ ] **DCR fallback:** Checks for `oauth.clientId` in `.mcp.json` before attempting RFC 7591 registration
+- [ ] **Loopback binding:** Callback server binds to `127.0.0.1` not `0.0.0.0`
+- [ ] **No token logging:** `access_token` and `refresh_token` values never appear in stdout/stderr/log output
+- [ ] **expiresAt=0 handled:** Tokens with `expiresAt=0` (Linear) not treated as expired; excluded from refresh loop
+- [ ] **`discoveryState` written:** `authorizationServerUrl` included in credential entry (required for refresh)
+- [ ] **Restart-after-auth:** Flow includes agent restart step; not "write token and hope CC reconnects"
+- [ ] **`.mcp.json` scope documented:** `rightclaw oauth status` warns if host global `.mcp.json` has servers absent from agent configs
 
 ---
 
@@ -264,13 +314,14 @@ Doctor uses `which::which` against the current process's PATH. Agent processes i
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| USE_BUILTIN_RIPGREP wrong value | LOW | Change "1" to "0" in worker.rs and cron.rs, rebuild |
-| Nix store mutation attempted | MEDIUM | `nix-store --verify --check-contents` to detect corruption; `nix-store --repair-path` if needed; revert to env var approach |
-| PATH divergence (doctor passes, agents fail) | MEDIUM | Add explicit PATH injection in cmd_up; re-run E2E verification |
-| macOS bwrap installed accidentally | LOW | `brew uninstall bubblewrap`; verify CC returns to Seatbelt sandbox |
-| Partial sandbox (rg fixed, socat/bwrap not) | MEDIUM | Run full E2E suite against all three deps; add socat/bwrap to agent PATH injection |
-| ~/.local/bin/claude shadows nix binary | LOW | `rm -rf ~/.local/bin/claude ~/.local/share/claude*`; add doctor check to detect this |
-| USE_BUILTIN_RIPGREP semantics changed in CC update | HIGH | Reverify against new CC version; may need to find replacement env var or alternative approach |
+| Wrong credential key | LOW | Delete wrong key from `.credentials.json`, re-run OAuth flow |
+| mcp-needs-auth-cache stale | LOW | Delete `$AGENT_DIR/.claude/mcp-needs-auth-cache.json`; CC re-evaluates on next tool call |
+| Token expired, no refresh token | LOW | `rightclaw oauth <agent> <server>` — re-initiates browser flow |
+| Tunnel URL changed | LOW | Re-run OAuth with new redirect URI; may require new DCR if provider validates exact URI |
+| PKCE state file lost | LOW | Delete any pending state files in `~/.rightclaw/oauth-pending/`; retry flow |
+| Credentials JSON corrupted | MEDIUM | Restore from `~/.claude/.credentials.json.bak`; re-run any affected OAuth flows |
+| All agent tokens expired simultaneously | HIGH | Operator completes OAuth flow for each server; mitigated by proactive refresh |
+| No reconnection after OAuth | LOW | Restart agent via `rightclaw restart <agent>`; design this as the expected flow |
 
 ---
 
@@ -278,29 +329,33 @@ Doctor uses `which::which` against the current process's PATH. Agent processes i
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| USE_BUILTIN_RIPGREP wrong value (=1 vs =0) | Phase 1: sandbox fix | `grep USE_BUILTIN_RIPGREP crates/**/*.rs` shows only `"0"` |
-| Nix store mutation temptation | Phase 1: pre-implementation constraint | Code review: no `/nix/store/` in any changed file |
-| Nix store hash rot | Phase 1 + Phase 2 | `grep -r '/nix/store/' .planning/ crates/` finds nothing |
-| macOS vs Linux divergence | Phase 1 + Phase 2 | Both platforms tested in E2E; macOS CI job exists |
-| Missing socat/bwrap in fix scope | Phase 2: E2E verification | Test suite has explicit network-inside-sandbox and write-isolation tests |
-| CC update invalidates env var | Phase 2: test design | E2E suite is automated and re-runnable, not one-time manual check |
-| Doctor PATH divergence | Phase 1 (agent PATH injection) + Phase 2 (doctor check) | Doctor validates rg reachable from agent env, not just shell env |
+| Wrong credential key format | Credential storage implementation | Unit test against live credential entry |
+| Per-agent mcp-needs-auth-cache | Auth detection phase | Path assertion: uses `$AGENT_DIR/.claude/`, not `~/.claude/` |
+| Token expiry silent failure | Token refresh phase | Integration test: write expired token, verify refresh fires |
+| Tunnel URL instability | Tunnel design phase | Default to loopback; explicit test with both loopback and tunnel modes |
+| PKCE state loss | OAuth callback server phase | Test: interrupt and restart callback server mid-flow |
+| No DCR fallback | OAuth flow implementation | Test with pre-configured `clientId` in `.mcp.json` (no DCR) |
+| Concurrent credential write | Credential storage implementation | Stress test: simultaneous OAuth completions, both tokens present |
+| HOME isolation scope | Auth detection phase | Verify detection reads only `$AGENT_DIR/.mcp.json` |
+| MCP reconnection failure | OAuth flow design | Acceptance test: OAuth → token written → agent restarted → tools available |
 
 ---
 
 ## Sources
 
-- [CC Issue #42068: Bundled ripgrep loses execute permission](https://github.com/anthropics/claude-code/issues/42068) — macOS + Linux, confirmed permissions bug, `USE_BUILTIN_RIPGREP=0` workaround documented in comments
-- [CC Issue #6415: USE_BUILTIN_RIPGREP ignored](https://github.com/anthropics/claude-code/issues/6415) — bug fixed August 2025; value semantics: `0` = system rg, `1` = built-in rg
-- [CC Issue #32275: bwrap on macOS via Homebrew triggers wrong sandbox path](https://github.com/anthropics/claude-code/issues/32275) — closed March 2026, root cause was missing rg; bwrap-on-macOS risk documented
-- [CC Issue #25418: Agent teams installs incompatible binary on NixOS, shadows nix binary](https://github.com/anthropics/claude-code/issues/25418) — `DISABLE_AUTOUPDATER` + `DISABLE_INSTALLATION_CHECKS` bypass in agent teams code path
-- [CC Issue #26282: Cowork sessions fail — sandbox dependency check fails inside VM](https://github.com/anthropics/claude-code/issues/26282) — sandbox dep check failure patterns
-- [anthropic-experimental/sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) — requires bwrap (Linux), sandbox-exec (macOS), socat; no env var override for dep paths
-- [sadjow/claude-code-nix](https://github.com/sadjow/claude-code-nix) — nix packaging approach; USE_BUILTIN_RIPGREP=0 used in nix overlays
-- [NixOS Discourse: Packaging Claude Code](https://discourse.nixos.org/t/packaging-claude-code-on-nixos/61072) — immutability constraints, chmod failures on nix store
-- [Nix store immutability](https://nixos.org/guides/nix-pills/the-nix-store.html) — store paths are content-addressed and immutable by design
-- [CC Advanced Setup docs — USE_BUILTIN_RIPGREP](https://code.claude.com/docs/en/setup) — `USE_BUILTIN_RIPGREP=0` listed as env var for system ripgrep
+- CC v2.1.89 source `cli.js` — `fM()` key function, `tokens()` refresh logic, `sD8()` credential path, `RF1()` auth cache path, `r1()` config dir resolution (HIGH — direct source inspection)
+- Live `~/.claude/.credentials.json` — verified `mcpOAuth` structure with Notion (`notion|eac663db915250e7`) and Linear (`plugin:linear:linear|638130d5ab3558f4`) entries (HIGH — live data)
+- [CC issue #38813: OAuth tokens expire silently in headless automation](https://github.com/anthropics/claude-code/issues/38813) (MEDIUM)
+- [CC issue #28262: MCP OAuth tokens not auto-refreshing despite valid refresh tokens](https://github.com/anthropics/claude-code/issues/28262) (MEDIUM)
+- [CC issue #10250: OAuth succeeds but MCP reconnection fails, requires restart](https://github.com/anthropics/claude-code/issues/10250) (HIGH — matches source analysis)
+- [CC issue #26281: MCP OAuth tokens without expires_in and refresh_token silently expire](https://github.com/anthropics/claude-code/issues/26281) (MEDIUM)
+- [CC issue #30272: /mcp menu doesn't surface revoked server as needing re-auth](https://github.com/anthropics/claude-code/issues/30272) (MEDIUM)
+- [claude-plugins-official issue #17: Slack MCP fails — does not support dynamic client registration](https://github.com/anthropics/claude-plugins-official/issues/17) (HIGH — official plugin repo)
+- [CC issue #38102: MCP OAuth "does not support dynamic client registration" despite clientId configured](https://github.com/anthropics/claude-code/issues/38102) (MEDIUM)
+- [ngrok free plan limits documentation](https://ngrok.com/docs/pricing-limits/free-plan-limits) — 2h session cap, random URLs (HIGH — official docs)
+- [RFC 8252: OAuth 2.0 for Native Apps](https://datatracker.ietf.org/doc/html/rfc8252) — loopback redirect URI exemption (HIGH — RFC)
+- [MCP Authorization spec 2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization) — SHOULD support DCR, fallback to static client (HIGH — official spec)
 
 ---
-*Pitfalls research for: v3.1 Sandbox Fix & Verification — nix + CC sandbox dependency detection + end-to-end verification*
-*Researched: 2026-04-02*
+*Pitfalls research for: MCP OAuth automation in headless multi-agent runtime (RightClaw v3.2)*
+*Researched: 2026-04-03*

@@ -1,195 +1,307 @@
-# Feature Research: Sandbox Fix & E2E Verification (v3.1)
+# Feature Research: MCP OAuth Automation (v3.2)
 
-**Domain:** Claude Code sandbox dependency detection — nix/devenv environments
-**Researched:** 2026-04-02
-**Confidence:** HIGH (CC official docs + GitHub issues verified; nix devenv.nix inspected directly)
-
----
-
-## Context: What This Milestone Fixes
-
-v3.0 shipped with sandbox enabled via `.claude/settings.json` per agent (`sandbox.enabled: true`).
-The problem: CC's sandbox startup check looks for system `rg` (ripgrep) in PATH. In nix/devenv
-environments, `rg` is either absent or lives in a nix store path that isn't in the PATH when
-process-compose spawns agents.
-
-**Current devenv.nix packages:** `git`, `process-compose`, `socat`, `bubblewrap` (Linux only).
-**Missing:** `ripgrep`. This causes CC sandbox to fail its dependency check before any agent work runs.
-
-**Separately:** V3.0 E2E flow (rightclaw up → bot → Telegram → cron) has never been validated with
-`sandbox.enabled: true`. VER-01 was cancelled from v2.5. This milestone closes that gap.
-
-**Existing features that must NOT be regreted:**
-- `rightclaw up` generates `.claude/settings.json` with `sandbox.enabled: true` (default)
-- `rightclaw doctor` checks `bwrap` + `socat` + runs bwrap smoke test
-- `--no-sandbox` flag generates settings with `sandbox.enabled: false`
-- Shell wrapper sets `HOME=$AGENT_DIR`, forwards 6 identity env vars
-- `rightclaw doctor` checks managed-settings.json, Telegram webhooks, agent structure, sqlite3
+**Domain:** MCP OAuth authentication automation for headless Claude Code agents
+**Researched:** 2026-04-03
+**Confidence:** HIGH (spec verified from modelcontextprotocol.io; CC credential structure verified from live ~/.credentials.json; CC bugs verified from GitHub issues)
 
 ---
 
-## CC Sandbox Dependency Check — How It Works
+## Context: What This Milestone Solves
 
-**Source: CC official docs + GitHub issues (HIGH confidence)**
+RightClaw agents run headless. When an MCP server requires OAuth, CC normally:
+1. Detects it needs auth (stores server name + timestamp in `~/.claude/mcp-needs-auth-cache.json`)
+2. Triggers `/mcp` interactive menu inside the session
+3. Opens a browser for the user
 
-CC's sandbox startup checks for three system binaries on Linux/WSL2:
+None of this works headless. There is also a live CC bug (issues #11585, #36307, opened 2025,
+still open April 2026): HTTP MCP servers requiring OAuth **never trigger the browser flow** even in
+interactive mode. CC shows "Needs authentication" permanently without any path to complete it.
 
-| Binary | Purpose | Where CC looks |
-|--------|---------|----------------|
-| `rg` (ripgrep) | File search, skill/command discovery | System PATH |
-| `bwrap` (bubblewrap) | Filesystem + network isolation kernel primitive | System PATH |
-| `socat` | Unix socket relay for network sandbox proxy | System PATH |
+RightClaw needs to own the full OAuth flow externally — detect, authorize, write credentials, then
+let CC pick them up without any interactive prompting.
 
-**CC uses vendored ripgrep for grep tool but checks system `rg` for sandbox startup.**
-The vendored binary lives at `<cc-install>/vendor/ripgrep/<arch>/rg` and is controlled by
-`USE_BUILTIN_RIPGREP` env var (default: use vendored). The sandbox dependency check is separate —
-it requires system `rg` to be in PATH regardless of `USE_BUILTIN_RIPGREP`.
+---
 
-**Exact error when sandbox check fails:**
+## MCP OAuth Specification — Verified Facts
+
+**Source: modelcontextprotocol.io/specification/draft/basic/authorization — HIGH confidence**
+
+### What Flow Is Used
+
+- **OAuth 2.1 Authorization Code Flow + PKCE (S256)** — mandatory, not optional
+- **NOT** RFC 8628 Device Flow — the spec does not reference device flow at all
+- Redirect URI must be `localhost` or HTTPS (spec requirement)
+- `resource` parameter (RFC 8707) required in both auth request and token request
+- No implicit grant (OAuth 2.1 removes it)
+
+### How Auth Need Is Detected
+
+MCP server returns `HTTP 401 Unauthorized` with `WWW-Authenticate` header:
 ```
-Error: Sandbox dependencies are not available on this system.
-Required: ripgrep (rg), bubblewrap (bwrap), and socat.
+WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource",
+                         scope="files:read"
 ```
 
-**Fallback behavior:** By default CC shows a warning and runs without sandbox when dependencies are
-missing. To make it a hard failure: `sandbox.failIfUnavailable: true` in settings.json.
+CC writes the server name + timestamp to `~/.claude/mcp-needs-auth-cache.json`:
+```json
+{"notion":{"timestamp":1775217851548},"claude.ai Google Calendar":{"timestamp":1775217851861}}
+```
+This cache records which servers need auth at the time CC last tried connecting. Rightclaw reads
+this to determine what needs authorization.
 
-**`/sandbox` command in CC:** Opens interactive menu showing current sandbox mode, dependency status,
-and installation instructions for missing deps. Does not directly surface to rightclaw (CC TUI only).
+### Discovery Sequence
 
-**ENV vars that affect sandbox behavior:**
-- `USE_BUILTIN_RIPGREP=0` — use system `rg` for grep tool (default: 1 = vendored); does NOT affect sandbox check
-- `CLAUDE_DISABLE_NONESSENTIAL_TRAFFIC` — blocks feature flags, not sandbox
-- No env var to skip sandbox dependency check specifically
+1. Client hits MCP server → gets 401 + `resource_metadata` URL
+2. Client fetches Protected Resource Metadata (RFC 9728) to find authorization server URL
+3. Client fetches Authorization Server Metadata (RFC 8414 or OIDC discovery) from AS
+4. Client registers itself (Client ID Metadata Document, Dynamic Client Registration, or pre-registered)
+5. Client opens browser to auth URL (with PKCE code_challenge, resource parameter)
+6. User authenticates → AS redirects to `redirect_uri` with authorization code
+7. Client exchanges code for tokens (with code_verifier)
+8. Client uses access token on subsequent MCP requests
+
+### Client Registration — Priority Order
+
+1. Pre-registered client_id (if known relationship with AS)
+2. Client ID Metadata Document — client hosts JSON at HTTPS URL used as client_id
+3. Dynamic Client Registration (RFC 7591) — POST to `/register`, get client_id back
+4. Manual user input (last resort)
+
+Most popular MCP servers (Notion, Linear, Slack, Google Workspace) support DCR or have
+pre-known client registration endpoints.
+
+### Token Storage — Verified from Live ~/.credentials.json
+
+CC stores all OAuth credentials in `~/.claude/.credentials.json` (Linux), macOS Keychain on macOS.
+
+**Actual structure (values redacted, keys confirmed):**
+```json
+{
+  "claudeAiOauth": { ... },
+  "mcpOAuth": {
+    "<serverName>|<hash>": {
+      "serverName": "notion",
+      "serverUrl": "https://api.notion.com/mcp",
+      "accessToken": "<token>",
+      "expiresAt": <unix_ms>,
+      "discoveryState": {
+        "authorizationServerUrl": "https://api.notion.com",
+        "resourceMetadataUrl": "https://api.notion.com/.well-known/..."
+      },
+      "clientId": "<id>",
+      "refreshToken": "<token>",
+      "scope": ""
+    }
+  }
+}
+```
+
+Key: `<serverName>|<8-char hash>` — e.g., `"notion|eac663db915250e7"`. Hash is derived from
+server URL (confirmed: same server URL produces same hash across instances).
+
+**`expiresAt` is Unix epoch in milliseconds**, not seconds.
+
+**Access token empty string** = auth was started but never completed (seen in Linear entry with
+`accessToken: ""`). This means DCR ran but browser flow was never completed.
+
+### Token Refresh
+
+- CC is supposed to auto-refresh before expiry using `refreshToken`
+- **Known CC bug (issues #28256, #29718, #35092):** Token refresh fails silently or not triggered
+  proactively. CC only refreshes on-demand when the token has already expired.
+- Refresh is standard OAuth: POST to token endpoint with `grant_type=refresh_token`
+- Refresh token rotation is required by OAuth 2.1 for public clients — new access + refresh token
+  issued on each refresh; old refresh token is immediately invalid
+- No CC env var or hook to trigger refresh externally
+- **Rightclaw must own refresh** — check `expiresAt`, call token endpoint, write updated entry
+  back to `.credentials.json`
 
 ---
 
 ## Feature Landscape
 
-### Table Stakes
-
-Features required for sandbox to actually work in the nix/devenv environment where rightclaw is
-developed. Missing any = sandbox silently degrades to disabled.
+### Table Stakes (Users Expect These)
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| `ripgrep` in devenv.nix packages | CC sandbox startup requires `rg` in PATH. Without it, sandbox check fails (warning, not hard error by default). Agents run unsandboxed. | LOW | Add `pkgs.ripgrep` to `devenv.nix`. One line. |
-| `rightclaw doctor` detects `rg` absence (Fail on Linux) | Doctor already checks `bwrap` and `socat` as Fail-severity on Linux. Same pattern must cover `rg`. | LOW | Add `check_binary("rg", ...)` in `doctor.rs` Linux block alongside existing bwrap/socat checks |
-| `rightclaw doctor` verifies sandbox is actually enabled in generated settings.json | Sandbox might be disabled if `--no-sandbox` was used or settings.json is stale/corrupt | LOW | Read `agent/.claude/settings.json`, verify `sandbox.enabled: true`; Warn if false |
-| E2E validation: sandbox-enabled bot receives Telegram message, responds | Core v3.0 flow must work with sandbox ON. Currently never validated with sandbox enabled. | MED | Manual UAT checklist + smoke test |
-| E2E validation: cron fires under sandbox | `claude -p` subprocess spawned by cron runtime must work inside sandbox filesystem/network rules | MED | Cron execution with `sandbox.enabled: true` verified against allowed domains/paths |
+| Read `mcp-needs-auth-cache.json` to detect which servers need auth | The entry point. Without knowing what needs auth, nothing else works. | LOW | File is at `~/.claude/mcp-needs-auth-cache.json` (or `$CLAUDE_CONFIG_DIR`). Must handle HOME-isolated agents (each agent has its own `$AGENT_DIR/.claude/`). |
+| Cross-reference with `.mcp.json` to find server URLs | Auth cache has server names; `.mcp.json` has URLs. Need both to run discovery. | LOW | Agent's `.mcp.json` is generated by rightclaw — we already own its structure. Only `http`/`https` transport servers need OAuth; `stdio` servers use env credentials per MCP spec. |
+| OAuth Authorization Server discovery (RFC 9728 + RFC 8414) | Spec-required. Must handle both `WWW-Authenticate` header path and well-known URI fallback. Also OIDC discovery. | MEDIUM | Three well-known URIs to try in priority order per spec. Each popular service (Notion, Linear, Slack) has different AS URL patterns. |
+| Local callback HTTP server on `localhost` | OAuth 2.1 requires redirect URI to be localhost or HTTPS. Headless = no browser on remote hosts; callback must be captured locally. | MEDIUM | Bind to random port (or configurable), register `http://localhost:<port>/callback` as redirect URI. Axum or hyper in Rust. Must handle the code parameter from redirect. |
+| Open browser for user authorization | OAuth requires human approval. Even headless agents need one-time human authorization per service. Rightclaw cannot bypass this. | LOW | `open::that()` crate or `xdg-open`/`open` command. Print URL to terminal as fallback. User authorizes; AS redirects to localhost callback. |
+| Exchange authorization code for tokens (with PKCE) | Core OAuth step. Must include code_verifier, resource parameter, client_id. | MEDIUM | POST to token endpoint. Handle Dynamic Client Registration first if no client_id stored. |
+| Write token to `~/.claude/.credentials.json` under `mcpOAuth.<key>` | CC reads this file to get its tokens. If rightclaw doesn't write here, CC still sees "needs auth". | MEDIUM | Must merge into existing JSON (not overwrite). Key format: `<serverName>\|<hash>`. Hash derivation must match CC's algorithm or be verified empirically. |
+| `rightclaw mcp-auth <agent>` subcommand | User-facing entry point. Discovers what needs auth, runs the flow, writes tokens. | LOW | Top-level UX. Lists what needs auth, prompts user to confirm, runs flow per server. |
 
 ### Differentiators
 
-Features that make sandbox failures visible and diagnosable before they silently degrade security.
-
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Doctor detects sandbox actually active (not just deps present) | Presence of `bwrap` + `rg` + `socat` does not guarantee sandbox ran. Doctor should also check that generated settings.json has `sandbox.enabled: true`. | LOW | Read settings.json per agent, report `sandbox-config/<agent>` pass/warn |
-| `sandbox.failIfUnavailable: true` in generated settings.json | Turns sandbox degradation from silent to hard failure. Operators immediately see that sandbox is broken instead of agents silently running unsandboxed. | LOW | Add `failIfUnavailable: true` to `generate_settings()` output. Docs must explain this makes `--no-sandbox` the explicit escape hatch. |
-| Doctor check for USE_BUILTIN_RIPGREP env var conflict | Setting `USE_BUILTIN_RIPGREP=0` in agent env does NOT fix sandbox check — users may misunderstand and set it thinking it helps. Detect and warn. | LOW | If `USE_BUILTIN_RIPGREP=0` set in agent.yaml env and `rg` not in PATH, warn: "USE_BUILTIN_RIPGREP=0 does not substitute for system rg needed by sandbox check" |
-| E2E test script with sandbox enabled | Automated smoke test: `rightclaw up`, verify `sandbox.enabled: true` in settings.json, send test Telegram message, verify response, wait for cron tick, verify cron ran | MED | Shell script in `tests/e2e/`; not full automation but repeatable manual UAT checklist |
+| Token refresh detection and execution | CC's refresh is buggy. Rightclaw proactively checks `expiresAt` in `.credentials.json` and refreshes tokens before they expire. Agents never hit auth failures mid-task. | MEDIUM | Run as part of `rightclaw up` pre-flight or as separate `rightclaw mcp-refresh` command. POST to token endpoint with `grant_type=refresh_token`. Handle rotation (update both access + refresh token). |
+| Tunnel integration for external redirect URIs | Some OAuth providers reject `localhost` redirect URIs (Notion requires HTTPS). Rightclaw can spin up a Cloudflare/ngrok tunnel automatically, get a stable HTTPS URL, register it, complete flow. | HIGH | ngrok-rs or cloudflared-rs integration. Tunnel URL must be used as redirect_uri in DCR registration. URL changes per session unless using paid static domain. Cloudflare Tunnel with stable domain is preferable for repeatability. |
+| Pre-flight auth check in `rightclaw up` | Before starting agents, `rightclaw up` checks which servers need auth and warns the operator. Prevents agents from starting in a state where MCP tools are silently unavailable. | LOW | Read auth cache + credentials, cross-check expiry. Print "Warning: Notion needs auth — run `rightclaw mcp-auth <agent>` first". |
+| Dynamic Client Registration support | Many popular MCP servers (Notion, Linear, Google Workspace) use DCR. Without it, user must manually register an OAuth app. With it, rightclaw registers itself automatically per-server. | MEDIUM | POST to registration endpoint from AS metadata. Store `clientId` (and optionally `clientSecret` for confidential clients) in rightclaw's own state, not in CC's credential file. |
+| `rightclaw doctor` checks MCP auth status | Doctor reports which agents have expired or missing MCP tokens. Surfaces before agent failure, not after. | LOW | Warn severity. Read `mcpOAuth` from `.credentials.json`, check `expiresAt` < now + buffer. |
 
 ### Anti-Features
 
 | Anti-Feature | Why Requested | Why Avoid | Alternative |
 |--------------|---------------|-----------|-------------|
-| `sandbox.failIfUnavailable: false` as default (current behavior) | "Agents still run even if sandbox fails" | Silent sandbox degradation is a security foot-gun. Users think they have sandbox protection, don't. | Set `failIfUnavailable: true` in generated settings. `--no-sandbox` is the explicit opt-out. |
-| Injecting `rg` path directly into CC via env var | "Fix without touching devenv.nix — just point CC at the nix store path" | No CC env var accepts a custom `rg` path for the sandbox check. The check uses `which`/PATH lookup. Path injection into PATH is the only supported mechanism. | Add `pkgs.ripgrep` to devenv.nix; PATH injection handled by devenv shell |
-| USE_BUILTIN_RIPGREP=1 in agent env as sandbox fix | "Just tell CC to use its vendored ripgrep" | Vendored rg controls grep tool only. Sandbox check is a separate code path that always checks system PATH. Setting this does nothing for sandbox. | System ripgrep via devenv.nix is the only fix. |
-| Patching CC's vendor/ripgrep permissions | "chmod +x the vendored binary" | Fixes skill/command discovery (known issue #42068) but is orthogonal to sandbox check. Sandbox needs system rg. | Fix the right problem: add system ripgrep to devenv.nix |
-| Doctor suppressing rg Fail when sandbox.enabled is false | "If sandbox is off, rg isn't needed" | Operator may not realize sandbox is degraded. Always report missing `rg` on Linux; context (sandbox disabled) is informational only. | Report Fail for missing rg, add detail "sandbox will degrade to unsandboxed mode" |
+| Device Flow (RFC 8628) | "Headless-friendly — no redirect needed" | MCP spec does not include device flow. No popular MCP server (Notion, Linear, Slack) supports it. Building device flow support would only work for custom servers that implement it. | Authorization Code + PKCE with localhost callback is spec-compliant and works with all production MCP servers. |
+| Storing tokens in rightclaw's own credential store | "Don't touch CC's internal files" | If tokens aren't in `~/.claude/.credentials.json`, CC won't use them. CC reads only its own credential file. Rightclaw would own tokens but agents would still fail. | Write to CC's credential file. This is the only supported path. File format is verified from live system. |
+| Automatic browser opener in headless CI | "Automate everything" | OAuth requires human consent. No browser in CI means the flow cannot complete. Automated token injection from static credentials is an OAuth violation and breaks token rotation. | In CI, pre-populate credentials via `rightclaw mcp-auth` in development, then copy credentials to CI environment as a secret. Rightclaw handles refresh from that point forward. |
+| Polling for callback (no local server) | "Simpler than running HTTP server" | Polling requires public URL. Local callback server is simpler, more reliable, and spec-compliant. Redirect URI is `localhost` which all spec-compliant servers must accept. | Local callback HTTP server — one tokio task, one endpoint, shut down after single request. |
+| Tunnel by default | "Always works, even behind NAT" | Most OAuth providers accept `localhost` redirect URIs. Tunnel introduces complexity, external dependency, and ephemeral URLs that break registered redirect URIs. | Only use tunnel when provider explicitly rejects localhost (detected from DCR error response or documented provider requirement). |
 
 ---
 
 ## Feature Dependencies
 
 ```
-[pkgs.ripgrep in devenv.nix]
-    └──satisfies──> [CC sandbox rg dependency check]
-    └──unblocks──> [sandbox.enabled: true agents actually run sandboxed]
-    └──required before──> [E2E verification with sandbox enabled]
+[Read mcp-needs-auth-cache.json]
+    └──required by──> [Know which servers need auth]
+                          └──required by──> [OAuth discovery per server]
+                          └──required by──> [Pre-flight check in `rightclaw up`]
+                          └──required by──> [Doctor auth status check]
 
-[doctor rg check (Linux Fail)]
-    └──depends on──> [existing check_binary() infrastructure in doctor.rs]
-    └──parallel to──> [existing bwrap check, socat check]
-    └──surfaces before launch──> [sandbox degradation risk]
+[Cross-reference with .mcp.json]
+    └──required by──> [Get server URL for discovery]
+    └──parallel to──> [Read auth cache]
 
-[sandbox.failIfUnavailable: true in generate_settings()]
-    └──depends on──> [generate_settings() in codegen/settings.rs]
-    └──changes behavior on dep failure──> [CC errors instead of silently running unsandboxed]
-    └──requires devenv.nix ripgrep fix to work correctly, otherwise rightclaw up fails hard]
-    └──escape hatch is──> [--no-sandbox flag, which sets sandbox.enabled: false]
+[Authorization Server Discovery]
+    └──required by──> [Dynamic Client Registration]
+    └──required by──> [Open browser with auth URL]
+    └──required by──> [Token exchange]
+    └──required by──> [Token refresh]
 
-[doctor sandbox-config check per agent]
-    └──depends on──> [agent settings.json exists (generated by rightclaw up)]
-    └──reads──> [agent/.claude/settings.json]
-    └──independent of──> [rg binary check (structural check, not dep check)]
-    └──reports──> [sandbox-config/<agent> Pass/Warn]
+[Dynamic Client Registration]
+    └──required by──> [Browser auth (need client_id for auth URL)]
+    └──skipped if──> [client_id already stored from previous DCR]
 
-[E2E verification: bot + cron with sandbox]
-    └──depends on──> [ripgrep in PATH (devenv fix)]
-    └──depends on──> [bwrap + socat already present in devenv.nix]
-    └──depends on──> [v3.0 bot runtime (Phase 23-28, already built)]
-    └──depends on──> [cron runtime (Phase 27, already built)]
-    └──validates end-to-end: rightclaw up → sandbox ON → Telegram msg → CC subprocess → response]
+[Local callback HTTP server]
+    └──required by──> [Receive authorization code from AS redirect]
+    └──parallel with──> [Browser opener]
+
+[Open browser with auth URL]
+    └──required by──> [User authorization step]
+    └──depends on──> [PKCE code_challenge generated]
+    └──depends on──> [client_id from DCR or pre-registration]
+
+[Authorization code exchange]
+    └──required by──> [Get access + refresh tokens]
+    └──depends on──> [Authorization code from callback server]
+    └──depends on──> [PKCE code_verifier stored from earlier]
+
+[Write to ~/.credentials.json]
+    └──required by──> [CC picks up tokens and uses MCP server]
+    └──depends on──> [Access token from exchange]
+    └──must merge──> [Existing mcpOAuth entries not overwritten]
+
+[Token refresh]
+    └──depends on──> [refreshToken in credentials.json]
+    └──depends on──> [Token endpoint URL from stored discoveryState]
+    └──independent of──> [Browser, callback server — no user interaction needed]
+    └──writes back to──> [credentials.json same as initial write]
+
+[Tunnel integration]
+    └──depends on──> [Local callback server (tunnel forwards to it)]
+    └──only needed when──> [Provider rejects localhost redirect URI]
+    └──enhances──> [Authorization flow for restrictive providers]
 ```
+
+### Dependency Notes
+
+- **DCR before browser auth:** Client must have a `client_id` to construct the authorization URL. DCR must succeed first. If DCR is already done (client_id stored), skip.
+- **Callback server parallel with browser:** Server must be listening before browser opens, or the redirect arrives with no one home.
+- **Hash derivation is critical:** The key `<serverName>|<hash>` in `mcpOAuth` must match what CC expects. Hash must be verified empirically against a known-good credential entry (confirmed: Notion hash is `eac663db915250e7` for `https://api.notion.com/mcp`). Wrong hash = CC ignores the entry.
+- **Credentials.json merge is critical:** File contains `claudeAiOauth` (CC's own login). Overwriting it logs the user out. Must read-modify-write only the `mcpOAuth` section.
+- **Token refresh does not depend on user:** Refresh is safe to run unattended. Only the initial authorization requires user interaction.
 
 ---
 
 ## MVP Definition
 
-### Must Ship in v3.1
+### Launch With (v3.2)
 
-1. **devenv.nix: add `pkgs.ripgrep`** — one-line fix. Unblocks everything else.
-2. **doctor.rs: add `rg` check on Linux** — Fail severity, same pattern as bwrap/socat.
-3. **generate_settings(): add `failIfUnavailable: true`** — hard failure when sandbox deps missing.
-4. **E2E validation pass: sandbox-enabled agents** — run full flow (up → bot → Telegram → cron) with sandbox ON; document results in UAT checklist.
+Minimum to make MCP OAuth work for agents with the most popular servers (Notion, Linear):
 
-### Add If E2E Exposes Issues
+- [ ] Read `mcp-needs-auth-cache.json` — detect which servers need auth per agent
+- [ ] Cross-reference with agent's `.mcp.json` — get server URLs
+- [ ] Authorization Server discovery — RFC 9728 + RFC 8414 + OIDC (all three endpoints)
+- [ ] Dynamic Client Registration — works for Notion, Linear, Google Workspace
+- [ ] PKCE code_challenge/code_verifier generation (S256)
+- [ ] Local callback HTTP server (tokio/axum, single request, then shut down)
+- [ ] Browser opener via `open` crate with terminal URL fallback
+- [ ] Token exchange with PKCE verifier and resource parameter
+- [ ] Write tokens to `~/.claude/.credentials.json` — merge into `mcpOAuth`, correct key format
+- [ ] `rightclaw mcp-auth <agent>` subcommand — orchestrates full flow
+- [ ] Pre-flight warning in `rightclaw up` — report servers needing auth, don't block startup
 
-- Doctor checks sandbox-config per agent (reads settings.json, verifies enabled)
-- Doctor detects USE_BUILTIN_RIPGREP=0 misuse when rg absent
-- Cron runs need allowWrite to `crons/` dir in sandbox settings (verify current SandboxOverrides are sufficient)
+### Add After Validation (v3.2.x)
 
-### Out of Scope for v3.1
+- [ ] Token refresh command — `rightclaw mcp-refresh <agent>` — run automatically from `rightclaw up`
+- [ ] Doctor check for expired/missing MCP tokens — Warn severity
+- [ ] `rightclaw doctor` reports per-agent MCP auth status
 
-- Automated E2E tests (CI integration) — manual UAT is sufficient for now
-- Sandbox for the Rust bot process itself (teloxide binary is not a CC subprocess — sandbox does not apply)
-- Webhook or network isolation for the bot's Telegram long-polling calls — bot runs outside CC sandbox
+### Future Consideration (v3.3+)
+
+- [ ] Tunnel integration — only for providers that reject localhost (Slack enterprise, some Google Workspace configs)
+- [ ] Automated refresh on schedule — periodic background refresh before expiry via cron task or rightclaw up hook
+- [ ] Multi-agent credential sharing — right now each agent has isolated HOME; shared OAuth tokens need explicit opt-in (SEED-004 territory)
 
 ---
 
-## What E2E Verification Must Check
+## Feature Prioritization Matrix
 
-A sandbox-enabled E2E pass is considered valid when all of the following hold:
+| Feature | User Value | Implementation Cost | Priority |
+|---------|------------|---------------------|----------|
+| Auth detection (cache + .mcp.json cross-ref) | HIGH | LOW | P1 |
+| AS discovery (RFC 9728 + RFC 8414) | HIGH | MEDIUM | P1 |
+| Dynamic Client Registration | HIGH | MEDIUM | P1 |
+| PKCE generation | HIGH | LOW | P1 |
+| Local callback server | HIGH | MEDIUM | P1 |
+| Browser opener | HIGH | LOW | P1 |
+| Token exchange | HIGH | MEDIUM | P1 |
+| Write to .credentials.json (correct key format) | HIGH | MEDIUM | P1 |
+| `rightclaw mcp-auth` subcommand | HIGH | LOW | P1 |
+| Pre-flight warning in `rightclaw up` | MEDIUM | LOW | P1 |
+| Token refresh | HIGH | MEDIUM | P2 |
+| Doctor MCP auth check | MEDIUM | LOW | P2 |
+| Tunnel integration | MEDIUM | HIGH | P3 |
 
-| Check | Pass Criteria |
-|-------|---------------|
-| `rightclaw doctor` | All Linux checks pass: `bwrap` ok, `socat` ok, `rg` ok, `bwrap-sandbox` ok |
-| `rightclaw up` | Succeeds; no sandbox dep error in CC startup logs |
-| `agent/.claude/settings.json` | `sandbox.enabled: true`, `failIfUnavailable: true` |
-| Bot receives Telegram message | Message arrives, `claude -p` subprocess spawned |
-| CC subprocess runs under sandbox | No "sandbox unavailable" warning in CC stderr/debug output |
-| Bot sends response | Response arrives in Telegram thread |
-| `crons/*.yaml` spec exists | Cron task fires at scheduled time under sandbox |
-| Cron output logged | `cron_runs` table entry written; no sandbox-related failure in logs |
-| `rightclaw doctor` post-up | All checks still pass; no webhook conflicts |
+---
+
+## Known CC Bugs Affecting This Feature (as of April 2026)
+
+These are bugs in CC that rightclaw must work around, not fix:
+
+| Bug | Issue | Impact on RightClaw |
+|-----|-------|---------------------|
+| HTTP MCP servers never trigger browser OAuth flow | #11585, #36307 | Core motivation for this milestone. RightClaw owns the flow entirely. |
+| After token revocation, `/mcp` menu doesn't show re-auth needed | #30272 | Auth cache file (`mcp-needs-auth-cache.json`) may not be updated on revocation. RightClaw should also check `expiresAt` and empty `accessToken` in credentials as signals. |
+| OAuth auth succeeds but MCP reconnection fails, requires restart | #10250 | After rightclaw writes tokens, may need to restart CC session for it to pick them up. `rightclaw mcp-auth` should note this. |
+| Token refresh not triggered proactively | #28256, #29718 | Rightclaw's refresh command is the workaround. Run from `rightclaw up` pre-flight. |
+| Token refresh fails due to Keychain permission errors (macOS) | #19456 | On macOS, Keychain may block programmatic access. RightClaw reads/writes `~/.claude/.credentials.json` directly on Linux; macOS path may need separate investigation. |
 
 ---
 
 ## Sources
 
-- [CC Sandboxing docs](https://code.claude.com/docs/en/sandboxing) — dependency requirements (bwrap, socat), failIfUnavailable setting, sandbox modes (HIGH)
-- [CC Troubleshooting docs](https://code.claude.com/docs/en/troubleshooting) — WSL2 sandbox setup, rg for search/discovery, USE_BUILTIN_RIPGREP (HIGH)
-- [CC issue #26282](https://github.com/anthropics/claude-code/issues/26282) — exact error message "Required: ripgrep (rg), bubblewrap (bwrap), and socat" (HIGH)
-- [CC issue #42068](https://github.com/anthropics/claude-code/issues/42068) — vendored ripgrep path `vendor/ripgrep/<arch>/rg`, permissions issue (HIGH)
-- [CC issue #1843](https://github.com/anthropics/claude-code/issues/1843) — USE_BUILTIN_RIPGREP controls grep tool only, not sandbox check (MEDIUM)
-- [RightClaw devenv.nix](../../../devenv.nix) — current packages: missing ripgrep confirmed (HIGH — direct inspection)
-- [RightClaw doctor.rs](../../../crates/rightclaw/src/doctor.rs) — existing check_binary pattern, bwrap/socat Linux block (HIGH — direct inspection)
-- [RightClaw codegen/settings.rs](../../../crates/rightclaw/src/codegen/settings.rs) — generate_settings(), current sandbox JSON structure (HIGH — direct inspection)
-- [RightClaw PROJECT.md](../../PROJECT.md) — VER-01 validation gap, active milestone context (HIGH)
+- [MCP Authorization Specification](https://modelcontextprotocol.io/specification/draft/basic/authorization) — OAuth 2.1 flow, PKCE requirements, discovery sequence (HIGH)
+- [CC issue #11585](https://github.com/anthropics/claude-code/issues/11585) — HTTP MCP servers never trigger OAuth browser flow (HIGH)
+- [CC issue #36307](https://github.com/anthropics/claude-code/issues/36307) — duplicate of #11585, still open April 2026 (HIGH)
+- [CC issue #30272](https://github.com/anthropics/claude-code/issues/30272) — /mcp menu doesn't show re-auth after token revocation (HIGH)
+- [CC issue #10250](https://github.com/anthropics/claude-code/issues/10250) — reconnect fails after successful OAuth, requires restart (HIGH)
+- [CC issue #28256 / #29718](https://github.com/anthropics/claude-code/issues/29718) — token refresh not triggered proactively (HIGH)
+- [CC issue #19456](https://github.com/anthropics/claude-code/issues/19456) — macOS Keychain permission errors on token refresh (MEDIUM)
+- `~/.claude/mcp-needs-auth-cache.json` — live file confirmed: `{"notion":{"timestamp":...},...}` structure (HIGH — direct inspection)
+- `~/.claude/.credentials.json` — live file confirmed: `mcpOAuth.<serverName>|<hash>` key format, `accessToken`/`refreshToken`/`expiresAt`/`discoveryState`/`clientId` fields (HIGH — direct inspection, values redacted)
+- [RFC 8414 — OAuth 2.0 Authorization Server Metadata](https://datatracker.ietf.org/doc/html/rfc8414) — AS discovery (HIGH)
+- [RFC 9728 — OAuth 2.0 Protected Resource Metadata](https://datatracker.ietf.org/doc/html/rfc9728) — resource metadata discovery (HIGH)
+- [RFC 7591 — Dynamic Client Registration](https://datatracker.ietf.org/doc/html/rfc7591) — registration endpoint (HIGH)
+- [Stytch: OAuth for MCP explained](https://stytch.com/blog/oauth-for-mcp-explained-with-a-real-world-example/) — practical flow walkthrough (MEDIUM)
+- [Upstash: Implementing MCP OAuth](https://upstash.com/blog/mcp-oauth-implementation) — implementation details (MEDIUM)
 
 ---
-*Feature research for: RightClaw v3.1 Sandbox Fix & E2E Verification*
-*Researched: 2026-04-02*
+*Feature research for: RightClaw v3.2 MCP OAuth Automation*
+*Researched: 2026-04-03*

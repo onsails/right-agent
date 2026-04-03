@@ -1,245 +1,303 @@
-# Stack Research: v3.1 Sandbox Fix & Verification
+# Stack Research: v3.2 MCP OAuth Automation
 
-**Domain:** CC native sandbox dependency detection in nix environments
-**Researched:** 2026-04-02
-**Confidence:** HIGH — root cause confirmed by CC source inspection and Bun.which() live test
+**Domain:** MCP OAuth 2.1 automation in Rust CLI with tokio async runtime
+**Researched:** 2026-04-03
+**Confidence:** HIGH — credentials format confirmed from live ~/.claude/ inspection; crate choices verified against current crates.io; MCP spec read from modelcontextprotocol.io
 
 ## Scope
 
-Delta-research for the v3.1 milestone. Covers ONLY the sandbox fix:
-1. Root cause of sandbox silently disabling in nix environments
-2. Fix approaches ranked by correctness
-3. Doctor diagnostics for sandbox dep detection
-4. What NOT to try
-
-Existing stack (tokio, serde, reqwest, rusqlite, teloxide, etc.) is NOT re-evaluated.
+Delta-research for the v3.2 milestone. Covers ONLY the new crates and patterns needed
+for MCP OAuth automation. Existing stack (tokio, reqwest, serde, serde_json, rusqlite,
+thiserror, miette, etc.) is NOT re-evaluated.
 
 ---
 
-## Root Cause (Confirmed)
+## Question 1: Local HTTP Server for OAuth Callback
 
-The nix CC package installs the vendored ripgrep binary at:
+**Recommendation: axum 0.8**
 
+| Option | Verdict | Reason |
+|--------|---------|--------|
+| axum | **USE THIS** | tokio-native async, already in RightClaw's ecosystem (tokio workspace dep), macro-free API, Tower middleware, one-shot route pattern is trivial |
+| tiny_http | Avoid | Blocking/synchronous — would require `spawn_blocking` or a dedicated thread to not block tokio. Callback needs to accept exactly one request then shut down; axum's `oneshot` channel pattern does this cleanly. |
+| warp | Avoid | Heavier macro API, less maintained than axum, no advantage for single-route server |
+| hyper direct | Overkill | axum is the ergonomic layer on top of hyper; use axum |
+
+axum is not yet in the workspace dependencies but tokio already is, so adding axum adds only one new direct dep (it pulls in hyper/tower transitively which are already present via reqwest).
+
+The OAuth callback server needs to:
+1. Bind to `127.0.0.1:0` (OS-assigned port) to get a random free port
+2. Accept exactly one GET request with `?code=...&state=...`
+3. Return a "you can close this tab" HTML response
+4. Send the code through a `tokio::sync::oneshot` channel to the main OAuth flow
+5. Shut down
+
+axum handles this with a `Router`, a `oneshot::Sender` in State, and `axum::Server::bind`.
+
+**Version:** 0.8.x (current is 0.8.6 as of early 2026). Use `axum = "0.8"` in workspace.
+
+---
+
+## Question 2: Tunnel Integration
+
+**Recommendation: shell out to `cloudflared` binary (quick tunnel mode)**
+
+There is no Cloudflare Tunnel Rust SDK. Cloudflare provides only the `cloudflared` CLI binary (Go), and no official Rust crate for tunnel management. The `cloudflared` crate on lib.rs is a thin third-party wrapper with minimal maintenance.
+
+ngrok has an official Rust SDK (`ngrok` crate, v0.16.x), but it **requires a registered ngrok account and an authtoken**. This is a hard dependency on user infrastructure that is unsuitable as a default. The crate embeds the ngrok agent — it is not a thin HTTP client.
+
+**Approach: shell out to `cloudflared`**
+
+Cloudflare Quick Tunnels (`cloudflared tunnel --url http://localhost:<port>`) require:
+- The `cloudflared` binary installed (via `rightclaw doctor` check)
+- No account, no login, no token — completely free
+- Tunnel URL is printed to stderr as `https://<random>.trycloudflare.com`
+
+Integration pattern:
+```rust
+// Spawn cloudflared, parse tunnel URL from stderr
+let mut child = tokio::process::Command::new("cloudflared")
+    .args(["tunnel", "--url", &format!("http://127.0.0.1:{port}")])
+    .stderr(Stdio::piped())
+    .spawn()?;
+
+// Parse URL from stderr lines:
+// "INF +----------------------------+"
+// "INF | Your quick Tunnel has been created! Visit it at (it may take a few seconds to start): |"
+// "INF | https://<hash>.trycloudflare.com |"
 ```
-/nix/store/<hash>-claude-code-bun-2.1.89/lib/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/x64-linux/rg
-```
 
-The nix store is immutable — all files get permissions `r--r--r--` (444). No execute bit.
+Parse with a regex: `https://[a-z0-9-]+\.trycloudflare\.com` from stderr lines.
 
-CC's `checkDependencies()` calls `Bun.which(rgPath)` where `rgPath` is the absolute
-path to the vendored binary. `Bun.which()` checks that a file exists AND is executable.
-Since `444 & --x == 0`, `Bun.which()` returns `null`. CC pushes `"ripgrep not found"`
-to the errors array and sandbox silently disables.
+**ngrok as opt-in alternative:** If the user has an ngrok authtoken set as `NGROK_AUTHTOKEN` env var, support `ngrok` crate as a secondary option (provides stable subdomain if user has a paid plan). Gate behind a feature flag or CLI option `--tunnel ngrok|cloudflare`. Default: cloudflare.
 
-**Confirmed via live test:**
-```
-Bun.which("/nix/.../vendor/ripgrep/x64-linux/rg")  → null   (not executable)
-Bun.which("rg")                                      → "/home/wb/.nix-profile/bin/rg"
-```
+| Option | Account needed | Rust crate | Stable URL | Verdict |
+|--------|---------------|-----------|-----------|---------|
+| cloudflared quick tunnel | No | None (shell out) | No (random) | **Default** |
+| ngrok SDK | Yes (authtoken) | `ngrok = "0.16"` | Paid plans only | Opt-in |
+| bore / rathole | Requires VPS | N/A | Self-hosted | Out of scope |
 
-**CC source path** (cli.js, G34 = checkDependencies):
-```js
-if (Zr(z.command) === null)   // Zr = Bun.which()
-    K.push(`ripgrep (${z.command}) not found`);
-```
+**Doctor check:** Add `cloudflared` to `rightclaw doctor` checks (Warn severity if absent — OAuth will fail without a tunnel unless callback is localhost-only). On macOS: `brew install cloudflare/cloudflare/cloudflared`. On Linux: snap or direct binary download.
 
-**CC source path** (Bv8 = ripgrep config getter):
-```js
-Bv8 = $1(() => {
-    if (A_(process.env.USE_BUILTIN_RIPGREP)) {   // A_("0") → true
-        let { cmd: z } = tK4("rg", []);
-        if (z !== "rg") return { mode: "system", command: "rg", args: [] };
+---
+
+## Question 3: OAuth 2.0 Token Management
+
+**Recommendation: `oauth2` crate v5.0 + manual JSON persistence to ~/.claude/.credentials.json**
+
+The `oauth2` crate (ramosbugs/oauth2-rs) is the ecosystem standard for OAuth 2.1 in Rust:
+- 35M+ downloads, actively maintained
+- Strongly typed (compile-time correct flows)
+- PKCE built-in: `PkceCodeChallenge::new_random_sha256()`
+- Async support via reqwest backend (already in workspace)
+- Resource Indicators (RFC 8707) — can pass `resource` parameter manually via extra params
+
+MCP spec mandates OAuth 2.1 + PKCE (S256 method) + Resource Indicators (RFC 8707). The `oauth2` crate covers all of this.
+
+**Token storage: write directly to `~/.claude/.credentials.json`**
+
+Claude Code manages OAuth tokens in `~/.claude/.credentials.json` under the `mcpOAuth` key. RightClaw must write tokens into this file so CC picks them up without requiring the user to authenticate again via `/mcp`.
+
+Confirmed format (live inspection, 2026-04-03):
+```json
+{
+  "mcpOAuth": {
+    "<serverName>|<clientIdHash>": {
+      "serverName": "notion",
+      "serverUrl": "https://api.notion.com/v1/mcp",
+      "accessToken": "...",
+      "expiresAt": 1234567890000,
+      "discoveryState": { ... },
+      "clientId": "...",
+      "refreshToken": "...",
+      "scope": "..."
     }
-    // ... falls through to builtin/vendor path
-    return { mode: "builtin", command: ".../vendor/ripgrep/x64-linux/rg", args: [] };
-});
+  }
+}
 ```
 
-`A_(value)` returns `true` when value is `"0"`, `"false"`, `"no"`, or `"off"` — i.e. it
-means "is USE_BUILTIN_RIPGREP disabled?" When `USE_BUILTIN_RIPGREP=0`, the vendored
-path is SKIPPED and `rg` from PATH is used instead.
+Notes on the format:
+- Key pattern: `<serverName>|<clientIdHash>` where hash appears to be hex characters from client registration
+- `expiresAt` is milliseconds since epoch (not seconds — verified: values ~1.7T range = 2024 era ms timestamps)
+- `refreshToken` is optional (not all OAuth servers issue them)
+- `scope` is optional
+- `discoveryState` is a dict — structure TBD by inspection of a populated entry; likely caches discovery metadata to avoid re-fetching `/.well-known/oauth-protected-resource`
+
+File merge strategy: read existing JSON, merge `mcpOAuth` key, write back. Never clobber `claudeAiOauth` or other top-level keys.
+
+**No external token storage crate needed.** Use `serde_json::Value` for merge-safe writes. The `oauth2` crate handles in-memory token state; persistence is our responsibility.
+
+**Token refresh:** The `oauth2` crate's `exchange_refresh_token()` method handles refresh. Check `expiresAt` before making MCP calls; if expired, refresh automatically. CC has a known bug (issue #28256) where it does NOT refresh automatically — rightclaw should own this logic proactively.
 
 ---
 
-## Pre-existing Bug in Rightclaw
+## Question 4: MCP Auth Detection
 
-`crates/bot/src/telegram/worker.rs` line 399 has the wrong value:
+**No MCP client crate needed — use reqwest directly**
 
+The MCP spec (2025-11-25 draft) defines auth detection via standard HTTP:
+
+1. Make an unauthenticated GET or POST to the MCP server URL
+2. If the server requires auth, it returns `HTTP 401 Unauthorized` with header:
+   ```
+   WWW-Authenticate: Bearer resource_metadata="https://..."
+   ```
+3. Parse `resource_metadata` URL from the header
+4. GET the resource metadata document → find `authorization_servers`
+5. GET `/.well-known/oauth-authorization-server` on the AS → get `authorization_endpoint`, `token_endpoint`, `code_challenge_methods_supported`
+
+Detection algorithm:
 ```rust
-// WRONG — "1" means "builtin is enabled" → still uses vendored path
-cmd.env("USE_BUILTIN_RIPGREP", "1");
+// 1. Probe the MCP server URL (stdio servers are skipped — auth only for HTTP transport)
+let resp = reqwest_client.get(&mcp_url).send().await?;
+if resp.status() == StatusCode::UNAUTHORIZED {
+    let www_auth = resp.headers().get("WWW-Authenticate");
+    // parse resource_metadata from header value
+    // proceed with OAuth flow
+}
+// 200 or other = no auth needed (or already authenticated via token)
 ```
 
-The comment says "Use system rg instead of CC's bundled vendor binary" but `"1"` does
-the opposite. The correct fix is `"0"`.
+**For .mcp.json entries with `type: "stdio"`:** Skip — MCP spec explicitly states stdio transport SHOULD NOT follow OAuth spec; credentials come from env.
+
+**For `type: "sse"` or `type: "http"`:** Probe as above.
+
+The `rmcp` crate (already in workspace as MCP server library) is for implementing MCP servers, not clients. It does not expose a client API useful for auth probing. Use reqwest directly.
 
 ---
 
-## Fix: Approach 1 — Set USE_BUILTIN_RIPGREP=0 in CC subprocess env (RECOMMENDED)
+## Question 5: Claude Code's mcp-needs-auth-cache.json
 
-**Where:** Every `tokio::process::Command` that invokes `claude`/`claude-bun`.
-**Files:** `crates/bot/src/telegram/worker.rs` (invoke_cc), `crates/bot/src/cron.rs` (cron job invoker).
+**Format confirmed via live inspection (2026-04-03):**
 
-```rust
-cmd.env("USE_BUILTIN_RIPGREP", "0");   // "0" → A_("0") = true → skip vendored binary, use rg from PATH
+```json
+{
+  "<serverName>": {
+    "timestamp": 1775217851548
+  }
+}
 ```
 
-When `USE_BUILTIN_RIPGREP=0`, CC calls `tK4("rg", [])` to resolve the system `rg`. This
-uses `Bun.which("rg")` — finds `/home/wb/.nix-profile/bin/rg` → returns `{ mode: "system", command: "rg" }`.
-`checkDependencies` then calls `Bun.which("rg")` → non-null → no error → sandbox initializes.
+Located at: `~/.claude/mcp-needs-auth-cache.json`
 
-**Prerequisite:** `rg` must be in PATH when CC runs. In devenv, ripgrep is already in
-the devenv PATH (`devenv.nix` does NOT currently include ripgrep but the user's nix
-profile has it). The devenv.nix should add ripgrep explicitly so it is always available:
+- Key = MCP server name (as declared in `.mcp.json`)
+- `timestamp` = milliseconds since epoch when CC determined auth is needed
+- CC writes this file when it probes an MCP server and gets 401
+- If rightclaw detects a server in this cache, that server definitely needs OAuth
+- After successful OAuth, the entry should be removed from this cache (or CC removes it on next successful connection)
 
-```nix
-packages = [
-    pkgs.git
-    pkgs.process-compose
-    pkgs.socat
-    pkgs.ripgrep          # ADD: required for CC sandbox rg check
-] ++ lib.optionals pkgs.stdenv.isLinux [
-    pkgs.bubblewrap
-];
-```
-
-**Why this is correct:**
-- Zero runtime cost — env var set at subprocess spawn time
-- CC validates `rg` in PATH not a hard-coded path
-- Works for both worker.rs (Telegram bot) and cron.rs (cron jobs)
-- Mirrors the approach used by `sadjow/claude-code-nix` (authoritative nix CC package)
-
-**Confidence:** HIGH — approach confirmed by CC source + nix package precedent.
+**Integration:** RightClaw can read this file as a pre-check to identify servers that CC has already flagged as needing auth. This is faster than probing each server ourselves. Cross-reference with `.mcp.json` entries to build the auth-needed list.
 
 ---
 
-## Fix: Approach 2 — Add ripgrep to devenv packages (REQUIRED COMPLEMENT)
+## Recommended New Crates
 
-Even with `USE_BUILTIN_RIPGREP=0`, CC must find `rg` in PATH. The rightclaw process-compose
-entries run with the environment that rightclaw up was launched in. The devenv environment
-currently gets ripgrep from the user's `~/.nix-profile`, not from devenv explicitly.
+| Crate | Version | Purpose | Workspace? |
+|-------|---------|---------|-----------|
+| `axum` | `0.8` | OAuth callback HTTP server | Add to workspace |
+| `oauth2` | `5.0` | PKCE + OAuth 2.1 client flow | Add to workspace |
+| `open` | `5.3` | Open browser for authorization URL | Add to workspace |
 
-Add to `devenv.nix`:
+**No new crates needed for:**
+- Tunnel integration (shell out to `cloudflared`)
+- MCP auth detection (reqwest already in workspace)
+- Token storage (serde_json already in workspace)
+- Async runtime (tokio already in workspace)
+- HTTP client for token exchange (reqwest already in workspace)
 
-```nix
-packages = [
-    pkgs.git
-    pkgs.process-compose
-    pkgs.socat
-    pkgs.ripgrep
-] ++ lib.optionals pkgs.stdenv.isLinux [
-    pkgs.bubblewrap
-];
+**Avoid adding:**
+- `ngrok` crate — requires user account; shell-out to cloudflared is better default
+- `openidconnect` crate — overkill; CC MCP OAuth does not use OIDC in practice
+- Any keychain crate — CC reads from `~/.claude/.credentials.json` on Linux; no keychain integration needed for rightclaw to write tokens
+
+---
+
+## Cargo.toml Additions
+
+Add to `[workspace.dependencies]`:
+```toml
+axum = "0.8"
+oauth2 = "5.0"
+open = "5.3"
 ```
 
-This ensures ripgrep is in PATH in any devenv shell, not just when the user happens to
-have it in their nix profile.
-
-**Confidence:** HIGH — ripgrep is a standard nix package.
-
----
-
-## Fix: Approach 3 — Doctor check for vendored rg executability (DIAGNOSTIC)
-
-The doctor should detect the nix sandbox issue before launch and surface a clear message.
-
-Add to `crates/rightclaw/src/doctor.rs`:
-
-```rust
-// Check: CC vendored ripgrep executability (nix issue)
-checks.push(check_cc_vendored_rg());
+Add to `crates/rightclaw/Cargo.toml` `[dependencies]`:
+```toml
+axum = { workspace = true }
+oauth2 = { workspace = true }
+open = { workspace = true }
 ```
 
-The check should:
-1. Find the CC binary path (using `which::which("claude").or_else(|_| which::which("claude-bun"))`)
-2. Resolve the node_modules parent: `cc_bin.parent()?.parent()?.join("lib/node_modules/@anthropic-ai/claude-code")`
-3. For Linux, build the vendored path: `cc_root/vendor/ripgrep/x64-linux/rg`
-4. Check if the file exists AND is executable (`metadata.permissions().mode() & 0o111 != 0`)
-5. If not executable: emit Warn with message "CC vendored ripgrep not executable (nix store). Set USE_BUILTIN_RIPGREP=0 in agent env — rightclaw up handles this automatically."
-6. If `USE_BUILTIN_RIPGREP=0` is already set: emit Pass "CC using system ripgrep (nix-compatible)"
-7. If no vendored rg found at all (non-nix install): emit Pass "CC vendored ripgrep not present (non-nix install)"
+---
 
-**Severity:** Warn (not Fail) — rightclaw up automatically injects `USE_BUILTIN_RIPGREP=0`
-so after the fix the doctor check becomes informational.
+## Integration Points in Existing Codebase
+
+| Area | What Touches It | Notes |
+|------|----------------|-------|
+| `cmd_up` (rightclaw/src/cmd/up.rs) | Read `mcp-needs-auth-cache.json` after writing `.mcp.json` | Check which servers need auth; surface count to user |
+| New: `cmd_auth.rs` | `rightclaw auth <agent>` subcommand | Runs OAuth flow per-server that needs auth |
+| `doctor.rs` | Add `cloudflared` binary check | Warn severity if absent; OAuth flows require it |
+| `~/.claude/.credentials.json` | Read+merge write | Never clobber existing keys |
+| `~/.claude/mcp-needs-auth-cache.json` | Read-only | Use to detect pre-identified servers needing auth |
 
 ---
 
-## What NOT to Try
+## Alternatives Considered
 
-| Approach | Why Not |
-|----------|---------|
-| `chmod +x .../vendor/ripgrep/x64-linux/rg` | Nix store is immutable — chmod fails with EROFS. Re-applied on every nix upgrade anyway. |
-| Nix overlay to patch CC package | Overkill — the fix is a single env var. Nix overlays require nix expertise and pin the CC version. |
-| Symlink system rg over vendored path | Nix store is read-only. Would require a writable CC install. |
-| `sandbox.enabled: false` in settings.json | Defeats the entire security model. The goal is to ENABLE sandbox, not disable it. |
-| Set `USE_BUILTIN_RIPGREP=1` | WRONG — value "1" passes `A_("1") = false`, keeping the vendored path. The existing code in worker.rs has this bug. |
-| Wrapper script around claude binary | More complexity than needed. env var approach is cleaner and already works. |
-| `SANDBOX_RUNTIME=1` env var | That's an internal CC env var set INSIDE the sandbox. Not for external use. |
-
----
-
-## Integration Points in Rightclaw
-
-### worker.rs (invoke_cc) — BROKEN, needs fix
-```rust
-// Current (wrong):
-cmd.env("USE_BUILTIN_RIPGREP", "1");
-
-// Fixed:
-cmd.env("USE_BUILTIN_RIPGREP", "0");
-```
-
-### cron.rs (cron job invoker) — needs same fix
-The cron job invoker spawns `claude -p` similarly. Verify it also sets
-`USE_BUILTIN_RIPGREP=0` or add it.
-
-### devenv.nix — add ripgrep
-```nix
-pkgs.ripgrep
-```
-
-### doctor.rs — add check_cc_vendored_rg
-New check function that detects nix install + non-executable vendored rg + advises.
+| Category | Recommended | Alternative | Why Not |
+|----------|-------------|-------------|---------|
+| Local HTTP | axum 0.8 | tiny_http | Synchronous — incompatible with tokio async architecture |
+| Local HTTP | axum 0.8 | warp | Less maintained, heavier macros, no advantage |
+| Tunnel | cloudflared shell-out | ngrok crate | ngrok requires paid account + authtoken; bad UX as default |
+| Tunnel | cloudflared shell-out | rathole | Requires self-hosted VPS; out of scope |
+| OAuth client | oauth2 5.0 | openidconnect | Superset of oauth2 crate, OIDC not required for MCP OAuth |
+| OAuth client | oauth2 5.0 | manual reqwest calls | Reinvents PKCE, token exchange, error handling |
+| Token storage | Direct JSON write | keyring crate | CC reads plaintext `~/.claude/.credentials.json` on Linux; keychain not needed |
+| MCP detection | reqwest probe | rmcp client | rmcp is server-only; no client probe capability |
 
 ---
 
-## No New Rust Crates Required
+## What NOT to Add
 
-The fix requires no new dependencies:
-
-| What | How |
-|------|-----|
-| `USE_BUILTIN_RIPGREP=0` in subprocess env | `std::process::Command::env()` / `tokio::process::Command::env()` — already used |
-| Vendored rg executability check | `std::fs::metadata()` + `std::os::unix::fs::PermissionsExt` — stdlib |
-| Find CC binary for doctor check | `which::which()` — already in workspace deps |
-| ripgrep in devenv PATH | `pkgs.ripgrep` in devenv.nix — devenv package, not a Rust crate |
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| `ngrok` crate (as default) | Requires account + authtoken — blocks users without ngrok accounts | `cloudflared` quick tunnel (shell-out) |
+| `openidconnect` crate | OIDC is optional in MCP OAuth spec; CC MCP servers use OAuth 2.1 not OIDC | `oauth2` crate directly |
+| `hyper` direct | axum wraps it; no need to use hyper directly | axum |
+| `keyring` crate | CC stores tokens in plaintext JSON on Linux; macOS keychain is not used for per-agent flow | Direct `~/.claude/.credentials.json` write |
+| `tungstenite` / websocket crates | Not needed; MCP auth probing uses standard HTTP | reqwest |
 
 ---
 
-## Verification Sequence
+## Confidence Assessment
 
-After applying the fix, the sandbox status can be verified:
-
-1. `rightclaw doctor` — should show Pass for new `cc-sandbox-rg` check
-2. `rightclaw up` — launch agent
-3. Inside agent session: `/sandbox` — should show sandbox enabled, not disabled
-4. Inside agent session: `/doctor` — CC's own doctor should report ripgrep working
-5. `rightclaw doctor` in a fresh shell (without devenv active) — ensure rg is still found
+| Area | Confidence | Evidence |
+|------|-----------|---------|
+| CC credentials format | HIGH | Live inspection of `~/.claude/.credentials.json` on dev machine |
+| mcp-needs-auth-cache.json format | HIGH | Live file read — format confirmed |
+| MCP auth detection (401 + WWW-Authenticate) | HIGH | Official MCP spec read from modelcontextprotocol.io |
+| axum as callback server | HIGH | tokio-native, ecosystem standard, widely used pattern |
+| cloudflared quick tunnel | HIGH | Official docs confirm no-account quick tunnels |
+| oauth2 crate PKCE/OAuth 2.1 support | HIGH | Docs.rs confirmed, v5.0 current |
+| ngrok requires authtoken | HIGH | Official ngrok docs confirm mandatory authtoken |
+| `expiresAt` is milliseconds | MEDIUM | Values ~1.7T consistent with ms epoch; inferred from live data but not CC source confirmed |
+| `discoveryState` field structure | LOW | Present in live data as dict; internal structure not inspected (token values redacted) |
 
 ---
 
 ## Sources
 
-- CC cli.js source, G34 (`checkDependencies`) — extracted from `/nix/store/.../cli.js`, line 780
-- CC cli.js source, Bv8 (`ripgrep config getter`) — `USE_BUILTIN_RIPGREP` logic confirmed
-- CC cli.js source, Zr (`Bun.which` wrapper) — used for dependency detection
-- CC cli.js source, A_ — value semantics: `"0"` → builtin disabled → use system rg
-- [sadjow/claude-code-nix package.nix](https://github.com/sadjow/claude-code-nix/blob/main/package.nix) — `USE_BUILTIN_RIPGREP=0` + `--prefix PATH ripgrep` pattern confirmed HIGH confidence
-- [CC issue #42068](https://github.com/anthropics/claude-code/issues/42068) — vendored rg permissions bug (same root issue), April 2026
-- [CC sandboxing docs](https://code.claude.com/docs/en/sandboxing) — `sandbox.failIfUnavailable` behavior
-- Live Bun.which test: `Bun.which("/nix/.../vendor/ripgrep/x64-linux/rg")` → `null` (confirmed)
-- Live file check: `/nix/.../vendor/ripgrep/x64-linux/rg` has mode `r--r--r--` (444)
+- Live `~/.claude/mcp-needs-auth-cache.json` inspection — format confirmed 2026-04-03
+- Live `~/.claude/.credentials.json` structure inspection — key pattern and field types confirmed 2026-04-03
+- [MCP Authorization Spec](https://modelcontextprotocol.io/specification/draft/basic/authorization) — 401 detection, WWW-Authenticate header, PKCE requirements, RFC 8707 resource parameter
+- [oauth2 crate docs.rs](https://docs.rs/oauth2/latest/oauth2/) — v5.0, PKCE types
+- [oauth2-rs GitHub](https://github.com/ramosbugs/oauth2-rs) — maintenance status, reqwest backend
+- [ngrok Rust quickstart](https://ngrok.com/docs/getting-started/rust) — authtoken requirement confirmed
+- [ngrok-rust GitHub](https://github.com/ngrok/ngrok-rust) — v0.16.x current
+- [Cloudflare Quick Tunnels](https://try.cloudflare.com/) — no-account quick tunnel confirmed
+- [axum crates.io](https://crates.io/crates/axum) — v0.8.6 current
+- [CC issue #28256](https://github.com/anthropics/claude-code/issues/28256) — refresh token bug confirming token storage format
 
 ---
-*Stack research for: RightClaw v3.1 Sandbox Fix & Verification*
-*Researched: 2026-04-02*
+*Stack research for: RightClaw v3.2 MCP OAuth Automation*
+*Researched: 2026-04-03*
