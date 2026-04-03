@@ -85,7 +85,7 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
 - [x] **Phase 32: Credential Foundation** - Correct key formula + atomic credential writes (completed 2026-04-03)
 - [x] **Phase 33: Auth Detection** - Per-agent MCP auth status surface and pre-flight warning (completed 2026-04-03)
 - [x] **Phase 34: Core OAuth Flow + Bot MCP Commands** - Full OAuth 2.1 + PKCE with cloudflared named tunnel + bot commands (merged with former Phase 36) (completed 2026-04-03)
-- [ ] **Phase 35: Token Refresh** - On-demand refresh, pre-flight refresh, doctor integration
+- [ ] **Phase 35: Token Refresh** - Automatic bot-owned refresh scheduler + doctor integration
 
 ## Phase Details
 
@@ -134,15 +134,20 @@ Plans:
 - [x] 34-04-PLAN.md — Bot integration: axum UDS callback server, /mcp and /doctor commands
 
 ### Phase 35: Token Refresh
-**Goal**: Operators can refresh MCP OAuth tokens without re-authenticating, and `rightclaw up` proactively refreshes expired tokens before launching agents
+**Goal**: The bot automatically refreshes MCP OAuth tokens before expiry; `rightclaw doctor` surfaces missing/expired tokens per agent
 **Depends on**: Phase 34
 **Requirements**: REFRESH-01, REFRESH-02, REFRESH-03, REFRESH-04
+**Note**: REFRESH-01 (CLI command) and REFRESH-02 (rightclaw up refresh) superseded by D-01/D-02 — bot scheduler is the only refresh mechanism
 **Success Criteria** (what must be TRUE):
-  1. `rightclaw mcp refresh [<server>] [--agent <name>]` exchanges the stored `refresh_token` for a new access token without opening a browser
-  2. `rightclaw up` refreshes tokens with expired `expiresAt` before launching agents; if refresh fails, logs Warn and continues (does not abort launch)
-  3. `rightclaw doctor` reports missing or expired MCP OAuth tokens per agent (Warn severity) and confirms `cloudflared` is available in PATH (Warn severity)
-  4. Tokens with `expiresAt=0` are skipped by the refresh loop and treated as non-expiring (Linear and similar providers)
-**Plans**: TBD
+  1. Bot startup spawns a background task that refreshes tokens before expiry (10-minute buffer) and retries up to 3 times on failure without crashing
+  2. `rightclaw doctor` includes an `mcp-tokens` check: Warn when any agent has missing/expired tokens, Pass otherwise
+  3. Tokens with `expiresAt=0` are skipped by the scheduler and counted as ok in doctor (non-expiring, Linear and similar providers)
+  4. `CredentialToken` stores `client_id`/`client_secret` so the scheduler can POST the refresh grant without re-running DCR
+**Plans**: 3 plans
+Plans:
+- [ ] 35-01-PLAN.md — Extend CredentialToken with client_id/client_secret; backfill OAuth callback
+- [ ] 35-02-PLAN.md — mcp::refresh module: scheduler, per-token loop, refresh grant POST
+- [ ] 35-03-PLAN.md — Bot integration: spawn scheduler; doctor check_mcp_tokens
 
 ## Progress
 
@@ -162,4 +167,4 @@ Plans:
 | 32. Credential Foundation | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 33. Auth Detection | v3.2 | 1/1 | Complete    | 2026-04-03 |
 | 34. Core OAuth Flow + Bot | v3.2 | 4/4 | Complete    | 2026-04-03 |
-| 35. Token Refresh | v3.2 | 0/? | Not started | - |
+| 35. Token Refresh | v3.2 | 0/3 | Not started | - |
