@@ -82,13 +82,13 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `sandbox.ripgrep.command` injected into per-agent settings.json with resolved system rg path; `USE_BUILTIN_RIPGREP=0` corrected in worker.rs + cron.rs; `failIfUnavailable:true` set — v3.1 Phase 29 (SBOX-01..04)
 - ✓ `rightclaw doctor` checks rg in PATH + validates settings.json ripgrep.command (cross-platform) — v3.1 Phase 30 (DOC-01, DOC-02)
 - ✓ `tests/e2e/verify-sandbox.sh` — repeatable 4-stage script proving sandbox engagement via exit-code strategy under `failIfUnavailable:true`; live-run confirmed 2026-04-03 — v3.1 Phase 31 (VER-01..03)
+- ✓ `mcp::credentials` module — `mcp_oauth_key` deterministic key derivation (Notion test vector locked), `write_credential` atomic tmp+rename with 5-slot backup rotation, `read_credential`; CRED-01, CRED-02 — v3.2 Phase 32
 
 ### Active
 
 - MCP authentication detection — detect unauthenticated MCP servers in .mcp.json
 - OAuth callback server — local HTTP to receive OAuth redirect
 - Tunnel integration — ngrok/Cloudflare for external redirect URL
-- Credential storage — write OAuth tokens to CC's internal MCP credential files
 - Token refresh — automatic refresh or prompt on expiry
 
 ### Out of Scope
@@ -188,4 +188,4 @@ This document evolves at phase transitions and milestone boundaries.
 - VER-01 description in verify-sandbox.sh slightly overclaims — matches cron.rs pattern, not worker.rs `--resume` path (sandbox correctness unaffected)
 
 ---
-*Last updated: 2026-04-03 — v3.2 milestone started*
+*Last updated: 2026-04-03 — Phase 32 complete (credential-foundation)*
