@@ -110,7 +110,9 @@ Plans:
   1. `rightclaw mcp status` prints a table of MCP servers per agent showing auth state (present / missing / expired) for each server
   2. `rightclaw mcp status --agent <name>` filters the table to a single named agent
   3. `rightclaw up` prints a non-fatal Warn (does not abort launch) when any agent has MCP servers with missing or expired OAuth tokens
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 33-01-PLAN.md — mcp::detect module + CLI wiring for mcp status + cmd_up warn
 
 ### Phase 34: Core OAuth Flow
 **Goal**: Operators can complete a full OAuth 2.1 + PKCE flow for any named MCP server via `rightclaw mcp auth`, with tokens written to CC's credential store and the agent restarted automatically
