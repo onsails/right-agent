@@ -76,6 +76,17 @@ pub enum MemoryCommands {
     },
 }
 
+/// Subcommands for `rightclaw mcp`.
+#[derive(Subcommand)]
+pub enum McpCommands {
+    /// Show MCP server auth state per agent (present / missing / expired)
+    Status {
+        /// Filter to a single agent by name
+        #[arg(long)]
+        agent: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize RightClaw home directory with default agent
@@ -132,6 +143,11 @@ pub enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
+    },
+    /// Inspect and manage MCP server OAuth credentials
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
     },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
@@ -203,6 +219,9 @@ async fn main() -> miette::Result<()> {
                 cmd_memory_delete(&home, &agent, id),
             MemoryCommands::Stats { agent, json } =>
                 cmd_memory_stats(&home, &agent, json),
+        },
+        Commands::Mcp { command } => match command {
+            McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()),
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
@@ -298,6 +317,51 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
+    let agents_dir = home.join("agents");
+    let all_agents = rightclaw::agent::discover_agents(&agents_dir)
+        .map_err(|e| miette::miette!("failed to discover agents: {e:#}"))?;
+
+    let agents: Vec<_> = if let Some(name) = agent_filter {
+        let found: Vec<_> = all_agents.into_iter().filter(|a| a.name == name).collect();
+        if found.is_empty() {
+            return Err(miette::miette!("agent '{name}' not found"));
+        }
+        found
+    } else {
+        all_agents
+    };
+
+    let host_home = dirs::home_dir()
+        .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
+    let credentials_path = host_home.join(".claude").join(".credentials.json");
+
+    let mut any_output = false;
+
+    for agent in &agents {
+        let mcp_path = agent.path.join(".mcp.json");
+        let servers = rightclaw::mcp::detect::mcp_auth_status(&mcp_path, &credentials_path)
+            .map_err(|e| miette::miette!("failed to read MCP status for '{}': {e:#}", agent.name))?;
+
+        if servers.is_empty() {
+            continue; // no HTTP/SSE servers — skip silently
+        }
+
+        any_output = true;
+        println!("{}:", agent.name);
+        for s in &servers {
+            println!("  {:<20} {}", s.name, s.state);
+        }
+        println!();
+    }
+
+    if !any_output {
+        println!("No MCP OAuth servers found.");
+    }
+
     Ok(())
 }
 
@@ -478,6 +542,30 @@ async fn cmd_up(
         // 11. Generate .mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
         rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name)?;
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
+    }
+
+    // Collect MCP auth issues across all agents (DETECT-02).
+    {
+        let credentials_path = host_home.join(".claude").join(".credentials.json");
+        let mut auth_issues: Vec<String> = Vec::new();
+        for agent in &agents {
+            let mcp_path = agent.path.join(".mcp.json");
+            match rightclaw::mcp::detect::mcp_auth_status(&mcp_path, &credentials_path) {
+                Ok(servers) => {
+                    for s in servers {
+                        if s.state != rightclaw::mcp::detect::AuthState::Present {
+                            auth_issues.push(format!("{}/{} ({})", agent.name, s.name, s.state));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(agent = %agent.name, "failed to read MCP auth status: {e:#}");
+                }
+            }
+        }
+        if !auth_issues.is_empty() {
+            tracing::warn!("MCP auth required: {}", auth_issues.join(", "));
+        }
     }
 
     // Generate process-compose.yaml (bot-only entries, Phase 26).
