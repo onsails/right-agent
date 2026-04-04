@@ -1,6 +1,6 @@
 ingress:
 {% for agent in agents %}
-  - hostname: {{ tunnel_url }}
+  - hostname: {{ tunnel_hostname }}
     path: /oauth/{{ agent.name }}/callback
     service: unix:{{ agent.socket_path }}
 {% endfor %}

@@ -24,10 +24,10 @@ struct CloudflaredAgent {
 /// # Arguments
 ///
 /// * `agents` — slice of `(name, agent_dir)` pairs
-/// * `tunnel_url` — public hostname for the named tunnel (e.g. `example.trycloudflare.com`)
+/// * `tunnel_hostname` — public hostname for the named tunnel (e.g. `example.trycloudflare.com`)
 pub fn generate_cloudflared_config(
     agents: &[(String, PathBuf)],
-    tunnel_url: &str,
+    tunnel_hostname: &str,
 ) -> miette::Result<String> {
     let cf_agents: Vec<CloudflaredAgent> = agents
         .iter()
@@ -40,13 +40,20 @@ pub fn generate_cloudflared_config(
         })
         .collect();
 
+    // cloudflared ingress hostname must be a bare hostname without scheme.
+    // Strip https:// or http:// if the caller passed a full URL.
+    let hostname = tunnel_hostname
+        .strip_prefix("https://")
+        .or_else(|| tunnel_hostname.strip_prefix("http://"))
+        .unwrap_or(tunnel_hostname);
+
     let mut env = Environment::new();
     env.add_template("cloudflared", CF_TEMPLATE)
         .map_err(|e| miette::miette!("cloudflared template parse error: {e:#}"))?;
     let tmpl = env
         .get_template("cloudflared")
         .expect("template was just added");
-    tmpl.render(context! { agents => cf_agents, tunnel_url => tunnel_url })
+    tmpl.render(context! { agents => cf_agents, tunnel_hostname => hostname })
         .map_err(|e| miette::miette!("cloudflared template render error: {e:#}"))
 }
 

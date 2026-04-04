@@ -76,17 +76,6 @@ pub enum MemoryCommands {
     },
 }
 
-/// Subcommands for `rightclaw mcp`.
-#[derive(Subcommand)]
-pub enum McpCommands {
-    /// Show MCP server auth state per agent (present / missing / expired)
-    Status {
-        /// Filter to a single agent by name
-        #[arg(long)]
-        agent: Option<String>,
-    },
-}
-
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize RightClaw home directory with default agent
@@ -101,6 +90,9 @@ pub enum Commands {
         /// Cloudflare Tunnel token (from Cloudflare dashboard — used for OAuth callbacks)
         #[arg(long)]
         tunnel_token: Option<String>,
+        /// Public hostname for the tunnel (e.g. example.com — required with --tunnel-token)
+        #[arg(long)]
+        tunnel_hostname: Option<String>,
     },
     /// List discovered agents and their status
     List,
@@ -147,11 +139,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
-    /// Inspect and manage MCP server OAuth credentials
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommands,
-    },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
     /// Run the per-agent Telegram bot (long-polling, teloxide)
@@ -196,7 +183,8 @@ async fn main() -> miette::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_token } => cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, tunnel_token.as_deref()),
+        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_token, tunnel_hostname } =>
+            cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, tunnel_token.as_deref(), tunnel_hostname.as_deref()),
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home),
         Commands::Up {
@@ -223,9 +211,6 @@ async fn main() -> miette::Result<()> {
             MemoryCommands::Stats { agent, json } =>
                 cmd_memory_stats(&home, &agent, json),
         },
-        Commands::Mcp { command } => match command {
-            McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()),
-        },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
         Commands::Bot { agent, debug } => {
@@ -244,6 +229,7 @@ fn cmd_init(
     telegram_token: Option<&str>,
     telegram_allowed_chat_ids: &[i64],
     tunnel_token: Option<&str>,
+    tunnel_hostname: Option<&str>,
 ) -> miette::Result<()> {
     // If --telegram-token flag provided, validate it upfront.
     // Otherwise prompt interactively.
@@ -269,19 +255,39 @@ fn cmd_init(
         println!("Telegram chat ID allowlist configured.");
     }
 
-    // Write tunnel config and print derived hostname if token provided (per D-11).
-    if let Some(t_token) = tunnel_token {
-        let tunnel_config = rightclaw::config::TunnelConfig {
-            token: t_token.to_string(),
-        };
-        // Validate token and derive hostname before writing — fail fast (per D-11)
-        let derived_hostname = tunnel_config.hostname()?;
-        let config = rightclaw::config::GlobalConfig {
-            tunnel: Some(tunnel_config),
-        };
-        rightclaw::config::write_global_config(home, &config)?;
-        println!("Tunnel config written to {}/config.yaml", home.display());
-        println!("Tunnel hostname: {derived_hostname}");
+    // Write tunnel config if provided.
+    match (tunnel_token, tunnel_hostname) {
+        (Some(t_token), Some(t_hostname)) => {
+            // Validate hostname is bare domain (no scheme prefix)
+            if t_hostname.starts_with("https://") || t_hostname.starts_with("http://") {
+                return Err(miette::miette!(
+                    "--tunnel-hostname must be a bare domain (e.g. example.com), not a URL"
+                ));
+            }
+            let tunnel_config = rightclaw::config::TunnelConfig {
+                token: t_token.to_string(),
+                hostname: t_hostname.to_string(),
+            };
+            // Validate token is decodable and extract UUID for confirmation printout
+            let uuid = tunnel_config.tunnel_uuid()?;
+            let config = rightclaw::config::GlobalConfig {
+                tunnel: Some(tunnel_config),
+            };
+            rightclaw::config::write_global_config(home, &config)?;
+            println!("Tunnel config written to {}/config.yaml", home.display());
+            println!("Tunnel UUID: {uuid} (hostname: {t_hostname})");
+        }
+        (Some(_), None) => {
+            return Err(miette::miette!(
+                "--tunnel-hostname is required when --tunnel-token is provided"
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(miette::miette!(
+                "--tunnel-token is required when --tunnel-hostname is provided"
+            ));
+        }
+        (None, None) => {} // No tunnel config — skip
     }
 
     Ok(())
@@ -341,51 +347,6 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
             );
         }
     }
-    Ok(())
-}
-
-fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
-    let agents_dir = home.join("agents");
-    let all_agents = rightclaw::agent::discover_agents(&agents_dir)
-        .map_err(|e| miette::miette!("failed to discover agents: {e:#}"))?;
-
-    let agents: Vec<_> = if let Some(name) = agent_filter {
-        let found: Vec<_> = all_agents.into_iter().filter(|a| a.name == name).collect();
-        if found.is_empty() {
-            return Err(miette::miette!("agent '{name}' not found"));
-        }
-        found
-    } else {
-        all_agents
-    };
-
-    let host_home = dirs::home_dir()
-        .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
-    let credentials_path = host_home.join(".claude").join(".credentials.json");
-
-    let mut any_output = false;
-
-    for agent in &agents {
-        let mcp_path = agent.path.join(".mcp.json");
-        let servers = rightclaw::mcp::detect::mcp_auth_status(&mcp_path, &credentials_path)
-            .map_err(|e| miette::miette!("failed to read MCP status for '{}': {e:#}", agent.name))?;
-
-        if servers.is_empty() {
-            continue; // no HTTP/SSE servers — skip silently
-        }
-
-        any_output = true;
-        println!("{}:", agent.name);
-        for s in &servers {
-            println!("  {:<20} {}", s.name, s.state);
-        }
-        println!();
-    }
-
-    if !any_output {
-        println!("No MCP OAuth servers found.");
-    }
-
     Ok(())
 }
 
@@ -568,30 +529,6 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
-    // Collect MCP auth issues across all agents (DETECT-02).
-    {
-        let credentials_path = host_home.join(".claude").join(".credentials.json");
-        let mut auth_issues: Vec<String> = Vec::new();
-        for agent in &agents {
-            let mcp_path = agent.path.join(".mcp.json");
-            match rightclaw::mcp::detect::mcp_auth_status(&mcp_path, &credentials_path) {
-                Ok(servers) => {
-                    for s in servers {
-                        if s.state != rightclaw::mcp::detect::AuthState::Present {
-                            auth_issues.push(format!("{}/{} ({})", agent.name, s.name, s.state));
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(agent = %agent.name, "failed to read MCP auth status: {e:#}");
-                }
-            }
-        }
-        if !auth_issues.is_empty() {
-            tracing::warn!("MCP auth required: {}", auth_issues.join(", "));
-        }
-    }
-
     // Read global config for optional cloudflared tunnel integration (D-03, D-09).
     let global_config = rightclaw::config::read_global_config(home)?;
     let tunnel = global_config.tunnel.as_ref();
@@ -603,7 +540,7 @@ async fn cmd_up(
             .map(|a| (a.name.clone(), a.path.clone()))
             .collect();
         let cf_config =
-            rightclaw::codegen::cloudflared::generate_cloudflared_config(&agent_pairs, &tunnel_cfg.hostname()?)?;
+            rightclaw::codegen::cloudflared::generate_cloudflared_config(&agent_pairs, &tunnel_cfg.hostname)?;
         let cf_config_path = home.join("cloudflared-config.yml");
         std::fs::write(&cf_config_path, &cf_config)
             .map_err(|e| miette::miette!("write cloudflared config: {e:#}"))?;

@@ -19,6 +19,16 @@ use super::session::{delete_session, effective_thread_id};
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 use super::BotType;
 
+/// Newtype wrapper for the agent directory passed via dptree dependencies.
+/// Distinct from RightclawHome to prevent TypeId collision in dptree.
+#[derive(Clone)]
+pub struct AgentDir(pub PathBuf);
+
+/// Newtype wrapper for the rightclaw home directory passed via dptree dependencies.
+/// Distinct from AgentDir to prevent TypeId collision in dptree.
+#[derive(Clone)]
+pub struct RightclawHome(pub PathBuf);
+
 /// Newtype wrapper for the debug flag passed via dptree dependencies.
 #[derive(Clone)]
 pub struct DebugFlag(pub bool);
@@ -40,7 +50,7 @@ pub async fn handle_message(
     bot: BotType,
     msg: Message,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
-    agent_dir: Arc<PathBuf>,
+    agent_dir: Arc<AgentDir>,
     debug_flag: Arc<DebugFlag>,
 ) -> ResponseResult<()> {
     // Only process messages with text (ignore stickers, photos, etc. in Phase 25)
@@ -79,7 +89,7 @@ pub async fn handle_message(
             },
             None => {
                 // No sender yet — spawn a new worker task
-                let agent_name = agent_dir
+                let agent_name = agent_dir.0
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
@@ -87,10 +97,10 @@ pub async fn handle_message(
                 let ctx = WorkerContext {
                     chat_id,
                     effective_thread_id: eff_thread_id,
-                    agent_dir: (*agent_dir).clone(),
+                    agent_dir: agent_dir.0.clone(),
                     agent_name,
                     bot: bot.clone(),
-                    db_path: (*agent_dir).clone(),
+                    db_path: agent_dir.0.clone(),
                     debug: debug_flag.0,
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
@@ -131,7 +141,7 @@ pub async fn handle_reset(
     bot: BotType,
     msg: Message,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
-    agent_dir: Arc<PathBuf>,
+    agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
@@ -141,7 +151,7 @@ pub async fn handle_reset(
     worker_map.remove(&key);
 
     // Delete session from DB — errors propagate via `?` (CLAUDE.rust.md: fail fast)
-    let conn = rightclaw::memory::open_connection(&agent_dir)
+    let conn = rightclaw::memory::open_connection(&agent_dir.0)
         .map_err(|e| to_request_err(format!("reset: open DB: {:#}", e)))?;
     delete_session(&conn, chat_id.0, eff_thread_id)
         .map_err(|e| to_request_err(format!("reset: delete session: {:#}", e)))?;
@@ -173,13 +183,13 @@ pub async fn handle_mcp(
     bot: BotType,
     msg: Message,
     args: String,
-    agent_dir: Arc<PathBuf>,
+    agent_dir: Arc<AgentDir>,
     pending_auth: PendingAuthMap,
-    home: Arc<PathBuf>,
+    home: Arc<RightclawHome>,
 ) -> ResponseResult<()> {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let result = match parts.first().copied() {
-        None | Some("list") => handle_mcp_list(&bot, &msg, &agent_dir).await,
+        None | Some("list") => handle_mcp_list(&bot, &msg, &agent_dir.0).await,
         Some("auth") => {
             let server = match parts.get(1) {
                 Some(s) => *s,
@@ -188,11 +198,11 @@ pub async fn handle_mcp(
                     return Ok(());
                 }
             };
-            handle_mcp_auth(&bot, &msg, server, &agent_dir, pending_auth, &home).await
+            handle_mcp_auth(&bot, &msg, server, &agent_dir.0, pending_auth, &home.0).await
         }
         Some("add") => {
             let rest = parts[1..].join(" ");
-            handle_mcp_add(&bot, &msg, &rest, &agent_dir).await
+            handle_mcp_add(&bot, &msg, &rest, &agent_dir.0).await
         }
         Some("remove") => {
             let server = match parts.get(1) {
@@ -202,7 +212,7 @@ pub async fn handle_mcp(
                     return Ok(());
                 }
             };
-            handle_mcp_remove(&bot, &msg, server, &agent_dir).await
+            handle_mcp_remove(&bot, &msg, server, &agent_dir.0).await
         }
         Some(unknown) => {
             bot.send_message(
@@ -376,13 +386,15 @@ async fn handle_mcp_auth(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let tunnel_hostname = match tunnel.hostname() {
-        Ok(h) => h,
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot derive tunnel hostname: {e:#}")).await?;
-            return Ok(());
-        }
-    };
+    if tunnel.hostname.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "Tunnel hostname not configured — run `rightclaw init --tunnel-hostname HOSTNAME`",
+        )
+        .await?;
+        return Ok(());
+    }
+    let tunnel_hostname = tunnel.hostname.clone();
     let redirect_uri = format!("https://{tunnel_hostname}/oauth/{agent_name}/callback");
     let (client_id, client_secret) = match rightclaw::mcp::oauth::register_client_or_fallback(
         &http_client,
@@ -602,9 +614,9 @@ async fn handle_mcp_remove(
 pub async fn handle_doctor(
     bot: BotType,
     msg: Message,
-    home: Arc<PathBuf>,
+    home: Arc<RightclawHome>,
 ) -> ResponseResult<()> {
-    let checks = rightclaw::doctor::run_doctor(&home);
+    let checks = rightclaw::doctor::run_doctor(&home.0);
     let mut text = String::from("Doctor results:\n\n");
     for check in &checks {
         text.push_str(&format!("{check}\n"));
@@ -616,4 +628,45 @@ pub async fn handle_doctor(
     text.push_str(&format!("\n{pass_count}/{} checks passed", checks.len()));
     bot.send_message(msg.chat.id, text).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::TypeId;
+
+    /// Regression test: AgentDir and RightclawHome must have distinct TypeIds.
+    /// If they shared the same type (e.g., both Arc<PathBuf>), dptree would overwrite
+    /// the first registration with the second, causing all handlers to receive the
+    /// wrong path for one of the two parameters.
+    #[test]
+    fn agent_dir_and_rightclaw_home_have_distinct_type_ids() {
+        assert_ne!(
+            TypeId::of::<AgentDir>(),
+            TypeId::of::<RightclawHome>(),
+            "AgentDir and RightclawHome must be distinct types to avoid dptree TypeId collision"
+        );
+    }
+
+    #[test]
+    fn agent_dir_and_rightclaw_home_hold_independent_paths() {
+        let agent = AgentDir(PathBuf::from("/agents/myagent"));
+        let home = RightclawHome(PathBuf::from("/home/user/.rightclaw"));
+
+        assert_eq!(agent.0, PathBuf::from("/agents/myagent"));
+        assert_eq!(home.0, PathBuf::from("/home/user/.rightclaw"));
+        assert_ne!(agent.0, home.0);
+    }
+
+    #[test]
+    fn agent_dir_and_rightclaw_home_clone_independently() {
+        let agent = AgentDir(PathBuf::from("/agents/myagent"));
+        let home = RightclawHome(PathBuf::from("/home/user/.rightclaw"));
+
+        let agent2 = agent.clone();
+        let home2 = home.clone();
+
+        assert_eq!(agent.0, agent2.0);
+        assert_eq!(home.0, home2.0);
+    }
 }

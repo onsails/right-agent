@@ -22,35 +22,36 @@ pub struct GlobalConfig {
     pub tunnel: Option<TunnelConfig>,
 }
 
-/// Cloudflare Named Tunnel configuration (per D-04).
+/// Cloudflare Named Tunnel configuration.
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
     pub token: String,
+    pub hostname: String,
 }
 
 impl TunnelConfig {
-    /// Derive the public hostname from the JWT tunnel token.
-    ///
-    /// Cloudflare named tunnel tokens are JWTs (`header.payload.signature`).
-    /// The payload is base64url-encoded JSON with a `"t"` field containing
-    /// the tunnel UUID. Returns `<uuid>.cfargotunnel.com` (per D-05, D-08, D-09).
-    pub fn hostname(&self) -> miette::Result<String> {
+    /// Extract UUID from tunnel token. Supports single-segment (real CF token)
+    /// and three-segment JWT formats. Returns the raw UUID string (no domain suffix).
+    pub fn tunnel_uuid(&self) -> miette::Result<String> {
         let parts: Vec<&str> = self.token.split('.').collect();
-        if parts.len() != 3 {
-            return Err(miette::miette!(
-                "tunnel token has wrong number of segments (expected 3, got {})",
-                parts.len()
-            ));
-        }
+        let encoded = match parts.len() {
+            1 => parts[0],
+            3 => parts[1],
+            n => {
+                return Err(miette::miette!(
+                    "unrecognized token format (expected 1 or 3 segments, got {n})"
+                ));
+            }
+        };
         let payload_bytes = URL_SAFE_NO_PAD
-            .decode(parts[1])
+            .decode(encoded)
             .map_err(|e| miette::miette!("tunnel token base64 decode failed: {e}"))?;
         let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
             .map_err(|e| miette::miette!("tunnel token JSON parse failed: {e:#}"))?;
         let uuid = payload["t"]
             .as_str()
             .ok_or_else(|| miette::miette!("tunnel token payload missing 't' field"))?;
-        Ok(format!("{uuid}.cfargotunnel.com"))
+        Ok(uuid.to_string())
     }
 }
 
@@ -60,11 +61,10 @@ struct RawGlobalConfig {
     tunnel: Option<RawTunnelConfig>,
 }
 
-/// serde-saphyr silently ignores unknown fields by default.
-/// Old `config.yaml` files with a `hostname:` field are safe to read (per D-02).
 #[derive(Debug, Deserialize)]
 struct RawTunnelConfig {
     token: String,
+    hostname: String,
 }
 
 /// Read global config from `<home>/config.yaml`.
@@ -80,22 +80,22 @@ pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
     let raw: RawGlobalConfig = serde_saphyr::from_str(&content)
         .map_err(|e| miette::miette!("parse config.yaml: {e:#}"))?;
     Ok(GlobalConfig {
-        tunnel: raw.tunnel.map(|t| TunnelConfig { token: t.token }),
+        tunnel: raw.tunnel.map(|t| TunnelConfig { token: t.token, hostname: t.hostname }),
     })
 }
 
 /// Write global config to `<home>/config.yaml`.
 ///
 /// Note: serde-saphyr is deserialize-only — YAML is written manually.
-/// Writes only `token` field under `tunnel:` — hostname is derived at runtime (per D-06).
 pub fn write_global_config(home: &Path, config: &GlobalConfig) -> miette::Result<()> {
     let path = home.join("config.yaml");
     let mut content = String::new();
     if let Some(ref tunnel) = config.tunnel {
         content.push_str("tunnel:\n");
-        // Escape quotes in token defensively
         let token = tunnel.token.replace('"', "\\\"");
+        let hostname = tunnel.hostname.replace('"', "\\\"");
         content.push_str(&format!("  token: \"{token}\"\n"));
+        content.push_str(&format!("  hostname: \"{hostname}\"\n"));
     }
     std::fs::write(&path, &content)
         .map_err(|e| miette::miette!("write config.yaml: {e:#}"))?;
@@ -133,47 +133,51 @@ mod tests {
         assert!(config.tunnel.is_none(), "no tunnel config when file absent");
     }
 
-    // --- JWT hostname derivation tests (Task 1 RED tests) ---
-
     fn make_fake_jwt(uuid: &str) -> String {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         let payload = format!(r#"{{"t":"{uuid}"}}"#);
         let encoded = URL_SAFE_NO_PAD.encode(payload.as_bytes());
         format!("eyJhbGciOiJIUzI1NiJ9.{encoded}.sig")
     }
 
     #[test]
-    fn hostname_decode_valid_token() {
+    fn tunnel_uuid_decode_valid_jwt() {
         let token = make_fake_jwt("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        let cfg = TunnelConfig { token };
-        let h = cfg.hostname().unwrap();
-        assert_eq!(h, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.cfargotunnel.com");
+        let cfg = TunnelConfig { token, hostname: "test.example.com".to_string() };
+        let uuid = cfg.tunnel_uuid().unwrap();
+        assert_eq!(uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     }
 
     #[test]
-    fn hostname_decode_wrong_segment_count() {
-        let cfg = TunnelConfig { token: "notajwt".to_string() };
-        let err = cfg.hostname().unwrap_err();
+    fn tunnel_uuid_decode_single_segment() {
+        // Real CF token: single base64url-encoded JSON blob
+        let token = "eyJhIjoiNjEyZWE2ZmU3ZjBiMmY2Njg5ZjdjYjAxNTc4NWZhM2UiLCJ0IjoiN2EyMTU1YTUtMmFiMy00ZmNkLTlhNDUtZTYxY2NlNDc0ODc5IiwicyI6Ik56WXhaVGs0WkRJdE56RXdOeTAwT1RsbUxUaGpPVEF0TkRrek5qSXpZVE0wTUdVMSJ9".to_string();
+        let cfg = TunnelConfig { token, hostname: "right.example.com".to_string() };
+        let uuid = cfg.tunnel_uuid().unwrap();
+        assert_eq!(uuid, "aaaabbbb-0000-1111-2222-ccccddddeeee");
+    }
+
+    #[test]
+    fn tunnel_uuid_wrong_segment_count() {
+        let cfg = TunnelConfig { token: "a.b".to_string(), hostname: "h.example.com".to_string() };
+        let err = cfg.tunnel_uuid().unwrap_err();
         assert!(
-            err.to_string().contains("wrong number of segments"),
-            "expected 'wrong number of segments' in: {err}"
+            err.to_string().contains("unrecognized token format (expected 1 or 3 segments, got 2)"),
+            "expected unrecognized token format error in: {err}"
         );
     }
 
     #[test]
-    fn hostname_decode_invalid_base64() {
-        let cfg = TunnelConfig { token: "hdr.!!!.sig".to_string() };
-        let err = cfg.hostname().unwrap_err();
-        // Should fail at base64 decode step
-        assert!(err.to_string().len() > 0, "should have error message");
+    fn tunnel_uuid_invalid_base64() {
+        let cfg = TunnelConfig { token: "hdr.!!!.sig".to_string(), hostname: "h.example.com".to_string() };
+        let err = cfg.tunnel_uuid().unwrap_err();
+        assert!(!err.to_string().is_empty(), "should have error message");
     }
 
     #[test]
-    fn hostname_decode_missing_t_field() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    fn tunnel_uuid_missing_t_field() {
         let payload = URL_SAFE_NO_PAD.encode(r#"{"other":"value"}"#.as_bytes());
-        let cfg = TunnelConfig { token: format!("h.{payload}.sig") };
-        let err = cfg.hostname().unwrap_err();
+        let cfg = TunnelConfig { token: format!("h.{payload}.sig"), hostname: "h.example.com".to_string() };
+        let err = cfg.tunnel_uuid().unwrap_err();
         assert!(
             err.to_string().contains("missing 't' field"),
             "expected \"missing 't' field\" in: {err}"
@@ -181,70 +185,38 @@ mod tests {
     }
 
     #[test]
-    fn write_then_read_roundtrips_token_only() {
+    fn write_then_read_roundtrips_token_and_hostname() {
         let dir = TempDir::new().unwrap();
         let written = GlobalConfig {
             tunnel: Some(TunnelConfig {
                 token: "tok123".to_string(),
+                hostname: "my.example.com".to_string(),
             }),
         };
         write_global_config(dir.path(), &written).unwrap();
         let read = read_global_config(dir.path()).unwrap();
         let tunnel = read.tunnel.expect("tunnel should be present after write");
         assert_eq!(tunnel.token, "tok123");
+        assert_eq!(tunnel.hostname, "my.example.com");
     }
 
     #[test]
-    fn read_config_with_legacy_hostname_field_silently_ignored() {
-        let dir = TempDir::new().unwrap();
-        let yaml = r#"tunnel:
-  token: "tok"
-  hostname: "old.example.com"
-"#;
-        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
-        let config = read_global_config(dir.path()).unwrap();
-        let tunnel = config.tunnel.expect("tunnel should be parsed");
-        assert_eq!(tunnel.token, "tok");
-        // no hostname field on struct — confirms it was silently ignored
-    }
-
-    #[test]
-    fn write_global_config_writes_only_token_field() {
+    fn write_global_config_writes_hostname_field() {
         let dir = TempDir::new().unwrap();
         let config = GlobalConfig {
             tunnel: Some(TunnelConfig {
                 token: "mytoken".to_string(),
+                hostname: "my.example.com".to_string(),
             }),
         };
         write_global_config(dir.path(), &config).unwrap();
         let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
-        assert!(
-            !content.contains("hostname:"),
-            "written YAML must not contain 'hostname:'"
-        );
+        assert!(content.contains("hostname: \"my.example.com\""), "written YAML must contain hostname field");
         assert!(content.contains("token:"), "written YAML must contain 'token:'");
     }
 
-    // --- Updated existing tests (no hostname field) ---
-
     #[test]
-    fn write_global_config_creates_valid_yaml() {
-        let dir = TempDir::new().unwrap();
-        let config = GlobalConfig {
-            tunnel: Some(TunnelConfig {
-                token: "mytoken".to_string(),
-            }),
-        };
-        write_global_config(dir.path(), &config).unwrap();
-        let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
-        // Should be parseable by serde-saphyr
-        let raw: RawGlobalConfig = serde_saphyr::from_str(&content).unwrap();
-        let tunnel = raw.tunnel.expect("tunnel should parse from written YAML");
-        assert_eq!(tunnel.token, "mytoken");
-    }
-
-    #[test]
-    fn read_global_config_parses_yaml_with_tunnel_fields() {
+    fn read_config_parses_token_and_hostname() {
         let dir = TempDir::new().unwrap();
         let yaml = r#"tunnel:
   token: "testtoken"
@@ -254,6 +226,6 @@ mod tests {
         let config = read_global_config(dir.path()).unwrap();
         let tunnel = config.tunnel.expect("tunnel should be parsed");
         assert_eq!(tunnel.token, "testtoken");
-        // hostname field no longer exists on TunnelConfig — only token is checked
+        assert_eq!(tunnel.hostname, "test.example.com");
     }
 }

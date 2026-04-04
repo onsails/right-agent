@@ -33,7 +33,7 @@ fn two_agents_produce_two_ingress_rules_plus_catch_all() {
 }
 
 #[test]
-fn ingress_hostname_matches_tunnel_url() {
+fn ingress_hostname_matches_tunnel_hostname() {
     let agents = vec![(
         "myagent".to_string(),
         PathBuf::from("/tmp/agents/myagent"),
@@ -94,5 +94,29 @@ fn zero_agents_still_produces_catch_all() {
     assert!(
         yaml.contains("http_status:404"),
         "catch-all required even with 0 agents: {yaml}"
+    );
+}
+
+#[test]
+fn https_scheme_stripped_from_hostname() {
+    let agents = vec![("agent".to_string(), PathBuf::from("/tmp/agents/agent"))];
+    let yaml = generate_cloudflared_config(&agents, "https://right.example.com").unwrap();
+    assert!(
+        yaml.contains("hostname: right.example.com"),
+        "https:// scheme must be stripped: {yaml}"
+    );
+    assert!(
+        !yaml.contains("https://"),
+        "https:// must not appear in output: {yaml}"
+    );
+}
+
+#[test]
+fn http_scheme_stripped_from_hostname() {
+    let agents = vec![("agent".to_string(), PathBuf::from("/tmp/agents/agent"))];
+    let yaml = generate_cloudflared_config(&agents, "http://right.example.com").unwrap();
+    assert!(
+        yaml.contains("hostname: right.example.com"),
+        "http:// scheme must be stripped: {yaml}"
     );
 }

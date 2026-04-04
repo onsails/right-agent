@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, DebugFlag};
+use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, AgentDir, DebugFlag, RightclawHome};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -67,9 +67,9 @@ pub async fn run_telegram(
     // Shared state
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
         Arc::new(DashMap::new());
-    let agent_dir_arc: Arc<PathBuf> = Arc::new(agent_dir);
+    let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let debug_arc: Arc<DebugFlag> = Arc::new(DebugFlag(debug));
-    let home_arc: Arc<PathBuf> = Arc::new(home);
+    let home_arc: Arc<RightclawHome> = Arc::new(RightclawHome(home));
     let pending_auth_arc: PendingAuthMap = pending_auth;
 
     // Dispatch schema (RESEARCH.md Pattern 1)
@@ -149,7 +149,7 @@ pub async fn run_telegram(
         Err(e) => tracing::warn!("delete_my_commands failed (non-fatal): {e:#}"),
     }
     match bot.set_my_commands(BotCommand::bot_commands()).await {
-        Ok(_) => tracing::info!("set_my_commands succeeded — /reset registered"),
+        Ok(_) => tracing::info!("set_my_commands succeeded — commands registered"),
         Err(e) => tracing::warn!("set_my_commands failed (non-fatal): {e:#}"),
     }
 
