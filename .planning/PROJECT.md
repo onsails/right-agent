@@ -85,10 +85,11 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `mcp::credentials` module — `mcp_oauth_key` deterministic key derivation (Notion test vector locked), `write_credential` atomic tmp+rename with 5-slot backup rotation, `read_credential`; CRED-01, CRED-02 — v3.2 Phase 32
 - ✓ `mcp::detect` module — `AuthState` enum (present/missing/expired), `mcp_auth_status` reads .mcp.json + credentials.json; `rightclaw mcp status [--agent NAME]` CLI; `rightclaw up` pre-launch warn; DETECT-01, DETECT-02 — v3.2 Phase 33
 - ✓ MCP OAuth 2.1 engine — AS discovery (RFC 9728→8414→OIDC), DCR with static clientId fallback, PKCE S256, token exchange; cloudflared named tunnel integration with ingress codegen; Telegram bot commands /mcp list/auth/add/remove + /doctor; PendingAuth one-shot state with 10-min cleanup; post-auth credential write + agent restart — v3.2 Phase 34
+- ✓ Token refresh scheduler — `mcp::refresh` module: `deadline_from_unix` guard, `post_refresh_grant` form POST, per-server retry loop (3×5min backoff), `run_refresh_scheduler` spawns one tokio task per qualifying server at bot startup; `check_mcp_tokens` doctor check; `client_id`/`client_secret` backfilled into `CredentialToken`; REFRESH-01..04 — v3.2 Phase 35
 
 ### Active
 
-- Token refresh — automatic refresh or prompt on expiry
+(none — v3.2 milestone complete)
 
 ### Out of Scope
 
