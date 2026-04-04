@@ -116,6 +116,13 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // Tunnel config presence check — Warn severity (D-03)
     checks.push(check_tunnel_config(home));
 
+    // Tunnel token validity check — only when tunnel is configured (D-09)
+    if let Ok(global_cfg) = crate::config::read_global_config(home) {
+        if let Some(ref tunnel_cfg) = global_cfg.tunnel {
+            checks.push(check_tunnel_token(tunnel_cfg));
+        }
+    }
+
     // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
     checks.push(check_mcp_tokens(home));
 
@@ -638,7 +645,7 @@ fn check_tunnel_config(home: &Path) -> DoctorCheck {
             status: CheckStatus::Warn,
             detail: "no tunnel configured — MCP OAuth callbacks will not work".to_string(),
             fix: Some(
-                "run `rightclaw init --tunnel-token TOKEN --tunnel-url URL` to configure tunnel"
+                "run `rightclaw init --tunnel-token TOKEN --tunnel-hostname HOSTNAME` to configure tunnel"
                     .to_string(),
             ),
         },
@@ -647,6 +654,30 @@ fn check_tunnel_config(home: &Path) -> DoctorCheck {
             status: CheckStatus::Warn,
             detail: format!("failed to read config.yaml: {e:#}"),
             fix: None,
+        },
+    }
+}
+
+/// Check that the configured tunnel token is valid and yields a decodable UUID. (D-09)
+///
+/// Only called when tunnel is configured. Warn severity — invalid token means DNS
+/// routing wrapper will fail at `rightclaw up` time, but doctor runs independently.
+fn check_tunnel_token(tunnel_cfg: &crate::config::TunnelConfig) -> DoctorCheck {
+    match tunnel_cfg.tunnel_uuid() {
+        Ok(uuid) => DoctorCheck {
+            name: "tunnel-token".to_string(),
+            status: CheckStatus::Pass,
+            detail: format!("valid (UUID: {uuid})"),
+            fix: None,
+        },
+        Err(e) => DoctorCheck {
+            name: "tunnel-token".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!("tunnel token invalid — cannot extract tunnel UUID: {e:#}"),
+            fix: Some(
+                "re-run `rightclaw init --tunnel-token TOKEN --tunnel-hostname HOSTNAME` with a valid Cloudflare tunnel token"
+                    .to_string(),
+            ),
         },
     }
 }

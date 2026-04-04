@@ -823,7 +823,7 @@ fn tunnel_token_valid_jwt_passes() {
     let payload =
         URL_SAFE_NO_PAD.encode(r#"{"t":"aaaabbbb-0000-1111-2222-ccccddddeeee"}"#.as_bytes());
     let token = format!("hdr.{payload}.sig");
-    let cfg = rightclaw::config::TunnelConfig { token, hostname: "example.com".to_string() };
+    let cfg = crate::config::TunnelConfig { token, hostname: "example.com".to_string() };
     let check = check_tunnel_token(&cfg);
     assert_eq!(check.status, CheckStatus::Pass);
     assert!(
@@ -835,7 +835,7 @@ fn tunnel_token_valid_jwt_passes() {
 
 #[test]
 fn tunnel_token_invalid_warns() {
-    let cfg = rightclaw::config::TunnelConfig {
+    let cfg = crate::config::TunnelConfig {
         token: "not.a.valid.token.at.all".to_string(),
         hostname: "example.com".to_string(),
     };
