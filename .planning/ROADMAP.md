@@ -178,3 +178,16 @@ Plans:
 | 34. Core OAuth Flow + Bot | v3.2 | 4/4 | Complete    | 2026-04-03 |
 | 35. Token Refresh | v3.2 | 3/3 | Complete    | 2026-04-04 |
 | 36. JWT hostname derivation | v3.2 | 1/1 | Complete   | 2026-04-04 |
+| 37. v3.2 UAT gap fixes | v3.2 | 0/3 | In Progress | — |
+
+### Phase 37: Fix v3.2 UAT gaps: tunnel setup flow (--tunnel-hostname, DNS routing wrapper, doctor checks), MCP tracing logs, mcp status labels, rightclaw up warning visibility
+
+**Goal:** Restore working tunnel setup flow — store user-supplied hostname, write DNS routing wrapper script, fix OAuth bot hostname access, add mcp handler tracing, improve UX labels and visibility.
+**Requirements**: UAT gaps from v3.2-UAT.md (D-01..D-14)
+**Depends on:** Phase 36
+**Plans:** 3 plans
+
+Plans:
+- [ ] 37-01-PLAN.md — TunnelConfig hostname field + tunnel_uuid() + --tunnel-hostname CLI arg
+- [ ] 37-02-PLAN.md — AuthState label fix + doctor tunnel-token check + mcp handler tracing
+- [ ] 37-03-PLAN.md — DNS wrapper script generation + process-compose integration + eprintln MCP warning
