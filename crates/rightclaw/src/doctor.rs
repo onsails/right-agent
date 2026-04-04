@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
+const MCP_ISSUES_PREFIX: &str = "missing/expired: ";
 
 /// Status of a single doctor check.
 #[derive(Debug, Clone, PartialEq)]
@@ -117,10 +118,10 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     checks.push(check_tunnel_config(home));
 
     // Tunnel token validity check — only when tunnel is configured (D-09)
-    if let Ok(global_cfg) = crate::config::read_global_config(home) {
-        if let Some(ref tunnel_cfg) = global_cfg.tunnel {
-            checks.push(check_tunnel_token(tunnel_cfg));
-        }
+    if let Ok(global_cfg) = crate::config::read_global_config(home)
+        && let Some(ref tunnel_cfg) = global_cfg.tunnel
+    {
+        checks.push(check_tunnel_token(tunnel_cfg));
     }
 
     // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
@@ -751,7 +752,7 @@ fn check_mcp_tokens_with_creds(home: &Path, credentials_path: &Path) -> DoctorCh
         DoctorCheck {
             name: "mcp-tokens".to_string(),
             status: CheckStatus::Warn,
-            detail: format!("missing/expired: {}", problems.join(", ")),
+            detail: format!("{}{}", MCP_ISSUES_PREFIX, problems.join(", ")),
             fix: Some(
                 "Run /mcp auth <server> in Telegram to authenticate".to_string(),
             ),
@@ -769,13 +770,13 @@ pub fn mcp_auth_issues(home: &Path) -> Option<Vec<String>> {
         // Extract the problem list from "missing/expired: agent1/notion, agent2/linear"
         let problems: Vec<String> = check
             .detail
-            .strip_prefix("missing/expired: ")
+            .strip_prefix(MCP_ISSUES_PREFIX)
             .unwrap_or(&check.detail)
             .split(", ")
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .collect();
-        if problems.is_empty() { None } else { Some(problems) }
+        (!problems.is_empty()).then_some(problems)
     } else {
         None
     }

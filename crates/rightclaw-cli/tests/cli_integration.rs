@@ -278,3 +278,63 @@ fn test_down_no_state_file() {
         .failure()
         .stderr(predicate::str::contains("No running instance"));
 }
+
+// ---------------------------------------------------------------------------
+// --tunnel-hostname flag validation tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_init_tunnel_token_without_hostname_fails() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args(["--home", home, "init", "--tunnel-token", "fake.token.sig"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--tunnel-hostname"));
+}
+
+#[test]
+fn test_init_tunnel_hostname_without_token_fails() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args(["--home", home, "init", "--tunnel-hostname", "example.com"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--tunnel-token"));
+}
+
+#[test]
+fn test_init_tunnel_hostname_with_https_prefix_fails() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args([
+            "--home", home, "init",
+            "--tunnel-token", "fake.token.sig",
+            "--tunnel-hostname", "https://example.com",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bare domain"));
+}
+
+#[test]
+fn test_init_tunnel_hostname_with_http_prefix_fails() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args([
+            "--home", home, "init",
+            "--tunnel-token", "fake.token.sig",
+            "--tunnel-hostname", "http://example.com",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bare domain"));
+}
