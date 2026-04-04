@@ -64,6 +64,10 @@ struct RawGlobalConfig {
 #[derive(Debug, Deserialize)]
 struct RawTunnelConfig {
     token: String,
+    /// `hostname` was added in v3.2. Old config.yaml files written before that only contain
+    /// `token:`. Using `#[serde(default)]` lets those files parse successfully with an empty
+    /// hostname; `cmd_up` detects the empty value and guides the user to re-run `rightclaw init`.
+    #[serde(default)]
     hostname: String,
 }
 
