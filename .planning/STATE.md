@@ -177,9 +177,10 @@ None.
 | 260326-us1 | Replace is_tty with is_interactive in process-compose template | 2026-03-26 | 427f5e1 | [260326-us1-replace-is-tty-with-is-interactive-in-pr](./quick/260326-us1-replace-is-tty-with-is-interactive-in-pr/) |
 | 260327-04d | Fix rightmemory MCP binary path — use absolute path from current_exe() | 2026-03-27 | fb5972e | [260327-04d-fix-rightmemory-mcp-binary-path-use-abso](./quick/260327-04d-fix-rightmemory-mcp-binary-path-use-abso/) |
 | 260402-ip3 | Add ENABLE_CLAUDEAI_MCP_SERVERS=false and MCP_CONNECTION_NONBLOCKING=1 to process-compose template | 2026-04-02 | c6e3e61 | [260402-ip3-add-enable-claudeai-mcp-servers-false-to](./quick/260402-ip3-add-enable-claudeai-mcp-servers-false-to/) |
+| 260405-srr | Simplify MCP OAuth: delete custom OAuth flow, switch to CC-native via .claude.json | 2026-04-05 | 8c3e1b0, b971bbe | [260405-srr-simplify-mcp-oauth-write-http-servers-to](./quick/260405-srr-simplify-mcp-oauth-write-http-servers-to/) |
 
 ## Session Continuity
 
-Last session: 2026-04-05T20:20:12.208Z
-Stopped at: Completed 41-02-PLAN.md
+Last session: 2026-04-05T20:56:09Z
+Stopped at: Completed quick-260405-srr
 Resume file: None
