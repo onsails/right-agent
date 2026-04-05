@@ -243,6 +243,7 @@ fn cmd_init(
             rightclaw::init::validate_telegram_token(t)?;
             Some(t.to_string())
         }
+        None if yes => None,
         None => rightclaw::init::prompt_telegram_token()?,
     };
 
