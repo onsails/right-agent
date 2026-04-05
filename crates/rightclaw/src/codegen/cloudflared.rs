@@ -12,6 +12,17 @@ struct CloudflaredAgent {
     socket_path: String,
 }
 
+/// Cloudflared credentials for local ingress mode.
+///
+/// When provided, the generated config includes `tunnel:` and `credentials-file:`
+/// fields so cloudflared honours local ingress rules instead of fetching remote
+/// configuration from the Cloudflare dashboard (which is the behaviour with
+/// `--token` alone).
+pub struct CloudflaredCredentials {
+    pub tunnel_uuid: String,
+    pub credentials_file: PathBuf,
+}
+
 /// Generate cloudflared ingress config YAML for OAuth callback routing.
 ///
 /// Each agent gets a path-based ingress rule routing `GET /oauth/<name>/callback`
@@ -25,9 +36,12 @@ struct CloudflaredAgent {
 ///
 /// * `agents` — slice of `(name, agent_dir)` pairs
 /// * `tunnel_hostname` — public hostname for the named tunnel (e.g. `example.trycloudflare.com`)
+/// * `credentials` — when `Some`, embeds `tunnel:` + `credentials-file:` in the config so
+///   cloudflared uses local ingress instead of remote config
 pub fn generate_cloudflared_config(
     agents: &[(String, PathBuf)],
     tunnel_hostname: &str,
+    credentials: Option<&CloudflaredCredentials>,
 ) -> miette::Result<String> {
     let cf_agents: Vec<CloudflaredAgent> = agents
         .iter()
@@ -47,14 +61,24 @@ pub fn generate_cloudflared_config(
         .or_else(|| tunnel_hostname.strip_prefix("http://"))
         .unwrap_or(tunnel_hostname);
 
+    let tunnel_uuid = credentials.map(|c| c.tunnel_uuid.as_str()).unwrap_or("");
+    let credentials_file = credentials
+        .map(|c| c.credentials_file.display().to_string())
+        .unwrap_or_default();
+
     let mut env = Environment::new();
     env.add_template("cloudflared", CF_TEMPLATE)
         .map_err(|e| miette::miette!("cloudflared template parse error: {e:#}"))?;
     let tmpl = env
         .get_template("cloudflared")
         .expect("template was just added");
-    tmpl.render(context! { agents => cf_agents, tunnel_hostname => hostname })
-        .map_err(|e| miette::miette!("cloudflared template render error: {e:#}"))
+    tmpl.render(context! {
+        agents => cf_agents,
+        tunnel_hostname => hostname,
+        tunnel_uuid => tunnel_uuid,
+        credentials_file => credentials_file,
+    })
+    .map_err(|e| miette::miette!("cloudflared template render error: {e:#}"))
 }
 
 #[cfg(test)]

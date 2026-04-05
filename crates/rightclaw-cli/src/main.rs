@@ -568,9 +568,31 @@ async fn cmd_up(
             .iter()
             .map(|a| (a.name.clone(), a.path.clone()))
             .collect();
+
+        // Detect cloudflared credentials file in ~/.cloudflared/*.json.
+        // When found, embed tunnel: + credentials-file: in the config so cloudflared
+        // honours local ingress rules. Without this, --token mode fetches remote config
+        // from the Cloudflare dashboard and ignores local ingress entirely (breaking
+        // OAuth callback routing to unix sockets).
+        let token_uuid = tunnel_cfg.tunnel_uuid()?;
+        let cf_creds = detect_cloudflared_credentials(&token_uuid);
+        if cf_creds.is_none() {
+            tracing::warn!(
+                "no cloudflared credentials file found in ~/.cloudflared/ — \
+                 OAuth callback ingress rules may not apply (remote config takes precedence)"
+            );
+        }
+        let creds_arg = cf_creds.as_ref().map(|(uuid, path)| {
+            rightclaw::codegen::cloudflared::CloudflaredCredentials {
+                tunnel_uuid: uuid.clone(),
+                credentials_file: path.clone(),
+            }
+        });
+
         let cf_config = rightclaw::codegen::cloudflared::generate_cloudflared_config(
             &agent_pairs,
             &tunnel_cfg.hostname,
+            creds_arg.as_ref(),
         )?;
         let cf_config_path = home.join("cloudflared-config.yml");
         std::fs::write(&cf_config_path, &cf_config)
@@ -581,12 +603,22 @@ async fn cmd_up(
         let scripts_dir = home.join("scripts");
         std::fs::create_dir_all(&scripts_dir)
             .map_err(|e| miette::miette!("create scripts dir: {e:#}"))?;
-        let uuid = tunnel_cfg.tunnel_uuid()?;
+        // Use the credentials tunnel UUID if available (may differ from JWT token UUID).
+        let effective_uuid = cf_creds
+            .as_ref()
+            .map(|(u, _)| u.as_str())
+            .unwrap_or(token_uuid.as_str());
         let hostname = &tunnel_cfg.hostname;
         let token = &tunnel_cfg.token;
         let cf_config_path_str = cf_config_path.display();
+        let run_cmd = if cf_creds.is_some() {
+            // Credentials embedded in config — no --token needed.
+            format!("exec cloudflared tunnel --config {cf_config_path_str} run\n")
+        } else {
+            format!("exec cloudflared tunnel --config {cf_config_path_str} run --token {token}\n")
+        };
         let script_content = format!(
-            "#!/bin/sh\nset -e\ncloudflared tunnel route dns {uuid} {hostname}\nexec cloudflared tunnel --config {cf_config_path_str} run --token {token}\n"
+            "#!/bin/sh\nset -e\ncloudflared tunnel route dns {effective_uuid} {hostname}\n{run_cmd}"
         );
         let script_path = scripts_dir.join("cloudflared-start.sh");
         std::fs::write(&script_path, &script_content)
@@ -1094,6 +1126,46 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
         .exec();
 
     Err(miette::miette!("failed to launch claude: {err}"))
+}
+
+/// Find a cloudflared credentials file in `~/.cloudflared/`.
+///
+/// Prefers `~/.cloudflared/<token_uuid>.json` (matching the configured token tunnel).
+/// Falls back to the first `*.json` file that contains a `TunnelID` field.
+/// Returns `(tunnel_uuid, credentials_path)` or `None` if nothing is found.
+fn detect_cloudflared_credentials(token_uuid: &str) -> Option<(String, std::path::PathBuf)> {
+    let cf_dir = dirs::home_dir()?.join(".cloudflared");
+
+    // First: look for a credentials file that matches the token tunnel UUID.
+    let matching = cf_dir.join(format!("{token_uuid}.json"));
+    if matching.exists() {
+        return Some((token_uuid.to_string(), matching));
+    }
+
+    // Fallback: any *.json file with a TunnelID field.
+    let entries = std::fs::read_dir(&cf_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        if let Some(uuid) = v["TunnelID"].as_str() {
+            tracing::info!(
+                credentials = %path.display(),
+                credentials_uuid = %uuid,
+                token_uuid = %token_uuid,
+                "using cloudflared credentials file for local ingress mode"
+            );
+            return Some((uuid.to_string(), path));
+        }
+    }
+    None
 }
 
 fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
