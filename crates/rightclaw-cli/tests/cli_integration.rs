@@ -278,3 +278,18 @@ fn test_down_no_state_file() {
         .failure()
         .stderr(predicate::str::contains("No running instance"));
 }
+
+#[test]
+fn test_init_yes_no_telegram_prompt() {
+    // Regression for UAT gap: `rightclaw init -y` must not block on stdin
+    // waiting for a Telegram token when --telegram-token is omitted.
+    // cert.pem is absent in CI so the tunnel section is skipped;
+    // the only previously-blocking call was prompt_telegram_token().
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args(["--home", home, "init", "-y", "--tunnel-hostname", "example.com"])
+        .assert()
+        .success();
+}
