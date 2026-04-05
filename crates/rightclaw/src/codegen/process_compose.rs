@@ -29,6 +29,15 @@ struct BotProcessAgent {
     debug: bool,
 }
 
+/// Template context for the cloudflared tunnel process entry.
+#[derive(Debug, Serialize)]
+struct CloudflaredEntry {
+    /// Absolute path to the cloudflared-start.sh wrapper script.
+    command: String,
+    /// Working directory for the process (rightclaw home dir).
+    working_dir: String,
+}
+
 /// Map `RestartPolicy` to process-compose's expected string values.
 fn restart_policy_str(policy: &RestartPolicy) -> &'static str {
     match policy {
@@ -45,7 +54,27 @@ fn restart_policy_str(policy: &RestartPolicy) -> &'static str {
 ///
 /// Each entry runs `<exe_path> bot --agent <name>` with env vars for the agent
 /// directory, name, and Telegram token.
-pub fn generate_process_compose(agents: &[AgentDef], exe_path: &Path, debug: bool) -> miette::Result<String> {
+pub fn generate_process_compose(
+    agents: &[AgentDef],
+    exe_path: &Path,
+    debug: bool,
+    cloudflared_script: Option<&Path>,
+) -> miette::Result<String> {
+    // Build cloudflared template context when tunnel script is provided.
+    // working_dir = parent of scripts/ dir (i.e., rightclaw home).
+    let cf_entry: Option<CloudflaredEntry> = cloudflared_script.map(|script| {
+        let working_dir = script
+            .parent() // scripts/
+            .and_then(|p| p.parent()) // home/
+            .unwrap_or(script)
+            .display()
+            .to_string();
+        CloudflaredEntry {
+            command: script.display().to_string(),
+            working_dir,
+        }
+    });
+
     let bot_agents: Vec<BotProcessAgent> = agents
         .iter()
         .filter_map(|agent| {
@@ -89,7 +118,7 @@ pub fn generate_process_compose(agents: &[AgentDef], exe_path: &Path, debug: boo
         .map_err(|e| miette::miette!("template parse error: {e:#}"))?;
     let tmpl = env.get_template("pc").expect("template just added");
 
-    tmpl.render(context! { agents => bot_agents })
+    tmpl.render(context! { agents => bot_agents, cloudflared => cf_entry })
         .map_err(|e| miette::miette!("template render error: {e:#}"))
 }
 

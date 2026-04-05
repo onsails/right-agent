@@ -25,3 +25,15 @@ processes:
       signal: 15
       timeout_seconds: 30
 {% endfor %}
+{% if cloudflared %}
+  cloudflared:
+    command: "{{ cloudflared.command }}"
+    working_dir: "{{ cloudflared.working_dir }}"
+    availability:
+      restart: "on_failure"
+      backoff_seconds: 5
+      max_restarts: 10
+    shutdown:
+      signal: 15
+      timeout_seconds: 30
+{% endif %}
