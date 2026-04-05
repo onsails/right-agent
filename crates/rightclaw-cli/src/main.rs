@@ -683,6 +683,17 @@ async fn cmd_up(
 
     // Generate cloudflared config and wrapper script when tunnel is configured (Phase 38).
     let global_cfg = rightclaw::config::read_global_config(home)?;
+
+    // Pre-flight: if tunnel is configured, cloudflared binary must be in PATH.
+    // Check before generating any files to avoid leaving stale artifacts.
+    if global_cfg.tunnel.is_some() {
+        which::which("cloudflared").map_err(|_| {
+            miette::miette!(
+                "TunnelConfig is present but `cloudflared` is not in PATH — install cloudflared first"
+            )
+        })?;
+    }
+
     let cloudflared_script_path: Option<std::path::PathBuf> = if let Some(tunnel_cfg) = global_cfg.tunnel {
         let agent_pairs: Vec<(String, std::path::PathBuf)> = agents
             .iter()
@@ -730,8 +741,6 @@ async fn cmd_up(
     } else {
         None
     };
-    let _ = cloudflared_script_path; // used by process-compose template in future phases
-
     // Generate process-compose.yaml (bot-only entries, Phase 26).
     let has_bot_agents = agents.iter().any(|a| {
         a.config
@@ -743,7 +752,12 @@ async fn cmd_up(
         eprintln!("rightclaw: no agents have Telegram tokens configured — nothing to start");
         return Err(miette::miette!("no agents have Telegram tokens configured"));
     }
-    let pc_config = rightclaw::codegen::generate_process_compose(&agents, &self_exe, debug)?;
+    let pc_config = rightclaw::codegen::generate_process_compose(
+        &agents,
+        &self_exe,
+        debug,
+        cloudflared_script_path.as_deref(),
+    )?;
     let config_path = run_dir.join("process-compose.yaml");
     std::fs::write(&config_path, &pc_config)
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
