@@ -179,7 +179,7 @@ Plans:
 | 35. Token Refresh | v3.2 | 3/3 | Complete    | 2026-04-04 |
 | 36. JWT hostname derivation | v3.2 | 1/1 | Complete   | 2026-04-04 |
 | 37. v3.2 UAT gap fixes | v3.2 | 3/3 | Complete   | 2026-04-04 |
-| 38. Tunnel refactor (credentials-file) | v3.2 | 0/3 | Planning   | — |
+| 38. Tunnel refactor (credentials-file) | v3.2 | 0/3 | Planned    |  |
 
 ### Phase 37: Fix v3.2 UAT gaps: tunnel setup flow (--tunnel-hostname, DNS routing wrapper, doctor checks), MCP tracing logs, mcp status labels, rightclaw up warning visibility
 
@@ -198,7 +198,7 @@ Plans:
 **Goal:** Replace JWT token approach with proper named tunnel flow. `rightclaw init --tunnel-credentials-file PATH --tunnel-hostname DOMAIN` copies the cloudflared credentials JSON to `~/.rightclaw/tunnel/`, stores tunnel_uuid + credentials_file path in config.yaml. `rightclaw up` uses credentials-file exclusively — no runtime detection, no --token fallback.
 **Requirements**: TUNL-01
 **Depends on:** Phase 37
-**Plans:** 3 plans
+**Plans:** 0/3 plans executed
 
 Plans:
 - [ ] 38-01-PLAN.md — TunnelConfig struct refactor: tunnel_uuid + credentials_file fields, updated read/write, migration error for old token-only configs, remove JWT decode
