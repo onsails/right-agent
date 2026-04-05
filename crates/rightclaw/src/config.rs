@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 
 /// Resolve RIGHTCLAW_HOME: cli_home > env_home > ~/.rightclaw
@@ -22,37 +21,15 @@ pub struct GlobalConfig {
     pub tunnel: Option<TunnelConfig>,
 }
 
-/// Cloudflare Named Tunnel configuration.
+/// Cloudflare Named Tunnel configuration (credentials-file based, Phase 38+).
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
-    pub token: String,
+    /// TunnelID read directly from the credentials JSON `TunnelID` field.
+    pub tunnel_uuid: String,
+    /// Absolute path to the cloudflared credentials JSON file.
+    pub credentials_file: PathBuf,
+    /// Public hostname for the tunnel (e.g. right.example.com).
     pub hostname: String,
-}
-
-impl TunnelConfig {
-    /// Extract UUID from tunnel token. Supports single-segment (real CF token)
-    /// and three-segment JWT formats. Returns the raw UUID string (no domain suffix).
-    pub fn tunnel_uuid(&self) -> miette::Result<String> {
-        let parts: Vec<&str> = self.token.split('.').collect();
-        let encoded = match parts.len() {
-            1 => parts[0],
-            3 => parts[1],
-            n => {
-                return Err(miette::miette!(
-                    "unrecognized token format (expected 1 or 3 segments, got {n})"
-                ));
-            }
-        };
-        let payload_bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(|e| miette::miette!("tunnel token base64 decode failed: {e}"))?;
-        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes)
-            .map_err(|e| miette::miette!("tunnel token JSON parse failed: {e:#}"))?;
-        let uuid = payload["t"]
-            .as_str()
-            .ok_or_else(|| miette::miette!("tunnel token payload missing 't' field"))?;
-        Ok(uuid.to_string())
-    }
 }
 
 /// Helper structs for YAML deserialization via serde-saphyr.
@@ -63,10 +40,15 @@ struct RawGlobalConfig {
 
 #[derive(Debug, Deserialize)]
 struct RawTunnelConfig {
+    /// Legacy field — present in configs written before Phase 38. Keep to avoid parse error.
+    /// Its presence (non-empty) with absent credentials_file triggers a migration error.
+    #[serde(default)]
     token: String,
-    /// `hostname` was added in v3.2. Old config.yaml files written before that only contain
-    /// `token:`. Using `#[serde(default)]` lets those files parse successfully with an empty
-    /// hostname; `cmd_up` detects the empty value and guides the user to re-run `rightclaw init`.
+    /// New field added in Phase 38.
+    #[serde(default)]
+    tunnel_uuid: String,
+    #[serde(default)]
+    credentials_file: String,
     #[serde(default)]
     hostname: String,
 }
@@ -74,6 +56,7 @@ struct RawTunnelConfig {
 /// Read global config from `<home>/config.yaml`.
 ///
 /// Returns `Ok(GlobalConfig::default())` if the file does not exist.
+/// Returns `Err` with a migration hint if the config uses the old `token:` format.
 pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
     let path = home.join("config.yaml");
     if !path.exists() {
@@ -84,7 +67,22 @@ pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
     let raw: RawGlobalConfig = serde_saphyr::from_str(&content)
         .map_err(|e| miette::miette!("parse config.yaml: {e:#}"))?;
     Ok(GlobalConfig {
-        tunnel: raw.tunnel.map(|t| TunnelConfig { token: t.token, hostname: t.hostname }),
+        tunnel: raw
+            .tunnel
+            .map(|t| -> miette::Result<TunnelConfig> {
+                if t.credentials_file.is_empty() || t.tunnel_uuid.is_empty() {
+                    return Err(miette::miette!(
+                        help = "run: rightclaw init --tunnel-credentials-file PATH --tunnel-hostname HOSTNAME",
+                        "Tunnel config is outdated (uses token-based format) — re-run `rightclaw init` to migrate"
+                    ));
+                }
+                Ok(TunnelConfig {
+                    tunnel_uuid: t.tunnel_uuid,
+                    credentials_file: PathBuf::from(&t.credentials_file),
+                    hostname: t.hostname,
+                })
+            })
+            .transpose()?,
     })
 }
 
@@ -96,9 +94,11 @@ pub fn write_global_config(home: &Path, config: &GlobalConfig) -> miette::Result
     let mut content = String::new();
     if let Some(ref tunnel) = config.tunnel {
         content.push_str("tunnel:\n");
-        let token = tunnel.token.replace('"', "\\\"");
+        let uuid = tunnel.tunnel_uuid.replace('"', "\\\"");
+        let creds = tunnel.credentials_file.display().to_string().replace('"', "\\\"");
         let hostname = tunnel.hostname.replace('"', "\\\"");
-        content.push_str(&format!("  token: \"{token}\"\n"));
+        content.push_str(&format!("  tunnel_uuid: \"{uuid}\"\n"));
+        content.push_str(&format!("  credentials_file: \"{creds}\"\n"));
         content.push_str(&format!("  hostname: \"{hostname}\"\n"));
     }
     std::fs::write(&path, &content)
@@ -131,105 +131,114 @@ mod tests {
     }
 
     #[test]
-    fn read_global_config_returns_default_when_file_missing() {
-        let dir = TempDir::new().unwrap();
-        let config = read_global_config(dir.path()).unwrap();
-        assert!(config.tunnel.is_none(), "no tunnel config when file absent");
-    }
-
-    fn make_fake_jwt(uuid: &str) -> String {
-        let payload = format!(r#"{{"t":"{uuid}"}}"#);
-        let encoded = URL_SAFE_NO_PAD.encode(payload.as_bytes());
-        format!("eyJhbGciOiJIUzI1NiJ9.{encoded}.sig")
-    }
-
-    #[test]
-    fn tunnel_uuid_decode_valid_jwt() {
-        let token = make_fake_jwt("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-        let cfg = TunnelConfig { token, hostname: "test.example.com".to_string() };
-        let uuid = cfg.tunnel_uuid().unwrap();
-        assert_eq!(uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-    }
-
-    #[test]
-    fn tunnel_uuid_decode_single_segment() {
-        // Real CF token: single base64url-encoded JSON blob
-        let token = "eyJhIjoiNjEyZWE2ZmU3ZjBiMmY2Njg5ZjdjYjAxNTc4NWZhM2UiLCJ0IjoiN2EyMTU1YTUtMmFiMy00ZmNkLTlhNDUtZTYxY2NlNDc0ODc5IiwicyI6Ik56WXhaVGs0WkRJdE56RXdOeTAwT1RsbUxUaGpPVEF0TkRrek5qSXpZVE0wTUdVMSJ9".to_string();
-        let cfg = TunnelConfig { token, hostname: "right.example.com".to_string() };
-        let uuid = cfg.tunnel_uuid().unwrap();
-        assert_eq!(uuid, "7a2155a5-2ab3-4fcd-9a45-e61cce474879");
-    }
-
-    #[test]
-    fn tunnel_uuid_wrong_segment_count() {
-        let cfg = TunnelConfig { token: "a.b".to_string(), hostname: "h.example.com".to_string() };
-        let err = cfg.tunnel_uuid().unwrap_err();
-        assert!(
-            err.to_string().contains("unrecognized token format (expected 1 or 3 segments, got 2)"),
-            "expected unrecognized token format error in: {err}"
+    fn tunnel_config_has_credentials_file_field() {
+        let cfg = TunnelConfig {
+            tunnel_uuid: "e765cc71-d0c2-42a3-864b-81566f8817fd".to_string(),
+            credentials_file: PathBuf::from(
+                "/home/wb/.rightclaw/tunnel/e765cc71-d0c2-42a3-864b-81566f8817fd.json",
+            ),
+            hostname: "right.example.com".to_string(),
+        };
+        assert_eq!(cfg.tunnel_uuid, "e765cc71-d0c2-42a3-864b-81566f8817fd");
+        assert_eq!(
+            cfg.credentials_file,
+            PathBuf::from(
+                "/home/wb/.rightclaw/tunnel/e765cc71-d0c2-42a3-864b-81566f8817fd.json"
+            )
         );
+        assert_eq!(cfg.hostname, "right.example.com");
     }
 
     #[test]
-    fn tunnel_uuid_invalid_base64() {
-        let cfg = TunnelConfig { token: "hdr.!!!.sig".to_string(), hostname: "h.example.com".to_string() };
-        let err = cfg.tunnel_uuid().unwrap_err();
-        assert!(!err.to_string().is_empty(), "should have error message");
-    }
-
-    #[test]
-    fn tunnel_uuid_missing_t_field() {
-        let payload = URL_SAFE_NO_PAD.encode(r#"{"other":"value"}"#.as_bytes());
-        let cfg = TunnelConfig { token: format!("h.{payload}.sig"), hostname: "h.example.com".to_string() };
-        let err = cfg.tunnel_uuid().unwrap_err();
-        assert!(
-            err.to_string().contains("missing 't' field"),
-            "expected \"missing 't' field\" in: {err}"
-        );
-    }
-
-    #[test]
-    fn write_then_read_roundtrips_token_and_hostname() {
+    fn write_then_read_roundtrips_new_fields() {
         let dir = TempDir::new().unwrap();
         let written = GlobalConfig {
             tunnel: Some(TunnelConfig {
-                token: "tok123".to_string(),
-                hostname: "my.example.com".to_string(),
+                tunnel_uuid: "abc-123".to_string(),
+                credentials_file: PathBuf::from("/tmp/abc-123.json"),
+                hostname: "test.example.com".to_string(),
             }),
         };
         write_global_config(dir.path(), &written).unwrap();
         let read = read_global_config(dir.path()).unwrap();
         let tunnel = read.tunnel.expect("tunnel should be present after write");
-        assert_eq!(tunnel.token, "tok123");
-        assert_eq!(tunnel.hostname, "my.example.com");
+        assert_eq!(tunnel.tunnel_uuid, "abc-123");
+        assert_eq!(tunnel.credentials_file, PathBuf::from("/tmp/abc-123.json"));
+        assert_eq!(tunnel.hostname, "test.example.com");
     }
 
     #[test]
-    fn write_global_config_writes_hostname_field() {
+    fn write_global_config_emits_tunnel_uuid_not_token() {
         let dir = TempDir::new().unwrap();
         let config = GlobalConfig {
             tunnel: Some(TunnelConfig {
-                token: "mytoken".to_string(),
-                hostname: "my.example.com".to_string(),
+                tunnel_uuid: "abc-123".to_string(),
+                credentials_file: PathBuf::from("/tmp/abc-123.json"),
+                hostname: "test.example.com".to_string(),
             }),
         };
         write_global_config(dir.path(), &config).unwrap();
         let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
-        assert!(content.contains("hostname: \"my.example.com\""), "written YAML must contain hostname field");
-        assert!(content.contains("token:"), "written YAML must contain 'token:'");
+        assert!(
+            content.contains("tunnel_uuid: \"abc-123\""),
+            "written YAML must contain tunnel_uuid field, got: {content}"
+        );
+        assert!(
+            !content.contains("token:"),
+            "written YAML must NOT contain token field, got: {content}"
+        );
     }
 
     #[test]
-    fn read_config_parses_token_and_hostname() {
+    fn old_config_with_token_only_yields_migration_error() {
         let dir = TempDir::new().unwrap();
-        let yaml = r#"tunnel:
-  token: "testtoken"
-  hostname: "test.example.com"
-"#;
+        let yaml = "tunnel:\n  token: \"eyJhIjoiNjEy...\"\n  hostname: \"example.com\"\n";
+        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+        let err = read_global_config(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("re-run `rightclaw init`"),
+            "expected migration error containing 're-run `rightclaw init`', got: {err}"
+        );
+    }
+
+    #[test]
+    fn old_config_missing_credentials_file_yields_migration_error() {
+        let dir = TempDir::new().unwrap();
+        let yaml = "tunnel:\n  token: \"tok\"\n  hostname: \"h.com\"\n";
+        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+        let err = read_global_config(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("re-run `rightclaw init`"),
+            "expected migration error for old config format, got: {err}"
+        );
+    }
+
+    #[test]
+    fn read_config_parses_new_format() {
+        let dir = TempDir::new().unwrap();
+        let yaml = concat!(
+            "tunnel:\n",
+            "  tunnel_uuid: \"e765cc71-d0c2-42a3-864b-81566f8817fd\"\n",
+            "  credentials_file: \"/home/wb/.rightclaw/tunnel/e765cc71-d0c2-42a3-864b-81566f8817fd.json\"\n",
+            "  hostname: \"right.example.com\"\n",
+        );
         std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
         let config = read_global_config(dir.path()).unwrap();
         let tunnel = config.tunnel.expect("tunnel should be parsed");
-        assert_eq!(tunnel.token, "testtoken");
-        assert_eq!(tunnel.hostname, "test.example.com");
+        assert_eq!(tunnel.tunnel_uuid, "e765cc71-d0c2-42a3-864b-81566f8817fd");
+        assert_eq!(
+            tunnel.credentials_file,
+            PathBuf::from(
+                "/home/wb/.rightclaw/tunnel/e765cc71-d0c2-42a3-864b-81566f8817fd.json"
+            )
+        );
+        assert_eq!(tunnel.hostname, "right.example.com");
+    }
+
+    #[test]
+    fn read_global_config_returns_default_when_file_missing() {
+        let dir = TempDir::new().unwrap();
+        let config = read_global_config(dir.path()).unwrap();
+        assert!(config.tunnel.is_none(), "no tunnel config when file absent");
     }
 }
