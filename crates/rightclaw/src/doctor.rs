@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
+const MCP_ISSUES_PREFIX: &str = "missing/expired: ";
 
 /// Status of a single doctor check.
 #[derive(Debug, Clone, PartialEq)]
@@ -110,12 +111,21 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // DOC-02: per-agent settings.json ripgrep.command validation (cross-platform)
     checks.extend(check_ripgrep_in_settings(home));
 
-    // Tunnel credentials file existence check — only when tunnel is configured
+    // cloudflared binary check — Warn severity (D-03, OAUTH-04)
+    checks.push(check_cloudflared_binary());
+
+    // Tunnel config presence check — Warn severity (D-03)
+    checks.push(check_tunnel_config(home));
+
+    // Tunnel credentials file check — only when tunnel is configured
     if let Ok(global_cfg) = crate::config::read_global_config(home)
         && let Some(ref tunnel_cfg) = global_cfg.tunnel
     {
         checks.push(check_tunnel_credentials_file(tunnel_cfg));
     }
+
+    // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
+    checks.push(check_mcp_tokens(home));
 
     checks
 }
@@ -600,6 +610,55 @@ fn fetch_webhook_url(token: &str) -> Result<String, String> {
     })
 }
 
+/// Check if `cloudflared` binary is available in PATH. (D-03, OAUTH-04)
+///
+/// Warn severity — cloudflared is optional for non-OAuth deployments.
+/// Absence only becomes critical when OAuth callbacks via named tunnel are needed.
+fn check_cloudflared_binary() -> DoctorCheck {
+    let raw = check_binary(
+        "cloudflared",
+        Some("install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"),
+    );
+    DoctorCheck {
+        status: if raw.status == CheckStatus::Pass {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warn
+        },
+        ..raw
+    }
+}
+
+/// Check whether a cloudflare tunnel is configured in `<home>/config.yaml`. (D-03)
+///
+/// Warn severity — tunnel is optional for bots that don't use MCP OAuth.
+/// When tunnel is absent, `/mcp auth` will fail at runtime but other commands work.
+fn check_tunnel_config(home: &Path) -> DoctorCheck {
+    match crate::config::read_global_config(home) {
+        Ok(cfg) if cfg.tunnel.is_some() => DoctorCheck {
+            name: "tunnel-config".to_string(),
+            status: CheckStatus::Pass,
+            detail: "tunnel configured in config.yaml".to_string(),
+            fix: None,
+        },
+        Ok(_) => DoctorCheck {
+            name: "tunnel-config".to_string(),
+            status: CheckStatus::Warn,
+            detail: "no tunnel configured — MCP OAuth callbacks will not work".to_string(),
+            fix: Some(
+                "run `rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME` to configure tunnel"
+                    .to_string(),
+            ),
+        },
+        Err(e) => DoctorCheck {
+            name: "tunnel-config".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!("failed to read config.yaml: {e:#}"),
+            fix: None,
+        },
+    }
+}
+
 /// Check that the credentials file stored in TunnelConfig actually exists on disk.
 ///
 /// Warn severity — missing file means cloudflared will fail at `rightclaw up` time.
@@ -619,15 +678,130 @@ fn check_tunnel_credentials_file(tunnel_cfg: &crate::config::TunnelConfig) -> Do
             name: "tunnel-credentials".to_string(),
             status: CheckStatus::Warn,
             detail: format!(
-                "credentials file not found at {}",
+                "credentials file missing: {}",
                 tunnel_cfg.credentials_file.display()
             ),
             fix: Some(
-                "re-run `rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME` to restore"
+                "re-run `rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME` to regenerate tunnel credentials"
                     .to_string(),
             ),
         }
     }
+}
+
+/// Check MCP OAuth token status across all agents. (REFRESH-03)
+///
+/// Aggregates missing/expired tokens into a single Warn check.
+/// Tokens with expires_at=0 (non-expiring) count as ok (REFRESH-04).
+/// Only synchronous file I/O — no HTTP calls.
+fn check_mcp_tokens_with_creds(home: &Path, credentials_path: &Path) -> DoctorCheck {
+    let agents_dir = home.join("agents");
+
+    if !agents_dir.exists() {
+        return DoctorCheck {
+            name: "mcp-tokens".to_string(),
+            status: CheckStatus::Pass,
+            detail: "all present".to_string(),
+            fix: None,
+        };
+    }
+
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(e) => e,
+        Err(_) => {
+            return DoctorCheck {
+                name: "mcp-tokens".to_string(),
+                status: CheckStatus::Pass,
+                detail: "all present".to_string(),
+                fix: None,
+            };
+        }
+    };
+
+    let mut problems: Vec<String> = vec![];
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let agent_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        let mcp_path = path.join(".mcp.json");
+        let statuses = match crate::mcp::detect::mcp_auth_status(&mcp_path, credentials_path) {
+            Ok(s) => s,
+            Err(_) => continue, // skip agents with unreadable .mcp.json
+        };
+
+        for s in statuses {
+            if matches!(
+                s.state,
+                crate::mcp::detect::AuthState::Missing | crate::mcp::detect::AuthState::Expired
+            ) {
+                problems.push(format!("{agent_name}/{}", s.name));
+            }
+        }
+    }
+
+    if problems.is_empty() {
+        DoctorCheck {
+            name: "mcp-tokens".to_string(),
+            status: CheckStatus::Pass,
+            detail: "all present".to_string(),
+            fix: None,
+        }
+    } else {
+        DoctorCheck {
+            name: "mcp-tokens".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!("{}{}", MCP_ISSUES_PREFIX, problems.join(", ")),
+            fix: Some(
+                "Run /mcp auth <server> in Telegram to authenticate".to_string(),
+            ),
+        }
+    }
+}
+
+/// Return MCP auth issues for display in `rightclaw up` before TUI takes over (D-13).
+///
+/// Returns `Some(problems)` when any agent has missing/expired MCP tokens, `None` when all ok.
+/// Uses the same logic as the doctor mcp-tokens check.
+pub fn mcp_auth_issues(home: &Path) -> Option<Vec<String>> {
+    let check = check_mcp_tokens(home);
+    if check.status == CheckStatus::Warn {
+        // Extract the problem list from "missing/expired: agent1/notion, agent2/linear"
+        let problems: Vec<String> = check
+            .detail
+            .strip_prefix(MCP_ISSUES_PREFIX)
+            .unwrap_or(&check.detail)
+            .split(", ")
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        (!problems.is_empty()).then_some(problems)
+    } else {
+        None
+    }
+}
+
+/// Thin public wrapper for check_mcp_tokens_with_creds using host credentials path.
+fn check_mcp_tokens(home: &Path) -> DoctorCheck {
+    let credentials_path = match dirs::home_dir() {
+        Some(h) => h.join(".claude").join(".credentials.json"),
+        None => {
+            return DoctorCheck {
+                name: "mcp-tokens".to_string(),
+                status: CheckStatus::Warn,
+                detail: "cannot determine home directory for credentials".to_string(),
+                fix: None,
+            }
+        }
+    };
+    check_mcp_tokens_with_creds(home, &credentials_path)
 }
 
 /// Generate fix guidance for bubblewrap sandbox failures.

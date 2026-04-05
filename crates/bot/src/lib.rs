@@ -105,6 +105,29 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         }
     }
 
+    // Warn about unauthenticated MCP servers at startup (UAT gap — test 8).
+    match rightclaw::mcp::detect::mcp_auth_status(
+        &agent_dir.join(".mcp.json"),
+        &dirs::home_dir()
+            .unwrap_or_default()
+            .join(".claude")
+            .join(".credentials.json"),
+    ) {
+        Ok(statuses) => {
+            for s in &statuses {
+                if s.state != rightclaw::mcp::detect::AuthState::Present {
+                    tracing::warn!(
+                        agent = %args.agent,
+                        server = %s.name,
+                        state = %s.state,
+                        "MCP server needs auth"
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!(agent = %args.agent, "mcp_auth_status check failed: {e:#}"),
+    }
+
     // Warn if allowed_chat_ids is empty (D-05)
     if config.allowed_chat_ids.is_empty() {
         tracing::warn!(
@@ -123,6 +146,82 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_bot, cron_chat_ids).await;
     });
 
-    // Start Telegram dispatcher
-    telegram::run_telegram(token, config.allowed_chat_ids, agent_dir, args.debug).await
+    // Build shared OAuth PendingAuth map
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use telegram::oauth_callback::{OAuthCallbackState, PendingAuthMap, run_oauth_callback_server, run_pending_auth_cleanup};
+
+    let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    // Derive pc_port from env with constant fallback
+    let pc_port: u16 = std::env::var("RC_PC_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(rightclaw::runtime::pc_client::PC_PORT);
+
+    // Read tunnel/global config
+    let global_config = rightclaw::config::read_global_config(&home)?;
+    let _ = global_config; // used for future tunnel config; notify_chat_ids passed below
+
+    let credentials_path = dirs::home_dir()
+        .ok_or_else(|| miette::miette!("cannot determine home directory for credentials"))?
+        .join(".claude")
+        .join(".credentials.json");
+
+    // Clone for refresh scheduler before credentials_path is moved into OAuthCallbackState (line 152)
+    let refresh_credentials_path = credentials_path.clone();
+
+    // Spawn refresh scheduler — proactively refreshes MCP OAuth tokens before expiry (Phase 35)
+    let refresh_agent_dir = agent_dir.clone();
+    let refresh_creds = refresh_credentials_path;
+    let refresh_http_client = reqwest::Client::new();
+    tokio::spawn(async move {
+        rightclaw::mcp::refresh::run_refresh_scheduler(
+            refresh_agent_dir,
+            refresh_creds,
+            refresh_http_client,
+        )
+        .await;
+    });
+
+    let notify_bot = teloxide::Bot::new(token.clone());
+    let notify_chat_ids = config.allowed_chat_ids.clone();
+    let agent_name = args.agent.clone();
+
+    let oauth_state = OAuthCallbackState {
+        pending_auth: Arc::clone(&pending_auth),
+        credentials_path,
+        mcp_json_path: agent_dir.join(".mcp.json"),
+        agent_name: agent_name.clone(),
+        pc_port,
+        bot: notify_bot,
+        notify_chat_ids,
+    };
+
+    // Spawn cleanup task
+    tokio::spawn(run_pending_auth_cleanup(Arc::clone(&pending_auth)));
+
+    // Spawn axum OAuth callback server and wait for it to bind before starting teloxide
+    let socket_path = agent_dir.join("oauth-callback.sock");
+    let (axum_ready_tx, axum_ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let axum_socket = socket_path.clone();
+    let axum_handle = tokio::spawn(async move {
+        run_oauth_callback_server(axum_socket, oauth_state, Some(axum_ready_tx)).await
+    });
+    // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
+    let _ = axum_ready_rx.await;
+
+    // Run teloxide + axum concurrently via tokio::select!
+    tokio::select! {
+        result = telegram::run_telegram(
+            token,
+            config.allowed_chat_ids,
+            agent_dir,
+            args.debug,
+            Arc::clone(&pending_auth),
+            home,
+        ) => result,
+        result = axum_handle => result
+            .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
+    }
 }

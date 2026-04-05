@@ -76,6 +76,17 @@ pub enum MemoryCommands {
     },
 }
 
+/// Subcommands for `rightclaw mcp`.
+#[derive(Subcommand)]
+pub enum McpCommands {
+    /// Show MCP OAuth auth status for all agents (or a single agent)
+    Status {
+        /// Filter to a single agent by name
+        #[arg(long)]
+        agent: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize RightClaw home directory with default agent
@@ -144,6 +155,11 @@ pub enum Commands {
     },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
+    /// Inspect MCP OAuth token status
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
     /// Run the per-agent Telegram bot (long-polling, teloxide)
     Bot {
         /// Agent name (resolves to $RIGHTCLAW_HOME/agents/<name>/)
@@ -214,6 +230,9 @@ async fn main() -> miette::Result<()> {
                 cmd_memory_delete(&home, &agent, id),
             MemoryCommands::Stats { agent, json } =>
                 cmd_memory_stats(&home, &agent, json),
+        },
+        Commands::Mcp { command } => match command {
+            McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()),
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
@@ -1300,6 +1319,44 @@ mod tests {
         let result: Result<Vec<TunnelListEntry>, _> = serde_json::from_str(json);
         assert!(result.is_ok(), "parse must succeed with unknown fields present");
     }
+
+    // ---- McpCommands variant existence (compile-time) ----
+
+    #[test]
+    fn mcp_commands_status_variant_exists() {
+        use super::McpCommands;
+        let _ = McpCommands::Status { agent: None };
+        let _ = McpCommands::Status { agent: Some("right".to_string()) };
+    }
+
+    // ---- cmd_mcp_status error paths ----
+
+    #[test]
+    fn cmd_mcp_status_errors_on_nonexistent_agent() {
+        use super::cmd_mcp_status;
+        let tmp = TempDir::new().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        fs::create_dir_all(&agents_dir).unwrap();
+
+        let result = cmd_mcp_status(tmp.path(), Some("nonexistent"));
+        let err = result.expect_err("should fail when agent not found");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("agent not found"),
+            "error must mention 'agent not found', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cmd_mcp_status_returns_ok_with_no_mcp_json() {
+        use super::cmd_mcp_status;
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = tmp.path().join("agents").join("myagent");
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let result = cmd_mcp_status(tmp.path(), Some("myagent"));
+        assert!(result.is_ok(), "should succeed when .mcp.json absent");
+    }
 }
 
 const MANAGED_SETTINGS_DIR: &str = "/etc/claude-code";
@@ -1628,4 +1685,57 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
         .exec();
 
     Err(miette::miette!("failed to launch claude: {err}"))
+}
+
+fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
+    use rightclaw::mcp::detect::mcp_auth_status;
+
+    let agents_dir = home.join("agents");
+    let credentials_path = dirs::home_dir()
+        .ok_or_else(|| miette::miette!("cannot determine home directory"))?
+        .join(".claude")
+        .join(".credentials.json");
+
+    // Collect agent dirs — either all or filtered to one
+    let entries: Vec<std::path::PathBuf> = if let Some(name) = agent_filter {
+        let dir = agents_dir.join(name);
+        if !dir.is_dir() {
+            return Err(miette::miette!("agent not found: {name}"));
+        }
+        vec![dir]
+    } else {
+        let rd = std::fs::read_dir(&agents_dir)
+            .map_err(|e| miette::miette!("cannot read agents dir: {e:#}"))?;
+        let mut dirs: Vec<_> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.sort();
+        dirs
+    };
+
+    let mut any = false;
+    for agent_dir in &entries {
+        let agent_name = agent_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        let mcp_path = agent_dir.join(".mcp.json");
+        let statuses = mcp_auth_status(&mcp_path, &credentials_path)
+            .map_err(|e| miette::miette!("mcp_auth_status for {agent_name}: {e:#}"))?;
+        for s in &statuses {
+            let icon = match s.state {
+                rightclaw::mcp::detect::AuthState::Present => "✅",
+                rightclaw::mcp::detect::AuthState::Missing => "❌",
+                rightclaw::mcp::detect::AuthState::Expired => "⚠️",
+            };
+            println!("{agent_name}  {icon} {}  {}", s.name, s.state);
+            any = true;
+        }
+    }
+    if !any {
+        println!("No HTTP MCP servers configured.");
+    }
+    Ok(())
 }
