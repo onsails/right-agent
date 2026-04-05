@@ -566,7 +566,7 @@ async fn cmd_up(
     }
 
     // Generate cloudflared config and wrapper script when tunnel is configured (Phase 38).
-    let global_cfg = rightclaw::config::read_global_config(&home)?;
+    let global_cfg = rightclaw::config::read_global_config(home)?;
     let cloudflared_script_path: Option<std::path::PathBuf> = if let Some(tunnel_cfg) = global_cfg.tunnel {
         let agent_pairs: Vec<(String, std::path::PathBuf)> = agents
             .iter()
