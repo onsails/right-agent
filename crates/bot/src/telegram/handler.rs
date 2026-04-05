@@ -621,6 +621,7 @@ pub async fn handle_doctor(
     msg: Message,
     home: Arc<RightclawHome>,
 ) -> ResponseResult<()> {
+    tracing::info!("handle_doctor: running diagnostics");
     let checks = rightclaw::doctor::run_doctor(&home.0);
     let mut body = String::new();
     for check in &checks {
@@ -631,10 +632,17 @@ pub async fn handle_doctor(
         .filter(|c| matches!(c.status, rightclaw::doctor::CheckStatus::Pass))
         .count();
     body.push_str(&format!("\n{pass_count}/{} checks passed", checks.len()));
-    let text = format!("Doctor results:\n\n<pre>{}</pre>", body);
-    bot.send_message(msg.chat.id, text)
+    // HTML-escape body before wrapping in <pre> — doctor output may contain <, >, &
+    let escaped = body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let text = format!("Doctor results:\n\n<pre>{}</pre>", escaped);
+    if let Err(e) = bot.send_message(msg.chat.id, &text)
         .parse_mode(teloxide::types::ParseMode::Html)
-        .await?;
+        .await
+    {
+        tracing::error!("handle_doctor: Telegram rejected HTML message: {e:#}");
+        // Fallback: send as plain text without <pre> wrapper
+        bot.send_message(msg.chat.id, format!("Doctor results:\n\n{body}")).await?;
+    }
     Ok(())
 }
 
