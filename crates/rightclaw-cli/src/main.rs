@@ -329,6 +329,43 @@ fn tunnel_uuid_from_credentials_file(path: &std::path::Path) -> miette::Result<S
         .ok_or_else(|| miette::miette!("credentials file missing 'TunnelID' field"))
 }
 
+// ---- Auto-tunnel helpers (Phase 39) ----
+
+/// An entry returned by `cloudflared tunnel list -o json`.
+#[derive(serde::Deserialize)]
+struct TunnelListEntry {
+    id: String,
+    name: String,
+}
+
+/// Testable variant of detect_cloudflared_cert — takes an explicit home dir.
+fn detect_cloudflared_cert_with_home(home: &std::path::Path) -> bool {
+    // Stub — always false until Task 2 implementation
+    let _ = home;
+    false
+}
+
+/// Returns true if `~/.cloudflared/cert.pem` exists (cloudflared login has been run).
+fn detect_cloudflared_cert() -> bool {
+    dirs::home_dir()
+        .map(|h| detect_cloudflared_cert_with_home(&h))
+        .unwrap_or(false)
+}
+
+/// Testable variant — builds `<home>/.cloudflared/<uuid>.json` path.
+fn cloudflared_credentials_path_for_home(home: &std::path::Path, uuid: &str) -> std::path::PathBuf {
+    // Stub — returns home unchanged until Task 2 implementation
+    let _ = uuid;
+    home.to_path_buf()
+}
+
+/// Returns `~/.cloudflared/<uuid>.json` for the given tunnel UUID.
+fn cloudflared_credentials_path(uuid: &str) -> miette::Result<std::path::PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
+    Ok(cloudflared_credentials_path_for_home(&home, uuid))
+}
+
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
     let checks = rightclaw::doctor::run_doctor(home);
     let mut has_failure = false;
@@ -768,7 +805,7 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_agent_db, truncate_content, tunnel_uuid_from_credentials_file, write_managed_settings, ConfigCommands, MemoryCommands};
+    use super::{cloudflared_credentials_path_for_home, detect_cloudflared_cert_with_home, resolve_agent_db, truncate_content, tunnel_uuid_from_credentials_file, write_managed_settings, ConfigCommands, MemoryCommands, TunnelListEntry};
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1156,6 +1193,55 @@ mod tests {
         fs::write(&creds_path, "not json").unwrap();
         let result = tunnel_uuid_from_credentials_file(&creds_path);
         assert!(result.is_err(), "should fail on invalid JSON");
+    }
+
+    // ---- auto-tunnel helper tests (Phase 39 TDD RED) ----
+
+    #[test]
+    fn detect_cloudflared_cert_returns_false_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let result = detect_cloudflared_cert_with_home(tmp.path());
+        assert!(!result, "should return false when cert.pem is absent");
+    }
+
+    #[test]
+    fn detect_cloudflared_cert_returns_true_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let cloudflared_dir = tmp.path().join(".cloudflared");
+        fs::create_dir_all(&cloudflared_dir).unwrap();
+        fs::write(cloudflared_dir.join("cert.pem"), "dummy cert content").unwrap();
+        let result = detect_cloudflared_cert_with_home(tmp.path());
+        assert!(result, "should return true when cert.pem exists");
+    }
+
+    #[test]
+    fn cloudflared_credentials_path_constructs_expected_path() {
+        let result = cloudflared_credentials_path_for_home(std::path::Path::new("/home/user"), "abc-123");
+        assert_eq!(result, PathBuf::from("/home/user/.cloudflared/abc-123.json"));
+    }
+
+    #[test]
+    fn parse_tunnel_list_finds_tunnel_by_name() {
+        let json = r#"[{"id":"abc-123","name":"rightclaw","created_at":"2026-04-05T10:00:00Z","deleted_at":"0001-01-01T00:00:00Z","connections":[]}]"#;
+        let tunnels: Vec<TunnelListEntry> = serde_json::from_str(json).expect("parse should succeed");
+        let found = tunnels.into_iter().find(|t| t.name == "rightclaw");
+        assert!(found.is_some(), "should find tunnel by name");
+        assert_eq!(found.unwrap().id, "abc-123");
+    }
+
+    #[test]
+    fn parse_tunnel_list_returns_none_for_missing_name() {
+        let json = r#"[{"id":"abc-123","name":"rightclaw","created_at":"2026-04-05T10:00:00Z","deleted_at":"0001-01-01T00:00:00Z","connections":[]}]"#;
+        let tunnels: Vec<TunnelListEntry> = serde_json::from_str(json).expect("parse should succeed");
+        let found = tunnels.into_iter().find(|t| t.name == "other-tunnel");
+        assert!(found.is_none(), "should return None for unknown tunnel name");
+    }
+
+    #[test]
+    fn parse_tunnel_list_ignores_unknown_fields() {
+        let json = r#"[{"id":"x","name":"n","future_field":"whatever"}]"#;
+        let result: Result<Vec<TunnelListEntry>, _> = serde_json::from_str(json);
+        assert!(result.is_ok(), "parse must succeed with unknown fields present");
     }
 }
 
