@@ -417,10 +417,11 @@ fn create_tunnel(cf_bin: &std::path::Path, name: &str) -> miette::Result<TunnelL
         .map_err(|e| miette::miette!("parse cloudflared create output: {e:#}"))
 }
 
-/// Create a DNS CNAME record for the tunnel. Non-fatal — logs warn on failure.
+/// Create a DNS CNAME record for the tunnel. Uses --overwrite-dns to replace
+/// stale CNAMEs pointing to old/dead tunnels. Non-fatal — logs warn on failure.
 fn route_dns(cf_bin: &std::path::Path, uuid: &str, hostname: &str) {
     let result = std::process::Command::new(cf_bin)
-        .args(["tunnel", "--loglevel", "error", "route", "dns", uuid, hostname])
+        .args(["tunnel", "--loglevel", "error", "route", "dns", "--overwrite-dns", uuid, hostname])
         .output();
     match result {
         Ok(output) if output.status.success() => {
@@ -745,7 +746,7 @@ async fn cmd_up(
         let hostname = &tunnel_cfg.hostname;
         let cf_config_path_str = cf_config_path.display();
         let script_content = format!(
-            "#!/bin/sh\ncloudflared tunnel route dns {uuid} {hostname} || true\nexec cloudflared tunnel --config {cf_config_path_str} run\n"
+            "#!/bin/sh\ncloudflared tunnel route dns --overwrite-dns {uuid} {hostname} || true\nexec cloudflared tunnel --config {cf_config_path_str} run\n"
         );
         let script_path = scripts_dir.join("cloudflared-start.sh");
         std::fs::write(&script_path, &script_content)
