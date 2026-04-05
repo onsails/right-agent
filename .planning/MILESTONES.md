@@ -1,5 +1,17 @@
 # Milestones
 
+## v3.2 MCP & Tunnel (Shipped: 2026-04-05)
+
+**Phases completed:** 2 phases, 3 plans, 6 tasks
+
+**Key accomplishments:**
+
+- cloudflared spawned as persistent process-compose entry via conditional Jinja2 block, wired from cmd_up with pre-flight PATH check
+- Replaced proprietary .credentials.json key-derivation with direct .mcp.json Authorization header injection and _rightclaw_oauth metadata storage
+- Completed OAuth token migration from .credentials.json to .mcp.json headers — removed credentials_path from all structs/functions, eliminated PcClient agent restart from callback
+
+---
+
 ## v3.1 Sandbox Fix & Verification (Shipped: 2026-04-03)
 
 **Phases completed:** 3 phases, 3 plans, 4 tasks

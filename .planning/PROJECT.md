@@ -8,14 +8,9 @@ RightClaw is a multi-agent runtime for Claude Code. Each agent runs as an indepe
 
 Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, each with its own sandbox configuration and identity, orchestrated by a single CLI command.
 
-## Current Milestone: v3.2 (TBD)
+## Current Milestone: Planning Next
 
-**Goal:** Next milestone — to be defined.
-
-**Target features:**
-- Fix sandbox so CC finds its dependencies when launched from rightclaw (nix vendored ripgrep path issue)
-- End-to-end verification of rightclaw up → bot → Telegram → cron flow with sandbox enabled
-- Doctor diagnostics detect and report sandbox dependency issues before launch
+**Goal:** v3.2 MCP & Tunnel shipped. Next milestone TBD via `/gsd-new-milestone`.
 
 ## Requirements
 
@@ -81,10 +76,14 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ `rightclaw doctor` checks rg in PATH + validates settings.json ripgrep.command (cross-platform) — v3.1 Phase 30 (DOC-01, DOC-02)
 - ✓ `tests/e2e/verify-sandbox.sh` — repeatable 4-stage script proving sandbox engagement via exit-code strategy under `failIfUnavailable:true`; live-run confirmed 2026-04-03 — v3.1 Phase 31 (VER-01..03)
 - ✓ `generate_process_compose` extended with `cloudflared_script: Option<&Path>`; `CloudflaredEntry` struct serializes script path; template conditional block renders cloudflared process only when TunnelConfig present; pre-flight `which::which("cloudflared")` check in cmd_up — v3.2 Phase 40 (TUNL-02)
+- ✓ Cloudflared auto-tunnel: `rightclaw init` detects `~/.cloudflared/cert.pem`, auto-creates Named Tunnel, routes DNS with `--overwrite-dns` — v3.2 Phase 39
+- ✓ MCP OAuth for headless agents: `/mcp auth` does OAuth discovery (RFC 9728/8414), PKCE, cloudflared callback, writes Bearer token to `.claude.json` `type:http` server headers — v3.2 Phase 41
+- ✓ `/mcp add/remove/list` manage HTTP MCP servers in `.claude.json`; CC handles OAuth natively for `.claude.json` servers — v3.2 Phase 41
+- ✓ `/doctor` via Telegram with HTML-escaped `<pre>` output + plain-text fallback — v3.2
 
 ### Active
 
-None — v3.2 Phase 40 complete.
+None — v3.2 shipped.
 
 ### Out of Scope
 
@@ -136,6 +135,10 @@ None — v3.2 Phase 40 complete.
 | sandbox.failIfUnavailable: true unconditional (v3.1) | Silent sandbox degradation caused invisible failures; fatal is safer than silent | ✓ Good |
 | Exit-code proof for E2E sandbox verification (v3.1) | Stderr grep is brittle across CC versions; exit 0 under failIfUnavailable is definitive | ✓ Good |
 | claude → claude-bun binary fallback in verify-sandbox.sh (v3.1) | Nix installs `claude-bun`, not `claude`; mirrors worker.rs which() fallback pattern | ✓ Good |
+| Write MCP tokens to .claude.json not .credentials.json (v3.2) | CC uses proprietary key derivation for .credentials.json that can't be replicated; .claude.json with type:http + Authorization header works natively | ✓ Good |
+| Headless OAuth via cloudflared callback (v3.2) | CC can't do browser OAuth in -p mode; rightclaw's /mcp auth handles the redirect via cloudflared tunnel | ✓ Good |
+| Delete custom token refresh (v3.2) | CC handles refresh natively for servers in .claude.json; custom refresh.rs was unnecessary complexity | ✓ Good |
+| --overwrite-dns in route_dns (v3.2) | Stale CNAME pointing to dead tunnel caused 530/1033; --overwrite-dns replaces it automatically | ✓ Good |
 
 ## Evolution
 
@@ -156,12 +159,13 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
-**v3.2 Phase 40 complete** (2026-04-05). Cloudflared wired into process-compose.
+**v3.2 MCP & Tunnel shipped** (2026-04-05).
 
-- `generate_process_compose` extended to accept `cloudflared_script: Option<&Path>`; `CloudflaredEntry` struct carries script path + working_dir for template rendering
-- `templates/process-compose.yaml.j2` conditional block: cloudflared process with restart on_failure, signal 15, timeout 30, backoff 5, max_restarts 10 — rendered only when TunnelConfig present
-- Pre-flight `which::which("cloudflared")` check in `cmd_up` before any file generation; fails fast with clear error if binary missing
-- 2 new tests (cloudflared with/without tunnel); 279 total passing; workspace builds clean
+- Cloudflared auto-tunnel: `rightclaw init` detects cert.pem, creates Named Tunnel, routes DNS with `--overwrite-dns`, wires into process-compose as persistent process
+- MCP OAuth for headless agents: `/mcp auth` does RFC 9728/8414 discovery + PKCE + cloudflared callback, writes Bearer token to `.claude.json` with `type: http` — CC handles auth natively from there
+- `/mcp add/remove/list` manage HTTP servers in `.claude.json`; stdio servers (rightmemory) stay in `.mcp.json`
+- `/doctor` via Telegram with HTML-escaped output + plain-text fallback
+- Custom OAuth token storage (`.credentials.json`, refresh scheduler) deleted — CC manages tokens for `.claude.json` servers
 
 **v3.1 shipped** (2026-04-03). Sandbox Fix & Verification complete.
 
@@ -176,6 +180,11 @@ This document evolves at phase transitions and milestone boundaries.
 - v2.1 (2026-03-25): Headless agent isolation — per-agent HOME override + credential symlinks
 - v2.2 (2026-03-26): Skills registry — ClawHub removed, `/rightskills` (skills.sh) as built-in
 - v2.3 (2026-03-27): Memory system — per-agent SQLite, MCP server, CLI inspection
+- v2.4 (2026-03-28): Sandbox Telegram fix
+- v2.5 (2026-03-31): RightCron reliability — inline bootstrap, CHECK/RECONCILE split
+- v3.0 (2026-04-01): Teloxide bot runtime — native Rust Telegram bot, cron scheduler
+- v3.1 (2026-04-03): Sandbox fix & verification — ripgrep path, E2E sandbox proof
+- v3.2 (2026-04-05): MCP & Tunnel — cloudflared auto-tunnel, MCP OAuth via .claude.json
 - v2.4 (2026-03-28): Telegram diagnosis — iv6/M6 gap identified, fix deferred to CC upstream
 - v2.5 (2026-03-31): RightCron reliability — inline bootstrap + CHECK/RECONCILE skill redesign
 - v3.0 (2026-04-01): Teloxide bot runtime — native Rust bot, CC agent dispatch, cron runtime, PC cutover
