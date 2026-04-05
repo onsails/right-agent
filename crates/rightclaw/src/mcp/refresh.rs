@@ -263,7 +263,6 @@ async fn run_token_refresh_loop(
 /// Each qualifying server gets its own `run_token_refresh_loop` task.
 pub async fn run_refresh_scheduler(
     agent_dir: PathBuf,
-    _credentials_path: PathBuf,
     http_client: reqwest::Client,
 ) {
     let mcp_path = agent_dir.join(".mcp.json");
@@ -476,8 +475,7 @@ mod tests {
 
         // run_refresh_scheduler should return without panicking (no task spawned)
         let http_client = reqwest::Client::new();
-        let credentials_path = dir.path().join(".credentials.json"); // unused but signature kept
-        run_refresh_scheduler(agent_dir, credentials_path, http_client).await;
+        run_refresh_scheduler(agent_dir, http_client).await;
         // If we get here, the scheduler correctly skipped the server
     }
 }
