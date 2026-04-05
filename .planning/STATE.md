@@ -4,8 +4,8 @@ milestone: v3.2
 milestone_name: MCP OAuth
 status: executing
 stopped_at: Phase 37 context gathered
-last_updated: "2026-04-04T22:30:06.354Z"
-last_activity: 2026-04-04 -- Phase 37 execution started
+last_updated: "2026-04-05T00:24:17.918Z"
+last_activity: 2026-04-05 -- Phase v3.2-mcp-oauth-uat execution started
 progress:
   total_phases: 5
   completed_phases: 5
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 37 — fix-v3-2-uat-gaps-tunnel-setup-flow-tunnel-hostname-dns-rout
+**Current focus:** Phase v3.2-mcp-oauth-uat — MCP OAuth UAT gaps
 
 ## Current Position
 
-Phase: 37 (fix-v3-2-uat-gaps-tunnel-setup-flow-tunnel-hostname-dns-rout) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 37
-Last activity: 2026-04-04 -- Phase 37 execution started
+Phase: v3.2-mcp-oauth-uat (MCP OAuth UAT gaps) — EXECUTING
+Plan: 1 of 1
+Status: Executing Phase v3.2-mcp-oauth-uat
+Last activity: 2026-04-05 -- Phase v3.2-mcp-oauth-uat execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 ### Roadmap Evolution
 
 - Phase 36 added: Auto-derive cfargotunnel hostname from tunnel token JWT
+- Phase 38 added: Tunnel refactor — replace --tunnel-token JWT with cloudflared credentials-file named tunnel approach
 - Phase 37 added: Fix v3.2 UAT gaps: tunnel setup flow (--tunnel-hostname, DNS routing wrapper, doctor checks), MCP tracing logs, mcp status labels, rightclaw up warning visibility
 
 ### Decisions

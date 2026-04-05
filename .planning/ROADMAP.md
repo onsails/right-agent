@@ -191,3 +191,13 @@ Plans:
 - [x] 37-01-PLAN.md — TunnelConfig hostname field + tunnel_uuid() + --tunnel-hostname CLI arg
 - [x] 37-02-PLAN.md — AuthState label fix + doctor tunnel-token check + mcp handler tracing
 - [x] 37-03-PLAN.md — DNS wrapper script generation + process-compose integration + eprintln MCP warning
+
+### Phase 38: Tunnel refactor: replace --tunnel-token with credentials-file
+
+**Goal:** Replace JWT token approach with proper named tunnel flow. `rightclaw init` creates/reuses a cloudflared named tunnel via credentials file, enabling local ingress control for OAuth callbacks.
+**Requirements**: TBD
+**Depends on:** Phase 37
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 38 to break down)
