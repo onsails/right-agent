@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 41-01-PLAN.md
-last_updated: "2026-04-05T20:13:41.021Z"
+stopped_at: Completed 41-02-PLAN.md
+last_updated: "2026-04-05T20:20:12.211Z"
 last_activity: 2026-04-05
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 3
-  completed_plans: 2
-  percent: 67
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State
@@ -75,6 +75,7 @@ Progress: [██████████] 100%
 | Phase 39-cloudflared-auto-tunnel P01 | 25 | 2 tasks | 3 files |
 | 40 | 1 | - | - |
 | Phase 41 P01 | 9 | 2 tasks | 10 files |
+| Phase 41 P02 | 4 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -146,6 +147,8 @@ Recent decisions relevant to v2.3:
 - [Phase 39-cloudflared-auto-tunnel]: cert.pem as login signal — absent means skip tunnel setup with info message; credentials_file points to ~/.cloudflared/<uuid>.json directly (no copy)
 - [Phase 39-cloudflared-auto-tunnel]: tunnel_uuid_from_credentials_file removed; UUID now from tunnel list/create JSON output via TunnelListEntry struct
 - [Phase 41]: Replaced .credentials.json key-derivation with direct .mcp.json Authorization header injection; updated all callers in Plan 01 (Rule 3 deviation)
+- [Phase 41]: Agent restart via PcClient removed from OAuth callback — CC uses claude -p per message
+- [Phase 41]: Complete .credentials.json migration: all OAuth token I/O via .mcp.json headers
 
 ### Roadmap Evolution
 
@@ -177,6 +180,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-05T20:13:41.018Z
-Stopped at: Completed 41-01-PLAN.md
+Last session: 2026-04-05T20:20:12.208Z
+Stopped at: Completed 41-02-PLAN.md
 Resume file: None
