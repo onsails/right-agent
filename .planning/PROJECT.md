@@ -8,9 +8,9 @@ RightClaw is a multi-agent runtime for Claude Code. Each agent runs as an indepe
 
 Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, each with its own sandbox configuration and identity, orchestrated by a single CLI command.
 
-## Current Milestone: Planning Next
+## Current Milestone: v3.3 MCP Self-Management
 
-**Goal:** v3.2 MCP & Tunnel shipped. Next milestone TBD via `/gsd-new-milestone`.
+**Goal:** Agents can manage their own MCP server connections via native MCP tools — add, remove, list, and OAuth authenticate HTTP MCP servers without Telegram bot commands.
 
 ## Requirements
 

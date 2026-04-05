@@ -12,6 +12,7 @@
 - ✅ **v3.0 Teloxide Bot Runtime** - Phases 22-28.2 (shipped 2026-04-01)
 - ✅ **v3.1 Sandbox Fix & Verification** - Phases 29-31 (shipped 2026-04-03)
 - ✅ **v3.2 MCP & Tunnel** - Phases 38-41 (shipped 2026-04-05)
+- 🚧 **v3.3 MCP Self-Management** - Phase 1 (in progress)
 
 ## Phases
 
@@ -99,3 +100,16 @@ See [milestones/v3.2-ROADMAP.md](milestones/v3.2-ROADMAP.md)
 | 22-28.2. Teloxide Bot Runtime | v3.0 | ✓ | Complete | 2026-04-01 |
 | 29-31. Sandbox Fix & Verification | v3.1 | ✓ | Complete | 2026-04-03 |
 | 38-41. MCP & Tunnel | v3.2 | ✓ | Complete | 2026-04-05 |
+| 1. MCP management tools | v3.3 | 0/? | Not started | - |
+
+### 🚧 v3.3 MCP Self-Management (In Progress)
+
+### Phase 1: MCP management tools in rightmemory server
+
+**Goal:** Add mcp_add, mcp_remove, mcp_list, mcp_auth tools to the rightmemory MCP server so agents can self-manage their MCP connections.
+**Requirements**: MCP-TOOL-01, MCP-TOOL-02, MCP-TOOL-03, MCP-TOOL-04, MCP-TOOL-05, MCP-NF-01, MCP-NF-02
+**Depends on:** —
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 1 to break down)
