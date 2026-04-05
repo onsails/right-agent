@@ -16,6 +16,7 @@ processes:
       - RC_TELEGRAM_TOKEN_FILE={{ agent.token_file }}
 {% endif %}
       - ENABLE_CLAUDEAI_MCP_SERVERS=false
+      - ENABLE_TOOL_SEARCH=false
       - MCP_CONNECTION_NONBLOCKING=1
     availability:
       restart: "{{ agent.restart_policy }}"

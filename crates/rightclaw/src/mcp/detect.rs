@@ -37,12 +37,30 @@ impl std::fmt::Display for ServerSource {
     }
 }
 
+/// Whether the MCP server is HTTP (url-bearing) or stdio (command+args).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServerKind {
+    Http,
+    Stdio,
+}
+
+impl std::fmt::Display for ServerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServerKind::Http => write!(f, "http"),
+            ServerKind::Stdio => write!(f, "stdio"),
+        }
+    }
+}
+
 /// Status for a single MCP server entry.
 pub struct ServerStatus {
     pub name: String,
+    /// URL for HTTP servers, command name for stdio servers.
     pub url: String,
     pub state: AuthState,
     pub source: ServerSource,
+    pub kind: ServerKind,
 }
 
 /// Return status for all MCP servers in an agent directory.
@@ -81,6 +99,7 @@ pub fn mcp_auth_status(
                         url: url.to_string(),
                         state: AuthState::Present, // CC manages auth natively
                         source: ServerSource::ClaudeJson,
+                        kind: ServerKind::Http,
                     });
                 }
             }
@@ -95,32 +114,40 @@ pub fn mcp_auth_status(
 
         if let Some(servers) = root.get("mcpServers").and_then(|v| v.as_object()) {
             for (name, entry) in servers {
-                let url = match entry.get("url").and_then(|v| v.as_str()) {
-                    Some(u) => u.to_string(),
-                    None => continue, // stdio server — skip
-                };
-
                 // Skip if already listed from .claude.json (avoid duplicates)
                 if results.iter().any(|r| r.name == *name) {
                     continue;
                 }
 
-                let has_bearer = entry
-                    .get("headers")
-                    .and_then(|v| v.get("Authorization"))
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s.starts_with("Bearer "));
+                if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
+                    // HTTP server
+                    let has_bearer = entry
+                        .get("headers")
+                        .and_then(|v| v.get("Authorization"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s.starts_with("Bearer "));
 
-                results.push(ServerStatus {
-                    name: name.clone(),
-                    url,
-                    state: if has_bearer {
-                        AuthState::Present
-                    } else {
-                        AuthState::Missing
-                    },
-                    source: ServerSource::McpJson,
-                });
+                    results.push(ServerStatus {
+                        name: name.clone(),
+                        url: url.to_string(),
+                        state: if has_bearer {
+                            AuthState::Present
+                        } else {
+                            AuthState::Missing
+                        },
+                        source: ServerSource::McpJson,
+                        kind: ServerKind::Http,
+                    });
+                } else if let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) {
+                    // Stdio server
+                    results.push(ServerStatus {
+                        name: name.clone(),
+                        url: cmd.to_string(),
+                        state: AuthState::Present, // stdio servers don't need auth
+                        source: ServerSource::McpJson,
+                        kind: ServerKind::Stdio,
+                    });
+                }
             }
         }
     }
@@ -240,12 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn stdio_server_skipped() {
+    fn stdio_server_included() {
         let dir = tempdir().unwrap();
         write_mcp_json(dir.path(), &[("rightmemory", None)]);
 
         let result = mcp_auth_status(dir.path()).unwrap();
-        assert!(result.is_empty());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "rightmemory");
+        assert_eq!(result[0].kind, ServerKind::Stdio);
+        assert_eq!(result[0].state, AuthState::Present);
+        assert_eq!(result[0].url, "some-binary");
     }
 
     #[test]
@@ -279,6 +310,26 @@ mod tests {
         assert_eq!(result[0].source, ServerSource::McpJson);
         assert_eq!(result[1].name, "notion");
         assert_eq!(result[1].source, ServerSource::ClaudeJson);
+    }
+
+    #[test]
+    fn mixed_http_and_stdio_both_listed() {
+        let dir = tempdir().unwrap();
+        write_mcp_json(
+            dir.path(),
+            &[
+                ("notion", Some("https://mcp.notion.com/mcp")),
+                ("rightmemory", None),
+            ],
+        );
+
+        let result = mcp_auth_status(dir.path()).unwrap();
+        assert_eq!(result.len(), 2);
+        // Sorted by name
+        assert_eq!(result[0].name, "notion");
+        assert_eq!(result[0].kind, ServerKind::Http);
+        assert_eq!(result[1].name, "rightmemory");
+        assert_eq!(result[1].kind, ServerKind::Stdio);
     }
 
     #[test]

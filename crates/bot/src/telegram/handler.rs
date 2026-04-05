@@ -257,10 +257,20 @@ async fn handle_mcp_list(
             rightclaw::mcp::detect::AuthState::Present => "ok",
             rightclaw::mcp::detect::AuthState::Missing => "needs auth",
         };
-        text.push_str(&format!(
-            "  {} ({}) -- {} [{}]\n",
-            s.name, s.source, icon, s.url
-        ));
+        match s.kind {
+            rightclaw::mcp::detect::ServerKind::Http => {
+                text.push_str(&format!(
+                    "  {} ({}) -- {} [{}]\n",
+                    s.name, s.source, icon, s.url
+                ));
+            }
+            rightclaw::mcp::detect::ServerKind::Stdio => {
+                text.push_str(&format!(
+                    "  {} ({}) -- stdio\n",
+                    s.name, s.source
+                ));
+            }
+        }
     }
     bot.send_message(msg.chat.id, text).await?;
     Ok(())
@@ -502,6 +512,15 @@ async fn handle_mcp_remove(
     agent_dir: &Path,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp remove");
+
+    if server_name == rightclaw::mcp::PROTECTED_MCP_SERVER {
+        bot.send_message(
+            msg.chat.id,
+            format!("Cannot remove '{server_name}' — required for core functionality."),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let claude_json_path = agent_dir.join(".claude.json");
     let agent_path_key = agent_dir
