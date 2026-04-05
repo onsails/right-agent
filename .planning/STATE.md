@@ -1,11 +1,11 @@
 ---
 gsd_state_version: 1.0
-milestone: v3.1
-milestone_name: Sandbox Fix & Verification
-status: complete
-stopped_at: v3.1 milestone archived
-last_updated: "2026-04-03T11:00:00.000Z"
-last_activity: 2026-04-03
+milestone: v3.2
+milestone_name: MCP OAuth
+status: executing
+stopped_at: Phase 38 verified
+last_updated: "2026-04-05T02:00:00.000Z"
+last_activity: 2026-04-05 -- Phase 38 verified (passed)
 progress:
   total_phases: 3
   completed_phases: 3
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Planning next milestone (v3.2)
+**Current focus:** Phase 38 — tunnel-refactor (VERIFIED: passed)
 
 ## Current Position
 
-Phase: v3.1 complete — planning next milestone
-Plan: —
-Status: Milestone v3.1 archived 2026-04-03
-Last activity: 2026-04-03
+Phase: 38 (tunnel-refactor) — VERIFIED (passed 8/8)
+Plan: 3 of 3
+Status: Phase 38 complete and verified
+Last activity: 2026-04-05 -- Phase 38 verified (passed)
 
 Progress: [██████████] 100%
 
@@ -69,6 +69,9 @@ Progress: [██████████] 100%
 | Phase 28.2-v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime P02 | 2 | 2 tasks | 1 files |
 | Phase 30-doctor-diagnostics P01 | 4 | 2 tasks | 3 files |
 | Phase 31-e2e-verification P01 | 2 | 2 tasks | 2 files |
+| Phase 38-tunnel-refactor P01 | 8 | 1 tasks | 1 files |
+| Phase 38-tunnel-refactor P02 | 20 | 2 tasks | 4 files |
+| Phase 38-tunnel-refactor P03 | 12 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -133,6 +136,10 @@ Recent decisions relevant to v2.3:
 - [Phase 30-01]: check_ripgrep_in_settings is cross-platform (not Linux-gated) per DOC-02 requirement
 - [Phase 31-e2e-verification]: Tasks 1+2 collapsed: subshell cwd written directly in initial implementation
 - [Phase 31-e2e-verification]: Sandbox proof via exit code under failIfUnavailable:true (not brittle stderr parsing)
+- [Phase 38-tunnel-refactor]: TunnelID read directly from credentials JSON TunnelID field — no JWT decode; UUID stored in struct eliminates base64 path entirely
+- [Phase 38-tunnel-refactor]: RawTunnelConfig retains legacy token field as serde(default) to avoid parse panic on old configs; migration error on empty credentials_file or tunnel_uuid
+- [Phase 38-tunnel-refactor]: cloudflared.rs created in Plan 02 (not 03) as blocking dependency for cmd_up compilation
+- [Phase 38-tunnel-refactor]: cloudflared_script_path suppressed with let _ — future phase wires it into process-compose template
 
 ### Roadmap Evolution
 
@@ -140,6 +147,7 @@ Recent decisions relevant to v2.3:
 - Phase 28.1 inserted after Phase 28: v3.0 UAT — manual end-to-end testing of Teloxide bot, cron runtime, and rightclaw up flow (URGENT)
 - Phase 28.2 inserted after Phase 28.1: v3.0 UAT Fix — teloxide missing native-tls (bot restart loop) and doctor nested tokio runtime panic (URGENT)
 - v3.1 roadmap created: Phases 29-31 — Sandbox Fix, Doctor Diagnostics, E2E Verification
+- Phase 38 added: tunnel-refactor — credentials-file based cloudflared tunnel config (replaces JWT/token approach)
 
 ### Pending Todos
 
@@ -161,6 +169,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-02T22:16:53.824Z
-Stopped at: Completed 31-01-PLAN.md
+Last session: 2026-04-05T02:00:00.000Z
+Stopped at: Phase 38 verified (passed 8/8)
 Resume file: None
