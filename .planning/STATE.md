@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed quick-260405-srr
-last_updated: "2026-04-05T21:38:26.361Z"
+stopped_at: Completed quick-260405-uz6
+last_updated: "2026-04-05T22:18:13.673Z"
 last_activity: 2026-04-05
 progress:
   total_phases: 2
@@ -178,6 +178,7 @@ None.
 | 260327-04d | Fix rightmemory MCP binary path — use absolute path from current_exe() | 2026-03-27 | fb5972e | [260327-04d-fix-rightmemory-mcp-binary-path-use-abso](./quick/260327-04d-fix-rightmemory-mcp-binary-path-use-abso/) |
 | 260402-ip3 | Add ENABLE_CLAUDEAI_MCP_SERVERS=false and MCP_CONNECTION_NONBLOCKING=1 to process-compose template | 2026-04-02 | c6e3e61 | [260402-ip3-add-enable-claudeai-mcp-servers-false-to](./quick/260402-ip3-add-enable-claudeai-mcp-servers-false-to/) |
 | 260405-srr | Simplify MCP OAuth: delete custom OAuth flow, switch to CC-native via .claude.json | 2026-04-05 | 8c3e1b0, b971bbe | [260405-srr-simplify-mcp-oauth-write-http-servers-to](./quick/260405-srr-simplify-mcp-oauth-write-http-servers-to/) |
+| 260405-uz6 | Show stdio MCP servers in /mcp list and protect rightmemory from /mcp remove | 2026-04-05 | b184502 | [260405-uz6-show-stdio-mcp-servers-in-mcp-list-and-p](./quick/260405-uz6-show-stdio-mcp-servers-in-mcp-list-and-p/) |
 
 ## Session Continuity
 
