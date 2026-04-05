@@ -43,6 +43,7 @@ struct RawTunnelConfig {
     /// Legacy field — present in configs written before Phase 38. Keep to avoid parse error.
     /// Its presence (non-empty) with absent credentials_file triggers a migration error.
     #[serde(default)]
+    #[allow(dead_code)]
     token: String,
     /// New field added in Phase 38.
     #[serde(default)]
