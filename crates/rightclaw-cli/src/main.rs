@@ -87,6 +87,12 @@ pub enum Commands {
         /// (e.g. --telegram-allowed-chat-ids 85743491,100200300)
         #[arg(long, value_delimiter = ',')]
         telegram_allowed_chat_ids: Vec<i64>,
+        /// Path to cloudflared credentials JSON file (from `cloudflared tunnel create`)
+        #[arg(long, help = "Path to cloudflared credentials JSON file (from cloudflared tunnel create)")]
+        tunnel_credentials_file: Option<String>,
+        /// Public hostname for the tunnel (e.g. right.example.com)
+        #[arg(long)]
+        tunnel_hostname: Option<String>,
     },
     /// List discovered agents and their status
     List,
@@ -177,7 +183,9 @@ async fn main() -> miette::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Init { telegram_token, telegram_allowed_chat_ids } => cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids),
+        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_credentials_file, tunnel_hostname } => {
+            cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, tunnel_credentials_file.as_deref(), tunnel_hostname.as_deref())
+        }
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home),
         Commands::Up {
@@ -217,7 +225,13 @@ async fn main() -> miette::Result<()> {
     }
 }
 
-fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_allowed_chat_ids: &[i64]) -> miette::Result<()> {
+fn cmd_init(
+    home: &Path,
+    telegram_token: Option<&str>,
+    telegram_allowed_chat_ids: &[i64],
+    tunnel_credentials_file: Option<&str>,
+    tunnel_hostname: Option<&str>,
+) -> miette::Result<()> {
     // If --telegram-token flag provided, validate it upfront.
     // Otherwise prompt interactively.
     let token = match telegram_token {
@@ -241,7 +255,78 @@ fn cmd_init(home: &Path, telegram_token: Option<&str>, telegram_allowed_chat_ids
     if !telegram_allowed_chat_ids.is_empty() {
         println!("Telegram chat ID allowlist configured.");
     }
+
+    // Tunnel config: copy credentials file and write TunnelConfig to config.yaml.
+    match (tunnel_credentials_file, tunnel_hostname) {
+        (Some(creds_path_str), Some(t_hostname)) => {
+            // Validate hostname is a bare domain, not a URL.
+            if t_hostname.starts_with("https://") || t_hostname.starts_with("http://") {
+                return Err(miette::miette!(
+                    "--tunnel-hostname must be a bare domain (e.g. example.com), not a URL"
+                ));
+            }
+            // Resolve source path to absolute.
+            let src = std::path::PathBuf::from(creds_path_str)
+                .canonicalize()
+                .map_err(|e| miette::miette!("resolve credentials file path: {e:#}"))?;
+            // Read TunnelID from JSON.
+            let uuid = tunnel_uuid_from_credentials_file(&src)?;
+            // Create tunnel dir and copy file.
+            let tunnel_dir = home.join("tunnel");
+            std::fs::create_dir_all(&tunnel_dir)
+                .map_err(|e| miette::miette!("create tunnel dir: {e:#}"))?;
+            let dest = tunnel_dir.join(format!("{uuid}.json"));
+            std::fs::copy(&src, &dest)
+                .map_err(|e| miette::miette!("copy credentials file: {e:#}"))?;
+            // Set 0600 permissions on copy.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| miette::miette!("chmod credentials file: {e:#}"))?;
+            }
+            // Write config.yaml with new TunnelConfig.
+            let tunnel_config = rightclaw::config::TunnelConfig {
+                tunnel_uuid: uuid.clone(),
+                credentials_file: dest,
+                hostname: t_hostname.to_string(),
+            };
+            let config = rightclaw::config::GlobalConfig {
+                tunnel: Some(tunnel_config),
+            };
+            rightclaw::config::write_global_config(home, &config)?;
+            println!("Tunnel config written to {}/config.yaml", home.display());
+            println!("Tunnel UUID: {uuid} (hostname: {t_hostname})");
+        }
+        (Some(_), None) => {
+            return Err(miette::miette!(
+                "--tunnel-hostname is required when --tunnel-credentials-file is provided"
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(miette::miette!(
+                "--tunnel-credentials-file is required when --tunnel-hostname is provided"
+            ));
+        }
+        (None, None) => {} // No tunnel config — skip
+    }
+
     Ok(())
+}
+
+/// Extract the TunnelID field from a cloudflared credentials JSON file.
+///
+/// The credentials JSON produced by `cloudflared tunnel create` contains a
+/// `TunnelID` field with the tunnel's UUID string.  No JWT decode is needed.
+fn tunnel_uuid_from_credentials_file(path: &std::path::Path) -> miette::Result<String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| miette::miette!("read credentials file: {e:#}"))?;
+    let v: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| miette::miette!("parse credentials file: {e:#}"))?;
+    v["TunnelID"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| miette::miette!("credentials file missing 'TunnelID' field"))
 }
 
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
@@ -632,7 +717,7 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_agent_db, truncate_content, write_managed_settings, ConfigCommands, MemoryCommands};
+    use super::{resolve_agent_db, truncate_content, tunnel_uuid_from_credentials_file, write_managed_settings, ConfigCommands, MemoryCommands};
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -983,6 +1068,43 @@ mod tests {
         let result = std::fs::remove_dir_all(agent_dir.join(".claude/skills/skills"));
         // Either Ok or NotFound error — never panics
         assert!(result.is_ok() || result.unwrap_err().kind() == std::io::ErrorKind::NotFound);
+    }
+
+    // ---- tunnel_uuid_from_credentials_file tests ----
+
+    #[test]
+    fn cmd_init_reads_tunnel_id_from_credentials_json() {
+        let tmp = TempDir::new().unwrap();
+        let creds_path = tmp.path().join("tunnel.json");
+        fs::write(
+            &creds_path,
+            r#"{"AccountTag":"a","TunnelSecret":"s","TunnelID":"e765cc71-d0c2-42a3-864b-81566f8817fd","Endpoint":""}"#,
+        )
+        .unwrap();
+        let result = tunnel_uuid_from_credentials_file(&creds_path).expect("should succeed");
+        assert_eq!(result, "e765cc71-d0c2-42a3-864b-81566f8817fd");
+    }
+
+    #[test]
+    fn cmd_init_returns_error_on_missing_tunnel_id_field() {
+        let tmp = TempDir::new().unwrap();
+        let creds_path = tmp.path().join("no-tunnel-id.json");
+        fs::write(&creds_path, r#"{"foo":"bar"}"#).unwrap();
+        let err = tunnel_uuid_from_credentials_file(&creds_path).expect_err("should fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("missing 'TunnelID'"),
+            "error must mention missing TunnelID, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn cmd_init_returns_error_on_invalid_json() {
+        let tmp = TempDir::new().unwrap();
+        let creds_path = tmp.path().join("bad.json");
+        fs::write(&creds_path, "not json").unwrap();
+        let result = tunnel_uuid_from_credentials_file(&creds_path);
+        assert!(result.is_err(), "should fail on invalid JSON");
     }
 }
 
