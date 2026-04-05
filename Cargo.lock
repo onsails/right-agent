@@ -2155,7 +2155,6 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "dirs",
- "hex",
  "miette",
  "minijinja",
  "rand 0.10.0",

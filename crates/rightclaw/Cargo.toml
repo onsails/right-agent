@@ -19,7 +19,6 @@ which = { workspace = true }
 rusqlite = { workspace = true }
 rusqlite_migration = { workspace = true }
 sha2 = { workspace = true }
-hex = { workspace = true }
 tempfile = { workspace = true }
 subtle = { workspace = true }
 rand = { workspace = true }

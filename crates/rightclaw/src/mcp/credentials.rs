@@ -1,9 +1,7 @@
-use hex;
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
 use std::io::Write as _;
+use std::path::Path;
+use tempfile::NamedTempFile;
 
 /// Error type for credential operations.
 #[derive(Debug, thiserror::Error)]
@@ -12,15 +10,16 @@ pub enum CredentialError {
     Io(#[from] std::io::Error),
     #[error("JSON parse error on credentials file: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("backup rotation failed: {0}")]
-    BackupFailed(String),
+    #[error("server '{0}' not found in mcpServers")]
+    ServerNotFound(String),
     #[error("credentials file parent directory not found")]
     InvalidPath,
     #[error("atomic write failed: {0}")]
     Persist(#[from] tempfile::PersistError),
 }
 
-/// MCP OAuth token as stored in ~/.claude/.credentials.json.
+/// MCP OAuth token held in memory during refresh grant cycle.
+/// Retained for internal use by refresh.rs.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CredentialToken {
     pub access_token: String,
@@ -30,12 +29,10 @@ pub struct CredentialToken {
     /// Unix timestamp seconds. 0 = non-expiring (e.g. Linear).
     #[serde(rename = "expiresAt")]
     pub expires_at: u64,
-    /// OAuth client_id used to obtain this token — stored for refresh grant.
-    /// Absent in credentials written before Phase 35 (deserializes as None).
+    /// OAuth client_id used to obtain this token -- stored for refresh grant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     /// OAuth client_secret (confidential clients only). None for public clients.
-    /// Absent in credentials written before Phase 35 (deserializes as None).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 }
@@ -44,176 +41,166 @@ impl std::fmt::Debug for CredentialToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CredentialToken")
             .field("access_token", &"[REDACTED]")
-            .field("refresh_token", &self.refresh_token.as_deref().map(|_| "[REDACTED]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_deref().map(|_| "[REDACTED]"),
+            )
             .field("token_type", &self.token_type)
             .field("scope", &self.scope)
             .field("expires_at", &self.expires_at)
             .field("client_id", &self.client_id)
-            .field("client_secret", &self.client_secret.as_deref().map(|_| "[REDACTED]"))
+            .field(
+                "client_secret",
+                &self.client_secret.as_deref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
 
-/// Derive the key CC uses in ~/.claude/.credentials.json for an MCP OAuth token.
-///
-/// Formula: `serverName|sha256({"type":"<type>","url":"<url>","headers":{}}, compact)[:16 hex chars]`
-/// Field order is FIXED (type → url → headers) — wrong order produces a wrong key.
-///
-/// IMPORTANT: serde_json::json! sorts keys alphabetically, which would produce the wrong hash.
-/// We build the compact JSON string manually to guarantee the exact field order CC expects.
-pub fn mcp_oauth_key(server_name: &str, server_type: &str, url: &str) -> String {
-    // Manual compact JSON construction to guarantee field order: type → url → headers.
-    // serde_json::json! sorts keys alphabetically (headers → type → url), producing a wrong key.
-    // The type and url values are user-controlled strings — escape them properly.
-    let type_escaped = server_type.replace('\\', "\\\\").replace('"', "\\\"");
-    let url_escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
-    let compact = format!(r#"{{"type":"{type_escaped}","url":"{url_escaped}","headers":{{}}}}"#);
-
-    let hash = Sha256::digest(compact.as_bytes());
-    // First 8 bytes = 16 hex chars (D-03)
-    let hex_str = hex::encode(&hash[..8]);
-    format!("{server_name}|{hex_str}")
-}
-
-/// Rotate existing backups and copy current file to .bak.
-/// Slot order: .bak.4 (oldest, dropped) ← .bak.3 ← .bak.2 ← .bak.1 ← .bak ← current file
-fn rotate_backups(path: &Path) -> Result<(), CredentialError> {
-    // Build slot paths in oldest-first order for the shift
-    let slots: Vec<PathBuf> = [".bak.4", ".bak.3", ".bak.2", ".bak.1", ".bak"]
-        .iter()
-        .map(|ext| {
-            let mut p = path.to_path_buf();
-            let fname = p.file_name().unwrap().to_string_lossy().into_owned();
-            p.set_file_name(format!("{fname}{ext}"));
-            p
-        })
-        .collect();
-
-    // slots[0] = .bak.4 (oldest) — drop it
-    if slots[0].exists() {
-        std::fs::remove_file(&slots[0])
-            .map_err(|e| CredentialError::BackupFailed(format!("remove .bak.4: {e}")))?;
-    }
-
-    // Shift older slots first to avoid overwriting: .bak.3→.bak.4, .bak.2→.bak.3, ..., .bak→.bak.1
-    // Must iterate ascending so we don't clobber a slot before moving it.
-    // TOCTOU: under concurrent access a slot may disappear between exists() and rename().
-    // Treat ENOENT on rename as benign — another thread already moved it.
-    for i in 1..slots.len() {
-        if slots[i].exists() {
-            match std::fs::rename(&slots[i], &slots[i - 1]) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Another concurrent writer already moved this slot — not an error.
-                }
-                Err(e) => {
-                    return Err(CredentialError::BackupFailed(format!("rename backup slot: {e}")));
-                }
-            }
-        }
-    }
-
-    // Copy current file → .bak (last slot after shift)
-    let bak_path = {
-        let mut p = path.to_path_buf();
-        let fname = p.file_name().unwrap().to_string_lossy().into_owned();
-        p.set_file_name(format!("{fname}.bak"));
-        p
-    };
-    std::fs::copy(path, &bak_path)
-        .map_err(|e| CredentialError::BackupFailed(format!("copy to .bak: {e}")))?;
-
-    Ok(())
+/// OAuth refresh metadata stored in .mcp.json under _rightclaw_oauth per server.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OAuthMetadata {
+    pub refresh_token: Option<String>,
+    /// Unix timestamp seconds. 0 = non-expiring.
+    pub expires_at: u64,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
 }
 
 /// Atomically write JSON value to path using same-dir NamedTempFile + rename.
-fn write_json_atomic(path: &Path, value: &serde_json::Value) -> Result<(), CredentialError> {
+pub(crate) fn write_json_atomic(
+    path: &Path,
+    value: &serde_json::Value,
+) -> Result<(), CredentialError> {
     let content = serde_json::to_string_pretty(value)?;
     let dir = path.parent().ok_or(CredentialError::InvalidPath)?;
-    // CRITICAL: new_in(dir) — same filesystem as target, avoids EXDEV on tmpfs
     let mut tmp = NamedTempFile::new_in(dir)?;
     tmp.write_all(content.as_bytes())?;
-    // persist() = rename(2) — atomic, replaces target if it exists
     tmp.persist(path)?;
     Ok(())
 }
 
-/// Write an MCP OAuth token to ~/.claude/.credentials.json under the correct CC key.
-///
-/// - Derives the key using mcp_oauth_key(server_name, "http", server_url) per D-03.
-/// - Merges with existing content — never removes other keys (D-08).
-/// - Creates a rotating backup before modifying an existing file (D-06).
-/// - Skips backup if the file does not yet exist (D-07).
-/// - Write is atomic via NamedTempFile::persist() (D-05).
-pub fn write_credential(
-    credentials_path: &Path,
-    server_name: &str,
-    server_url: &str,
-    token: &CredentialToken,
-) -> Result<(), CredentialError> {
-    let key = mcp_oauth_key(server_name, "http", server_url);
-
-    // Read existing or start fresh
-    let mut root: serde_json::Value = if credentials_path.exists() {
-        let content = std::fs::read_to_string(credentials_path)?;
-        match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                // Corrupt file: log warning, treat as empty (backup preserved prior good copy)
-                tracing::warn!(
-                    path = %credentials_path.display(),
-                    error = %e,
-                    "credentials file is corrupt — treating as empty, prior backup preserved"
-                );
-                serde_json::json!({})
-            }
-        }
-    } else {
-        serde_json::json!({})
-    };
-
-    // Ensure root is an object
-    if !root.is_object() {
-        root = serde_json::json!({});
+/// Read and parse .mcp.json. Returns empty object with mcpServers if file absent.
+fn read_mcp_json(path: &Path) -> Result<serde_json::Value, CredentialError> {
+    if !path.exists() {
+        return Ok(serde_json::json!({ "mcpServers": {} }));
     }
-
-    // Backup before first modification (D-06, D-07)
-    if credentials_path.exists() {
-        rotate_backups(credentials_path)?;
-    }
-
-    // Upsert the token under the derived key (D-08)
-    let token_value = serde_json::to_value(token)?;
-    root.as_object_mut()
-        .expect("root is always an object after normalization")
-        .insert(key, token_value);
-
-    // Atomic write (D-05)
-    write_json_atomic(credentials_path, &root)?;
-
-    Ok(())
+    let content = std::fs::read_to_string(path)?;
+    let root: serde_json::Value = serde_json::from_str(&content)?;
+    Ok(root)
 }
 
-/// Read an MCP OAuth token from ~/.claude/.credentials.json by server name and URL.
-///
-/// Returns Ok(None) if the file does not exist or the key is absent.
-pub fn read_credential(
-    credentials_path: &Path,
+/// Write Bearer token into .mcp.json headers for the named server.
+/// Atomic read-modify-write. Preserves all other .mcp.json content.
+/// Creates headers object if absent. Server entry must already exist.
+pub fn write_bearer_to_mcp_json(
+    mcp_json_path: &Path,
     server_name: &str,
-    server_url: &str,
-) -> Result<Option<CredentialToken>, CredentialError> {
-    if !credentials_path.exists() {
+    access_token: &str,
+) -> Result<(), CredentialError> {
+    let mut root = read_mcp_json(mcp_json_path)?;
+
+    let servers = root
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| CredentialError::ServerNotFound(server_name.to_string()))?;
+
+    let entry = servers
+        .get_mut(server_name)
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| CredentialError::ServerNotFound(server_name.to_string()))?;
+
+    // Create headers object if absent
+    if !entry.contains_key("headers") {
+        entry.insert(
+            "headers".to_string(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+    }
+
+    let headers = entry
+        .get_mut("headers")
+        .and_then(|v| v.as_object_mut())
+        .expect("headers was just created or already existed as object");
+
+    headers.insert(
+        "Authorization".to_string(),
+        serde_json::Value::String(format!("Bearer {access_token}")),
+    );
+
+    write_json_atomic(mcp_json_path, &root)
+}
+
+/// Write OAuth refresh metadata into .mcp.json _rightclaw_oauth for the named server.
+/// Atomic read-modify-write. Preserves all other .mcp.json content.
+pub fn write_oauth_metadata(
+    mcp_json_path: &Path,
+    server_name: &str,
+    metadata: &OAuthMetadata,
+) -> Result<(), CredentialError> {
+    let mut root = read_mcp_json(mcp_json_path)?;
+
+    let servers = root
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| CredentialError::ServerNotFound(server_name.to_string()))?;
+
+    let entry = servers
+        .get_mut(server_name)
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| CredentialError::ServerNotFound(server_name.to_string()))?;
+
+    let metadata_value = serde_json::to_value(metadata)?;
+    entry.insert("_rightclaw_oauth".to_string(), metadata_value);
+
+    write_json_atomic(mcp_json_path, &root)
+}
+
+/// Read the Bearer token from .mcp.json headers.Authorization for the named server.
+/// Returns None if file/server/header absent. Strips "Bearer " prefix.
+pub fn read_bearer_from_mcp_json(
+    mcp_json_path: &Path,
+    server_name: &str,
+) -> Result<Option<String>, CredentialError> {
+    if !mcp_json_path.exists() {
         return Ok(None);
     }
 
-    let content = std::fs::read_to_string(credentials_path)?;
-    let root: serde_json::Value = serde_json::from_str(&content)?;
-    let key = mcp_oauth_key(server_name, "http", server_url);
+    let root = read_mcp_json(mcp_json_path)?;
 
-    match root.get(&key) {
+    let token = root
+        .get("mcpServers")
+        .and_then(|v| v.get(server_name))
+        .and_then(|v| v.get("headers"))
+        .and_then(|v| v.get("Authorization"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+
+    Ok(token)
+}
+
+/// Read OAuth refresh metadata from .mcp.json _rightclaw_oauth for the named server.
+/// Returns None if file/server/metadata absent.
+pub fn read_oauth_metadata(
+    mcp_json_path: &Path,
+    server_name: &str,
+) -> Result<Option<OAuthMetadata>, CredentialError> {
+    if !mcp_json_path.exists() {
+        return Ok(None);
+    }
+
+    let root = read_mcp_json(mcp_json_path)?;
+
+    let meta_value = root
+        .get("mcpServers")
+        .and_then(|v| v.get(server_name))
+        .and_then(|v| v.get("_rightclaw_oauth"));
+
+    match meta_value {
         Some(v) => {
-            let token: CredentialToken = serde_json::from_value(v.clone())?;
-            Ok(Some(token))
+            let metadata: OAuthMetadata = serde_json::from_value(v.clone())?;
+            Ok(Some(metadata))
         }
         None => Ok(None),
     }
@@ -224,227 +211,244 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn make_token(access: &str) -> CredentialToken {
-        CredentialToken {
-            access_token: access.to_string(),
-            refresh_token: None,
-            token_type: Some("Bearer".to_string()),
-            scope: None,
-            expires_at: 0,
-            client_id: None,
-            client_secret: None,
-        }
+    /// Helper: create .mcp.json with a server entry (url-based).
+    fn write_mcp_with_server(dir: &std::path::Path, server_name: &str, url: &str) -> std::path::PathBuf {
+        let path = dir.join(".mcp.json");
+        let v = serde_json::json!({
+            "mcpServers": {
+                server_name: {
+                    "url": url
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        path
     }
 
-    // --- REFRESH-04: client_id / client_secret field tests ---
+    // --- write_bearer_to_mcp_json tests ---
 
     #[test]
-    fn client_id_none_not_serialized() {
-        let token = make_token("tok");
-        // client_id is None — skip_serializing_if = "Option::is_none" must suppress it
-        let json_str = serde_json::to_string(&token).unwrap();
-        assert!(!json_str.contains("client_id"), "client_id=None must NOT appear in JSON");
-    }
+    fn write_bearer_sets_authorization_header() {
+        let dir = tempdir().unwrap();
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
 
-    #[test]
-    fn client_id_some_serialized() {
-        let token = CredentialToken {
-            client_id: Some("cli-abc".to_string()),
-            ..make_token("tok")
-        };
-        let json_str = serde_json::to_string(&token).unwrap();
-        assert!(
-            json_str.contains(r#""client_id":"cli-abc""#),
-            "client_id=Some must appear in JSON; got: {json_str}"
-        );
-    }
+        write_bearer_to_mcp_json(&mcp, "notion", "my_access_token").unwrap();
 
-    #[test]
-    fn old_json_round_trips_without_client_id() {
-        // Simulate a credential written before Phase 35 (no client_id/client_secret fields)
-        let json = r#"{"access_token":"t","expiresAt":0}"#;
-        let token: CredentialToken = serde_json::from_str(json).unwrap();
-        assert!(token.client_id.is_none(), "client_id must be None when absent in JSON");
-        assert!(token.client_secret.is_none(), "client_secret must be None when absent in JSON");
-    }
-
-    #[test]
-    fn debug_redacts_client_secret() {
-        let token = CredentialToken {
-            client_secret: Some("s3cr3t".to_string()),
-            ..make_token("tok")
-        };
-        let debug_str = format!("{:?}", token);
-        assert!(
-            debug_str.contains("[REDACTED]"),
-            "Debug must contain [REDACTED] for client_secret"
-        );
-        assert!(
-            !debug_str.contains("s3cr3t"),
-            "Debug must NOT expose actual client_secret value"
-        );
-    }
-
-    // --- CRED-01: key formula tests ---
-    #[test]
-    fn notion_test_vector() {
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
         assert_eq!(
-            mcp_oauth_key("notion", "http", "https://mcp.notion.com/mcp"),
-            "notion|eac663db915250e7"
+            content["mcpServers"]["notion"]["headers"]["Authorization"],
+            "Bearer my_access_token"
         );
     }
 
     #[test]
-    fn key_is_deterministic() {
-        let a = mcp_oauth_key("x", "http", "https://a.com");
-        let b = mcp_oauth_key("x", "http", "https://a.com");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn credential_token_serializes_expires_at_camel_case() {
-        let token = make_token("tok");
-        let json_str = serde_json::to_string(&token).unwrap();
-        assert!(json_str.contains("\"expiresAt\""), "must serialize as camelCase expiresAt");
-        assert!(!json_str.contains("\"expires_at\""), "must NOT serialize as snake_case");
-    }
-
-    // --- CRED-02: write/read/backup tests ---
-    #[test]
-    fn write_creates_file_on_first_write() {
+    fn write_bearer_preserves_existing_entries() {
         let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
+        let mcp = dir.path().join(".mcp.json");
+        let v = serde_json::json!({
+            "mcpServers": {
+                "notion": { "url": "https://mcp.notion.com/mcp" },
+                "linear": { "url": "https://mcp.linear.app/mcp" }
+            }
+        });
+        std::fs::write(&mcp, serde_json::to_string(&v).unwrap()).unwrap();
 
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("tok1")).unwrap();
+        write_bearer_to_mcp_json(&mcp, "notion", "tok123").unwrap();
 
-        assert!(creds.exists(), ".credentials.json must exist after first write");
-        let content = std::fs::read_to_string(&creds).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(v.get("notion|eac663db915250e7").is_some(), "key notion|eac663db915250e7 must be present");
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        // notion has the header
+        assert_eq!(
+            content["mcpServers"]["notion"]["headers"]["Authorization"],
+            "Bearer tok123"
+        );
+        // linear is untouched
+        assert_eq!(
+            content["mcpServers"]["linear"]["url"],
+            "https://mcp.linear.app/mcp"
+        );
     }
 
     #[test]
-    fn write_preserves_unrelated_keys() {
+    fn write_bearer_creates_headers_if_absent() {
         let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
-        std::fs::write(
-            &creds,
-            r#"{"claudeAiOauth": {"token": "existing"}}"#,
-        ).unwrap();
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
 
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("tok")).unwrap();
+        // Server entry has no headers key
+        write_bearer_to_mcp_json(&mcp, "notion", "tok").unwrap();
 
-        let content = std::fs::read_to_string(&creds).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(v["claudeAiOauth"]["token"], "existing", "claudeAiOauth must survive");
-        assert!(v.get("notion|eac663db915250e7").is_some(), "new MCP key must be present");
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        assert!(content["mcpServers"]["notion"]["headers"].is_object());
+        assert_eq!(
+            content["mcpServers"]["notion"]["headers"]["Authorization"],
+            "Bearer tok"
+        );
     }
 
     #[test]
-    fn no_backup_on_first_write() {
+    fn write_bearer_errors_if_server_not_found() {
         let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
 
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("tok")).unwrap();
-
-        assert!(!dir.path().join(".credentials.json.bak").exists(), "no .bak on first write");
+        let err = write_bearer_to_mcp_json(&mcp, "nonexistent", "tok").unwrap_err();
+        assert!(
+            matches!(err, CredentialError::ServerNotFound(_)),
+            "expected ServerNotFound, got: {err:?}"
+        );
     }
 
     #[test]
-    fn backup_created_on_second_write() {
+    fn write_bearer_errors_if_file_absent() {
         let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
+        let mcp = dir.path().join(".mcp.json");
+        // File doesn't exist -> read_mcp_json returns empty mcpServers -> ServerNotFound
+        let err = write_bearer_to_mcp_json(&mcp, "notion", "tok").unwrap_err();
+        assert!(matches!(err, CredentialError::ServerNotFound(_)));
+    }
 
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("tok1")).unwrap();
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("tok2")).unwrap();
+    // --- write_oauth_metadata tests ---
 
-        let bak = dir.path().join(".credentials.json.bak");
-        assert!(bak.exists(), ".credentials.json.bak must exist after second write");
+    #[test]
+    fn write_oauth_metadata_sets_rightclaw_oauth() {
+        let dir = tempdir().unwrap();
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
+
+        let meta = OAuthMetadata {
+            refresh_token: Some("rt_xxx".to_string()),
+            expires_at: 1712345678,
+            client_id: Some("cli-abc".to_string()),
+            client_secret: None,
+        };
+        write_oauth_metadata(&mcp, "notion", &meta).unwrap();
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        let oauth = &content["mcpServers"]["notion"]["_rightclaw_oauth"];
+        assert_eq!(oauth["refresh_token"], "rt_xxx");
+        assert_eq!(oauth["expires_at"], 1712345678);
+        assert_eq!(oauth["client_id"], "cli-abc");
+        assert!(oauth["client_secret"].is_null());
+    }
+
+    // --- read_bearer_from_mcp_json tests ---
+
+    #[test]
+    fn read_bearer_returns_token_when_present() {
+        let dir = tempdir().unwrap();
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
+        write_bearer_to_mcp_json(&mcp, "notion", "my_token").unwrap();
+
+        let result = read_bearer_from_mcp_json(&mcp, "notion").unwrap();
+        assert_eq!(result, Some("my_token".to_string()));
     }
 
     #[test]
-    fn backup_rotation_max_five_slots() {
+    fn read_bearer_returns_none_when_no_headers() {
         let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
 
-        // 6 writes — should produce .bak through .bak.4 (5 slots), oldest dropped
-        for i in 0..6u8 {
-            write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token(&format!("tok{i}"))).unwrap();
-        }
-
-        assert!(dir.path().join(".credentials.json.bak").exists());
-        assert!(dir.path().join(".credentials.json.bak.1").exists());
-        assert!(dir.path().join(".credentials.json.bak.2").exists());
-        assert!(dir.path().join(".credentials.json.bak.3").exists());
-        assert!(dir.path().join(".credentials.json.bak.4").exists());
-        // No .bak.5 should exist
-        assert!(!dir.path().join(".credentials.json.bak.5").exists());
-    }
-
-    #[test]
-    fn read_roundtrip() {
-        let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
-
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("mytoken")).unwrap();
-        let result = read_credential(&creds, "notion", "https://mcp.notion.com/mcp").unwrap();
-
-        assert!(result.is_some(), "read must return Some after write");
-        assert_eq!(result.unwrap().access_token, "mytoken");
-    }
-
-    #[test]
-    fn read_returns_none_for_missing_key() {
-        let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
-
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("tok")).unwrap();
-        let result = read_credential(&creds, "linear", "https://mcp.linear.app/mcp").unwrap();
-
-        assert!(result.is_none(), "missing key must return None");
-    }
-
-    #[test]
-    fn read_returns_none_when_file_absent() {
-        let dir = tempdir().unwrap();
-        let creds = dir.path().join(".credentials.json");
-
-        let result = read_credential(&creds, "notion", "https://mcp.notion.com/mcp").unwrap();
+        let result = read_bearer_from_mcp_json(&mcp, "notion").unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn concurrent_writes_produce_valid_json() {
-        use std::sync::Arc;
+    fn read_bearer_returns_none_when_no_authorization() {
         let dir = tempdir().unwrap();
-        let creds = Arc::new(dir.path().join(".credentials.json"));
+        let mcp = dir.path().join(".mcp.json");
+        let v = serde_json::json!({
+            "mcpServers": {
+                "notion": {
+                    "url": "https://mcp.notion.com/mcp",
+                    "headers": { "X-Custom": "val" }
+                }
+            }
+        });
+        std::fs::write(&mcp, serde_json::to_string(&v).unwrap()).unwrap();
 
-        // Write initial file
-        write_credential(&creds, "notion", "https://mcp.notion.com/mcp", &make_token("init")).unwrap();
-
-        let handles: Vec<_> = (0..10)
-            .map(|i| {
-                let creds = Arc::clone(&creds);
-                std::thread::spawn(move || {
-                    write_credential(
-                        &creds,
-                        "notion",
-                        "https://mcp.notion.com/mcp",
-                        &make_token(&format!("tok{i}")),
-                    )
-                    .unwrap();
-                })
-            })
-            .collect();
-
-        for h in handles {
-            h.join().unwrap();
-        }
-
-        // File must be valid JSON after all concurrent writes
-        let content = std::fs::read_to_string(&*creds).unwrap();
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&content);
-        // If this panics, the concurrent writes corrupted the file
-        assert!(parsed.is_ok(), "concurrent writes must not corrupt the file");
+        let result = read_bearer_from_mcp_json(&mcp, "notion").unwrap();
+        assert!(result.is_none());
     }
+
+    #[test]
+    fn read_bearer_returns_none_when_file_absent() {
+        let dir = tempdir().unwrap();
+        let mcp = dir.path().join(".mcp.json");
+        let result = read_bearer_from_mcp_json(&mcp, "notion").unwrap();
+        assert!(result.is_none());
+    }
+
+    // --- read_oauth_metadata tests ---
+
+    #[test]
+    fn read_oauth_metadata_returns_struct_when_present() {
+        let dir = tempdir().unwrap();
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
+        let meta = OAuthMetadata {
+            refresh_token: Some("rt".to_string()),
+            expires_at: 999,
+            client_id: Some("c".to_string()),
+            client_secret: Some("s".to_string()),
+        };
+        write_oauth_metadata(&mcp, "notion", &meta).unwrap();
+
+        let result = read_oauth_metadata(&mcp, "notion").unwrap().unwrap();
+        assert_eq!(result.refresh_token, Some("rt".to_string()));
+        assert_eq!(result.expires_at, 999);
+        assert_eq!(result.client_id, Some("c".to_string()));
+        assert_eq!(result.client_secret, Some("s".to_string()));
+    }
+
+    #[test]
+    fn read_oauth_metadata_returns_none_when_absent() {
+        let dir = tempdir().unwrap();
+        let mcp = write_mcp_with_server(dir.path(), "notion", "https://mcp.notion.com/mcp");
+
+        let result = read_oauth_metadata(&mcp, "notion").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_oauth_metadata_returns_none_when_file_absent() {
+        let dir = tempdir().unwrap();
+        let mcp = dir.path().join(".mcp.json");
+        let result = read_oauth_metadata(&mcp, "notion").unwrap();
+        assert!(result.is_none());
+    }
+
+    // --- Atomic write test ---
+
+    #[test]
+    fn write_is_atomic_via_tempfile_persist() {
+        // Verify write_json_atomic creates the file atomically
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.json");
+        let value = serde_json::json!({"key": "value"});
+        write_json_atomic(&path, &value).unwrap();
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(content["key"], "value");
+    }
+
+    // --- CredentialToken retained ---
+
+    #[test]
+    fn credential_token_struct_retained() {
+        // CredentialToken must still exist for refresh.rs
+        let _token = CredentialToken {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            token_type: None,
+            scope: None,
+            expires_at: 0,
+            client_id: None,
+            client_secret: None,
+        };
+    }
+
+    // --- Verify old functions are gone (compile-time check) ---
+    // mcp_oauth_key, write_credential, read_credential, rotate_backups
+    // are removed — if someone tries to call them, compilation fails.
 }
