@@ -1,61 +1,79 @@
 use std::path::PathBuf;
 
-/// Credentials for a cloudflared Named Tunnel (credentials-file mode).
+use minijinja::{Environment, context};
+use serde::Serialize;
+
+const CF_TEMPLATE: &str = include_str!("../../../../templates/cloudflared-config.yml.j2");
+
+/// Serializable agent entry for the cloudflared ingress template.
+#[derive(Debug, Serialize)]
+struct CloudflaredAgent {
+    name: String,
+    socket_path: String,
+}
+
+/// Cloudflared credentials for local ingress mode.
 ///
-/// Fields match the cloudflared config YAML keys `tunnel` and `credentials-file`.
+/// When provided, the generated config includes `tunnel:` and `credentials-file:`
+/// fields so cloudflared honours local ingress rules instead of fetching remote
+/// configuration from the Cloudflare dashboard (which is the behaviour with
+/// `--token` alone).
 pub struct CloudflaredCredentials {
-    /// TunnelID UUID from the credentials JSON (e.g. "e765cc71-d0c2-42a3-864b-81566f8817fd").
     pub tunnel_uuid: String,
-    /// Absolute path to the credentials JSON file.
     pub credentials_file: PathBuf,
 }
 
-/// Generate a cloudflared tunnel config YAML.
+/// Generate cloudflared ingress config YAML for OAuth callback routing.
 ///
-/// When `credentials` is `Some`, the config includes `tunnel:` and
-/// `credentials-file:` fields required for Named Tunnel mode.
+/// Per cloudflared requirements, the config always ends with a
+/// catch-all `service: http_status:404` rule.
 ///
-/// `agents` is a list of `(name, path)` pairs used to build ingress rules.
-/// Each agent is expected to expose an HTTP service; this function generates
-/// a catch-all rule routing to localhost. Callers embed actual service ports
-/// via their own process-compose setup — the ingress here is a minimal
-/// placeholder that routes the primary hostname.
+/// # Arguments
 ///
-/// The final catch-all `service: http_status:404` is required by cloudflared.
+/// * `agents` — slice of `(name, agent_dir)` pairs
+/// * `tunnel_hostname` — public hostname for the named tunnel (e.g. `right.example.com`)
+/// * `credentials` — when `Some`, embeds `tunnel:` + `credentials-file:` in the config so
+///   cloudflared uses local ingress instead of remote config. Always `Some` after Phase 38.
 pub fn generate_cloudflared_config(
     agents: &[(String, PathBuf)],
     tunnel_hostname: &str,
     credentials: Option<&CloudflaredCredentials>,
 ) -> miette::Result<String> {
-    let mut out = String::new();
+    let cf_agents: Vec<CloudflaredAgent> = agents
+        .iter()
+        .map(|(name, dir)| CloudflaredAgent {
+            name: name.clone(),
+            socket_path: dir
+                .join("oauth-callback.sock")
+                .to_string_lossy()
+                .to_string(),
+        })
+        .collect();
 
-    if let Some(creds) = credentials {
-        let uuid = creds.tunnel_uuid.replace('"', "\\\"");
-        let creds_path = creds.credentials_file.display().to_string();
-        out.push_str(&format!("tunnel: {uuid}\n"));
-        out.push_str(&format!("credentials-file: {creds_path}\n"));
-        out.push('\n');
-    }
+    // cloudflared ingress hostname must be a bare hostname without scheme.
+    let hostname = tunnel_hostname
+        .strip_prefix("https://")
+        .or_else(|| tunnel_hostname.strip_prefix("http://"))
+        .unwrap_or(tunnel_hostname);
 
-    // Ingress rules: one rule per agent, then a mandatory catch-all.
-    out.push_str("ingress:\n");
-    for (name, _path) in agents {
-        let hostname = if agents.len() == 1 {
-            // Single agent: use the tunnel hostname directly.
-            tunnel_hostname.to_string()
-        } else {
-            // Multiple agents: use <name>.<tunnel_hostname>.
-            format!("{name}.{tunnel_hostname}")
-        };
-        // Route to Claude Code's default MCP/plugin port or a placeholder.
-        out.push_str(&format!(
-            "  - hostname: {hostname}\n    service: http://localhost:8080\n"
-        ));
-    }
-    // Required catch-all rule.
-    out.push_str("  - service: http_status:404\n");
+    let tunnel_uuid = credentials.map(|c| c.tunnel_uuid.as_str()).unwrap_or("");
+    let credentials_file = credentials
+        .map(|c| c.credentials_file.display().to_string())
+        .unwrap_or_default();
 
-    Ok(out)
+    let mut env = Environment::new();
+    env.add_template("cloudflared", CF_TEMPLATE)
+        .map_err(|e| miette::miette!("cloudflared template parse error: {e:#}"))?;
+    let tmpl = env
+        .get_template("cloudflared")
+        .expect("template was just added");
+    tmpl.render(context! {
+        agents => cf_agents,
+        tunnel_hostname => hostname,
+        tunnel_uuid => tunnel_uuid,
+        credentials_file => credentials_file,
+    })
+    .map_err(|e| miette::miette!("cloudflared template render error: {e:#}"))
 }
 
 #[cfg(test)]

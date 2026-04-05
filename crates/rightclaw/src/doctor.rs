@@ -110,6 +110,13 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // DOC-02: per-agent settings.json ripgrep.command validation (cross-platform)
     checks.extend(check_ripgrep_in_settings(home));
 
+    // Tunnel credentials file existence check — only when tunnel is configured
+    if let Ok(global_cfg) = crate::config::read_global_config(home)
+        && let Some(ref tunnel_cfg) = global_cfg.tunnel
+    {
+        checks.push(check_tunnel_credentials_file(tunnel_cfg));
+    }
+
     checks
 }
 
@@ -591,6 +598,36 @@ fn fetch_webhook_url(token: &str) -> Result<String, String> {
                 .to_string())
         })
     })
+}
+
+/// Check that the credentials file stored in TunnelConfig actually exists on disk.
+///
+/// Warn severity — missing file means cloudflared will fail at `rightclaw up` time.
+fn check_tunnel_credentials_file(tunnel_cfg: &crate::config::TunnelConfig) -> DoctorCheck {
+    if tunnel_cfg.credentials_file.exists() {
+        DoctorCheck {
+            name: "tunnel-credentials".to_string(),
+            status: CheckStatus::Pass,
+            detail: format!(
+                "credentials file present at {}",
+                tunnel_cfg.credentials_file.display()
+            ),
+            fix: None,
+        }
+    } else {
+        DoctorCheck {
+            name: "tunnel-credentials".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!(
+                "credentials file not found at {}",
+                tunnel_cfg.credentials_file.display()
+            ),
+            fix: Some(
+                "re-run `rightclaw init --tunnel-credentials-file PATH --tunnel-hostname HOSTNAME` to restore"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 /// Generate fix guidance for bubblewrap sandbox failures.

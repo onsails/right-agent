@@ -681,3 +681,77 @@ fn run_doctor_includes_sandbox_rg_checks_when_agent_has_settings() {
     );
     assert_eq!(sandbox_rg_checks[0].name, "sandbox-rg/testagent");
 }
+
+// ---- check_tunnel_credentials_file tests ----
+
+#[test]
+fn check_tunnel_credentials_file_pass_when_file_exists() {
+    use std::path::PathBuf;
+    let dir = tempdir().unwrap();
+    let tunnel_dir = dir.path().join("tunnel");
+    std::fs::create_dir_all(&tunnel_dir).unwrap();
+    let creds_path = tunnel_dir.join("abc.json");
+    std::fs::write(&creds_path, r#"{"TunnelID":"abc"}"#).unwrap();
+
+    let cfg = crate::config::TunnelConfig {
+        tunnel_uuid: "abc".to_string(),
+        credentials_file: creds_path,
+        hostname: "h.com".to_string(),
+    };
+    let check = check_tunnel_credentials_file(&cfg);
+    assert_eq!(check.name, "tunnel-credentials");
+    assert_eq!(
+        check.status,
+        CheckStatus::Pass,
+        "file exists — must be Pass, got: {:?} detail: {}",
+        check.status,
+        check.detail
+    );
+    assert!(
+        check.detail.contains("present at"),
+        "detail must say 'present at', got: {}",
+        check.detail
+    );
+    assert!(check.fix.is_none());
+}
+
+#[test]
+fn check_tunnel_credentials_file_warn_when_file_missing() {
+    use std::path::PathBuf;
+    let cfg = crate::config::TunnelConfig {
+        tunnel_uuid: "abc".to_string(),
+        credentials_file: PathBuf::from("/nonexistent/path/abc.json"),
+        hostname: "h.com".to_string(),
+    };
+    let check = check_tunnel_credentials_file(&cfg);
+    assert_eq!(check.name, "tunnel-credentials");
+    assert_eq!(
+        check.status,
+        CheckStatus::Warn,
+        "missing file — must be Warn, got: {:?} detail: {}",
+        check.status,
+        check.detail
+    );
+    assert!(
+        check.detail.contains("not found at"),
+        "detail must say 'not found at', got: {}",
+        check.detail
+    );
+    assert!(check.fix.is_some(), "must have fix hint");
+}
+
+#[test]
+fn run_doctor_has_tunnel_credentials_check_not_tunnel_token() {
+    let dir = tempdir().unwrap();
+    // Need agents/ dir so run_doctor doesn't fail before tunnel checks
+    std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+
+    let checks = run_doctor(dir.path());
+
+    // No tunnel-token check must exist (JWT check is dead code)
+    assert!(
+        !checks.iter().any(|c| c.name == "tunnel-token"),
+        "tunnel-token check must not exist, found: {:?}",
+        checks.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
+}
