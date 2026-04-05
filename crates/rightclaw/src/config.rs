@@ -73,7 +73,7 @@ pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
             .map(|t| -> miette::Result<TunnelConfig> {
                 if t.credentials_file.is_empty() || t.tunnel_uuid.is_empty() {
                     return Err(miette::miette!(
-                        help = "run: rightclaw init --tunnel-credentials-file PATH --tunnel-hostname HOSTNAME",
+                        help = "run: rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME",
                         "Tunnel config is outdated (uses token-based format) — re-run `rightclaw init` to migrate"
                     ));
                 }

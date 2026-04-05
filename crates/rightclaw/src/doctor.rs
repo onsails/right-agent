@@ -623,7 +623,7 @@ fn check_tunnel_credentials_file(tunnel_cfg: &crate::config::TunnelConfig) -> Do
                 tunnel_cfg.credentials_file.display()
             ),
             fix: Some(
-                "re-run `rightclaw init --tunnel-credentials-file PATH --tunnel-hostname HOSTNAME` to restore"
+                "re-run `rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME` to restore"
                     .to_string(),
             ),
         }
