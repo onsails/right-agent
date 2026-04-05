@@ -692,23 +692,21 @@ fn write_mcp_json_for_doctor(agent_dir: &std::path::Path, server_name: &str, ser
     std::fs::write(agent_dir.join(".mcp.json"), content).unwrap();
 }
 
-/// Helper: write a Bearer token + OAuth metadata into the agent's .mcp.json.
-/// This replaces the old write_credential_for_doctor that used .credentials.json.
+/// Helper: write a Bearer token into the agent's .mcp.json Authorization header.
 fn write_bearer_for_doctor(
     agent_dir: &std::path::Path,
     server_name: &str,
     _server_url: &str,
-    expires_at: u64,
 ) {
-    use crate::mcp::credentials::{write_bearer_to_mcp_json, write_oauth_metadata, OAuthMetadata};
     let mcp_path = agent_dir.join(".mcp.json");
-    write_bearer_to_mcp_json(&mcp_path, server_name, "test-token").unwrap();
-    write_oauth_metadata(&mcp_path, server_name, &OAuthMetadata {
-        refresh_token: None,
-        expires_at,
-        client_id: None,
-        client_secret: None,
-    }).unwrap();
+    let content = std::fs::read_to_string(&mcp_path).unwrap();
+    let mut root: serde_json::Value = serde_json::from_str(&content).unwrap();
+    let entry = root["mcpServers"][server_name].as_object_mut().unwrap();
+    entry.insert(
+        "headers".to_string(),
+        serde_json::json!({ "Authorization": "Bearer test-token" }),
+    );
+    std::fs::write(&mcp_path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
 }
 
 #[test]
@@ -737,8 +735,8 @@ fn check_mcp_tokens_pass_when_all_present() {
     let server_url = "https://mcp.notion.com/mcp";
     write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
 
-    // Write Bearer token + far-future expiry into .mcp.json
-    write_bearer_for_doctor(&agent_dir, "notion", server_url, 9_999_999_999);
+    // Write Bearer token into .mcp.json
+    write_bearer_for_doctor(&agent_dir, "notion", server_url);
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);
@@ -768,41 +766,18 @@ fn check_mcp_tokens_warn_on_missing_token() {
 }
 
 #[test]
-fn check_mcp_tokens_warn_on_expired_token() {
-    // Agent with an expired credential -- Expired -- Warn listing agent1/notion
-    let dir = tempdir().unwrap();
-    let agent_dir = dir.path().join("agents").join("agent1");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-
-    let server_url = "https://mcp.notion.com/mcp";
-    write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
-
-    // expires_at = 1 -- far past -- Expired
-    write_bearer_for_doctor(&agent_dir, "notion", server_url, 1);
-
-    let result = check_mcp_tokens_impl(dir.path());
-    assert_eq!(result.status, CheckStatus::Warn);
-    assert!(
-        result.detail.contains("agent1/notion"),
-        "detail must contain 'agent1/notion', got: {}",
-        result.detail
-    );
-}
-
-#[test]
-fn check_mcp_tokens_nonexpiring_is_ok() {
-    // expires_at=0 (non-expiring, REFRESH-04) -- Present -- Pass
+fn check_mcp_tokens_pass_when_bearer_present() {
+    // Agent with Bearer header in .mcp.json -- Present -- Pass
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("agent1");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     let server_url = "https://mcp.linear.app/mcp";
     write_mcp_json_for_doctor(&agent_dir, "linear", server_url);
-
-    write_bearer_for_doctor(&agent_dir, "linear", server_url, 0); // non-expiring
+    write_bearer_for_doctor(&agent_dir, "linear", server_url);
 
     let result = check_mcp_tokens_impl(dir.path());
-    assert_eq!(result.status, CheckStatus::Pass, "expires_at=0 must be Pass");
+    assert_eq!(result.status, CheckStatus::Pass);
     assert_eq!(result.name, "mcp-tokens");
 }
 
@@ -893,6 +868,7 @@ fn mcp_auth_issues_returns_some_when_mcp_tokens_warn() {
 fn mcp_auth_issues_prefix_constant_matches_detail_format() {
     // Ensure MCP_ISSUES_PREFIX is exactly the prefix used by check_mcp_tokens_impl/check_mcp_tokens.
     // If the format string changes, this test catches it.
+    assert_eq!(MCP_ISSUES_PREFIX, "missing: ");
     let detail = format!("{}agent1/notion, agent2/linear", MCP_ISSUES_PREFIX);
     let stripped = detail.strip_prefix(MCP_ISSUES_PREFIX);
     assert!(stripped.is_some(), "MCP_ISSUES_PREFIX does not match detail format");

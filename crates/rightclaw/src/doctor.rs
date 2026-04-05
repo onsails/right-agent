@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
-const MCP_ISSUES_PREFIX: &str = "missing/expired: ";
+const MCP_ISSUES_PREFIX: &str = "missing: ";
 
 /// Status of a single doctor check.
 #[derive(Debug, Clone, PartialEq)]
@@ -644,7 +644,7 @@ fn check_tunnel_config(home: &Path) -> DoctorCheck {
         Ok(_) => DoctorCheck {
             name: "tunnel-config".to_string(),
             status: CheckStatus::Warn,
-            detail: "no tunnel configured — MCP OAuth callbacks will not work".to_string(),
+            detail: "no tunnel configured".to_string(),
             fix: Some(
                 "run `rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME` to configure tunnel"
                     .to_string(),
@@ -731,17 +731,13 @@ fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
             None => continue,
         };
 
-        let mcp_path = path.join(".mcp.json");
-        let statuses = match crate::mcp::detect::mcp_auth_status(&mcp_path) {
+        let statuses = match crate::mcp::detect::mcp_auth_status(&path) {
             Ok(s) => s,
-            Err(_) => continue, // skip agents with unreadable .mcp.json
+            Err(_) => continue, // skip agents with unreadable files
         };
 
         for s in statuses {
-            if matches!(
-                s.state,
-                crate::mcp::detect::AuthState::Missing | crate::mcp::detect::AuthState::Expired
-            ) {
+            if matches!(s.state, crate::mcp::detect::AuthState::Missing) {
                 problems.push(format!("{agent_name}/{}", s.name));
             }
         }
