@@ -93,7 +93,7 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
 | 30. Doctor Diagnostics | v3.1 | 1/1 | Complete | 2026-04-02 |
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
 | 32-38. MCP OAuth + Tunnel Refactor | v3.2 | ✓ | Complete | 2026-04-05 |
-| 39. Cloudflared Auto-Tunnel | v3.2 | 1/1 | Planned | — |
+| 39. Cloudflared Auto-Tunnel | v3.2 | 1/1 | Complete   | 2026-04-05 |
 
 Plans:
-- [ ] 39-01-PLAN.md — Auto-detect/create cloudflared named tunnel; replace Phase 38 manual credentials-file UX
+- [x] 39-01-PLAN.md — Auto-detect/create cloudflared named tunnel; replace Phase 38 manual credentials-file UX

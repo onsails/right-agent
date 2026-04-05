@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v3.2
-milestone_name: MCP OAuth
-status: executing
-stopped_at: Phase 38 verified
-last_updated: "2026-04-05T02:00:00.000Z"
-last_activity: 2026-04-05 -- Phase 38 verified (passed)
+milestone: v1.0
+milestone_name: milestone
+status: verifying
+stopped_at: Completed 39-01-PLAN.md
+last_updated: "2026-04-05T12:24:29.712Z"
+last_activity: 2026-04-05
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 3
-  completed_plans: 3
+  total_phases: 35
+  completed_phases: 32
+  total_plans: 58
+  completed_plans: 58
   percent: 100
 ---
 
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 Phase: 38 (tunnel-refactor) — VERIFIED (passed 8/8)
 Plan: 3 of 3
-Status: Phase 38 complete and verified
-Last activity: 2026-04-05 -- Phase 38 verified (passed)
+Status: Phase complete — ready for verification
+Last activity: 2026-04-05
 
 Progress: [██████████] 100%
 
@@ -72,6 +72,7 @@ Progress: [██████████] 100%
 | Phase 38-tunnel-refactor P01 | 8 | 1 tasks | 1 files |
 | Phase 38-tunnel-refactor P02 | 20 | 2 tasks | 4 files |
 | Phase 38-tunnel-refactor P03 | 12 | 2 tasks | 6 files |
+| Phase 39-cloudflared-auto-tunnel P01 | 25 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -140,6 +141,8 @@ Recent decisions relevant to v2.3:
 - [Phase 38-tunnel-refactor]: RawTunnelConfig retains legacy token field as serde(default) to avoid parse panic on old configs; migration error on empty credentials_file or tunnel_uuid
 - [Phase 38-tunnel-refactor]: cloudflared.rs created in Plan 02 (not 03) as blocking dependency for cmd_up compilation
 - [Phase 38-tunnel-refactor]: cloudflared_script_path suppressed with let _ — future phase wires it into process-compose template
+- [Phase 39-cloudflared-auto-tunnel]: cert.pem as login signal — absent means skip tunnel setup with info message; credentials_file points to ~/.cloudflared/<uuid>.json directly (no copy)
+- [Phase 39-cloudflared-auto-tunnel]: tunnel_uuid_from_credentials_file removed; UUID now from tunnel list/create JSON output via TunnelListEntry struct
 
 ### Roadmap Evolution
 
@@ -169,6 +172,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-05T02:00:00.000Z
-Stopped at: Phase 38 verified (passed 8/8)
+Last session: 2026-04-05T12:24:29.708Z
+Stopped at: Completed 39-01-PLAN.md
 Resume file: None
