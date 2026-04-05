@@ -94,6 +94,17 @@ See [milestones/v3.1-ROADMAP.md](milestones/v3.1-ROADMAP.md)
 | 31. E2E Verification | v3.1 | 1/1 | Complete | 2026-04-03 |
 | 32-38. MCP OAuth + Tunnel Refactor | v3.2 | ✓ | Complete | 2026-04-05 |
 | 39. Cloudflared Auto-Tunnel | v3.2 | 1/1 | Complete   | 2026-04-05 |
+| 40. Wire Cloudflared into Process-Compose | v3.2 | 0/1 | Not planned | — |
 
 Plans:
 - [x] 39-01-PLAN.md — Auto-detect/create cloudflared named tunnel; replace Phase 38 manual credentials-file UX
+
+### Phase 40: Wire cloudflared into process-compose
+
+**Goal:** When TunnelConfig is present in global config, `rightclaw up` starts cloudflared as a process in process-compose alongside agents.
+**Requirements**: TUNL-02
+**Depends on:** Phase 39
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 40 to break down)

@@ -2,9 +2,9 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 39-01-PLAN.md
-last_updated: "2026-04-05T12:24:29.712Z"
+status: complete
+stopped_at: Phase 39 VERIFIED (passed 7/7)
+last_updated: "2026-04-05T12:45:00Z"
 last_activity: 2026-04-05
 progress:
   total_phases: 35
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-03 after v3.1 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 38 — tunnel-refactor (VERIFIED: passed)
+**Current focus:** Phase 39 — cloudflared-auto-tunnel (VERIFIED: passed)
 
 ## Current Position
 
-Phase: 38 (tunnel-refactor) — VERIFIED (passed 8/8)
+Phase: 39 (cloudflared-auto-tunnel) — VERIFIED (passed 7/7)
 Plan: 3 of 3
-Status: Phase complete — ready for verification
+Status: Phase complete — VERIFIED (passed)
 Last activity: 2026-04-05
 
 Progress: [██████████] 100%
@@ -151,6 +151,7 @@ Recent decisions relevant to v2.3:
 - Phase 28.2 inserted after Phase 28.1: v3.0 UAT Fix — teloxide missing native-tls (bot restart loop) and doctor nested tokio runtime panic (URGENT)
 - v3.1 roadmap created: Phases 29-31 — Sandbox Fix, Doctor Diagnostics, E2E Verification
 - Phase 38 added: tunnel-refactor — credentials-file based cloudflared tunnel config (replaces JWT/token approach)
+- Phase 40 added: wire-cloudflared-into-process-compose — wire cloudflared_script_path into PC template so rightclaw up starts tunnel process (gap found during phase 39 UAT)
 
 ### Pending Todos
 
