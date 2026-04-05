@@ -82,33 +82,31 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     let token = telegram::resolve_token(&agent_dir, &config)?;
 
     // PC-04: Clear any prior Telegram webhook before starting long-polling.
-    // Fatal if this fails — competing with an active webhook causes silent message drops.
+    // Fatal if this fails -- competing with an active webhook causes silent message drops.
     {
         use teloxide::requests::Requester as _;
         let webhook_bot = teloxide::Bot::new(token.clone());
         webhook_bot
             .delete_webhook()
             .await
-            .map_err(|e| miette::miette!("deleteWebhook failed — long polling would compete with active webhook: {e:#}"))?;
+            .map_err(|e| miette::miette!("deleteWebhook failed -- long polling would compete with active webhook: {e:#}"))?;
 
-        // Log bot identity — helps detect token conflicts with other running CC sessions
+        // Log bot identity -- helps detect token conflicts with other running CC sessions
         match webhook_bot.get_me().await {
             Ok(me) => tracing::info!(
                 agent = %args.agent,
                 bot_id = me.id.0,
                 bot_username = %me.username(),
-                "deleteWebhook succeeded — bot identity confirmed"
+                "deleteWebhook succeeded -- bot identity confirmed"
             ),
             // getMe is diagnostic-only; a transient API failure here does not block operation.
-            // Intentional FAIL FAST exception — deleteWebhook already confirmed connectivity.
+            // Intentional FAIL FAST exception -- deleteWebhook already confirmed connectivity.
             Err(e) => tracing::warn!(agent = %args.agent, "getMe failed (non-fatal, bot identity unknown): {e:#}"),
         }
     }
 
-    // Warn about unauthenticated MCP servers at startup (UAT gap — test 8).
-    match rightclaw::mcp::detect::mcp_auth_status(
-        &agent_dir.join(".mcp.json"),
-    ) {
+    // Warn about unauthenticated MCP servers at startup (UAT gap -- test 8).
+    match rightclaw::mcp::detect::mcp_auth_status(&agent_dir) {
         Ok(statuses) => {
             for s in &statuses {
                 if s.state != rightclaw::mcp::detect::AuthState::Present {
@@ -128,7 +126,7 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     if config.allowed_chat_ids.is_empty() {
         tracing::warn!(
             agent = %args.agent,
-            "allowed_chat_ids is empty — all incoming messages will be dropped"
+            "allowed_chat_ids is empty -- all incoming messages will be dropped"
         );
     }
 
@@ -142,64 +140,14 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_bot, cron_chat_ids).await;
     });
 
-    // Build shared OAuth PendingAuth map
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use telegram::oauth_callback::{OAuthCallbackState, PendingAuthMap, run_oauth_callback_server, run_pending_auth_cleanup};
-
-    let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-
-    // Read tunnel/global config
-    let global_config = rightclaw::config::read_global_config(&home)?;
-    let _ = global_config; // used for future tunnel config; notify_chat_ids passed below
-
-    // Spawn refresh scheduler — proactively refreshes MCP OAuth tokens before expiry (Phase 35)
-    let refresh_agent_dir = agent_dir.clone();
-    let refresh_http_client = reqwest::Client::new();
-    tokio::spawn(async move {
-        rightclaw::mcp::refresh::run_refresh_scheduler(
-            refresh_agent_dir,
-            refresh_http_client,
-        )
-        .await;
-    });
-
-    let notify_bot = teloxide::Bot::new(token.clone());
-    let notify_chat_ids = config.allowed_chat_ids.clone();
-    let agent_name = args.agent.clone();
-
-    let oauth_state = OAuthCallbackState {
-        pending_auth: Arc::clone(&pending_auth),
-        mcp_json_path: agent_dir.join(".mcp.json"),
-        agent_name: agent_name.clone(),
-        bot: notify_bot,
-        notify_chat_ids,
-    };
-
-    // Spawn cleanup task
-    tokio::spawn(run_pending_auth_cleanup(Arc::clone(&pending_auth)));
-
-    // Spawn axum OAuth callback server and wait for it to bind before starting teloxide
-    let socket_path = agent_dir.join("oauth-callback.sock");
-    let (axum_ready_tx, axum_ready_rx) = tokio::sync::oneshot::channel::<()>();
-    let axum_socket = socket_path.clone();
-    let axum_handle = tokio::spawn(async move {
-        run_oauth_callback_server(axum_socket, oauth_state, Some(axum_ready_tx)).await
-    });
-    // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
-    let _ = axum_ready_rx.await;
-
-    // Run teloxide + axum concurrently via tokio::select!
-    tokio::select! {
-        result = telegram::run_telegram(
-            token,
-            config.allowed_chat_ids,
-            agent_dir,
-            args.debug,
-            Arc::clone(&pending_auth),
-            home,
-        ) => result,
-        result = axum_handle => result
-            .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
-    }
+    // Run teloxide dispatcher directly -- no axum callback server or refresh scheduler needed.
+    // CC handles OAuth natively for HTTP MCP servers in .claude.json.
+    telegram::run_telegram(
+        token,
+        config.allowed_chat_ids,
+        agent_dir,
+        args.debug,
+        home,
+    )
+    .await
 }

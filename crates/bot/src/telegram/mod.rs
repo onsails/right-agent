@@ -2,7 +2,6 @@ pub mod bot;
 pub mod dispatch;
 pub mod filter;
 pub mod handler;
-pub mod oauth_callback;
 pub mod session;
 pub mod worker;
 

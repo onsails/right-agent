@@ -22,11 +22,6 @@ serde = { workspace = true }
 serde-saphyr = { workspace = true }
 walkdir = { workspace = true }
 cron = { workspace = true }
-axum = { workspace = true }
-reqwest = { workspace = true }
-rand = { workspace = true }
-base64 = { workspace = true }
-subtle = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

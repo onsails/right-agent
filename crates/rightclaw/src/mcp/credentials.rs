@@ -42,16 +42,6 @@ fn read_claude_json(path: &Path) -> Result<serde_json::Value, CredentialError> {
     Ok(root)
 }
 
-/// Read and parse .mcp.json. Returns empty object with mcpServers if file absent.
-pub(crate) fn read_mcp_json(path: &Path) -> Result<serde_json::Value, CredentialError> {
-    if !path.exists() {
-        return Ok(json!({ "mcpServers": {} }));
-    }
-    let content = std::fs::read_to_string(path)?;
-    let root: serde_json::Value = serde_json::from_str(&content)?;
-    Ok(root)
-}
-
 /// Add an HTTP MCP server to .claude.json under `projects.<agent_path_key>.mcpServers.<name>`.
 ///
 /// Creates the entire structure if absent. Atomic read-modify-write via tempfile.

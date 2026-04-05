@@ -1717,16 +1717,14 @@ fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()>
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("?");
-        let mcp_path = agent_dir.join(".mcp.json");
-        let statuses = mcp_auth_status(&mcp_path)
+        let statuses = mcp_auth_status(agent_dir)
             .map_err(|e| miette::miette!("mcp_auth_status for {agent_name}: {e:#}"))?;
         for s in &statuses {
             let icon = match s.state {
-                rightclaw::mcp::detect::AuthState::Present => "✅",
-                rightclaw::mcp::detect::AuthState::Missing => "❌",
-                rightclaw::mcp::detect::AuthState::Expired => "⚠️",
+                rightclaw::mcp::detect::AuthState::Present => "ok",
+                rightclaw::mcp::detect::AuthState::Missing => "needs auth",
             };
-            println!("{agent_name}  {icon} {}  {}", s.name, s.state);
+            println!("{agent_name}  {icon} {} [{}]  {}", s.name, s.source, s.state);
             any = true;
         }
     }

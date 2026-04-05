@@ -7,7 +7,7 @@
 //!
 //! GOTCHA: queued messages in a worker channel are lost on worker task panic.
 //! When the worker is respawned (Pitfall 7), the in-progress batch is discarded.
-//! This is an accepted trade-off — retrying arbitrary messages is not safe.
+//! This is an accepted trade-off -- retrying arbitrary messages is not safe.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
 use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, AgentDir, DebugFlag, RightclawHome};
-use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
 #[derive(BotCommands, Clone)]
@@ -32,7 +31,7 @@ enum BotCommand {
     Start,
     #[command(description = "Reset conversation session for this thread")]
     Reset,
-    #[command(description = "MCP server management (list/auth/add/remove)")]
+    #[command(description = "MCP server management (list/add/remove)")]
     Mcp(String),
     #[command(description = "Run diagnostics")]
     Doctor,
@@ -42,7 +41,7 @@ enum BotCommand {
 ///
 /// - Accepts agent_dir for session DB access and CC subprocess invocation.
 /// - Creates a DashMap<SessionKey, Sender<DebounceMsg>> for per-session workers.
-/// - Schema: filter by chat_id → branch /reset command → dispatch text messages.
+/// - Schema: filter by chat_id -> branch /reset command -> dispatch text messages.
 /// - SIGTERM/SIGINT: kill in-flight subprocesses, shutdown dispatcher.
 ///
 /// BOT-04 subprocess cleanup strategy: use kill_on_drop(true) on each Child in invoke_cc.
@@ -55,7 +54,6 @@ pub async fn run_telegram(
     allowed_chat_ids: Vec<i64>,
     agent_dir: PathBuf,
     debug: bool,
-    pending_auth: PendingAuthMap,
     home: PathBuf,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
@@ -70,7 +68,6 @@ pub async fn run_telegram(
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let debug_arc: Arc<DebugFlag> = Arc::new(DebugFlag(debug));
     let home_arc: Arc<RightclawHome> = Arc::new(RightclawHome(home));
-    let pending_auth_arc: PendingAuthMap = pending_auth;
 
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
@@ -103,7 +100,6 @@ pub async fn run_telegram(
             Arc::clone(&worker_map),
             Arc::clone(&agent_dir_arc),
             Arc::clone(&debug_arc),
-            pending_auth_arc,
             Arc::clone(&home_arc)
         ])
         .build();
@@ -119,16 +115,16 @@ pub async fn run_telegram(
 
         tokio::select! {
             _ = sigterm.recv() => {
-                tracing::info!("SIGTERM received — initiating graceful shutdown");
+                tracing::info!("SIGTERM received -- initiating graceful shutdown");
             }
             result = tokio::signal::ctrl_c() => {
                 if result.is_ok() {
-                    tracing::info!("SIGINT received — initiating graceful shutdown");
+                    tracing::info!("SIGINT received -- initiating graceful shutdown");
                 }
             }
         }
 
-        // Shutdown dispatcher — worker tasks drain their mpsc channels and exit.
+        // Shutdown dispatcher -- worker tasks drain their mpsc channels and exit.
         // In-flight CC subprocesses are killed by kill_on_drop(true) when workers are dropped.
         match shutdown_token.shutdown() {
             Ok(fut) => {
@@ -136,20 +132,20 @@ pub async fn run_telegram(
                 tracing::info!("dispatcher stopped");
             }
             Err(_idle) => {
-                tracing::debug!("dispatcher was idle at shutdown — already stopped");
+                tracing::debug!("dispatcher was idle at shutdown -- already stopped");
             }
         }
     });
 
     // Register /reset command with Telegram Bot API.
     // First delete all existing commands to clear any leftover commands from other clients
-    // (e.g., CC Telegram plugin sets /status /help /start — these must be cleared).
+    // (e.g., CC Telegram plugin sets /status /help /start -- these must be cleared).
     match bot.delete_my_commands().await {
         Ok(_) => tracing::info!("delete_my_commands succeeded"),
         Err(e) => tracing::warn!("delete_my_commands failed (non-fatal): {e:#}"),
     }
     match bot.set_my_commands(BotCommand::bot_commands()).await {
-        Ok(_) => tracing::info!("set_my_commands succeeded — commands registered"),
+        Ok(_) => tracing::info!("set_my_commands succeeded -- commands registered"),
         Err(e) => tracing::warn!("set_my_commands failed (non-fatal): {e:#}"),
     }
 
