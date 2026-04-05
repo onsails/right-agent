@@ -14,6 +14,7 @@ use teloxide::prelude::*;
 use teloxide::types::Message;
 use teloxide::RequestError;
 
+use super::oauth_callback::PendingAuthMap;
 use super::session::{delete_session, effective_thread_id};
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 use super::BotType;
@@ -183,13 +184,22 @@ pub async fn handle_mcp(
     msg: Message,
     args: String,
     agent_dir: Arc<AgentDir>,
+    pending_auth: PendingAuthMap,
+    home: Arc<RightclawHome>,
 ) -> ResponseResult<()> {
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
     let parts: Vec<&str> = args.split_whitespace().collect();
     let result = match parts.first().copied() {
         None | Some("list") => handle_mcp_list(&bot, &msg, &agent_dir.0).await,
         Some("auth") => {
-            handle_mcp_auth(&bot, &msg).await
+            let server = match parts.get(1) {
+                Some(s) => *s,
+                None => {
+                    bot.send_message(msg.chat.id, "Usage: /mcp auth <server>").await?;
+                    return Ok(());
+                }
+            };
+            handle_mcp_auth(&bot, &msg, server, &agent_dir.0, pending_auth, &home.0).await
         }
         Some("add") => {
             let rest = parts[1..].join(" ");
@@ -256,16 +266,187 @@ async fn handle_mcp_list(
     Ok(())
 }
 
-/// `/mcp auth` -- CC handles OAuth natively. Return guidance message.
+/// `/mcp auth <server>` -- initiate OAuth flow: discovery, PKCE, send auth URL.
 async fn handle_mcp_auth(
     bot: &BotType,
     msg: &Message,
+    server_name: &str,
+    agent_dir: &Path,
+    pending_auth: PendingAuthMap,
+    home: &Path,
 ) -> Result<(), RequestError> {
+    tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp auth");
+
+    // 1. Read .claude.json to find server URL
+    let claude_json_path = agent_dir.join(".claude.json");
+    let agent_path_key = agent_dir
+        .canonicalize()
+        .unwrap_or_else(|_| agent_dir.to_path_buf())
+        .display()
+        .to_string();
+
+    let servers = match rightclaw::mcp::credentials::list_http_servers_from_claude_json(
+        &claude_json_path,
+        &agent_path_key,
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("Cannot read .claude.json: {e:#}")).await?;
+            return Ok(());
+        }
+    };
+
+    let server_url = match servers.iter().find(|(name, _)| name == server_name) {
+        Some((_, url)) => url.clone(),
+        None => {
+            bot.send_message(
+                msg.chat.id,
+                format!("Server '{server_name}' not found in .claude.json"),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // 2. Read tunnel config
+    let global_config = match rightclaw::config::read_global_config(home) {
+        Ok(c) => c,
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("Cannot read config.yaml: {e:#}")).await?;
+            return Ok(());
+        }
+    };
+    let tunnel = match global_config.tunnel.as_ref() {
+        Some(t) => t.clone(),
+        None => {
+            bot.send_message(
+                msg.chat.id,
+                "Tunnel not configured. Run:\n  rightclaw init --tunnel-token TOKEN",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // 3. Check cloudflared binary
+    if which::which("cloudflared").is_err() {
+        bot.send_message(
+            msg.chat.id,
+            "Error: cloudflared binary not found in PATH. Install cloudflared first.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // 4. AS discovery
+    let http_client = reqwest::Client::new();
     bot.send_message(
         msg.chat.id,
-        "CC handles OAuth natively for HTTP MCP servers.\n\n\
-         To add an HTTP server:\n  /mcp add <name> <url>\n\n\
-         CC will prompt for authentication when the agent connects.",
+        format!("Discovering OAuth endpoints for {server_name}..."),
+    )
+    .await?;
+
+    let metadata = match rightclaw::mcp::oauth::discover_as(&http_client, &server_url).await {
+        Ok(m) => m,
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("AS discovery failed for {server_name}: {e:#}"),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // 5. DCR or static clientId
+    let agent_name = agent_dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    if tunnel.hostname.is_empty() {
+        bot.send_message(
+            msg.chat.id,
+            "Tunnel hostname not configured -- run `rightclaw init --tunnel-hostname HOSTNAME`",
+        )
+        .await?;
+        return Ok(());
+    }
+    let redirect_uri = format!("https://{}/oauth/{agent_name}/callback", tunnel.hostname);
+    let (client_id, client_secret) = match rightclaw::mcp::oauth::register_client_or_fallback(
+        &http_client,
+        &metadata,
+        None, // no static clientId from .claude.json -- DCR only
+        &redirect_uri,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("Client registration failed: {e:#}"),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // 6. Generate PKCE + state
+    let (code_verifier, code_challenge) = rightclaw::mcp::oauth::generate_pkce();
+    let state = rightclaw::mcp::oauth::generate_state();
+
+    // 7. Tunnel healthcheck -- hit tunnel root to verify cloudflared is running
+    let healthcheck_url = format!("https://{}/", tunnel.hostname);
+    match http_client
+        .get(&healthcheck_url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_server_error() => {
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "Tunnel healthcheck returned {} -- cloudflared may be misconfigured",
+                    resp.status()
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+        Ok(_) => {} // 2xx/3xx/4xx = tunnel is reachable
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("Tunnel healthcheck failed: {e:#}\nIs cloudflared running?"),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    // 8. Store PendingAuth
+    let pending = rightclaw::mcp::oauth::PendingAuth {
+        server_name: server_name.to_string(),
+        server_url: server_url.clone(),
+        code_verifier,
+        state: state.clone(),
+        token_endpoint: metadata.token_endpoint.clone(),
+        client_id: client_id.clone(),
+        client_secret,
+        redirect_uri: redirect_uri.clone(),
+        created_at: std::time::Instant::now(),
+    };
+    pending_auth.lock().await.insert(state.clone(), pending);
+
+    // 9. Build and send auth URL
+    let auth_url = rightclaw::mcp::oauth::build_auth_url(
+        &metadata, &client_id, &redirect_uri, &state, &code_challenge, None,
+    );
+    bot.send_message(
+        msg.chat.id,
+        format!("Authenticate {server_name}:\n\n{auth_url}"),
     )
     .await?;
     Ok(())

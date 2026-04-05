@@ -32,3 +32,8 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tempfile = "3.27"
 chrono = { version = "0.4", features = ["serde"] }
 cron = "0.16"
+sha2 = "0.10"
+rand = "0.9"
+base64 = "0.22"
+subtle = "2.6"
+axum = "0.8"

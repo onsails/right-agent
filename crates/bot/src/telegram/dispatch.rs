@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
 use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, AgentDir, DebugFlag, RightclawHome};
+use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
 #[derive(BotCommands, Clone)]
@@ -54,6 +55,7 @@ pub async fn run_telegram(
     allowed_chat_ids: Vec<i64>,
     agent_dir: PathBuf,
     debug: bool,
+    pending_auth: PendingAuthMap,
     home: PathBuf,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
@@ -67,6 +69,7 @@ pub async fn run_telegram(
         Arc::new(DashMap::new());
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let debug_arc: Arc<DebugFlag> = Arc::new(DebugFlag(debug));
+    let pending_auth_arc: PendingAuthMap = pending_auth;
     let home_arc: Arc<RightclawHome> = Arc::new(RightclawHome(home));
 
     // Dispatch schema (RESEARCH.md Pattern 1)
@@ -100,6 +103,7 @@ pub async fn run_telegram(
             Arc::clone(&worker_map),
             Arc::clone(&agent_dir_arc),
             Arc::clone(&debug_arc),
+            pending_auth_arc,
             Arc::clone(&home_arc)
         ])
         .build();

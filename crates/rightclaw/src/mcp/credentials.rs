@@ -140,6 +140,41 @@ pub fn list_http_servers_from_claude_json(
     Ok(result)
 }
 
+/// Set custom headers on an HTTP MCP server entry in .claude.json.
+///
+/// The server entry must already exist (call `add_http_server_to_claude_json` first).
+/// Headers are stored under `mcpServers.<name>.headers.<header_name>`.
+/// This is the CC convention for attaching Bearer tokens to HTTP MCP servers.
+pub fn set_server_header(
+    claude_json_path: &Path,
+    agent_path_key: &str,
+    server_name: &str,
+    header_name: &str,
+    header_value: &str,
+) -> Result<(), CredentialError> {
+    let mut root = read_claude_json(claude_json_path)?;
+
+    let server = root
+        .get_mut("projects")
+        .and_then(|p| p.get_mut(agent_path_key))
+        .and_then(|proj| proj.get_mut("mcpServers"))
+        .and_then(|s| s.get_mut(server_name))
+        .ok_or_else(|| CredentialError::ServerNotFound(server_name.to_string()))?;
+
+    let headers = server
+        .as_object_mut()
+        .ok_or(CredentialError::InvalidPath)?
+        .entry("headers")
+        .or_insert_with(|| json!({}));
+
+    headers
+        .as_object_mut()
+        .ok_or(CredentialError::InvalidPath)?
+        .insert(header_name.to_string(), json!(header_value));
+
+    write_json_atomic(claude_json_path, &root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +316,60 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         let servers = list_http_servers_from_claude_json(&path, "/agents/bot").unwrap();
         assert!(servers.is_empty());
+    }
+
+    // --- set_server_header tests ---
+
+    #[test]
+    fn set_header_adds_authorization_to_existing_server() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        add_http_server_to_claude_json(&path, "/agents/bot", "notion", "https://mcp.notion.com/mcp")
+            .unwrap();
+
+        set_server_header(&path, "/agents/bot", "notion", "Authorization", "Bearer tok-abc")
+            .unwrap();
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            content["projects"]["/agents/bot"]["mcpServers"]["notion"]["headers"]["Authorization"],
+            "Bearer tok-abc"
+        );
+        // URL preserved
+        assert_eq!(
+            content["projects"]["/agents/bot"]["mcpServers"]["notion"]["url"],
+            "https://mcp.notion.com/mcp"
+        );
+    }
+
+    #[test]
+    fn set_header_returns_server_not_found_when_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        std::fs::write(&path, "{}").unwrap();
+
+        let err = set_server_header(&path, "/agents/bot", "ghost", "Authorization", "Bearer x")
+            .unwrap_err();
+        assert!(matches!(err, CredentialError::ServerNotFound(_)));
+    }
+
+    #[test]
+    fn set_header_overwrites_existing_header() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".claude.json");
+        add_http_server_to_claude_json(&path, "/agents/bot", "notion", "https://mcp.notion.com/mcp")
+            .unwrap();
+
+        set_server_header(&path, "/agents/bot", "notion", "Authorization", "Bearer old").unwrap();
+        set_server_header(&path, "/agents/bot", "notion", "Authorization", "Bearer new").unwrap();
+
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            content["projects"]["/agents/bot"]["mcpServers"]["notion"]["headers"]["Authorization"],
+            "Bearer new"
+        );
     }
 
     // --- Atomic write test ---
