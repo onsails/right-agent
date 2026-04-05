@@ -100,7 +100,7 @@ See [milestones/v3.2-ROADMAP.md](milestones/v3.2-ROADMAP.md)
 | 22-28.2. Teloxide Bot Runtime | v3.0 | ✓ | Complete | 2026-04-01 |
 | 29-31. Sandbox Fix & Verification | v3.1 | ✓ | Complete | 2026-04-03 |
 | 38-41. MCP & Tunnel | v3.2 | ✓ | Complete | 2026-04-05 |
-| 1. MCP management tools | v3.3 | 0/2 | Not started | - |
+| 1. MCP management tools | v3.3 | 2/2 | Human UAT pending | - |
 
 ### 🚧 v3.3 MCP Self-Management (In Progress)
 
