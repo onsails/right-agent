@@ -113,4 +113,4 @@ See [milestones/v3.2-ROADMAP.md](milestones/v3.2-ROADMAP.md)
 
 Plans:
 - [x] 01-01-PLAN.md — Extend MemoryServer struct with rightclaw_home/agent_dir fields, inject RC_RIGHTCLAW_HOME into mcp_config, extract tests to separate file
-- [ ] 01-02-PLAN.md — Add mcp_add, mcp_remove, mcp_list, mcp_auth tools to MemoryServer with full tests
+- [x] 01-02-PLAN.md — Add mcp_add, mcp_remove, mcp_list, mcp_auth tools to MemoryServer with full tests
