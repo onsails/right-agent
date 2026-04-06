@@ -21,7 +21,7 @@ use serde::Deserialize;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
-use rightclaw::mcp::credentials::{add_http_server_to_claude_json, set_server_header};
+use rightclaw::mcp::credentials::{add_http_server_to_claude_json, set_server_header_in_claude_json};
 use rightclaw::mcp::oauth::{exchange_token, verify_state, PendingAuth};
 
 /// Shared in-memory map of OAuth state -> pending auth session.
@@ -212,14 +212,14 @@ async fn complete_oauth_flow(
     .map_err(|e| miette::miette!("add_http_server_to_claude_json failed: {e:#}"))?;
 
     // Set Authorization: Bearer <token> header
-    set_server_header(
+    set_server_header_in_claude_json(
         &cb_state.claude_json_path,
         &cb_state.agent_path_key,
         &pending.server_name,
         "Authorization",
         &format!("Bearer {}", token_resp.access_token),
     )
-    .map_err(|e| miette::miette!("set_server_header failed: {e:#}"))?;
+    .map_err(|e| miette::miette!("set_server_header_in_claude_json failed: {e:#}"))?;
 
     tracing::info!(
         agent = %agent_name,
