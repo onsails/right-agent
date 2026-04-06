@@ -152,12 +152,17 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
 
     let mcp_json_path = agent_dir.join(".mcp.json");
 
+    // Create refresh scheduler channels
+    let (refresh_tx, refresh_rx) = tokio::sync::mpsc::channel::<rightclaw::mcp::refresh::RefreshEntry>(32);
+    let (notify_refresh_tx, mut notify_refresh_rx) = tokio::sync::mpsc::channel::<String>(32);
+
     let oauth_state = OAuthCallbackState {
         pending_auth: Arc::clone(&pending_auth),
         mcp_json_path,
         agent_name: agent_name.clone(),
         bot: notify_bot,
         notify_chat_ids,
+        refresh_tx,
     };
 
     // Spawn cleanup task
@@ -172,6 +177,30 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     });
     // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
     let _ = axum_ready_rx.await;
+
+    // Spawn OAuth refresh scheduler
+    let oauth_state_path = agent_dir.join("oauth-state.json");
+    let mcp_json_path_for_refresh = agent_dir.join("staging").join(".mcp.json");
+    let sandbox_for_refresh = rightclaw::codegen::sandbox::sandbox_name(&agent_name);
+    tokio::spawn(rightclaw::mcp::refresh::run_refresh_scheduler(
+        oauth_state_path,
+        mcp_json_path_for_refresh,
+        sandbox_for_refresh,
+        refresh_rx,
+        notify_refresh_tx,
+    ));
+
+    // Forward refresh error notifications to Telegram
+    let bot_for_notify = teloxide::Bot::new(token.clone());
+    let ids_for_notify: Vec<i64> = config.allowed_chat_ids.clone();
+    tokio::spawn(async move {
+        use teloxide::requests::Requester as _;
+        while let Some(msg) = notify_refresh_rx.recv().await {
+            for &chat_id in &ids_for_notify {
+                let _ = bot_for_notify.send_message(teloxide::types::ChatId(chat_id), &msg).await;
+            }
+        }
+    });
 
     // Run teloxide + axum concurrently via tokio::select!
     tokio::select! {

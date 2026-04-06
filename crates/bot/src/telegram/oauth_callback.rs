@@ -49,6 +49,8 @@ pub struct OAuthCallbackState {
     pub bot: teloxide::Bot,
     /// Chat IDs to notify after OAuth completes
     pub notify_chat_ids: Vec<i64>,
+    /// Channel to notify refresh scheduler about new OAuth tokens
+    pub refresh_tx: tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshEntry>,
 }
 
 /// Build the axum router for the OAuth callback server.
@@ -224,6 +226,22 @@ async fn complete_oauth_flow(
         "Bearer token written to .mcp.json"
     );
 
+    // Notify refresh scheduler about new token
+    if let Some(expires_in) = token_resp.expires_in {
+        let oauth_entry = rightclaw::mcp::refresh::OAuthServerState {
+            refresh_token: token_resp.refresh_token.clone(),
+            token_endpoint: pending.token_endpoint.clone(),
+            client_id: pending.client_id.clone(),
+            client_secret: pending.client_secret.clone(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64),
+            server_url: pending.server_url.clone(),
+        };
+        let _ = cb_state.refresh_tx.send(rightclaw::mcp::refresh::RefreshEntry {
+            server_name: pending.server_name.clone(),
+            state: oauth_entry,
+        }).await;
+    }
+
     // Notify Telegram
     notify_telegram(
         &cb_state.bot,
@@ -315,12 +333,14 @@ mod tests {
 
     /// Build a minimal OAuthCallbackState for tests (no real bot/credentials)
     fn dummy_state(map: PendingAuthMap) -> OAuthCallbackState {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
         OAuthCallbackState {
             pending_auth: map,
             mcp_json_path: PathBuf::from("/tmp/fake.mcp.json"),
             agent_name: "test-agent".to_string(),
             bot: teloxide::Bot::new("0:fake_token_for_tests"),
             notify_chat_ids: vec![],
+            refresh_tx: tx,
         }
     }
 
