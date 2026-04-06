@@ -616,7 +616,7 @@ async fn cmd_up(
     // Write agent definition, reply-schema.json, and settings.json for each agent.
     for agent in &agents {
         // Generate .claude/settings.json with sandbox config (Phase 6).
-        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home, rg_path.clone())?;
+        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home, rg_path.clone(), None)?;
         let claude_dir = agent.path.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
@@ -699,7 +699,7 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "memory.db initialized");
 
         // 11. Generate .mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
-        rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name, home)?;
+        rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name, home, None)?;
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
