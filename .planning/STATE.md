@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.4
 milestone_name: Chrome Integration
-status: planning
-stopped_at: Phase 42 context gathered (discuss mode)
-last_updated: "2026-04-06T01:09:44.397Z"
-last_activity: 2026-04-06 — v3.4 roadmap created, Phase 2 ready to plan
+status: verifying
+stopped_at: Phase 43 context gathered
+last_updated: "2026-04-06T14:54:17.962Z"
+last_activity: 2026-04-06 -- Phase 42 verified (PASSED 15/15)
 progress:
   total_phases: 3
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 1
+  total_plans: 3
+  completed_plans: 3
+  percent: 100
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-06 after v3.3 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 2 — Chrome Config Infrastructure + MCP Injection
+**Current focus:** Phase 43 (next) — init command chrome config persistence
 
 ## Current Position
 
-Phase: 2 of 4 (Chrome Config Infrastructure + MCP Injection)
-Plan: —
-Status: Ready to plan
-Last activity: 2026-04-06 — v3.4 roadmap created, Phase 2 ready to plan
+Phase: 42 (chrome-config-infrastructure-mcp-injection) — COMPLETE
+Phase: 43 (next) — not yet started
+Status: Phase 42 verified and complete. Ready for Phase 43.
+Last activity: 2026-04-06 -- Phase 42 verified (PASSED 15/15)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
@@ -47,6 +47,9 @@ Recent decisions relevant to v3.4:
 - [v3.4 research]: Chrome sandbox: `--no-sandbox` arg (bubblewrap is outer sandbox) + allowedCommands + allowWrite for userDataDir
 - [v3.4 research]: Chrome path revalidated on every `rightclaw up`, not just init
 - [v3.4 research]: All Chrome features are non-fatal — Warn severity throughout, never abort
+- [phase 42]: ChromeConfig follows TunnelConfig pattern exactly — two PathBuf fields, no chrome_profile field (hardcoded .chrome-profile in codegen)
+- [phase 42]: global_cfg read hoisted before per-agent loop in cmd_up() — single read shared by chrome_cfg and tunnel block
+- [phase 42]: allowed_commands emitted only when non-empty — cleaner JSON, matching excludedCommands pattern
 
 ### Pending Todos
 
@@ -54,10 +57,10 @@ None.
 
 ### Blockers/Concerns
 
-- Need to verify `chrome-devtools-mcp` binary install path convention (global npm vs. cargo) before Phase 2 implementation
+None for phase 43. Phase 42 verification resolved the chrome binary install path question — mcp_binary_path is a user-configured field in config.yaml, no convention assumption needed at this layer.
 
 ## Session Continuity
 
-Last session: 2026-04-06T01:09:44.394Z
-Stopped at: Phase 42 context gathered (discuss mode)
-Resume file: .planning/phases/42-chrome-config-infrastructure-mcp-injection/42-CONTEXT.md
+Last session: 2026-04-06T14:54:17.959Z
+Stopped at: Phase 43 context gathered
+Resume file: .planning/phases/43-init-detection-up-revalidation/43-CONTEXT.md
