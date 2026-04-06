@@ -277,4 +277,130 @@ mod tests {
         let config = read_global_config(dir.path()).unwrap();
         assert!(config.tunnel.is_none(), "no tunnel config when file absent");
     }
+
+    #[test]
+    fn chrome_config_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let written = GlobalConfig {
+            tunnel: None,
+            chrome: Some(ChromeConfig {
+                chrome_path: PathBuf::from("/usr/bin/google-chrome-stable"),
+                mcp_binary_path: PathBuf::from("/usr/local/bin/chrome-devtools-mcp"),
+            }),
+        };
+        write_global_config(dir.path(), &written).unwrap();
+        let read = read_global_config(dir.path()).unwrap();
+        let chrome = read.chrome.expect("chrome should be present after write");
+        assert_eq!(chrome.chrome_path, PathBuf::from("/usr/bin/google-chrome-stable"));
+        assert_eq!(
+            chrome.mcp_binary_path,
+            PathBuf::from("/usr/local/bin/chrome-devtools-mcp")
+        );
+    }
+
+    #[test]
+    fn write_global_config_emits_chrome_section() {
+        let dir = TempDir::new().unwrap();
+        let config = GlobalConfig {
+            tunnel: None,
+            chrome: Some(ChromeConfig {
+                chrome_path: PathBuf::from("/usr/bin/google-chrome-stable"),
+                mcp_binary_path: PathBuf::from("/usr/local/bin/chrome-devtools-mcp"),
+            }),
+        };
+        write_global_config(dir.path(), &config).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
+        assert!(content.contains("chrome:"), "must contain chrome: section, got: {content}");
+        assert!(
+            content.contains("chrome_path: \"/usr/bin/google-chrome-stable\""),
+            "must contain chrome_path, got: {content}"
+        );
+        assert!(
+            content.contains("mcp_binary_path: \"/usr/local/bin/chrome-devtools-mcp\""),
+            "must contain mcp_binary_path, got: {content}"
+        );
+    }
+
+    #[test]
+    fn read_config_no_chrome_section_is_none() {
+        let dir = TempDir::new().unwrap();
+        let yaml = concat!(
+            "tunnel:\n",
+            "  tunnel_uuid: \"abc-123\"\n",
+            "  credentials_file: \"/tmp/abc-123.json\"\n",
+            "  hostname: \"test.example.com\"\n",
+        );
+        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+        let config = read_global_config(dir.path()).unwrap();
+        assert!(config.chrome.is_none(), "chrome must be None when section absent");
+    }
+
+    #[test]
+    fn read_config_with_chrome_section_parses() {
+        let dir = TempDir::new().unwrap();
+        let yaml = concat!(
+            "chrome:\n",
+            "  chrome_path: \"/usr/bin/chrome\"\n",
+            "  mcp_binary_path: \"/usr/local/bin/chrome-devtools-mcp\"\n",
+        );
+        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+        let config = read_global_config(dir.path()).unwrap();
+        let chrome = config.chrome.expect("chrome should be parsed");
+        assert_eq!(chrome.chrome_path, PathBuf::from("/usr/bin/chrome"));
+        assert_eq!(
+            chrome.mcp_binary_path,
+            PathBuf::from("/usr/local/bin/chrome-devtools-mcp")
+        );
+    }
+
+    #[test]
+    fn read_config_chrome_empty_fields_yields_none() {
+        // Current implementation uses .filter().map() which treats empty fields as None
+        // (not an error). This is intentional — empty chrome config means "not configured".
+        let dir = TempDir::new().unwrap();
+        let yaml = "chrome:\n  chrome_path: \"\"\n  mcp_binary_path: \"\"\n";
+        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+        let config = read_global_config(dir.path()).unwrap();
+        assert!(
+            config.chrome.is_none(),
+            "chrome must be None when fields are empty"
+        );
+    }
+
+    #[test]
+    fn write_then_read_with_tunnel_and_chrome() {
+        let dir = TempDir::new().unwrap();
+        let written = GlobalConfig {
+            tunnel: Some(TunnelConfig {
+                tunnel_uuid: "abc-123".to_string(),
+                credentials_file: PathBuf::from("/tmp/abc-123.json"),
+                hostname: "test.example.com".to_string(),
+            }),
+            chrome: Some(ChromeConfig {
+                chrome_path: PathBuf::from("/usr/bin/google-chrome-stable"),
+                mcp_binary_path: PathBuf::from("/usr/local/bin/chrome-devtools-mcp"),
+            }),
+        };
+        write_global_config(dir.path(), &written).unwrap();
+        let read = read_global_config(dir.path()).unwrap();
+        let tunnel = read.tunnel.expect("tunnel should be present");
+        assert_eq!(tunnel.tunnel_uuid, "abc-123");
+        let chrome = read.chrome.expect("chrome should be present");
+        assert_eq!(chrome.chrome_path, PathBuf::from("/usr/bin/google-chrome-stable"));
+    }
+
+    #[test]
+    fn write_global_config_no_chrome_omits_section() {
+        let dir = TempDir::new().unwrap();
+        let config = GlobalConfig {
+            tunnel: None,
+            chrome: None,
+        };
+        write_global_config(dir.path(), &config).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
+        assert!(
+            !content.contains("chrome:"),
+            "written YAML must NOT contain chrome: when chrome is None, got: {content}"
+        );
+    }
 }

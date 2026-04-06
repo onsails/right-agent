@@ -2172,6 +2172,7 @@ dependencies = [
  "dirs",
  "miette",
  "predicates",
+ "reqwest 0.13.2",
  "rightclaw",
  "rightclaw-bot",
  "rmcp",
