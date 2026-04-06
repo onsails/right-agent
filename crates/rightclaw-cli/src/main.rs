@@ -348,6 +348,7 @@ fn cmd_init(
     };
     let config = rightclaw::config::GlobalConfig {
         tunnel: Some(tunnel_config),
+        chrome: None,
     };
     rightclaw::config::write_global_config(home, &config)?;
     println!("Tunnel config written. UUID: {uuid}, hostname: {hostname}");
