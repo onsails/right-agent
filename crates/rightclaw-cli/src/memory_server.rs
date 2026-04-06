@@ -52,29 +52,6 @@ pub struct CronShowRunParams {
     pub run_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct McpAddParams {
-    #[schemars(description = "MCP server identifier (e.g. 'notion', 'linear')")]
-    pub name: String,
-    #[schemars(description = "HTTP MCP server URL (must start with https://)")]
-    pub url: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct McpRemoveParams {
-    #[schemars(description = "MCP server name to remove from .claude.json")]
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct McpListParams {}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct McpAuthParams {
-    #[schemars(description = "MCP server name to initiate OAuth for (must exist in .claude.json)")]
-    pub server_name: String,
-}
-
 // --- Server struct ---
 
 #[derive(Clone)]
@@ -82,24 +59,15 @@ pub struct MemoryServer {
     tool_router: ToolRouter<Self>,
     conn: Arc<Mutex<rusqlite::Connection>>,
     agent_name: String,
-    agent_dir: std::path::PathBuf,
-    rightclaw_home: std::path::PathBuf,
 }
 
 #[tool_router]
 impl MemoryServer {
-    pub fn new(
-        conn: rusqlite::Connection,
-        agent_name: String,
-        agent_dir: std::path::PathBuf,
-        rightclaw_home: std::path::PathBuf,
-    ) -> Self {
+    pub fn new(conn: rusqlite::Connection, agent_name: String) -> Self {
         Self {
             tool_router: Self::tool_router(),
             conn: Arc::new(Mutex::new(conn)),
             agent_name,
-            agent_dir,
-            rightclaw_home,
         }
     }
 
@@ -269,146 +237,6 @@ impl MemoryServer {
             Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
         }
     }
-
-    #[tool(description = "Add an HTTP MCP server to this agent's .claude.json. The server becomes available after the next agent restart.")]
-    async fn mcp_add(
-        &self,
-        Parameters(params): Parameters<McpAddParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if !params.url.starts_with("https://") {
-            return Err(McpError::invalid_params(
-                format!("URL must start with 'https://' — got: {}", params.url),
-                None,
-            ));
-        }
-        let claude_json_path = self.agent_dir.join(".claude.json");
-        let agent_path_key = self
-            .agent_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.agent_dir.clone())
-            .display()
-            .to_string();
-        rightclaw::mcp::credentials::add_http_server_to_claude_json(
-            &claude_json_path,
-            &agent_path_key,
-            &params.name,
-            &params.url,
-        )
-        .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Added MCP server '{}' ({}). Restart agent for it to take effect.",
-            params.name, params.url
-        ))]))
-    }
-
-    #[tool(description = "Remove an HTTP MCP server from this agent's .claude.json. The 'rightmemory' server is protected and cannot be removed. Only removes servers in .claude.json — servers in .mcp.json must be edited manually.")]
-    async fn mcp_remove(
-        &self,
-        Parameters(params): Parameters<McpRemoveParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if params.name == rightclaw::mcp::PROTECTED_MCP_SERVER {
-            return Err(McpError::invalid_params(
-                format!(
-                    "Cannot remove '{}' — required for core agent functionality",
-                    params.name
-                ),
-                None,
-            ));
-        }
-        let claude_json_path = self.agent_dir.join(".claude.json");
-        let agent_path_key = self
-            .agent_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.agent_dir.clone())
-            .display()
-            .to_string();
-        match rightclaw::mcp::credentials::remove_http_server_from_claude_json(
-            &claude_json_path,
-            &agent_path_key,
-            &params.name,
-        ) {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Removed MCP server '{}'. Restart agent for change to take effect.",
-                params.name
-            ))])),
-            Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
-                Err(McpError::invalid_params(
-                    format!(
-                        "Server '{}' not found in .claude.json. If it was added via .mcp.json, edit that file directly.",
-                        params.name
-                    ),
-                    None,
-                ))
-            }
-            Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
-        }
-    }
-
-    #[tool(description = "List all configured MCP servers for this agent. Shows name, URL, auth state (present/auth required), source (.claude.json or .mcp.json), and kind (http/stdio). Never exposes token values.")]
-    async fn mcp_list(
-        &self,
-        Parameters(_params): Parameters<McpListParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let statuses = rightclaw::mcp::detect::mcp_auth_status(&self.agent_dir)
-            .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-        let items: Vec<serde_json::Value> = statuses
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "url": s.url,
-                    "auth": s.state.to_string(),
-                    "source": s.source.to_string(),
-                    "kind": s.kind.to_string(),
-                })
-            })
-            .collect();
-        let output = serde_json::to_string_pretty(&items)
-            .map_err(|e| McpError::internal_error(format!("serialization error: {e:#}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(output)]))
-    }
-
-    #[tool(description = "Discover the OAuth authorization server for an HTTP MCP server and return its authorization endpoint URL. Use this to confirm the server supports OAuth. To complete authentication, use the Telegram bot command: /mcp auth <server_name>")]
-    async fn mcp_auth(
-        &self,
-        Parameters(params): Parameters<McpAuthParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let claude_json_path = self.agent_dir.join(".claude.json");
-        let agent_path_key = self
-            .agent_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.agent_dir.clone())
-            .display()
-            .to_string();
-        let servers = rightclaw::mcp::credentials::list_http_servers_from_claude_json(
-            &claude_json_path,
-            &agent_path_key,
-        )
-        .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-        let server_url = servers
-            .iter()
-            .find(|(name, _)| name == &params.server_name)
-            .map(|(_, url)| url.clone())
-            .ok_or_else(|| {
-                McpError::invalid_params(
-                    format!(
-                        "Server '{}' not found in .claude.json. Add it first with mcp_add.",
-                        params.server_name
-                    ),
-                    None,
-                )
-            })?;
-
-        let http_client = reqwest::Client::new();
-        let metadata = rightclaw::mcp::oauth::discover_as(&http_client, &server_url)
-            .await
-            .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Server '{}' supports OAuth. Authorization endpoint: {}\n\nTo authenticate, run in Telegram: /mcp auth {}",
-            params.server_name, metadata.authorization_endpoint, params.server_name
-        ))]))
-    }
 }
 
 #[tool_handler]
@@ -420,7 +248,7 @@ impl rmcp::ServerHandler for MemoryServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "RightClaw tools: store, recall, search, forget, cron_list_runs, cron_show_run, mcp_add, mcp_remove, mcp_list, mcp_auth",
+                "RightClaw tools: store, recall, search, forget, cron_list_runs, cron_show_run",
             )
     }
 }
@@ -484,17 +312,7 @@ pub async fn run_memory_server() -> miette::Result<()> {
         }
     };
 
-    let agent_dir = home.clone();
-
-    let rightclaw_home = match std::env::var("RC_RIGHTCLAW_HOME") {
-        Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
-        _ => {
-            tracing::warn!("RC_RIGHTCLAW_HOME not set — mcp_auth tunnel commands will be unavailable");
-            std::path::PathBuf::from(".")
-        }
-    };
-
-    let server = MemoryServer::new(conn, agent_name, agent_dir, rightclaw_home);
+    let server = MemoryServer::new(conn, agent_name);
     let service = server
         .serve(stdio())
         .await
@@ -507,5 +325,168 @@ pub async fn run_memory_server() -> miette::Result<()> {
 }
 
 #[cfg(test)]
-#[path = "memory_server_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use rmcp::handler::server::ServerHandler;
+    use tempfile::tempdir;
+
+    fn setup_server() -> (MemoryServer, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let conn = rightclaw::memory::open_connection(dir.path()).expect("open_connection");
+        let server = MemoryServer::new(conn, "test-agent".to_string());
+        (server, dir)
+    }
+
+    fn insert_cron_run(
+        server: &MemoryServer,
+        id: &str,
+        job_name: &str,
+        started_at: &str,
+        status: &str,
+    ) {
+        let conn = server.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![id, job_name, started_at, status, format!("/tmp/{id}.log")],
+        )
+        .expect("insert cron_run");
+    }
+
+    fn call_result_text(result: CallToolResult) -> String {
+        result
+            .content
+            .into_iter()
+            .filter_map(|c| {
+                if let rmcp::model::RawContent::Text(t) = c.raw {
+                    Some(t.text)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn test_get_info_server_name() {
+        let (server, _dir) = setup_server();
+        let info = server.get_info();
+        assert_eq!(info.server_info.name, "rightclaw");
+    }
+
+    #[tokio::test]
+    async fn test_cron_list_runs_empty() {
+        let (server, _dir) = setup_server();
+        let result = server
+            .cron_list_runs(Parameters(CronListRunsParams {
+                job_name: None,
+                limit: None,
+            }))
+            .await
+            .expect("cron_list_runs ok");
+        let text = call_result_text(result);
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(parsed, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_cron_list_runs_two_rows() {
+        let (server, _dir) = setup_server();
+        insert_cron_run(&server, "run-001", "deploy-check", "2026-04-01T10:00:00Z", "success");
+        insert_cron_run(&server, "run-002", "health-ping", "2026-04-01T11:00:00Z", "success");
+
+        let result = server
+            .cron_list_runs(Parameters(CronListRunsParams {
+                job_name: None,
+                limit: None,
+            }))
+            .await
+            .expect("cron_list_runs ok");
+        let text = call_result_text(result);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(parsed.len(), 2);
+        // Ordered by started_at DESC — run-002 first
+        assert_eq!(parsed[0]["id"], "run-002");
+        assert_eq!(parsed[1]["id"], "run-001");
+    }
+
+    #[tokio::test]
+    async fn test_cron_list_runs_filter_job_name() {
+        let (server, _dir) = setup_server();
+        insert_cron_run(&server, "run-a1", "job-a", "2026-04-01T10:00:00Z", "success");
+        insert_cron_run(&server, "run-b1", "job-b", "2026-04-01T10:01:00Z", "success");
+
+        let result = server
+            .cron_list_runs(Parameters(CronListRunsParams {
+                job_name: Some("job-a".to_string()),
+                limit: None,
+            }))
+            .await
+            .expect("cron_list_runs ok");
+        let text = call_result_text(result);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["job_name"], "job-a");
+        assert_eq!(parsed[0]["id"], "run-a1");
+    }
+
+    #[tokio::test]
+    async fn test_cron_list_runs_limit() {
+        let (server, _dir) = setup_server();
+        for i in 0..5 {
+            insert_cron_run(
+                &server,
+                &format!("run-{i:03}"),
+                "batch-job",
+                &format!("2026-04-01T{i:02}:00:00Z"),
+                "success",
+            );
+        }
+        let result = server
+            .cron_list_runs(Parameters(CronListRunsParams {
+                job_name: None,
+                limit: Some(2),
+            }))
+            .await
+            .expect("cron_list_runs ok");
+        let text = call_result_text(result);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_cron_show_run_found() {
+        let (server, _dir) = setup_server();
+        insert_cron_run(&server, "run-xyz", "nightly-report", "2026-04-01T02:00:00Z", "success");
+
+        let result = server
+            .cron_show_run(Parameters(CronShowRunParams {
+                run_id: "run-xyz".to_string(),
+            }))
+            .await
+            .expect("cron_show_run ok");
+        let text = call_result_text(result);
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(parsed["id"], "run-xyz");
+        assert_eq!(parsed["job_name"], "nightly-report");
+        assert!(parsed["log_path"].as_str().unwrap().contains("run-xyz"));
+    }
+
+    #[tokio::test]
+    async fn test_cron_show_run_not_found() {
+        let (server, _dir) = setup_server();
+
+        let result = server
+            .cron_show_run(Parameters(CronShowRunParams {
+                run_id: "nonexistent-id".to_string(),
+            }))
+            .await
+            .expect("cron_show_run returns Ok (not error) for missing");
+        let text = call_result_text(result);
+        assert!(
+            text.contains("not found"),
+            "Expected 'not found' in output, got: {text}"
+        );
+    }
+}

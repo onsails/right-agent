@@ -1,347 +1,381 @@
-# Architecture Research: chrome-devtools-mcp Integration
+# Architecture Research
 
-**Domain:** RightClaw — chrome-devtools-mcp milestone
-**Researched:** 2026-04-05
-**Confidence:** HIGH
+**Domain:** CC sandbox fix and end-to-end verification for nix environments
+**Researched:** 2026-04-02
+**Confidence:** HIGH (direct codebase inspection + CC cli.js source analysis)
 
 ## Standard Architecture
 
 ### System Overview
 
 ```
-config.yaml (GlobalConfig)
+rightclaw up
     │
-    ├── tunnel: Option<TunnelConfig>   ← existing
-    └── chrome: Option<ChromeConfig>  ← NEW (optional field)
+    ├── runtime/deps.rs → verify_dependencies()
+    │     checks: process-compose, claude/claude-bun
+    │     NEW: warn if rg absent AND CC vendor rg not executable
+    │
+    ├── for each agent:
+    │     codegen/settings.rs → generate_settings()
+    │         writes agent/.claude/settings.json
+    │         existing: sandbox.enabled, filesystem, network
+    │         NEW: sandbox.ripgrep.command → absolute system rg path
+    │
+    └── codegen/process_compose.rs → generate_process_compose()
+          no changes — bot-only template already complete
 
-cmd_up() per-agent loop
-    │
-    ├── generate_settings(...)
-    ├── generate_agent_claude_json(...)
-    ├── generate_mcp_config(...)       ← MODIFIED: inject chrome-devtools if chrome set
-    │       │
-    │       ├── mcpServers.rightmemory      ← existing
-    │       └── mcpServers.chrome-devtools  ← NEW (conditional on chrome_path)
-    └── ...
+doctor.rs → run_doctor()
+    existing: bwrap, socat, bwrap-sandbox checks
+    NEW: check_sandbox_ripgrep() DoctorCheck
 
-run_doctor(home) checks
-    │
-    ├── check_cloudflared_binary()     ← existing pattern to follow
-    └── check_chrome()                 ← NEW: Warn severity
+process-compose (bot processes)
+    └── crates/bot/ → rightclaw bot --agent <name>
+          ├── telegram/worker.rs → invoke_cc()
+          │     USE_BUILTIN_RIPGREP=1  (already set — belt-and-suspenders)
+          │     HOME=agent_dir
+          │     spawns: claude-bun -p --dangerously-skip-permissions ...
+          │         CC reads agent/.claude/settings.json
+          │         sandbox.ripgrep.command tells CC which rg to use
+          │         CC's bwrap wraps the subprocess
+          │
+          └── cron.rs → execute_job()
+                USE_BUILTIN_RIPGREP=1  (already set — belt-and-suspenders)
+                HOME=agent_dir
+                spawns: claude-bun -p --dangerously-skip-permissions ...
+                    same settings.json read path
 ```
 
-### Component Responsibilities
+### Root Cause: CC Vendor rg Has No Execute Bit in Nix Store
 
-| Component | Responsibility | File:Line |
-|-----------|---------------|-----------|
-| `GlobalConfig` | Runtime config deserialized from config.yaml | `crates/rightclaw/src/config.rs:19` |
-| `write_global_config` / `read_global_config` | YAML round-trip for config | `crates/rightclaw/src/config.rs:61,93` |
-| `generate_mcp_config` | Write `.mcp.json` merging MCP server entries per agent | `crates/rightclaw/src/codegen/mcp_config.rs:12` |
-| `cmd_up` agent loop | Calls `generate_mcp_config` per agent | `crates/rightclaw-cli/src/main.rs:701` |
-| `cmd_init` | Resolves tunnel config after home init, writes GlobalConfig | `crates/rightclaw-cli/src/main.rs:250` |
-| `run_doctor` | Runs all checks, collects DoctorCheck vec, never short-circuits | `crates/rightclaw/src/doctor.rs:46` |
-| `check_binary` | Private fn: `which::which`, returns Pass/Fail DoctorCheck | `crates/rightclaw/src/doctor.rs:136` |
+CC resolves its rg binary in this order (from `cli.js` `$aA` lazy value):
 
-## Recommended Project Structure Changes
+1. `USE_BUILTIN_RIPGREP` set → find system `rg` via `findActualExecutable("rg", [])`
+2. bun embedded mode → use `process.execPath --ripgrep`
+3. default fallback → `vendor/ripgrep/<arch>-<platform>/rg` (absolute nix store path)
 
-No new files needed. All changes are additive to existing files.
+The vendored rg in the current CC nix package has mode `.r--r--r--` — **no execute bit**:
+```
+.r--r--r-- 5.6M root  1 Jan  1970
+  /nix/store/hhydcyh1z6h2fyznlqagb1p66l07yhp6-claude-code-bun-2.1.89/
+  lib/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/x64-linux/rg
+```
+Confirmed: attempting to execute it gives `permission denied`.
+
+`USE_BUILTIN_RIPGREP=1` is already set in `worker.rs` and `cron.rs`. This tells CC
+to prefer system `rg` via PATH lookup. However, CC's `checkDependencies` function
+(`zT8` in cli.js) runs the resolved rg binary to verify it works. If that test fails
+(e.g., system rg not in the subprocess PATH, or resolved to vendor path which has
+no execute bit), CC sets `SandboxUnavailableReason` and **silently degrades** to
+unsandboxed mode — no error exit, no diagnostic output visible to rightclaw.
+
+**`failIfUnavailable`** (a `settings.json` flag) defaults to `false`, so the silent
+degradation happens with no observable failure. Agents keep running, but unsandboxed.
+
+### The Fix: sandbox.ripgrep in settings.json
+
+CC's `settings.json` schema supports an explicit `sandbox.ripgrep` override:
+```json
+"sandbox": {
+  "ripgrep": {
+    "command": "/nix/store/.../bin/rg",
+    "args": []
+  }
+}
+```
+
+This field is documented in the CC settings schema (confirmed in `cli.js` Zod schema):
+```
+sandbox.ripgrep: {command: string, args?: string[]}
+  "Custom ripgrep configuration for bundled ripgrep"
+```
+
+When `sandbox.ripgrep.command` is set, CC's `oO6()` function returns it directly
+instead of running `$aA()` (the path that falls through to the vendor binary).
+The `checkDependencies` call uses this path for its executable test — if it points
+to a working system `rg`, the sandbox check passes.
+
+**Implementation:** In `generate_settings()`, resolve `which::which("rg")` to get
+the absolute system rg path, then inject it into the sandbox JSON. This is done
+at `rightclaw up` time so the path is always current (no hardcoded nix store hash).
+
+## Component Responsibilities
+
+| Component | Responsibility | Change |
+|-----------|----------------|--------|
+| `codegen/settings.rs` | Generate `settings.json` per agent | **MODIFY** |
+| `codegen/settings_tests.rs` | Unit tests for settings generation | **MODIFY** |
+| `runtime/deps.rs` | Pre-flight dependency check in `rightclaw up` | **MODIFY** |
+| `doctor.rs` | Comprehensive diagnostics | **MODIFY** |
+| `telegram/worker.rs` | Spawn CC for Telegram messages | unchanged (already has `USE_BUILTIN_RIPGREP=1`) |
+| `cron.rs` | Spawn CC for cron jobs | unchanged (already has `USE_BUILTIN_RIPGREP=1`) |
+| `codegen/process_compose.rs` | Bot process PC config | unchanged |
+| `agent/types.rs` | `SandboxOverrides` struct | unchanged |
+| `templates/process-compose.yaml.j2` | Bot process template | unchanged |
+
+## Recommended Project Structure
+
+No new files. All changes in existing files:
 
 ```
 crates/rightclaw/src/
-├── config.rs           # ADD: ChromeConfig struct, RawChromeConfig, extend GlobalConfig, read/write
 ├── codegen/
-│   └── mcp_config.rs   # MODIFY: add chrome_path: Option<&Path> param, inject chrome-devtools entry
-└── doctor.rs           # ADD: check_chrome() fn + check_chrome_path(), wire into run_doctor()
-
-crates/rightclaw-cli/src/
-└── main.rs             # MODIFY: cmd_init() chrome detection, move read_global_config before agent loop,
-                        #         pass chrome path to generate_mcp_config at line 701
-
-crates/bot/src/
-└── lib.rs              # ADD: startup chrome path existence check (warn-only)
+│   ├── settings.rs          ← MODIFY: add sandbox.ripgrep to JSON output
+│   └── settings_tests.rs    ← MODIFY: add tests for ripgrep field presence
+├── runtime/
+│   └── deps.rs              ← MODIFY: add rg warning (non-fatal)
+└── doctor.rs                ← MODIFY: add check_sandbox_ripgrep() DoctorCheck
 ```
 
-## Integration Points
+### Structure Rationale
 
-### 1. ChromeConfig in config.rs
+- **settings.rs** is the natural home for the rg path injection — it already builds
+  the complete `settings.json` JSON value. No new abstraction needed.
+- **deps.rs** is the `verify_dependencies()` fast-fail path. Adding an rg warning
+  here surfaces the issue before any process starts, not after agents fail silently.
+- **doctor.rs** provides post-hoc diagnostics via `rightclaw doctor`. Adding a
+  `check_sandbox_ripgrep()` here lets users debug without running `rightclaw up`.
 
-**Pattern to follow:** `TunnelConfig` — separate public struct, private `RawXxx` for deserialization, extend `GlobalConfig`, extend both `read_global_config` and `write_global_config`.
+## Architectural Patterns
 
-New structs:
+### Pattern 1: Inject sandbox.ripgrep at settings.json Generation Time
+
+**What:** Resolve `which::which("rg")` in `generate_settings()` and embed the
+absolute path into the `sandbox.ripgrep` field.
+
+**When to use:** Always — even when `USE_BUILTIN_RIPGREP=1` is set, the
+`checkDependencies` path in CC needs a working rg to enable the sandbox.
+
+**Trade-offs:**
+- Pro: CC uses this path for both `checkDependencies` and runtime operations
+- Pro: Absolute path survives HOME override (no relative PATH lookup needed)
+- Pro: Officially supported settings.json field — not a hack
+- Pro: Settings regenerated on every `rightclaw up` — always current path
+- Con: If system rg absent: field omitted, sandbox degrades, must warn caller
+
+**Example:**
 ```rust
-pub struct ChromeConfig {
-    pub chrome_path: PathBuf,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawChromeConfig {
-    #[serde(default)]
-    chrome_path: String,
-}
-```
-
-Extend `GlobalConfig` at line 19:
-```rust
-pub struct GlobalConfig {
-    pub tunnel: Option<TunnelConfig>,
-    pub chrome: Option<ChromeConfig>,   // add
-}
-```
-
-`read_global_config` (line 61): extend `RawGlobalConfig` with `chrome: Option<RawChromeConfig>`, map to `ChromeConfig` in the same `.transpose()?` pattern as tunnel. Return `Err` if `chrome_path` is present but empty.
-
-`write_global_config` (line 93): serde-saphyr is deserialize-only — YAML is written manually. Add a `chrome:` block after the tunnel block, mirroring lines 97-103:
-```
-chrome:
-  chrome_path: "/usr/bin/google-chrome"
-```
-
-**Config YAML shape:**
-```yaml
-chrome:
-  chrome_path: "/usr/bin/google-chrome"
-```
-
-**Where `GlobalConfig` is used in cmd_up:** Currently read at line 706 (after the per-agent loop). Chrome path must be available *inside* the per-agent loop at line 701. Move `read_global_config` to before the loop (alongside `self_exe` and `rg_path` at line 595 area), extract `chrome_cfg` from it, then pass `chrome_cfg.as_ref().map(|c| c.chrome_path.as_path())` to `generate_mcp_config`.
-
-### 2. generate_mcp_config extension
-
-**Current signature (mcp_config.rs:12):**
-```rust
-pub fn generate_mcp_config(
-    agent_path: &Path,
-    binary: &Path,
-    agent_name: &str,
-    rightclaw_home: &Path,
-) -> miette::Result<()>
-```
-
-**New signature — add at end to minimize call-site churn:**
-```rust
-pub fn generate_mcp_config(
-    agent_path: &Path,
-    binary: &Path,
-    agent_name: &str,
-    rightclaw_home: &Path,
-    chrome_path: Option<&Path>,
-) -> miette::Result<()>
-```
-
-**Injection logic** — after the `rightmemory` insert at line 39:
-```rust
-if chrome_path.is_some() {
-    servers.insert(
-        "chrome-devtools".to_string(),
-        serde_json::json!({
-            "command": "npx",
-            "args": ["-y", "chrome-devtools-mcp@latest"],
-            "env": {
-                "CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS": "1"
-            }
-        }),
-    );
+// In generate_settings(), after building the sandbox block:
+if let Ok(rg_path) = which::which("rg") {
+    settings["sandbox"]["ripgrep"] = serde_json::json!({
+        "command": rg_path.display().to_string(),
+        "args": []
+    });
+    // If rg not found: omit field; deps.rs/doctor.rs warn separately
 }
 ```
 
-Note: `chrome-devtools-mcp` discovers Chrome automatically. The `chrome_path` gates whether the entry is injected — it is not passed as `--executablePath` unless agents consistently fail Chrome discovery (defer that complexity). If explicit path forwarding is needed later, add `"--executablePath", chrome_path.to_str().unwrap()` to the args array.
+### Pattern 2: Non-Fatal rg Warning in verify_dependencies()
 
-**Call site at main.rs:701** — update to:
+**What:** After the claude binary check in `verify_dependencies()`, add a
+non-fatal check: if system rg is absent AND the CC vendor rg is not executable,
+emit a `tracing::warn!` — not an error. Agent launch proceeds; sandbox just
+won't work.
+
+**When to use:** In `cmd_up` fast-fail path — catches the issue before launch
+so the operator sees it in the terminal, not in CC's silent degradation.
+
+**Trade-offs:**
+- Pro: Consistent with existing git warning pattern (warn-only, never return Err)
+- Pro: Actionable: user sees the warning before agents start
+- Con: Soft warning is easy to miss — doctor.rs provides the explicit check
+
+**Example:**
 ```rust
-rightclaw::codegen::generate_mcp_config(
-    &agent.path, &self_exe, &agent.name, home,
-    chrome_cfg.as_ref().map(|c| c.chrome_path.as_path()),
-)?;
-```
-
-Adding the param triggers a compile error at the call site, which is the correct way to catch all callers (tests included).
-
-### 3. Chrome detection in cmd_init
-
-**Where to insert:** After tunnel setup (line 352 `write_global_config` call) but before `Ok(())`. Chrome detection is non-interactive and non-fatal.
-
-**Detection logic (new private fn `detect_chrome_binary() -> Option<PathBuf>`):**
-```rust
-fn detect_chrome_binary() -> Option<PathBuf> {
-    for name in &["google-chrome", "chromium-browser", "chromium", "chrome"] {
-        if let Ok(p) = which::which(name) { return Some(p); }
-    }
-    // macOS hardcoded path
-    let mac = std::path::Path::new(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    );
-    if mac.exists() { return Some(mac.to_path_buf()); }
-    None
-}
-```
-
-**Critical:** `cmd_init` currently writes `GlobalConfig` only when tunnel is configured (line 349). To avoid a double-write footgun, accumulate both `tunnel` and `chrome` into a single `GlobalConfig` before calling `write_global_config` once. Concretely:
-
-1. Compute `tunnel_config: Option<TunnelConfig>` from existing tunnel setup logic.
-2. Compute `chrome_config: Option<ChromeConfig>` from `detect_chrome_binary()`.
-3. If either is `Some`, call `write_global_config` once with both fields populated.
-
-This avoids a read-back-to-merge step and is consistent with how the function currently works.
-
-### 4. Bot startup Chrome check
-
-**Location:** `crates/bot/src/lib.rs` in the `run()` fn (called via `rightclaw_bot::run(...)` at main.rs:240).
-
-**Pattern:** Non-fatal warn. Use `tracing::warn!` — the codebase uses `tracing`, not the `log` crate directly.
-
-```rust
-let global_cfg = rightclaw::config::read_global_config(&home_path)?;
-if let Some(ref chrome) = global_cfg.chrome {
-    if !chrome.chrome_path.exists() {
+// Non-fatal: sandbox degrades silently without rg; warn the operator.
+let rg_available = which::which("rg").is_ok();
+if !rg_available {
+    // Check CC vendor path as fallback detection
+    let vendor_rg_executable = resolve_cc_vendor_rg()
+        .map(|p| std::fs::metadata(&p)
+            .map(|m| { use std::os::unix::fs::PermissionsExt; m.permissions().mode() & 0o111 != 0 })
+            .unwrap_or(false))
+        .unwrap_or(false);
+    if !vendor_rg_executable {
         tracing::warn!(
-            path = %chrome.chrome_path.display(),
-            "chrome_path configured but binary not found — chrome-devtools-mcp will fail to launch"
+            "rg not found in PATH and CC vendor ripgrep lacks execute permission — \
+             CC sandbox will be silently disabled. \
+             Install ripgrep: sudo apt install ripgrep (or pacman/dnf)"
         );
     }
-} else {
-    tracing::debug!("no chrome configured — chrome-devtools-mcp not injected into agents");
 }
 ```
 
-Use `debug!` for the "not configured" case — it is normal and noisy to warn on every bot start.
+### Pattern 3: DoctorCheck for Sandbox ripgrep
 
-### 5. check_chrome() in doctor.rs
+**What:** Add `check_sandbox_ripgrep()` in `run_doctor()` — a `DoctorCheck`
+with `Warn` severity when rg is unavailable. Placed in the Linux-only block
+after `check_bwrap_sandbox()`.
 
-**Pattern:** `check_cloudflared_binary()` (line 617) — calls `check_binary()`, wraps to downgrade Fail to Warn.
+**When to use:** `rightclaw doctor` diagnostic path. Also acts as documentation
+for operators who need to understand sandbox requirements.
 
-But `check_binary` takes a single name with `claude-bun` alternatives only (line 137). For Chrome we need multiple names. Write `check_chrome` directly without delegating to `check_binary`:
+**Trade-offs:**
+- Pro: Follows exact existing DoctorCheck pattern (name, status, detail, fix)
+- Pro: `Warn` severity matches the fact that agents still run (just unsandboxed)
+- Con: Requires resolving CC binary path, which is slightly involved
 
-```rust
-fn check_chrome() -> DoctorCheck {
-    let candidates = ["google-chrome", "chromium-browser", "chromium", "chrome"];
-    for name in candidates {
-        if let Ok(path) = which::which(name) {
-            return DoctorCheck {
-                name: "chrome".to_string(),
-                status: CheckStatus::Pass,
-                detail: path.display().to_string(),
-                fix: None,
-            };
-        }
-    }
-    let mac = std::path::Path::new(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    );
-    if mac.exists() {
-        return DoctorCheck {
-            name: "chrome".to_string(),
-            status: CheckStatus::Pass,
-            detail: mac.display().to_string(),
-            fix: None,
-        };
-    }
-    DoctorCheck {
-        name: "chrome".to_string(),
-        status: CheckStatus::Warn,   // optional capability, not hard dependency
-        detail: "not found in PATH or standard macOS path".to_string(),
-        fix: Some(
-            "install Google Chrome or Chromium; or manually set chrome.chrome_path in ~/.rightclaw/config.yaml"
-                .to_string(),
-        ),
-    }
-}
+**Check shape:**
 ```
-
-**Wire into `run_doctor` (doctor.rs:115):** Add after `check_cloudflared_binary()`:
-```rust
-checks.push(check_chrome());
-
-// If chrome is configured, verify the path still exists on disk
-if let Ok(global_cfg) = crate::config::read_global_config(home)
-    && let Some(ref chrome_cfg) = global_cfg.chrome
-{
-    checks.push(check_chrome_path(chrome_cfg));
-}
+  sandbox-ripgrep      warn   rg not found in PATH and CC vendor rg not executable
+    fix: Install ripgrep: sudo apt install ripgrep (or dnf/pacman)
 ```
-
-`check_chrome_path` mirrors `check_tunnel_credentials_file` (line 665): check `.exists()`, return Pass or Warn with a fix hint.
 
 ## Data Flow
 
-### rightclaw up — Chrome MCP injection
+### cmd_up — Sandbox Fix Flow
 
 ```
 cmd_up()
     │
-    ├── resolve rg_path, self_exe (existing, line ~596)
-    ├── read_global_config(home)          ← MOVE here from line 706
-    │       └── chrome_cfg: Option<ChromeConfig>
+    ├── verify_dependencies()  [deps.rs]
+    │     ├── which("process-compose") → ok/fail
+    │     ├── which("claude"/"claude-bun") → ok/fail
+    │     └── NEW: if which("rg").is_err() && vendor_rg_not_executable
+    │               → tracing::warn! (non-fatal, continue)
     │
-    └── for agent in agents:
-            └── generate_mcp_config(
-                    &agent.path, &self_exe, &agent.name, home,
-                    chrome_cfg.as_ref().map(|c| c.chrome_path.as_path())
-                )
-                    ├── mcpServers.rightmemory    (always)
-                    └── mcpServers.chrome-devtools (if chrome_path is Some)
+    ├── for each agent:
+    │     generate_settings(agent, no_sandbox, &host_home)  [settings.rs]
+    │         existing: sandbox.enabled, filesystem, network, etc.
+    │         NEW: if which("rg").is_ok()
+    │               → settings["sandbox"]["ripgrep"] = {command: rg_path, args: []}
+    │
+    └── generate_process_compose()  [unchanged]
+          bot processes use USE_BUILTIN_RIPGREP=1 (belt-and-suspenders)
+          but settings.json ripgrep field is the primary fix
 ```
 
-### rightclaw init — Chrome detection
+### CC Subprocess — Sandbox Enable Flow (after fix)
 
 ```
-cmd_init()
-    ├── init_rightclaw_home(...)          // home skeleton, agent dirs
-    ├── tunnel setup (existing)           // computes tunnel_config: Option<TunnelConfig>
-    ├── detect_chrome_binary()            // NEW: returns Option<PathBuf>
-    │       ├── which::which("google-chrome") / "chromium-browser" / "chromium" / "chrome"
-    │       └── macOS hardcoded path fallback
-    └── if tunnel.is_some() || chrome.is_some():
-            write_global_config(home, &GlobalConfig { tunnel, chrome })  // single write
+claude-bun -p --dangerously-skip-permissions ...
+    reads agent/.claude/settings.json
+    sandbox.enabled = true
+    sandbox.ripgrep.command = "/nix/store/.../bin/rg"  ← NEW
+         │
+         oO6() returns {command: "/nix/store/.../bin/rg", args: []}
+         zT8() checkDependencies:
+             bwrap → found ✓
+             socat → found ✓
+             rg (runs command) → /nix/store/.../bin/rg works ✓
+         SandboxUnavailableReason() → undefined (no reason = sandbox enabled)
+         bwrap wraps bash subprocess ✓
 ```
 
-## Build Order
+### doctor — New Check Flow
 
-Dependencies are strictly additive. Each step compiles independently:
+```
+run_doctor(home)
+    ├── check_binary("bwrap")         ← existing
+    ├── check_binary("socat")         ← existing
+    ├── check_bwrap_sandbox()         ← existing
+    └── NEW: check_sandbox_ripgrep()
+              step 1: which("rg") → if found, Pass
+              step 2: else: resolve CC binary → find vendor rg path
+              step 3: check vendor rg mode & 0o111 != 0 → if ok, Pass
+              step 4: else Warn with fix hint
+```
 
-**Step 1** — `config.rs`: Add `ChromeConfig`, `RawChromeConfig`, extend `GlobalConfig`, extend `read_global_config` / `write_global_config`. Write tests: roundtrip with chrome field, absent chrome returns `None`, empty chrome_path returns `Err`.
+## Integration Points
 
-**Step 2** — `mcp_config.rs`: Add `chrome_path: Option<&Path>` param. All existing tests break at compile time (missing 5th arg) — update them to pass `None`. Write new tests: chrome entry injected when `Some`, absent when `None`, idempotent on second call with same `Some`.
+### External Service: CC settings.json sandbox.ripgrep field
 
-**Step 3** — `doctor.rs`: Add `check_chrome()` and `check_chrome_path()`, wire into `run_doctor`. Depends on step 1 for `GlobalConfig`. Write tests.
+| Field | Schema | Notes |
+|-------|--------|-------|
+| `sandbox.ripgrep.command` | `string` | Absolute path to rg binary |
+| `sandbox.ripgrep.args` | `string[]` optional | Extra rg args (use `[]`) |
 
-**Step 4** — `main.rs`: Update `generate_mcp_config` call site (line 701) to pass `chrome_cfg`. Move `read_global_config` before the agent loop. Add `detect_chrome_binary()` and chrome accumulation to `cmd_init`. Depends on steps 1 and 2.
+This field was confirmed present in CC v2.1.89 cli.js Zod schema. It overrides
+CC's internal `$aA()` path resolution, including the vendor fallback.
 
-**Step 5** — `bot/src/lib.rs`: Add startup chrome check. Depends on step 1 only. Purely additive.
+**Confidence: HIGH** — confirmed by source inspection of active CC version.
+
+### Internal Boundary: settings.rs ↔ deps.rs
+
+Both independently call `which::which("rg")`. There is no shared state needed —
+settings.rs uses the result to populate JSON, deps.rs uses it to decide whether
+to warn. No refactoring needed; the two calls are independent.
+
+If code reuse becomes desirable in the future, extract a `resolve_system_rg() -> Option<PathBuf>`
+helper in a shared module. Not needed for this milestone.
+
+### Internal Boundary: deps.rs ↔ doctor.rs
+
+Both check rg availability. The doctor check is richer (resolves CC vendor path as
+fallback, emits DoctorCheck struct). The deps.rs check is simpler (just warn).
+Code can be duplicated (small amount) or shared via an `is_rg_available_for_sandbox()`
+helper. Given the existing pattern (doctor.rs is standalone), duplication is fine.
+
+## Scaling Considerations
+
+Not applicable — this is a local CLI tool. The fix affects only per-agent
+`settings.json` generation at `rightclaw up` time.
 
 ## Anti-Patterns
 
-### Anti-Pattern 1: Passing chrome_path as env var to chrome-devtools-mcp
+### Anti-Pattern 1: Symlinking rg into the Agent Dir
 
-**What people do:** Set `CHROME_PATH` env var in the MCP entry, expecting the server to use it.
-**Why it's wrong:** `chrome-devtools-mcp` uses `--executablePath` as a CLI arg, not `CHROME_PATH`. Unrecognized env vars are silently ignored.
-**Do this instead:** If explicit path forwarding is ever needed, add `"--executablePath"` and the path string to the `args` array. Default: let `chrome-devtools-mcp` discover Chrome automatically.
+**What people do:** Create a symlink at `agent_dir/.bin/rg` → system rg,
+then add `agent_dir/.bin` to the PATH or `allowWrite`.
 
-### Anti-Pattern 2: Writing GlobalConfig twice in cmd_init
+**Why it's wrong:** Bubblewrap's `--bind agent_dir agent_dir` is for write
+access, not PATH injection. The CC subprocess inherits PATH from the spawning
+process (rightclaw/process-compose), not from `allowWrite`. The symlink approach
+adds complexity for zero benefit.
 
-**What people do:** Write tunnel config, detect chrome, write config a second time.
-**Why it's wrong:** The manual YAML serializer in `write_global_config` only emits fields it knows about. A second write without reading back first will miss the first write's fields.
-**Do this instead:** Accumulate both `tunnel: Option<TunnelConfig>` and `chrome: Option<ChromeConfig>` before calling `write_global_config` once.
+**Do this instead:** Set `sandbox.ripgrep.command` in settings.json — CC reads
+this before constructing the bwrap call. Clean, supported, one line.
 
-### Anti-Pattern 3: Fail severity for missing Chrome in doctor
+### Anti-Pattern 2: Hardcoding the Nix Store Hash
 
-**What people do:** Mirror the `bwrap` check with `CheckStatus::Fail` when Chrome is absent.
-**Why it's wrong:** Chrome is an optional capability enhancement. Missing Chrome doesn't break `rightclaw up`, agent launch, memory, tunnel, or Telegram.
-**Do this instead:** `CheckStatus::Warn` (same as `cloudflared` and `sqlite3`). Only use `Fail` if Chrome is explicitly configured in config.yaml but the path no longer exists on disk.
+**What people do:** Hardcode `/nix/store/<hash>-ripgrep-.../bin/rg` in settings.rs
+or a constant.
 
-### Anti-Pattern 4: Reading global config inside the per-agent loop
+**Why it's wrong:** The nix store hash changes on every `rg` version update.
+After a `nix profile upgrade`, the hardcoded path is stale.
 
-**What people do:** Call `read_global_config` inside the `for agent in agents` loop to get chrome_path.
-**Why it's wrong:** Reads the same file N times (once per agent), and the current code structure already calls `read_global_config` after the loop at line 706. Splitting the read creates two callsites that must stay in sync.
-**Do this instead:** Read global config once before the loop, extract `chrome_cfg`, pass it into `generate_mcp_config` on each iteration.
+**Do this instead:** `which::which("rg")` at `rightclaw up` time always resolves
+to the current nix profile symlink target — automatically correct after upgrades.
+
+### Anti-Pattern 3: Setting failIfUnavailable to Make Problems Visible
+
+**What people do:** Add `"failIfUnavailable": true` to `settings.json` to force
+CC to exit loudly when sandbox can't start, making the problem visible.
+
+**Why it's wrong:** CC exits on startup with an error, the bot process crashes,
+process-compose restarts it, infinite restart loop. The operator only sees the
+restart counter climbing with no useful output. This is for managed enterprise
+deployments, not debugging.
+
+**Do this instead:** Fix the root cause (inject working rg path in settings.json).
+Use `rightclaw doctor` to diagnose before `rightclaw up`.
+
+### Anti-Pattern 4: Adding /nix or /nix/store to allowRead
+
+**What people do:** Add `/nix` or `/nix/store` to `settings.json` `allowRead`,
+assuming sandbox can't read the rg binary.
+
+**Why it's wrong:** The bwrap sandbox already does `--ro-bind / /` — the entire
+filesystem is bind-mounted read-only. The nix store is already readable. The
+problem is the execute bit being absent on the vendored binary, not read access.
+`allowRead` does not affect execute semantics.
+
+**Do this instead:** Point CC to a different rg binary via `sandbox.ripgrep.command`.
 
 ## Sources
 
-- `crates/rightclaw/src/config.rs` — GlobalConfig, TunnelConfig pattern (inspected directly)
-- `crates/rightclaw/src/codegen/mcp_config.rs` — generate_mcp_config signature and JSON merge logic
-- `crates/rightclaw/src/doctor.rs` — DoctorCheck, check_binary, check_cloudflared_binary, run_doctor wiring
-- `crates/rightclaw-cli/src/main.rs` — cmd_init flow (lines 250-356), cmd_up agent loop (lines 526-703), generate_mcp_config call at line 701
-- [chrome-devtools-mcp npm](https://www.npmjs.com/package/chrome-devtools-mcp) — command/args/env var configuration
-- [ChromeDevTools/chrome-devtools-mcp GitHub](https://github.com/ChromeDevTools/chrome-devtools-mcp) — --executablePath, --channel, --headless options
+- CC source: `/nix/store/hhydcyh1z6h2fyznlqagb1p66l07yhp6-claude-code-bun-2.1.89/lib/node_modules/@anthropic-ai/claude-code/cli.js` (inspected 2026-04-02)
+  - `$aA` lazy: rg resolution order (USE_BUILTIN_RIPGREP → system → vendor)
+  - `zT8` / `checkDependencies`: verifies bwrap + socat + rg at sandbox init
+  - `vx_` / `SandboxUnavailableReason`: returns reason string when sandbox can't start (silent degradation when `failIfUnavailable=false`)
+  - `oO6()`: returns `{rgPath, rgArgs}` — `sandbox.ripgrep` field overrides `$aA()`
+  - `sandbox.ripgrep` Zod schema: `{command: string, args?: string[]}` — confirmed documented field
+  - `failIfUnavailable`: opt-in hard failure (default false)
+  - `z34`: linux dep check function (bwrap + socat only — rg tested separately via `checkDependencies`)
+- UAT failure record: `.planning/phases/28.2-v3-0-uat-fix-teloxide-native-tls-and-doctor-async-runtime/28.2-UAT.md` lines 101-111
+- Existing fix attempt: `crates/bot/src/telegram/worker.rs:399` + `cron.rs:227` — `USE_BUILTIN_RIPGREP=1` already set (insufficient alone)
+- Vendor rg permissions: mode `.r--r--r--` confirmed via `ls -la` on active CC nix build
+- System rg path: `/nix/store/l327dgzc03fl423swhgkqnrb76ymsd9f-ripgrep-15.1.0/bin/rg` (.r-xr-xr-x — executable)
 
 ---
-*Architecture research for: chrome-devtools-mcp integration in RightClaw*
-*Researched: 2026-04-05*
+*Architecture research for: v3.1 CC sandbox nix rg fix*
+*Researched: 2026-04-02*

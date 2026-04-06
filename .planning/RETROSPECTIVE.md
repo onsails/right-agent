@@ -113,39 +113,10 @@
 
 ---
 
-## Milestone: v3.3 — MCP Self-Management
-
-**Shipped:** 2026-04-06
-**Phases:** 1 | **Plans:** 2 | **Tasks:** 4
-
-### What Was Built
-- `MemoryServer` extended with `agent_dir` + `rightclaw_home` fields; `RC_RIGHTCLAW_HOME` injected into `.mcp.json`
-- Four `#[tool]` methods: `mcp_add`, `mcp_remove`, `mcp_list`, `mcp_auth` — full test coverage (9 new tests)
-- AGENTS.md templates updated so agents know to use these tools instead of editing `.claude.json`
-
-### What Worked
-- Reusing existing infrastructure (credentials.rs, detect.rs, oauth.rs) made Plan 02 trivially fast (4 min)
-- Process-boundary constraint for `mcp_auth` (no PKCE/DCR) was identified early in planning and baked into the design — avoided an entire class of implementation complexity
-- Test extraction to `memory_server_tests.rs` in Plan 01 created clean space for Plan 02's tools
-
-### What Was Inefficient
-- STATE.md/ROADMAP.md got out of sync during worktree execution — orchestrator had to manually resync at phase start
-- gsd-tools `init execute-phase 1` resolved to the old v1.0 `01-foundation-and-agent-discovery` dir instead of the current milestone's `01-mcp-management-tools-in-rightmemory-server` — duplicate phase number collision between milestones
-
-### Patterns Established
-- When two phase dirs share the same numeric prefix across milestones, `gsd-tools` picks the first alphabetically — always check which dir was resolved before executing
-- `mcp_auth` discovery-only design is the right boundary: AS discovery crosses process, PKCE state does not
-
-### Key Lessons
-- Milestone was tiny (1 phase, 4 tasks, 1 day) — this size is ideal for focused capability additions that don't need multi-wave coordination
-
----
-
 ## Cross-Milestone Trends
 
 | Milestone | Phases | Plans | What Shipped | Outcome |
 |-----------|--------|-------|-------------|---------|
-| v3.3 MCP Self-Management | 1 | 2 | mcp_add/remove/list/auth in rightmemory server | ✓ Full delivery, 7/7 reqs |
 | v3.1 Sandbox Fix & Verification | 3 | 3 | rg injection, failIfUnavailable, doctor, E2E script | ✓ Full delivery, live-confirmed |
 | v2.5 RightCron Reliability | 1+1cancelled | 2 | Inline bootstrap + CHECK/RECONCILE redesign | ✓ Code shipped, E2E deferred |
 | v2.4 Sandbox Telegram Fix | 1 | 1 | CC channels bug diagnosis | Deferred fix to CC |

@@ -1,76 +1,101 @@
-# Requirements: RightClaw v3.4 Chrome Integration
+# Requirements: RightClaw v3.2 MCP OAuth
 
-**Defined:** 2026-04-06
+**Defined:** 2026-04-03
 **Core Value:** Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, each with its own sandbox configuration and identity, orchestrated by a single CLI command.
 
-## v3.4 Requirements
+## v3.2 Requirements
 
-### CHROME — Detection & Config
+### CRED — Credential Foundation
 
-- [ ] **CHROME-01**: Operator can run `rightclaw init` and have Chrome auto-detected at standard paths (Linux: `/usr/bin/google-chrome-stable`, `/usr/bin/google-chrome`, `/usr/bin/chromium-browser`, `/usr/bin/chromium`, `/snap/bin/chromium`; macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`, `~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`); detected path saved to `~/.rightclaw/config.yaml` under `chrome.chrome_path`
-- [ ] **CHROME-02**: Operator can pass `--chrome-path <path>` to `rightclaw init` to override auto-detection; provided path saved to config
-- [ ] **CHROME-03**: Chrome detection is non-fatal — no Chrome found logs a warn and skips saving chrome config; init continues normally
+- [x] **CRED-01**: Operator can trust that MCP OAuth tokens are written under the exact key CC expects — `serverName|sha256({"type":"...","url":"...","headers":{}}, no whitespace)[:16]` — verified by unit test against live Notion entry (`notion|eac663db915250e7`)
+- [x] **CRED-02**: Operator can trust concurrent `rightclaw` invocations never corrupt `.credentials.json` — write is atomic (tmp + POSIX rename) with backup before modification; never clobbers unrelated keys (`claudeAiOauth`, etc.)
 
-### INJECT — MCP Entry Generation
+### DETECT — Auth Detection
 
-- [ ] **INJECT-01**: `rightclaw up` injects a `chrome-devtools` entry into per-agent `.mcp.json` when `chrome.chrome_path` is set in `~/.rightclaw/config.yaml`; entry uses absolute path to globally-installed `chrome-devtools-mcp` binary (never `npx`)
-- [ ] **INJECT-02**: Generated `.mcp.json` chrome-devtools entry passes `--executablePath <chrome_path>`, `--headless`, `--isolated`, `--no-sandbox` (bubblewrap outer sandbox), and `--userDataDir <agent_dir>/.chrome-profile` as args
-- [ ] **INJECT-03**: Chrome path is revalidated on every `rightclaw up`; if configured path no longer exists, logs warn and skips injection for that run (does not abort)
+- [x] **DETECT-01**: Operator can run `rightclaw mcp status [--agent <name>]` and see a table of MCP servers with auth state per agent (present / missing / expired)
+- [x] **DETECT-02**: Operator sees a non-fatal Warn during `rightclaw up` when any agent has MCP servers with missing or expired OAuth tokens
 
-### SBOX — Sandbox Settings
+### OAUTH — Core OAuth Flow
 
-- [ ] **SBOX-01**: `generate_settings()` adds Chrome sandbox overrides to per-agent `settings.json` when Chrome is configured: Chrome binary path added to `allowedCommands`; agent `chrome-profile` dir added to `allowWrite`
-- [ ] **SBOX-02**: Chrome sandbox overrides are additive — merged with existing `SandboxOverrides` from `agent.yaml` using the same `Vec::extend` pattern as existing overrides
+- [x] **OAUTH-01**: Operator can send `/mcp auth <server>` via Telegram bot to complete a full OAuth 2.1 + PKCE flow for a named MCP server (per D-01: no CLI command — bot is the only entrypoint)
+- [x] **OAUTH-02**: OAuth flow performs AS discovery in priority order: RFC 9728 (resource metadata) → RFC 8414 (AS metadata) → OIDC `.well-known/openid-configuration` fallback
+- [x] **OAUTH-03**: OAuth flow performs Dynamic Client Registration (RFC 7591) with automatic fallback to static `clientId` from `.mcp.json` when server lacks a `registration_endpoint`
+- [x] **OAUTH-04**: OAuth flow requires cloudflared named tunnel as redirect URI — if `cloudflared` binary is absent, bot replies with a clear error before the flow starts (no partial state left behind)
+- [x] **OAUTH-05**: OAuth flow verifies tunnel is reachable via explicit HTTP request before presenting auth URL to operator — aborts with error if tunnel healthcheck fails (named tunnel, not quick tunnel)
+- [x] **OAUTH-06**: OAuth flow persists PKCE state to file before opening browser; axum callback server on random loopback port receives the redirect through the tunnel
+- [x] **OAUTH-07**: OAuth flow writes completed token to `~/.claude/.credentials.json` via atomic CRED write; agent is restarted via process-compose REST API after successful token storage
 
-### VALID — Doctor + Bot + Up Validation
+### REFRESH — Token Refresh
 
-- [ ] **VALID-01**: `rightclaw doctor` includes a `check_chrome()` check — verifies Chrome binary exists at configured path; Warn severity if missing or unconfigured; skipped if chrome not in config
-- [ ] **VALID-02**: Bot process startup validates Chrome configuration — logs `tracing::warn!` if Chrome is configured but binary missing; logs `tracing::debug!` if Chrome is not configured at all
+- ~~[ ] **REFRESH-01**: Operator can run `rightclaw mcp refresh [<server>] [--agent <name>]` to on-demand refresh an MCP OAuth token without user interaction (uses `refresh_token`, no browser)~~ *(superseded by D-01 — bot scheduler owns all refresh logic)*
+- ~~[ ] **REFRESH-02**: `rightclaw up` proactively refreshes tokens with expired `expiresAt` before launching agents (non-fatal — logs Warn if refresh fails, continues launch)~~ *(superseded by D-02 — bot startup handles refresh; `rightclaw up` retains Warn-only detection from DETECT-02)*
+- [x] **REFRESH-03**: `rightclaw doctor` reports missing/expired MCP OAuth tokens per agent (Warn severity) and checks that `cloudflared` binary is available in PATH (Warn severity)
+- [x] **REFRESH-04**: Tokens with `expiresAt=0` are skipped by the refresh loop and treated as non-expiring (handles Linear and similar providers)
 
-### AGENT — System Prompt Template
+### BOT — Telegram Bot MCP Commands
 
-- [ ] **AGENT-01**: `templates/right/AGENTS.md` and `identity/AGENTS.md` include a "Browser Automation" section instructing agents to: use ChromeDevTools MCP for all browser tasks; call `navigate_page` then `take_snapshot` before any interaction; use `uid` from snapshot for `click`/`fill`/`hover`; use `take_screenshot` to verify results
+- [x] **BOT-01**: User can send `/mcp` in Telegram to receive a list of MCP servers configured for the agent with their auth status (present / missing / expired)
+- [x] **BOT-02**: User can send `/mcp auth <server>` in Telegram to trigger the OAuth flow — bot replies with the auth URL; after user completes auth, bot confirms success or reports tunnel/auth error
+- [x] **BOT-03**: User can send `/mcp add <config>` in Telegram to add a new MCP server to the agent's `.mcp.json` (syntax mirrors `claude mcp add`)
+- [x] **BOT-04**: User can send `/mcp remove <server>` in Telegram to remove an MCP server from the agent's `.mcp.json`
+- [x] **BOT-05**: User can send `/doctor` in Telegram to run `rightclaw doctor` and receive the results in chat (including tunnel availability and MCP auth status per server)
+
+### TUNL — Tunnel Integration
+
+- [x] **TUNL-01**: Operator can configure cloudflared named tunnel via `rightclaw init --tunnel-token <TOKEN> --tunnel-url <URL>` — config stored in `~/.rightclaw/config.yaml`; `rightclaw up` spawns cloudflared as a persistent process-compose entry; `rightclaw doctor` checks cloudflared binary and tunnel config (Warn severity). Stable URL across restarts — required for bot-initiated OAuth (TUNL-02 merged here).
 
 ## Future Requirements
 
-### External Chrome Process
+### Tunnel
 
-- **CHROME-EXT-01**: Chrome runs as a dedicated process-compose process outside all agent sandboxes; agents connect via `--browserUrl http://127.0.0.1:9222` — deferred to v3.5 (cleaner architecture, requires process-compose integration work)
+- **TUNL-ALT**: Operator can configure ngrok as alternative tunnel provider (requires authtoken in config) — deferred past Phase 34
 
-### Per-Agent Chrome Toggle
+### Per-Agent OAuth
 
-- **CHROME-AGENT-01**: Per-agent `agent.yaml` `chrome.enabled: false` field to opt individual agents out of Chrome MCP injection — deferred, global on/off is sufficient for v3.4
+- **PERAG-01**: Each agent can hold its own MCP OAuth tokens (isolated from other agents' credentials) — deferred pending per-agent HOME isolation v2 work (SEED-004 territory)
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Chrome as process-compose entry | v3.5 work — external Chrome approach requires additional integration |
-| ngrok / other tunnel for Chrome redirect | Not relevant to browser automation |
-| Chrome version enforcement / pinning | Warn-only for v3.4; hard requirement deferred |
-| Slim mode (3-tool subset) | Full tool set is correct default; slim mode adds config complexity |
-| `--autoConnect` mode | Requires manual Chrome setup; not compatible with headless agent model |
+| Device Flow (RFC 8628) | Not in MCP spec; no production MCP server supports it |
+| Storing tokens outside `~/.claude/.credentials.json` | CC reads only its own credential file; separate store would be ignored |
+| Relying on CC's internal headless token refresh | Confirmed broken (CC issues #28256, #29718, #35092); rightclaw owns refresh |
+| macOS Keychain for MCP tokens | macOS may use Keychain; v3.2 scoped to Linux only |
+| Automated background refresh daemon | No long-lived rightclaw process to host it; on-demand refresh is sufficient |
+| Tunnel as default for CLI OAuth flow | CLI-initiated flow (`rightclaw mcp auth`) can print URL to terminal; tunnel only mandatory for bot-initiated flow |
 
 ## Traceability
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CHROME-01 | Phase 3 | Pending |
-| CHROME-02 | Phase 3 | Pending |
-| CHROME-03 | Phase 3 | Pending |
-| INJECT-01 | Phase 2 | Pending |
-| INJECT-02 | Phase 2 | Pending |
-| INJECT-03 | Phase 3 | Pending |
-| SBOX-01 | Phase 2 | Pending |
-| SBOX-02 | Phase 2 | Pending |
-| VALID-01 | Phase 4 | Pending |
-| VALID-02 | Phase 4 | Pending |
-| AGENT-01 | Phase 4 | Pending |
+| CRED-01 | Phase 32 | Complete |
+| CRED-02 | Phase 32 | Complete |
+| DETECT-01 | Phase 33 | Complete |
+| DETECT-02 | Phase 33 | Complete |
+| OAUTH-01 | Phase 34 | Complete |
+| OAUTH-02 | Phase 34 | Complete |
+| OAUTH-03 | Phase 34 | Complete |
+| OAUTH-04 | Phase 34 | Complete |
+| OAUTH-05 | Phase 34 | Complete |
+| OAUTH-06 | Phase 34 | Complete |
+| OAUTH-07 | Phase 34 | Complete |
+| REFRESH-01 | Phase 35 | Superseded (D-01) |
+| REFRESH-02 | Phase 35 | Superseded (D-02) |
+| REFRESH-03 | Phase 35 | Complete |
+| REFRESH-04 | Phase 35 | Complete |
+| BOT-01 | Phase 34 | Complete |
+| BOT-02 | Phase 34 | Complete |
+| BOT-03 | Phase 34 | Complete |
+| BOT-04 | Phase 34 | Complete |
+| BOT-05 | Phase 34 | Complete |
+| TUNL-01 | Phase 34 | Complete |
 
 **Coverage:**
-- v3.4 requirements: 11 total
-- Mapped to phases: 11 ✓
-- Unmapped: 0
+- v3.2 requirements: 21 total (CRED×2 + DETECT×2 + OAUTH×7 + REFRESH×4 + BOT×5 + TUNL×1)
+- Mapped to phases: 21
+- Unmapped: 0 ✓
 
 ---
-*Requirements defined: 2026-04-06*
+*Requirements defined: 2026-04-03*
+*Last updated: 2026-04-03 — D-10: OAUTH-01/04/05 restated per bot-only scope; BOT-01..05 moved to Phase 34; TUNL-01 (named tunnel) moved from Future into Phase 34; coverage count updated to 21*

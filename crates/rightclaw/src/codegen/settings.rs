@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::agent::AgentDef;
-use crate::config::ChromeConfig;
 
 /// Default domains agents need to reach.
 const DEFAULT_ALLOWED_DOMAINS: &[&str] = &[
@@ -30,7 +29,6 @@ pub fn generate_settings(
     no_sandbox: bool,
     host_home: &Path,
     rg_path: Option<PathBuf>,
-    chrome_config: Option<&ChromeConfig>,
 ) -> miette::Result<serde_json::Value> {
     // Base filesystem allowWrite: agent's own directory (absolute path, D-02).
     let mut allow_write = vec![agent.path.display().to_string()];
@@ -42,7 +40,6 @@ pub fn generate_settings(
         .collect();
 
     let mut excluded_commands: Vec<String> = vec![];
-    let mut allowed_commands: Vec<String> = vec![];
 
     // Build allowRead: agent path as default, plus user overrides (D-09b).
     // Agent path must be in allowRead because it lives inside the denied host HOME.
@@ -56,12 +53,6 @@ pub fn generate_settings(
         allowed_domains.extend(overrides.allowed_domains.iter().cloned());
         excluded_commands.extend(overrides.excluded_commands.iter().cloned());
         allow_read.extend(overrides.allow_read.iter().cloned());
-    }
-
-    // Chrome sandbox overrides — additive after user overrides (per D-11, SBOX-01, SBOX-02).
-    if let Some(chrome) = chrome_config {
-        allow_write.push(agent.path.join(".chrome-profile").display().to_string());
-        allowed_commands.push(chrome.chrome_path.to_string_lossy().into_owned());
     }
 
     // Build denyRead with absolute host HOME paths (HOME-05).
@@ -101,11 +92,6 @@ pub fn generate_settings(
     // Add excludedCommands only if non-empty (cleaner output).
     if !excluded_commands.is_empty() {
         settings["sandbox"]["excludedCommands"] = serde_json::json!(excluded_commands);
-    }
-
-    // Add allowedCommands only if non-empty (cleaner output, matches excludedCommands pattern).
-    if !allowed_commands.is_empty() {
-        settings["sandbox"]["allowedCommands"] = serde_json::json!(allowed_commands);
     }
 
     // Inject system ripgrep path when available (D-01, D-03, SBOX-01).

@@ -1,188 +1,245 @@
-# Stack Research: v3.4 Chrome Integration
+# Stack Research: v3.1 Sandbox Fix & Verification
 
-**Domain:** Chrome browser MCP integration for RightClaw (Rust CLI, multi-agent runtime)
-**Researched:** 2026-04-05
-**Confidence:** HIGH for npm package identity and invocation; MEDIUM for Chrome path coverage
+**Domain:** CC native sandbox dependency detection in nix environments
+**Researched:** 2026-04-02
+**Confidence:** HIGH — root cause confirmed by CC source inspection and Bun.which() live test
 
 ## Scope
 
-Delta-research for the v3.4 milestone. Covers ONLY what is new:
-1. chrome-devtools-mcp package identity, version, and invocation
-2. Chrome binary paths for Linux (apt, snap) and macOS (standard, Homebrew)
-3. CLI flags and env vars for Chrome path configuration
-4. Whether a Rust crate exists for Chrome detection
+Delta-research for the v3.1 milestone. Covers ONLY the sandbox fix:
+1. Root cause of sandbox silently disabling in nix environments
+2. Fix approaches ranked by correctness
+3. Doctor diagnostics for sandbox dep detection
+4. What NOT to try
 
-Existing stack (tokio, serde, reqwest, rusqlite, teloxide, which, etc.) is NOT re-evaluated.
-
----
-
-## Package Identity
-
-**Package:** `chrome-devtools-mcp`
-**npm org:** ChromeDevTools (official Google/Chrome team)
-**Latest version:** 0.21.0 (published 2026-04-03, 3 days ago)
-**Weekly downloads:** 447,568 — classified "Influential project" by npm
-**Node.js requirement:** v20.19 or newer LTS
-**GitHub:** https://github.com/ChromeDevTools/chrome-devtools-mcp
-
-This is the authoritative package. There are forks (`@mcp-b/chrome-devtools-mcp`, `@daohoangson/chrome-devtools-mcp`, `mcp-chromedevtools`) but none have meaningful adoption or official backing. Use the unscoped `chrome-devtools-mcp`.
+Existing stack (tokio, serde, reqwest, rusqlite, teloxide, etc.) is NOT re-evaluated.
 
 ---
 
-## Invocation Command
+## Root Cause (Confirmed)
 
-```json
-{
-  "command": "npx",
-  "args": ["-y", "chrome-devtools-mcp@latest"]
-}
+The nix CC package installs the vendored ripgrep binary at:
+
+```
+/nix/store/<hash>-claude-code-bun-2.1.89/lib/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/x64-linux/rg
 ```
 
-The `-y` flag suppresses npm prompts. `@latest` ensures the most recent stable version. This is the canonical form confirmed by the official Chrome for Developers blog post and the package README.
+The nix store is immutable — all files get permissions `r--r--r--` (444). No execute bit.
 
-**With Chrome path configured:**
-```json
-{
-  "command": "npx",
-  "args": [
-    "-y",
-    "chrome-devtools-mcp@latest",
-    "--executablePath", "/usr/bin/google-chrome-stable",
-    "--headless"
-  ]
-}
+CC's `checkDependencies()` calls `Bun.which(rgPath)` where `rgPath` is the absolute
+path to the vendored binary. `Bun.which()` checks that a file exists AND is executable.
+Since `444 & --x == 0`, `Bun.which()` returns `null`. CC pushes `"ripgrep not found"`
+to the errors array and sandbox silently disables.
+
+**Confirmed via live test:**
+```
+Bun.which("/nix/.../vendor/ripgrep/x64-linux/rg")  → null   (not executable)
+Bun.which("rg")                                      → "/home/wb/.nix-profile/bin/rg"
 ```
 
----
+**CC source path** (cli.js, G34 = checkDependencies):
+```js
+if (Zr(z.command) === null)   // Zr = Bun.which()
+    K.push(`ripgrep (${z.command}) not found`);
+```
 
-## CLI Flags (Relevant to RightClaw)
-
-| Flag | Alias | Type | Default | Purpose |
-|------|-------|------|---------|---------|
-| `--executablePath` | `-e`, `--executable-path` | string | auto-detect | Absolute path to Chrome binary. Primary config point. |
-| `--headless` | — | boolean | false | Run Chrome without UI. Set true for agent use. |
-| `--userDataDir` | `--user-data-dir` | string | `$HOME/.cache/chrome-devtools-mcp/chrome-profile` | Chrome profile directory. |
-| `--channel` | — | string | stable | Chrome channel when not using `--executablePath`. Values: stable, canary, beta, dev. |
-| `--browserUrl` | `-u`, `--browser-url` | string | — | Connect to already-running Chrome (skip launch). Advanced use. |
-
-**No `CHROME_PATH` env var.** The package does NOT read `CHROME_PATH` from the environment. Chrome path MUST be passed as `--executablePath` in the args array. Setting `CHROME_PATH` in the `.mcp.json` env section is silently ignored.
-
-**Env vars that DO affect behavior:**
-- `CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS` — disables telemetry
-- `CI` — disables telemetry automatically
-- `DEBUG=*` — verbose logging
-
----
-
-## Chrome Binary Paths
-
-### Linux — Probe Order
-
-| Path | Method | Notes |
-|------|--------|-------|
-| `/usr/bin/google-chrome-stable` | APT (google-chrome-stable deb) | Most common on Debian/Ubuntu with Google official repo |
-| `/usr/bin/google-chrome` | APT (symlink) | Symlink to stable, present on most Google Chrome apt installs |
-| `/usr/bin/chromium-browser` | APT (Ubuntu chromium-browser package) | Pre-20.04 Ubuntu standard |
-| `/usr/bin/chromium` | APT (Debian, Fedora, Arch) | Alternate name; Fedora/Arch use `chromium` not `chromium-browser` |
-| `/snap/bin/chromium` | Snap (Ubuntu 20.04+ default) | Ubuntu ships Chromium via snap since 20.04; `apt install chromium-browser` now redirects to snap |
-
-**Snap caveat:** `/snap/bin/chromium` is a wrapper script, not the actual binary. It has its own `/tmp` and IPC namespace. `chrome-devtools-mcp` spawns Chrome as a child process, so snap Chromium should work. Flag it in doctor output when snap path is detected.
-
-**PATH fallbacks via `which::which()`** (use after hardcoded list fails):
-- `google-chrome-stable`
-- `google-chrome`
-- `chromium-browser`
-- `chromium`
-
-### macOS — Probe Order
-
-| Path | Method | Notes |
-|------|--------|-------|
-| `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` | Standard DMG / `brew install --cask google-chrome` | Universal — both Intel and ARM. Homebrew cask installs here regardless of Homebrew prefix. |
-| `/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary` | Canary DMG | Developer machines |
-| `/Applications/Chromium.app/Contents/MacOS/Chromium` | `brew install --cask chromium` | Less common |
-| `$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` | Per-user install | When user installs to ~/Applications |
-
-**Homebrew Intel vs ARM:** `brew install --cask google-chrome` places the `.app` in `/Applications/` on both Intel (`/usr/local/`) and ARM (`/opt/homebrew/`). The binary path is identical — no platform split needed for macOS Chrome paths.
-
----
-
-## No Rust Crate for Chrome Detection
-
-There is no dedicated Rust crate for Chrome path detection. The Node.js ecosystem has `chrome-launcher` (by Google) which does this, but it has no Rust equivalent as a standalone crate.
-
-Existing Rust browser automation crates (`chromiumoxide`, `headless_chrome`, `spider_chrome`) all implement manual path probing internally — a hardcoded list + system PATH lookup. This is the standard pattern.
-
-RightClaw already has `which` as a workspace dependency. Use it for PATH fallbacks after probing the hardcoded list. No new crates required.
-
----
-
-## .mcp.json Integration Shape
-
-Extends `generate_mcp_config()` in `crates/rightclaw/src/codegen/mcp_config.rs`. The Chrome entry follows the same merge-and-upsert pattern as `rightmemory`.
-
-```json
-{
-  "mcpServers": {
-    "rightmemory": { "...existing entry..." },
-    "chrome-devtools": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "chrome-devtools-mcp@latest",
-        "--executablePath", "<chrome_path from config.yaml>",
-        "--headless"
-      ]
+**CC source path** (Bv8 = ripgrep config getter):
+```js
+Bv8 = $1(() => {
+    if (A_(process.env.USE_BUILTIN_RIPGREP)) {   // A_("0") → true
+        let { cmd: z } = tK4("rg", []);
+        if (z !== "rg") return { mode: "system", command: "rg", args: [] };
     }
-  }
-}
+    // ... falls through to builtin/vendor path
+    return { mode: "builtin", command: ".../vendor/ripgrep/x64-linux/rg", args: [] };
+});
 ```
 
-**When Chrome is not configured:** omit the `chrome-devtools` entry entirely. An entry with a missing `--executablePath` causes `npx` to fail and produces confusing agent errors.
+`A_(value)` returns `true` when value is `"0"`, `"false"`, `"no"`, or `"off"` — i.e. it
+means "is USE_BUILTIN_RIPGREP disabled?" When `USE_BUILTIN_RIPGREP=0`, the vendored
+path is SKIPPED and `rg` from PATH is used instead.
 
 ---
 
-## Alternatives Considered
+## Pre-existing Bug in Rightclaw
 
-| Recommended | Alternative | Why Not |
-|-------------|-------------|---------|
-| `chrome-devtools-mcp` | `@mcp-b/chrome-devtools-mcp` | Fork with no unique value, far lower adoption |
-| `chrome-devtools-mcp` | `mcp-chromedevtools` | Unrelated third-party, no official backing |
-| `npx -y chrome-devtools-mcp@latest` | Pin `chrome-devtools-mcp@0.21.0` | Agents stuck on stale APIs; the package evolves frequently (0.21.0 just dropped) |
-| `--executablePath` flag | `--channel stable` | `--channel` relies on package's own detection which is unreliable on Linux snap/nix. Explicit path is safer. |
+`crates/bot/src/telegram/worker.rs` line 399 has the wrong value:
+
+```rust
+// WRONG — "1" means "builtin is enabled" → still uses vendored path
+cmd.env("USE_BUILTIN_RIPGREP", "1");
+```
+
+The comment says "Use system rg instead of CC's bundled vendor binary" but `"1"` does
+the opposite. The correct fix is `"0"`.
 
 ---
 
-## What NOT to Use
+## Fix: Approach 1 — Set USE_BUILTIN_RIPGREP=0 in CC subprocess env (RECOMMENDED)
 
-| Avoid | Why | Use Instead |
-|-------|-----|-------------|
-| `CHROME_PATH` in `.mcp.json` env section | Package ignores this env var. Silently does nothing. | `--executablePath` in `args` array |
-| Injecting entry when Chrome path is unconfigured | npx invocation fails, agent sees broken MCP tool | Skip injection; doctor warns instead |
-| Flatpak Chrome path | Chrome is not officially on Flathub; path is user-specific and unreliable | Probe standard APT/snap paths; allow `--chrome-path` override |
+**Where:** Every `tokio::process::Command` that invokes `claude`/`claude-bun`.
+**Files:** `crates/bot/src/telegram/worker.rs` (invoke_cc), `crates/bot/src/cron.rs` (cron job invoker).
+
+```rust
+cmd.env("USE_BUILTIN_RIPGREP", "0");   // "0" → A_("0") = true → skip vendored binary, use rg from PATH
+```
+
+When `USE_BUILTIN_RIPGREP=0`, CC calls `tK4("rg", [])` to resolve the system `rg`. This
+uses `Bun.which("rg")` — finds `/home/wb/.nix-profile/bin/rg` → returns `{ mode: "system", command: "rg" }`.
+`checkDependencies` then calls `Bun.which("rg")` → non-null → no error → sandbox initializes.
+
+**Prerequisite:** `rg` must be in PATH when CC runs. In devenv, ripgrep is already in
+the devenv PATH (`devenv.nix` does NOT currently include ripgrep but the user's nix
+profile has it). The devenv.nix should add ripgrep explicitly so it is always available:
+
+```nix
+packages = [
+    pkgs.git
+    pkgs.process-compose
+    pkgs.socat
+    pkgs.ripgrep          # ADD: required for CC sandbox rg check
+] ++ lib.optionals pkgs.stdenv.isLinux [
+    pkgs.bubblewrap
+];
+```
+
+**Why this is correct:**
+- Zero runtime cost — env var set at subprocess spawn time
+- CC validates `rg` in PATH not a hard-coded path
+- Works for both worker.rs (Telegram bot) and cron.rs (cron jobs)
+- Mirrors the approach used by `sadjow/claude-code-nix` (authoritative nix CC package)
+
+**Confidence:** HIGH — approach confirmed by CC source + nix package precedent.
+
+---
+
+## Fix: Approach 2 — Add ripgrep to devenv packages (REQUIRED COMPLEMENT)
+
+Even with `USE_BUILTIN_RIPGREP=0`, CC must find `rg` in PATH. The rightclaw process-compose
+entries run with the environment that rightclaw up was launched in. The devenv environment
+currently gets ripgrep from the user's `~/.nix-profile`, not from devenv explicitly.
+
+Add to `devenv.nix`:
+
+```nix
+packages = [
+    pkgs.git
+    pkgs.process-compose
+    pkgs.socat
+    pkgs.ripgrep
+] ++ lib.optionals pkgs.stdenv.isLinux [
+    pkgs.bubblewrap
+];
+```
+
+This ensures ripgrep is in PATH in any devenv shell, not just when the user happens to
+have it in their nix profile.
+
+**Confidence:** HIGH — ripgrep is a standard nix package.
+
+---
+
+## Fix: Approach 3 — Doctor check for vendored rg executability (DIAGNOSTIC)
+
+The doctor should detect the nix sandbox issue before launch and surface a clear message.
+
+Add to `crates/rightclaw/src/doctor.rs`:
+
+```rust
+// Check: CC vendored ripgrep executability (nix issue)
+checks.push(check_cc_vendored_rg());
+```
+
+The check should:
+1. Find the CC binary path (using `which::which("claude").or_else(|_| which::which("claude-bun"))`)
+2. Resolve the node_modules parent: `cc_bin.parent()?.parent()?.join("lib/node_modules/@anthropic-ai/claude-code")`
+3. For Linux, build the vendored path: `cc_root/vendor/ripgrep/x64-linux/rg`
+4. Check if the file exists AND is executable (`metadata.permissions().mode() & 0o111 != 0`)
+5. If not executable: emit Warn with message "CC vendored ripgrep not executable (nix store). Set USE_BUILTIN_RIPGREP=0 in agent env — rightclaw up handles this automatically."
+6. If `USE_BUILTIN_RIPGREP=0` is already set: emit Pass "CC using system ripgrep (nix-compatible)"
+7. If no vendored rg found at all (non-nix install): emit Pass "CC vendored ripgrep not present (non-nix install)"
+
+**Severity:** Warn (not Fail) — rightclaw up automatically injects `USE_BUILTIN_RIPGREP=0`
+so after the fix the doctor check becomes informational.
+
+---
+
+## What NOT to Try
+
+| Approach | Why Not |
+|----------|---------|
+| `chmod +x .../vendor/ripgrep/x64-linux/rg` | Nix store is immutable — chmod fails with EROFS. Re-applied on every nix upgrade anyway. |
+| Nix overlay to patch CC package | Overkill — the fix is a single env var. Nix overlays require nix expertise and pin the CC version. |
+| Symlink system rg over vendored path | Nix store is read-only. Would require a writable CC install. |
+| `sandbox.enabled: false` in settings.json | Defeats the entire security model. The goal is to ENABLE sandbox, not disable it. |
+| Set `USE_BUILTIN_RIPGREP=1` | WRONG — value "1" passes `A_("1") = false`, keeping the vendored path. The existing code in worker.rs has this bug. |
+| Wrapper script around claude binary | More complexity than needed. env var approach is cleaner and already works. |
+| `SANDBOX_RUNTIME=1` env var | That's an internal CC env var set INSIDE the sandbox. Not for external use. |
+
+---
+
+## Integration Points in Rightclaw
+
+### worker.rs (invoke_cc) — BROKEN, needs fix
+```rust
+// Current (wrong):
+cmd.env("USE_BUILTIN_RIPGREP", "1");
+
+// Fixed:
+cmd.env("USE_BUILTIN_RIPGREP", "0");
+```
+
+### cron.rs (cron job invoker) — needs same fix
+The cron job invoker spawns `claude -p` similarly. Verify it also sets
+`USE_BUILTIN_RIPGREP=0` or add it.
+
+### devenv.nix — add ripgrep
+```nix
+pkgs.ripgrep
+```
+
+### doctor.rs — add check_cc_vendored_rg
+New check function that detects nix install + non-executable vendored rg + advises.
 
 ---
 
 ## No New Rust Crates Required
 
+The fix requires no new dependencies:
+
 | What | How |
 |------|-----|
-| Chrome path probing (hardcoded list) | `std::path::Path::exists()` — stdlib |
-| Chrome PATH fallbacks | `which::which()` — already in workspace |
-| Config persistence | `~/.rightclaw/config.yaml` — already exists via serde-saphyr |
-| .mcp.json injection | `generate_mcp_config()` in mcp_config.rs — extend existing function |
+| `USE_BUILTIN_RIPGREP=0` in subprocess env | `std::process::Command::env()` / `tokio::process::Command::env()` — already used |
+| Vendored rg executability check | `std::fs::metadata()` + `std::os::unix::fs::PermissionsExt` — stdlib |
+| Find CC binary for doctor check | `which::which()` — already in workspace deps |
+| ripgrep in devenv PATH | `pkgs.ripgrep` in devenv.nix — devenv package, not a Rust crate |
+
+---
+
+## Verification Sequence
+
+After applying the fix, the sandbox status can be verified:
+
+1. `rightclaw doctor` — should show Pass for new `cc-sandbox-rg` check
+2. `rightclaw up` — launch agent
+3. Inside agent session: `/sandbox` — should show sandbox enabled, not disabled
+4. Inside agent session: `/doctor` — CC's own doctor should report ripgrep working
+5. `rightclaw doctor` in a fresh shell (without devenv active) — ensure rg is still found
 
 ---
 
 ## Sources
 
-- [chrome-devtools-mcp npm](https://www.npmjs.com/package/chrome-devtools-mcp) — v0.21.0, 447k downloads/week, HIGH confidence
-- [ChromeDevTools/chrome-devtools-mcp GitHub README](https://github.com/ChromeDevTools/chrome-devtools-mcp) — `--executablePath`, `--headless`, `--channel` flags, HIGH confidence
-- [Chrome DevTools MCP blog](https://developer.chrome.com/blog/chrome-devtools-mcp) — canonical `npx -y chrome-devtools-mcp@latest` invocation, HIGH confidence
-- [chrome-devtools-mcp troubleshooting.md](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/troubleshooting.md) — `--executablePath` WSL usage patterns, MEDIUM confidence
-- [GoogleChrome/chrome-launcher chrome-finder.ts](https://github.com/GoogleChrome/chrome-launcher/blob/main/src/chrome-finder.ts) — Linux/macOS probe path list reference, MEDIUM confidence (chrome-launcher uses puppeteer-core not chrome-launcher internally, but platform path landscape identical)
-- [Ubuntu snap Chromium issue tracking](https://github.com/SeleniumHQ/selenium/issues/7788) — `/snap/bin/chromium` path confirmed, MEDIUM confidence
+- CC cli.js source, G34 (`checkDependencies`) — extracted from `/nix/store/.../cli.js`, line 780
+- CC cli.js source, Bv8 (`ripgrep config getter`) — `USE_BUILTIN_RIPGREP` logic confirmed
+- CC cli.js source, Zr (`Bun.which` wrapper) — used for dependency detection
+- CC cli.js source, A_ — value semantics: `"0"` → builtin disabled → use system rg
+- [sadjow/claude-code-nix package.nix](https://github.com/sadjow/claude-code-nix/blob/main/package.nix) — `USE_BUILTIN_RIPGREP=0` + `--prefix PATH ripgrep` pattern confirmed HIGH confidence
+- [CC issue #42068](https://github.com/anthropics/claude-code/issues/42068) — vendored rg permissions bug (same root issue), April 2026
+- [CC sandboxing docs](https://code.claude.com/docs/en/sandboxing) — `sandbox.failIfUnavailable` behavior
+- Live Bun.which test: `Bun.which("/nix/.../vendor/ripgrep/x64-linux/rg")` → `null` (confirmed)
+- Live file check: `/nix/.../vendor/ripgrep/x64-linux/rg` has mode `r--r--r--` (444)
 
 ---
-*Stack research for: RightClaw v3.4 Chrome Integration*
-*Researched: 2026-04-05*
+*Stack research for: RightClaw v3.1 Sandbox Fix & Verification*
+*Researched: 2026-04-02*

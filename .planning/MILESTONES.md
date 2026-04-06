@@ -1,18 +1,5 @@
 # Milestones
 
-## v3.3 MCP Self-Management (Shipped: 2026-04-06)
-
-**Phases completed:** 1 phase, 2 plans, 4 tasks
-
-**Key accomplishments:**
-
-- Extended `MemoryServer` with `agent_dir` + `rightclaw_home` fields; injected `RC_RIGHTCLAW_HOME` into rightmemory `.mcp.json` env; extracted tests to `memory_server_tests.rs`
-- Added `mcp_add`, `mcp_remove`, `mcp_list`, `mcp_auth` tools to MemoryServer — agents can now self-manage HTTP MCP connections without Telegram
-- `mcp_auth` performs OAuth AS discovery (RFC 9728/8414) and returns `authorization_endpoint`; no PKCE/DCR (process-boundary constraint); bot handles full flow
-- AGENTS.md templates updated — all agents know to use rightmemory MCP tools for server management instead of editing `.claude.json` directly
-
----
-
 ## v3.2 MCP & Tunnel (Shipped: 2026-04-05)
 
 **Phases completed:** 2 phases, 3 plans, 6 tasks

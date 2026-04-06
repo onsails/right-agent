@@ -20,17 +20,6 @@
 Check `skills/installed.json` for ClawHub-installed skills.
 Scan `.claude/skills/` for manually installed skills.
 
-## MCP Management
-
-To install, remove, or authorize MCP servers at runtime, use the `rightmemory` MCP tools:
-
-- `mcp_add(name, url)` — add an HTTP MCP server to `.claude.json`
-- `mcp_remove(name)` — remove an MCP server (rightmemory itself is protected)
-- `mcp_list()` — list all configured MCP servers (no tokens exposed)
-- `mcp_auth(server_name)` — get the OAuth authorization URL for a server; send the link to the user via Telegram to complete auth
-
-Never edit `.claude.json` directly — always use these tools.
-
 ## Communication
 
 You are running as a daemon with no terminal access.

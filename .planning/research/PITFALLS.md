@@ -1,170 +1,208 @@
 # Pitfalls Research
 
-**Domain:** Chrome browser MCP integration in a bubblewrap/Seatbelt-sandboxed headless agent runtime
-**Researched:** 2026-04-05
-**Confidence:** HIGH for bubblewrap nested sandbox failures (confirmed from chrome-devtools-mcp official docs + CC sandbox-runtime source); HIGH for npx startup issues (multiple independent sources, 2025-2026); MEDIUM for Chrome version compatibility (official docs + puppeteer issue tracker); HIGH for optionality recommendation (architectural reasoning from existing codebase patterns)
+**Domain:** Fixing CC sandbox dependency detection in nix environments + end-to-end verification of rightclaw sandbox pipeline
+**Researched:** 2026-04-02
+**Confidence:** HIGH for ripgrep/vendor env var behavior (confirmed GitHub issues, official docs); HIGH for nix immutability constraints (nix design docs); MEDIUM for multi-vendor dep gaps (extrapolated from sandbox-runtime source observations); HIGH for macOS/Linux divergence (confirmed CC issues #32275, #19996); MEDIUM for env var env-var-value polarity bug (code inspection + issue #6415)
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: bubblewrap Sandbox Blocks Chrome's Own Sandbox — Nested Sandbox Deadlock
+### Pitfall 1: USE_BUILTIN_RIPGREP=1 Forces Bundled Binary — The Exact Opposite of the Stated Intent
 
 **What goes wrong:**
-Chrome requires its own sandbox (seccomp + user namespaces) to start safely. bubblewrap itself uses Linux user namespaces. When Chrome runs *inside* a bubblewrap sandbox, it attempts to create child namespaces for each renderer process. This nested namespace creation fails because the bubblewrap container does not grant `CAP_SYS_ADMIN` or `clone(CLONE_NEWUSER)` to its children unless explicitly configured.
+The current codebase sets `cmd.env("USE_BUILTIN_RIPGREP", "1")` with the comment "Use system rg instead of CC's bundled vendor binary." The comment and value are inverted.
 
-Result: Chrome starts, then immediately crashes with `Failed to move to new namespace: PID namespaces supported, Network namespace supported, but failed to unshare user namespace`. The MCP server's npx process exits with a non-zero code and CC sees the tool as unavailable.
+`USE_BUILTIN_RIPGREP=1` means: **use the bundled CC binary** (this is the default — the "1" enables the built-in). Setting it to `"0"` forces CC to use the system `rg` from `PATH`.
 
-The official chrome-devtools-mcp troubleshooting doc states explicitly: "If sandboxes are enabled, `chrome-devtools-mcp` is not able to start Chrome" when the MCP client itself runs inside an OS sandbox.
+So the current code is actively forcing the broken bundled binary, not the system one. The nix store vendor binary lacks the execute bit (reported across Linux and macOS in CC issue #42068), so CC's sandbox silently degrades — skills don't load, grep tool fails — and the code's "fix" is actually reinforcing the failure.
 
 **Why it happens:**
-chrome-devtools-mcp launches Chrome via Puppeteer. Puppeteer does not pass `--no-sandbox` by default. Chrome's sandbox requires Linux user namespace support at a level bubblewrap's default policy denies. It is not a bug in bubblewrap or Chrome — it is an architectural conflict between two sandboxes trying to own namespace isolation.
+The naming is counterintuitive. "USE_BUILTIN_RIPGREP" sounds like "if 1, use system builtin rg," but in CC's implementation it means "if 1, use CC's own bundled rg." The bug is easy to introduce when reading the variable name without checking the issue tracker.
 
 **How to avoid:**
-There are two valid approaches:
-
-1. **Run Chrome outside the sandbox (preferred):** Launch a Chrome process outside the bubblewrap sandbox with `--remote-debugging-port=9222 --headless --no-first-run --disable-features=VizDisplayCompositor`. Then configure chrome-devtools-mcp with `--browser-url=http://127.0.0.1:9222` so the MCP server connects to the existing instance rather than launching its own. The MCP stdio server itself runs inside the sandbox; only Chrome runs outside. This matches the threat model — Chrome is sandboxed by its own mechanisms; the agent gets browser access via CDP, not direct filesystem access.
-
-2. **Use `--no-sandbox` flag with Chrome:** Pass `--chromeArg=--no-sandbox` to chrome-devtools-mcp. This disables Chrome's own sandbox. Only acceptable because the agent is already inside bubblewrap — the outer sandbox provides isolation. Do NOT use this approach without an outer sandbox — it exposes the host to renderer exploits.
+- Set `cmd.env("USE_BUILTIN_RIPGREP", "0")` to force system `rg`.
+- Add system `rg` to `PATH` before spawning `claude -p` (devenv already provides it via `pkgs.ripgrep` through rightclaw's `devenv.nix`, but not necessarily in the agent launch environment).
+- Doctor check: verify `rg` is in the `PATH` that agents will inherit. The `which::which("rg")` call in doctor.rs should validate the exact PATH the agents receive, not the operator's interactive PATH.
 
 **Warning signs:**
-- `chrome-devtools-mcp` MCP entry in `.mcp.json` but CC reports the tool as failing to initialize.
-- Chrome process in ps output but exits within 1-2 seconds.
-- stderr from the MCP process contains "Failed to move to new namespace" or "No usable sandbox".
+- Skills from `.claude/skills/` silently absent — CC doesn't list or invoke them.
+- Grep tool (Search tool in CC) returns empty results or EACCES error in stderr.
+- `claude --debug` shows `spawn .../vendor/ripgrep/.../rg EACCES` buried in debug output.
+- `USE_BUILTIN_RIPGREP=1` anywhere in the agent environment.
 
-**Phase to address:** Detection phase (init / doctor). The approach (external Chrome vs. --no-sandbox) must be decided before implementation, as it affects how the Chrome process is configured in process-compose.
+**Phase to address:** Phase 1 (sandbox dependency fix). Single-line fix — change `"1"` to `"0"` — but must be caught before testing or the entire verification effort validates the wrong behavior.
 
 ---
 
-### Pitfall 2: /dev/shm Missing or Too Small — Chrome Crashes Silently After Start
+### Pitfall 2: Nix Store Paths Are Immutable — Symlinking Into Them Silently Fails or Is Dangerous
 
 **What goes wrong:**
-Chrome uses `/dev/shm` as shared memory for IPC between its processes. The default bubblewrap sandbox does not bind-mount `/dev/shm` unless explicitly configured. Without `/dev/shm`, Chrome starts, renders a page, then crashes when renderer processes try to communicate. The crash may appear as a timeout on the MCP tool call, not a startup error.
+A naive "fix" for the missing execute bit is to `chmod +x` the vendor ripgrep or symlink a working binary into the nix store path. Both approaches fail:
 
-Even with `/dev/shm` present, bubblewrap may impose a size limit (tmpfs `--size=`) that is smaller than Chrome's minimum. Chrome needs at minimum 128MB; the CC sandbox defaults to a smaller tmpfs.
+1. **chmod +x on nix store**: the nix store is mounted read-only. `chmod +x /nix/store/<hash>/...` returns `EROFS: read-only file system`. Even if it were possible, the hash in the store path encodes the file contents and permissions — changing permissions invalidates the store derivation. This is not a valid fix.
+
+2. **Symlinking vendor/ripgrep into nix store path**: the vendor directory lives inside the CC npm package, which lives inside the nix store derivation for `claude-code`. The directory is immutable. You cannot write into it.
+
+3. **Symlinking nix store rg into a mutable path**: this works but creates a fragile dependency on a specific nix store hash. When the nix derivation for ripgrep is garbage collected or updated, the symlink breaks silently without error until the next CC invocation fails.
 
 **Why it happens:**
-CC's `settings.json` `sandbox` section controls bubblewrap configuration but does not automatically bind-mount `/dev/shm`. The developer tests Chrome outside the sandbox, sees it working, assumes the sandbox will work too.
+Developers familiar with mutable package managers (apt, brew, npm) assume they can patch installed files. Nix's content-addressed, immutable store invalidates this assumption entirely.
 
 **How to avoid:**
-- Use the external-Chrome approach (Pitfall 1, option 1) — Chrome runs outside bubblewrap entirely, no `/dev/shm` issue inside the sandbox.
-- If Chrome must run inside the sandbox: add `/dev/shm` to `SandboxOverrides.allow_write` paths AND add `--disable-dev-shm-usage` to Chrome flags so it falls back to `/tmp` (disk-backed shared memory). This flag avoids crashes at the cost of minor performance degradation — acceptable for agent use.
-- Add `--disable-gpu` and `--disable-software-rasterizer` flags to eliminate GPU-related crash paths entirely (agents have no display anyway).
+- Do NOT attempt to symlink into the nix store.
+- Do NOT attempt to chmod files in the nix store.
+- The correct fix is env var: set `USE_BUILTIN_RIPGREP=0` so CC uses `rg` from `PATH`, and ensure `rg` is in the PATH that agents receive at launch time (not just the developer's interactive shell PATH).
+- In `rightclaw up`, explicitly prepend the devenv/nix-provided `rg` to the agent's PATH via `cmd.env("PATH", ...)` if the system `rg` is only available through a devenv shell.
 
 **Warning signs:**
-- Chrome starts (npx process runs) but MCP tool calls time out or return empty results.
-- Chrome process exits with signal (segfault or bus error) a few seconds after first CDP command.
-- `--disable-dev-shm-usage` not present in Chrome args when running inside sandbox.
+- A "fix" that involves `chmod +x` on a path containing `/nix/store/` — this will silently fail or corrupt the derivation.
+- A symlink from the project directory into `/nix/store/<hash>/...` — works until GC or update.
+- Doctor passes in the developer's devenv shell but fails on a fresh `rightclaw up` from a non-devenv terminal.
 
-**Phase to address:** Implementation phase. Must be validated by actually running Chrome inside a real bubblewrap sandbox, not just testing in an uncontained environment.
+**Phase to address:** Phase 1 (sandbox dependency fix). Must explicitly decide "no nix store mutation" before starting implementation, or it will be re-attempted as a quick fix when the env var approach seems more involved.
 
 ---
 
-### Pitfall 3: Chrome Path Saved at Init, Stale by Next Launch — Silent Failure
+### Pitfall 3: Nix Store Hash Changes on Every CC Update — Hardcoded Paths Rot Immediately
 
 **What goes wrong:**
-`rightclaw init` detects Chrome at a standard path (e.g., `/usr/bin/google-chrome`) and saves it to `~/.rightclaw/config.yaml`. Six months later: Chrome is updated and its binary moves (e.g., `/usr/bin/chromium-browser` on Ubuntu after a package rename), removed (user switched to Flatpak Chrome), or the saved path points to a symlink that was silently invalidated by a distro update.
+Any path containing a nix store hash is version-specific: `/nix/store/abc123...-claude-code-1.2.3/...`. The hash changes every time the derivation changes — every CC update, every rebuild with different compiler flags, every devenv rebuild.
 
-On next `rightclaw up`, the path passes no validation at all (no check — rightclaw just writes it to `.mcp.json`), chrome-devtools-mcp silently fails to start, and agents have no browser tools. No error in logs — the MCP server just fails to initialize and CC treats it as an unavailable tool.
+If the sandbox fix hardcodes a nix store path anywhere (in doctor.rs, in shell wrappers, in test assertions, in any generated configuration), those paths break silently on the next update. The fix appears to work on the current version but regresses without warning on every subsequent CC update.
+
+This is particularly treacherous for doctor checks: if `check_binary("rg", ...)` uses `which::which` with the developer's PATH but the agent launch uses a different PATH (no devenv activation), doctor passes while `rightclaw up` agents fail.
 
 **Why it happens:**
-Path validation happens once at init, then the saved value is trusted forever. Chrome paths are not stable across distro updates, major version bumps, or installation method changes (system package → Flatpak → snap → tarball).
+Developers test in their devenv shell where everything is on PATH. The agent processes launched by process-compose inherit a different environment — only what `rightclaw up` explicitly forwards.
 
 **How to avoid:**
-- Validate Chrome binary on every `rightclaw up`, not just at init. Use `which::which` as a fallback if the saved path is gone.
-- Doctor check: verify Chrome at configured path exists AND is executable. Severity: Warn (not Error — agents still work without Chrome).
-- On startup: if the saved path is absent, try a short list of standard fallback paths. If still missing, log a warning and skip chrome-devtools-mcp injection (do not fail the entire `rightclaw up`).
-- Standard paths to probe (in order): `/usr/bin/google-chrome`, `/usr/bin/google-chrome-stable`, `/usr/bin/chromium-browser`, `/usr/bin/chromium`, `/snap/bin/chromium`, macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`, Homebrew: `$(brew --prefix)/bin/chromium`.
+- Never hardcode nix store paths in any generated or compiled artifact.
+- Use `which::which("rg")` dynamically at agent launch time, not at build time.
+- The doctor check for `rg` should validate that `rg` is reachable from the environment that agents will actually receive — consider testing with the exact env vars rightclaw sets on agent processes.
+- Add a dedicated doctor check: `sandbox-rg-accessible` — actually spawns a minimal CC command with the same env as agent processes and verifies rg works.
 
 **Warning signs:**
-- `~/.rightclaw/config.yaml` contains a `chrome_path` that points to a path that no longer exists.
-- Agents report no browser tools available but no explicit error logged.
-- Doctor shows "Chrome: not configured" after a system update even though Chrome is still installed (path changed).
+- Any `/nix/store/<hash>/` substring in generated files, doctor output, or runtime config.
+- Doctor passes in devenv shell but not in a fresh login terminal.
+- Tests that assert specific rg paths rather than testing behavior.
 
-**Phase to address:** Init detection phase AND `rightclaw up` generation phase. Both must validate path, not just init.
+**Phase to address:** Phase 1 (sandbox dependency fix) + Phase 2 (doctor diagnostics). The doctor check design must account for env divergence.
 
 ---
 
-### Pitfall 4: npx Startup Adds 3–8 Seconds Per Agent Launch — Blocks process-compose Health Checks
+### Pitfall 4: macOS and Linux Have Different Vendor Dep Chains — Fix One, Break the Other
 
 **What goes wrong:**
-`.mcp.json` entries using `npx chrome-devtools-mcp@latest` invoke npx on each agent startup. npx must:
-1. Check the npm registry for the latest version (network call, 200-500ms).
-2. Download the package if not cached (first run: 2-5 seconds; cached: 300-800ms).
-3. Resolve and start the Node.js process.
+CC uses different sandboxing mechanisms per OS:
+- **Linux**: bubblewrap + socat + ripgrep. The CC sandbox-runtime checks for all three.
+- **macOS**: Seatbelt (built-in `sandbox-exec`) + socat + ripgrep. No bwrap needed.
 
-When multiple agents start simultaneously in process-compose, each npx call makes a registry network call. In aggregate this delays agent initialization by 5-10 seconds. Worse: process-compose has health check timeouts. If MCP server startup exceeds the health check window, process-compose marks the process as unhealthy and restarts it — causing a restart loop.
+The nix environment pitfalls differ between platforms:
+- On Linux/devenv: `bwrap` from `pkgs.bubblewrap`, `socat` from `pkgs.socat`, `rg` from devenv PATH. These may or may not be in the agent launch PATH.
+- On macOS/devenv: no `bwrap` installed. **But if `bwrap` is installed via Homebrew on macOS (e.g., a Linux developer's laptop), CC detects it on PATH and switches to the Linux sandbox path — which fails on macOS** (confirmed CC issue #32275, locked March 2026).
 
-Separately, `npx ... @latest` version anchoring means each launch resolves the "latest" tag, which can pull a different version than what was running before (version drift). A breaking change in chrome-devtools-mcp could silently break all agents simultaneously on next launch.
+So the risk cuts both ways: bwrap missing on Linux = fail; bwrap present on macOS = also fail.
 
 **Why it happens:**
-`npx` is designed for convenience in interactive use, not for per-session daemon startup. It is routinely recommended in MCP documentation for simplicity, but this convenience hides significant startup cost and version instability in production runtimes.
+CC's platform detection checks binary availability before OS type in some code paths. The dev environment (Homebrew on macOS, devenv on Linux) may install binaries that confuse CC's runtime detection.
 
 **How to avoid:**
-- Do NOT use `npx` in the generated `.mcp.json` entry. Use a globally installed binary path instead.
-- Install chrome-devtools-mcp globally as part of `rightclaw init`: `npm install -g chrome-devtools-mcp@<pinned-version>`.
-- Write the resolved binary path (from `which::which("chrome-devtools-mcp")` or `npm prefix -g`) into the `.mcp.json` `command` field — same pattern as rightclaw uses `current_exe()` for the rightmemory entry.
-- Pin the version in `config.yaml` and doctor-check that the installed version matches.
-- If global install is undesirable: at minimum use `npx --no` (offline, fail if not cached) and pin `chrome-devtools-mcp@X.Y.Z` not `@latest`.
+- On macOS: do NOT install bwrap via Homebrew or include it in macOS devenv. The CLAUDE.md `devenv.nix` already scopes bwrap to Linux only (`lib.optionals pkgs.stdenv.isLinux`). This is correct — do not change it.
+- On Linux: ensure socat is reachable from the agent launch PATH, not just the devenv shell. The bwrap smoke test in doctor.rs currently tests with `--unshare-net --dev /dev` — this correctly detects AppArmor restrictions.
+- The `USE_BUILTIN_RIPGREP=0` fix applies identically to both platforms. Verify on both.
+- Doctor checks should emit different checks per platform, not a single cross-platform list.
 
 **Warning signs:**
-- `.mcp.json` entry has `"command": "npx"` with `"args": ["chrome-devtools-mcp@latest", ...]`.
-- Agent startup takes noticeably longer after adding Chrome MCP (5-10 seconds per agent).
-- process-compose shows chrome-devtools-mcp process restarting repeatedly.
-- Agents work on Monday, break on Wednesday — version drift via `@latest`.
+- A macOS developer testing fixes that work locally but break on Linux CI (or vice versa).
+- Any fix that involves `pkgs.bubblewrap` on macOS (wrongly added to non-Linux devenv).
+- `rightclaw doctor` showing "bwrap: pass" on macOS — this means bwrap is installed and may trigger the wrong sandbox path.
 
-**Phase to address:** MCP config generation phase. The `generate_mcp_config` pattern in `mcp_config.rs` should be followed: use absolute binary path, not npx.
+**Phase to address:** Phase 1 (sandbox fix must be tested on both platforms) + Phase 2 (doctor must distinguish macOS vs Linux vendor dep chains).
 
 ---
 
-### Pitfall 5: Chrome Version Incompatibility with chrome-devtools-mcp — Silent CDP Protocol Mismatch
+### Pitfall 5: Fixing Ripgrep Misses Other Vendor Dependencies — Sandbox Still Broken
 
 **What goes wrong:**
-chrome-devtools-mcp targets the latest Extended Stable Chrome release. It uses Chrome DevTools Protocol (CDP) commands that may not exist in older Chrome versions. If the system Chrome is significantly behind (e.g., Chrome 110 on an old Ubuntu LTS while chrome-devtools-mcp targets Chrome 135+), CDP commands fail silently or return unexpected results.
+CC's sandbox-runtime checks for multiple dependencies, not just ripgrep. Known deps:
+- `rg` (ripgrep) — for skill/command discovery and Grep tool
+- `socat` — for network proxying inside the bubblewrap sandbox (Linux)
+- `bwrap` (Linux only) — the container runtime itself
 
-The inverse also happens: Chrome auto-updates on macOS/Windows, advancing beyond what chrome-devtools-mcp was tested against. The tool officially supports "Other Chromium-based browsers" only with caveats — Chromium from distro packages may lag months behind Google Chrome's release cadence.
+If the fix addresses only ripgrep, the sandbox may partially work (skills load) but silently fail on network calls (socat missing) or fail entirely on bwrap invocation. The failure mode differs: missing socat causes network tool calls inside sandbox to fail or hang, not a startup error. Missing bwrap causes sandbox to disable silently (CC falls back to unsandboxed mode without a clear error).
 
 **Why it happens:**
-Chrome versions are not pinned by the system package manager on most distros. Google Chrome auto-updates silently on Linux (if installed from Google's repo). Chromium from distro packages (e.g., Ubuntu's `chromium-browser`) lags 3-6 months behind Chrome stable. The mismatch is not detected at init time.
+The issue that surfaces first (ripgrep, because it blocks skill loading, which is visible immediately) gets fixed, but the subtler dependencies (socat, bwrap) are not validated in the same pass.
 
 **How to avoid:**
-- During `rightclaw init` Chrome detection, record the detected Chrome version alongside the path.
-- Doctor check: verify Chrome version is >= minimum required (document this constant; as of 2026-04, Chrome 144+ is needed for Remote Debugging connections via chrome-devtools-mcp).
-- Prefer Google Chrome over Chromium in the path probe order — Chrome is more current.
-- Add version to doctor output so the operator can see what Chrome version agents are using.
-- If Chromium is detected and its version is too old, emit a Warn with a link to instructions for installing Google Chrome.
+- The fix phase must validate ALL sandbox dependencies end-to-end, not just ripgrep.
+- E2E verification must include: a tool call that uses the Grep tool (exercises rg), a Bash command that makes a network call inside sandbox (exercises socat + bwrap network proxy), and a filesystem write to the agent dir (exercises bwrap bind-mount).
+- Doctor must explicitly check all three deps against the agent launch environment, not just the shell PATH.
+- Add a doctor check that actually runs `claude -p "test" --max-turns 1` with sandbox enabled and checks for sandbox-related errors in stderr.
 
 **Warning signs:**
-- Chrome binary found and functional but `screenshot` or `navigate` MCP tools return errors.
-- Chromium from distro packages detected (binary name is `chromium-browser` not `google-chrome`).
-- Doctor reports Chrome found but does not report version.
+- "Sandbox fixed" declared after only validating skill loading / grep tool.
+- Telegram bot responds (proving basic CC works) but network tool calls inside agent fail silently.
+- No E2E test that exercises a sandboxed network call.
 
-**Phase to address:** Init detection phase (detect and record version) + Doctor phase (validate version).
+**Phase to address:** Phase 2 (E2E verification). The verification phase must have explicit test cases for each vendor dep, not just smoke tests.
 
 ---
 
-### Pitfall 6: Seatbelt (macOS) Blocks Chrome Profile Directory Write — Different Failure Than bubblewrap
+### Pitfall 6: CC Updates Can Silently Revert the Env Var Fix — No Stable Contract
 
 **What goes wrong:**
-On macOS, CC's sandbox uses Seatbelt (`sandbox-exec`). Seatbelt's deny rules restrict which directories the sandboxed process can write to. chrome-devtools-mcp defaults the Chrome profile directory to `~/.cache/chrome-devtools-mcp/chrome-profile`.
+`USE_BUILTIN_RIPGREP` is an undocumented internal env var. It is not part of CC's stable API. Anthropic has historically changed behavior of undocumented env vars without deprecation notices.
 
-If the agent's HOME is overridden to the agent dir (e.g., `~/.rightclaw/agents/right/`), then `~/.cache/` resolves to `~/.rightclaw/agents/right/.cache/` — a path that may or may not be in Seatbelt's allowed write set. Chrome fails to initialize its profile, exits with a non-zero code, and the MCP server dies silently.
+Two failure modes:
+1. A future CC update changes the semantics: `USE_BUILTIN_RIPGREP=0` stops working, or the variable is removed, or the variable is renamed.
+2. A future CC update fixes the nix store permission issue (e.g., via a postinstall chmod), making `USE_BUILTIN_RIPGREP=0` redundant — but now the system `rg` version may not match what CC expects (if CC adds a version check).
+
+Neither failure is detectable without running tests after each CC update.
 
 **Why it happens:**
-macOS Seatbelt rules are defined in `settings.json` `sandbox.allowWrite` (array of paths). The agent dir is permitted. But `~/.cache/chrome-devtools-mcp/` under a HOME-overridden agent dir is a non-obvious path that no one added to the allow list.
+Undocumented env vars are implementation details. CC issue #6415 confirmed the setting worked as of August 2025, but it was not documented in any public API.
 
 **How to avoid:**
-- Pass `--userDataDir` to chrome-devtools-mcp pointing to a path inside the agent directory (e.g., `$AGENT_DIR/.chrome-profile`). This keeps Chrome's profile within the already-permitted agent dir.
-- In the MCP config generation, inject `--userDataDir` as an arg pointing to a resolved absolute path inside the agent dir.
-- On macOS: add the Chrome profile dir to `SandboxOverrides.allow_write` if using external Chrome approach.
-- Use `--isolated` flag in chrome-devtools-mcp for agent use — creates a temporary profile that is cleaned up, avoiding profile directory drift.
+- Document the dependency explicitly in the codebase: "CC uses USE_BUILTIN_RIPGREP=0 to skip its bundled rg. This is undocumented. Verify after each CC update."
+- Add a CI-friendly doctor check that validates sandbox is actually engaged (not just that deps are present).
+- The E2E verification phase should be designed as a repeatable test (not a one-time manual check) specifically so it can be re-run after CC updates.
+- Consider wrapping the env var in a named constant in the Rust code with a comment linking to the CC issue.
 
 **Warning signs:**
-- Chrome starts on macOS but exits immediately after the first CDP command.
-- Seatbelt deny log: `deny(1) file-write-create` on a path under `~/.cache/chrome-devtools-mcp/`.
-- Agent HOME is overridden (HOME=$AGENT_DIR set in shell wrapper) but Chrome profile is not redirected.
+- CC version bumped in devenv.lock but no re-verification run.
+- `USE_BUILTIN_RIPGREP` removed from CC CHANGELOG with no note in rightclaw.
+- Doctor passes but skills silently absent after CC update.
 
-**Phase to address:** MCP config generation phase. `--userDataDir` must be injected as part of the generated `.mcp.json` args.
+**Phase to address:** Phase 2 (E2E verification must be designed as repeatable, not one-time) + ongoing maintenance awareness.
+
+---
+
+### Pitfall 7: Agent Launch PATH Diverges From Doctor PATH — Doctor Lies
+
+**What goes wrong:**
+`rightclaw doctor` runs in the operator's interactive shell (which has devenv activated, so `rg`, `bwrap`, `socat` are all on PATH). Agent processes launched by process-compose inherit a different environment — only what rightclaw explicitly sets.
+
+If rightclaw does not explicitly inject the devenv PATH or the system PATH into agent env, the agent may fail to find `rg` or `socat` even though doctor reports them as present.
+
+Concretely: a developer runs `devenv shell`, then `rightclaw doctor` — all green. They exit the shell and run `rightclaw up` from a regular terminal where devenv PATH is not active. Agents fail to find `rg`. Doctor passed, agents broken.
+
+**Why it happens:**
+Doctor uses `which::which` against the current process's PATH. Agent processes inherit only what `std::process::Command` explicitly sets via `.env()`. If PATH is not forwarded, the agent sees the minimal system PATH, not the devenv PATH.
+
+**How to avoid:**
+- In `rightclaw up`, explicitly resolve the paths to `rg`, `socat`, and `bwrap` at launch time and include them in the PATH forwarded to agents.
+- Or: inject the devenv PATH explicitly — detect devenv activation and capture `DEVENV_PROFILE/bin` for injection.
+- Doctor should warn when `rg` is found but is only accessible via a devenv shell (heuristic: path contains `/nix/store/` or `/devenv/`).
+- Consider adding a `--check-agent-env` flag to doctor that simulates agent launch environment.
+
+**Warning signs:**
+- Doctor passes but agents fail immediately after launch.
+- `rg` path in doctor output contains `/nix/store/` or `devenv` — only available in devenv context.
+- Agent stderr contains "rg not found" or "EACCES" despite doctor showing rg present.
+
+**Phase to address:** Phase 1 (sandbox fix) — the PATH injection must be part of the fix, not the doctor. Phase 2 (doctor diagnostics) — doctor must detect devenv-only deps.
 
 ---
 
@@ -172,12 +210,12 @@ macOS Seatbelt rules are defined in `settings.json` `sandbox.allowWrite` (array 
 
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| `npx chrome-devtools-mcp@latest` in .mcp.json | Zero setup, always current | 3-8s startup delay, version drift, registry dependency at launch | Never in production; only for manual one-off testing |
-| Save Chrome path at init, never revalidate | Simple code | Silent failure after Chrome update/move | Never — always validate on `up` |
-| Inject chrome-devtools-mcp even when Chrome absent | Uniform agent config | MCP server fails to start on every launch, pollutes logs | Never — make injection conditional |
-| Use `--no-sandbox` without outer bubblewrap sandbox | Fixes nested sandbox issue | Renderer exploits escape to host filesystem | Only acceptable inside a bubblewrap or Seatbelt outer sandbox |
-| Don't pin chrome-devtools-mcp version | Always latest features | Breaking change hits all agents simultaneously on next launch | Never for the global install; acceptable only with a lock file |
-| Profile dir under ~/.cache (default) | No config needed | Seatbelt denies write on macOS with HOME override | Never when HOME is overridden to agent dir |
+| Set USE_BUILTIN_RIPGREP=1 (the current bug) | Looks like a fix, compiles | Forced bundled rg, sandbox broken | Never — correct value is 0 |
+| chmod +x on nix store | Quick unblock | Breaks on rebuild, violates nix invariants | Never |
+| Hardcode nix store path | Avoids dynamic PATH resolution | Rots on every CC update | Never |
+| Test only in devenv shell | Tests pass quickly | Doctor/agent PATH divergence goes undetected | Never for E2E tests |
+| Only fix rg, skip socat/bwrap validation | One failing thing fixed | Partial sandbox — network calls broken | Never for "sandbox verified" claim |
+| USE_BUILTIN_RIPGREP without a constant + comment | Shorter code | Future maintainer won't know what it does | Acceptable if documented with CC issue link |
 
 ---
 
@@ -185,14 +223,14 @@ macOS Seatbelt rules are defined in `settings.json` `sandbox.allowWrite` (array 
 
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| bubblewrap + Chrome | Launch Chrome inside bwrap, no extra flags | Run Chrome outside bwrap with `--browser-url`, or pass `--no-sandbox` to Chrome inside bwrap |
-| bubblewrap + /dev/shm | Assume /dev/shm is available inside sandbox | Pass `--disable-dev-shm-usage` to Chrome; add /dev/shm bind-mount if needed |
-| Seatbelt + Chrome profile | Default profile dir under ~/.cache | Use `--userDataDir` pointing inside the permitted agent dir |
-| .mcp.json + npx | Use `npx chrome-devtools-mcp@latest` | Install globally, use absolute binary path (mirror rightmemory pattern) |
-| Chrome path | Validate only at init | Validate on every `rightclaw up`, probe fallback paths if saved path gone |
-| Chrome version | Detect binary, skip version check | Detect + record + validate version in doctor |
-| External Chrome process | Add to process-compose as a separate process | Launch as a process-compose entry with `--remote-debugging-port=9222`; healthcheck via `curl http://127.0.0.1:9222/json/version` |
-| Agents without Chrome configured | Inject chrome-devtools-mcp entry anyway | Skip MCP entry entirely when Chrome path absent; log info-level message |
+| nix + CC vendor rg | Set USE_BUILTIN_RIPGREP=1 thinking it enables system rg | Set =0 to use system rg; =1 (default) uses bundled |
+| nix store + chmod | chmod +x /nix/store/.../rg | Don't touch nix store; use env var instead |
+| devenv + process-compose | Agent inherits developer's devenv PATH | Explicitly set PATH in agent env during `rightclaw up` |
+| macOS + bwrap | Install bwrap via Homebrew "to match Linux" | Never install bwrap on macOS; CC uses Seatbelt there |
+| doctor + agent env | Doctor uses shell PATH, agents use process PATH | Doctor must check both or warn when deps are devenv-only |
+| CC update + USE_BUILTIN_RIPGREP | Assume env var persists unchanged | Re-verify after CC version bump; env var is undocumented |
+| sandbox verification | Only test that skill loads (rg present) | Also test network call inside sandbox (socat) and write isolation (bwrap) |
+| USE_BUILTIN_RIPGREP in settings.json env section | Setting it in settings.json but not cmd env | Set in the process env directly via `cmd.env()` — settings.json env section may not propagate to sandbox-runtime |
 
 ---
 
@@ -200,26 +238,25 @@ macOS Seatbelt rules are defined in `settings.json` `sandbox.allowWrite` (array 
 
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| `--no-sandbox` Chrome without outer sandbox | Renderer exploits escape to host | Only use `--no-sandbox` when bubblewrap/Seatbelt is the outer layer; doctor should verify sandbox is active when `--no-sandbox` is passed to Chrome |
-| Exposing `--remote-debugging-port=9222` on 0.0.0.0 | Other processes on the machine can control the agent's Chrome session | Bind only to `127.0.0.1`; verify Chrome launch args include `--remote-debugging-address=127.0.0.1` |
-| Chrome profile dir shared across agents | One agent can read another agent's cookies, credentials, browsing history via Chrome profile | Each agent must have its own `--userDataDir` path; never share a Chrome profile between agents |
-| `chrome-devtools-mcp@latest` unverified at runtime | Malicious npm publish could inject code into agent sessions | Pin version; use `npm audit` in doctor check; prefer signed releases |
-| Allowing Chrome access to agent dir via `--userDataDir` | Chrome writes profiling, crash dumps, cache inside agent dir — potentially sensitive data | Use `--isolated` flag for temporary profiles, or scope `--userDataDir` to a subdirectory outside the agent's sensitive directories |
+| Disabling sandbox to work around dep issues (`--no-sandbox`) | Agents run with unrestricted filesystem + network access; defeats the security model | Fix deps instead of disabling; `--no-sandbox` should only be a debug flag, never production |
+| Passing `DISABLE_INSTALLATION_CHECKS=1` without `DISABLE_AUTOUPDATER=1` | CC agent teams may still download unpatched binaries to ~/.local/bin/, shadowing nix-managed ones | Pass both env vars together; add doctor check for ~/.local/bin/claude shadow |
+| bwrap AppArmor fix via `sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` | Disables protection globally, not just for bwrap | Use targeted AppArmor profile (already in doctor.rs guidance) |
+| Injecting full HOST PATH into agent env | Agent may find and execute host binaries outside allowedDomains | Inject minimal PATH: only dirs containing rg, socat, bwrap, git |
 
 ---
 
 ## "Looks Done But Isn't" Checklist
 
-- [ ] **Nested sandbox tested**: Chrome integration tested inside a real bubblewrap sandbox, not just in an uncontained shell — verify Chrome actually starts without "No usable sandbox" crash.
-- [ ] **Path validation on `up`**: Chrome path checked on every `rightclaw up`, not just at init — test with a path that was valid at init but deleted before `up`.
-- [ ] **MCP entry skipped when Chrome absent**: `rightclaw up` with no Chrome configured produces `.mcp.json` without a chrome-devtools-mcp entry — agents launch successfully.
-- [ ] **No npx in generated .mcp.json**: Inspect the generated `.mcp.json` — `command` must be an absolute binary path, not `"npx"`.
-- [ ] **userDataDir is per-agent**: Two agents do not share the same Chrome profile directory.
-- [ ] **External Chrome process registered in process-compose**: If using `--browser-url` approach, Chrome has its own process-compose entry with a working healthcheck.
-- [ ] **Doctor checks Chrome version**: `rightclaw doctor` output includes Chrome version string alongside the path.
-- [ ] **macOS profile write confirmed**: On macOS, verify Chrome can write its profile dir by checking Seatbelt deny logs after a test agent launch.
-- [ ] **`/dev/shm` or `--disable-dev-shm-usage` present**: If Chrome runs inside bubblewrap, verify one of these is configured.
-- [ ] **Port 9222 not already in use**: Doctor or preflight check verifies port 9222 is available before launching Chrome process.
+- [ ] **USE_BUILTIN_RIPGREP value**: Is it `"0"` (use system rg) not `"1"` (use bundled)? Check worker.rs and cron.rs.
+- [ ] **System rg in agent PATH**: Not just in devenv shell — verify `which rg` from a non-devenv terminal returns a valid binary, and that rightclaw up injects it into agent env.
+- [ ] **Sandbox actually engaged**: Not just "rg found." Run `claude -p "use bash to run: id" --max-turns 1` inside a sandboxed agent and verify sandbox constraints appear in stderr or behavior.
+- [ ] **Socat validated**: Not just that socat binary exists — verify a network tool call inside an agent sandbox succeeds (exercises socat proxy path).
+- [ ] **macOS verified separately**: A Linux fix that passes on Linux may break macOS (bwrap vs Seatbelt divergence). Test explicitly.
+- [ ] **Doctor uses agent env, not shell env**: Doctor check for rg should reflect what the agent process sees, not the operator's interactive PATH.
+- [ ] **No nix store paths in generated files**: grep for `/nix/store/` in all generated config, doctor output, and test assertions.
+- [ ] **CC update re-verification**: After any claude-code version bump, the sandbox E2E test must be re-run explicitly.
+- [ ] **Sandbox not silently disabled**: Verify `settings.json` still has `"sandbox": {"enabled": true}` after each `rightclaw up`. The `--no-sandbox` flag should not silently persist.
+- [ ] **~/.local/bin/claude shadow**: On NixOS/nix environments, check that CC agent teams has not downloaded an unpatched binary that shadows the nix-managed one.
 
 ---
 
@@ -227,14 +264,13 @@ macOS Seatbelt rules are defined in `settings.json` `sandbox.allowWrite` (array 
 
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Nested sandbox deadlock | LOW | Switch to `--browser-url` approach or add `--no-sandbox` to Chrome args; no code rewrite needed |
-| /dev/shm crash | LOW | Add `--disable-dev-shm-usage` to Chrome launch args |
-| Stale Chrome path | LOW | `rightclaw init --chrome-path <new-path>` to re-detect; or manually update `~/.rightclaw/config.yaml` |
-| npx version drift breaking change | MEDIUM | Pin to last known good version globally; update config.yaml chrome-devtools-mcp version field |
-| Chrome profile locked by Seatbelt | LOW | Add `--userDataDir` arg pointing inside agent dir to generated .mcp.json args |
-| Chrome version too old | MEDIUM | Install Google Chrome (not Chromium) from official repo; update saved path |
-| Port 9222 conflict | LOW | Allow `--remote-debugging-port` to be configurable in `config.yaml`; expose as a `rightclaw init` flag |
-| Shared Chrome profile across agents | HIGH | Requires .mcp.json regeneration for all agents with per-agent `--userDataDir`; no data corruption but isolation was void |
+| USE_BUILTIN_RIPGREP wrong value | LOW | Change "1" to "0" in worker.rs and cron.rs, rebuild |
+| Nix store mutation attempted | MEDIUM | `nix-store --verify --check-contents` to detect corruption; `nix-store --repair-path` if needed; revert to env var approach |
+| PATH divergence (doctor passes, agents fail) | MEDIUM | Add explicit PATH injection in cmd_up; re-run E2E verification |
+| macOS bwrap installed accidentally | LOW | `brew uninstall bubblewrap`; verify CC returns to Seatbelt sandbox |
+| Partial sandbox (rg fixed, socat/bwrap not) | MEDIUM | Run full E2E suite against all three deps; add socat/bwrap to agent PATH injection |
+| ~/.local/bin/claude shadows nix binary | LOW | `rm -rf ~/.local/bin/claude ~/.local/share/claude*`; add doctor check to detect this |
+| USE_BUILTIN_RIPGREP semantics changed in CC update | HIGH | Reverify against new CC version; may need to find replacement env var or alternative approach |
 
 ---
 
@@ -242,44 +278,29 @@ macOS Seatbelt rules are defined in `settings.json` `sandbox.allowWrite` (array 
 
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| Nested sandbox deadlock (bubblewrap) | Chrome config generation phase | Run `rightclaw up` and verify chrome-devtools-mcp MCP tool initializes inside a real bwrap session |
-| /dev/shm missing inside bubblewrap | Chrome config generation phase | Chrome process survives first CDP navigation command inside sandbox |
-| Stale Chrome path | Both `rightclaw up` AND doctor phases | Delete Chrome binary, run `rightclaw up` — must warn and skip, not crash |
-| npx startup delay + version drift | MCP config generation phase | Inspect generated `.mcp.json` — no `"command": "npx"` present |
-| Chrome version incompatibility | Init detection + doctor phase | `rightclaw doctor` outputs Chrome version; old Chromium produces Warn |
-| Seatbelt profile write failure (macOS) | MCP config generation phase | macOS agent launch with HOME override — Chrome tool succeeds |
-| Chrome MCP optional when absent | `rightclaw up` generation phase | `rightclaw up` with no Chrome configured — agents start, no chrome-devtools-mcp entry in .mcp.json |
-
----
-
-## Optionality Decision
-
-**Chrome MCP must be optional. Recommendation: Warn, never block.**
-
-Rationale:
-1. RightClaw's existing pattern for all optional dependencies (git, sqlite3, socat, rg) is Warn severity in doctor — agent runtime continues without them. Chrome is no different.
-2. The majority of rightclaw use cases are text/code agents (memory, cron, Telegram). Requiring Chrome for all agents would break existing setups on Chrome-less servers.
-3. Linux headless servers (common deployment target) often have no Chrome available and installing it has significant overhead (100MB+ package with system dependencies).
-4. The `--browser-url` approach allows agents to use Chrome only when an operator has explicitly set it up, matching the self-service model.
-
-**Implementation:** `chrome_path` is absent from `config.yaml` by default. `rightclaw init` probes for Chrome and offers to configure it if found, but skips silently if not. `rightclaw up` injects the chrome-devtools-mcp entry only when `chrome_path` is present and valid. `rightclaw doctor` emits a `Warn` (not `Fail`) when Chrome path is configured but the binary is gone.
+| USE_BUILTIN_RIPGREP wrong value (=1 vs =0) | Phase 1: sandbox fix | `grep USE_BUILTIN_RIPGREP crates/**/*.rs` shows only `"0"` |
+| Nix store mutation temptation | Phase 1: pre-implementation constraint | Code review: no `/nix/store/` in any changed file |
+| Nix store hash rot | Phase 1 + Phase 2 | `grep -r '/nix/store/' .planning/ crates/` finds nothing |
+| macOS vs Linux divergence | Phase 1 + Phase 2 | Both platforms tested in E2E; macOS CI job exists |
+| Missing socat/bwrap in fix scope | Phase 2: E2E verification | Test suite has explicit network-inside-sandbox and write-isolation tests |
+| CC update invalidates env var | Phase 2: test design | E2E suite is automated and re-runnable, not one-time manual check |
+| Doctor PATH divergence | Phase 1 (agent PATH injection) + Phase 2 (doctor check) | Doctor validates rg reachable from agent env, not just shell env |
 
 ---
 
 ## Sources
 
-- [chrome-devtools-mcp troubleshooting.md — official sandbox guidance](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/troubleshooting.md) — explicit statement that sandboxed MCP clients cannot start Chrome; `--browser-url` as workaround
-- [chrome-devtools-mcp GitHub README](https://github.com/ChromeDevTools/chrome-devtools-mcp) — `--executablePath`, `--browser-url`, `--userDataDir`, `--isolated`, `--headless`, `--chromeArg` flag documentation
-- [Chromium /dev/shm issue #736452](https://bugs.chromium.org/p/chromium/issues/detail?id=736452) — `--disable-dev-shm-usage` flag origin; confirmed fix for tmpfs-constrained environments
-- [Puppeteer issue #10367: Headless fails without sandbox](https://github.com/puppeteer/puppeteer/issues/10367) — nested sandbox + `--no-sandbox` behavior documented
-- [Matt Ferrante on npx MCP server latency](https://x.com/ferrants/status/1920703234249032039) — real-world warning: npx is unacceptable for production MCP servers
-- [MCP server MySQL issue #108: npx timeout with health check](https://github.com/benborla/mcp-server-mysql/issues/108) — process-compose health check timeout caused by npx startup delay
-- [opencode issue #820: slow npx MCP startup blocks chat](https://github.com/sst/opencode/issues/820) — npx holds main thread during agent startup
-- [chrome-devtools-mcp issue #140: automatic connection to existing Chrome session](https://github.com/ChromeDevTools/chrome-devtools-mcp/issues/140) — `--browser-url` usage confirmed for connecting to externally-managed Chrome
-- [bubblewrap containers/bubblewrap](https://github.com/containers/bubblewrap) — user namespace inheritance; no automatic /dev/shm bind-mount
-- [Simpleit.rocks: Chrome GPU process error on Ubuntu](https://simpleit.rocks/linux/ubuntu/fixing-common-google-chrome-gpu-process-error-message-in-linux/) — `--disable-gpu` + `--disable-software-rasterizer` flags for headless servers
-- [zenika/alpine-chrome Docker image](https://hub.docker.com/r/zenika/alpine-chrome) — `--disable-dev-shm-usage` + `--no-sandbox` pattern for containerized Chrome
+- [CC Issue #42068: Bundled ripgrep loses execute permission](https://github.com/anthropics/claude-code/issues/42068) — macOS + Linux, confirmed permissions bug, `USE_BUILTIN_RIPGREP=0` workaround documented in comments
+- [CC Issue #6415: USE_BUILTIN_RIPGREP ignored](https://github.com/anthropics/claude-code/issues/6415) — bug fixed August 2025; value semantics: `0` = system rg, `1` = built-in rg
+- [CC Issue #32275: bwrap on macOS via Homebrew triggers wrong sandbox path](https://github.com/anthropics/claude-code/issues/32275) — closed March 2026, root cause was missing rg; bwrap-on-macOS risk documented
+- [CC Issue #25418: Agent teams installs incompatible binary on NixOS, shadows nix binary](https://github.com/anthropics/claude-code/issues/25418) — `DISABLE_AUTOUPDATER` + `DISABLE_INSTALLATION_CHECKS` bypass in agent teams code path
+- [CC Issue #26282: Cowork sessions fail — sandbox dependency check fails inside VM](https://github.com/anthropics/claude-code/issues/26282) — sandbox dep check failure patterns
+- [anthropic-experimental/sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) — requires bwrap (Linux), sandbox-exec (macOS), socat; no env var override for dep paths
+- [sadjow/claude-code-nix](https://github.com/sadjow/claude-code-nix) — nix packaging approach; USE_BUILTIN_RIPGREP=0 used in nix overlays
+- [NixOS Discourse: Packaging Claude Code](https://discourse.nixos.org/t/packaging-claude-code-on-nixos/61072) — immutability constraints, chmod failures on nix store
+- [Nix store immutability](https://nixos.org/guides/nix-pills/the-nix-store.html) — store paths are content-addressed and immutable by design
+- [CC Advanced Setup docs — USE_BUILTIN_RIPGREP](https://code.claude.com/docs/en/setup) — `USE_BUILTIN_RIPGREP=0` listed as env var for system ripgrep
 
 ---
-*Pitfalls research for: v3.4 Chrome Browser MCP Integration — chrome-devtools-mcp in bubblewrap/Seatbelt sandboxed headless agent runtime*
-*Researched: 2026-04-05*
+*Pitfalls research for: v3.1 Sandbox Fix & Verification — nix + CC sandbox dependency detection + end-to-end verification*
+*Researched: 2026-04-02*
