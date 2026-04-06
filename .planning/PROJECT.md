@@ -8,9 +8,16 @@ RightClaw is a multi-agent runtime for Claude Code. Each agent runs as an indepe
 
 Run multiple autonomous Claude Code agents safely — each sandboxed by native OS-level isolation, each with its own sandbox configuration and identity, orchestrated by a single CLI command.
 
-## Current Milestone: Planning Next
+## Current Milestone: v3.4 Chrome Integration
 
-**Goal:** v3.3 MCP Self-Management shipped. Next milestone TBD via `/gsd-new-milestone`.
+**Goal:** Wire `chrome-devtools-mcp` into rightclaw as a built-in browser MCP — auto-detected at init, validated by doctor and bot startup, injected into every agent's `.mcp.json` and system prompt.
+
+**Target features:**
+- `rightclaw init` detects Chrome at standard paths (Linux + macOS incl. Homebrew); `--chrome-path` CLI override; path saved to `~/.rightclaw/config.yaml`
+- `chrome-devtools-mcp` entry injected into agent `.mcp.json` on every `rightclaw up` when Chrome is configured
+- `rightclaw doctor` checks Chrome binary at configured path (Warn severity if missing/unconfigured)
+- Bot process startup validates Chrome path and logs error if absent
+- AGENTS.md template updated — system prompt instructs agents to use ChromeDevTools MCP for all browser tasks
 
 ## Requirements
 

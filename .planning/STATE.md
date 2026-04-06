@@ -25,9 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-06 after v3.3 milestone)
 
 ## Current Position
 
-Milestone v3.3 complete. All phases shipped.
-Status: Ready for /gsd-new-milestone
-Last activity: 2026-04-06 -- v3.3 closed
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements for v3.4
+Last activity: 2026-04-06 — Milestone v3.4 Chrome Integration started
 
 Progress: [██████████] 100%
 
