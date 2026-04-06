@@ -83,6 +83,68 @@ pub fn generate_mcp_config(
     Ok(())
 }
 
+/// Generate `.mcp.json` with rightmemory as HTTP MCP server entry.
+///
+/// Used when agents run inside OpenShell sandbox and connect to host rightmemory via HTTP.
+pub fn generate_mcp_config_http(
+    agent_path: &Path,
+    _agent_name: &str,
+    rightmemory_url: &str,
+    bearer_token: &str,
+    chrome_config: Option<&ChromeConfig>,
+) -> miette::Result<()> {
+    let mcp_path = agent_path.join(".mcp.json");
+
+    let mut root: serde_json::Value = if mcp_path.exists() {
+        let content = std::fs::read_to_string(&mcp_path)
+            .map_err(|e| miette::miette!("failed to read .mcp.json: {e:#}"))?;
+        serde_json::from_str(&content)
+            .map_err(|e| miette::miette!("failed to parse .mcp.json: {e:#}"))?
+    } else {
+        serde_json::json!({})
+    };
+
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| miette::miette!(".mcp.json root is not a JSON object"))?;
+    if !obj.contains_key("mcpServers") {
+        obj.insert("mcpServers".to_string(), serde_json::json!({}));
+    }
+    let servers = obj
+        .get_mut("mcpServers")
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| miette::miette!("mcpServers is not a JSON object"))?;
+
+    servers.insert(
+        "rightmemory".to_string(),
+        serde_json::json!({
+            "type": "http",
+            "url": rightmemory_url,
+            "headers": {
+                "Authorization": format!("Bearer {bearer_token}")
+            }
+        }),
+    );
+
+    // Chrome devtools not available inside OpenShell sandbox -- skip chrome_config
+    let _ = chrome_config;
+
+    let output = serde_json::to_string_pretty(&root)
+        .map_err(|e| miette::miette!("failed to serialize .mcp.json: {e:#}"))?;
+    std::fs::write(&mcp_path, output)
+        .map_err(|e| miette::miette!("failed to write .mcp.json: {e:#}"))?;
+
+    Ok(())
+}
+
+/// Generate a random 32-byte Bearer token, base64url-encoded (no padding).
+pub fn generate_agent_token() -> String {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 32];
+    rand::fill(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +441,64 @@ mod tests {
         let servers = parsed["mcpServers"].as_object().unwrap();
         let count = servers.keys().filter(|k| k.as_str() == "chrome-devtools").count();
         assert_eq!(count, 1, "chrome-devtools should appear exactly once after two calls");
+    }
+
+    // --- HTTP rightmemory tests (OpenShell sandbox mode) ---
+
+    #[test]
+    fn generates_http_rightmemory_entry() {
+        let dir = tempdir().unwrap();
+        let token = "test-bearer-token-abc123";
+        generate_mcp_config_http(
+            dir.path(),
+            "brain",
+            "http://host.docker.internal:8100/mcp",
+            token,
+            None,
+        )
+        .unwrap();
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap())
+                .unwrap();
+        assert_eq!(content["mcpServers"]["rightmemory"]["type"], "http");
+        assert_eq!(
+            content["mcpServers"]["rightmemory"]["url"],
+            "http://host.docker.internal:8100/mcp"
+        );
+        assert_eq!(
+            content["mcpServers"]["rightmemory"]["headers"]["Authorization"],
+            "Bearer test-bearer-token-abc123"
+        );
+    }
+
+    #[test]
+    fn http_preserves_existing_servers() {
+        let dir = tempdir().unwrap();
+        let mcp_path = dir.path().join(".mcp.json");
+        std::fs::write(
+            &mcp_path,
+            r#"{"mcpServers":{"notion":{"type":"http","url":"https://mcp.notion.com/mcp"}}}"#,
+        )
+        .unwrap();
+        generate_mcp_config_http(dir.path(), "brain", "http://localhost:8100/mcp", "tok", None)
+            .unwrap();
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            content["mcpServers"]["notion"]["url"],
+            "https://mcp.notion.com/mcp"
+        );
+        assert_eq!(content["mcpServers"]["rightmemory"]["type"], "http");
+    }
+
+    #[test]
+    fn generate_agent_token_is_32_bytes_base64url() {
+        let token = generate_agent_token();
+        // 32 bytes -> 43 chars in base64url no-pad
+        assert_eq!(token.len(), 43);
+        // Should be different each time
+        let token2 = generate_agent_token();
+        assert_ne!(token, token2);
     }
 
     #[test]
