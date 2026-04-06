@@ -440,6 +440,7 @@ fn detect_chrome_binary(_home: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 /// Run `brew --prefix` and return the prefix path (macOS only, used by detect_mcp_binary).
+#[cfg(target_os = "macos")]
 fn brew_prefix() -> Option<std::path::PathBuf> {
     let out = std::process::Command::new("brew")
         .arg("--prefix")
