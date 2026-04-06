@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 which = { workspace = true }
 rmcp = { workspace = true }
+reqwest = { workspace = true }
 schemars = { workspace = true }
 rusqlite = { workspace = true }
 

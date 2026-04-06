@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.4
 milestone_name: Chrome Integration
 status: executing
-stopped_at: Phase 43 context gathered
-last_updated: "2026-04-06T15:13:57.318Z"
-last_activity: 2026-04-06 -- Phase 43 execution started
+stopped_at: Phase 44 not yet planned
+last_updated: "2026-04-06T20:00:00.000Z"
+last_activity: 2026-04-06 -- Restored v3.3 MCP code + planning artifacts deleted by 9297d83
 progress:
   total_phases: 3
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 5
-  completed_plans: 3
-  percent: 60
+  completed_plans: 5
+  percent: 67
 ---
 
 # Project State
@@ -21,17 +21,17 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-06 after v3.3 milestone)
 
 **Core value:** Run multiple autonomous Claude Code agents safely -- each sandboxed by native OS-level isolation, orchestrated by a single CLI command.
-**Current focus:** Phase 43 — init-detection-up-revalidation
+**Current focus:** Phase 44 — Validation + AGENTS.md Template (not yet planned)
 
 ## Current Position
 
-Phase: 43 (init-detection-up-revalidation) — EXECUTING
-Plan: 1 of 2
-Phase: 43 (next) — not yet started
-Status: Executing Phase 43
-Last activity: 2026-04-06 -- Phase 43 execution started
+Phase: 44 (next) — not yet planned
+Phase 42 (chrome-config-infrastructure-mcp-injection) — COMPLETE, verified 15/15
+Phase 43 (init-detection-up-revalidation) — COMPLETE, verified 7/7
+Status: Phases 42-43 complete, Phase 44 needs planning
+Last activity: 2026-04-06 -- Recovery of v3.3 code + planning artifacts
 
-Progress: [███░░░░░░░] 33%
+Progress: [██████░░░░] 67%
 
 ## Performance Metrics
 
@@ -58,10 +58,10 @@ None.
 
 ### Blockers/Concerns
 
-None for phase 43. Phase 42 verification resolved the chrome binary install path question — mcp_binary_path is a user-configured field in config.yaml, no convention assumption needed at this layer.
+None. Phase 44 (Doctor check + bot startup warn + AGENTS.md browser section) is next.
 
 ## Session Continuity
 
-Last session: 2026-04-06T14:54:17.959Z
-Stopped at: Phase 43 context gathered
-Resume file: .planning/phases/43-init-detection-up-revalidation/43-CONTEXT.md
+Last session: 2026-04-06T20:00:00.000Z
+Stopped at: Phase 44 not yet planned
+Resume file: N/A — recovery complete, ready for /gsd-discuss-phase 44 or /gsd-plan-phase 44

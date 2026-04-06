@@ -285,11 +285,45 @@ mod tests {
         );
         let args = parsed["mcpServers"]["chrome-devtools"]["args"].as_array().unwrap();
         let args_strs: Vec<&str> = args.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(args_strs.contains(&"--executablePath"), "args must contain --executablePath");
         assert!(args_strs.contains(&"/usr/bin/chrome"), "args must contain chrome path");
+        assert!(args_strs.contains(&"--headless"), "args must contain --headless");
+        assert!(args_strs.contains(&"--isolated"), "args must contain --isolated");
+        assert!(args_strs.contains(&"--no-sandbox"), "args must contain --no-sandbox");
+        assert!(args_strs.contains(&"--userDataDir"), "args must contain --userDataDir");
         assert!(
             args_strs.iter().any(|s| s.ends_with(".chrome-profile")),
             "args must contain path ending in .chrome-profile"
         );
+    }
+
+    #[test]
+    fn chrome_devtools_not_injected_when_none() {
+        let dir = tempdir().unwrap();
+        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/tmp/rc"), None).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            parsed["mcpServers"]["chrome-devtools"].is_null(),
+            "chrome-devtools must be absent when chrome_config is None"
+        );
+    }
+
+    #[test]
+    fn chrome_devtools_uses_absolute_binary_path_not_npx() {
+        use crate::config::ChromeConfig;
+        use std::path::PathBuf;
+        let dir = tempdir().unwrap();
+        let chrome = ChromeConfig {
+            chrome_path: PathBuf::from("/usr/bin/chrome"),
+            mcp_binary_path: PathBuf::from("/usr/local/bin/chrome-devtools-mcp"),
+        };
+        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/tmp/rc"), Some(&chrome)).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let command = parsed["mcpServers"]["chrome-devtools"]["command"].as_str().unwrap();
+        assert!(!command.contains("npx"), "command must NOT contain 'npx'");
+        assert_eq!(command, "/usr/local/bin/chrome-devtools-mcp", "command must be the exact mcp_binary_path");
     }
 
     #[test]
