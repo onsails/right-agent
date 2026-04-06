@@ -113,7 +113,11 @@ See [milestones/v3.3-ROADMAP.md](milestones/v3.3-ROADMAP.md)
   2. The `chrome-devtools` entry uses an absolute binary path to `chrome-devtools-mcp` — no `npx` in the command
   3. The agent's `settings.json` includes the Chrome binary in `allowedCommands` and the `.chrome-profile` dir in `allowWrite`
   4. Chrome sandbox overrides merge additively with existing `SandboxOverrides` from `agent.yaml` — existing overrides are not clobbered
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [ ] 42-01-PLAN.md — ChromeConfig struct + read/write support in config.rs
+- [ ] 42-02-PLAN.md — chrome-devtools MCP injection + sandbox override generators
+- [ ] 42-03-PLAN.md — cmd_up() wiring: hoist global_cfg, pass chrome_cfg to both generators
 
 ### Phase 43: Init Detection + Up Revalidation
 **Goal**: Chrome path is discovered at init and revalidated silently on every `rightclaw up` — operators never lose injection silently
@@ -151,6 +155,6 @@ See [milestones/v3.3-ROADMAP.md](milestones/v3.3-ROADMAP.md)
 | 29-31. Sandbox Fix & Verification | v3.1 | ✓ | Complete | 2026-04-03 |
 | 38-41. MCP & Tunnel | v3.2 | ✓ | Complete | 2026-04-05 |
 | 1. MCP management tools | v3.3 | 2/2 | Complete | 2026-04-06 |
-| 42. Chrome Config + MCP Injection | v3.4 | 0/TBD | Not started | - |
+| 42. Chrome Config + MCP Injection | v3.4 | 0/3 | Not started | - |
 | 43. Init Detection + Up Revalidation | v3.4 | 0/TBD | Not started | - |
 | 44. Validation + AGENTS.md Template | v3.4 | 0/TBD | Not started | - |
