@@ -185,9 +185,9 @@ async fn test_mcp_add_creates_entry() {
         .expect("mcp_add ok");
     let text = call_result_text(result);
     assert!(text.contains("notion"), "response should mention server name");
-    let claude_json = std::fs::read_to_string(dir.path().join(".claude.json")).unwrap();
-    assert!(claude_json.contains("\"notion\""), ".claude.json should contain notion");
-    assert!(claude_json.contains("\"http\""), ".claude.json entry should have type:http");
+    let mcp_json = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
+    assert!(mcp_json.contains("\"notion\""), ".mcp.json should contain notion");
+    assert!(mcp_json.contains("\"http\""), ".mcp.json entry should have type:http");
 }
 
 #[tokio::test]
@@ -224,10 +224,10 @@ async fn test_mcp_remove_existing_server() {
         .expect("mcp_remove ok");
     let text = call_result_text(result);
     assert!(text.contains("linear"), "response should mention server name");
-    let claude_json = std::fs::read_to_string(dir.path().join(".claude.json")).unwrap();
+    let mcp_json = std::fs::read_to_string(dir.path().join(".mcp.json")).unwrap();
     assert!(
-        !claude_json.contains("\"linear\""),
-        "linear should be removed from .claude.json"
+        !mcp_json.contains("\"linear\""),
+        "linear should be removed from .mcp.json"
     );
 }
 

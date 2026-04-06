@@ -271,7 +271,7 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "Add an HTTP MCP server to this agent's .claude.json. The server becomes available after the next agent restart.")]
+    #[tool(description = "Add an HTTP MCP server to this agent's .mcp.json. The server becomes available after the next agent restart.")]
     async fn mcp_add(
         &self,
         Parameters(params): Parameters<McpAddParams>,
@@ -282,16 +282,9 @@ impl MemoryServer {
                 None,
             ));
         }
-        let claude_json_path = self.agent_dir.join(".claude.json");
-        let agent_path_key = self
-            .agent_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.agent_dir.clone())
-            .display()
-            .to_string();
-        rightclaw::mcp::credentials::add_http_server_to_claude_json(
-            &claude_json_path,
-            &agent_path_key,
+        let mcp_json_path = self.agent_dir.join(".mcp.json");
+        rightclaw::mcp::credentials::add_http_server(
+            &mcp_json_path,
             &params.name,
             &params.url,
         )
@@ -302,7 +295,7 @@ impl MemoryServer {
         ))]))
     }
 
-    #[tool(description = "Remove an HTTP MCP server from this agent's .claude.json. The 'rightmemory' server is protected and cannot be removed. Only removes servers in .claude.json — servers in .mcp.json must be edited manually.")]
+    #[tool(description = "Remove an HTTP MCP server from this agent's .mcp.json. The 'rightmemory' server is protected and cannot be removed.")]
     async fn mcp_remove(
         &self,
         Parameters(params): Parameters<McpRemoveParams>,
@@ -316,16 +309,9 @@ impl MemoryServer {
                 None,
             ));
         }
-        let claude_json_path = self.agent_dir.join(".claude.json");
-        let agent_path_key = self
-            .agent_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.agent_dir.clone())
-            .display()
-            .to_string();
-        match rightclaw::mcp::credentials::remove_http_server_from_claude_json(
-            &claude_json_path,
-            &agent_path_key,
+        let mcp_json_path = self.agent_dir.join(".mcp.json");
+        match rightclaw::mcp::credentials::remove_http_server(
+            &mcp_json_path,
             &params.name,
         ) {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
@@ -335,7 +321,7 @@ impl MemoryServer {
             Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
                 Err(McpError::invalid_params(
                     format!(
-                        "Server '{}' not found in .claude.json. If it was added via .mcp.json, edit that file directly.",
+                        "Server '{}' not found in .mcp.json.",
                         params.name
                     ),
                     None,
@@ -374,16 +360,9 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<McpAuthParams>,
     ) -> Result<CallToolResult, McpError> {
-        let claude_json_path = self.agent_dir.join(".claude.json");
-        let agent_path_key = self
-            .agent_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.agent_dir.clone())
-            .display()
-            .to_string();
-        let servers = rightclaw::mcp::credentials::list_http_servers_from_claude_json(
-            &claude_json_path,
-            &agent_path_key,
+        let mcp_json_path = self.agent_dir.join(".mcp.json");
+        let servers = rightclaw::mcp::credentials::list_http_servers(
+            &mcp_json_path,
         )
         .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
         let server_url = servers
@@ -393,7 +372,7 @@ impl MemoryServer {
             .ok_or_else(|| {
                 McpError::invalid_params(
                     format!(
-                        "Server '{}' not found in .claude.json. Add it first with mcp_add.",
+                        "Server '{}' not found in .mcp.json. Add it first with mcp_add.",
                         params.server_name
                     ),
                     None,

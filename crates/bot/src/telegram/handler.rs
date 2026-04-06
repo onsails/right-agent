@@ -287,21 +287,15 @@ async fn handle_mcp_auth(
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp auth");
 
-    // 1. Read .claude.json to find server URL
-    let claude_json_path = agent_dir.join(".claude.json");
-    let agent_path_key = agent_dir
-        .canonicalize()
-        .unwrap_or_else(|_| agent_dir.to_path_buf())
-        .display()
-        .to_string();
+    // 1. Read .mcp.json to find server URL
+    let mcp_json_path = agent_dir.join(".mcp.json");
 
-    let servers = match rightclaw::mcp::credentials::list_http_servers_from_claude_json(
-        &claude_json_path,
-        &agent_path_key,
+    let servers = match rightclaw::mcp::credentials::list_http_servers(
+        &mcp_json_path,
     ) {
         Ok(s) => s,
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot read .claude.json: {e:#}")).await?;
+            bot.send_message(msg.chat.id, format!("Cannot read .mcp.json: {e:#}")).await?;
             return Ok(());
         }
     };
@@ -311,7 +305,7 @@ async fn handle_mcp_auth(
         None => {
             bot.send_message(
                 msg.chat.id,
-                format!("Server '{server_name}' not found in .claude.json"),
+                format!("Server '{server_name}' not found in .mcp.json"),
             )
             .await?;
             return Ok(());
@@ -479,16 +473,10 @@ async fn handle_mcp_add(
     let name = parts[0];
     let url = parts[1];
 
-    let claude_json_path = agent_dir.join(".claude.json");
-    let agent_path_key = agent_dir
-        .canonicalize()
-        .unwrap_or_else(|_| agent_dir.to_path_buf())
-        .display()
-        .to_string();
+    let mcp_json_path = agent_dir.join(".mcp.json");
 
-    match rightclaw::mcp::credentials::add_http_server_to_claude_json(
-        &claude_json_path,
-        &agent_path_key,
+    match rightclaw::mcp::credentials::add_http_server(
+        &mcp_json_path,
         name,
         url,
     ) {
@@ -522,16 +510,10 @@ async fn handle_mcp_remove(
         return Ok(());
     }
 
-    let claude_json_path = agent_dir.join(".claude.json");
-    let agent_path_key = agent_dir
-        .canonicalize()
-        .unwrap_or_else(|_| agent_dir.to_path_buf())
-        .display()
-        .to_string();
+    let mcp_json_path = agent_dir.join(".mcp.json");
 
-    match rightclaw::mcp::credentials::remove_http_server_from_claude_json(
-        &claude_json_path,
-        &agent_path_key,
+    match rightclaw::mcp::credentials::remove_http_server(
+        &mcp_json_path,
         server_name,
     ) {
         Ok(()) => {
@@ -541,7 +523,7 @@ async fn handle_mcp_remove(
         Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
             bot.send_message(
                 msg.chat.id,
-                format!("Server '{server_name}' not found in .claude.json"),
+                format!("Server '{server_name}' not found in .mcp.json"),
             )
             .await?;
         }

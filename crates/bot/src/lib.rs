@@ -151,19 +151,11 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     let notify_chat_ids = config.allowed_chat_ids.clone();
     let agent_name = args.agent.clone();
 
-    let claude_json_path = dirs::home_dir()
-        .ok_or_else(|| miette::miette!("cannot determine home directory"))?
-        .join(".claude.json");
-    let agent_path_key = agent_dir
-        .canonicalize()
-        .unwrap_or_else(|_| agent_dir.clone())
-        .display()
-        .to_string();
+    let mcp_json_path = agent_dir.join(".mcp.json");
 
     let oauth_state = OAuthCallbackState {
         pending_auth: Arc::clone(&pending_auth),
-        claude_json_path,
-        agent_path_key,
+        mcp_json_path,
         agent_name: agent_name.clone(),
         bot: notify_bot,
         notify_chat_ids,

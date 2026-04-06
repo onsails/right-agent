@@ -21,7 +21,7 @@ use serde::Deserialize;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
-use rightclaw::mcp::credentials::{add_http_server_to_claude_json, set_server_header_in_claude_json};
+use rightclaw::mcp::credentials::{add_http_server, set_server_header};
 use rightclaw::mcp::oauth::{exchange_token, verify_state, PendingAuth};
 
 /// Shared in-memory map of OAuth state -> pending auth session.
@@ -41,10 +41,8 @@ pub struct CallbackParams {
 #[derive(Clone)]
 pub struct OAuthCallbackState {
     pub pending_auth: PendingAuthMap,
-    /// Path to ~/.claude.json (for Bearer token storage)
-    pub claude_json_path: PathBuf,
-    /// Agent path key for .claude.json projects section (canonicalized agent dir)
-    pub agent_path_key: String,
+    /// Path to agent's .mcp.json (for Bearer token storage)
+    pub mcp_json_path: PathBuf,
     /// Agent name (for logging and notifications)
     pub agent_name: String,
     /// Telegram Bot for sending notifications
@@ -202,30 +200,28 @@ async fn complete_oauth_flow(
         "token exchange succeeded"
     );
 
-    // Ensure server entry exists in .claude.json (idempotent)
-    add_http_server_to_claude_json(
-        &cb_state.claude_json_path,
-        &cb_state.agent_path_key,
+    // Ensure server entry exists in .mcp.json (idempotent)
+    add_http_server(
+        &cb_state.mcp_json_path,
         &pending.server_name,
         &pending.server_url,
     )
-    .map_err(|e| miette::miette!("add_http_server_to_claude_json failed: {e:#}"))?;
+    .map_err(|e| miette::miette!("add_http_server failed: {e:#}"))?;
 
     // Set Authorization: Bearer <token> header
-    set_server_header_in_claude_json(
-        &cb_state.claude_json_path,
-        &cb_state.agent_path_key,
+    set_server_header(
+        &cb_state.mcp_json_path,
         &pending.server_name,
         "Authorization",
         &format!("Bearer {}", token_resp.access_token),
     )
-    .map_err(|e| miette::miette!("set_server_header_in_claude_json failed: {e:#}"))?;
+    .map_err(|e| miette::miette!("set_server_header failed: {e:#}"))?;
 
     tracing::info!(
         agent = %agent_name,
         server = %pending.server_name,
         url = %pending.server_url,
-        "Bearer token written to .claude.json"
+        "Bearer token written to .mcp.json"
     );
 
     // Notify Telegram
@@ -233,7 +229,7 @@ async fn complete_oauth_flow(
         &cb_state.bot,
         &cb_state.notify_chat_ids,
         &format!(
-            "OAuth complete for {} (agent {agent_name}). Token written to .claude.json.",
+            "OAuth complete for {} (agent {agent_name}). Token written to .mcp.json.",
             pending.server_name,
         ),
     )
@@ -321,8 +317,7 @@ mod tests {
     fn dummy_state(map: PendingAuthMap) -> OAuthCallbackState {
         OAuthCallbackState {
             pending_auth: map,
-            claude_json_path: PathBuf::from("/tmp/fake-claude.json"),
-            agent_path_key: "/agents/test-agent".to_string(),
+            mcp_json_path: PathBuf::from("/tmp/fake.mcp.json"),
             agent_name: "test-agent".to_string(),
             bot: teloxide::Bot::new("0:fake_token_for_tests"),
             notify_chat_ids: vec![],
