@@ -341,11 +341,6 @@ async fn invoke_cc(
     eff_thread_id: i64,
     ctx: &WorkerContext,
 ) -> Result<Option<ReplyOutput>, String> {
-    // Resolve CC binary (D-12)
-    let cc_bin = which::which("claude")
-        .or_else(|_| which::which("claude-bun"))
-        .map_err(|_| "⚠️ Agent error: claude binary not found in PATH".to_string())?;
-
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
     let conn = rightclaw::memory::open_connection(&ctx.agent_dir)
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
@@ -368,40 +363,48 @@ async fn invoke_cc(
         }
     };
 
-    // Build command (AGDEF-02, AGDEF-03, D-01, D-13, D-14)
+    // Build claude -p args for execution inside OpenShell sandbox
     let reply_schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
-    let mut cmd = tokio::process::Command::new(&cc_bin);
-    cmd.arg("-p");
-    cmd.arg("--dangerously-skip-permissions");
+    let mut claude_args: Vec<String> = vec![
+        "claude".into(),
+        "-p".into(),
+        "--dangerously-skip-permissions".into(),
+    ];
     // NOTE: --verbose is intentionally NOT passed even in debug mode.
     // --verbose combined with --output-format json switches CC to stream-json array output,
     // breaking parse_reply_output which expects a single JSON object.
     // CC stderr is already captured and logged at debug level below.
     for arg in &cmd_args {
-        cmd.arg(arg);
+        claude_args.push(arg.clone());
     }
-    cmd.arg("--output-format").arg("json");
+    claude_args.push("--output-format".into());
+    claude_args.push("json".into());
 
     // --agent only on first call (AGDEF-02); resume inherits from session (AGDEF-03)
     if is_first_call {
-        cmd.arg("--agent").arg(&ctx.agent_name);
+        claude_args.push("--agent".into());
+        claude_args.push(ctx.agent_name.clone());
     }
 
     // --json-schema on BOTH first and resume calls (D-01, Pitfall 4)
     // CC expects inline JSON string, NOT a file path — read and inline the content
+    // Schema file lives on HOST; bot reads it before exec into sandbox.
     let reply_schema = std::fs::read_to_string(&reply_schema_path)
         .map_err(|e| format_error_reply(-1, &format!("reply-schema.json read failed: {:#}", e)))?;
-    cmd.arg("--json-schema").arg(&reply_schema);
+    claude_args.push("--json-schema".into());
+    claude_args.push(reply_schema);
 
-    cmd.arg("--").arg(xml);
-    cmd.env("HOME", &ctx.agent_dir);
-    // CC internal env var — "0" = skip bundled rg, use system rg from PATH (D-05, D-06, SBOX-02).
-    // Counterintuitive: A_("0")=true means "builtin disabled" -> falls through to system rg.
-    // "1" = use CC's vendored rg (default; broken in nix — vendor binary lacks execute bit).
-    // UNDOCUMENTED: re-verify after CC version bumps.
-    // See: https://github.com/anthropics/claude-code/issues/6415
-    cmd.env("USE_BUILTIN_RIPGREP", "0");
-    cmd.current_dir(&ctx.agent_dir);
+    claude_args.push("--".into());
+    claude_args.push(xml.to_string());
+
+    // Execute inside OpenShell sandbox — CC binary is resolved inside the container,
+    // env vars (HOME, USE_BUILTIN_RIPGREP) and cwd are managed by the sandbox.
+    let sandbox = rightclaw::codegen::sandbox::sandbox_name(&ctx.agent_name);
+    let mut cmd = tokio::process::Command::new("openshell");
+    cmd.args(["sandbox", "exec", &sandbox, "--"]);
+    for arg in &claude_args {
+        cmd.arg(arg);
+    }
     cmd.stdin(Stdio::null()); // DIS-02: prevent pipe deadlock
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
