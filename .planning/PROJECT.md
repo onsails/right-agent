@@ -10,7 +10,7 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 
 ## Current Milestone: Planning Next
 
-**Goal:** v3.2 MCP & Tunnel shipped. Next milestone TBD via `/gsd-new-milestone`.
+**Goal:** v3.3 MCP Self-Management shipped. Next milestone TBD via `/gsd-new-milestone`.
 
 ## Requirements
 
@@ -80,10 +80,14 @@ Run multiple autonomous Claude Code agents safely — each sandboxed by native O
 - ✓ MCP OAuth for headless agents: `/mcp auth` does OAuth discovery (RFC 9728/8414), PKCE, cloudflared callback, writes Bearer token to `.claude.json` `type:http` server headers — v3.2 Phase 41
 - ✓ `/mcp add/remove/list` manage HTTP MCP servers in `.claude.json`; CC handles OAuth natively for `.claude.json` servers — v3.2 Phase 41
 - ✓ `/doctor` via Telegram with HTML-escaped `<pre>` output + plain-text fallback — v3.2
+- ✓ `mcp_add/remove/list/auth` MCP tools in rightmemory server — agents self-manage HTTP MCP connections without Telegram — v3.3 Phase 1 (MCP-TOOL-01..05)
+- ✓ `MemoryServer` carries `agent_dir` + `rightclaw_home`; `RC_RIGHTCLAW_HOME` injected into `.mcp.json` env — v3.3 Phase 1 (MCP-NF-02)
+- ✓ `mcp_auth` performs AS discovery (RFC 9728/8414), returns `authorization_endpoint`; no PKCE/DCR — v3.3 Phase 1 (MCP-NF-01)
+- ✓ AGENTS.md templates updated — agents know to use rightmemory tools instead of editing `.claude.json` directly — v3.3
 
 ### Active
 
-None — v3.2 shipped.
+None — v3.3 shipped.
 
 ### Out of Scope
 
@@ -139,6 +143,8 @@ None — v3.2 shipped.
 | Headless OAuth via cloudflared callback (v3.2) | CC can't do browser OAuth in -p mode; rightclaw's /mcp auth handles the redirect via cloudflared tunnel | ✓ Good |
 | Delete custom token refresh (v3.2) | CC handles refresh natively for servers in .claude.json; custom refresh.rs was unnecessary complexity | ✓ Good |
 | --overwrite-dns in route_dns (v3.2) | Stale CNAME pointing to dead tunnel caused 530/1033; --overwrite-dns replaces it automatically | ✓ Good |
+| mcp_auth discovery-only, no PKCE (v3.3) | code_verifier cannot cross process boundary to bot's PendingAuthMap; AS discovery + URL return is sufficient for bot-initiated flow | ✓ Good |
+| https:// validation in mcp_add (v3.3) | T-02-01 threat: rejects non-https URLs at tool boundary before any write | ✓ Good |
 
 ## Evolution
 
@@ -158,6 +164,12 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ## Current State
+
+**v3.3 MCP Self-Management shipped** (2026-04-06).
+
+- `mcp_add/remove/list/auth` tools in rightmemory MCP server — agents manage their own HTTP MCP connections at runtime without Telegram bot involvement
+- `mcp_auth` does AS discovery (RFC 9728/8414) and returns the `authorization_endpoint` URL; full OAuth flow still goes through Telegram bot (process-boundary constraint)
+- AGENTS.md templates updated — all new agents know to use rightmemory tools rather than edit `.claude.json` directly
 
 **v3.2 MCP & Tunnel shipped** (2026-04-05).
 
@@ -185,10 +197,7 @@ This document evolves at phase transitions and milestone boundaries.
 - v3.0 (2026-04-01): Teloxide bot runtime — native Rust Telegram bot, cron scheduler
 - v3.1 (2026-04-03): Sandbox fix & verification — ripgrep path, E2E sandbox proof
 - v3.2 (2026-04-05): MCP & Tunnel — cloudflared auto-tunnel, MCP OAuth via .claude.json
-- v2.4 (2026-03-28): Telegram diagnosis — iv6/M6 gap identified, fix deferred to CC upstream
-- v2.5 (2026-03-31): RightCron reliability — inline bootstrap + CHECK/RECONCILE skill redesign
-- v3.0 (2026-04-01): Teloxide bot runtime — native Rust bot, CC agent dispatch, cron runtime, PC cutover
-- v3.1 (2026-04-03): Sandbox fix — nix ripgrep path, failIfUnavailable enforcement, doctor diagnostics, E2E verification script
+- v3.3 (2026-04-06): MCP Self-Management — mcp_add/remove/list/auth tools in rightmemory server
 
 **Known limitations:**
 - SEED-002: BOOTSTRAP.md onboarding doesn't trigger via Telegram
@@ -199,4 +208,4 @@ This document evolves at phase transitions and milestone boundaries.
 - VER-01 description in verify-sandbox.sh slightly overclaims — matches cron.rs pattern, not worker.rs `--resume` path (sandbox correctness unaffected)
 
 ---
-*Last updated: 2026-04-05 after Phase 40 (cloudflared wired into process-compose)*
+*Last updated: 2026-04-06 after v3.3 milestone (MCP Self-Management)*
