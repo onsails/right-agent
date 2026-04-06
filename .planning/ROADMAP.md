@@ -98,7 +98,7 @@ See [milestones/v3.3-ROADMAP.md](milestones/v3.3-ROADMAP.md)
 
 **Milestone Goal:** Wire `chrome-devtools-mcp` into rightclaw as a built-in browser MCP — auto-detected at init, injected into every agent's `.mcp.json` and sandbox settings, validated by doctor and bot startup, and surfaced in AGENTS.md system prompt templates.
 
-- [ ] **Phase 42: Chrome Config Infrastructure + MCP Injection** - ChromeConfig struct, per-agent .mcp.json injection, sandbox overrides
+- [x] **Phase 42: Chrome Config Infrastructure + MCP Injection** - ChromeConfig struct, per-agent .mcp.json injection, sandbox overrides (completed 2026-04-06)
 - [ ] **Phase 43: Init Detection + Up Revalidation** - Auto-detect Chrome at init, --chrome-path override, revalidate on every up
 - [ ] **Phase 44: Validation + AGENTS.md Template** - Doctor check, bot startup warn, AGENTS.md browser automation section
 
@@ -115,9 +115,9 @@ See [milestones/v3.3-ROADMAP.md](milestones/v3.3-ROADMAP.md)
   4. Chrome sandbox overrides merge additively with existing `SandboxOverrides` from `agent.yaml` — existing overrides are not clobbered
 **Plans**: 3 plans
 Plans:
-- [ ] 42-01-PLAN.md — ChromeConfig struct + read/write support in config.rs
-- [ ] 42-02-PLAN.md — chrome-devtools MCP injection + sandbox override generators
-- [ ] 42-03-PLAN.md — cmd_up() wiring: hoist global_cfg, pass chrome_cfg to both generators
+- [x] 42-01-PLAN.md — ChromeConfig struct + read/write support in config.rs
+- [x] 42-02-PLAN.md — chrome-devtools MCP injection + sandbox override generators
+- [x] 42-03-PLAN.md — cmd_up() wiring: hoist global_cfg, pass chrome_cfg to both generators
 
 ### Phase 43: Init Detection + Up Revalidation
 **Goal**: Chrome path is discovered at init and revalidated silently on every `rightclaw up` — operators never lose injection silently
@@ -128,7 +128,10 @@ Plans:
   2. Running `rightclaw init --chrome-path /custom/chrome` saves the provided path to config regardless of what auto-detection finds
   3. Running `rightclaw init` on a machine with no Chrome logs a warning and completes normally — init does not fail
   4. Running `rightclaw up` when the configured Chrome path no longer exists logs a warning and skips injection for that run — agents start normally
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 43-01-PLAN.md — Chrome + MCP detection helpers, --chrome-path arg, cmd_init() single-write refactor
+- [ ] 43-02-PLAN.md — cmd_up() per-run Chrome path revalidation
 
 ### Phase 44: Validation + AGENTS.md Template
 **Goal**: Operators can verify Chrome configuration via `rightclaw doctor`; agents know to use ChromeDevTools MCP for browser tasks
@@ -155,6 +158,6 @@ Plans:
 | 29-31. Sandbox Fix & Verification | v3.1 | ✓ | Complete | 2026-04-03 |
 | 38-41. MCP & Tunnel | v3.2 | ✓ | Complete | 2026-04-05 |
 | 1. MCP management tools | v3.3 | 2/2 | Complete | 2026-04-06 |
-| 42. Chrome Config + MCP Injection | v3.4 | 0/3 | Not started | - |
-| 43. Init Detection + Up Revalidation | v3.4 | 0/TBD | Not started | - |
+| 42. Chrome Config + MCP Injection | v3.4 | 3/3 | Complete   | 2026-04-06 |
+| 43. Init Detection + Up Revalidation | v3.4 | 0/2 | Not started | - |
 | 44. Validation + AGENTS.md Template | v3.4 | 0/TBD | Not started | - |
