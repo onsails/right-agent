@@ -126,6 +126,19 @@ pub fn generate_settings(
     Ok(settings)
 }
 
+/// Generate minimal settings.json for agents inside OpenShell sandbox.
+///
+/// OpenShell handles all sandboxing — no CC sandbox config needed.
+/// Only CC behavioral flags remain.
+pub fn generate_settings_minimal() -> serde_json::Value {
+    serde_json::json!({
+        "skipDangerousModePermissionPrompt": true,
+        "autoMemoryEnabled": false,
+        "spinnerTipsEnabled": false,
+        "prefersReducedMotion": true,
+    })
+}
+
 #[cfg(test)]
 #[path = "settings_tests.rs"]
 mod tests;
