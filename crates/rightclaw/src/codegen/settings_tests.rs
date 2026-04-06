@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::{AgentConfig, AgentDef, RestartPolicy, SandboxOverrides};
-use crate::codegen::generate_settings;
+use crate::codegen::{generate_settings, generate_settings_minimal};
 use crate::config::ChromeConfig;
 
 fn make_test_agent(name: &str, config: Option<AgentConfig>) -> AgentDef {
@@ -459,4 +459,16 @@ fn no_sandbox_still_injects_chrome_overrides() {
         allowed_commands.iter().any(|v| v == "/usr/bin/chrome"),
         "allowedCommands must contain chrome path even with no_sandbox=true, got: {allowed_commands:?}"
     );
+}
+
+#[test]
+fn generates_minimal_settings() {
+    let settings = generate_settings_minimal();
+    let obj = settings.as_object().unwrap();
+    assert_eq!(obj["skipDangerousModePermissionPrompt"], true);
+    assert_eq!(obj["autoMemoryEnabled"], false);
+    assert_eq!(obj["spinnerTipsEnabled"], false);
+    assert_eq!(obj["prefersReducedMotion"], true);
+    // Must NOT contain sandbox key
+    assert!(obj.get("sandbox").is_none(), "minimal settings should not contain sandbox config");
 }
