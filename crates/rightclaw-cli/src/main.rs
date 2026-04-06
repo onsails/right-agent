@@ -682,6 +682,31 @@ async fn cmd_up(
     // Fail fast if required tools are missing.
     rightclaw::runtime::verify_dependencies()?;
 
+    // Read global config early — needed for Chrome revalidation before any agent work.
+    // Also reused by the cloudflared tunnel block after the per-agent loop.
+    let global_cfg = rightclaw::config::read_global_config(home)?;
+
+    // Revalidate Chrome paths on every up — if either path is gone, skip injection for this run
+    // (INJECT-03). Warn so operators know; agents always start normally regardless of outcome.
+    // Done before the health check so the warn appears even when already-running blocks up.
+    let chrome_cfg: Option<&rightclaw::config::ChromeConfig> = match global_cfg.chrome.as_ref() {
+        Some(cfg) if !cfg.chrome_path.exists() => {
+            tracing::warn!(
+                path = %cfg.chrome_path.display(),
+                "configured Chrome binary no longer exists — skipping injection for this run. Re-run `rightclaw init` to update."
+            );
+            None
+        }
+        Some(cfg) if !cfg.mcp_binary_path.exists() => {
+            tracing::warn!(
+                path = %cfg.mcp_binary_path.display(),
+                "configured chrome-devtools-mcp binary no longer exists — skipping injection for this run. Re-install: npm install -g chrome-devtools-mcp"
+            );
+            None
+        }
+        other => other,
+    };
+
     let run_dir = home.join("run");
     std::fs::create_dir_all(&run_dir)
         .map_err(|e| miette::miette!("failed to create run directory: {e:#}"))?;
@@ -764,7 +789,7 @@ async fn cmd_up(
     // Write agent definition, reply-schema.json, and settings.json for each agent.
     for agent in &agents {
         // Generate .claude/settings.json with sandbox config (Phase 6).
-        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home, rg_path.clone())?;
+        let settings = rightclaw::codegen::generate_settings(agent, no_sandbox, &host_home, rg_path.clone(), chrome_cfg)?;
         let claude_dir = agent.path.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
@@ -847,12 +872,12 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "memory.db initialized");
 
         // 11. Generate .mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
-        rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name)?;
+        rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name, home, chrome_cfg)?;
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
     // Generate cloudflared config and wrapper script when tunnel is configured (Phase 38).
-    let global_cfg = rightclaw::config::read_global_config(home)?;
+    // (global_cfg is read before the per-agent loop — reused here for tunnel block)
 
     // Pre-flight: if tunnel is configured, cloudflared binary must be in PATH.
     // Check before generating any files to avoid leaving stale artifacts.

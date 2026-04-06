@@ -333,3 +333,37 @@ fn test_init_chrome_path_arg_warns_when_mcp_missing() {
         .success()
         .stdout(predicate::str::contains("chrome-devtools-mcp not found"));
 }
+
+// --- Phase 43 Plan 02: Per-run Chrome path revalidation in cmd_up ---
+
+#[test]
+fn test_up_warns_when_chrome_path_missing() {
+    // INJECT-03: rightclaw up with chrome_path pointing to non-existent file must warn and skip
+    // injection, not abort. The up command will fail after the warn (no process-compose in test
+    // env), but the warn must appear before that failure.
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Initialize first so agent structure exists.
+    rightclaw()
+        .args(["--home", home, "init"])
+        .assert()
+        .success();
+
+    // Write a config.yaml with a chrome_path that doesn't exist on disk.
+    let config_content = "chrome:\n  chrome_path: /nonexistent/chrome\n  mcp_binary_path: /nonexistent/mcp\n";
+    fs::write(dir.path().join("config.yaml"), config_content).unwrap();
+
+    // Run `up` — it will fail (no process-compose or already running), but the chrome warn
+    // must appear first. tracing_subscriber writes to stdout by default (see main.rs init).
+    let output = rightclaw()
+        .args(["--home", home, "up"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("no longer exists"),
+        "expected chrome path warn in stdout, got: {stdout}"
+    );
+}

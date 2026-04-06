@@ -192,6 +192,7 @@ mod tests {
                 credentials_file: PathBuf::from("/tmp/abc-123.json"),
                 hostname: "test.example.com".to_string(),
             }),
+            chrome: None,
         };
         write_global_config(dir.path(), &written).unwrap();
         let read = read_global_config(dir.path()).unwrap();
@@ -210,6 +211,7 @@ mod tests {
                 credentials_file: PathBuf::from("/tmp/abc-123.json"),
                 hostname: "test.example.com".to_string(),
             }),
+            chrome: None,
         };
         write_global_config(dir.path(), &config).unwrap();
         let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
