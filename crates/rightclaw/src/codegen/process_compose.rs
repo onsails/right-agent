@@ -33,6 +33,15 @@ struct BotProcessAgent {
     home_dir: String,
 }
 
+/// Template context for the shared right MCP HTTP server process.
+#[derive(Debug, Serialize)]
+struct RightMcpServer {
+    exe_path: String,
+    port: u16,
+    token_map_path: String,
+    home_dir: String,
+}
+
 /// Template context for the cloudflared tunnel process entry.
 #[derive(Debug, Serialize)]
 struct CloudflaredEntry {
@@ -66,6 +75,7 @@ pub fn generate_process_compose(
     run_dir: &Path,
     home: &Path,
     cloudflared_script: Option<&Path>,
+    token_map_path: Option<&Path>,
 ) -> miette::Result<String> {
     // Build cloudflared template context when tunnel script is provided.
     // working_dir = parent of scripts/ dir (i.e., rightclaw home).
@@ -80,6 +90,13 @@ pub fn generate_process_compose(
             command: script.display().to_string(),
             working_dir,
         }
+    });
+
+    let right_mcp_server: Option<RightMcpServer> = token_map_path.map(|p| RightMcpServer {
+        exe_path: exe_path.display().to_string(),
+        port: 8100,
+        token_map_path: p.display().to_string(),
+        home_dir: home.display().to_string(),
     });
 
     let bot_agents: Vec<BotProcessAgent> = agents
@@ -133,6 +150,7 @@ pub fn generate_process_compose(
         agents => bot_agents,
         cloudflared => cf_entry,
         pc_port => crate::runtime::pc_client::PC_PORT,
+        right_mcp_server => right_mcp_server,
     })
     .map_err(|e| miette::miette!("template render error: {e:#}"))
 }

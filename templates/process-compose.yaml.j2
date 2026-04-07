@@ -3,6 +3,19 @@ version: "0.5"
 is_strict: true
 
 processes:
+{% if right_mcp_server %}
+  right-mcp-server:
+    command: "{{ right_mcp_server.exe_path }} memory-server-http --port {{ right_mcp_server.port }} --token-map {{ right_mcp_server.token_map_path }}"
+    environment:
+      - RC_RIGHTCLAW_HOME={{ right_mcp_server.home_dir }}
+    availability:
+      restart: "always"
+      backoff_seconds: 3
+      max_restarts: 10
+    shutdown:
+      signal: 15
+      timeout_seconds: 10
+{% endif %}
 {% for agent in agents %}
   {{ agent.name }}-bot:
     command: "{{ agent.exe_path }} bot --agent {{ agent.agent_name }}{% if agent.no_sandbox %} --no-sandbox{% endif %}{% if agent.debug %} --debug{% endif %}"
@@ -32,6 +45,11 @@ processes:
     shutdown:
       signal: 15
       timeout_seconds: 30
+{% if right_mcp_server %}
+    depends_on:
+      right-mcp-server:
+        condition: process_started
+{% endif %}
 {% endfor %}
 
 {% if cloudflared %}

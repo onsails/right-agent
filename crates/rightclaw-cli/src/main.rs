@@ -1036,6 +1036,7 @@ async fn cmd_up(
         &run_dir,
         home,
         cloudflared_script_path.as_deref(),
+        Some(&token_map_path),
     )?;
     let config_path = run_dir.join("process-compose.yaml");
     std::fs::write(&config_path, &pc_config)
