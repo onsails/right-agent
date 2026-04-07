@@ -249,6 +249,24 @@ pub async fn handle_mcp(
     Ok(())
 }
 
+/// Best-effort upload of .mcp.json to sandbox after modification.
+/// Derives sandbox name from agent directory name.
+async fn upload_mcp_json_to_sandbox(agent_dir: &Path) {
+    let agent_name = agent_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    let sandbox = rightclaw::openshell::sandbox_name(agent_name);
+    let mcp_json = agent_dir.join(".mcp.json");
+    if mcp_json.exists() {
+        if let Err(e) = rightclaw::openshell::upload_file(&sandbox, &mcp_json, "/sandbox/").await {
+            tracing::warn!(agent = agent_name, "failed to upload .mcp.json to sandbox: {e:#}");
+        } else {
+            tracing::info!(agent = agent_name, "uploaded .mcp.json to sandbox after MCP config change");
+        }
+    }
+}
+
 /// `/mcp list` -- show all MCP servers from .claude.json and .mcp.json.
 async fn handle_mcp_list(
     bot: &BotType,
@@ -502,6 +520,7 @@ async fn handle_mcp_add(
         url,
     ) {
         Ok(()) => {
+            upload_mcp_json_to_sandbox(agent_dir).await;
             bot.send_message(msg.chat.id, format!("Added MCP server: {name} ({url})"))
                 .await?;
         }
@@ -538,6 +557,7 @@ async fn handle_mcp_remove(
         server_name,
     ) {
         Ok(()) => {
+            upload_mcp_json_to_sandbox(agent_dir).await;
             bot.send_message(msg.chat.id, format!("Removed MCP server: {server_name}"))
                 .await?;
         }

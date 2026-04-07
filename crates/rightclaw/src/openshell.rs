@@ -182,6 +182,32 @@ pub async fn generate_ssh_config(
     Ok(dest)
 }
 
+/// Apply a policy to a running sandbox via `openshell policy set`.
+///
+/// Uses `--wait` to block until the sandbox confirms it loaded the new policy.
+pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> {
+    let output = Command::new("openshell")
+        .args(["policy", "set", name, "--policy"])
+        .arg(policy_path)
+        .args(["--wait", "--timeout", "30"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| miette::miette!("failed to run openshell policy set: {e:#}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "openshell policy set failed (exit {}): {stderr}",
+            output.status
+        ));
+    }
+
+    tracing::info!(sandbox = name, "policy applied");
+    Ok(())
+}
+
 /// Execute a command inside a sandbox over SSH.
 ///
 /// Uses `-F config_path` to pick up the sandbox SSH config, and
@@ -237,6 +263,22 @@ pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_path: &str) ->
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(miette::miette!("openshell upload failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Download a file or directory from a sandbox to the host.
+pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) -> miette::Result<()> {
+    let output = Command::new("openshell")
+        .args(["sandbox", "download", sandbox, sandbox_path])
+        .arg(host_dest)
+        .output()
+        .await
+        .map_err(|e| miette::miette!("openshell download failed: {e:#}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!("openshell download failed: {stderr}"));
     }
     Ok(())
 }

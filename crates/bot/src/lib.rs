@@ -1,5 +1,6 @@
 pub mod cron;
 pub mod error;
+pub mod sync;
 pub mod telegram;
 
 pub use error::BotError;
@@ -226,40 +227,37 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
                     .join("openshell/gateways/openshell/mtls")
             });
 
-        // Delete stale sandbox (best-effort).
-        rightclaw::openshell::delete_sandbox(&sandbox).await;
-
-        // Populate staging dir with agent files for sandbox upload.
-        // Copies .claude/ (resolving symlinks) so sandbox has credentials, settings, agent def.
-        let upload_dir = agent_dir.join("staging");
-        let staging_claude = upload_dir.join(".claude");
-        if staging_claude.exists() {
-            std::fs::remove_dir_all(&staging_claude)
-                .map_err(|e| miette::miette!("failed to clean staging/.claude: {e:#}"))?;
-        }
-        copy_dir_resolve_symlinks(&agent_dir.join(".claude"), &staging_claude)
-            .map_err(|e| miette::miette!("failed to copy .claude to staging: {e:#}"))?;
-        tracing::info!(agent = %args.agent, "populated staging/.claude for sandbox upload");
-
-        // Spawn sandbox.
-        let mut child = rightclaw::openshell::spawn_sandbox(&sandbox, &policy_path, Some(&upload_dir))?;
-
-        // Connect gRPC and wait for ready, racing against child exit.
+        // Check if sandbox already exists and is READY.
         let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
-        tokio::select! {
-            result = rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
-                result?;
-                // `openshell sandbox create` is a long-lived monitor process.
-                // Drop the handle — kill_on_drop(false) keeps it alive.
-                drop(child);
-            }
-            status = child.wait() => {
-                let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
-                if !status.success() {
-                    return Err(miette::miette!(
-                        "openshell sandbox create for '{}' exited with {status} before reaching READY",
-                        args.agent
-                    ));
+        let sandbox_exists = rightclaw::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
+
+        if sandbox_exists {
+            // Reuse existing sandbox — just apply updated policy.
+            tracing::info!(agent = %args.agent, "reusing existing sandbox");
+            rightclaw::openshell::apply_policy(&sandbox, &policy_path).await?;
+        } else {
+            // Sandbox doesn't exist — create with curated staging dir.
+            tracing::info!(agent = %args.agent, "creating new sandbox");
+            let upload_dir = agent_dir.join("staging");
+            prepare_staging_dir(&agent_dir, &upload_dir)?;
+
+            let mut child = rightclaw::openshell::spawn_sandbox(&sandbox, &policy_path, Some(&upload_dir))?;
+
+            tokio::select! {
+                result = rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
+                    result?;
+                    // `openshell sandbox create` is a long-lived monitor process.
+                    // Drop the handle — kill_on_drop(false) keeps it alive.
+                    drop(child);
+                }
+                status = child.wait() => {
+                    let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
+                    if !status.success() {
+                        return Err(miette::miette!(
+                            "openshell sandbox create for '{}' exited with {status} before reaching READY",
+                            args.agent
+                        ));
+                    }
                 }
             }
         }
@@ -276,12 +274,12 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         None
     };
 
-    // Run teloxide + axum concurrently via tokio::select!
-    let sandbox_name_for_cleanup = if !args.no_sandbox {
-        Some(rightclaw::openshell::sandbox_name(&args.agent))
-    } else {
-        None
-    };
+    // Spawn background sync task for sandbox file sync.
+    if !args.no_sandbox {
+        let sync_agent_dir = agent_dir.clone();
+        let sync_sandbox = rightclaw::openshell::sandbox_name(&args.agent);
+        tokio::spawn(sync::run_sync_task(sync_agent_dir, sync_sandbox));
+    }
 
     let pc_port: u16 = std::env::var("RC_PC_PORT")
         .ok()
@@ -303,12 +301,79 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
     };
 
-    // Cleanup sandbox on shutdown (best-effort).
-    if let Some(ref name) = sandbox_name_for_cleanup {
-        rightclaw::openshell::delete_sandbox(name).await;
+    result
+}
+
+/// Prepare the staging directory for sandbox upload.
+///
+/// Copies curated files from the agent directory into staging/,
+/// excluding credentials (sandbox gets its own via login flow) and plugins (not used).
+fn prepare_staging_dir(agent_dir: &std::path::Path, upload_dir: &std::path::Path) -> miette::Result<()> {
+    let staging_claude = upload_dir.join(".claude");
+    if staging_claude.exists() {
+        std::fs::remove_dir_all(&staging_claude)
+            .map_err(|e| miette::miette!("failed to clean staging/.claude: {e:#}"))?;
+    }
+    std::fs::create_dir_all(&staging_claude)
+        .map_err(|e| miette::miette!("failed to create staging/.claude: {e:#}"))?;
+
+    let src_claude = agent_dir.join(".claude");
+
+    // Copy individual items — NOT credentials, NOT plugins, NOT shell-snapshots
+    let copy_items: &[&str] = &[
+        "settings.json",
+        "reply-schema.json",
+        "agents", // agent definition directory
+    ];
+
+    for item in copy_items {
+        let src = src_claude.join(item);
+        let dst = staging_claude.join(item);
+        if !src.exists() {
+            continue;
+        }
+        let meta = std::fs::metadata(&src)
+            .map_err(|e| miette::miette!("failed to stat {}: {e:#}", src.display()))?;
+        if meta.is_dir() {
+            copy_dir_resolve_symlinks(&src, &dst)
+                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
+        } else {
+            std::fs::copy(&src, &dst)
+                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
+        }
     }
 
-    result
+    // Copy only rightclaw builtin skills (not entire skills/ tree)
+    let skills_src = src_claude.join("skills");
+    if skills_src.exists() {
+        for builtin in &["rightskills", "cronsync"] {
+            let skill_src = skills_src.join(builtin);
+            let skill_dst = staging_claude.join("skills").join(builtin);
+            if skill_src.exists() {
+                copy_dir_resolve_symlinks(&skill_src, &skill_dst)
+                    .map_err(|e| miette::miette!("failed to copy skill {builtin} to staging: {e:#}"))?;
+            }
+        }
+    }
+
+    // Copy .claude.json (trust/onboarding — at agent root, not inside .claude/)
+    let claude_json_src = agent_dir.join(".claude.json");
+    let claude_json_dst = upload_dir.join(".claude.json");
+    if claude_json_src.exists() {
+        std::fs::copy(&claude_json_src, &claude_json_dst)
+            .map_err(|e| miette::miette!("failed to copy .claude.json to staging: {e:#}"))?;
+    }
+
+    // Copy .mcp.json
+    let mcp_json_src = agent_dir.join(".mcp.json");
+    let mcp_json_dst = upload_dir.join(".mcp.json");
+    if mcp_json_src.exists() {
+        std::fs::copy(&mcp_json_src, &mcp_json_dst)
+            .map_err(|e| miette::miette!("failed to copy .mcp.json to staging: {e:#}"))?;
+    }
+
+    tracing::info!("prepared staging dir for sandbox upload");
+    Ok(())
 }
 
 /// Recursively copy a directory, resolving symlinks to regular files.
