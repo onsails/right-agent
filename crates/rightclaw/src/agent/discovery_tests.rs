@@ -167,11 +167,11 @@ fn discover_detects_mcp_json() {
     fs::create_dir(&agent_dir).unwrap();
     fs::write(agent_dir.join("IDENTITY.md"), "# MCP").unwrap();
 
-    fs::write(agent_dir.join(".mcp.json"), "{}").unwrap();
+    fs::write(agent_dir.join("mcp.json"), "{}").unwrap();
 
     let agents = discover_agents(dir.path()).unwrap();
     assert_eq!(agents.len(), 1);
-    assert!(agents[0].path.join(".mcp.json").exists());
+    assert!(agents[0].path.join("mcp.json").exists());
 }
 
 #[test]

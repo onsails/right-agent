@@ -266,7 +266,7 @@ pub async fn handle_mcp(
     Ok(())
 }
 
-/// Best-effort upload of .mcp.json to sandbox after modification.
+/// Best-effort upload of mcp.json to sandbox after modification.
 /// Derives sandbox name from agent directory name.
 async fn upload_mcp_json_to_sandbox(agent_dir: &Path) {
     let agent_name = agent_dir
@@ -274,17 +274,17 @@ async fn upload_mcp_json_to_sandbox(agent_dir: &Path) {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
     let sandbox = rightclaw::openshell::sandbox_name(agent_name);
-    let mcp_json = agent_dir.join(".mcp.json");
+    let mcp_json = agent_dir.join("mcp.json");
     if mcp_json.exists() {
         if let Err(e) = rightclaw::openshell::upload_file(&sandbox, &mcp_json, "/sandbox/").await {
-            tracing::warn!(agent = agent_name, "failed to upload .mcp.json to sandbox: {e:#}");
+            tracing::warn!(agent = agent_name, "failed to upload mcp.json to sandbox: {e:#}");
         } else {
-            tracing::info!(agent = agent_name, "uploaded .mcp.json to sandbox after MCP config change");
+            tracing::info!(agent = agent_name, "uploaded mcp.json to sandbox after MCP config change");
         }
     }
 }
 
-/// `/mcp list` -- show all MCP servers from .claude.json and .mcp.json.
+/// `/mcp list` -- show all MCP servers from .claude.json and mcp.json.
 async fn handle_mcp_list(
     bot: &BotType,
     msg: &Message,
@@ -343,15 +343,15 @@ async fn handle_mcp_auth(
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp auth");
 
-    // 1. Read .mcp.json to find server URL
-    let mcp_json_path = agent_dir.join(".mcp.json");
+    // 1. Read mcp.json to find server URL
+    let mcp_json_path = agent_dir.join("mcp.json");
 
     let servers = match rightclaw::mcp::credentials::list_http_servers(
         &mcp_json_path,
     ) {
         Ok(s) => s,
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot read .mcp.json: {e:#}")).await?;
+            bot.send_message(msg.chat.id, format!("Cannot read mcp.json: {e:#}")).await?;
             return Ok(());
         }
     };
@@ -361,7 +361,7 @@ async fn handle_mcp_auth(
         None => {
             bot.send_message(
                 msg.chat.id,
-                format!("Server '{server_name}' not found in .mcp.json"),
+                format!("Server '{server_name}' not found in mcp.json"),
             )
             .await?;
             return Ok(());
@@ -529,7 +529,7 @@ async fn handle_mcp_add(
     let name = parts[0];
     let url = parts[1];
 
-    let mcp_json_path = agent_dir.join(".mcp.json");
+    let mcp_json_path = agent_dir.join("mcp.json");
 
     match rightclaw::mcp::credentials::add_http_server(
         &mcp_json_path,
@@ -567,7 +567,7 @@ async fn handle_mcp_remove(
         return Ok(());
     }
 
-    let mcp_json_path = agent_dir.join(".mcp.json");
+    let mcp_json_path = agent_dir.join("mcp.json");
 
     match rightclaw::mcp::credentials::remove_http_server(
         &mcp_json_path,
@@ -581,7 +581,7 @@ async fn handle_mcp_remove(
         Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
             bot.send_message(
                 msg.chat.id,
-                format!("Server '{server_name}' not found in .mcp.json"),
+                format!("Server '{server_name}' not found in mcp.json"),
             )
             .await?;
         }

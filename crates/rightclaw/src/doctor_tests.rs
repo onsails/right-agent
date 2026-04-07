@@ -684,21 +684,21 @@ fn run_doctor_includes_sandbox_rg_checks_when_agent_has_settings() {
 
 // ---- check_mcp_tokens tests (REFRESH-03, REFRESH-04) ----
 
-/// Helper: write a minimal .mcp.json with one HTTP server entry.
+/// Helper: write a minimal mcp.json with one HTTP server entry.
 fn write_mcp_json_for_doctor(agent_dir: &std::path::Path, server_name: &str, server_url: &str) {
     let content = format!(
         r#"{{"mcpServers": {{"{server_name}": {{"url": "{server_url}"}}}}}}"#,
     );
-    std::fs::write(agent_dir.join(".mcp.json"), content).unwrap();
+    std::fs::write(agent_dir.join("mcp.json"), content).unwrap();
 }
 
-/// Helper: write a Bearer token into the agent's .mcp.json Authorization header.
+/// Helper: write a Bearer token into the agent's mcp.json Authorization header.
 fn write_bearer_for_doctor(
     agent_dir: &std::path::Path,
     server_name: &str,
     _server_url: &str,
 ) {
-    let mcp_path = agent_dir.join(".mcp.json");
+    let mcp_path = agent_dir.join("mcp.json");
     let content = std::fs::read_to_string(&mcp_path).unwrap();
     let mut root: serde_json::Value = serde_json::from_str(&content).unwrap();
     let entry = root["mcpServers"][server_name].as_object_mut().unwrap();
@@ -735,7 +735,7 @@ fn check_mcp_tokens_pass_when_all_present() {
     let server_url = "https://mcp.notion.com/mcp";
     write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
 
-    // Write Bearer token into .mcp.json
+    // Write Bearer token into mcp.json
     write_bearer_for_doctor(&agent_dir, "notion", server_url);
 
     let result = check_mcp_tokens_impl(dir.path());
@@ -745,7 +745,7 @@ fn check_mcp_tokens_pass_when_all_present() {
 
 #[test]
 fn check_mcp_tokens_warn_on_missing_token() {
-    // Agent with .mcp.json but no credential → Missing → Warn listing agent1/notion
+    // Agent with mcp.json but no credential → Missing → Warn listing agent1/notion
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("agent1");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -767,7 +767,7 @@ fn check_mcp_tokens_warn_on_missing_token() {
 
 #[test]
 fn check_mcp_tokens_pass_when_bearer_present() {
-    // Agent with Bearer header in .mcp.json -- Present -- Pass
+    // Agent with Bearer header in mcp.json -- Present -- Pass
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("agent1");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -832,13 +832,13 @@ fn mcp_auth_issues_returns_none_when_agents_dir_empty() {
 
 #[test]
 fn mcp_auth_issues_returns_some_when_mcp_tokens_warn() {
-    // Craft a scenario where .mcp.json has a URL server but no Bearer token → Missing → Warn
+    // Craft a scenario where mcp.json has a URL server but no Bearer token → Missing → Warn
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("myagent");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    // .mcp.json with one OAuth server but no Authorization header
+    // mcp.json with one OAuth server but no Authorization header
     std::fs::write(
-        agent_dir.join(".mcp.json"),
+        agent_dir.join("mcp.json"),
         r#"{"mcpServers":{"notion":{"url":"https://mcp.notion.com/mcp"}}}"#,
     )
     .unwrap();

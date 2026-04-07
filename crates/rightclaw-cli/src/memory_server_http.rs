@@ -265,7 +265,7 @@ impl HttpMemoryServer {
         }
     }
 
-    #[tool(description = "Add an HTTP MCP server to this agent's .mcp.json. The server becomes available after the next agent restart.")]
+    #[tool(description = "Add an HTTP MCP server to this agent's mcp.json. The server becomes available after the next agent restart.")]
     async fn mcp_add(
         &self,
         Extension(parts): Extension<http::request::Parts>,
@@ -278,7 +278,7 @@ impl HttpMemoryServer {
                 None,
             ));
         }
-        let mcp_json_path = agent.dir.join(".mcp.json");
+        let mcp_json_path = agent.dir.join("mcp.json");
         rightclaw::mcp::credentials::add_http_server(&mcp_json_path, &params.name, &params.url)
             .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -287,7 +287,7 @@ impl HttpMemoryServer {
         ))]))
     }
 
-    #[tool(description = "Remove an HTTP MCP server from this agent's .mcp.json. The 'rightmemory' server is protected and cannot be removed.")]
+    #[tool(description = "Remove an HTTP MCP server from this agent's mcp.json. The 'rightmemory' server is protected and cannot be removed.")]
     async fn mcp_remove(
         &self,
         Extension(parts): Extension<http::request::Parts>,
@@ -300,7 +300,7 @@ impl HttpMemoryServer {
                 None,
             ));
         }
-        let mcp_json_path = agent.dir.join(".mcp.json");
+        let mcp_json_path = agent.dir.join("mcp.json");
         match rightclaw::mcp::credentials::remove_http_server(&mcp_json_path, &params.name) {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Removed MCP server '{}'. Restart agent for change to take effect.",
@@ -308,7 +308,7 @@ impl HttpMemoryServer {
             ))])),
             Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
                 Err(McpError::invalid_params(
-                    format!("Server '{}' not found in .mcp.json.", params.name),
+                    format!("Server '{}' not found in mcp.json.", params.name),
                     None,
                 ))
             }
@@ -316,7 +316,7 @@ impl HttpMemoryServer {
         }
     }
 
-    #[tool(description = "List all configured MCP servers for this agent. Shows name, URL, auth state (present/auth required), source (.claude.json or .mcp.json), and kind (http/stdio). Never exposes token values.")]
+    #[tool(description = "List all configured MCP servers for this agent. Shows name, URL, auth state (present/auth required), source (.claude.json or mcp.json), and kind (http/stdio). Never exposes token values.")]
     async fn mcp_list(
         &self,
         Extension(parts): Extension<http::request::Parts>,
@@ -349,7 +349,7 @@ impl HttpMemoryServer {
         Parameters(params): Parameters<McpAuthParams>,
     ) -> Result<CallToolResult, McpError> {
         let agent = Self::agent_from_parts(&parts)?;
-        let mcp_json_path = agent.dir.join(".mcp.json");
+        let mcp_json_path = agent.dir.join("mcp.json");
         let servers = rightclaw::mcp::credentials::list_http_servers(&mcp_json_path)
             .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
         let server_url = servers
@@ -359,7 +359,7 @@ impl HttpMemoryServer {
             .ok_or_else(|| {
                 McpError::invalid_params(
                     format!(
-                        "Server '{}' not found in .mcp.json. Add it first with mcp_add.",
+                        "Server '{}' not found in mcp.json. Add it first with mcp_add.",
                         params.server_name
                     ),
                     None,

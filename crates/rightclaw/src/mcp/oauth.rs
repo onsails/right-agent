@@ -18,7 +18,7 @@ pub enum OAuthError {
     NoBrowserAuth,
     #[error("Invalid OAuth state token — possible CSRF attempt")]
     InvalidState,
-    #[error("Missing client_id: server has no registration_endpoint and .mcp.json has no clientId")]
+    #[error("Missing client_id: server has no registration_endpoint and mcp.json has no clientId")]
     MissingClientId,
     #[error("Missing endpoint: {0}")]
     MissingEndpoint(String),
@@ -338,7 +338,7 @@ pub async fn register_client(
     Ok(dcr)
 }
 
-/// Try DCR; fall back to a static `client_id` from `.mcp.json` configuration.
+/// Try DCR; fall back to a static `client_id` from `mcp.json` configuration.
 ///
 /// Per D-08: if `registration_endpoint` is absent, use `static_client_id`.
 /// If neither is available, return `OAuthError::MissingClientId`.

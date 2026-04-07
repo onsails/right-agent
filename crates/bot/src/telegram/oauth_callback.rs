@@ -41,7 +41,7 @@ pub struct CallbackParams {
 #[derive(Clone)]
 pub struct OAuthCallbackState {
     pub pending_auth: PendingAuthMap,
-    /// Path to agent's .mcp.json (for Bearer token storage)
+    /// Path to agent's mcp.json (for Bearer token storage)
     pub mcp_json_path: PathBuf,
     /// Agent name (for logging and notifications)
     pub agent_name: String,
@@ -202,7 +202,7 @@ async fn complete_oauth_flow(
         "token exchange succeeded"
     );
 
-    // Ensure server entry exists in .mcp.json (idempotent)
+    // Ensure server entry exists in mcp.json (idempotent)
     add_http_server(
         &cb_state.mcp_json_path,
         &pending.server_name,
@@ -223,7 +223,7 @@ async fn complete_oauth_flow(
         agent = %agent_name,
         server = %pending.server_name,
         url = %pending.server_url,
-        "Bearer token written to .mcp.json"
+        "Bearer token written to mcp.json"
     );
 
     // Notify refresh scheduler about new token
@@ -247,7 +247,7 @@ async fn complete_oauth_flow(
         &cb_state.bot,
         &cb_state.notify_chat_ids,
         &format!(
-            "OAuth complete for {} (agent {agent_name}). Token written to .mcp.json.",
+            "OAuth complete for {} (agent {agent_name}). Token written to mcp.json.",
             pending.server_name,
         ),
     )
@@ -336,7 +336,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
         OAuthCallbackState {
             pending_auth: map,
-            mcp_json_path: PathBuf::from("/tmp/fake.mcp.json"),
+            mcp_json_path: PathBuf::from("/tmp/fake-mcp.json"),
             agent_name: "test-agent".to_string(),
             bot: teloxide::Bot::new("0:fake_token_for_tests"),
             notify_chat_ids: vec![],

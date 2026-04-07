@@ -32,7 +32,7 @@ pub(crate) fn write_json_atomic(
     Ok(())
 }
 
-/// Read and parse .mcp.json. Returns empty object if file absent.
+/// Read and parse mcp.json. Returns empty object if file absent.
 fn read_mcp_json(path: &Path) -> Result<serde_json::Value, CredentialError> {
     if !path.exists() {
         return Ok(json!({}));
@@ -51,7 +51,7 @@ fn ensure_mcp_servers(root: &mut serde_json::Value) -> Result<(), CredentialErro
     Ok(())
 }
 
-/// Add an HTTP MCP server to `.mcp.json` under `mcpServers.<name>`.
+/// Add an HTTP MCP server to `mcp.json` under `mcpServers.<name>`.
 ///
 /// Creates the file and structure if absent. Atomic read-modify-write via tempfile.
 pub fn add_http_server(
@@ -73,7 +73,7 @@ pub fn add_http_server(
     write_json_atomic(mcp_json_path, &root)
 }
 
-/// Remove an HTTP MCP server from `.mcp.json` under `mcpServers.<name>`.
+/// Remove an HTTP MCP server from `mcp.json` under `mcpServers.<name>`.
 ///
 /// Returns `CredentialError::ServerNotFound` if the server entry does not exist.
 pub fn remove_http_server(
@@ -94,7 +94,7 @@ pub fn remove_http_server(
     write_json_atomic(mcp_json_path, &root)
 }
 
-/// List all HTTP MCP servers from `.mcp.json`.
+/// List all HTTP MCP servers from `mcp.json`.
 ///
 /// Returns vec of `(name, url)` pairs sorted by name. Returns empty vec if file or
 /// `mcpServers` is absent.
@@ -120,7 +120,7 @@ pub fn list_http_servers(
     Ok(result)
 }
 
-/// Set a custom header on an HTTP MCP server entry in `.mcp.json`.
+/// Set a custom header on an HTTP MCP server entry in `mcp.json`.
 ///
 /// The server entry must already exist (call `add_http_server` first).
 /// Headers are stored under `mcpServers.<name>.headers.<header_name>`.
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn add_creates_mcp_json_when_absent() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".mcp.json");
+        let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn add_merges_into_existing() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".mcp.json");
+        let path = dir.path().join("mcp.json");
         std::fs::write(&path, serde_json::to_string_pretty(&serde_json::json!({
             "mcpServers": { "rightmemory": { "type": "http", "url": "http://localhost:8100/mcp" } }
         })).unwrap()).unwrap();
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn remove_deletes_named_server() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".mcp.json");
+        let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
         add_http_server(&path, "linear", "https://mcp.linear.app/mcp").unwrap();
         remove_http_server(&path, "notion").unwrap();
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn remove_returns_not_found() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".mcp.json");
+        let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
         let err = remove_http_server(&path, "nonexistent").unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn list_returns_sorted() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".mcp.json");
+        let path = dir.path().join("mcp.json");
         add_http_server(&path, "zebra", "https://zebra.example.com/mcp").unwrap();
         add_http_server(&path, "apple", "https://apple.example.com/mcp").unwrap();
         let servers = list_http_servers(&path).unwrap();
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn list_returns_empty_when_absent() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("nonexistent.mcp.json");
+        let path = dir.path().join("nonexistent-mcp.json");
         let servers = list_http_servers(&path).unwrap();
         assert!(servers.is_empty());
     }
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn set_header_adds_authorization() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".mcp.json");
+        let path = dir.path().join("mcp.json");
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
         set_server_header(&path, "notion", "Authorization", "Bearer tok-abc").unwrap();
         let content: serde_json::Value =
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn set_header_returns_not_found() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join(".mcp.json");
+        let path = dir.path().join("mcp.json");
         std::fs::write(&path, "{}").unwrap();
         let err = set_server_header(&path, "ghost", "Authorization", "Bearer x").unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
