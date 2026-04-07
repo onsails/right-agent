@@ -298,11 +298,9 @@ fn test_init_yes_no_telegram_prompt() {
         .success();
 }
 
-// --- Phase 43 Plan 01: Chrome detection + single config write ---
-
 #[test]
 fn test_init_always_writes_config() {
-    // D-11: config.yaml must be written even when no cloudflared cert and no Chrome detected.
+    // D-11: config.yaml must be written even when no cloudflared cert detected.
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -314,61 +312,7 @@ fn test_init_always_writes_config() {
 
     assert!(
         dir.path().join("config.yaml").exists(),
-        "config.yaml must exist after init even with no tunnel and no chrome"
-    );
-}
-
-#[test]
-fn test_init_chrome_path_arg_warns_when_mcp_missing() {
-    // CHROME-02: --chrome-path override accepted; CHROME-03: missing MCP binary warns + skips.
-    // /dev/null exists as a regular file on Linux — satisfies chrome binary existence check.
-    // Use --telegram-token to avoid interactive stdin prompt.
-    let dir = tempdir().unwrap();
-    let home = dir.path().to_str().unwrap();
-
-    rightclaw()
-        .args([
-            "--home", home,
-            "init",
-            "--telegram-token", "123456:ABCdef",
-            "--chrome-path", "/dev/null",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("chrome-devtools-mcp not found"));
-}
-
-// --- Phase 43 Plan 02: Per-run Chrome path revalidation in cmd_up ---
-
-#[test]
-fn test_up_warns_when_chrome_path_missing() {
-    // INJECT-03: rightclaw up with chrome_path pointing to non-existent file must warn and skip
-    // injection, not abort. The up command will fail after the warn (no process-compose in test
-    // env), but the warn must appear before that failure.
-    let dir = tempdir().unwrap();
-    let home = dir.path().to_str().unwrap();
-
-    // Initialize first so agent structure exists.
-    rightclaw()
-        .args(["--home", home, "init"])
-        .assert()
-        .success();
-
-    // Write a config.yaml with a chrome_path that doesn't exist on disk.
-    let config_content = "chrome:\n  chrome_path: /nonexistent/chrome\n  mcp_binary_path: /nonexistent/mcp\n";
-    fs::write(dir.path().join("config.yaml"), config_content).unwrap();
-
-    // Run `up` — it will fail (no process-compose or already running), but the chrome warn
-    // must appear first. tracing_subscriber writes to stdout by default (see main.rs init).
-    let output = rightclaw()
-        .args(["--home", home, "up"])
-        .output()
-        .unwrap();
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("no longer exists"),
-        "expected chrome path warn in stdout, got: {stdout}"
+        "config.yaml must exist after init even with no tunnel"
     );
 }
 
