@@ -447,10 +447,12 @@ async fn invoke_cc(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true); // BOT-04: killed on SIGTERM
 
+    let sandboxed = ctx.ssh_config_path.is_some();
     tracing::info!(
         ?chat_id,
         ?eff_thread_id,
         is_first_call,
+        sandboxed,
         "invoking claude -p"
     );
 
@@ -461,24 +463,36 @@ async fn invoke_cc(
     // DIS-02: always wait_with_output, never .wait()
     let output = wait_with_timeout(child, CC_TIMEOUT_SECS).await?;
 
-    // DIS-06: non-zero exit or non-empty stderr → error reply
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+
+    // Always log outcome — debuggability over brevity.
+    tracing::info!(
+        ?chat_id,
+        exit_code,
+        stdout_len = stdout_str.len(),
+        stderr_len = stderr_str.len(),
+        sandboxed,
+        "claude -p finished"
+    );
+    if !stderr_str.is_empty() {
+        tracing::warn!(?chat_id, stderr = %stderr_str, "CC stderr");
+    }
+
+    // DIS-06: non-zero exit → error reply
     if !output.status.success() {
-        let exit_code = output.status.code().unwrap_or(-1);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format_error_reply(exit_code, &stderr));
+        // If stderr is empty, include stdout (claude sometimes writes errors there).
+        let error_detail = if stderr_str.trim().is_empty() && !stdout_str.trim().is_empty() {
+            format!("(stderr empty, stdout): {}", stdout_str.chars().take(500).collect::<String>())
+        } else {
+            stderr_str.to_string()
+        };
+        return Err(format_error_reply(exit_code, &error_detail));
     }
-
-    if ctx.debug {
-        let stderr_str = String::from_utf8_lossy(&output.stderr);
-        if !stderr_str.is_empty() {
-            tracing::info!(?chat_id, stderr = %stderr_str, "CC stderr");
-        }
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
 
     // DIS-04: parse session_id for debug verification (D-15: mismatch only warns)
-    match parse_reply_output(&raw) {
+    match parse_reply_output(&stdout_str) {
         Ok((reply_output, session_id_from_cc)) => {
             // D-15: verify session_id at debug level only
             if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call)
@@ -503,7 +517,7 @@ async fn invoke_cc(
             tracing::warn!(?chat_id, reason, "CC response parse failed");
             Err(format!(
                 "⚠️ Agent error: {reason}\nRaw output (truncated): {}",
-                &raw.chars().take(200).collect::<String>()
+                &stdout_str.chars().take(200).collect::<String>()
             ))
         }
     }
