@@ -1058,9 +1058,15 @@ async fn cmd_down(home: &Path) -> miette::Result<()> {
     let run_dir = home.join("run");
     let state_path = run_dir.join("state.json");
 
-    let _state = rightclaw::runtime::read_state(&state_path).map_err(|_| {
+    let state = rightclaw::runtime::read_state(&state_path).map_err(|_| {
         miette::miette!("No running instance found. Is rightclaw running?")
     })?;
+
+    // Delete OpenShell sandboxes (best-effort — logs warnings on failure).
+    for agent in &state.agents {
+        let sandbox = rightclaw::openshell::sandbox_name(&agent.name);
+        rightclaw::openshell::delete_sandbox(&sandbox).await;
+    }
 
     // Best-effort shutdown via REST API.
     match rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT) {
