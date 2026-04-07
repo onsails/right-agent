@@ -13,13 +13,15 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 /// - reply-schema.json -- structured output schema
 /// - rightclaw builtin skills
 /// - .claude.json -- verified and fixed if CC overwrote rightclaw keys
-pub async fn run_sync_task(agent_dir: PathBuf, sandbox_name: String) {
-    // Run first sync immediately on startup (fixes stale config in reused sandboxes).
-    tracing::info!(sandbox = %sandbox_name, "sync: initial cycle");
-    if let Err(e) = sync_cycle(&agent_dir, &sandbox_name).await {
-        tracing::error!(sandbox = %sandbox_name, "sync: initial cycle failed: {e:#}");
-    }
+/// Run one sync cycle. Called synchronously at startup before teloxide starts,
+/// ensuring sandbox has correct config before any claude -p invocations.
+pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
+    tracing::info!(sandbox = sandbox_name, "sync: initial cycle (blocking)");
+    sync_cycle(agent_dir, sandbox_name).await
+}
 
+/// Run the periodic sync loop (spawned as background task after initial_sync).
+pub async fn run_sync_task(agent_dir: PathBuf, sandbox_name: String) {
     let mut tick = interval(SYNC_INTERVAL);
     tick.tick().await; // consume immediate tick
 

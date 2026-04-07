@@ -274,11 +274,15 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         None
     };
 
-    // Spawn background sync task for sandbox file sync.
+    // Sync config files to sandbox before starting teloxide.
+    // Blocks until first sync completes — ensures sandbox has correct .claude.json,
+    // settings.json, etc. before any claude -p invocations.
     if !args.no_sandbox {
-        let sync_agent_dir = agent_dir.clone();
         let sync_sandbox = rightclaw::openshell::sandbox_name(&args.agent);
-        tokio::spawn(sync::run_sync_task(sync_agent_dir, sync_sandbox));
+        sync::initial_sync(&agent_dir, &sync_sandbox).await?;
+        let sync_agent_dir = agent_dir.clone();
+        let sync_sandbox_bg = sync_sandbox;
+        tokio::spawn(sync::run_sync_task(sync_agent_dir, sync_sandbox_bg));
     }
 
     let pc_port: u16 = std::env::var("RC_PC_PORT")
