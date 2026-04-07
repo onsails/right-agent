@@ -349,8 +349,14 @@ pub fn spawn_worker(
             match reply_result {
                 Ok(Some(output)) => {
                     if let Some(content) = output.content {
-                        // Split long responses (DIS-05)
                         let parts = split_message(&content);
+                        tracing::info!(
+                            ?key,
+                            content_len = content.len(),
+                            parts = parts.len(),
+                            reply_to = output.reply_to_message_id,
+                            "sending reply to Telegram"
+                        );
                         for part in parts {
                             let mut send = ctx.bot.send_message(tg_chat_id, &part);
                             if eff_thread_id != 0 {
@@ -373,15 +379,18 @@ pub fn spawn_worker(
                                 );
                             }
                         }
+                    } else {
+                        tracing::warn!(
+                            ?key,
+                            "CC returned content: null — no reply sent to user (structured output had no content)"
+                        );
                     }
-                    // content: None → silent (D-05)
                 }
                 Ok(None) => {
-                    // Should not happen (parse_reply_output returns Err on missing result)
-                    tracing::warn!(?key, "unexpected Ok(None) from invoke_cc");
+                    tracing::warn!(?key, "unexpected Ok(None) from invoke_cc — no reply sent");
                 }
                 Err(err_msg) => {
-                    // DIS-06: error reply
+                    tracing::info!(?key, "sending error reply to Telegram");
                     let mut send = ctx.bot.send_message(tg_chat_id, &err_msg);
                     if eff_thread_id != 0 {
                         send = send
