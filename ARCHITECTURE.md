@@ -20,7 +20,7 @@ src/
 │   ├── discovery.rs    # Scan agents/ dir, validate names, parse agent.yaml
 │   └── types.rs        # AgentDef, AgentConfig, RestartPolicy, SandboxOverrides
 ├── config/
-│   └── config.rs       # GlobalConfig (tunnel, chrome), RIGHTCLAW_HOME resolution
+│   └── config.rs       # GlobalConfig (tunnel), RIGHTCLAW_HOME resolution
 ├── codegen/
 │   ├── agent_def.rs    # .md with frontmatter for CC agent definition
 │   ├── claude_json.rs  # .claude.json — trust (/sandbox + agent dir), onboarding, credential symlinks
@@ -90,7 +90,7 @@ rightclaw init
   ├─ Write IDENTITY.md, SOUL.md, USER.md, agent.yaml
   ├─ Generate .claude/settings.json, .claude.json
   ├─ Symlink credentials from ~/.claude/
-  ├─ Detect Telegram token, cloudflared tunnel, Chrome binary
+  ├─ Detect Telegram token, cloudflared tunnel
   └─ Write ~/.rightclaw/config.yaml
 
 rightclaw up [--agents x,y] [--detach] [--no-sandbox]
@@ -194,7 +194,7 @@ OAuth callback → write Bearer to agent_dir/.mcp.json → send RefreshEntry
 
 | Scope | File | Source of Truth |
 |-------|------|-----------------|
-| Global | `~/.rightclaw/config.yaml` | Tunnel, Chrome config |
+| Global | `~/.rightclaw/config.yaml` | Tunnel config |
 | Per-agent | `agents/<name>/agent.yaml` | Restart, model, telegram, sandbox overrides, env |
 | Generated | `agents/<name>/.claude/settings.json` | CC behavioral flags (regenerated on `up`) |
 | Generated | `agents/<name>/.claude.json` | Trust, onboarding suppression (read-modify-write) |
@@ -216,7 +216,7 @@ cron_runs       (job_name, run_id, started_at, completed_at, exit_code, log_path
 ```rust
 AgentDef        // Discovered agent: name, path, identity, config, optional files
 AgentConfig     // From agent.yaml: restart, model, telegram, sandbox overrides, env
-GlobalConfig    // From config.yaml: tunnel, chrome
+GlobalConfig    // From config.yaml: tunnel
 RuntimeState    // Persisted JSON: agents, socket_path, started_at
 MemoryEntry     // SQLite row: id, content, tags, stored_by, importance
 WorkerContext   // Per-session: chat_id, thread_id, agent_dir, bot, db, ssh config, pc_port, auth state
