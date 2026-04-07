@@ -4,11 +4,6 @@ use clap::{Parser, Subcommand};
 
 mod memory_server;
 
-/// Default port for the rightmemory MCP HTTP server.
-/// Used by policy generation when wiring OpenShell sandbox network rules.
-#[allow(dead_code)]
-const RIGHTMEMORY_PORT: u16 = 8100;
-
 #[derive(Parser)]
 #[command(name = "rightclaw", version, about = "Multi-agent runtime for Claude Code")]
 pub struct Cli {
@@ -882,55 +877,19 @@ async fn cmd_up(
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
     }
 
-    // --- OpenShell sandbox lifecycle ---
-    let mtls_dir = dirs::config_dir()
-        .ok_or_else(|| miette::miette!("cannot determine config directory"))?
-        .join("openshell/gateways/openshell/mtls");
-    let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
-    let ssh_config_dir = run_dir.join("ssh");
-    std::fs::create_dir_all(&ssh_config_dir)
-        .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+    // Generate OpenShell policies when sandbox mode is active.
+    if !no_sandbox {
+        let policy_dir = run_dir.join("policies");
+        std::fs::create_dir_all(&policy_dir)
+            .map_err(|e| miette::miette!("failed to create policy dir: {e:#}"))?;
 
-    let policy_dir = run_dir.join("policies");
-    std::fs::create_dir_all(&policy_dir)
-        .map_err(|e| miette::miette!("failed to create policy dir: {e:#}"))?;
-
-    for agent in &agents {
-        let sandbox = rightclaw::openshell::sandbox_name(&agent.name);
-        // Delete stale sandbox (best-effort, does not propagate errors).
-        rightclaw::openshell::delete_sandbox(&sandbox).await;
-
-        // Generate policy.yaml for this agent.
-        // TODO: extract external MCP server domains from .mcp.json for policy network rules.
-        let policy_yaml = rightclaw::codegen::policy::generate_policy(RIGHTMEMORY_PORT, &[]);
-        let policy_path = policy_dir.join(format!("{}.yaml", agent.name));
-        std::fs::write(&policy_path, &policy_yaml)
-            .map_err(|e| miette::miette!("failed to write policy for '{}': {e:#}", agent.name))?;
-
-        // Spawn sandbox with upload of staging dir.
-        let upload_dir = agent.path.join("staging");
-        let mut child = rightclaw::openshell::spawn_sandbox(&sandbox, &policy_path, Some(&upload_dir))?;
-
-        // Wait for sandbox to reach READY phase via gRPC polling.
-        // Check child hasn't exited early (would indicate create failure).
-        tokio::select! {
-            result = rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
-                result?;
-            }
-            status = child.wait() => {
-                let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
-                if !status.success() {
-                    return Err(miette::miette!(
-                        "openshell sandbox create for '{}' exited with {status} before reaching READY",
-                        agent.name
-                    ));
-                }
-            }
+        for agent in &agents {
+            // TODO: extract external MCP server domains from .mcp.json for policy network rules.
+            let policy_yaml = rightclaw::codegen::policy::generate_policy(8100, &[]);
+            let policy_path = policy_dir.join(format!("{}.yaml", agent.name));
+            std::fs::write(&policy_path, &policy_yaml)
+                .map_err(|e| miette::miette!("failed to write policy for '{}': {e:#}", agent.name))?;
         }
-
-        // Generate SSH config for this sandbox.
-        rightclaw::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
-        tracing::info!(agent = %agent.name, "OpenShell sandbox ready");
     }
 
     // Generate cloudflared config and wrapper script when tunnel is configured (Phase 38).
@@ -1086,15 +1045,9 @@ async fn cmd_down(home: &Path) -> miette::Result<()> {
     let run_dir = home.join("run");
     let state_path = run_dir.join("state.json");
 
-    let state = rightclaw::runtime::read_state(&state_path).map_err(|_| {
+    let _state = rightclaw::runtime::read_state(&state_path).map_err(|_| {
         miette::miette!("No running instance found. Is rightclaw running?")
     })?;
-
-    // Delete OpenShell sandboxes (best-effort — logs warnings on failure).
-    for agent in &state.agents {
-        let sandbox = rightclaw::openshell::sandbox_name(&agent.name);
-        rightclaw::openshell::delete_sandbox(&sandbox).await;
-    }
 
     // Best-effort shutdown via REST API.
     match rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT) {
