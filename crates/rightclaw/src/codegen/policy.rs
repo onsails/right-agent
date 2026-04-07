@@ -44,6 +44,14 @@ network_policies:
         port: 443
         protocol: rest
         access: full
+      - host: "claude.com"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "*.claude.com"
+        port: 443
+        protocol: rest
+        access: full
     binaries:
       - path: "/sandbox/**"
 

@@ -187,7 +187,7 @@ pub fn extract_auth_url(lines: &[String]) -> Option<String> {
         let url = &url_part[..end];
 
         // Match OAuth-specific URLs on Anthropic/Claude domains.
-        let is_auth_domain = url.contains("anthropic") || url.contains("claude.ai");
+        let is_auth_domain = url.contains("anthropic") || url.contains("claude.ai") || url.contains("claude.com");
         let is_auth_path = url.contains("/oauth/") || url.contains("/authorize");
         if is_auth_domain && is_auth_path {
             return Some(url.to_string());
@@ -741,18 +741,20 @@ async fn invoke_cc(
                         &ctx.bot,
                         tg_chat_id,
                         ctx.effective_thread_id,
-                        "Claude needs to log in. Starting login session...",
+                        "Claude needs to log in. A login link will be sent shortly...",
                     )
                     .await
                     {
                         tracing::warn!(?chat_id, "failed to send auth error notification: {e:#}");
                     }
                     spawn_auth_watcher(ctx, tg_chat_id, ctx.effective_thread_id);
+                    // Return Ok(None) — the initial message above is sufficient,
+                    // don't send a second error message before the URL arrives.
+                    return Ok(None);
+                } else {
+                    // Watcher already running — silent, don't spam.
+                    return Ok(None);
                 }
-                return Err(
-                    "Login in progress. Please complete authentication using the link sent above."
-                        .to_string(),
-                );
             } else {
                 return Err(
                     "Claude needs to log in. Run `claude` in your terminal to authenticate."
@@ -1079,6 +1081,18 @@ mod tests {
         let url = extract_auth_url(&lines);
         assert!(url.is_some());
         assert!(url.unwrap().contains("claude.ai"));
+    }
+
+    #[test]
+    fn extract_auth_url_finds_claude_com_url() {
+        // Real URL from `claude auth login --claudeai` inside sandbox.
+        let lines = vec![
+            "Opening browser to sign in…\r".to_string(),
+            "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=abc".to_string(),
+        ];
+        let url = extract_auth_url(&lines);
+        assert!(url.is_some());
+        assert!(url.unwrap().contains("claude.com/cai/oauth/"));
     }
 
     #[test]
