@@ -40,7 +40,7 @@ network_policies:
         port: 443
         protocol: rest
         access: full
-      - host: "*.claude.ai"
+      - host: "*.claude.com"
         port: 443
         protocol: rest
         access: full
@@ -48,12 +48,12 @@ network_policies:
         port: 443
         protocol: rest
         access: full
-      - host: "*.claude.com"
+      - host: "*.claude.ai"
         port: 443
         protocol: rest
         access: full
     binaries:
-      - path: "/sandbox/**"
+      - path: "**"
 
   rightmemory:
     endpoints:
@@ -62,7 +62,7 @@ network_policies:
         protocol: rest
         access: full
     binaries:
-      - path: "/sandbox/**"
+      - path: "**"
 "#
     );
 
@@ -76,7 +76,7 @@ network_policies:
         protocol: rest
         access: full
     binaries:
-      - path: "/sandbox/**"
+      - path: "**"
 "#
         ));
     }
@@ -94,7 +94,7 @@ mod tests {
         assert!(policy.contains("host.docker.internal"));
         assert!(policy.contains("8100"));
         assert!(policy.contains("*.anthropic.com"));
-        assert!(policy.contains("*.claude.ai"));
+        assert!(policy.contains("*.claude.com"));
         assert!(policy.contains("best_effort"));
         assert!(policy.contains("version: 1"));
     }
