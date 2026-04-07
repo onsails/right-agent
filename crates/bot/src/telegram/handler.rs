@@ -24,6 +24,10 @@ use super::BotType;
 #[derive(Clone)]
 pub struct AgentDir(pub PathBuf);
 
+/// SSH config path for the agent's OpenShell sandbox.
+#[derive(Clone)]
+pub struct SshConfigPath(pub PathBuf);
+
 /// Newtype wrapper for the rightclaw home directory passed via dptree dependencies.
 /// Distinct from AgentDir to prevent TypeId collision in dptree.
 #[derive(Clone)]
@@ -52,6 +56,7 @@ pub async fn handle_message(
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
     debug_flag: Arc<DebugFlag>,
+    ssh_config: Arc<SshConfigPath>,
 ) -> ResponseResult<()> {
     // Only process messages with text (ignore stickers, photos, etc. in Phase 25)
     let text = match msg.text() {
@@ -102,6 +107,7 @@ pub async fn handle_message(
                     bot: bot.clone(),
                     db_path: agent_dir.0.clone(),
                     debug: debug_flag.0,
+                    ssh_config_path: ssh_config.0.clone(),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());

@@ -210,7 +210,10 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             agent_dir,
             args.debug,
             Arc::clone(&pending_auth),
-            home,
+            home.clone(),
+            home.join("run").join("ssh").join(
+                format!("{}.ssh-config", rightclaw::openshell::sandbox_name(&agent_name))
+            ),
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,

@@ -48,6 +48,8 @@ pub struct WorkerContext {
     pub db_path: PathBuf,
     /// When true, pass --verbose to CC subprocess and log CC stderr at debug level.
     pub debug: bool,
+    /// Path to the SSH config file for this agent's OpenShell sandbox.
+    pub ssh_config_path: PathBuf,
 }
 
 /// Parsed output from CC structured JSON response (`result` field per D-03).
@@ -397,11 +399,13 @@ async fn invoke_cc(
     claude_args.push("--".into());
     claude_args.push(xml.to_string());
 
-    // Execute inside OpenShell sandbox — CC binary is resolved inside the container,
+    // Execute inside OpenShell sandbox via SSH — CC binary is resolved inside the container,
     // env vars (HOME, USE_BUILTIN_RIPGREP) and cwd are managed by the sandbox.
-    let sandbox = rightclaw::openshell::sandbox_name(&ctx.agent_name);
-    let mut cmd = tokio::process::Command::new("openshell");
-    cmd.args(["sandbox", "exec", &sandbox, "--"]);
+    let ssh_host = rightclaw::openshell::ssh_host(&ctx.agent_name);
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.arg("-F").arg(&ctx.ssh_config_path);
+    cmd.arg(&ssh_host);
+    cmd.arg("--");
     for arg in &claude_args {
         cmd.arg(arg);
     }
