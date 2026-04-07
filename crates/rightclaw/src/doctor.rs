@@ -57,6 +57,10 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
             "claude",
             Some("https://docs.anthropic.com/en/docs/claude-code"),
         ),
+        check_binary(
+            "openshell",
+            Some("https://github.com/NVIDIA/OpenShell"),
+        ),
     ];
 
     // Linux-only sandbox dependency checks

@@ -162,7 +162,7 @@ fn run_doctor_always_checks_all_three_binaries() {
     assert!(binary_names.contains(&"rightclaw"), "missing rightclaw check");
     assert!(binary_names.contains(&"process-compose"), "missing process-compose check");
     assert!(binary_names.contains(&"claude"), "missing claude check");
-    assert!(!binary_names.contains(&"openshell"), "openshell should not be checked");
+    assert!(binary_names.contains(&"openshell"), "missing openshell check");
 }
 
 #[test]

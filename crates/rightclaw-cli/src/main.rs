@@ -891,18 +891,44 @@ async fn cmd_up(
     std::fs::create_dir_all(&ssh_config_dir)
         .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
 
+    let policy_dir = run_dir.join("policies");
+    std::fs::create_dir_all(&policy_dir)
+        .map_err(|e| miette::miette!("failed to create policy dir: {e:#}"))?;
+
     for agent in &agents {
         let sandbox = rightclaw::openshell::sandbox_name(&agent.name);
         // Delete stale sandbox (best-effort, does not propagate errors).
         rightclaw::openshell::delete_sandbox(&sandbox).await;
-        // policy.yaml path
-        let policy_path = agent.path.join("policy.yaml");
-        // Spawn sandbox with upload of staging dir
+
+        // Generate policy.yaml for this agent.
+        // TODO: extract external MCP server domains from .mcp.json for policy network rules.
+        let policy_yaml = rightclaw::codegen::policy::generate_policy(RIGHTMEMORY_PORT, &[]);
+        let policy_path = policy_dir.join(format!("{}.yaml", agent.name));
+        std::fs::write(&policy_path, &policy_yaml)
+            .map_err(|e| miette::miette!("failed to write policy for '{}': {e:#}", agent.name))?;
+
+        // Spawn sandbox with upload of staging dir.
         let upload_dir = agent.path.join("staging");
-        let _child = rightclaw::openshell::spawn_sandbox(&sandbox, &policy_path, Some(&upload_dir))?;
-        // Wait for sandbox to reach READY phase
-        rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2).await?;
-        // Generate SSH config for this sandbox
+        let mut child = rightclaw::openshell::spawn_sandbox(&sandbox, &policy_path, Some(&upload_dir))?;
+
+        // Wait for sandbox to reach READY phase via gRPC polling.
+        // Check child hasn't exited early (would indicate create failure).
+        tokio::select! {
+            result = rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
+                result?;
+            }
+            status = child.wait() => {
+                let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
+                if !status.success() {
+                    return Err(miette::miette!(
+                        "openshell sandbox create for '{}' exited with {status} before reaching READY",
+                        agent.name
+                    ));
+                }
+            }
+        }
+
+        // Generate SSH config for this sandbox.
         rightclaw::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
         tracing::info!(agent = %agent.name, "OpenShell sandbox ready");
     }
