@@ -50,7 +50,7 @@ pub struct OAuthCallbackState {
     /// Chat IDs to notify after OAuth completes
     pub notify_chat_ids: Vec<i64>,
     /// Channel to notify refresh scheduler about new OAuth tokens
-    pub refresh_tx: tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshEntry>,
+    pub refresh_tx: tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>,
 }
 
 /// Build the axum router for the OAuth callback server.
@@ -248,7 +248,7 @@ async fn complete_oauth_flow(
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64),
             server_url: pending.server_url.clone(),
         };
-        let _ = cb_state.refresh_tx.send(rightclaw::mcp::refresh::RefreshEntry {
+        let _ = cb_state.refresh_tx.send(rightclaw::mcp::refresh::RefreshMessage::NewEntry {
             server_name: pending.server_name.clone(),
             state: oauth_entry,
         }).await;

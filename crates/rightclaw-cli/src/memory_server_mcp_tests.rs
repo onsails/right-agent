@@ -305,24 +305,28 @@ async fn test_mcp_auth_server_not_found() {
 }
 
 #[test]
-fn test_get_info_mentions_mcp_tools() {
+fn test_get_info_mentions_record_tools() {
     let (server, _dir) = setup_server_with_dir();
     let info = server.get_info();
     let instructions = info.instructions.unwrap_or_default();
     assert!(
+        instructions.contains("store_record"),
+        "instructions should mention store_record: {instructions}"
+    );
+    assert!(
+        instructions.contains("query_records"),
+        "instructions should mention query_records: {instructions}"
+    );
+    assert!(
+        instructions.contains("search_records"),
+        "instructions should mention search_records: {instructions}"
+    );
+    assert!(
+        instructions.contains("delete_record"),
+        "instructions should mention delete_record: {instructions}"
+    );
+    assert!(
         instructions.contains("mcp_add"),
         "instructions should mention mcp_add: {instructions}"
-    );
-    assert!(
-        instructions.contains("mcp_remove"),
-        "instructions should mention mcp_remove: {instructions}"
-    );
-    assert!(
-        instructions.contains("mcp_list"),
-        "instructions should mention mcp_list: {instructions}"
-    );
-    assert!(
-        instructions.contains("mcp_auth"),
-        "instructions should mention mcp_auth: {instructions}"
     );
 }

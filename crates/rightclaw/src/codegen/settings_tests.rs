@@ -6,7 +6,7 @@ fn generates_behavioral_flags() {
     assert_eq!(settings["skipDangerousModePermissionPrompt"], true);
     assert_eq!(settings["spinnerTipsEnabled"], false);
     assert_eq!(settings["prefersReducedMotion"], true);
-    assert_eq!(settings["autoMemoryEnabled"], false);
+    assert_eq!(settings["autoMemoryEnabled"], true);
 }
 
 #[test]

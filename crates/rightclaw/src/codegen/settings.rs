@@ -7,7 +7,7 @@ pub fn generate_settings() -> miette::Result<serde_json::Value> {
         "skipDangerousModePermissionPrompt": true,
         "spinnerTipsEnabled": false,
         "prefersReducedMotion": true,
-        "autoMemoryEnabled": false,
+        "autoMemoryEnabled": true,
     });
 
     Ok(settings)

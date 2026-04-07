@@ -28,11 +28,16 @@ pub struct OAuthState {
     pub servers: HashMap<String, OAuthServerState>,
 }
 
-/// Message sent from OAuth callback to refresh scheduler.
+/// Message sent to refresh scheduler (new token or removal).
 #[derive(Debug)]
-pub struct RefreshEntry {
-    pub server_name: String,
-    pub state: OAuthServerState,
+pub enum RefreshMessage {
+    /// New or updated OAuth token — schedule refresh timer.
+    NewEntry {
+        server_name: String,
+        state: OAuthServerState,
+    },
+    /// Server removed — cancel timer and clean up state.
+    RemoveServer { server_name: String },
 }
 
 /// Load OAuth state from file. Returns empty state if file doesn't exist.
@@ -81,14 +86,14 @@ pub fn refresh_due_in(entry: &OAuthServerState) -> Duration {
 
 /// Run the OAuth token refresh scheduler.
 ///
-/// Listens for new `RefreshEntry` messages from OAuth callbacks and maintains
+/// Listens for `RefreshMessage` messages (new tokens or removals) and maintains
 /// timers for each server. On successful refresh: updates Bearer in `mcp_json_path`,
 /// re-uploads into sandbox, updates `oauth_state_path`.
 pub async fn run_refresh_scheduler(
     oauth_state_path: std::path::PathBuf,
     mcp_json_path: std::path::PathBuf,
     sandbox_name: Option<String>,
-    mut rx: tokio::sync::mpsc::Receiver<RefreshEntry>,
+    mut rx: tokio::sync::mpsc::Receiver<RefreshMessage>,
     notify_tx: tokio::sync::mpsc::Sender<String>,
 ) {
     let http_client = reqwest::Client::new();
@@ -119,15 +124,27 @@ pub async fn run_refresh_scheduler(
         let next = timers.iter().min_by_key(|(_, instant)| *instant);
 
         tokio::select! {
-            // New entry from OAuth callback
-            Some(entry) = rx.recv() => {
-                let due = refresh_due_in(&entry.state);
-                timers.insert(entry.server_name.clone(), tokio::time::Instant::now() + due);
-                state.servers.insert(entry.server_name.clone(), entry.state);
-                if let Err(e) = save_oauth_state(&oauth_state_path, &state) {
-                    tracing::error!("failed to save oauth state: {e:#}");
+            // Message from handler or OAuth callback
+            Some(msg) = rx.recv() => {
+                match msg {
+                    RefreshMessage::NewEntry { server_name, state: entry_state } => {
+                        let due = refresh_due_in(&entry_state);
+                        timers.insert(server_name.clone(), tokio::time::Instant::now() + due);
+                        state.servers.insert(server_name.clone(), entry_state);
+                        if let Err(e) = save_oauth_state(&oauth_state_path, &state) {
+                            tracing::error!("failed to save oauth state: {e:#}");
+                        }
+                        tracing::info!(server = %server_name, due_secs = due.as_secs(), "new refresh scheduled");
+                    }
+                    RefreshMessage::RemoveServer { server_name } => {
+                        timers.remove(&server_name);
+                        state.servers.remove(&server_name);
+                        if let Err(e) = save_oauth_state(&oauth_state_path, &state) {
+                            tracing::error!("failed to save oauth state: {e:#}");
+                        }
+                        tracing::info!(server = %server_name, "refresh cancelled — server removed");
+                    }
                 }
-                tracing::info!(server = %entry.server_name, due_secs = due.as_secs(), "new refresh scheduled");
             }
 
             // Timer fires

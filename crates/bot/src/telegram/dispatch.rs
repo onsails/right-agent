@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, AgentDir, AuthCodeSlot, AuthWatcherFlag, DebugFlag, RightclawHome, SshConfigPath};
+use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, AgentDir, AuthCodeSlot, AuthWatcherFlag, DebugFlag, RefreshTx, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -59,6 +59,7 @@ pub async fn run_telegram(
     pending_auth: PendingAuthMap,
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
+    refresh_tx: tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
@@ -80,6 +81,7 @@ pub async fn run_telegram(
     let auth_code_slot_arc: Arc<AuthCodeSlot> = Arc::new(AuthCodeSlot(
         Arc::new(tokio::sync::Mutex::new(None)),
     ));
+    let refresh_tx_arc: Arc<RefreshTx> = Arc::new(RefreshTx(refresh_tx));
 
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
@@ -116,7 +118,8 @@ pub async fn run_telegram(
             Arc::clone(&home_arc),
             Arc::clone(&ssh_config_arc),
             Arc::clone(&auth_watcher_flag_arc),
-            Arc::clone(&auth_code_slot_arc)
+            Arc::clone(&auth_code_slot_arc),
+            Arc::clone(&refresh_tx_arc)
         ])
         .build();
 

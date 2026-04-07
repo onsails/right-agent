@@ -48,6 +48,10 @@ pub struct AuthWatcherFlag(pub Arc<AtomicBool>);
 #[derive(Clone)]
 pub struct AuthCodeSlot(pub Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>);
 
+/// Channel sender for notifying the refresh scheduler about server removals.
+#[derive(Clone)]
+pub struct RefreshTx(pub tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>);
+
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
 fn to_request_err(e: impl std::fmt::Display) -> RequestError {
     RequestError::Io(std::io::Error::other(e.to_string()).into())
@@ -218,6 +222,7 @@ pub async fn handle_mcp(
     agent_dir: Arc<AgentDir>,
     pending_auth: PendingAuthMap,
     home: Arc<RightclawHome>,
+    refresh_tx: Arc<RefreshTx>,
 ) -> ResponseResult<()> {
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -245,7 +250,7 @@ pub async fn handle_mcp(
                     return Ok(());
                 }
             };
-            handle_mcp_remove(&bot, &msg, server, &agent_dir.0).await
+            handle_mcp_remove(&bot, &msg, server, &agent_dir.0, &refresh_tx.0).await
         }
         Some(unknown) => {
             bot.send_message(
@@ -543,12 +548,13 @@ async fn handle_mcp_add(
     Ok(())
 }
 
-/// `/mcp remove <server>` -- remove a server entry from .claude.json.
+/// `/mcp remove <server>` -- remove a server entry from mcp.json and cancel refresh timer.
 async fn handle_mcp_remove(
     bot: &BotType,
     msg: &Message,
     server_name: &str,
     agent_dir: &Path,
+    refresh_tx: &tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp remove");
 
@@ -568,6 +574,11 @@ async fn handle_mcp_remove(
         server_name,
     ) {
         Ok(()) => {
+            // Cancel pending refresh timer and clean up oauth state for this server
+            let _ = refresh_tx.send(rightclaw::mcp::refresh::RefreshMessage::RemoveServer {
+                server_name: server_name.to_owned(),
+            }).await;
+
             upload_mcp_json_to_sandbox(agent_dir).await;
             bot.send_message(msg.chat.id, format!("Removed MCP server: {server_name}"))
                 .await?;

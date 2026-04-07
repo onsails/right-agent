@@ -25,8 +25,8 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::memory_server::{
-    CronListRunsParams, CronShowRunParams, ForgetParams, McpAddParams, McpAuthParams,
-    McpListParams, McpRemoveParams, RecallParams, SearchParams, StoreParams,
+    CronListRunsParams, CronShowRunParams, DeleteRecordParams, McpAddParams, McpAuthParams,
+    McpListParams, McpRemoveParams, QueryRecordsParams, SearchRecordsParams, StoreRecordParams,
     cron_run_to_json, entry_to_json,
 };
 
@@ -100,11 +100,11 @@ impl HttpMemoryServer {
         }
     }
 
-    #[tool(description = "Store a memory. Content is scanned for prompt injection. Returns memory ID.")]
-    async fn store(
+    #[tool(description = "Store a tagged record. Content is scanned for prompt injection. Use for structured data (cron results, audit entries, explicit facts) — not for general conversation context. Returns record ID.")]
+    async fn store_record(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<StoreParams>,
+        Parameters(params): Parameters<StoreRecordParams>,
     ) -> Result<CallToolResult, McpError> {
         let agent = Self::agent_from_parts(&parts)?;
         let conn_arc = self.get_conn_for_agent(&agent)?;
@@ -115,9 +115,9 @@ impl HttpMemoryServer {
             &params.content,
             params.tags.as_deref(),
             Some(agent.name.as_str()),
-            Some("mcp:store"),
+            Some("mcp:store_record"),
         ) {
-            Ok(id) => Ok(CallToolResult::success(vec![Content::text(format!("stored memory id={id}"))])),
+            Ok(id) => Ok(CallToolResult::success(vec![Content::text(format!("stored record id={id}"))])),
             Err(rightclaw::memory::MemoryError::InjectionDetected) => Err(McpError::invalid_params(
                 "content rejected: possible prompt injection detected",
                 None,
@@ -126,11 +126,11 @@ impl HttpMemoryServer {
         }
     }
 
-    #[tool(description = "Look up memories by tag or keyword. Returns matching active memories.")]
-    async fn recall(
+    #[tool(description = "Look up records by tag or keyword. Returns matching active records.")]
+    async fn query_records(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<RecallParams>,
+        Parameters(params): Parameters<QueryRecordsParams>,
     ) -> Result<CallToolResult, McpError> {
         let agent = Self::agent_from_parts(&parts)?;
         let conn_arc = self.get_conn_for_agent(&agent)?;
@@ -144,11 +144,11 @@ impl HttpMemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Full-text search memories using FTS5. Returns BM25-ranked results.")]
-    async fn search(
+    #[tool(description = "Full-text search records using FTS5. Returns BM25-ranked results.")]
+    async fn search_records(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<SearchParams>,
+        Parameters(params): Parameters<SearchRecordsParams>,
     ) -> Result<CallToolResult, McpError> {
         let agent = Self::agent_from_parts(&parts)?;
         let conn_arc = self.get_conn_for_agent(&agent)?;
@@ -162,11 +162,11 @@ impl HttpMemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Soft-delete a memory by ID. Entry is excluded from recall/search but preserved in audit log.")]
-    async fn forget(
+    #[tool(description = "Soft-delete a record by ID. Entry is excluded from queries but preserved in audit log.")]
+    async fn delete_record(
         &self,
         Extension(parts): Extension<http::request::Parts>,
-        Parameters(params): Parameters<ForgetParams>,
+        Parameters(params): Parameters<DeleteRecordParams>,
     ) -> Result<CallToolResult, McpError> {
         let agent = Self::agent_from_parts(&parts)?;
         let id = params.id;
@@ -174,9 +174,9 @@ impl HttpMemoryServer {
         let conn = conn_arc.lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
         match rightclaw::memory::store::forget_memory(&conn, id, Some(agent.name.as_str())) {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("forgot memory id={id}"))])),
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!("deleted record id={id}"))])),
             Err(rightclaw::memory::MemoryError::NotFound(_)) => Err(McpError::invalid_params(
-                format!("memory id={id} not found or already deleted"),
+                format!("record id={id} not found or already deleted"),
                 None,
             )),
             Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
@@ -387,7 +387,7 @@ impl rmcp::ServerHandler for HttpMemoryServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "RightClaw tools: store, recall, search, forget, cron_list_runs, cron_show_run, mcp_add, mcp_remove, mcp_list, mcp_auth",
+                "RightClaw tools: store_record, query_records, search_records, delete_record, cron_list_runs, cron_show_run, mcp_add, mcp_remove, mcp_list, mcp_auth",
             )
     }
 }

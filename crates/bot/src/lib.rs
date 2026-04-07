@@ -158,8 +158,10 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     let mcp_json_path = agent_dir.join("mcp.json");
 
     // Create refresh scheduler channels
-    let (refresh_tx, refresh_rx) = tokio::sync::mpsc::channel::<rightclaw::mcp::refresh::RefreshEntry>(32);
+    let (refresh_tx, refresh_rx) = tokio::sync::mpsc::channel::<rightclaw::mcp::refresh::RefreshMessage>(32);
     let (notify_refresh_tx, mut notify_refresh_rx) = tokio::sync::mpsc::channel::<String>(32);
+
+    let refresh_tx_for_handler = refresh_tx.clone();
 
     let oauth_state = OAuthCallbackState {
         pending_auth: Arc::clone(&pending_auth),
@@ -296,6 +298,7 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             Arc::clone(&pending_auth),
             home.clone(),
             ssh_config_path,
+            refresh_tx_for_handler,
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,

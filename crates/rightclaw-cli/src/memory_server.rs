@@ -13,28 +13,28 @@ use serde::Deserialize;
 // --- Parameter types ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct StoreParams {
-    #[schemars(description = "Content to store as a memory")]
+pub struct StoreRecordParams {
+    #[schemars(description = "Content to store as a record")]
     pub content: String,
     #[schemars(description = "Comma-separated tags for categorization")]
     pub tags: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct RecallParams {
+pub struct QueryRecordsParams {
     #[schemars(description = "Tag or keyword to search by")]
     pub query: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SearchParams {
+pub struct SearchRecordsParams {
     #[schemars(description = "Full-text search query")]
     pub query: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ForgetParams {
-    #[schemars(description = "Memory ID to soft-delete")]
+pub struct DeleteRecordParams {
+    #[schemars(description = "Record ID to soft-delete")]
     pub id: i64,
 }
 
@@ -104,10 +104,10 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "Store a memory. Content is scanned for prompt injection. Returns memory ID.")]
-    async fn store(
+    #[tool(description = "Store a tagged record. Content is scanned for prompt injection. Use for structured data (cron results, audit entries, explicit facts) — not for general conversation context. Returns record ID.")]
+    async fn store_record(
         &self,
-        Parameters(params): Parameters<StoreParams>,
+        Parameters(params): Parameters<StoreRecordParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self
             .conn
@@ -118,10 +118,10 @@ impl MemoryServer {
             &params.content,
             params.tags.as_deref(),
             Some(self.agent_name.as_str()),
-            Some("mcp:store"),
+            Some("mcp:store_record"),
         ) {
             Ok(id) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "stored memory id={id}"
+                "stored record id={id}"
             ))])),
             Err(rightclaw::memory::MemoryError::InjectionDetected) => Err(McpError::invalid_params(
                 "content rejected: possible prompt injection detected",
@@ -131,10 +131,10 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "Look up memories by tag or keyword. Returns matching active memories.")]
-    async fn recall(
+    #[tool(description = "Look up records by tag or keyword. Returns matching active records.")]
+    async fn query_records(
         &self,
-        Parameters(params): Parameters<RecallParams>,
+        Parameters(params): Parameters<QueryRecordsParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self
             .conn
@@ -148,10 +148,10 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Full-text search memories using FTS5. Returns BM25-ranked results.")]
-    async fn search(
+    #[tool(description = "Full-text search records using FTS5. Returns BM25-ranked results.")]
+    async fn search_records(
         &self,
-        Parameters(params): Parameters<SearchParams>,
+        Parameters(params): Parameters<SearchRecordsParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self
             .conn
@@ -165,10 +165,10 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Soft-delete a memory by ID. Entry is excluded from recall/search but preserved in audit log.")]
-    async fn forget(
+    #[tool(description = "Soft-delete a record by ID. Entry is excluded from queries but preserved in audit log.")]
+    async fn delete_record(
         &self,
-        Parameters(params): Parameters<ForgetParams>,
+        Parameters(params): Parameters<DeleteRecordParams>,
     ) -> Result<CallToolResult, McpError> {
         let id = params.id;
         let conn = self
@@ -181,10 +181,10 @@ impl MemoryServer {
             Some(self.agent_name.as_str()),
         ) {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "forgot memory id={id}"
+                "deleted record id={id}"
             ))])),
             Err(rightclaw::memory::MemoryError::NotFound(_)) => Err(McpError::invalid_params(
-                format!("memory id={id} not found or already deleted"),
+                format!("record id={id} not found or already deleted"),
                 None,
             )),
             Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
@@ -400,7 +400,7 @@ impl rmcp::ServerHandler for MemoryServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "RightClaw tools: store, recall, search, forget, cron_list_runs, cron_show_run, mcp_add, mcp_remove, mcp_list, mcp_auth",
+                "RightClaw tools: store_record, query_records, search_records, delete_record, cron_list_runs, cron_show_run, mcp_add, mcp_remove, mcp_list, mcp_auth",
             )
     }
 }
