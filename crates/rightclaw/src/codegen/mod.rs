@@ -5,7 +5,7 @@ pub mod mcp_config;
 pub mod plugin;
 pub mod policy;
 pub mod process_compose;
-pub mod sandbox;
+
 pub mod settings;
 pub mod skills;
 pub mod telegram;

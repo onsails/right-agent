@@ -147,7 +147,7 @@ pub async fn run_refresh_scheduler(
                         }
 
                         // Re-upload .mcp.json into sandbox
-                        if let Err(e) = crate::codegen::sandbox::upload_file(
+                        if let Err(e) = crate::openshell::upload_file(
                             &sandbox_name,
                             &mcp_json_path,
                             "/sandbox/.mcp.json",

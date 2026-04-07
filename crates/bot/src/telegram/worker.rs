@@ -399,7 +399,7 @@ async fn invoke_cc(
 
     // Execute inside OpenShell sandbox — CC binary is resolved inside the container,
     // env vars (HOME, USE_BUILTIN_RIPGREP) and cwd are managed by the sandbox.
-    let sandbox = rightclaw::codegen::sandbox::sandbox_name(&ctx.agent_name);
+    let sandbox = rightclaw::openshell::sandbox_name(&ctx.agent_name);
     let mut cmd = tokio::process::Command::new("openshell");
     cmd.args(["sandbox", "exec", &sandbox, "--"]);
     for arg in &claude_args {

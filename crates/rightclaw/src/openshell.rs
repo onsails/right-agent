@@ -211,6 +211,23 @@ pub async fn ssh_exec(
     Ok(stdout)
 }
 
+/// Upload a file from host into a running sandbox.
+pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_path: &str) -> miette::Result<()> {
+    let output = Command::new("openshell")
+        .args(["sandbox", "upload", sandbox])
+        .arg(host_path)
+        .arg(sandbox_path)
+        .output()
+        .await
+        .map_err(|e| miette::miette!("openshell upload failed: {e:#}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!("openshell upload failed: {stderr}"));
+    }
+    Ok(())
+}
+
 /// Delete a sandbox. Best-effort — logs a warning on failure but does not
 /// propagate the error (stale sandboxes that don't exist shouldn't block callers).
 pub async fn delete_sandbox(name: &str) {
