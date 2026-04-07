@@ -94,7 +94,7 @@ pub fn init_rightclaw_home(
             heartbeat_path: None,
         };
 
-        let settings = crate::codegen::generate_settings(&agent_def, false, &host_home, None, None)?;
+        let settings = crate::codegen::generate_settings(&agent_def, None)?;
         let claude_dir = agents_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir).map_err(|e| {
             miette::miette!("Failed to create {}: {}", claude_dir.display(), e)
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn init_creates_settings_with_sandbox_config() {
+    fn init_creates_settings_without_sandbox_section() {
         let dir = tempdir().unwrap();
         init_rightclaw_home(dir.path(), None, &[]).unwrap();
 
@@ -369,11 +369,12 @@ mod tests {
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-        assert_eq!(json["sandbox"]["enabled"], true);
-        assert_eq!(json["sandbox"]["autoAllowBashIfSandboxed"], true);
-        assert_eq!(json["sandbox"]["allowUnsandboxedCommands"], false);
-        assert!(json["sandbox"]["filesystem"]["allowWrite"].as_array().is_some());
-        assert!(json["sandbox"]["network"]["allowedDomains"].as_array().is_some());
+        assert!(
+            json.get("sandbox").is_none(),
+            "settings.json should not contain sandbox section — OpenShell is the security layer"
+        );
+        assert_eq!(json["skipDangerousModePermissionPrompt"], true);
+        assert_eq!(json["autoMemoryEnabled"], false);
     }
 
     #[test]
