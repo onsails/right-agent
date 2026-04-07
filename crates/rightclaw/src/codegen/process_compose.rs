@@ -25,6 +25,10 @@ struct BotProcessAgent {
     max_restarts: u32,
     /// When true, passes `--debug` to `rightclaw bot` so CC stderr is logged at debug level.
     debug: bool,
+    /// When true, sandbox is disabled (direct claude -p calls).
+    no_sandbox: bool,
+    /// Absolute path to the generated OpenShell policy.yaml for this agent. None when no_sandbox.
+    sandbox_policy_path: Option<String>,
 }
 
 /// Template context for the cloudflared tunnel process entry.
@@ -56,6 +60,8 @@ pub fn generate_process_compose(
     agents: &[AgentDef],
     exe_path: &Path,
     debug: bool,
+    no_sandbox: bool,
+    run_dir: &Path,
     cloudflared_script: Option<&Path>,
 ) -> miette::Result<String> {
     // Build cloudflared template context when tunnel script is provided.
@@ -98,6 +104,18 @@ pub fn generate_process_compose(
                 backoff_seconds: backoff,
                 max_restarts: max,
                 debug,
+                no_sandbox,
+                sandbox_policy_path: if no_sandbox {
+                    None
+                } else {
+                    Some(
+                        run_dir
+                            .join("policies")
+                            .join(format!("{}.yaml", agent.name))
+                            .display()
+                            .to_string(),
+                    )
+                },
             })
         })
         .collect();
