@@ -78,7 +78,7 @@ pub fn refresh_due_in(entry: &OAuthServerState) -> Duration {
 pub async fn run_refresh_scheduler(
     oauth_state_path: std::path::PathBuf,
     mcp_json_path: std::path::PathBuf,
-    sandbox_name: String,
+    sandbox_name: Option<String>,
     mut rx: tokio::sync::mpsc::Receiver<RefreshEntry>,
     notify_tx: tokio::sync::mpsc::Sender<String>,
 ) {
@@ -146,13 +146,15 @@ pub async fn run_refresh_scheduler(
                             tracing::error!(server = %name, "failed to update .mcp.json: {e:#}");
                         }
 
-                        // Re-upload .mcp.json into sandbox
-                        if let Err(e) = crate::openshell::upload_file(
-                            &sandbox_name,
-                            &mcp_json_path,
-                            "/sandbox/.mcp.json",
-                        ).await {
-                            tracing::error!(server = %name, "failed to re-upload .mcp.json: {e:#}");
+                        // Re-upload .mcp.json into sandbox (skip when no sandbox)
+                        if let Some(ref sbox) = sandbox_name {
+                            if let Err(e) = crate::openshell::upload_file(
+                                sbox,
+                                &mcp_json_path,
+                                "/sandbox/.mcp.json",
+                            ).await {
+                                tracing::error!(server = %name, "failed to re-upload .mcp.json: {e:#}");
+                            }
                         }
 
                         // Schedule next refresh

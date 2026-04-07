@@ -183,7 +183,11 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     // Spawn OAuth refresh scheduler
     let oauth_state_path = agent_dir.join("oauth-state.json");
     let mcp_json_path_for_refresh = agent_dir.join("staging").join(".mcp.json");
-    let sandbox_for_refresh = rightclaw::openshell::sandbox_name(&agent_name);
+    let sandbox_for_refresh = if !args.no_sandbox {
+        Some(rightclaw::openshell::sandbox_name(&agent_name))
+    } else {
+        None
+    };
     tokio::spawn(rightclaw::mcp::refresh::run_refresh_scheduler(
         oauth_state_path,
         mcp_json_path_for_refresh,
@@ -234,6 +238,8 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         tokio::select! {
             result = rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
                 result?;
+                // Reap the create process to avoid zombie accumulation on bot restarts.
+                let _ = child.wait().await;
             }
             status = child.wait() => {
                 let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
