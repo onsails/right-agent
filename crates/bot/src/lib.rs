@@ -181,7 +181,7 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     // Spawn OAuth refresh scheduler
     let oauth_state_path = agent_dir.join("oauth-state.json");
     let mcp_json_path_for_refresh = agent_dir.join("staging").join(".mcp.json");
-    let sandbox_for_refresh = rightclaw::codegen::sandbox::sandbox_name(&agent_name);
+    let sandbox_for_refresh = rightclaw::openshell::sandbox_name(&agent_name);
     tokio::spawn(rightclaw::mcp::refresh::run_refresh_scheduler(
         oauth_state_path,
         mcp_json_path_for_refresh,
