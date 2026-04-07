@@ -8,7 +8,7 @@ Three crates in a Cargo workspace:
 |-------|------|------|
 | **rightclaw** | `crates/rightclaw/` | Core library — agent discovery, codegen, config, memory, runtime, MCP, OpenShell |
 | **rightclaw-cli** | `crates/rightclaw-cli/` | CLI binary (`rightclaw`) + memory MCP server (stdio/HTTP) |
-| **rightclaw-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine |
+| **rightclaw-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
 
 ## Module Map
 
@@ -23,15 +23,14 @@ src/
 │   └── config.rs       # GlobalConfig (tunnel, chrome), RIGHTCLAW_HOME resolution
 ├── codegen/
 │   ├── agent_def.rs    # .md with frontmatter for CC agent definition
-│   ├── claude_json.rs  # .claude.json — trust, onboarding, credential/plugin symlinks
+│   ├── claude_json.rs  # .claude.json — trust (/sandbox + agent dir), onboarding, credential symlinks
 │   ├── settings.rs     # .claude/settings.json — behavioral flags
 │   ├── mcp_config.rs   # .mcp.json — rightmemory + external MCP entries
-│   ├── policy.rs       # OpenShell policy.yaml — network/filesystem sandbox rules
+│   ├── policy.rs       # OpenShell policy.yaml — network/filesystem/TLS sandbox rules
 │   ├── process_compose.rs  # process-compose.yaml via minijinja
 │   ├── skills.rs       # Install built-in skills to .claude/skills/
 │   ├── telegram.rs     # Telegram-specific codegen helpers
-│   ├── cloudflared.rs  # Tunnel entry generation
-│   └── plugin.rs       # Plugin symlink management
+│   └── cloudflared.rs  # Tunnel entry generation
 ├── memory/
 │   ├── store.rs        # SQLite: store, recall, search (FTS5/BM25), forget
 │   ├── migrations.rs   # Schema versioning (rusqlite_migration)
@@ -45,8 +44,8 @@ src/
 │   ├── credentials.rs  # OAuth token persistence
 │   ├── detect.rs       # MCP server detection from .claude.json
 │   ├── oauth.rs        # OAuth flow initiation
-│   └── refresh.rs      # Token refresh
-├── openshell.rs        # gRPC mTLS — sandbox spawn, readiness polling, SSH
+│   └── refresh.rs      # Token refresh scheduler
+├── openshell.rs        # gRPC mTLS — sandbox spawn/reuse, policy hot-reload, SSH exec, upload/download
 ├── doctor.rs           # Diagnostic checks (deps, structure, MCP, sandbox, tunnel)
 ├── init.rs             # rightclaw init workflow
 └── error.rs            # AgentError (miette diagnostics)
@@ -65,16 +64,18 @@ src/
 
 ```
 src/
-├── lib.rs              # Entry: resolve agent dir, open memory.db, start teloxide
+├── lib.rs              # Entry: resolve agent dir, open memory.db, sandbox lifecycle, start teloxide
 ├── telegram/
 │   ├── mod.rs          # Token resolution (env > file > yaml)
 │   ├── bot.rs          # Bot adaptor: CacheMe<Throttle<Bot>>
-│   ├── dispatch.rs     # Long-polling dispatcher setup
-│   ├── handler.rs      # /start, /reset, /mcp, /doctor + text→worker routing
-│   ├── worker.rs       # Per-session CC invocation, reply parsing, media upload
+│   ├── dispatch.rs     # Long-polling dispatcher setup + dptree DI
+│   ├── handler.rs      # /start, /reset, /mcp, /doctor + text→worker routing + auth code interception
+│   ├── worker.rs       # Per-session CC invocation, auth error detection, reply parsing
 │   ├── session.rs      # telegram_sessions table (chat_id, thread_id, uuid)
 │   ├── filter.rs       # Allowed chat ID enforcement
 │   └── oauth_callback.rs  # Axum OAuth redirect server
+├── login.rs            # PTY-driven Claude login flow (expectrl) — menu navigation, URL extraction, code submission
+├── sync.rs             # Background file sync: settings, schema, skills, .claude.json verification
 ├── cron.rs             # Cron engine: load specs, lock check, invoke CC, notify
 └── error.rs            # BotError types
 ```
@@ -88,7 +89,7 @@ rightclaw init
   ├─ Create ~/.rightclaw/agents/<name>/ with template files
   ├─ Write IDENTITY.md, SOUL.md, USER.md, agent.yaml
   ├─ Generate .claude/settings.json, .claude.json
-  ├─ Symlink credentials + plugins from ~/.claude/
+  ├─ Symlink credentials from ~/.claude/
   ├─ Detect Telegram token, cloudflared tunnel, Chrome binary
   └─ Write ~/.rightclaw/config.yaml
 
@@ -97,25 +98,97 @@ rightclaw up [--agents x,y] [--detach] [--no-sandbox]
   ├─ Per agent:
   │   ├─ Parse agent.yaml → AgentConfig
   │   ├─ Codegen: agent_def.md, settings.json, .claude.json, .mcp.json
-  │   ├─ Generate OpenShell policy.yaml (rightmemory + external MCPs)
-  │   ├─ Spawn sandbox (openshell gRPC), poll until READY
-  │   └─ Open + migrate memory.db
-  ├─ Install built-in skills
+  │   ├─ Generate OpenShell policy.yaml (network + TLS + filesystem rules)
+  │   └─ Install built-in skills (rightskills, cronsync)
   ├─ Generate process-compose.yaml (minijinja)
   └─ Launch process-compose (TUI or detached)
 
 rightclaw bot --agent <name>  (spawned by process-compose)
   ├─ Resolve token, open memory.db
-  ├─ Start teloxide long-polling dispatcher
-  ├─ Start cron engine (agents/crons/*.yaml)
-  └─ Per message:
-      ├─ Route to worker task via DashMap<(chat_id, thread_id), Sender>
-      ├─ Worker: debounce 60s → invoke CC → parse reply JSON
-      └─ Send Telegram response (text + media)
+  ├─ Clear Telegram webhook, verify bot identity
+  ├─ Sandbox lifecycle:
+  │   ├─ Check if sandbox exists via gRPC → reuse with policy hot-reload
+  │   ├─ Or create new: prepare staging dir, spawn sandbox, wait for READY
+  │   └─ Generate SSH config for sandbox exec
+  ├─ Initial sync: upload settings.json, .claude.json, skills to sandbox (blocking)
+  ├─ Start background sync task (every 5 min)
+  ├─ Start cron engine, OAuth callback server, refresh scheduler
+  └─ Start teloxide long-polling dispatcher
+
+Per message:
+  ├─ Check if login flow waiting for auth code → forward to PTY
+  ├─ Route to worker task via DashMap<(chat_id, thread_id), Sender>
+  ├─ Worker: debounce 500ms → invoke claude -p via SSH → parse reply JSON
+  ├─ On auth error (403/401): spawn PTY login flow
+  └─ Send Telegram response (text, split at 4096 chars)
 
 rightclaw down
   └─ POST /project/stop to process-compose REST API
 ```
+
+### OpenShell Sandbox Architecture
+
+Sandboxes are **persistent** — never deleted automatically. Survive bot restarts.
+
+```
+Bot startup:
+  ├─ gRPC GetSandbox → exists?
+  │   ├─ YES: apply_policy (hot-reload via openshell policy set --wait)
+  │   └─ NO: prepare_staging_dir → spawn_sandbox → wait_for_ready
+  ├─ generate_ssh_config (on every startup, host-side file)
+  ├─ initial_sync (blocking — before teloxide starts)
+  │   ├─ Upload settings.json, reply-schema.json, builtin skills
+  │   └─ Download .claude.json, verify trust keys, fix if CC overwrote them
+  └─ Background sync (every 5 min, same operations)
+
+Sandbox network:
+  ├─ HTTP CONNECT proxy at 10.200.0.1:3128 (set via HTTPS_PROXY env)
+  ├─ TLS MITM: proxy terminates TLS, re-signs with per-sandbox CA
+  │   └─ Sandbox trusts CA via /etc/openshell-tls/ca-bundle.pem
+  ├─ Policy controls which domains are allowed (wildcards supported)
+  └─ tls: terminate REQUIRED on all HTTPS endpoints (OpenShell v0.0.23)
+
+Staging dir (for initial upload only):
+  ├─ .claude/settings.json    — CC behavioral flags
+  ├─ .claude/reply-schema.json — structured output schema
+  ├─ .claude/agents/<name>.md  — agent definition
+  ├─ .claude/skills/{rightskills,cronsync}/ — builtin skills only
+  ├─ .claude.json              — trust + onboarding
+  └─ .mcp.json                 — MCP server entries
+  EXCLUDED: .credentials.json (sandbox gets own via login), plugins/, shell-snapshots/
+```
+
+### Login Flow (PTY-driven)
+
+When `claude -p` returns 403/401 (no credentials in sandbox):
+
+```
+1. is_auth_error() detects auth failure in CC JSON output
+2. spawn_auth_watcher() — tokio task:
+   ├─ Spawns blocking thread with expectrl PTY session
+   ├─ SSH -t into sandbox: claude --dangerously-skip-permissions -- /login
+   ├─ PTY width set to 500 cols (prevent URL line-wrapping)
+   ├─ Wait for "Select login method" menu → send \r (Claude subscription)
+   ├─ Wait for "Browser didn't open" → extract OAuth URL
+   ├─ Send URL to Telegram
+   ├─ Wait for "Paste" prompt → send WaitingForCode event
+   ├─ Telegram handler intercepts next message as auth code
+   ├─ Send code + \r to PTY
+   └─ Wait for success/error from CC
+3. On success: notify user in Telegram
+4. On error/timeout: notify user, reset auth_watcher_active flag
+```
+
+### MCP Token Refresh
+
+```
+OAuth callback → write Bearer to agent_dir/.mcp.json → send RefreshEntry
+  → refresh scheduler sets timer (expires_at - 10 min)
+  → on timer: POST refresh_token to token_endpoint
+  → update Bearer in .mcp.json → upload to sandbox
+```
+
+`/mcp add` and `/mcp remove` also trigger immediate upload of `.mcp.json` to sandbox.
 
 ### Configuration Hierarchy
 
@@ -146,29 +219,44 @@ AgentConfig     // From agent.yaml: restart, model, telegram, sandbox overrides,
 GlobalConfig    // From config.yaml: tunnel, chrome
 RuntimeState    // Persisted JSON: agents, socket_path, started_at
 MemoryEntry     // SQLite row: id, content, tags, stored_by, importance
-WorkerContext   // Per-session: chat_id, thread_id, agent_dir, bot, db, ssh config
+WorkerContext   // Per-session: chat_id, thread_id, agent_dir, bot, db, ssh config, pc_port, auth state
 ProcessInfo     // From process-compose API: name, status, pid, exit_code
+LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 ```
 
 ## External Integrations
 
 | System | Protocol | Notes |
 |--------|----------|-------|
-| process-compose | REST API (TCP :18927) | Health, process CRUD, logs, shutdown |
-| Claude Code CLI | Subprocess (`claude -p`) | HOME override to agent dir, env injection |
-| OpenShell | gRPC + mTLS (:8080) | Sandbox create/poll, policy upload, SSH config |
+| process-compose | REST API (TCP :18927) | Health, process start/stop/restart, logs, shutdown |
+| Claude Code CLI | Subprocess (`claude -p` via SSH) | Runs inside sandbox, structured JSON output |
+| Claude Code CLI | PTY (expectrl via SSH) | Interactive login flow — menu navigation, OAuth |
+| OpenShell | gRPC + mTLS (:8080) | Sandbox create/poll/reuse, policy hot-reload |
+| OpenShell | CLI (`openshell policy set/sandbox upload/download`) | Runtime file sync, policy updates |
 | Telegram | teloxide long-polling | CacheMe<Throttle<Bot>> adaptor, per-agent allowlist |
 | Cloudflare Tunnel | CLI (`cloudflared`) | Named tunnel, DNS CNAME, credentials file |
 | MCP | stdio + optional HTTP | rightmemory built-in, external via OAuth |
 
 ## Security Model
 
-- **Sandbox isolation**: OpenShell (bwrap on Linux, Seatbelt on macOS) — filesystem + network policies per agent
+- **Sandbox isolation**: OpenShell (k3s containers) — filesystem + network + TLS policies per agent
+- **TLS MITM**: OpenShell proxy terminates and re-signs TLS with per-sandbox CA for L7 inspection
+- **Credential isolation**: Host credentials never uploaded to sandbox. Each sandbox authenticates independently via OAuth login flow.
+- **Network policy**: Wildcard domain allowlists (*.anthropic.com, *.claude.com, *.claude.ai) + `tls: terminate` + `binaries: "**"`
+- **`--dangerously-skip-permissions`**: Always on for all CC invocations. OpenShell policy is the security layer, not CC's permission system.
 - **Prompt injection detection**: Pattern matching in memory guard before SQLite insert
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent in agent.yaml
-- **Credential sharing**: Symlinks from host `~/.claude/` — no credential duplication
 - **Protected MCP**: "rightmemory" cannot be removed via `/mcp remove`
 - **OAuth CSRF**: Token matching in callback server
+
+## OpenShell Policy Gotchas
+
+- `tls: terminate` is **required** on all HTTPS endpoints (OpenShell v0.0.23). Without it, proxy attempts raw L4 tunnel which fails with "Connection reset by peer" during TLS handshake.
+- `binaries: path: "**"` not `"/sandbox/**"`. Claude binary lives at `/usr/local/bin/claude`, not under `/sandbox/`.
+- `protocol: rest` and `access: full` required when `tls: terminate` is set.
+- Wildcard domains (`*.anthropic.com`) work — the earlier 403 was caused by the binaries restriction, not wildcard matching.
+- CC actively manages `.claude.json` — strips unknown project trust entries on startup. Use `--dangerously-skip-permissions` instead of relying on trust entries.
+- `HTTPS_PROXY=http://10.200.0.1:3128` is set automatically inside sandbox. All HTTP/HTTPS goes through the proxy.
 
 ## Directory Layout (Runtime)
 
@@ -179,17 +267,27 @@ ProcessInfo     // From process-compose API: name, status, pid, exit_code
 │   ├── IDENTITY.md, SOUL.md, USER.md, AGENTS.md, ...
 │   ├── agent.yaml
 │   ├── memory.db
+│   ├── oauth-state.json
+│   ├── oauth-callback.sock
 │   ├── crons/*.yaml
-│   ├── staging/
+│   ├── staging/           # Prepared on sandbox creation only
 │   └── .claude/
-│       ├── settings.json, .mcp.json
-│       ├── .credentials.json → ~/.claude/.credentials.json
-│       ├── plugins → ~/.claude/plugins
-│       └── skills/
+│       ├── settings.json
+│       ├── .mcp.json
+│       ├── .credentials.json → ~/.claude/.credentials.json  (host-only, NOT uploaded to sandbox)
+│       ├── reply-schema.json
+│       └── skills/{rightskills,cronsync}/
 ├── run/
 │   ├── process-compose.yaml
 │   ├── policies/<agent>.yaml
+│   ├── ssh/<agent>.ssh-config
 │   └── runtime-state.json
+├── logs/
+│   └── <agent>.log.<date>   # Per-agent daily log rotation
 └── scripts/
     └── cloudflared-start.sh
 ```
+
+## Logging
+
+Bot processes write to both stderr (process-compose TUI) and `~/.rightclaw/logs/<agent>.log` (daily rotation via `tracing-appender`). Login flow has step-by-step INFO-level logging for debuggability.
