@@ -478,9 +478,9 @@ pub async fn run_memory_server_http(
             bearer_auth_middleware,
         ));
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
-        .map_err(|e| miette::miette!("bind to 127.0.0.1:{port} failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("bind to 0.0.0.0:{port} failed: {e:#}"))?;
 
     tracing::info!(port, agents = ?agents_dir, "right HTTP MCP server listening");
 
