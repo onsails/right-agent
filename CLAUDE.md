@@ -2,7 +2,6 @@
 
 This is a Rust project. Follow conventions in CLAUDE.rust.md.
 
-<!-- GSD:project-start source:PROJECT.md -->
 ## Project
 
 **RightClaw**
@@ -19,9 +18,6 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 - **Compatibility**: Drop-in compatible with OpenClaw file conventions and ClawHub SKILL.md format
 - **Security**: Every agent must run inside OpenShell sandbox — no `--dangerously-skip-permissions` without policy enforcement
 - **OpenShell status**: Alpha software — may have breaking changes. Design for resilience.
-<!-- GSD:project-end -->
-
-<!-- GSD:stack-start source:research/STACK.md -->
 ## Technology Stack
 
 ## Async vs Sync Decision
@@ -113,40 +109,12 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 - [serde_yaml deprecation discussion](https://users.rust-lang.org/t/serde-yaml-deprecation-alternatives/108868)
 - [Rust CLI testing with assert_cmd](https://alexwlchan.net/2025/testing-rust-cli-apps-with-assert-cmd/)
 - [Async Rust: When to Use It](https://www.wyeworks.com/blog/2025/02/25/async-rust-when-to-use-it-when-to-avoid-it/)
-<!-- GSD:stack-end -->
-
-<!-- GSD:conventions-start source:CONVENTIONS.md -->
 ## Conventions
 
 - **Bot-first management**: All agent/MCP configuration goes through the Telegram bot (`/mcp add`, `/mcp remove`, `/mcp auth`, etc.). Never create or edit `.mcp.json`, agent configs, or credential files manually — the bot is the control plane.
 - **Debuggability over convenience**: Always prefer direct, observable signals over indirect heuristics. If an API provides status, use it — don't infer status from side effects (e.g. SSH connectivity as a proxy for sandbox readiness). Errors must propagate to logs, never be silently swallowed.
 - **Domain research before implementation**: Always verify external tool APIs by reading source code or running `--help` before writing integration code. Never rely solely on web documentation — it may be outdated or wrong.
-<!-- GSD:conventions-end -->
-
-<!-- GSD:architecture-start source:ARCHITECTURE.md -->
 ## Architecture
 
 Architecture not yet mapped. Follow existing patterns found in the codebase.
-<!-- GSD:architecture-end -->
 
-<!-- GSD:workflow-start source:GSD defaults -->
-## GSD Workflow Enforcement
-
-Before using Edit, Write, or other file-changing tools, start work through a GSD command so planning artifacts and execution context stay in sync.
-
-Use these entry points:
-- `/gsd:quick` for small fixes, doc updates, and ad-hoc tasks
-- `/gsd:debug` for investigation and bug fixing
-- `/gsd:execute-phase` for planned phase work
-
-Do not make direct repo edits outside a GSD workflow unless the user explicitly asks to bypass it.
-<!-- GSD:workflow-end -->
-
-
-
-<!-- GSD:profile-start -->
-## Developer Profile
-
-> Profile not yet configured. Run `/gsd:profile-user` to generate your developer profile.
-> This section is managed by `generate-claude-profile` -- do not edit manually.
-<!-- GSD:profile-end -->
