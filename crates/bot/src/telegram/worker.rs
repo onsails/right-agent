@@ -172,8 +172,8 @@ pub fn is_auth_error(stdout: &str) -> bool {
 
 /// Extract an OAuth URL from process log lines.
 ///
-/// Scans for `https://` URLs containing `anthropic` or `claude.ai` --
-/// these are the login URLs produced by `claude auth login`.
+/// Scans for `https://` URLs containing OAuth-specific path segments
+/// (`/oauth/` or `/authorize`) on Anthropic/Claude domains.
 /// Returns the first matching URL, trimmed of surrounding text.
 pub fn extract_auth_url(lines: &[String]) -> Option<String> {
     for line in lines {
@@ -186,7 +186,10 @@ pub fn extract_auth_url(lines: &[String]) -> Option<String> {
             .unwrap_or(url_part.len());
         let url = &url_part[..end];
 
-        if url.contains("anthropic") || url.contains("claude.ai") {
+        // Match OAuth-specific URLs on Anthropic/Claude domains.
+        let is_auth_domain = url.contains("anthropic") || url.contains("claude.ai");
+        let is_auth_path = url.contains("/oauth/") || url.contains("/authorize");
+        if is_auth_domain && is_auth_path {
             return Some(url.to_string());
         }
     }
@@ -1098,6 +1101,15 @@ mod tests {
     #[test]
     fn extract_auth_url_handles_empty() {
         let lines: Vec<String> = vec![];
+        assert!(extract_auth_url(&lines).is_none());
+    }
+
+    #[test]
+    fn extract_auth_url_ignores_non_oauth_anthropic_url() {
+        // The "supported countries" link from error messages must not be picked up.
+        let lines = vec![
+            "Check supported countries at https://anthropic.com/supported-countries".to_string(),
+        ];
         assert!(extract_auth_url(&lines).is_none());
     }
 

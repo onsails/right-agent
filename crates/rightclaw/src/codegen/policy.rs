@@ -30,13 +30,17 @@ process:
   run_as_group: sandbox
 
 network_policies:
-  anthropic_api:
+  anthropic:
     endpoints:
-      - host: "api.anthropic.com"
+      - host: "*.anthropic.com"
         port: 443
         protocol: rest
         access: full
-      - host: "statsig.anthropic.com"
+      - host: "anthropic.com"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "*.claude.ai"
         port: 443
         protocol: rest
         access: full
@@ -81,7 +85,8 @@ mod tests {
         let policy = generate_policy(8100, &[]);
         assert!(policy.contains("host.docker.internal"));
         assert!(policy.contains("8100"));
-        assert!(policy.contains("api.anthropic.com"));
+        assert!(policy.contains("*.anthropic.com"));
+        assert!(policy.contains("*.claude.ai"));
         assert!(policy.contains("best_effort"));
         assert!(policy.contains("version: 1"));
     }
