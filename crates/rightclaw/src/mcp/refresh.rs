@@ -136,25 +136,25 @@ pub async fn run_refresh_scheduler(
 
                 match do_refresh(&http_client, &entry, MAX_RETRIES).await {
                     Ok((new_entry, access_token)) => {
-                        // Update Bearer in .mcp.json with the NEW access token
+                        // Update Bearer in mcp.json with the NEW access token
                         if let Err(e) = crate::mcp::credentials::set_server_header(
                             &mcp_json_path,
                             &name,
                             "Authorization",
                             &format!("Bearer {access_token}"),
                         ) {
-                            tracing::error!(server = %name, "failed to update .mcp.json: {e:#}");
+                            tracing::error!(server = %name, "failed to update mcp.json: {e:#}");
                         }
 
-                        // Re-upload .mcp.json into sandbox (skip when no sandbox)
+                        // Re-upload mcp.json into sandbox (skip when no sandbox)
                         if let Some(ref sbox) = sandbox_name
                             && let Err(e) = crate::openshell::upload_file(
                                 sbox,
                                 &mcp_json_path,
-                                "/sandbox/.mcp.json",
+                                "/sandbox/mcp.json",
                             ).await
                         {
-                            tracing::error!(server = %name, "failed to re-upload .mcp.json: {e:#}");
+                            tracing::error!(server = %name, "failed to re-upload mcp.json: {e:#}");
                         }
 
                         // Schedule next refresh

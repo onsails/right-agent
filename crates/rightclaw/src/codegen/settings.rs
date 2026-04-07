@@ -7,7 +7,7 @@ use crate::config::ChromeConfig;
 /// OpenShell is the security layer; CC native sandbox is not used.
 ///
 /// `_chrome_config` is kept for API compatibility — Chrome MCP injection
-/// happens in `.mcp.json`, not settings.json. Will be removed in a future cleanup.
+/// happens in `mcp.json`, not settings.json. Will be removed in a future cleanup.
 pub fn generate_settings(
     _agent: &AgentDef,
     _chrome_config: Option<&ChromeConfig>,

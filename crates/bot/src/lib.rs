@@ -154,7 +154,7 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     let notify_chat_ids = config.allowed_chat_ids.clone();
     let agent_name = args.agent.clone();
 
-    let mcp_json_path = agent_dir.join(".mcp.json");
+    let mcp_json_path = agent_dir.join("mcp.json");
 
     // Create refresh scheduler channels
     let (refresh_tx, refresh_rx) = tokio::sync::mpsc::channel::<rightclaw::mcp::refresh::RefreshEntry>(32);
@@ -184,7 +184,7 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
 
     // Spawn OAuth refresh scheduler
     let oauth_state_path = agent_dir.join("oauth-state.json");
-    let mcp_json_path_for_refresh = agent_dir.join(".mcp.json");
+    let mcp_json_path_for_refresh = agent_dir.join("mcp.json");
     let sandbox_for_refresh = if !args.no_sandbox {
         Some(rightclaw::openshell::sandbox_name(&agent_name))
     } else {
@@ -369,12 +369,12 @@ fn prepare_staging_dir(agent_dir: &std::path::Path, upload_dir: &std::path::Path
             .map_err(|e| miette::miette!("failed to copy .claude.json to staging: {e:#}"))?;
     }
 
-    // Copy .mcp.json
-    let mcp_json_src = agent_dir.join(".mcp.json");
-    let mcp_json_dst = upload_dir.join(".mcp.json");
+    // Copy mcp.json
+    let mcp_json_src = agent_dir.join("mcp.json");
+    let mcp_json_dst = upload_dir.join("mcp.json");
     if mcp_json_src.exists() {
         std::fs::copy(&mcp_json_src, &mcp_json_dst)
-            .map_err(|e| miette::miette!("failed to copy .mcp.json to staging: {e:#}"))?;
+            .map_err(|e| miette::miette!("failed to copy mcp.json to staging: {e:#}"))?;
     }
 
     tracing::info!("prepared staging dir for sandbox upload");

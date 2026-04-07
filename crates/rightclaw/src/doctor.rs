@@ -781,7 +781,7 @@ pub fn mcp_auth_issues(home: &Path) -> Option<Vec<String>> {
     }
 }
 
-/// Check MCP token status across all agents — reads directly from .mcp.json headers.
+/// Check MCP token status across all agents — reads directly from mcp.json headers.
 fn check_mcp_tokens(home: &Path) -> DoctorCheck {
     check_mcp_tokens_impl(home)
 }

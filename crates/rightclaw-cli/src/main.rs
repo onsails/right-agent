@@ -687,7 +687,7 @@ fn cmd_list(home: &Path) -> miette::Result<()> {
         println!("Discovered {} agent(s):", agents.len());
         for agent in &agents {
             let config_status = if agent.config.is_some() { "yes" } else { "no" };
-            let mcp_status = if agent.path.join(".mcp.json").exists() {
+            let mcp_status = if agent.path.join("mcp.json").exists() {
                 "yes"
             } else {
                 "no"
@@ -797,7 +797,7 @@ async fn cmd_up(
     let host_home = dirs::home_dir()
         .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
 
-    // Resolve current executable path once — written into each agent's .mcp.json so the
+    // Resolve current executable path once — written into each agent's mcp.json so the
     // rightmemory MCP server can be found even when rightclaw is not on PATH (process-compose).
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
@@ -884,9 +884,9 @@ async fn cmd_up(
             .map_err(|e| miette::miette!("failed to open memory database for '{}': {e:#}", agent.name))?;
         tracing::debug!(agent = %agent.name, "memory.db initialized");
 
-        // 11. Generate .mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
+        // 11. Generate mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
         rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name, home, chrome_cfg)?;
-        tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
+        tracing::debug!(agent = %agent.name, "wrote mcp.json with rightmemory entry");
     }
 
     // Generate OpenShell policies when sandbox mode is active.
@@ -896,7 +896,7 @@ async fn cmd_up(
             .map_err(|e| miette::miette!("failed to create policy dir: {e:#}"))?;
 
         for agent in &agents {
-            // TODO: extract external MCP server domains from .mcp.json for policy network rules.
+            // TODO: extract external MCP server domains from mcp.json for policy network rules.
             let policy_yaml = rightclaw::codegen::policy::generate_policy(8100, &[]);
             let policy_path = policy_dir.join(format!("{}.yaml", agent.name));
             std::fs::write(&policy_path, &policy_yaml)
@@ -1656,7 +1656,7 @@ mod tests {
         fs::create_dir_all(&agent_dir).unwrap();
 
         let result = cmd_mcp_status(tmp.path(), Some("myagent"));
-        assert!(result.is_ok(), "should succeed when .mcp.json absent");
+        assert!(result.is_ok(), "should succeed when mcp.json absent");
     }
 }
 

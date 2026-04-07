@@ -32,7 +32,7 @@ impl std::fmt::Display for ServerSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServerSource::ClaudeJson => write!(f, ".claude.json"),
-            ServerSource::McpJson => write!(f, ".mcp.json"),
+            ServerSource::McpJson => write!(f, "mcp.json"),
         }
     }
 }
@@ -66,7 +66,7 @@ pub struct ServerStatus {
 /// Return status for all MCP servers in an agent directory.
 ///
 /// Combines HTTP servers from .claude.json (type: "http") and URL-bearing
-/// servers from .mcp.json. Stdio entries (command+args only) are skipped.
+/// servers from mcp.json. Stdio entries (command+args only) are skipped.
 /// Returns Ok(vec![]) when neither file exists.
 pub fn mcp_auth_status(
     agent_dir: &Path,
@@ -106,8 +106,8 @@ pub fn mcp_auth_status(
         }
     }
 
-    // 2. URL-bearing servers from .mcp.json (stdio servers skipped)
-    let mcp_json_path = agent_dir.join(".mcp.json");
+    // 2. URL-bearing servers from mcp.json (stdio servers skipped)
+    let mcp_json_path = agent_dir.join("mcp.json");
     if mcp_json_path.exists() {
         let content = std::fs::read_to_string(&mcp_json_path)?;
         let root: serde_json::Value = serde_json::from_str(&content)?;
@@ -194,7 +194,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Write .mcp.json with servers. url=Some means HTTP server, url=None means stdio.
+    /// Write mcp.json with servers. url=Some means HTTP server, url=None means stdio.
     fn write_mcp_json(
         dir: &std::path::Path,
         servers: &[(&str, Option<&str>)],
@@ -214,7 +214,7 @@ mod tests {
         }
         let v = serde_json::json!({ "mcpServers": map });
         std::fs::write(
-            dir.join(".mcp.json"),
+            dir.join("mcp.json"),
             serde_json::to_string_pretty(&v).unwrap(),
         )
         .unwrap();
@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn mcp_json_bearer_present_is_present() {
         let dir = tempdir().unwrap();
-        let mcp_path = dir.path().join(".mcp.json");
+        let mcp_path = dir.path().join("mcp.json");
         let v = serde_json::json!({
             "mcpServers": {
                 "notion": {

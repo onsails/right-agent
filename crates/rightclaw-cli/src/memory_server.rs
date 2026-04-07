@@ -271,7 +271,7 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "Add an HTTP MCP server to this agent's .mcp.json. The server becomes available after the next agent restart.")]
+    #[tool(description = "Add an HTTP MCP server to this agent's mcp.json. The server becomes available after the next agent restart.")]
     async fn mcp_add(
         &self,
         Parameters(params): Parameters<McpAddParams>,
@@ -282,7 +282,7 @@ impl MemoryServer {
                 None,
             ));
         }
-        let mcp_json_path = self.agent_dir.join(".mcp.json");
+        let mcp_json_path = self.agent_dir.join("mcp.json");
         rightclaw::mcp::credentials::add_http_server(
             &mcp_json_path,
             &params.name,
@@ -295,7 +295,7 @@ impl MemoryServer {
         ))]))
     }
 
-    #[tool(description = "Remove an HTTP MCP server from this agent's .mcp.json. The 'rightmemory' server is protected and cannot be removed.")]
+    #[tool(description = "Remove an HTTP MCP server from this agent's mcp.json. The 'rightmemory' server is protected and cannot be removed.")]
     async fn mcp_remove(
         &self,
         Parameters(params): Parameters<McpRemoveParams>,
@@ -309,7 +309,7 @@ impl MemoryServer {
                 None,
             ));
         }
-        let mcp_json_path = self.agent_dir.join(".mcp.json");
+        let mcp_json_path = self.agent_dir.join("mcp.json");
         match rightclaw::mcp::credentials::remove_http_server(
             &mcp_json_path,
             &params.name,
@@ -321,7 +321,7 @@ impl MemoryServer {
             Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
                 Err(McpError::invalid_params(
                     format!(
-                        "Server '{}' not found in .mcp.json.",
+                        "Server '{}' not found in mcp.json.",
                         params.name
                     ),
                     None,
@@ -331,7 +331,7 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "List all configured MCP servers for this agent. Shows name, URL, auth state (present/auth required), source (.claude.json or .mcp.json), and kind (http/stdio). Never exposes token values.")]
+    #[tool(description = "List all configured MCP servers for this agent. Shows name, URL, auth state (present/auth required), source (.claude.json or mcp.json), and kind (http/stdio). Never exposes token values.")]
     async fn mcp_list(
         &self,
         Parameters(_params): Parameters<McpListParams>,
@@ -360,7 +360,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<McpAuthParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mcp_json_path = self.agent_dir.join(".mcp.json");
+        let mcp_json_path = self.agent_dir.join("mcp.json");
         let servers = rightclaw::mcp::credentials::list_http_servers(
             &mcp_json_path,
         )
@@ -372,7 +372,7 @@ impl MemoryServer {
             .ok_or_else(|| {
                 McpError::invalid_params(
                     format!(
-                        "Server '{}' not found in .mcp.json. Add it first with mcp_add.",
+                        "Server '{}' not found in mcp.json. Add it first with mcp_add.",
                         params.server_name
                     ),
                     None,

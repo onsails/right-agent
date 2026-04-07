@@ -580,12 +580,12 @@ async fn invoke_cc(
         "--dangerously-skip-permissions".into(),
     ];
 
-    // MCP isolation: only use servers from our .mcp.json, block cloud MCPs.
+    // MCP isolation: only use servers from our mcp.json, block cloud MCPs.
     // Path differs by execution mode: /sandbox/ inside container, agent_dir on host.
     let mcp_config_path = if ctx.ssh_config_path.is_some() {
-        "/sandbox/.mcp.json".to_string()
+        "/sandbox/mcp.json".to_string()
     } else {
-        ctx.agent_dir.join(".mcp.json").to_string_lossy().into_owned()
+        ctx.agent_dir.join("mcp.json").to_string_lossy().into_owned()
     };
     claude_args.push("--mcp-config".into());
     claude_args.push(mcp_config_path);
