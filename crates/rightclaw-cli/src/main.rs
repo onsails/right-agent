@@ -171,6 +171,9 @@ pub enum Commands {
         /// Pass --verbose to CC subprocess and log CC stderr at debug level
         #[arg(long)]
         debug: bool,
+        /// Disable OpenShell sandbox (direct claude -p calls)
+        #[arg(long)]
+        no_sandbox: bool,
     },
 }
 
@@ -239,11 +242,12 @@ async fn main() -> miette::Result<()> {
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
-        Commands::Bot { agent, debug } => {
+        Commands::Bot { agent, debug, no_sandbox } => {
             rightclaw_bot::run(rightclaw_bot::BotArgs {
                 agent,
                 home: cli.home,
                 debug,
+                no_sandbox,
             })
             .await
         }
@@ -967,6 +971,8 @@ async fn cmd_up(
         &agents,
         &self_exe,
         debug,
+        no_sandbox,
+        &run_dir,
         cloudflared_script_path.as_deref(),
     )?;
     let config_path = run_dir.join("process-compose.yaml");

@@ -13,6 +13,8 @@ pub struct BotArgs {
     pub home: Option<String>,
     /// Pass --verbose to CC subprocess and log CC stderr at debug level.
     pub debug: bool,
+    /// Disable OpenShell sandbox — invoke claude -p directly.
+    pub no_sandbox: bool,
 }
 
 /// Entry point called from rightclaw-cli.
