@@ -24,3 +24,9 @@ rand = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
 chrono = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
