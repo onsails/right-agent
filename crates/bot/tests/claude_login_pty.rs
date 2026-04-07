@@ -72,6 +72,8 @@ fn claude_login_shows_oauth_url() {
     cmd.current_dir(home.path());
 
     let mut session = Session::spawn(cmd).expect("failed to spawn claude with PTY");
+    // Wide terminal so URLs don't wrap
+    session.get_process_mut().set_window_size(500, 50).expect("failed to set PTY size");
     session.set_expect_timeout(Some(std::time::Duration::from_secs(30)));
 
     // Wait for login method menu

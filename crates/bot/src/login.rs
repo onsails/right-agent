@@ -63,6 +63,10 @@ pub fn run_login_pty(
             return;
         }
     };
+    // Set wide terminal so URLs don't wrap across lines.
+    if let Err(e) = session.get_process_mut().set_window_size(500, 50) {
+        tracing::warn!("login: failed to set PTY window size: {e}");
+    }
     session.set_expect_timeout(Some(Duration::from_secs(30)));
 
     // Wait for login method menu
