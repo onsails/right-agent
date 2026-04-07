@@ -82,18 +82,29 @@ pub fn run_login_pty(
     }
     tracing::info!(agent = agent_name, "login: selected Claude subscription");
 
-    // Wait for OAuth URL
+    // Wait for "Browser didn't open" text which precedes the URL
     session.set_expect_timeout(Some(Duration::from_secs(30)));
-    match session.expect(expectrl::Regex("https://[^ \\r\\n]+")) {
-        Ok(found) => {
-            let raw = String::from_utf8_lossy(found.as_bytes());
-            // Clean ANSI escape sequences from URL
-            let url = strip_ansi(&raw).trim().to_string();
-            tracing::info!(agent = agent_name, url = %url, "login: OAuth URL extracted");
-            let _ = event_tx.blocking_send(LoginEvent::Url(url));
+    match session.expect(expectrl::Regex("Browser didn't open")) {
+        Ok(_) => {
+            // Now read the next line which contains the URL
+            session.set_expect_timeout(Some(Duration::from_secs(5)));
+            match session.expect(expectrl::Regex("https://[^\\s\\x1b]+")) {
+                Ok(found) => {
+                    let raw = String::from_utf8_lossy(found.as_bytes());
+                    let cleaned = strip_ansi(&raw);
+                    // Extract just the https:// URL from the matched text
+                    let url = extract_url_from_text(&cleaned);
+                    tracing::info!(agent = agent_name, url = %url, "login: OAuth URL extracted");
+                    let _ = event_tx.blocking_send(LoginEvent::Url(url));
+                }
+                Err(e) => {
+                    let _ = event_tx.blocking_send(LoginEvent::Error(format!("URL not found after browser prompt: {e:#}")));
+                    return;
+                }
+            }
         }
         Err(e) => {
-            let _ = event_tx.blocking_send(LoginEvent::Error(format!("OAuth URL did not appear: {e:#}")));
+            let _ = event_tx.blocking_send(LoginEvent::Error(format!("browser prompt did not appear: {e:#}")));
             return;
         }
     }
@@ -146,8 +157,19 @@ pub fn run_login_pty(
     std::thread::sleep(Duration::from_secs(1));
 }
 
+/// Extract the first `https://` URL from text that may contain surrounding content.
+pub fn extract_url_from_text(text: &str) -> String {
+    if let Some(start) = text.find("https://") {
+        let url_part = &text[start..];
+        let end = url_part.find(|c: char| c.is_whitespace() || c == '\x1b').unwrap_or(url_part.len());
+        url_part[..end].to_string()
+    } else {
+        text.trim().to_string()
+    }
+}
+
 /// Strip ANSI escape sequences from a string.
-fn strip_ansi(s: &str) -> String {
+pub fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut in_escape = false;
     let mut chars = s.chars().peekable();

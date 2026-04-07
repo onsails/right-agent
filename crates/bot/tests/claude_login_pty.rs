@@ -85,24 +85,34 @@ fn claude_login_shows_oauth_url() {
     println!("Pressing Enter for Claude subscription...");
     session.send("\r").expect("failed to send Enter");
 
-    // Wait for OAuth URL
+    // Wait for "Browser didn't open" — same approach as login.rs
+    println!("Waiting for browser prompt...");
+    session.expect(expectrl::Regex("Browser didn't open"))
+        .expect("browser prompt did not appear within 30s");
+
+    // Now capture the URL on the next line
     println!("Waiting for OAuth URL...");
-    let found = session.expect(expectrl::Regex("https://[^ \\r\\n]+oauth[^ \\r\\n]+"))
-        .expect("OAuth URL did not appear within 30s");
-    let url = String::from_utf8_lossy(found.as_bytes());
-    println!("OAuth URL: {}", url.trim());
+    session.set_expect_timeout(Some(std::time::Duration::from_secs(5)));
+    let found = session.expect(expectrl::Regex("https://[^\\s\\x1b]+"))
+        .expect("OAuth URL did not appear");
+    let raw_url = String::from_utf8_lossy(found.as_bytes());
+    println!("Raw OAuth URL: {:?}", raw_url);
 
-    // Verify it's a valid auth URL
-    assert!(
-        url.contains("oauth") || url.contains("authorize"),
-        "Expected OAuth URL, got: {url}"
-    );
-    assert!(
-        url.contains("claude") || url.contains("anthropic"),
-        "Expected Claude/Anthropic domain in URL, got: {url}"
-    );
+    // Clean and extract URL — same pipeline as login.rs
+    let cleaned = rightclaw_bot::login::strip_ansi(&raw_url);
+    let url = rightclaw_bot::login::extract_url_from_text(&cleaned);
+    println!("Cleaned OAuth URL: {url}");
 
-    println!("SUCCESS: OAuth URL extracted from interactive claude login flow");
+    // Verify parsed URL is clean and valid
+    assert!(url.starts_with("https://"), "URL should start with https://, got: {url}");
+    assert!(url.contains("oauth"), "URL should contain 'oauth', got: {url}");
+    assert!(
+        url.contains("claude.com") || url.contains("anthropic.com"),
+        "URL should contain claude.com or anthropic.com, got: {url}"
+    );
+    assert!(!url.contains('\x1b'), "URL should not contain ANSI escapes: {url}");
+
+    println!("SUCCESS: OAuth URL extracted and parsed cleanly from interactive claude login flow");
 
     // Clean up — send /exit or just drop (kill_on_drop)
     let _ = session.send_line("/exit");
