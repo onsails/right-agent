@@ -4,6 +4,9 @@ use clap::{Parser, Subcommand};
 
 mod memory_server;
 
+/// Default port for the rightmemory MCP HTTP server.
+const RIGHTMEMORY_PORT: u16 = 8100;
+
 #[derive(Parser)]
 #[command(name = "rightclaw", version, about = "Multi-agent runtime for Claude Code")]
 pub struct Cli {
@@ -875,6 +878,31 @@ async fn cmd_up(
         // 11. Generate .mcp.json with rightmemory MCP server entry (Phase 17, SKILL-05).
         rightclaw::codegen::generate_mcp_config(&agent.path, &self_exe, &agent.name, home, chrome_cfg)?;
         tracing::debug!(agent = %agent.name, "wrote .mcp.json with rightmemory entry");
+    }
+
+    // --- OpenShell sandbox lifecycle ---
+    let mtls_dir = dirs::config_dir()
+        .ok_or_else(|| miette::miette!("cannot determine config directory"))?
+        .join("openshell/gateways/openshell/mtls");
+    let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
+    let ssh_config_dir = run_dir.join("ssh");
+    std::fs::create_dir_all(&ssh_config_dir)
+        .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+
+    for agent in &agents {
+        let sandbox = rightclaw::openshell::sandbox_name(&agent.name);
+        // Delete stale sandbox (best-effort, does not propagate errors).
+        rightclaw::openshell::delete_sandbox(&sandbox).await;
+        // policy.yaml path
+        let policy_path = agent.path.join("policy.yaml");
+        // Spawn sandbox with upload of staging dir
+        let upload_dir = agent.path.join("staging");
+        let _child = rightclaw::openshell::spawn_sandbox(&sandbox, &policy_path, Some(&upload_dir))?;
+        // Wait for sandbox to reach READY phase
+        rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2).await?;
+        // Generate SSH config for this sandbox
+        rightclaw::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
+        tracing::info!(agent = %agent.name, "OpenShell sandbox ready");
     }
 
     // Generate cloudflared config and wrapper script when tunnel is configured (Phase 38).
