@@ -57,6 +57,9 @@ pub fn generate_mcp_config(
         }),
     );
 
+    // Remove stale "rightmemory" entry from pre-rename agents.
+    servers.remove("rightmemory");
+
     // Inject chrome-devtools MCP entry when Chrome is configured (per D-07, INJECT-01, INJECT-02).
     if let Some(chrome) = chrome_config {
         let profile_dir = agent_path.join(".chrome-profile");
@@ -125,6 +128,9 @@ pub fn generate_mcp_config_http(
             }
         }),
     );
+
+    // Remove stale "rightmemory" entry from pre-rename agents.
+    servers.remove("rightmemory");
 
     // Chrome devtools not available inside OpenShell sandbox -- skip chrome_config
     let _ = chrome_config;
