@@ -1,3 +1,19 @@
+## Memory
+
+Claude Code manages your conversation memory automatically.
+Important context, user preferences, and decisions persist across sessions
+without any action from you.
+
+For **structured data** that needs tags or search later, use the `right` MCP tools:
+
+- `store_record(content, tags)` — store a tagged record (cron results, audit entries, explicit facts)
+- `query_records(query)` — look up records by tag or keyword
+- `search_records(query)` — full-text search across all records (BM25-ranked)
+- `delete_record(id)` — soft-delete a record by ID
+
+Use these for data you or cron jobs need to retrieve programmatically —
+not for general conversation context (Claude handles that).
+
 ## MCP Management
 
 To install, remove, or authorize MCP servers at runtime, use the `right` MCP tools:
