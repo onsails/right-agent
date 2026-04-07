@@ -10,17 +10,6 @@ use std::time::Duration;
 use expectrl::Expect as _;
 use tokio::sync::{mpsc, oneshot};
 
-/// Result of a login attempt.
-#[derive(Debug)]
-pub enum LoginResult {
-    /// Login succeeded — credentials stored in sandbox.
-    Success,
-    /// Login failed or timed out.
-    Failed(String),
-    /// Could not extract OAuth URL.
-    NoUrl,
-}
-
 /// Messages sent from the login task to the auth watcher.
 #[derive(Debug)]
 pub enum LoginEvent {
@@ -56,6 +45,8 @@ pub fn run_login_pty(
     cmd.arg("--");
     cmd.args(["claude", "--dangerously-skip-permissions", "--", "/login"]);
 
+    tracing::info!(agent = agent_name, "login: spawning PTY session via SSH");
+
     let mut session = match expectrl::Session::spawn(cmd) {
         Ok(s) => s,
         Err(e) => {
@@ -65,40 +56,43 @@ pub fn run_login_pty(
     };
     // Set wide terminal so URLs don't wrap across lines.
     if let Err(e) = session.get_process_mut().set_window_size(500, 50) {
-        tracing::warn!("login: failed to set PTY window size: {e}");
+        tracing::warn!(agent = agent_name, "login: failed to set PTY window size: {e}");
     }
-    session.set_expect_timeout(Some(Duration::from_secs(30)));
 
-    // Wait for login method menu
-    tracing::info!(agent = agent_name, "login: waiting for login method menu");
+    // Step 1: Wait for login method menu
+    tracing::info!(agent = agent_name, "login: step 1 — waiting for login method menu (30s timeout)");
+    session.set_expect_timeout(Some(Duration::from_secs(30)));
     match session.expect(expectrl::Regex("(Select login method|Claude account|subscription)")) {
-        Ok(_) => {}
+        Ok(found) => {
+            let text = strip_ansi(&String::from_utf8_lossy(found.as_bytes()));
+            tracing::info!(agent = agent_name, matched = %text.chars().take(100).collect::<String>(), "login: step 1 — menu appeared");
+        }
         Err(e) => {
             let _ = event_tx.blocking_send(LoginEvent::Error(format!("login menu did not appear: {e:#}")));
             return;
         }
     }
 
-    // Press Enter to select option 1 (Claude subscription)
+    // Step 2: Press Enter to select option 1 (Claude subscription)
+    tracing::info!(agent = agent_name, "login: step 2 — sending \\r to select Claude subscription");
     if let Err(e) = session.send("\r") {
         let _ = event_tx.blocking_send(LoginEvent::Error(format!("failed to send Enter: {e:#}")));
         return;
     }
-    tracing::info!(agent = agent_name, "login: selected Claude subscription");
 
-    // Wait for "Browser didn't open" text which precedes the URL
+    // Step 3: Wait for "Browser didn't open" text which precedes the URL
+    tracing::info!(agent = agent_name, "login: step 3 — waiting for browser prompt (30s timeout)");
     session.set_expect_timeout(Some(Duration::from_secs(30)));
     match session.expect(expectrl::Regex("Browser didn't open")) {
         Ok(_) => {
-            // Now read the next line which contains the URL
+            tracing::info!(agent = agent_name, "login: step 3 — browser prompt appeared, extracting URL");
             session.set_expect_timeout(Some(Duration::from_secs(5)));
             match session.expect(expectrl::Regex("https://[^\\s\\x1b]+")) {
                 Ok(found) => {
                     let raw = String::from_utf8_lossy(found.as_bytes());
                     let cleaned = strip_ansi(&raw);
-                    // Extract just the https:// URL from the matched text
                     let url = extract_url_from_text(&cleaned);
-                    tracing::info!(agent = agent_name, url = %url, "login: OAuth URL extracted");
+                    tracing::info!(agent = agent_name, url_len = url.len(), "login: step 3 — OAuth URL extracted");
                     let _ = event_tx.blocking_send(LoginEvent::Url(url));
                 }
                 Err(e) => {
@@ -113,64 +107,88 @@ pub fn run_login_pty(
         }
     }
 
-    // CC shows a prompt asking user to paste the code from browser.
-    // Wait for it — look for "Paste" or "paste" specifically (not "code" which
-    // appears in the URL we just captured).
-    session.set_expect_timeout(Some(Duration::from_secs(15)));
-    match session.expect(expectrl::Regex("(?i)(paste|enter the code|enter code|authorization code)")) {
+    // Step 4: Wait for code paste prompt
+    // CC shows something like "Paste the code" or just an input field.
+    // Use "paste" specifically to avoid matching "code" from URL params.
+    tracing::info!(agent = agent_name, "login: step 4 — waiting for paste prompt (10s timeout)");
+    session.set_expect_timeout(Some(Duration::from_secs(10)));
+    match session.expect(expectrl::Regex("(?i)(paste|enter the code|enter code|authorization)")) {
         Ok(found) => {
             let text = strip_ansi(&String::from_utf8_lossy(found.as_bytes()));
-            tracing::info!(agent = agent_name, prompt = %text.trim(), "login: CC is asking for auth code");
-            let _ = event_tx.blocking_send(LoginEvent::WaitingForCode);
+            tracing::info!(agent = agent_name, prompt = %text.chars().take(100).collect::<String>(), "login: step 4 — paste prompt detected");
         }
         Err(_) => {
-            // No explicit paste prompt — CC might just show a text input.
-            // Still ask user for code, but log the situation.
-            tracing::info!(agent = agent_name, "login: no explicit paste prompt — asking for code anyway");
-            let _ = event_tx.blocking_send(LoginEvent::WaitingForCode);
+            tracing::info!(agent = agent_name, "login: step 4 — no explicit paste prompt (timeout). Proceeding anyway.");
         }
     }
+    let _ = event_tx.blocking_send(LoginEvent::WaitingForCode);
 
-    // Wait for auth code from Telegram (up to 5 minutes)
+    // Step 5: Wait for auth code from Telegram
+    tracing::info!(agent = agent_name, "login: step 5 — waiting for auth code from Telegram");
     let code = match code_rx.blocking_recv() {
-        Ok(c) => c,
+        Ok(c) => {
+            tracing::info!(agent = agent_name, code_len = c.len(), "login: step 5 — received auth code from Telegram");
+            c
+        }
         Err(_) => {
             let _ = event_tx.blocking_send(LoginEvent::Error("auth code channel closed (timeout?)".into()));
             return;
         }
     };
 
-    // Small delay to ensure CC's input field is ready
+    // Step 6: Send auth code to CC
     std::thread::sleep(Duration::from_millis(500));
-
-    // Send auth code to CC (use \r — CC TUI needs carriage return, not newline)
     let code_with_cr = format!("{code}\r");
-    tracing::info!(agent = agent_name, code_len = code.len(), "login: sending auth code");
+    tracing::info!(agent = agent_name, code_len = code.len(), "login: step 6 — sending auth code to PTY (with \\r)");
     if let Err(e) = session.send(&code_with_cr) {
         let _ = event_tx.blocking_send(LoginEvent::Error(format!("failed to send auth code: {e:#}")));
         return;
     }
 
-    // Wait for success indication — CC may show various messages after processing the code.
-    // Also match "API key" which CC shows when creating the key from the OAuth token.
-    session.set_expect_timeout(Some(Duration::from_secs(60)));
-    match session.expect(expectrl::Regex("(?i)(logged in|success|authenticated|welcome|API key|signed in)")) {
+    // Step 7: Wait for success or failure indication (10s)
+    tracing::info!(agent = agent_name, "login: step 7 — waiting for login result (10s timeout), looking for: logged in|success|authenticated|welcome|API key|signed in|error|failed|invalid");
+    session.set_expect_timeout(Some(Duration::from_secs(10)));
+    match session.expect(expectrl::Regex("(?i)(logged in|success|authenticated|welcome|API key|signed in|error|failed|invalid)")) {
         Ok(found) => {
-            let text = String::from_utf8_lossy(found.as_bytes());
-            tracing::info!(agent = agent_name, response = %strip_ansi(&text).chars().take(200).collect::<String>(), "login: authentication successful");
-            let _ = event_tx.blocking_send(LoginEvent::Done);
+            let raw = String::from_utf8_lossy(found.as_bytes());
+            let text = strip_ansi(&raw);
+            let summary = text.chars().take(300).collect::<String>();
+            tracing::info!(agent = agent_name, response = %summary, "login: step 7 — got response from CC");
+
+            // Check if it's an error
+            let lower = summary.to_lowercase();
+            if lower.contains("error") || lower.contains("failed") || lower.contains("invalid") {
+                let _ = event_tx.blocking_send(LoginEvent::Error(format!("CC reported error: {summary}")));
+            } else {
+                let _ = event_tx.blocking_send(LoginEvent::Done);
+            }
         }
-        Err(e) => {
-            tracing::warn!(agent = agent_name, "login: no success confirmation within 60s: {e:#}");
-            // Check if credentials were saved despite no confirmation
+        Err(_) => {
+            // Timeout — dump raw buffer for debugging
+            tracing::warn!(agent = agent_name, "login: step 7 — no response within 10s. Reading remaining PTY buffer for diagnostics...");
+
+            // Try to read whatever is in the buffer
+            session.set_expect_timeout(Some(Duration::from_millis(500)));
+            match session.expect(expectrl::Regex(".+")) {
+                Ok(found) => {
+                    let raw = String::from_utf8_lossy(found.as_bytes());
+                    let cleaned = strip_ansi(&raw);
+                    tracing::info!(agent = agent_name, buffer = %cleaned.chars().take(500).collect::<String>(), "login: PTY buffer after timeout");
+                }
+                Err(_) => {
+                    tracing::info!(agent = agent_name, "login: PTY buffer empty after timeout");
+                }
+            }
+
             let _ = event_tx.blocking_send(LoginEvent::Error(
-                "Login may have failed — no confirmation from Claude. Try sending a message to check.".into()
+                "No response from Claude after sending code. Check logs for PTY buffer dump.".into()
             ));
         }
     }
 
-    // Exit claude
-    let _ = session.send_line("/exit");
+    // Cleanup
+    tracing::info!(agent = agent_name, "login: cleaning up PTY session");
+    let _ = session.send("/exit\r");
     std::thread::sleep(Duration::from_secs(1));
 }
 
@@ -231,5 +249,16 @@ mod tests {
     #[test]
     fn strip_ansi_handles_empty() {
         assert_eq!(strip_ansi(""), "");
+    }
+
+    #[test]
+    fn extract_url_finds_https() {
+        let text = "some prefix https://example.com/path?q=1 trailing";
+        assert_eq!(extract_url_from_text(text), "https://example.com/path?q=1");
+    }
+
+    #[test]
+    fn extract_url_returns_input_when_no_url() {
+        assert_eq!(extract_url_from_text("no url here"), "no url here");
     }
 }
