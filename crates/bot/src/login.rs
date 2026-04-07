@@ -136,22 +136,25 @@ pub fn run_login_pty(
         }
     };
 
-    // Send auth code to CC
-    tracing::info!(agent = agent_name, "login: sending auth code");
-    if let Err(e) = session.send_line(&code) {
+    // Send auth code to CC (use \r — CC TUI needs carriage return, not newline)
+    let code_with_cr = format!("{code}\r");
+    tracing::info!(agent = agent_name, code_len = code.len(), "login: sending auth code");
+    if let Err(e) = session.send(&code_with_cr) {
         let _ = event_tx.blocking_send(LoginEvent::Error(format!("failed to send auth code: {e:#}")));
         return;
     }
 
-    // Wait for success indication
+    // Wait for success indication — CC may show various messages
     session.set_expect_timeout(Some(Duration::from_secs(30)));
-    match session.expect(expectrl::Regex("(?i)(logged in|success|authenticated|welcome)")) {
-        Ok(_) => {
-            tracing::info!(agent = agent_name, "login: authentication successful");
+    match session.expect(expectrl::Regex("(?i)(logged in|success|authenticated|welcome|API key)")) {
+        Ok(found) => {
+            let text = String::from_utf8_lossy(found.as_bytes());
+            tracing::info!(agent = agent_name, response = %strip_ansi(&text), "login: authentication successful");
             let _ = event_tx.blocking_send(LoginEvent::Done);
         }
-        Err(_) => {
-            tracing::warn!(agent = agent_name, "login: no success confirmation — assuming completed");
+        Err(e) => {
+            // Read whatever is in the buffer for debugging
+            tracing::warn!(agent = agent_name, "login: no success confirmation within 30s: {e:#}");
             let _ = event_tx.blocking_send(LoginEvent::Done);
         }
     }
