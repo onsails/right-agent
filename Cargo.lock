@@ -2427,8 +2427,11 @@ name = "rightclaw-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "axum",
  "clap",
+ "dashmap",
  "dirs",
+ "http",
  "miette",
  "predicates",
  "reqwest 0.13.2",
@@ -2442,6 +2445,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

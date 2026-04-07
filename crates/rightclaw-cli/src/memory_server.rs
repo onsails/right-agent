@@ -406,7 +406,7 @@ impl rmcp::ServerHandler for MemoryServer {
 }
 
 /// Convert a MemoryEntry to a serde_json::Value for JSON output.
-fn entry_to_json(entry: &rightclaw::memory::store::MemoryEntry) -> serde_json::Value {
+pub(crate) fn entry_to_json(entry: &rightclaw::memory::store::MemoryEntry) -> serde_json::Value {
     serde_json::json!({
         "id": entry.id,
         "content": entry.content,
@@ -417,7 +417,7 @@ fn entry_to_json(entry: &rightclaw::memory::store::MemoryEntry) -> serde_json::V
 }
 
 /// Convert a cron_runs row to JSON value.
-fn cron_run_to_json(
+pub(crate) fn cron_run_to_json(
     id: &str,
     job_name: &str,
     started_at: &str,

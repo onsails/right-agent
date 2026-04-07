@@ -25,6 +25,10 @@ rmcp = { workspace = true }
 reqwest = { workspace = true }
 schemars = { workspace = true }
 rusqlite = { workspace = true }
+axum = { workspace = true }
+dashmap = { workspace = true }
+tokio-util = { workspace = true }
+http = "1.0"
 
 [dev-dependencies]
 assert_cmd = "2.2"
