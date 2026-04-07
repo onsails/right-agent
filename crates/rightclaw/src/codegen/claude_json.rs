@@ -57,6 +57,13 @@ pub fn generate_agent_claude_json(agent: &AgentDef) -> miette::Result<()> {
             serde_json::Value::Bool(true),
         );
 
+    // Trust /sandbox path for OpenShell sandbox mode (agent runs inside container at /sandbox).
+    projects
+        .as_object_mut()
+        .ok_or_else(|| miette::miette!("projects is not a JSON object"))?
+        .entry("/sandbox")
+        .or_insert_with(|| serde_json::json!({"hasTrustDialogAccepted": true}));
+
     std::fs::write(
         &claude_json_path,
         serde_json::to_string_pretty(&config)
