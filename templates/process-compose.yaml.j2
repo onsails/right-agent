@@ -36,7 +36,7 @@ processes:
 {% for agent in agents %}
 {% if not agent.no_sandbox %}
   login-{{ agent.name }}:
-    command: "ssh -t -F {{ agent.home_dir }}/run/ssh/rightclaw-{{ agent.agent_name }}.ssh-config openshell-rightclaw-{{ agent.agent_name }} -- claude --dangerously-skip-permissions"
+    command: "ssh -t -F {{ agent.home_dir }}/run/ssh/rightclaw-{{ agent.agent_name }}.ssh-config openshell-rightclaw-{{ agent.agent_name }} -- claude auth login --claudeai"
     is_tty: true
     disabled: true
     availability:
