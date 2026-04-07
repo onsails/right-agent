@@ -349,7 +349,7 @@ mod tests {
             "settings.json should not contain sandbox section — OpenShell is the security layer"
         );
         assert_eq!(json["skipDangerousModePermissionPrompt"], true);
-        assert_eq!(json["autoMemoryEnabled"], false);
+        assert_eq!(json["autoMemoryEnabled"], true);
     }
 
     #[test]
