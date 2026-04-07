@@ -2,7 +2,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_dir = "../../proto/openshell";
 
     tonic_prost_build::configure()
-        .build_server(false)
+        .build_server(true)
         .compile_protos(
             &[
                 format!("{proto_dir}/sandbox.proto"),

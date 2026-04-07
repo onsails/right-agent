@@ -333,6 +333,21 @@ pub fn spawn_worker(
     tx_for_map
 }
 
+/// Shell-escape a string for safe inclusion in an SSH remote command.
+/// Wraps in single quotes, escaping any embedded single quotes.
+fn shell_escape(s: &str) -> String {
+    // Empty string → ''
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    // If the string contains no shell-special chars, return as-is.
+    if s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'/' || b == b':' || b == b'=') {
+        return s.to_string();
+    }
+    // Wrap in single quotes; replace ' with '\'' (end quote, escaped quote, start quote).
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
 ///
 /// Returns `Ok(Some(ReplyOutput))` on success,
@@ -401,15 +416,16 @@ async fn invoke_cc(
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: exec via SSH into the container.
-        // CC binary is resolved inside the container; env/cwd managed by sandbox.
+        // SSH concatenates remote args into a single string and passes to `sh -c`.
+        // Args containing JSON ({, }, ") must be shell-escaped to survive this.
         let ssh_host = rightclaw::openshell::ssh_host(&ctx.agent_name);
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
         c.arg("--");
-        for arg in &claude_args {
-            c.arg(arg);
-        }
+        // Build a single shell-escaped command string for the remote shell.
+        let escaped: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
+        c.arg(escaped.join(" "));
         c
     } else {
         // Direct exec (no sandbox).
