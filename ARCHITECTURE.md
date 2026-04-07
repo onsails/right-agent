@@ -25,7 +25,7 @@ src/
 │   ├── agent_def.rs    # .md with frontmatter for CC agent definition
 │   ├── claude_json.rs  # .claude.json — trust (/sandbox + agent dir), onboarding, credential symlinks
 │   ├── settings.rs     # .claude/settings.json — behavioral flags
-│   ├── mcp_config.rs   # .mcp.json — rightmemory + external MCP entries
+│   ├── mcp_config.rs   # .mcp.json — right + external MCP entries
 │   ├── policy.rs       # OpenShell policy.yaml — network/filesystem/TLS sandbox rules
 │   ├── process_compose.rs  # process-compose.yaml via minijinja
 │   ├── skills.rs       # Install built-in skills to .claude/skills/
@@ -198,7 +198,7 @@ OAuth callback → write Bearer to agent_dir/.mcp.json → send RefreshEntry
 | Per-agent | `agents/<name>/agent.yaml` | Restart, model, telegram, sandbox overrides, env |
 | Generated | `agents/<name>/.claude/settings.json` | CC behavioral flags (regenerated on `up`) |
 | Generated | `agents/<name>/.claude.json` | Trust, onboarding suppression (read-modify-write) |
-| Generated | `agents/<name>/.mcp.json` | MCP server entries (rightmemory + external) |
+| Generated | `agents/<name>/.mcp.json` | MCP server entries (right + external) |
 | Generated | `run/policies/<agent>.yaml` | OpenShell sandbox policy |
 
 ### Memory Schema (SQLite)
@@ -235,7 +235,7 @@ LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 | OpenShell | CLI (`openshell policy set/sandbox upload/download`) | Runtime file sync, policy updates |
 | Telegram | teloxide long-polling | CacheMe<Throttle<Bot>> adaptor, per-agent allowlist |
 | Cloudflare Tunnel | CLI (`cloudflared`) | Named tunnel, DNS CNAME, credentials file |
-| MCP | stdio + optional HTTP | rightmemory built-in, external via OAuth |
+| MCP | stdio + optional HTTP | right built-in, external via OAuth |
 
 ## Security Model
 
@@ -246,7 +246,7 @@ LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 - **`--dangerously-skip-permissions`**: Always on for all CC invocations. OpenShell policy is the security layer, not CC's permission system.
 - **Prompt injection detection**: Pattern matching in memory guard before SQLite insert
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent in agent.yaml
-- **Protected MCP**: "rightmemory" cannot be removed via `/mcp remove`
+- **Protected MCP**: "right" cannot be removed via `/mcp remove`
 - **OAuth CSRF**: Token matching in callback server
 
 ## OpenShell Policy Gotchas
