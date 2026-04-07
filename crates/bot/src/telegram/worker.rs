@@ -482,6 +482,14 @@ async fn invoke_cc(
 
     // DIS-06: non-zero exit → error reply
     if !output.status.success() {
+        // Log full output on failure for debuggability.
+        tracing::error!(
+            ?chat_id,
+            exit_code,
+            stdout = %stdout_str.chars().take(1000).collect::<String>(),
+            stderr = %stderr_str,
+            "claude -p failed"
+        );
         // If stderr is empty, include stdout (claude sometimes writes errors there).
         let error_detail = if stderr_str.trim().is_empty() && !stdout_str.trim().is_empty() {
             format!("(stderr empty, stdout): {}", stdout_str.chars().take(500).collect::<String>())
