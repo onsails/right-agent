@@ -1,13 +1,12 @@
 { pkgs, lib, config, inputs, ... }:
 
 {
-  packages = [
-    pkgs.git
-    pkgs.process-compose
-    pkgs.socat
-    pkgs.ripgrep          # SBOX-04: CC sandbox rg check; must be in agent launch PATH
-    pkgs.grpcurl
-    pkgs.protobuf
+  packages = with pkgs; [
+    process-compose
+    socat
+    ripgrep          # SBOX-04: CC sandbox rg check; must be in agent launch PATH
+    grpcurl
+    protobuf
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];
