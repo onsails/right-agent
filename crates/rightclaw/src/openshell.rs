@@ -61,16 +61,29 @@ pub async fn connect_grpc(
 }
 
 /// Check whether a sandbox has reached READY phase.
+///
+/// Returns `Ok(false)` when the sandbox does not exist yet (gRPC `NotFound`),
+/// which is the normal state right after `spawn_sandbox` — the create process
+/// hasn't registered the sandbox in OpenShell's registry yet.
 pub async fn is_sandbox_ready(
     client: &mut OpenShellClient<Channel>,
     name: &str,
 ) -> miette::Result<bool> {
-    let resp = client
+    let resp = match client
         .get_sandbox(GetSandboxRequest {
             name: name.to_owned(),
         })
         .await
-        .map_err(|e| miette::miette!("GetSandbox RPC failed for '{name}': {e:#}"))?;
+    {
+        Ok(r) => r,
+        Err(status) if status.code() == tonic::Code::NotFound => {
+            tracing::debug!(sandbox = name, "sandbox not found yet (expected during creation)");
+            return Ok(false);
+        }
+        Err(e) => {
+            return Err(miette::miette!("GetSandbox RPC failed for '{name}': {e:#}"));
+        }
+    };
 
     let sandbox = resp
         .into_inner()
@@ -262,18 +275,5 @@ pub async fn delete_sandbox(name: &str) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sandbox_name_prefixes_agent_name() {
-        assert_eq!(sandbox_name("brain"), "rightclaw-brain");
-        assert_eq!(sandbox_name("worker-1"), "rightclaw-worker-1");
-    }
-
-    #[test]
-    fn ssh_host_prefixes_sandbox_name() {
-        assert_eq!(ssh_host("brain"), "openshell-rightclaw-brain");
-        assert_eq!(ssh_host("worker-1"), "openshell-rightclaw-worker-1");
-    }
-}
+#[path = "openshell_tests.rs"]
+mod tests;

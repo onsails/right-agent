@@ -238,8 +238,9 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         tokio::select! {
             result = rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
                 result?;
-                // Reap the create process to avoid zombie accumulation on bot restarts.
-                let _ = child.wait().await;
+                // `openshell sandbox create` is a long-lived monitor process.
+                // Drop the handle — kill_on_drop(false) keeps it alive.
+                drop(child);
             }
             status = child.wait() => {
                 let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
