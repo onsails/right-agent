@@ -47,7 +47,16 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
         tracing::debug!("sync: uploaded reply-schema.json");
     }
 
-    // 3. Upload rightclaw builtin skills
+    // 3. Upload .mcp.json (rightmemory + external MCP servers with Bearer tokens)
+    let mcp_json = agent_dir.join(".mcp.json");
+    if mcp_json.exists() {
+        rightclaw::openshell::upload_file(sandbox, &mcp_json, "/sandbox/")
+            .await
+            .map_err(|e| miette::miette!("sync .mcp.json: {e:#}"))?;
+        tracing::debug!("sync: uploaded .mcp.json");
+    }
+
+    // 4. Upload rightclaw builtin skills
     for skill_name in &["rightskills", "cronsync"] {
         let skill_dir = agent_dir.join(".claude").join("skills").join(skill_name);
         if skill_dir.exists() {
@@ -57,7 +66,7 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
         }
     }
 
-    // 4. Verify .claude.json -- download, check rightclaw keys, fix if needed
+    // 5. Verify .claude.json -- download, check rightclaw keys, fix if needed
     verify_claude_json(agent_dir, sandbox).await?;
 
     tracing::debug!("sync: cycle complete");
