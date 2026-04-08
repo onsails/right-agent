@@ -50,7 +50,7 @@ RightClaw orchestrates multiple independent Claude Code sessions, each running i
 
 ### Security
 
-NVIDIA OpenShell containers per agent, credential isolation, declarative network and filesystem policies, prompt injection detection. See [Security Model](docs/SECURITY.md) for the full picture.
+NVIDIA OpenShell containers per agent, credential isolation, declarative network and filesystem policies, prompt injection detection. See [Security Model](docs/SECURITY.md) and [Policy Guide](docs/SECURITY.md#configuring-policies) for details.
 
 ### Compliance
 
