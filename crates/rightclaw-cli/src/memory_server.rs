@@ -83,7 +83,6 @@ pub struct MemoryServer {
     conn: Arc<Mutex<rusqlite::Connection>>,
     agent_name: String,
     agent_dir: std::path::PathBuf,
-    #[allow(dead_code)] // reserved for mcp_auth tunnel URL resolution
     rightclaw_home: std::path::PathBuf,
 }
 
@@ -360,6 +359,17 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<McpAuthParams>,
     ) -> Result<CallToolResult, McpError> {
+        // Guard: check tunnel state before attempting OAuth discovery.
+        let pc_port = std::env::var("RC_PC_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(rightclaw::runtime::pc_client::PC_PORT);
+        let tunnel_state =
+            rightclaw::tunnel::health::check_tunnel(&self.rightclaw_home, pc_port).await;
+        if let Some(err_msg) = tunnel_state.error_message() {
+            return Ok(CallToolResult::error(vec![Content::text(err_msg)]));
+        }
+
         let mcp_json_path = self.agent_dir.join("mcp.json");
         let servers = rightclaw::mcp::credentials::list_http_servers(
             &mcp_json_path,
