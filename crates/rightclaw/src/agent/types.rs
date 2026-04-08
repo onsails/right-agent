@@ -55,27 +55,36 @@ impl std::str::FromStr for NetworkPolicy {
     }
 }
 
-/// Per-agent sandbox overrides defined in agent.yaml.
-///
-/// All arrays MERGE with generated defaults (D-08).
+/// Sandbox execution mode for an agent.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxMode {
+    /// Run inside OpenShell container (default — secure).
+    #[default]
+    Openshell,
+    /// Run directly on host (needed for computer-use, Chrome, etc.).
+    None,
+}
+
+/// Per-agent sandbox configuration in agent.yaml.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SandboxOverrides {
-    /// Additional paths to allow writing (appended to defaults).
+pub struct SandboxConfig {
+    /// Execution mode: openshell (sandboxed) or none (direct host).
     #[serde(default)]
-    pub allow_write: Vec<String>,
+    pub mode: SandboxMode,
+    /// Path to OpenShell policy file, relative to agent directory.
+    /// Required when mode is openshell.
+    pub policy_file: Option<std::path::PathBuf>,
+}
 
-    /// Additional paths to allow reading (appended to defaults, D-09b).
-    #[serde(default)]
-    pub allow_read: Vec<String>,
-
-    /// Additional domains to allow (appended to defaults).
-    #[serde(default)]
-    pub allowed_domains: Vec<String>,
-
-    /// Commands to exclude from sandbox (appended to defaults).
-    #[serde(default)]
-    pub excluded_commands: Vec<String>,
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            mode: SandboxMode::Openshell,
+            policy_file: Option::None,
+        }
+    }
 }
 
 /// Parsed `agent.yaml` configuration for a single agent.
@@ -98,9 +107,9 @@ pub struct AgentConfig {
     /// Claude model to use (e.g. "sonnet", "opus", "haiku")
     pub model: Option<String>,
 
-    /// Per-agent sandbox overrides from `sandbox:` section.
+    /// Per-agent sandbox configuration from `sandbox:` section.
     #[serde(default)]
-    pub sandbox: Option<SandboxOverrides>,
+    pub sandbox: Option<SandboxConfig>,
 
     /// Inline Telegram bot token.
     #[serde(default)]
@@ -126,6 +135,48 @@ pub struct AgentConfig {
     /// Attachment handling configuration.
     #[serde(default)]
     pub attachments: AttachmentsConfig,
+}
+
+impl AgentConfig {
+    /// Effective sandbox mode — defaults to Openshell when `sandbox` section is absent.
+    pub fn sandbox_mode(&self) -> &SandboxMode {
+        self.sandbox
+            .as_ref()
+            .map(|s| &s.mode)
+            .unwrap_or(&SandboxMode::Openshell)
+    }
+
+    /// Resolved policy file path (absolute), or None if mode is None.
+    /// Returns Err if mode is Openshell but policy_file is missing.
+    pub fn resolve_policy_path(
+        &self,
+        agent_dir: &std::path::Path,
+    ) -> miette::Result<Option<std::path::PathBuf>> {
+        match self.sandbox_mode() {
+            SandboxMode::None => Ok(Option::None),
+            SandboxMode::Openshell => {
+                let rel = self
+                    .sandbox
+                    .as_ref()
+                    .and_then(|s| s.policy_file.as_ref())
+                    .ok_or_else(|| {
+                        miette::miette!(
+                            help = "Add `sandbox:\\n  policy_file: policy.yaml` to agent.yaml, or set `sandbox:\\n  mode: none`",
+                            "agent.yaml has sandbox mode 'openshell' but no policy_file specified"
+                        )
+                    })?;
+                let abs = agent_dir.join(rel);
+                if !abs.exists() {
+                    return Err(miette::miette!(
+                        help = "Run `rightclaw agent init <name>` to generate a default policy, or create the file manually",
+                        "policy file not found: {}",
+                        abs.display()
+                    ));
+                }
+                Ok(Some(abs))
+            }
+        }
+    }
 }
 
 /// Configuration for attachment handling.
@@ -251,81 +302,10 @@ unknown_field: "should fail"
     }
 
     #[test]
-    fn agent_config_with_sandbox_overrides() {
-        let yaml = r#"
-restart: on_failure
-sandbox:
-  allow_write:
-    - "/tmp/builds"
-  allow_read:
-    - "/data/shared"
-  allowed_domains:
-    - "registry.npmjs.org"
-  excluded_commands:
-    - "docker"
-"#;
-        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        let sandbox = config.sandbox.unwrap();
-        assert_eq!(sandbox.allow_write, vec!["/tmp/builds"]);
-        assert_eq!(sandbox.allow_read, vec!["/data/shared"]);
-        assert_eq!(sandbox.allowed_domains, vec!["registry.npmjs.org"]);
-        assert_eq!(sandbox.excluded_commands, vec!["docker"]);
-    }
-
-    #[test]
-    fn sandbox_overrides_deserializes_allow_read() {
-        let yaml = r#"
-sandbox:
-  allow_read:
-    - "/data/shared"
-    - "/mnt/datasets"
-"#;
-        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        let sandbox = config.sandbox.unwrap();
-        assert_eq!(sandbox.allow_read, vec!["/data/shared", "/mnt/datasets"]);
-    }
-
-    #[test]
-    fn sandbox_overrides_allow_read_defaults_empty() {
-        let yaml = "sandbox: {}";
-        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        let sandbox = config.sandbox.unwrap();
-        assert!(sandbox.allow_read.is_empty(), "allow_read should default to empty vec");
-    }
-
-    #[test]
     fn agent_config_without_sandbox_section() {
         let yaml = "restart: never";
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert!(config.sandbox.is_none());
-    }
-
-    #[test]
-    fn sandbox_overrides_empty_section() {
-        let yaml = "sandbox: {}";
-        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        let sandbox = config.sandbox.unwrap();
-        assert!(sandbox.allow_write.is_empty());
-        assert!(sandbox.allow_read.is_empty());
-        assert!(sandbox.allowed_domains.is_empty());
-        assert!(sandbox.excluded_commands.is_empty());
-    }
-
-    #[test]
-    fn sandbox_overrides_rejects_unknown_fields() {
-        let yaml = r#"
-sandbox:
-  allow_write:
-    - "/tmp"
-  unknown_field: "bad"
-"#;
-        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("unknown field"),
-            "expected 'unknown field' in error: {err}"
-        );
     }
 
     #[test]
@@ -396,5 +376,70 @@ attachments:
         let yaml = "";
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.attachments.retention_days, 7);
+    }
+
+    #[test]
+    fn sandbox_config_mode_openshell_with_policy() {
+        let yaml = r#"
+sandbox:
+  mode: openshell
+  policy_file: policy.yaml
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = config.sandbox.unwrap();
+        assert_eq!(sandbox.mode, SandboxMode::Openshell);
+        assert_eq!(
+            sandbox.policy_file.as_deref(),
+            Some(std::path::Path::new("policy.yaml"))
+        );
+    }
+
+    #[test]
+    fn sandbox_config_mode_none() {
+        let yaml = r#"
+sandbox:
+  mode: none
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = config.sandbox.unwrap();
+        assert_eq!(sandbox.mode, SandboxMode::None);
+        assert!(sandbox.policy_file.is_none());
+    }
+
+    #[test]
+    fn sandbox_config_defaults_to_openshell() {
+        let yaml = "sandbox: {}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sandbox = config.sandbox.unwrap();
+        assert_eq!(sandbox.mode, SandboxMode::Openshell);
+    }
+
+    #[test]
+    fn sandbox_config_rejects_unknown_mode() {
+        let yaml = r#"
+sandbox:
+  mode: docker
+"#;
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sandbox_config_rejects_old_allow_write_field() {
+        let yaml = r#"
+sandbox:
+  allow_write:
+    - "/tmp"
+"#;
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err(), "old SandboxOverrides fields must be rejected");
+    }
+
+    #[test]
+    fn agent_config_without_sandbox_defaults_mode_openshell() {
+        let yaml = "{}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        // sandbox is None — effective mode should be openshell (tested via helper)
+        assert!(config.sandbox.is_none());
     }
 }
