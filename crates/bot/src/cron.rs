@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use teloxide::prelude::Requester as _;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::telegram::{worker::parse_reply_output, BotType};
 
@@ -359,6 +360,7 @@ pub async fn run_cron_task(
     agent_name: String,
     bot: BotType,
     notify_chat_ids: Vec<i64>,
+    shutdown: CancellationToken,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
     let mut handles: HashMap<String, (CronSpec, JoinHandle<()>)> = HashMap::new();
@@ -369,9 +371,23 @@ pub async fn run_cron_task(
     reconcile_jobs(&mut handles, &agent_dir, &agent_name, &bot, &notify_chat_ids).await;
 
     loop {
-        interval.tick().await;
-        reconcile_jobs(&mut handles, &agent_dir, &agent_name, &bot, &notify_chat_ids).await;
+        tokio::select! {
+            _ = interval.tick() => {
+                reconcile_jobs(&mut handles, &agent_dir, &agent_name, &bot, &notify_chat_ids).await;
+            }
+            _ = shutdown.cancelled() => {
+                tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler, waiting for running jobs");
+                break;
+            }
+        }
     }
+
+    // Wait for all running job handles (don't abort — let in-flight jobs finish)
+    for (name, (_, handle)) in handles {
+        tracing::info!(job = %name, "cron shutdown: waiting for job to finish");
+        let _ = handle.await;
+    }
+    tracing::info!(agent = %agent_name, "cron shutdown complete — all jobs finished");
 }
 
 async fn reconcile_jobs(

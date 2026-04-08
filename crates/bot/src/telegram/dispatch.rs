@@ -18,6 +18,7 @@ use teloxide::dispatching::UpdateFilterExt;
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
@@ -60,6 +61,7 @@ pub async fn run_telegram(
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
     refresh_tx: tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>,
+    shutdown: CancellationToken,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
@@ -140,6 +142,9 @@ pub async fn run_telegram(
                 if result.is_ok() {
                     tracing::info!("SIGINT received -- initiating graceful shutdown");
                 }
+            }
+            _ = shutdown.cancelled() => {
+                tracing::info!("config change detected -- initiating graceful shutdown");
             }
         }
 

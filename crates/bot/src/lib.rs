@@ -145,14 +145,21 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         );
     }
 
+    // Graceful restart: config watcher cancels this token when agent.yaml changes.
+    use tokio_util::sync::CancellationToken;
+    let shutdown = CancellationToken::new();
+    let agent_yaml_path = agent_dir.join("agent.yaml");
+    config_watcher::spawn_config_watcher(&agent_yaml_path, shutdown.clone())?;
+
     // CRON-01: spawn cron task alongside Telegram dispatcher.
     // Build bot here so cron can send replies; run_telegram builds its own independent instance.
     let cron_bot = telegram::bot::build_bot(token.clone());
     let cron_agent_dir = agent_dir.clone();
     let cron_agent_name = args.agent.clone();
     let cron_chat_ids = config.allowed_chat_ids.clone();
-    tokio::spawn(async move {
-        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_bot, cron_chat_ids).await;
+    let cron_shutdown = shutdown.clone();
+    let cron_handle = tokio::spawn(async move {
+        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_bot, cron_chat_ids, cron_shutdown).await;
     });
 
     // Build shared OAuth PendingAuth map
@@ -321,13 +328,16 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     // Sync config files to sandbox before starting teloxide.
     // Blocks until first sync completes — ensures sandbox has correct .claude.json,
     // settings.json, etc. before any claude -p invocations.
-    if !args.no_sandbox {
+    let sync_handle = if !args.no_sandbox {
         let sync_sandbox = rightclaw::openshell::sandbox_name(&args.agent);
         sync::initial_sync(&agent_dir, &sync_sandbox).await?;
         let sync_agent_dir = agent_dir.clone();
         let sync_sandbox_bg = sync_sandbox;
-        tokio::spawn(sync::run_sync_task(sync_agent_dir, sync_sandbox_bg));
-    }
+        let sync_shutdown = shutdown.clone();
+        Some(tokio::spawn(sync::run_sync_task(sync_agent_dir, sync_sandbox_bg, sync_shutdown)))
+    } else {
+        None
+    };
 
     // Spawn periodic attachment cleanup task
     {
@@ -353,10 +363,19 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             home.clone(),
             ssh_config_path,
             refresh_tx_for_handler,
+            shutdown.clone(),
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
     };
+
+    tracing::info!("waiting for cron to finish");
+    let _ = cron_handle.await;
+    if let Some(handle) = sync_handle {
+        tracing::info!("waiting for sync to finish");
+        let _ = handle.await;
+    }
+    tracing::info!("graceful shutdown complete");
 
     result
 }
