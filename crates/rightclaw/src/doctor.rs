@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::Path;
 
+use owo_colors::OwoColorize;
+
 const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 const MCP_ISSUES_PREFIX: &str = "missing: ";
 
@@ -23,14 +25,14 @@ pub struct DoctorCheck {
 
 impl fmt::Display for DoctorCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let icon = match self.status {
-            CheckStatus::Pass => "ok",
-            CheckStatus::Fail => "FAIL",
-            CheckStatus::Warn => "warn",
+        let status_str = match self.status {
+            CheckStatus::Pass => format!("{}", "ok".green()),
+            CheckStatus::Fail => format!("{}", "FAIL".red().bold()),
+            CheckStatus::Warn => format!("{}", "warn".yellow()),
         };
-        write!(f, "  {:<20} {:<6} {}", self.name, icon, self.detail)?;
+        write!(f, "  {:<24} {:<6} {}", self.name, status_str, self.detail)?;
         if let Some(ref fix) = self.fix {
-            write!(f, "\n    fix: {fix}")?;
+            write!(f, "\n{:>32}{fix}", "fix: ".dimmed())?;
         }
         Ok(())
     }
@@ -82,8 +84,6 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
             checks.push(check_bwrap_sandbox());
         }
 
-        // DOC-01: ripgrep PATH check (sandbox dependency)
-        checks.push(check_rg_in_path());
     }
 
     // Agent structure checks
@@ -112,14 +112,19 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
         checks.push(check);
     }
 
-    // DOC-02: per-agent settings.json ripgrep.command validation (cross-platform)
-    checks.extend(check_ripgrep_in_settings(home));
 
     // cloudflared binary check — Warn severity (D-03, OAUTH-04)
     checks.push(check_cloudflared_binary());
 
     // Tunnel config + credentials checks (unified).
     checks.extend(check_tunnel_state(home));
+
+    // Tunnel health check — only when tunnel is configured.
+    if let Ok(cfg) = crate::config::read_global_config(home)
+        && cfg.tunnel.is_some()
+    {
+        checks.push(check_tunnel_health(home));
+    }
 
     // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
     checks.push(check_mcp_tokens(home));
@@ -164,139 +169,6 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
         detail: "not found in PATH".to_string(),
         fix: fix_hint.map(|s| s.to_string()),
     }
-}
-
-/// Check if ripgrep (`rg`) is available in PATH. (DOC-01)
-///
-/// Uses Warn (not Fail) when absent — ripgrep is a sandbox dependency but its
-/// absence is recoverable by reinstalling and running `rightclaw up` again.
-fn check_rg_in_path() -> DoctorCheck {
-    let raw = check_binary(
-        "rg",
-        Some("Install ripgrep: nix profile install nixpkgs#ripgrep / apt install ripgrep / brew install ripgrep"),
-    );
-    DoctorCheck {
-        status: if raw.status == CheckStatus::Pass {
-            CheckStatus::Pass
-        } else {
-            CheckStatus::Warn
-        },
-        ..raw
-    }
-}
-
-/// Validate per-agent settings.json sandbox.ripgrep.command. (DOC-02)
-///
-/// For each agent directory under `home/agents/`, checks that:
-/// - `.claude/settings.json` exists
-/// - The JSON is valid
-/// - `sandbox.ripgrep.command` key is present
-/// - The path it points to exists as a file on disk
-///
-/// Cross-platform — not gated to Linux.
-/// Returns an empty Vec when the agents directory does not exist.
-fn check_ripgrep_in_settings(home: &Path) -> Vec<DoctorCheck> {
-    let agents_dir = home.join("agents");
-    if !agents_dir.exists() {
-        return vec![];
-    }
-
-    let entries = match std::fs::read_dir(&agents_dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
-
-    let mut checks = Vec::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-
-        let check_name = format!("sandbox-rg/{name}");
-        let settings_path = path.join(".claude").join("settings.json");
-
-        if !settings_path.exists() {
-            checks.push(DoctorCheck {
-                name: check_name,
-                status: CheckStatus::Warn,
-                detail: "settings.json not found".to_string(),
-                fix: Some("Run `rightclaw up` to generate agent settings".to_string()),
-            });
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(&settings_path) {
-            Ok(c) => c,
-            Err(e) => {
-                checks.push(DoctorCheck {
-                    name: check_name,
-                    status: CheckStatus::Warn,
-                    detail: format!("cannot read settings.json: {e}"),
-                    fix: None,
-                });
-                continue;
-            }
-        };
-
-        let parsed: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => {
-                checks.push(DoctorCheck {
-                    name: check_name,
-                    status: CheckStatus::Warn,
-                    detail: "settings.json is not valid JSON".to_string(),
-                    fix: Some("Run `rightclaw up` to regenerate settings".to_string()),
-                });
-                continue;
-            }
-        };
-
-        match parsed["sandbox"]["ripgrep"]["command"].as_str() {
-            None => {
-                checks.push(DoctorCheck {
-                    name: check_name,
-                    status: CheckStatus::Warn,
-                    detail: "sandbox.ripgrep.command absent -- CC sandbox will fail at launch"
-                        .to_string(),
-                    fix: Some(
-                        "Ensure ripgrep is installed, then run `rightclaw up` to regenerate settings"
-                            .to_string(),
-                    ),
-                });
-            }
-            Some(cmd) => {
-                if std::path::Path::new(cmd).is_file() {
-                    checks.push(DoctorCheck {
-                        name: check_name,
-                        status: CheckStatus::Pass,
-                        detail: cmd.to_string(),
-                        fix: None,
-                    });
-                } else {
-                    checks.push(DoctorCheck {
-                        name: check_name,
-                        status: CheckStatus::Warn,
-                        detail: format!(
-                            "sandbox.ripgrep.command points to non-existent path: {cmd}"
-                        ),
-                        fix: Some(
-                            "Reinstall ripgrep and run `rightclaw up` to regenerate settings"
-                                .to_string(),
-                        ),
-                    });
-                }
-            }
-        }
-    }
-
-    checks
 }
 
 /// Validate agent directory structure.
@@ -679,6 +551,43 @@ fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
     }
 
     checks
+}
+
+/// Check tunnel reachability using the tunnel health module.
+fn check_tunnel_health(home: &Path) -> DoctorCheck {
+    use crate::runtime::pc_client::PC_PORT;
+    use crate::tunnel::health::{TunnelState, check_tunnel};
+
+    let state = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(check_tunnel(home, PC_PORT))
+    });
+
+    match state {
+        TunnelState::Healthy => DoctorCheck {
+            name: "tunnel-health".to_string(),
+            status: CheckStatus::Pass,
+            detail: "tunnel reachable".to_string(),
+            fix: None,
+        },
+        TunnelState::NotConfigured => DoctorCheck {
+            name: "tunnel-health".to_string(),
+            status: CheckStatus::Warn,
+            detail: "skipped — no tunnel configured".to_string(),
+            fix: None,
+        },
+        TunnelState::NotRunning => DoctorCheck {
+            name: "tunnel-health".to_string(),
+            status: CheckStatus::Warn,
+            detail: "skipped — cloudflared not running".to_string(),
+            fix: Some("run `rightclaw up` to start cloudflared".to_string()),
+        },
+        TunnelState::Unhealthy { reason } => DoctorCheck {
+            name: "tunnel-health".to_string(),
+            status: CheckStatus::Warn,
+            detail: format!("hostname not reachable: {reason}"),
+            fix: Some("check DNS and Cloudflare dashboard".to_string()),
+        },
+    }
 }
 
 /// Check MCP OAuth token status across all agents. (REFRESH-03)
