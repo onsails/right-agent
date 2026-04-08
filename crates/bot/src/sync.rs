@@ -1,6 +1,8 @@
 //! Background sync task: periodically uploads config files to sandbox.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
@@ -78,6 +80,109 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
     verify_claude_json(agent_dir, sandbox).await?;
 
     tracing::debug!("sync: cycle complete");
+    Ok(())
+}
+
+/// Files that CC may modify inside the sandbox. Synced back to host after each invocation.
+const REVERSE_SYNC_FILES: &[&str] = &[
+    "IDENTITY.md",
+    "SOUL.md",
+    "USER.md",
+    "MEMORY.md",
+    "BOOTSTRAP.md",
+];
+
+/// Sync .md files from sandbox back to host after a `claude -p` invocation.
+///
+/// For each file in `REVERSE_SYNC_FILES`:
+/// - Download from sandbox. If changed vs host: atomic write (tempfile + rename).
+/// - If download fails (file absent in sandbox): delete from host if it exists
+///   (handles the BOOTSTRAP.md deletion case).
+///
+/// Per-file errors are collected; the function returns an error summarizing all failures.
+/// Callers should log but not propagate — reverse sync is not on the critical path.
+pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
+    let tmp_dir = tempfile::tempdir()
+        .map_err(|e| miette::miette!("reverse sync: failed to create temp dir: {e:#}"))?;
+
+    let mut errors: Vec<String> = Vec::new();
+
+    for &filename in REVERSE_SYNC_FILES {
+        let sandbox_path = format!("/sandbox/{filename}");
+        let host_path = agent_dir.join(filename);
+
+        match rightclaw::openshell::download_file(sandbox_name, &sandbox_path, tmp_dir.path()).await
+        {
+            Ok(()) => {
+                let downloaded = tmp_dir.path().join(filename);
+                if !downloaded.exists() {
+                    // download_file succeeded but no file materialized — skip
+                    continue;
+                }
+                let new_content = match std::fs::read(&downloaded) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        errors.push(format!("{filename}: read downloaded failed: {e:#}"));
+                        continue;
+                    }
+                };
+
+                // Compare with host version — skip if identical
+                if host_path.exists() {
+                    if let Ok(existing) = std::fs::read(&host_path) {
+                        if existing == new_content {
+                            tracing::debug!(file = filename, "reverse sync: unchanged, skipping");
+                            continue;
+                        }
+                    }
+                }
+
+                // Atomic write: tempfile in agent_dir + rename
+                match atomic_write_bytes(&host_path, &new_content) {
+                    Ok(()) => {
+                        tracing::info!(file = filename, "reverse sync: updated on host");
+                    }
+                    Err(e) => {
+                        errors.push(format!("{filename}: atomic write failed: {e:#}"));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(file = filename, "reverse sync: download failed: {e:#}");
+                // File absent in sandbox — if it exists on host, CC deleted it
+                if host_path.exists() {
+                    if let Err(e) = std::fs::remove_file(&host_path) {
+                        errors.push(format!("{filename}: host delete failed: {e:#}"));
+                    } else {
+                        tracing::info!(file = filename, "reverse sync: deleted from host (absent in sandbox)");
+                    }
+                }
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(miette::miette!(
+            "reverse sync: {} file(s) failed: {}",
+            errors.len(),
+            errors.join("; ")
+        ))
+    }
+}
+
+/// Atomically write bytes to a path using tempfile + rename in the same directory.
+fn atomic_write_bytes(path: &Path, content: &[u8]) -> miette::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| miette::miette!("path has no parent directory"))?;
+    let mut tmp = NamedTempFile::new_in(dir)
+        .map_err(|e| miette::miette!("failed to create temp file: {e:#}"))?;
+    tmp.write_all(content)
+        .map_err(|e| miette::miette!("failed to write temp file: {e:#}"))?;
+    tmp.persist(path)
+        .map_err(|e| miette::miette!("failed to persist temp file: {e:#}"))?;
     Ok(())
 }
 
