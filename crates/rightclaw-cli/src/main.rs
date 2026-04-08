@@ -907,7 +907,6 @@ async fn cmd_up(
         &self_exe,
         &rightclaw::codegen::ProcessComposeConfig {
             debug,
-            no_sandbox,
             run_dir: &run_dir,
             home,
             cloudflared_script: cloudflared_script_path.as_deref(),
