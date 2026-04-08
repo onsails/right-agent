@@ -26,9 +26,9 @@ struct BotProcessAgent {
     max_restarts: u32,
     /// When true, passes `--debug` to `rightclaw bot` so CC stderr is logged at debug level.
     debug: bool,
-    /// When true, sandbox is disabled (direct claude -p calls).
-    no_sandbox: bool,
-    /// Absolute path to the generated OpenShell policy.yaml for this agent. None when no_sandbox.
+    /// Sandbox mode string: "openshell" or "none".
+    sandbox_mode: String,
+    /// Absolute path to the generated OpenShell policy.yaml for this agent. None when sandbox_mode == "none".
     sandbox_policy_path: Option<String>,
     /// Rightclaw home directory (for deterministic SSH config path in login process).
     home_dir: String,
@@ -64,7 +64,6 @@ fn restart_policy_str(policy: &RestartPolicy) -> &'static str {
 /// Configuration for process-compose.yaml generation.
 pub struct ProcessComposeConfig<'a> {
     pub debug: bool,
-    pub no_sandbox: bool,
     pub run_dir: &'a Path,
     pub home: &'a Path,
     pub cloudflared_script: Option<&'a Path>,
@@ -83,7 +82,7 @@ pub fn generate_process_compose(
     exe_path: &Path,
     config: &ProcessComposeConfig<'_>,
 ) -> miette::Result<String> {
-    let &ProcessComposeConfig { debug, no_sandbox, run_dir, home, cloudflared_script, token_map_path } = config;
+    let &ProcessComposeConfig { debug, run_dir: _, home, cloudflared_script, token_map_path } = config;
     // Build cloudflared template context when tunnel script is provided.
     // working_dir = parent of scripts/ dir (i.e., rightclaw home).
     let cf_entry: Option<CloudflaredEntry> = cloudflared_script.map(|script| {
@@ -121,6 +120,20 @@ pub fn generate_process_compose(
                 config.max_restarts,
             );
 
+            let sandbox_mode = match config.sandbox_mode() {
+                crate::agent::types::SandboxMode::Openshell => "openshell",
+                crate::agent::types::SandboxMode::None => "none",
+            };
+
+            let sandbox_policy_path = match config.sandbox_mode() {
+                crate::agent::types::SandboxMode::Openshell => config
+                    .sandbox
+                    .as_ref()
+                    .and_then(|s| s.policy_file.as_ref())
+                    .map(|rel| agent.path.join(rel).display().to_string()),
+                crate::agent::types::SandboxMode::None => None,
+            };
+
             Some(BotProcessAgent {
                 name: agent.name.clone(),
                 agent_name: agent.name.clone(),
@@ -131,18 +144,8 @@ pub fn generate_process_compose(
                 backoff_seconds: backoff,
                 max_restarts: max,
                 debug,
-                no_sandbox,
-                sandbox_policy_path: if no_sandbox {
-                    None
-                } else {
-                    Some(
-                        run_dir
-                            .join("policies")
-                            .join(format!("{}.yaml", agent.name))
-                            .display()
-                            .to_string(),
-                    )
-                },
+                sandbox_mode: sandbox_mode.to_owned(),
+                sandbox_policy_path,
                 home_dir: home.display().to_string(),
             })
         })

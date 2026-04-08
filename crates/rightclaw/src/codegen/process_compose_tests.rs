@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
+use crate::agent::types::{SandboxConfig, SandboxMode};
 use crate::codegen::{ProcessComposeConfig, generate_process_compose};
 
 const EXE_PATH: &str = "/usr/bin/rightclaw";
@@ -10,7 +11,6 @@ const EXE_PATH: &str = "/usr/bin/rightclaw";
 fn default_config() -> ProcessComposeConfig<'static> {
     ProcessComposeConfig {
         debug: false,
-        no_sandbox: true,
         run_dir: Path::new("/tmp/run"),
         home: Path::new("/home/user/.rightclaw"),
         cloudflared_script: None,
@@ -25,7 +25,7 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         backoff_seconds: 5,
         network_policy: Default::default(),
         model: None,
-        sandbox: None,
+        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None }),
         telegram_token: Some(token.to_string()),
 
         allowed_chat_ids: vec![],
@@ -56,7 +56,7 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         backoff_seconds: 5,
         network_policy: Default::default(),
         model: None,
-        sandbox: None,
+        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None }),
         telegram_token: None,
 
         allowed_chat_ids: vec![],
@@ -104,7 +104,7 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         backoff_seconds: 10,
         network_policy: Default::default(),
         model: None,
-        sandbox: None,
+        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None }),
         telegram_token: Some(token.to_string()),
 
         allowed_chat_ids: vec![],
@@ -393,66 +393,68 @@ fn cloudflared_with_script_produces_process_entry() {
 
 // ── Sandbox mode env vars ───────────────────────────────────────────────────
 
-#[test]
-fn no_sandbox_true_emits_sandbox_mode_none() {
-    let agents = vec![make_bot_agent("myagent", "123:tok")];
-    let exe = Path::new(EXE_PATH);
-    let output =
-        generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        output.contains("RC_SANDBOX_MODE=none"),
-        "expected RC_SANDBOX_MODE=none when no_sandbox=true:\n{output}"
-    );
-    assert!(
-        !output.contains("RC_SANDBOX_POLICY"),
-        "RC_SANDBOX_POLICY must be absent when no_sandbox=true:\n{output}"
-    );
+fn make_agent_with_sandbox(name: &str, token: &str, mode: SandboxMode, policy_file: Option<&str>) -> AgentDef {
+    let config = Some(AgentConfig {
+        restart: RestartPolicy::OnFailure,
+        max_restarts: 3,
+        backoff_seconds: 5,
+        network_policy: Default::default(),
+        model: None,
+        sandbox: Some(SandboxConfig {
+            mode,
+            policy_file: policy_file.map(std::path::PathBuf::from),
+        }),
+        telegram_token: Some(token.to_string()),
+        allowed_chat_ids: vec![],
+        env: std::collections::HashMap::new(),
+        secret: None,
+        attachments: Default::default(),
+    });
+    AgentDef {
+        name: name.to_owned(),
+        path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
+        identity_path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}/IDENTITY.md")),
+        config,
+        soul_path: None,
+        user_path: None,
+        agents_path: None,
+        tools_path: None,
+        bootstrap_path: None,
+        heartbeat_path: None,
+    }
 }
 
 #[test]
-fn no_sandbox_false_emits_openshell_mode_and_policy_path() {
-    let agents = vec![make_bot_agent("myagent", "123:tok")];
+fn per_agent_sandbox_openshell_emits_openshell_mode() {
+    let agents = vec![make_agent_with_sandbox("sandboxed", "123:tok", SandboxMode::Openshell, Some("policy.yaml"))];
     let exe = Path::new(EXE_PATH);
-    let output =
-        generate_process_compose(&agents, exe, &ProcessComposeConfig {
-            no_sandbox: false,
-            ..default_config()
-        }).unwrap();
-    assert!(
-        output.contains("RC_SANDBOX_MODE=openshell"),
-        "expected RC_SANDBOX_MODE=openshell when no_sandbox=false:\n{output}"
-    );
-    assert!(
-        output.contains("RC_SANDBOX_POLICY=/tmp/run/policies/myagent.yaml"),
-        "expected RC_SANDBOX_POLICY with policy path:\n{output}"
-    );
+    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
+    assert!(output.contains("RC_SANDBOX_MODE=openshell"), "expected RC_SANDBOX_MODE=openshell:\n{output}");
+    assert!(output.contains("RC_SANDBOX_POLICY=/home/user/.rightclaw/agents/sandboxed/policy.yaml"), "expected policy path:\n{output}");
+    assert!(!output.contains("--no-sandbox"), "--no-sandbox must not appear:\n{output}");
 }
 
 #[test]
-fn no_sandbox_false_command_lacks_no_sandbox_flag() {
-    let agents = vec![make_bot_agent("myagent", "123:tok")];
+fn per_agent_sandbox_none_emits_none_mode() {
+    let agents = vec![make_agent_with_sandbox("unsandboxed", "123:tok", SandboxMode::None, None)];
     let exe = Path::new(EXE_PATH);
-    let output =
-        generate_process_compose(&agents, exe, &ProcessComposeConfig {
-            no_sandbox: false,
-            ..default_config()
-        }).unwrap();
-    assert!(
-        !output.contains("--no-sandbox"),
-        "--no-sandbox must be absent from command when sandbox enabled:\n{output}"
-    );
+    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
+    assert!(output.contains("RC_SANDBOX_MODE=none"), "expected RC_SANDBOX_MODE=none:\n{output}");
+    assert!(!output.contains("RC_SANDBOX_POLICY"), "RC_SANDBOX_POLICY must be absent:\n{output}");
 }
 
 #[test]
-fn no_sandbox_true_command_has_no_sandbox_flag() {
-    let agents = vec![make_bot_agent("myagent", "123:tok")];
+fn mixed_sandbox_modes_in_same_config() {
+    let agents = vec![
+        make_agent_with_sandbox("sandboxed", "123:tok", SandboxMode::Openshell, Some("policy.yaml")),
+        make_agent_with_sandbox("direct", "456:tok", SandboxMode::None, None),
+    ];
     let exe = Path::new(EXE_PATH);
-    let output =
-        generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        output.contains("--no-sandbox"),
-        "expected --no-sandbox in command when no_sandbox=true:\n{output}"
-    );
+    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
+    assert!(output.contains("sandboxed-bot:"));
+    assert!(output.contains("direct-bot:"));
+    assert!(output.contains("RC_SANDBOX_MODE=openshell"));
+    assert!(output.contains("RC_SANDBOX_MODE=none"));
 }
 
 // ── Login process ───────────────────────────────────────────────────────────
@@ -463,10 +465,7 @@ fn no_sandbox_true_command_has_no_sandbox_flag() {
 fn bot_process_has_rc_pc_port_env() {
     let agents = vec![make_bot_agent("right", "123:tok")];
     let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &ProcessComposeConfig {
-        no_sandbox: false,
-        ..default_config()
-    }).unwrap();
+    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
     assert!(
         output.contains("RC_PC_PORT="),
         "expected RC_PC_PORT env var on bot process:\n{output}"
@@ -485,7 +484,6 @@ fn right_mcp_server_process_included_when_token_map_provided() {
         &agents,
         Path::new("/usr/bin/rightclaw"),
         &ProcessComposeConfig {
-            no_sandbox: false,
             run_dir: dir.path(),
             home: dir.path(),
             token_map_path: Some(&token_map),
