@@ -62,6 +62,13 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         dir
     };
 
+    // Create inbox/outbox directories for attachment handling
+    for subdir in &["inbox", "outbox", "tmp/inbox", "tmp/outbox"] {
+        let dir = agent_dir.join(subdir);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| miette::miette!("failed to create {}: {e:#}", dir.display()))?;
+    }
+
     // Parse agent config
     let config = parse_agent_config(&agent_dir)?.unwrap_or_else(|| {
         rightclaw::agent::types::AgentConfig {
@@ -279,6 +286,18 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         None
     };
 
+    // Create inbox/outbox inside sandbox for attachment handling
+    if !args.no_sandbox {
+        if let Some(ref cfg_path) = ssh_config_path {
+            let ssh_host = rightclaw::openshell::ssh_host(&args.agent);
+            for dir in &["/sandbox/inbox", "/sandbox/outbox"] {
+                rightclaw::openshell::ssh_exec(cfg_path, &ssh_host, &["mkdir", "-p", dir], 10)
+                    .await
+                    .map_err(|e| miette::miette!("failed to create {dir} in sandbox: {e:#}"))?;
+            }
+        }
+    }
+
     // Sync config files to sandbox before starting teloxide.
     // Blocks until first sync completes — ensures sandbox has correct .claude.json,
     // settings.json, etc. before any claude -p invocations.
@@ -288,6 +307,20 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         let sync_agent_dir = agent_dir.clone();
         let sync_sandbox_bg = sync_sandbox;
         tokio::spawn(sync::run_sync_task(sync_agent_dir, sync_sandbox_bg));
+    }
+
+    // Spawn periodic attachment cleanup task
+    {
+        let cleanup_agent_dir = agent_dir.clone();
+        let cleanup_ssh_config = ssh_config_path.clone();
+        let cleanup_agent_name = args.agent.clone();
+        let cleanup_retention = config.attachments.retention_days;
+        telegram::attachments::spawn_cleanup_task(
+            cleanup_agent_dir,
+            cleanup_ssh_config,
+            cleanup_agent_name,
+            cleanup_retention,
+        );
     }
 
     let result = tokio::select! {

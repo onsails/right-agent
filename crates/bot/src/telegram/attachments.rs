@@ -540,6 +540,88 @@ pub async fn send_attachments(
     Ok(())
 }
 
+/// Spawn a background task that periodically cleans up old attachment files.
+pub fn spawn_cleanup_task(
+    agent_dir: std::path::PathBuf,
+    ssh_config_path: Option<std::path::PathBuf>,
+    agent_name: String,
+    retention_days: u32,
+) {
+    tokio::spawn(async move {
+        let interval = std::time::Duration::from_secs(CLEANUP_INTERVAL_SECS);
+        loop {
+            tokio::time::sleep(interval).await;
+            if let Err(e) =
+                run_cleanup(&agent_dir, ssh_config_path.as_deref(), &agent_name, retention_days)
+                    .await
+            {
+                tracing::warn!("attachment cleanup failed: {e:#}");
+            }
+        }
+    });
+}
+
+async fn run_cleanup(
+    agent_dir: &std::path::Path,
+    ssh_config_path: Option<&std::path::Path>,
+    agent_name: &str,
+    retention_days: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(ssh_config) = ssh_config_path {
+        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let mtime_arg = format!("+{retention_days}");
+        // Use find to delete files older than retention_days in sandbox inbox/outbox
+        rightclaw::openshell::ssh_exec(
+            ssh_config,
+            &ssh_host,
+            &[
+                "find",
+                SANDBOX_INBOX,
+                SANDBOX_OUTBOX,
+                "-type",
+                "f",
+                "-mtime",
+                &mtime_arg,
+                "-delete",
+            ],
+            30,
+        )
+        .await?;
+    } else {
+        for subdir in &["inbox", "outbox"] {
+            let dir = agent_dir.join(subdir);
+            if dir.exists() {
+                cleanup_local_dir(&dir, retention_days).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cleanup_local_dir(
+    dir: &std::path::Path,
+    retention_days: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(u64::from(retention_days) * 86400);
+
+    let mut entries = tokio::fs::read_dir(dir).await?;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let metadata = entry.metadata().await?;
+        if !metadata.is_file() {
+            continue;
+        }
+        if let Ok(modified) = metadata.modified() {
+            if modified < cutoff {
+                tracing::debug!("cleaning up old attachment: {}", entry.path().display());
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
