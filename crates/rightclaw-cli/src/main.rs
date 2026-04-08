@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod memory_server;
 mod memory_server_http;
+mod wizard;
 
 #[derive(Parser)]
 #[command(name = "rightclaw", version, about = "Multi-agent runtime for Claude Code")]
