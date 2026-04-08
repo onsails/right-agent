@@ -330,15 +330,16 @@ fn cmd_init(
     tunnel_hostname: Option<&str>,
     yes: bool,
 ) -> miette::Result<()> {
-    // If --telegram-token flag provided, validate it upfront.
-    // Otherwise prompt interactively.
+    let interactive = !yes;
+
+    // Telegram token: CLI flag > interactive prompt > skip.
     let token = match telegram_token {
         Some(t) => {
             rightclaw::init::validate_telegram_token(t)?;
             Some(t.to_string())
         }
-        None if yes => None,
-        None => rightclaw::init::prompt_telegram_token()?,
+        None if !interactive => None,
+        None => crate::wizard::telegram_setup(None, true)?,
     };
 
     rightclaw::init::init_rightclaw_home(home, token.as_deref(), telegram_allowed_chat_ids)?;
@@ -349,200 +350,21 @@ fn cmd_init(
         home.display()
     );
     if token.is_some() {
-        println!("Telegram channel configured and plugin auto-enabled.");
+        println!("Telegram channel configured.");
     }
     if !telegram_allowed_chat_ids.is_empty() {
         println!("Telegram chat ID allowlist configured.");
     }
 
-    // Auto-tunnel setup: detect cloudflared login via cert.pem.
-    // Refactored to produce Option<TunnelConfig> (D-08, D-10) — single write at end.
-    let tunnel_cfg: Option<rightclaw::config::TunnelConfig> = if !detect_cloudflared_cert() {
-        println!("No cloudflared login found. Run `cloudflared login` to enable tunnel support.");
-        None
-    } else {
-        let cf_bin = which::which("cloudflared")
-            .map_err(|_| miette::miette!("cloudflared not found in PATH — install it first"))?;
+    // Tunnel setup via wizard.
+    let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
 
-        // Find or create the Named Tunnel.
-        let existing = find_tunnel_by_name(&cf_bin, tunnel_name)?;
-        let uuid = match existing {
-            Some(ref t) => {
-                if tunnel_hostname.is_some() || yes {
-                    // Silent reuse in non-interactive mode.
-                    t.id.clone()
-                } else {
-                    let msg = format!("Tunnel '{}' already exists. Reuse it?", tunnel_name);
-                    if prompt_yes_no(&msg, true)? {
-                        t.id.clone()
-                    } else {
-                        return Err(miette::miette!("tunnel setup cancelled"));
-                    }
-                }
-            }
-            None => {
-                let created = create_tunnel(&cf_bin, tunnel_name)?;
-                created.id
-            }
-        };
-
-        // Resolve hostname.
-        let hostname = match tunnel_hostname {
-            Some(h) => h.to_string(),
-            None if yes => {
-                return Err(miette::miette!(
-                    "--tunnel-hostname is required when using -y"
-                ));
-            }
-            None => prompt_hostname()?,
-        };
-
-        // Validate hostname is a bare domain, not a URL.
-        if hostname.starts_with("https://") || hostname.starts_with("http://") {
-            return Err(miette::miette!(
-                "--tunnel-hostname must be a bare domain (e.g. example.com), not a URL"
-            ));
-        }
-
-        // DNS CNAME record (non-fatal).
-        route_dns(&cf_bin, &uuid, &hostname);
-
-        // Credentials file is always at ~/.cloudflared/<uuid>.json — no copy needed.
-        let credentials_file = cloudflared_credentials_path(&uuid)?;
-        if !credentials_file.exists() {
-            tracing::warn!(
-                path = %credentials_file.display(),
-                "credentials file not found — tunnel may have been created on a different machine"
-            );
-        }
-
-        let tunnel_config = rightclaw::config::TunnelConfig {
-            tunnel_uuid: uuid.clone(),
-            credentials_file,
-            hostname: hostname.clone(),
-        };
-        println!("Tunnel config written. UUID: {uuid}, hostname: {hostname}");
-        Some(tunnel_config)
-    };
-
-    // Single config write regardless of which combination was detected (D-10, D-11).
     let config = rightclaw::config::GlobalConfig {
         tunnel: tunnel_cfg,
     };
     rightclaw::config::write_global_config(home, &config)?;
 
     Ok(())
-}
-
-// ---- Auto-tunnel helpers (Phase 39) ----
-
-/// An entry returned by `cloudflared tunnel list -o json` or `cloudflared tunnel create -o json`.
-#[derive(serde::Deserialize)]
-struct TunnelListEntry {
-    id: String,
-    name: String,
-}
-
-/// Testable variant of detect_cloudflared_cert — takes an explicit home dir.
-fn detect_cloudflared_cert_with_home(home: &std::path::Path) -> bool {
-    home.join(".cloudflared").join("cert.pem").exists()
-}
-
-/// Returns true if `~/.cloudflared/cert.pem` exists (cloudflared login has been run).
-fn detect_cloudflared_cert() -> bool {
-    dirs::home_dir()
-        .map(|h| detect_cloudflared_cert_with_home(&h))
-        .unwrap_or(false)
-}
-
-/// Testable variant — builds `<home>/.cloudflared/<uuid>.json` path.
-fn cloudflared_credentials_path_for_home(home: &std::path::Path, uuid: &str) -> std::path::PathBuf {
-    home.join(".cloudflared").join(format!("{uuid}.json"))
-}
-
-/// Returns `~/.cloudflared/<uuid>.json` for the given tunnel UUID.
-fn cloudflared_credentials_path(uuid: &str) -> miette::Result<std::path::PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
-    Ok(cloudflared_credentials_path_for_home(&home, uuid))
-}
-
-/// Query cloudflared for existing tunnels and find one by name.
-fn find_tunnel_by_name(cf_bin: &std::path::Path, name: &str) -> miette::Result<Option<TunnelListEntry>> {
-    let output = std::process::Command::new(cf_bin)
-        .args(["tunnel", "--loglevel", "error", "list", "-o", "json"])
-        .output()
-        .map_err(|e| miette::miette!("cloudflared list failed: {e:#}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(miette::miette!("cloudflared tunnel list failed: {stderr}"));
-    }
-    let tunnels: Vec<TunnelListEntry> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| miette::miette!("parse cloudflared list output: {e:#}"))?;
-    Ok(tunnels.into_iter().find(|t| t.name == name))
-}
-
-/// Create a new Named Tunnel via cloudflared and return the created entry.
-fn create_tunnel(cf_bin: &std::path::Path, name: &str) -> miette::Result<TunnelListEntry> {
-    let output = std::process::Command::new(cf_bin)
-        .args(["tunnel", "--loglevel", "error", "create", "-o", "json", name])
-        .output()
-        .map_err(|e| miette::miette!("cloudflared create failed: {e:#}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(miette::miette!("cloudflared tunnel create failed: {stderr}"));
-    }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| miette::miette!("parse cloudflared create output: {e:#}"))
-}
-
-/// Create a DNS CNAME record for the tunnel. Uses --overwrite-dns to replace
-/// stale CNAMEs pointing to old/dead tunnels. Non-fatal — logs warn on failure.
-fn route_dns(cf_bin: &std::path::Path, uuid: &str, hostname: &str) {
-    let result = std::process::Command::new(cf_bin)
-        .args(["tunnel", "--loglevel", "error", "route", "dns", "--overwrite-dns", uuid, hostname])
-        .output();
-    match result {
-        Ok(output) if output.status.success() => {
-            println!("DNS CNAME record created for {hostname}");
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("cloudflared route dns failed (non-fatal): {stderr}");
-        }
-        Err(e) => {
-            tracing::warn!("cloudflared route dns invocation failed (non-fatal): {e:#}");
-        }
-    }
-}
-
-/// Prompt user with a Y/n question. Returns true if yes (default when `default_yes`).
-fn prompt_yes_no(msg: &str, default_yes: bool) -> miette::Result<bool> {
-    use std::io::{self, Write};
-    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
-    print!("{msg} {hint}: ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("read input: {e}"))?;
-    let answer = input.trim().to_lowercase();
-    if answer.is_empty() {
-        return Ok(default_yes);
-    }
-    Ok(answer == "y" || answer == "yes")
-}
-
-/// Prompt user to enter a public hostname for the tunnel.
-fn prompt_hostname() -> miette::Result<String> {
-    use std::io::{self, Write};
-    print!("Public hostname for tunnel (e.g. right.example.com): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("read input: {e}"))?;
-    Ok(input.trim().to_string())
 }
 
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
@@ -1072,7 +894,7 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cloudflared_credentials_path_for_home, detect_cloudflared_cert_with_home, resolve_agent_db, truncate_content, write_managed_settings, ConfigCommands, MemoryCommands, TunnelListEntry};
+    use super::{resolve_agent_db, truncate_content, write_managed_settings, ConfigCommands, MemoryCommands};
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1423,55 +1245,6 @@ mod tests {
         let result = std::fs::remove_dir_all(agent_dir.join(".claude/skills/skills"));
         // Either Ok or NotFound error — never panics
         assert!(result.is_ok() || result.unwrap_err().kind() == std::io::ErrorKind::NotFound);
-    }
-
-    // ---- auto-tunnel helper tests (Phase 39) ----
-
-    #[test]
-    fn detect_cloudflared_cert_returns_false_when_absent() {
-        let tmp = TempDir::new().unwrap();
-        let result = detect_cloudflared_cert_with_home(tmp.path());
-        assert!(!result, "should return false when cert.pem is absent");
-    }
-
-    #[test]
-    fn detect_cloudflared_cert_returns_true_when_present() {
-        let tmp = TempDir::new().unwrap();
-        let cloudflared_dir = tmp.path().join(".cloudflared");
-        fs::create_dir_all(&cloudflared_dir).unwrap();
-        fs::write(cloudflared_dir.join("cert.pem"), "dummy cert content").unwrap();
-        let result = detect_cloudflared_cert_with_home(tmp.path());
-        assert!(result, "should return true when cert.pem exists");
-    }
-
-    #[test]
-    fn cloudflared_credentials_path_constructs_expected_path() {
-        let result = cloudflared_credentials_path_for_home(std::path::Path::new("/home/user"), "abc-123");
-        assert_eq!(result, PathBuf::from("/home/user/.cloudflared/abc-123.json"));
-    }
-
-    #[test]
-    fn parse_tunnel_list_finds_tunnel_by_name() {
-        let json = r#"[{"id":"abc-123","name":"rightclaw","created_at":"2026-04-05T10:00:00Z","deleted_at":"0001-01-01T00:00:00Z","connections":[]}]"#;
-        let tunnels: Vec<TunnelListEntry> = serde_json::from_str(json).expect("parse should succeed");
-        let found = tunnels.into_iter().find(|t| t.name == "rightclaw");
-        assert!(found.is_some(), "should find tunnel by name");
-        assert_eq!(found.unwrap().id, "abc-123");
-    }
-
-    #[test]
-    fn parse_tunnel_list_returns_none_for_missing_name() {
-        let json = r#"[{"id":"abc-123","name":"rightclaw","created_at":"2026-04-05T10:00:00Z","deleted_at":"0001-01-01T00:00:00Z","connections":[]}]"#;
-        let tunnels: Vec<TunnelListEntry> = serde_json::from_str(json).expect("parse should succeed");
-        let found = tunnels.into_iter().find(|t| t.name == "other-tunnel");
-        assert!(found.is_none(), "should return None for unknown tunnel name");
-    }
-
-    #[test]
-    fn parse_tunnel_list_ignores_unknown_fields() {
-        let json = r#"[{"id":"x","name":"n","future_field":"whatever"}]"#;
-        let result: Result<Vec<TunnelListEntry>, _> = serde_json::from_str(json);
-        assert!(result.is_ok(), "parse must succeed with unknown fields present");
     }
 
     // ---- McpCommands variant existence (compile-time) ----
