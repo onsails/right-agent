@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::agent::types::NetworkPolicy;
+
 const DEFAULT_IDENTITY: &str = include_str!("../../../templates/right/IDENTITY.md");
 const DEFAULT_SOUL: &str = include_str!("../../../templates/right/SOUL.md");
 const DEFAULT_USER: &str = include_str!("../../../templates/right/USER.md");
@@ -24,6 +26,7 @@ pub fn init_rightclaw_home(
     home: &Path,
     telegram_token: Option<&str>,
     telegram_allowed_chat_ids: &[i64],
+    network_policy: &NetworkPolicy,
 ) -> miette::Result<()> {
     let agents_dir = home.join("agents").join("right");
 
@@ -80,6 +83,20 @@ pub fn init_rightclaw_home(
                 .map_err(|e| miette::miette!("Failed to serialize settings: {e}"))?,
         )
         .map_err(|e| miette::miette!("Failed to write settings.json: {}", e))?;
+    }
+
+    // Write network policy to agent.yaml.
+    {
+        let agent_yaml_path = agents_dir.join("agent.yaml");
+        let mut yaml = std::fs::read_to_string(&agent_yaml_path)
+            .map_err(|e| miette::miette!("Failed to read agent.yaml: {}", e))?;
+        let policy_str = match network_policy {
+            NetworkPolicy::Restrictive => "restrictive",
+            NetworkPolicy::Permissive => "permissive",
+        };
+        yaml.push_str(&format!("\nnetwork_policy: {policy_str}\n"));
+        std::fs::write(&agent_yaml_path, &yaml)
+            .map_err(|e| miette::miette!("Failed to update agent.yaml: {}", e))?;
     }
 
     // Write Telegram token inline into agent.yaml.
@@ -179,16 +196,38 @@ pub fn prompt_telegram_token() -> miette::Result<Option<String>> {
     Ok(Some(token.to_string()))
 }
 
+/// Prompt the user for network policy choice interactively.
+///
+/// Returns the chosen `NetworkPolicy`. Defaults to `Restrictive` on empty input.
+pub fn prompt_network_policy() -> miette::Result<NetworkPolicy> {
+    use std::io::{self, Write};
+    println!("Network policy for sandbox:");
+    println!("  1. Restrictive — Anthropic/Claude domains only (recommended)");
+    println!("  2. Permissive — all HTTPS domains allowed (needed for external MCP servers)");
+    print!("Choose [1/2] (default: 1): ");
+    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+    match input.trim() {
+        "" | "1" => Ok(NetworkPolicy::Restrictive),
+        "2" => Ok(NetworkPolicy::Permissive),
+        other => Err(miette::miette!("Invalid choice: '{other}'. Expected 1 or 2.")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::agent::types::NetworkPolicy;
 
     #[test]
     fn init_creates_default_agent_files() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[]).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive).unwrap();
 
         let agents_dir = dir.path().join("agents").join("right");
         assert!(agents_dir.join("IDENTITY.md").exists());
@@ -218,7 +257,7 @@ mod tests {
     #[test]
     fn init_identity_contains_right() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[]).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive).unwrap();
 
         let content =
             std::fs::read_to_string(dir.path().join("agents/right/IDENTITY.md")).unwrap();
@@ -231,9 +270,9 @@ mod tests {
     #[test]
     fn init_errors_if_already_initialized() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[]).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive).unwrap();
 
-        let result = init_rightclaw_home(dir.path(), None, &[]);
+        let result = init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive);
         assert!(result.is_err());
         let err = format!("{:?}", result.unwrap_err());
         assert!(
@@ -250,7 +289,7 @@ mod tests {
     #[test]
     fn init_with_telegram_writes_token_inline_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[]).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -262,7 +301,7 @@ mod tests {
     #[test]
     fn init_creates_bootstrap_md() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[]).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive).unwrap();
 
         let bootstrap = std::fs::read_to_string(
             dir.path().join("agents/right/BOOTSTRAP.md"),
@@ -309,7 +348,7 @@ mod tests {
     #[test]
     fn init_with_telegram_creates_settings_json() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[]).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive).unwrap();
 
         let settings_path = dir
             .path()
@@ -343,7 +382,7 @@ mod tests {
     #[test]
     fn init_creates_settings_without_sandbox_section() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[]).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive).unwrap();
 
         let settings_path = dir.path().join("agents/right/.claude/settings.json");
         let content = std::fs::read_to_string(&settings_path).unwrap();
@@ -360,7 +399,7 @@ mod tests {
     #[test]
     fn init_without_telegram_creates_settings_without_plugin() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[]).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive).unwrap();
 
         let settings_path = dir
             .path()
@@ -396,6 +435,7 @@ mod tests {
             dir.path(),
             Some("123456:ABCdef"),
             &[85743491_i64, 100200300_i64],
+            &NetworkPolicy::Permissive,
         )
         .unwrap();
 
@@ -429,6 +469,7 @@ mod tests {
             dir.path(),
             Some("123456:ABCdef"),
             &[85743491_i64],
+            &NetworkPolicy::Permissive,
         )
         .unwrap();
 
@@ -450,7 +491,7 @@ mod tests {
     #[test]
     fn init_with_telegram_no_chat_ids_does_not_write_allowed_chat_ids() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[]).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -460,6 +501,30 @@ mod tests {
         assert!(
             !yaml.contains("allowed_chat_ids"),
             "allowed_chat_ids must not appear when no chat IDs provided"
+        );
+    }
+
+    #[test]
+    fn init_writes_network_policy_restrictive_to_agent_yaml() {
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Restrictive).unwrap();
+
+        let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
+        assert!(
+            yaml.contains("network_policy: restrictive"),
+            "agent.yaml must contain network_policy: restrictive, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn init_writes_network_policy_permissive_to_agent_yaml() {
+        let dir = tempdir().unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive).unwrap();
+
+        let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
+        assert!(
+            yaml.contains("network_policy: permissive"),
+            "agent.yaml must contain network_policy: permissive, got:\n{yaml}"
         );
     }
 }
