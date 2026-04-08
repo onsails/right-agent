@@ -64,40 +64,10 @@ pub struct WorkerContext {
 pub struct ReplyOutput {
     pub content: Option<String>,
     pub reply_to_message_id: Option<i32>,
-    /// STUB: Phase 25 warns and skips
-    pub media_paths: Option<Vec<String>>,
+    pub attachments: Option<Vec<super::attachments::OutboundAttachment>>,
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
-
-/// Format a batch of messages as XML per D-02.
-///
-/// Output:
-/// ```xml
-/// <messages>
-/// <msg id="123" ts="2026-03-31T12:00:00Z" from="user">text</msg>
-/// </messages>
-/// ```
-pub fn format_batch_xml(msgs: &[DebounceMsg]) -> String {
-    let mut out = String::from("<messages>\n");
-    for m in msgs {
-        let escaped = m
-            .text
-            .as_deref()
-            .unwrap_or("")
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;");
-        out.push_str(&format!(
-            "<msg id=\"{}\" ts=\"{}\" from=\"user\">{}</msg>\n",
-            m.message_id,
-            m.timestamp.format("%Y-%m-%dT%H:%M:%SZ"),
-            escaped,
-        ));
-    }
-    out.push_str("</messages>");
-    out
-}
 
 const TELEGRAM_LIMIT: usize = 4096;
 
@@ -228,18 +198,12 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
         ReplyOutput {
             content: if text.is_empty() { None } else { Some(text.to_string()) },
             reply_to_message_id: None,
-            media_paths: None,
+            attachments: None,
         }
     } else {
         serde_json::from_value(result_val.clone())
             .map_err(|e| format!("failed to deserialize result: {e}"))?
     };
-
-    if let Some(ref paths) = output.media_paths
-        && !paths.is_empty()
-    {
-        tracing::warn!("media_paths returned but not yet implemented -- skipping");
-    }
 
     Ok((output, session_id))
 }
@@ -316,8 +280,42 @@ pub fn spawn_worker(
                 }
             }
 
-            // Build XML batch (D-02)
-            let xml = format_batch_xml(&batch);
+            // Download attachments for all messages in batch
+            let mut input_messages = Vec::with_capacity(batch.len());
+            for msg in &batch {
+                let resolved = if msg.attachments.is_empty() {
+                    vec![]
+                } else {
+                    match super::attachments::download_attachments(
+                        &msg.attachments,
+                        msg.message_id,
+                        &ctx.bot,
+                        &ctx.agent_dir,
+                        ctx.ssh_config_path.as_deref(),
+                        &ctx.agent_name,
+                        tg_chat_id,
+                        eff_thread_id,
+                    ).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::error!(?key, "attachment download failed: {:#}", e);
+                            let _ = send_tg(&ctx.bot, tg_chat_id, eff_thread_id, &format!("Failed to download attachments: {e}")).await;
+                            vec![]
+                        }
+                    }
+                };
+                input_messages.push(super::attachments::InputMessage {
+                    message_id: msg.message_id,
+                    text: msg.text.clone(),
+                    timestamp: msg.timestamp,
+                    attachments: resolved,
+                });
+            }
+
+            let Some(input) = super::attachments::format_cc_input(&input_messages) else {
+                tracing::warn!(?key, "empty input after formatting -- skipping CC invocation");
+                continue;
+            };
 
             // Typing indicator: spawn task, cancel after subprocess completes (D-10)
             let cancel_token = CancellationToken::new();
@@ -340,7 +338,7 @@ pub fn spawn_worker(
             });
 
             // Invoke claude -p (D-13, D-14)
-            let reply_result = invoke_cc(&xml, chat_id, eff_thread_id, &ctx).await;
+            let reply_result = invoke_cc(&input, chat_id, eff_thread_id, &ctx).await;
 
             // Cancel typing indicator
             cancel_token.cancel();
@@ -349,13 +347,19 @@ pub fn spawn_worker(
             // Send reply (D-04, D-05, DIS-05, DIS-06)
             match reply_result {
                 Ok(Some(output)) => {
+                    let reply_to = if batch.len() == 1 {
+                        Some(batch[0].message_id)
+                    } else {
+                        output.reply_to_message_id
+                    };
+
                     if let Some(content) = output.content {
                         let parts = split_message(&content);
                         tracing::info!(
                             ?key,
                             content_len = content.len(),
                             parts = parts.len(),
-                            reply_to = output.reply_to_message_id,
+                            ?reply_to,
                             "sending reply to Telegram"
                         );
                         for part in parts {
@@ -365,26 +369,39 @@ pub fn spawn_worker(
                                     eff_thread_id as i32,
                                 )));
                             }
-                            if let Some(ref_id) = output.reply_to_message_id {
+                            if let Some(ref_id) = reply_to {
                                 send = send.reply_parameters(ReplyParameters {
                                     message_id: MessageId(ref_id),
                                     ..Default::default()
                                 });
                             }
-                            // No parse_mode — send as plain text (Pitfall 6)
                             if let Err(e) = send.await {
-                                tracing::error!(
-                                    ?key,
-                                    "failed to send Telegram reply: {:#}",
-                                    e
-                                );
+                                tracing::error!(?key, "failed to send Telegram reply: {:#}", e);
                             }
                         }
                     } else {
                         tracing::warn!(
                             ?key,
-                            "CC returned content: null — no reply sent to user (structured output had no content)"
+                            "CC returned content: null -- no text reply sent"
                         );
+                    }
+
+                    // Send outbound attachments
+                    if let Some(ref atts) = output.attachments {
+                        if !atts.is_empty() {
+                            if let Err(e) = super::attachments::send_attachments(
+                                atts,
+                                &ctx.bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &ctx.agent_dir,
+                                ctx.ssh_config_path.as_deref(),
+                                &ctx.agent_name,
+                            ).await {
+                                tracing::error!(?key, "failed to send attachments: {:#}", e);
+                                let _ = send_tg(&ctx.bot, tg_chat_id, eff_thread_id, &format!("Failed to send attachments: {e}")).await;
+                            }
+                        }
                     }
                 }
                 Ok(None) => {
@@ -419,7 +436,7 @@ fn shell_escape(s: &str) -> String {
 
 
 /// Send a Telegram message, optionally in a thread.
-async fn send_tg(
+pub(crate) async fn send_tg(
     bot: &super::BotType,
     chat_id: teloxide::types::ChatId,
     eff_thread_id: i64,
@@ -545,7 +562,7 @@ fn spawn_auth_watcher(
 /// Returns `Ok(Some(ReplyOutput))` on success,
 /// `Err(error_message_for_telegram)` on subprocess failure or missing reply tool.
 async fn invoke_cc(
-    xml: &str,
+    input: &str,
     chat_id: i64,
     eff_thread_id: i64,
     ctx: &WorkerContext,
@@ -615,9 +632,6 @@ async fn invoke_cc(
     claude_args.push("--json-schema".into());
     claude_args.push(reply_schema);
 
-    claude_args.push("--".into());
-    claude_args.push(xml.to_string());
-
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: exec via SSH into the container.
         // SSH concatenates remote args into a single string and passes to `sh -c`.
@@ -646,7 +660,7 @@ async fn invoke_cc(
         c.current_dir(&ctx.agent_dir);
         c
     };
-    cmd.stdin(Stdio::null()); // DIS-02: prevent pipe deadlock
+    cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true); // BOT-04: killed on SIGTERM
@@ -660,11 +674,17 @@ async fn invoke_cc(
         "invoking claude -p"
     );
 
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
 
-    // DIS-02: always wait_with_output, never .wait()
+    // Write input to stdin, then drop to signal EOF.
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(input.as_bytes()).await
+            .map_err(|e| format_error_reply(-1, &format!("stdin write failed: {:#}", e)))?;
+    }
+
     let output = wait_with_timeout(child, CC_TIMEOUT_SECS).await?;
 
     let exit_code = output.status.code().unwrap_or(-1);
@@ -777,49 +797,6 @@ async fn invoke_cc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
-    fn make_msg(id: i32, text: &str) -> DebounceMsg {
-        DebounceMsg {
-            message_id: id,
-            text: Some(text.to_string()),
-            timestamp: Utc.with_ymd_and_hms(2026, 3, 31, 12, 0, 0).unwrap(),
-            attachments: vec![],
-        }
-    }
-
-    // format_batch_xml tests
-    #[test]
-    fn batch_xml_single_message() {
-        let msgs = [make_msg(100, "hello")];
-        let xml = format_batch_xml(&msgs);
-        assert!(xml.contains("<messages>"));
-        assert!(xml.contains(r#"id="100""#));
-        assert!(xml.contains("hello"));
-        assert!(xml.contains("</messages>"));
-    }
-
-    #[test]
-    fn batch_xml_multi_message() {
-        let msgs = [make_msg(100, "first"), make_msg(101, "second")];
-        let xml = format_batch_xml(&msgs);
-        assert!(xml.contains(r#"id="100""#));
-        assert!(xml.contains(r#"id="101""#));
-        // order preserved
-        let pos100 = xml.find(r#"id="100""#).unwrap();
-        let pos101 = xml.find(r#"id="101""#).unwrap();
-        assert!(pos100 < pos101);
-    }
-
-    #[test]
-    fn batch_xml_escapes_special_chars() {
-        let msgs = [make_msg(1, "<b> & 'test'")];
-        let xml = format_batch_xml(&msgs);
-        assert!(xml.contains("&lt;b&gt;"));
-        assert!(xml.contains("&amp;"));
-        assert!(!xml.contains("<b>"));
-    }
-
     // split_message tests
     #[test]
     fn split_short_message() {
@@ -872,7 +849,7 @@ mod tests {
     // parse_reply_output tests (new structured output format per D-03)
     #[test]
     fn parse_reply_output_content_string() {
-        let json = r#"{"session_id":"abc","result":{"content":"hello","reply_to_message_id":null,"media_paths":null}}"#;
+        let json = r#"{"session_id":"abc","result":{"content":"hello","reply_to_message_id":null,"attachments":null}}"#;
         let (output, session_id) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("hello"));
         assert_eq!(session_id.as_deref(), Some("abc"));
@@ -895,17 +872,9 @@ mod tests {
 
     #[test]
     fn parse_reply_output_reply_to_message_id() {
-        let json = r#"{"result":{"content":"hi","reply_to_message_id":42,"media_paths":null}}"#;
+        let json = r#"{"result":{"content":"hi","reply_to_message_id":42,"attachments":null}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert_eq!(output.reply_to_message_id, Some(42));
-    }
-
-    #[test]
-    fn parse_reply_output_media_paths() {
-        let json = r#"{"result":{"content":"hi","reply_to_message_id":null,"media_paths":["a.png"]}}"#;
-        let (output, _) = parse_reply_output(json).unwrap();
-        let paths = output.media_paths.unwrap();
-        assert_eq!(paths, vec!["a.png".to_string()]);
     }
 
     #[test]
@@ -936,7 +905,7 @@ mod tests {
     #[test]
     fn parse_reply_output_structured_output_field() {
         // When structured_output is present, it should be used instead of result
-        let json = r#"{"session_id":"abc","result":"","structured_output":{"content":"Hello from structured!","reply_to_message_id":null,"media_paths":null}}"#;
+        let json = r#"{"session_id":"abc","result":"","structured_output":{"content":"Hello from structured!","reply_to_message_id":null,"attachments":null}}"#;
         let (output, session_id) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("Hello from structured!"));
         assert_eq!(session_id.as_deref(), Some("abc"));
@@ -945,7 +914,7 @@ mod tests {
     #[test]
     fn parse_reply_output_falls_back_to_result_when_no_structured_output() {
         // When structured_output is absent, fall back to result field
-        let json = r#"{"session_id":"xyz","result":{"content":"Fallback result","reply_to_message_id":null,"media_paths":null}}"#;
+        let json = r#"{"session_id":"xyz","result":{"content":"Fallback result","reply_to_message_id":null,"attachments":null}}"#;
         let (output, session_id) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("Fallback result"));
         assert_eq!(session_id.as_deref(), Some("xyz"));
@@ -958,6 +927,34 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("missing both"), "error should mention both fields: {err}");
+    }
+
+    #[test]
+    fn parse_reply_output_with_attachments() {
+        let json = r#"{"session_id":"abc","result":{"content":"Here you go","attachments":[{"type":"document","path":"/sandbox/outbox/data.csv","filename":"results.csv","caption":"Exported data"}]}}"#;
+        let (output, session_id) = parse_reply_output(json).unwrap();
+        assert_eq!(output.content.as_deref(), Some("Here you go"));
+        assert_eq!(session_id.as_deref(), Some("abc"));
+        let atts = output.attachments.unwrap();
+        assert_eq!(atts.len(), 1);
+        assert_eq!(atts[0].path, "/sandbox/outbox/data.csv");
+        assert_eq!(atts[0].filename.as_deref(), Some("results.csv"));
+    }
+
+    #[test]
+    fn parse_reply_output_text_only() {
+        let json = r#"{"result":{"content":"hello","reply_to_message_id":null,"attachments":null}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        assert_eq!(output.content.as_deref(), Some("hello"));
+        assert!(output.attachments.is_none());
+    }
+
+    #[test]
+    fn parse_reply_output_plain_string_fallback() {
+        let json = r#"{"result":"plain text fallback"}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        assert_eq!(output.content.as_deref(), Some("plain text fallback"));
+        assert!(output.attachments.is_none());
     }
 
     // wait_with_timeout tests

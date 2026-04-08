@@ -287,6 +287,37 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
     out
 }
 
+/// Download inbound attachments from Telegram, save to disk, optionally upload to sandbox.
+///
+/// Stub -- real implementation in Task 8.
+pub async fn download_attachments(
+    _attachments: &[InboundAttachment],
+    _message_id: i32,
+    _bot: &super::BotType,
+    _agent_dir: &std::path::Path,
+    _ssh_config_path: Option<&std::path::Path>,
+    _agent_name: &str,
+    _chat_id: teloxide::types::ChatId,
+    _eff_thread_id: i64,
+) -> Result<Vec<ResolvedAttachment>, Box<dyn std::error::Error + Send + Sync>> {
+    Err("download_attachments not yet implemented".into())
+}
+
+/// Download outbound attachments from sandbox and send to Telegram.
+///
+/// Stub -- real implementation in Task 9.
+pub async fn send_attachments(
+    _attachments: &[OutboundAttachment],
+    _bot: &super::BotType,
+    _chat_id: teloxide::types::ChatId,
+    _eff_thread_id: i64,
+    _agent_dir: &std::path::Path,
+    _ssh_config_path: Option<&std::path::Path>,
+    _agent_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Err("send_attachments not yet implemented".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
