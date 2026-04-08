@@ -32,6 +32,29 @@ pub enum NetworkPolicy {
     Permissive,
 }
 
+impl std::fmt::Display for NetworkPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NetworkPolicy::Restrictive => write!(f, "restrictive (Anthropic/Claude only)"),
+            NetworkPolicy::Permissive => write!(f, "permissive (all HTTPS)"),
+        }
+    }
+}
+
+impl std::str::FromStr for NetworkPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "restrictive" => Ok(NetworkPolicy::Restrictive),
+            "permissive" => Ok(NetworkPolicy::Permissive),
+            other => Err(format!(
+                "invalid network policy: '{other}'. Expected 'restrictive' or 'permissive'."
+            )),
+        }
+    }
+}
+
 /// Per-agent sandbox overrides defined in agent.yaml.
 ///
 /// All arrays MERGE with generated defaults (D-08).
