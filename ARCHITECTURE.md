@@ -66,6 +66,7 @@ src/
 src/
 ├── lib.rs              # Entry: resolve agent dir, open memory.db, sandbox lifecycle, start teloxide
 ├── telegram/
+│   ├── attachments.rs  # Attachment extraction, download/upload, send, cleanup, YAML formatting
 │   ├── mod.rs          # Token resolution (env > file > yaml)
 │   ├── bot.rs          # Bot adaptor: CacheMe<Throttle<Bot>>
 │   ├── dispatch.rs     # Long-polling dispatcher setup + dptree DI
@@ -116,11 +117,16 @@ rightclaw bot --agent <name>  (spawned by process-compose)
   └─ Start teloxide long-polling dispatcher
 
 Per message:
+  ├─ Extract text + attachments from Telegram message
   ├─ Check if login flow waiting for auth code → forward to PTY
   ├─ Route to worker task via DashMap<(chat_id, thread_id), Sender>
-  ├─ Worker: debounce 500ms → invoke claude -p via SSH → parse reply JSON
-  ├─ On auth error (403/401): spawn PTY login flow
-  └─ Send Telegram response (text, split at 4096 chars)
+  ├─ Worker: debounce 500ms → download attachments → upload to sandbox inbox
+  ├─ Format input: single text → raw string, multi/attachments → YAML
+  ├─ Pipe input to claude -p via stdin (SSH or direct)
+  ├─ Parse reply JSON with typed attachments
+  ├─ Send text reply to Telegram
+  ├─ Download outbound attachments from sandbox outbox → send to Telegram
+  └─ Periodic cleanup: hourly, configurable retention (default 7 days)
 
 rightclaw down
   └─ POST /project/stop to process-compose REST API
@@ -272,6 +278,10 @@ LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 │   ├── oauth-state.json
 │   ├── oauth-callback.sock
 │   ├── crons/*.yaml
+│   ├── inbox/          # Received Telegram attachments (no-sandbox mode)
+│   ├── outbox/         # CC-generated files for Telegram (no-sandbox mode)
+│   ├── tmp/inbox/      # Temporary download before sandbox upload
+│   ├── tmp/outbox/     # Temporary download from sandbox for sending
 │   ├── staging/           # Prepared on sandbox creation only
 │   └── .claude/
 │       ├── settings.json
