@@ -70,6 +70,7 @@ mod tests {
             allowed_chat_ids: vec![],
             env: std::collections::HashMap::new(),
             secret: None,
+            attachments: Default::default(),
         }
     }
 

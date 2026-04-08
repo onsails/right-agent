@@ -22,7 +22,8 @@ fn make_agent_at(
         telegram_token: None,
         allowed_chat_ids: vec![],
         env: Default::default(),
-            secret: None,
+        secret: None,
+        attachments: Default::default(),
     });
     AgentDef {
         name: "testbot".to_owned(),

@@ -78,6 +78,7 @@ mod tests {
             allowed_chat_ids: vec![],
             env: HashMap::new(),
             secret: None,
+            attachments: Default::default(),
         }
     }
 
