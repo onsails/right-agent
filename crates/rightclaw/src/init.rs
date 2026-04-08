@@ -240,6 +240,11 @@ mod tests {
             err.contains("already initialized"),
             "expected 'already initialized' in: {err}"
         );
+        // miette's Debug wraps long lines, so check for both words individually.
+        assert!(
+            err.contains("rightclaw") && err.contains("config"),
+            "expected 'rightclaw config' (not --force) in: {err}"
+        );
     }
 
     #[test]
