@@ -45,8 +45,13 @@ struct TunnelListEntry {
 // Cloudflared CLI helpers (private)
 // ---------------------------------------------------------------------------
 
-/// Sentinel error message returned when the user chooses to skip tunnel setup.
-const SKIP_TUNNEL_SENTINEL: &str = "__skip_tunnel__";
+/// Outcome of handling an existing tunnel interactively.
+enum TunnelOutcome {
+    /// Use this tunnel UUID.
+    Uuid(String),
+    /// User chose to skip tunnel setup entirely.
+    Skipped,
+}
 
 /// Find an existing tunnel by name via cloudflared CLI.
 fn find_tunnel_by_name(cf_bin: &Path, name: &str) -> miette::Result<Option<TunnelListEntry>> {
@@ -163,10 +168,9 @@ pub fn tunnel_setup(
     let uuid = match existing {
         Some(entry) => {
             if interactive {
-                match handle_existing_tunnel(&cf_bin, &entry, tunnel_name) {
-                    Ok(uuid) => uuid,
-                    Err(e) if e.to_string().contains(SKIP_TUNNEL_SENTINEL) => return Ok(None),
-                    Err(e) => return Err(e),
+                match handle_existing_tunnel(&cf_bin, &entry, tunnel_name)? {
+                    TunnelOutcome::Uuid(id) => id,
+                    TunnelOutcome::Skipped => return Ok(None),
                 }
             } else {
                 // Non-interactive: silently reuse.
@@ -230,14 +234,11 @@ pub fn tunnel_setup(
 // ---------------------------------------------------------------------------
 
 /// Prompt the user to decide what to do with an existing tunnel.
-///
-/// Returns the tunnel UUID to use, or an `Err` containing `__skip_tunnel__`
-/// if the user chose to skip.
 fn handle_existing_tunnel(
     cf_bin: &Path,
     existing: &TunnelListEntry,
     original_name: &str,
-) -> miette::Result<String> {
+) -> miette::Result<TunnelOutcome> {
     let short_uuid = if existing.id.len() > 8 {
         &existing.id[..8]
     } else {
@@ -260,7 +261,7 @@ fn handle_existing_tunnel(
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
     match selection {
-        TunnelExistingAction::Reuse => Ok(existing.id.clone()),
+        TunnelExistingAction::Reuse => Ok(TunnelOutcome::Uuid(existing.id.clone())),
 
         TunnelExistingAction::Rename => {
             let new_name = inquire::Text::new("New tunnel name:")
@@ -272,7 +273,7 @@ fn handle_existing_tunnel(
             }
             let entry = create_tunnel(cf_bin, new_name)?;
             println!("Created tunnel '{}' (UUID: {})", entry.name, entry.id);
-            Ok(entry.id)
+            Ok(TunnelOutcome::Uuid(entry.id))
         }
 
         TunnelExistingAction::DeleteAndRecreate => {
@@ -293,7 +294,7 @@ fn handle_existing_tunnel(
 
             let entry = create_tunnel(cf_bin, original_name)?;
             println!("Created tunnel '{}' (UUID: {})", entry.name, entry.id);
-            Ok(entry.id)
+            Ok(TunnelOutcome::Uuid(entry.id))
         }
 
         TunnelExistingAction::Skip => {
@@ -304,11 +305,12 @@ fn handle_existing_tunnel(
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
-            if !confirmed {
-                return Err(miette::miette!("tunnel setup cancelled"));
+            if confirmed {
+                Ok(TunnelOutcome::Skipped)
+            } else {
+                // User declined skip — re-prompt.
+                handle_existing_tunnel(cf_bin, existing, original_name)
             }
-
-            Err(miette::miette!("{SKIP_TUNNEL_SENTINEL}"))
         }
     }
 }
@@ -358,38 +360,54 @@ pub fn telegram_setup(
 // Global settings menu (public)
 // ---------------------------------------------------------------------------
 
+/// Menu items for the global settings menu.
+enum GlobalMenuItem {
+    Tunnel(String),
+    Done,
+}
+
+impl fmt::Display for GlobalMenuItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tunnel(display) => write!(f, "{display}"),
+            Self::Done => write!(f, "Done"),
+        }
+    }
+}
+
 /// Interactive menu for editing global RightClaw settings.
 pub fn global_setting_menu(home: &Path) -> miette::Result<()> {
     loop {
         let config = read_global_config(home)?;
 
-        let tunnel_display = match &config.tunnel {
+        let tunnel_label = match &config.tunnel {
             Some(t) => format!("Tunnel: {} ({})", t.hostname, &t.tunnel_uuid[..8.min(t.tunnel_uuid.len())]),
             None => "Tunnel: (not configured)".to_string(),
         };
 
-        let options = vec![tunnel_display.clone(), "Done".to_string()];
+        let options = vec![
+            GlobalMenuItem::Tunnel(tunnel_label),
+            GlobalMenuItem::Done,
+        ];
 
         let selection = inquire::Select::new("Global settings:", options)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
-        if selection == "Done" {
-            break;
-        }
+        match selection {
+            GlobalMenuItem::Done => break,
+            GlobalMenuItem::Tunnel(_) => {
+                let tunnel_name = inquire::Text::new("Tunnel name:")
+                    .with_default("rightclaw")
+                    .prompt()
+                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
-        if selection == tunnel_display {
-            let tunnel_name = inquire::Text::new("Tunnel name:")
-                .with_default("rightclaw")
-                .prompt()
-                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+                let result = tunnel_setup(tunnel_name.trim(), None, true)?;
 
-            let result = tunnel_setup(tunnel_name.trim(), None, true)?;
-
-            let mut new_config = read_global_config(home)?;
-            new_config.tunnel = result;
-            write_global_config(home, &new_config)?;
-            println!("Global config saved.");
+                let new_config = rightclaw::config::GlobalConfig { tunnel: result };
+                write_global_config(home, &new_config)?;
+                println!("Global config saved.");
+            }
         }
     }
 
