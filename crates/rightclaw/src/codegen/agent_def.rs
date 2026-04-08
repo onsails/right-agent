@@ -4,7 +4,7 @@ use crate::agent::AgentDef;
 ///
 /// Agents write replies as JSON conforming to this schema.
 /// `content` is required (may be null for media-only replies).
-pub const REPLY_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"reply_to_message_id":{"type":["integer","null"]},"media_paths":{"type":["array","null"],"items":{"type":"string"}}},"required":["content"]}"#;
+pub const REPLY_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]}"#;
 
 /// Generate an agent definition `.md` file for Claude Code's native agent system (AGDEF-01).
 ///

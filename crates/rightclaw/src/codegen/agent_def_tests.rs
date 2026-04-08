@@ -154,43 +154,50 @@ fn soul_present_user_absent_skips_user() {
     );
 }
 
-/// Test 6: REPLY_SCHEMA_JSON const is valid JSON with required fields
+/// Test 6: REPLY_SCHEMA_JSON has typed attachments (not media_paths)
 #[test]
-fn reply_schema_json_is_valid_and_has_required_fields() {
-    // Must parse as valid JSON
+fn reply_schema_json_is_valid_and_has_attachments() {
     let value: serde_json::Value =
         serde_json::from_str(REPLY_SCHEMA_JSON).expect("REPLY_SCHEMA_JSON must be valid JSON");
 
-    // Must be an object type
-    assert_eq!(
-        value["type"].as_str(),
-        Some("object"),
-        "top-level type must be 'object'"
-    );
+    assert_eq!(value["type"].as_str(), Some("object"));
 
-    // Must have properties for content, reply_to_message_id, media_paths
     let props = &value["properties"];
-    assert!(
-        !props["content"].is_null(),
-        "must have 'content' property"
-    );
+    assert!(!props["content"].is_null(), "must have 'content' property");
     assert!(
         !props["reply_to_message_id"].is_null(),
         "must have 'reply_to_message_id' property"
     );
+
+    // media_paths must NOT exist (replaced by attachments)
     assert!(
-        !props["media_paths"].is_null(),
-        "must have 'media_paths' property"
+        props["media_paths"].is_null(),
+        "media_paths must be removed from schema"
     );
 
-    // Must have required array containing "content"
-    let required = value["required"]
+    // attachments must exist with correct structure
+    let atts = &props["attachments"];
+    assert!(!atts.is_null(), "must have 'attachments' property");
+    let items = &atts["items"];
+    assert!(!items.is_null(), "attachments must have 'items'");
+    let item_props = &items["properties"];
+    assert!(!item_props["type"].is_null(), "attachment items must have 'type'");
+    assert!(!item_props["path"].is_null(), "attachment items must have 'path'");
+    assert!(!item_props["filename"].is_null(), "attachment items must have 'filename'");
+    assert!(!item_props["caption"].is_null(), "attachment items must have 'caption'");
+
+    // type must be an enum with expected variants
+    let type_enum = items["properties"]["type"]["enum"]
         .as_array()
-        .expect("required must be an array");
-    assert!(
-        required.iter().any(|v| v.as_str() == Some("content")),
-        "required must include 'content'"
-    );
+        .expect("type must be an enum");
+    assert!(type_enum.iter().any(|v| v.as_str() == Some("photo")));
+    assert!(type_enum.iter().any(|v| v.as_str() == Some("document")));
+    assert!(type_enum.iter().any(|v| v.as_str() == Some("video")));
+    assert!(type_enum.iter().any(|v| v.as_str() == Some("voice")));
+
+    // required must include "content"
+    let required = value["required"].as_array().expect("required must be an array");
+    assert!(required.iter().any(|v| v.as_str() == Some("content")));
 }
 
 /// Test that frontmatter does NOT contain a tools: field (per D-05)
