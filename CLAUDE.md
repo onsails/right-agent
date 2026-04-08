@@ -109,6 +109,10 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 - [serde_yaml deprecation discussion](https://users.rust-lang.org/t/serde-yaml-deprecation-alternatives/108868)
 - [Rust CLI testing with assert_cmd](https://alexwlchan.net/2025/testing-rust-cli-apps-with-assert-cmd/)
 - [Async Rust: When to Use It](https://www.wyeworks.com/blog/2025/02/25/async-rust-when-to-use-it-when-to-avoid-it/)
+## Docs
+
+- Always commit `docs/superpowers/` spec and plan files. Never leave them untracked.
+
 ## Conventions
 
 - **Bot-first management**: All agent/MCP configuration goes through the Telegram bot (`/mcp add`, `/mcp remove`, `/mcp auth`, etc.). Never create or edit `.mcp.json`, agent configs, or credential files manually — the bot is the control plane.
