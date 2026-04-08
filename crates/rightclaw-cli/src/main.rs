@@ -439,6 +439,12 @@ fn cmd_init(
     };
     rightclaw::config::write_global_config(home, &config)?;
 
+    println!();
+    println!("Setup complete. Next steps:");
+    println!("  rightclaw up        Launch agents");
+    println!("  rightclaw config    Change global settings");
+    println!("  rightclaw doctor    Check configuration");
+
     Ok(())
 }
 
