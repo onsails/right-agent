@@ -2,16 +2,6 @@ use std::path::Path;
 
 use clap::{Parser, Subcommand};
 
-fn parse_network_policy(s: &str) -> Result<rightclaw::agent::types::NetworkPolicy, String> {
-    match s {
-        "restrictive" => Ok(rightclaw::agent::types::NetworkPolicy::Restrictive),
-        "permissive" => Ok(rightclaw::agent::types::NetworkPolicy::Permissive),
-        other => Err(format!(
-            "invalid network policy: '{other}'. Expected 'restrictive' or 'permissive'."
-        )),
-    }
-}
-
 mod memory_server;
 mod memory_server_http;
 mod wizard;
@@ -146,7 +136,7 @@ pub enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
         /// Network policy: restrictive (Anthropic/Claude only) or permissive (all HTTPS)
-        #[arg(long, value_parser = parse_network_policy)]
+        #[arg(long)]
         network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
     },
     /// List discovered agents and their status
@@ -460,13 +450,7 @@ fn cmd_init(
     if !chat_ids.is_empty() {
         println!("Telegram chat ID allowlist configured.");
     }
-    let policy_label = match &network_policy {
-        rightclaw::agent::types::NetworkPolicy::Restrictive => {
-            "restrictive (Anthropic/Claude only)"
-        }
-        rightclaw::agent::types::NetworkPolicy::Permissive => "permissive (all HTTPS)",
-    };
-    println!("Network policy: {policy_label}");
+    println!("Network policy: {network_policy}");
 
     // Tunnel setup via wizard.
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;

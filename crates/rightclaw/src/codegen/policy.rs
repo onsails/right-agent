@@ -2,6 +2,32 @@
 
 use crate::agent::types::NetworkPolicy;
 
+/// Domains allowed in restrictive mode (Anthropic/Claude only).
+const RESTRICTIVE_DOMAINS: &[&str] = &[
+    "*.anthropic.com",
+    "anthropic.com",
+    "*.claude.com",
+    "claude.com",
+    "*.claude.ai",
+    "claude.ai",
+];
+
+fn restrictive_endpoints() -> String {
+    RESTRICTIVE_DOMAINS
+        .iter()
+        .map(|host| {
+            format!(
+                r#"      - host: "{host}"
+        port: 443
+        protocol: rest
+        access: full
+        tls: terminate"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Generate an OpenShell policy YAML string.
 ///
 /// `right_mcp_port`: TCP port for the host-side right MCP HTTP server.
@@ -12,8 +38,7 @@ use crate::agent::types::NetworkPolicy;
 /// is accessed via plain HTTP through the Docker bridge network.
 pub fn generate_policy(right_mcp_port: u16, network_policy: &NetworkPolicy) -> String {
     let network_section = match network_policy {
-        NetworkPolicy::Permissive => {
-            r#"  outbound:
+        NetworkPolicy::Permissive => r#"  outbound:
     endpoints:
       - host: "**.*"
         port: 443
@@ -22,39 +47,12 @@ pub fn generate_policy(right_mcp_port: u16, network_policy: &NetworkPolicy) -> S
         tls: terminate
     binaries:
       - path: "**""#
-                .to_owned()
-        }
+            .to_owned(),
         NetworkPolicy::Restrictive => {
-            r#"  anthropic:
-    endpoints:
-      - host: "*.anthropic.com"
-        port: 443
-        protocol: rest
-        access: full
-        tls: terminate
-      - host: "anthropic.com"
-        port: 443
-        protocol: rest
-        access: full
-        tls: terminate
-      - host: "*.claude.com"
-        port: 443
-        protocol: rest
-        access: full
-        tls: terminate
-      - host: "claude.com"
-        port: 443
-        protocol: rest
-        access: full
-        tls: terminate
-      - host: "*.claude.ai"
-        port: 443
-        protocol: rest
-        access: full
-        tls: terminate
-    binaries:
-      - path: "**""#
-                .to_owned()
+            format!(
+                "  anthropic:\n    endpoints:\n{}\n    binaries:\n      - path: \"**\"",
+                restrictive_endpoints()
+            )
         }
     };
 
@@ -167,6 +165,7 @@ mod tests {
         assert!(policy.contains(r#"host: "*.claude.com""#));
         assert!(policy.contains(r#"host: "claude.com""#));
         assert!(policy.contains(r#"host: "*.claude.ai""#));
+        assert!(policy.contains(r#"host: "claude.ai""#));
         assert!(!policy.contains(r#"host: "**.*""#), "restrictive must not contain wildcard");
     }
 
