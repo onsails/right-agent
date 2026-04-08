@@ -43,6 +43,20 @@ pub enum ConfigCommands {
 /// Subcommands for `rightclaw agent`.
 #[derive(Subcommand)]
 pub enum AgentCommands {
+    /// Initialize a new agent
+    Init {
+        /// Agent name (alphanumeric + hyphens)
+        name: String,
+        /// Non-interactive mode
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Network policy: restrictive or permissive
+        #[arg(long)]
+        network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
+        /// Sandbox mode: openshell or none
+        #[arg(long)]
+        sandbox_mode: Option<String>,
+    },
     /// Configure an agent interactively (or get/set a specific setting)
     Config {
         /// Agent name (interactive selection if omitted)
@@ -349,21 +363,24 @@ async fn main() -> miette::Result<()> {
                 ))
             }
         },
-        Commands::Agent {
-            command: AgentCommands::Config { name, key, value },
-        } => {
-            match (key, value) {
-                (None, None) => crate::wizard::agent_setting_menu(&home, name.as_deref())?,
-                (Some(_key), _) => {
-                    return Err(miette::miette!(
-                        "Direct get/set not yet implemented. Use `rightclaw agent config` for interactive mode."
-                    ));
-                }
-                (None, Some(_)) => {
-                    return Err(miette::miette!("Cannot set a value without a key"));
-                }
+        Commands::Agent { command } => match command {
+            AgentCommands::Init { name, yes, network_policy, sandbox_mode } => {
+                cmd_agent_init(&home, &name, yes, network_policy, sandbox_mode)
             }
-            Ok(())
+            AgentCommands::Config { name, key, value } => {
+                match (key, value) {
+                    (None, None) => crate::wizard::agent_setting_menu(&home, name.as_deref())?,
+                    (Some(_key), _) => {
+                        return Err(miette::miette!(
+                            "Direct get/set not yet implemented. Use `rightclaw agent config` for interactive mode."
+                        ));
+                    }
+                    (None, Some(_)) => {
+                        return Err(miette::miette!("Cannot set a value without a key"));
+                    }
+                }
+                Ok(())
+            }
         },
         Commands::Memory { command } => match command {
             MemoryCommands::List { agent, limit, offset, json } =>
@@ -429,7 +446,26 @@ fn cmd_init(
         None => rightclaw::init::prompt_network_policy()?,
     };
 
-    rightclaw::init::init_rightclaw_home(home, token.as_deref(), &chat_ids, &network_policy)?;
+    // Sandbox mode: interactive prompt > openshell (default for --yes).
+    let sandbox = if !interactive {
+        rightclaw::agent::types::SandboxMode::Openshell
+    } else {
+        use std::io::{self, Write};
+        println!("Sandbox mode for the default 'right' agent:");
+        println!("  1. OpenShell — run in isolated container (recommended)");
+        println!("  2. None — run directly on host (for computer-use, Chrome, etc.)");
+        print!("Choose [1/2] (default: 1): ");
+        io::stdout().flush().map_err(|e| miette::miette!("flush: {e}"))?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).map_err(|e| miette::miette!("read: {e}"))?;
+        match input.trim() {
+            "" | "1" => rightclaw::agent::types::SandboxMode::Openshell,
+            "2" => rightclaw::agent::types::SandboxMode::None,
+            other => return Err(miette::miette!("Invalid choice: '{other}'")),
+        }
+    };
+
+    rightclaw::init::init_rightclaw_home(home, token.as_deref(), &chat_ids, &network_policy, &sandbox)?;
 
     println!("Initialized RightClaw at {}", home.display());
     println!(
@@ -457,6 +493,91 @@ fn cmd_init(
     println!("  rightclaw up        Launch agents");
     println!("  rightclaw config    Change global settings");
     println!("  rightclaw doctor    Check configuration");
+
+    Ok(())
+}
+
+fn cmd_agent_init(
+    home: &Path,
+    name: &str,
+    yes: bool,
+    network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
+    sandbox_mode: Option<String>,
+) -> miette::Result<()> {
+    let interactive = !yes;
+
+    // Sandbox mode: CLI --sandbox-mode > interactive prompt > openshell default.
+    let sandbox = match sandbox_mode.as_deref() {
+        Some("openshell") => rightclaw::agent::types::SandboxMode::Openshell,
+        Some("none") => rightclaw::agent::types::SandboxMode::None,
+        Some(other) => {
+            return Err(miette::miette!(
+                "Invalid sandbox mode: '{other}'. Expected 'openshell' or 'none'."
+            ))
+        }
+        None if !interactive => rightclaw::agent::types::SandboxMode::Openshell,
+        None => {
+            use std::io::{self, Write};
+            println!("Sandbox mode:");
+            println!("  1. OpenShell — run in isolated container (recommended)");
+            println!("  2. None — run directly on host (for computer-use, Chrome, etc.)");
+            print!("Choose [1/2] (default: 1): ");
+            io::stdout().flush().map_err(|e| miette::miette!("flush: {e}"))?;
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| miette::miette!("read: {e}"))?;
+            match input.trim() {
+                "" | "1" => rightclaw::agent::types::SandboxMode::Openshell,
+                "2" => rightclaw::agent::types::SandboxMode::None,
+                other => return Err(miette::miette!("Invalid choice: '{other}'")),
+            }
+        }
+    };
+
+    // Network policy: only relevant for openshell mode.
+    let network_policy = if matches!(sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
+        match network_policy {
+            Some(p) => p,
+            None if !interactive => rightclaw::agent::types::NetworkPolicy::Restrictive,
+            None => rightclaw::init::prompt_network_policy()?,
+        }
+    } else {
+        // For none mode, network policy is irrelevant — default to permissive.
+        network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive)
+    };
+
+    // Telegram token: only in interactive mode.
+    let token = if interactive {
+        crate::wizard::telegram_setup(None, true)?
+    } else {
+        None
+    };
+
+    // Chat IDs: only if token is set and interactive.
+    let chat_ids: Vec<i64> = if interactive && token.is_some() {
+        crate::wizard::chat_ids_setup()?
+    } else {
+        vec![]
+    };
+
+    let agents_parent = home.join("agents");
+    let agent_dir = rightclaw::init::init_agent(
+        &agents_parent,
+        name,
+        token.as_deref(),
+        &chat_ids,
+        &network_policy,
+        &sandbox,
+    )?;
+
+    println!("Agent '{name}' created at {}", agent_dir.display());
+    if token.is_some() {
+        println!("Telegram channel configured.");
+    }
+    if !chat_ids.is_empty() {
+        println!("Telegram chat ID allowlist configured.");
+    }
 
     Ok(())
 }
