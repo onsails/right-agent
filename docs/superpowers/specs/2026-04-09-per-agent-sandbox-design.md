@@ -1,7 +1,7 @@
 # Per-Agent Sandbox Configuration
 
 **Date:** 2026-04-09
-**Status:** Approved
+**Status:** Implemented
 
 ## Problem
 
