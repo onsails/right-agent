@@ -8,8 +8,8 @@ use serde::Deserialize;
 #[serde(rename_all = "snake_case")]
 pub enum RestartPolicy {
     Never,
-    #[default]
     OnFailure,
+    #[default]
     Always,
 }
 
@@ -18,7 +18,7 @@ fn default_max_restarts() -> u32 {
 }
 
 fn default_backoff_seconds() -> u32 {
-    5
+    3
 }
 
 /// Per-agent sandbox overrides defined in agent.yaml.
