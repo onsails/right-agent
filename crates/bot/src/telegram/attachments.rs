@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::path::PathBuf;
+use teloxide::types::Message;
 
 /// All Telegram media types we handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +178,113 @@ fn yaml_escape_string(s: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+/// Extract all attachments from a Telegram message.
+///
+/// Checks: photo, document, video, audio, voice, video_note, sticker, animation.
+/// For photo, picks the highest-resolution variant (last in the array).
+pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
+    let mut out = Vec::new();
+
+    // Photo: array of sizes, last = highest resolution. Always JPEG.
+    if let Some(sizes) = msg.photo() {
+        if let Some(best) = sizes.last() {
+            out.push(InboundAttachment {
+                file_id: best.file.id.0.clone(),
+                kind: AttachmentKind::Photo,
+                mime_type: Some("image/jpeg".to_owned()),
+                filename: None,
+                file_size: Some(best.file.size),
+            });
+        }
+    }
+
+    // Document
+    if let Some(doc) = msg.document() {
+        out.push(InboundAttachment {
+            file_id: doc.file.id.0.clone(),
+            kind: AttachmentKind::Document,
+            mime_type: doc.mime_type.as_ref().map(|m| m.to_string()),
+            filename: doc.file_name.clone(),
+            file_size: Some(doc.file.size),
+        });
+    }
+
+    // Video
+    if let Some(vid) = msg.video() {
+        out.push(InboundAttachment {
+            file_id: vid.file.id.0.clone(),
+            kind: AttachmentKind::Video,
+            mime_type: vid.mime_type.as_ref().map(|m| m.to_string()),
+            filename: vid.file_name.clone(),
+            file_size: Some(vid.file.size),
+        });
+    }
+
+    // Audio
+    if let Some(aud) = msg.audio() {
+        out.push(InboundAttachment {
+            file_id: aud.file.id.0.clone(),
+            kind: AttachmentKind::Audio,
+            mime_type: aud.mime_type.as_ref().map(|m| m.to_string()),
+            filename: aud.file_name.clone(),
+            file_size: Some(aud.file.size),
+        });
+    }
+
+    // Voice
+    if let Some(voice) = msg.voice() {
+        out.push(InboundAttachment {
+            file_id: voice.file.id.0.clone(),
+            kind: AttachmentKind::Voice,
+            mime_type: voice.mime_type.as_ref().map(|m| m.to_string()),
+            filename: None,
+            file_size: Some(voice.file.size),
+        });
+    }
+
+    // VideoNote — always mp4, no filename
+    if let Some(vn) = msg.video_note() {
+        out.push(InboundAttachment {
+            file_id: vn.file.id.0.clone(),
+            kind: AttachmentKind::VideoNote,
+            mime_type: Some("video/mp4".to_owned()),
+            filename: None,
+            file_size: Some(vn.file.size),
+        });
+    }
+
+    // Sticker — mime depends on format
+    if let Some(stk) = msg.sticker() {
+        let mime = if stk.is_video() {
+            "video/webm"
+        } else if stk.is_animated() {
+            "application/x-tgsticker"
+        } else {
+            "image/webp"
+        };
+        out.push(InboundAttachment {
+            file_id: stk.file.id.0.clone(),
+            kind: AttachmentKind::Sticker,
+            mime_type: Some(mime.to_owned()),
+            filename: None,
+            file_size: Some(stk.file.size),
+        });
+    }
+
+    // Animation (GIF)
+    if let Some(anim) = msg.animation() {
+        out.push(InboundAttachment {
+            file_id: anim.file.id.0.clone(),
+            kind: AttachmentKind::Animation,
+            mime_type: anim.mime_type.as_ref().map(|m| m.to_string()),
+            filename: anim.file_name.clone(),
+            file_size: Some(anim.file.size),
+        });
+    }
+
+    out
 }
 
 #[cfg(test)]
