@@ -11,6 +11,7 @@ fn make_agent_at(
     with_soul: bool,
     with_user: bool,
     with_agents: bool,
+    with_bootstrap: bool,
 ) -> AgentDef {
     let config = model.map(|m| AgentConfig {
         model: Some(m),
@@ -34,7 +35,7 @@ fn make_agent_at(
         user_path: if with_user { Some(path.join("USER.md")) } else { None },
         agents_path: if with_agents { Some(path.join("AGENTS.md")) } else { None },
         tools_path: None,
-        bootstrap_path: None,
+        bootstrap_path: if with_bootstrap { Some(path.join("BOOTSTRAP.md")) } else { None },
         heartbeat_path: None,
     }
 }
@@ -59,6 +60,7 @@ fn all_files_produces_frontmatter_and_body_sections() {
         true,
         true,
         true,
+        false,
     );
     let result = generate_agent_definition(&agent).unwrap();
 
@@ -89,7 +91,7 @@ fn model_none_produces_inherit() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "identity-text");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false);
+    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(
@@ -104,7 +106,7 @@ fn identity_only_produces_frontmatter_plus_identity() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "# My Identity\n");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false);
+    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(result.starts_with("---\n"), "must start with frontmatter");
@@ -122,7 +124,7 @@ fn identity_only_produces_frontmatter_plus_identity() {
 fn missing_identity_returns_err() {
     let tmp = tempfile::tempdir().unwrap();
     // Intentionally do NOT create IDENTITY.md.
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false);
+    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
     let result = generate_agent_definition(&agent);
 
     assert!(result.is_err(), "expected Err when IDENTITY.md is missing");
@@ -141,7 +143,7 @@ fn soul_present_user_absent_skips_user() {
     write_file(tmp.path(), "SOUL.md", "soul-text");
     // user_path is None (flag = false)
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, true, false, false);
+    let agent = make_agent_at(tmp.path().to_path_buf(), None, true, false, false, false);
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(result.contains("soul-text"), "must contain soul section");
@@ -203,7 +205,7 @@ fn agent_definition_includes_attachment_format_docs() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "identity-text");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false);
+    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(
@@ -230,7 +232,7 @@ fn no_tools_field_in_frontmatter() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "identity-text");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false);
+    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
     let result = generate_agent_definition(&agent).unwrap();
 
     // Extract frontmatter between first --- and second ---
@@ -241,4 +243,56 @@ fn no_tools_field_in_frontmatter() {
         !frontmatter.contains("tools:"),
         "frontmatter must not contain 'tools:' field, got:\n{frontmatter}"
     );
+}
+
+#[test]
+fn bootstrap_present_appears_between_identity_and_soul() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(tmp.path(), "IDENTITY.md", "identity-text");
+    write_file(tmp.path(), "BOOTSTRAP.md", "bootstrap-text");
+    write_file(tmp.path(), "SOUL.md", "soul-text");
+
+    let agent = make_agent_at(
+        tmp.path().to_path_buf(),
+        None,
+        true,
+        false,
+        false,
+        true,
+    );
+    let result = generate_agent_definition(&agent).unwrap();
+
+    assert!(result.contains("bootstrap-text"), "must contain bootstrap section");
+    let identity_pos = result.find("identity-text").unwrap();
+    let bootstrap_pos = result.find("bootstrap-text").unwrap();
+    let soul_pos = result.find("soul-text").unwrap();
+    assert!(
+        bootstrap_pos > identity_pos,
+        "bootstrap must come after identity"
+    );
+    assert!(
+        bootstrap_pos < soul_pos,
+        "bootstrap must come before soul"
+    );
+}
+
+#[test]
+fn bootstrap_none_excluded_from_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(tmp.path(), "IDENTITY.md", "identity-text");
+    write_file(tmp.path(), "SOUL.md", "soul-text");
+
+    let agent = make_agent_at(
+        tmp.path().to_path_buf(),
+        None,
+        true,
+        false,
+        false,
+        false,
+    );
+    let result = generate_agent_definition(&agent).unwrap();
+
+    assert!(!result.contains("bootstrap"), "must not contain bootstrap when path is None");
+    assert!(result.contains("identity-text"), "must still contain identity");
+    assert!(result.contains("soul-text"), "must still contain soul");
 }

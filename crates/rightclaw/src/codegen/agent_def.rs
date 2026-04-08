@@ -74,7 +74,8 @@ pub fn generate_agent_definition(agent: &AgentDef) -> miette::Result<String> {
     let mut sections = vec![identity_content];
 
     // Optional files: silently skip if path is None or file does not exist on disk.
-    let optional: [Option<&std::path::PathBuf>; 3] = [
+    let optional: [Option<&std::path::PathBuf>; 4] = [
+        agent.bootstrap_path.as_ref(),
         agent.soul_path.as_ref(),
         agent.user_path.as_ref(),
         agent.agents_path.as_ref(),
