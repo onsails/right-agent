@@ -260,9 +260,9 @@ backoff_seconds: 30
     fn agent_config_deserializes_minimal_yaml_with_defaults() {
         let yaml = "{}";
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert_eq!(config.restart, RestartPolicy::OnFailure);
+        assert_eq!(config.restart, RestartPolicy::Always);
         assert_eq!(config.max_restarts, 3);
-        assert_eq!(config.backoff_seconds, 5);
+        assert_eq!(config.backoff_seconds, 3);
     }
 
     #[test]

@@ -151,9 +151,6 @@ pub enum Commands {
         /// Launch in background with TUI server
         #[arg(short, long)]
         detach: bool,
-        /// Disable sandbox enforcement (development only)
-        #[arg(long)]
-        no_sandbox: bool,
         /// Enable debug logging (writes to $RIGHTCLAW_HOME/run/<agent>-debug.log)
         #[arg(long)]
         debug: bool,
@@ -213,9 +210,6 @@ pub enum Commands {
         /// Pass --verbose to CC subprocess and log CC stderr at debug level
         #[arg(long)]
         debug: bool,
-        /// Disable OpenShell sandbox (direct claude -p calls)
-        #[arg(long)]
-        no_sandbox: bool,
     },
 }
 
@@ -317,9 +311,8 @@ async fn main() -> miette::Result<()> {
         Commands::Up {
             agents,
             detach,
-            no_sandbox,
             debug,
-        } => cmd_up(&home, agents, detach, no_sandbox, debug).await,
+        } => cmd_up(&home, agents, detach, debug).await,
         Commands::Down => cmd_down(&home).await,
         Commands::Status => cmd_status(&home).await,
         Commands::Restart { agent } => cmd_restart(&home, &agent).await,
@@ -388,12 +381,11 @@ async fn main() -> miette::Result<()> {
         // Unreachable: MemoryServer/MemoryServerHttp are dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
         Commands::MemoryServerHttp { .. } => unreachable!("MemoryServerHttp dispatched before tracing init"),
-        Commands::Bot { agent, debug, no_sandbox } => {
+        Commands::Bot { agent, debug } => {
             rightclaw_bot::run(rightclaw_bot::BotArgs {
                 agent,
                 home: cli.home,
                 debug,
-                no_sandbox,
             })
             .await
         }
@@ -530,62 +522,10 @@ async fn cmd_up(
     home: &Path,
     agents_filter: Option<Vec<String>>,
     detach: bool,
-    no_sandbox: bool,
     debug: bool,
 ) -> miette::Result<()> {
     // Fail fast if required tools are missing.
     rightclaw::runtime::verify_dependencies()?;
-
-    // Pre-flight: when sandbox mode is active, verify OpenShell is ready.
-    // The bot process needs mTLS certs to connect to the gateway's gRPC API —
-    // without them it will crash in a loop. Diagnose the specific issue and
-    // offer to fix it interactively.
-    if !no_sandbox {
-        match rightclaw::openshell::preflight_check() {
-            rightclaw::openshell::OpenShellStatus::Ready(_) => {}
-            rightclaw::openshell::OpenShellStatus::NotInstalled => {
-                println!("OpenShell is not installed. Sandbox mode requires OpenShell.");
-                println!();
-                let install = inquire::Confirm::new("Install OpenShell now?")
-                    .with_default(true)
-                    .prompt()
-                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-                if install {
-                    println!("Installing OpenShell...");
-                    let status = std::process::Command::new("sh")
-                        .args(["-c", "curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh"])
-                        .status()
-                        .map_err(|e| miette::miette!("failed to run installer: {e:#}"))?;
-                    if !status.success() {
-                        return Err(miette::miette!(
-                            help = "Install manually: https://github.com/NVIDIA/OpenShell",
-                            "OpenShell installer failed"
-                        ));
-                    }
-                    // After install, still need a gateway — fall through to gateway check.
-                    println!();
-                    match rightclaw::openshell::preflight_check() {
-                        rightclaw::openshell::OpenShellStatus::Ready(_) => {}
-                        rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
-                            start_openshell_gateway()?;
-                        }
-                        other => return Err(openshell_status_error(other)),
-                    }
-                } else {
-                    return Err(miette::miette!(
-                        help = "Install from https://github.com/NVIDIA/OpenShell, or use `rightclaw up --no-sandbox`",
-                        "OpenShell is required for sandbox mode"
-                    ));
-                }
-            }
-            rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
-                start_openshell_gateway()?;
-            }
-            status @ rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
-                return Err(openshell_status_error(status));
-            }
-        }
-    }
 
     // Read global config — needed for cloudflared tunnel block after the per-agent loop.
     let global_cfg = rightclaw::config::read_global_config(home)?;
@@ -637,6 +577,63 @@ async fn cmd_up(
         return Err(miette::miette!(
             "no agents found. Run `rightclaw init` to create a default agent."
         ));
+    }
+
+    // Pre-flight: when any agent needs sandbox, verify OpenShell is ready.
+    // The bot process needs mTLS certs to connect to the gateway's gRPC API —
+    // without them it will crash in a loop. Diagnose the specific issue and
+    // offer to fix it interactively.
+    let any_sandboxed = agents.iter().any(|a| {
+        a.config
+            .as_ref()
+            .map(|c| matches!(c.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell))
+            .unwrap_or(true) // default is openshell
+    });
+    if any_sandboxed {
+        match rightclaw::openshell::preflight_check() {
+            rightclaw::openshell::OpenShellStatus::Ready(_) => {}
+            rightclaw::openshell::OpenShellStatus::NotInstalled => {
+                println!("OpenShell is not installed. Sandbox mode requires OpenShell.");
+                println!();
+                let install = inquire::Confirm::new("Install OpenShell now?")
+                    .with_default(true)
+                    .prompt()
+                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+                if install {
+                    println!("Installing OpenShell...");
+                    let status = std::process::Command::new("sh")
+                        .args(["-c", "curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh"])
+                        .status()
+                        .map_err(|e| miette::miette!("failed to run installer: {e:#}"))?;
+                    if !status.success() {
+                        return Err(miette::miette!(
+                            help = "Install manually: https://github.com/NVIDIA/OpenShell",
+                            "OpenShell installer failed"
+                        ));
+                    }
+                    // After install, still need a gateway — fall through to gateway check.
+                    println!();
+                    match rightclaw::openshell::preflight_check() {
+                        rightclaw::openshell::OpenShellStatus::Ready(_) => {}
+                        rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
+                            start_openshell_gateway()?;
+                        }
+                        other => return Err(openshell_status_error(other)),
+                    }
+                } else {
+                    return Err(miette::miette!(
+                        help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
+                        "OpenShell is required for sandbox mode"
+                    ));
+                }
+            }
+            rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
+                start_openshell_gateway()?;
+            }
+            status @ rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
+                return Err(openshell_status_error(status));
+            }
+        }
     }
 
     // Clear rightcron init locks so the bootstrap hook fires on this session.
@@ -760,10 +757,12 @@ async fn cmd_up(
         // 12. Generate mcp.json with right HTTP MCP server entry.
         let bearer_token = rightclaw::mcp::derive_token(&agent_secret, "right-mcp")?;
         let mcp_port = rightclaw::runtime::MCP_HTTP_PORT;
-        let right_mcp_url = if no_sandbox {
-            format!("http://127.0.0.1:{mcp_port}/mcp")
-        } else {
-            format!("http://host.docker.internal:{mcp_port}/mcp")
+        let agent_sandbox_mode = agent.config.as_ref()
+            .map(|c| c.sandbox_mode().clone())
+            .unwrap_or_default();
+        let right_mcp_url = match agent_sandbox_mode {
+            rightclaw::agent::types::SandboxMode::None => format!("http://127.0.0.1:{mcp_port}/mcp"),
+            rightclaw::agent::types::SandboxMode::Openshell => format!("http://host.docker.internal:{mcp_port}/mcp"),
         };
         rightclaw::codegen::generate_mcp_config_http(
             &agent.path,
@@ -799,25 +798,10 @@ async fn cmd_up(
     .map_err(|e| miette::miette!("failed to write agent-tokens.json: {e:#}"))?;
     tracing::debug!("wrote agent-tokens.json");
 
-    // Generate OpenShell policies when sandbox mode is active.
-    if !no_sandbox {
-        let policy_dir = run_dir.join("policies");
-        std::fs::create_dir_all(&policy_dir)
-            .map_err(|e| miette::miette!("failed to create policy dir: {e:#}"))?;
-
-        for agent in &agents {
-            let network_policy = agent
-                .config
-                .as_ref()
-                .map(|c| &c.network_policy)
-                .unwrap_or(&rightclaw::agent::types::NetworkPolicy::Permissive);
-            let policy_yaml = rightclaw::codegen::policy::generate_policy(
-                rightclaw::runtime::MCP_HTTP_PORT,
-                network_policy,
-            );
-            let policy_path = policy_dir.join(format!("{}.yaml", agent.name));
-            std::fs::write(&policy_path, &policy_yaml)
-                .map_err(|e| miette::miette!("failed to write policy for '{}': {e:#}", agent.name))?;
+    // Validate policy files exist for all sandboxed agents.
+    for agent in &agents {
+        if let Some(ref config) = agent.config {
+            config.resolve_policy_path(&agent.path)?;
         }
     }
 
@@ -996,7 +980,7 @@ fn start_openshell_gateway() -> miette::Result<()> {
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
     if !start {
         return Err(miette::miette!(
-            help = "Run `openshell gateway start` manually, or use `rightclaw up --no-sandbox`",
+            help = "Run `openshell gateway start` manually, or set `sandbox: mode: none` in agent.yaml",
             "OpenShell gateway is required for sandbox mode"
         ));
     }
@@ -1026,16 +1010,16 @@ fn openshell_status_error(status: rightclaw::openshell::OpenShellStatus) -> miet
     match status {
         rightclaw::openshell::OpenShellStatus::Ready(_) => unreachable!(),
         rightclaw::openshell::OpenShellStatus::NotInstalled => miette::miette!(
-            help = "Install from https://github.com/NVIDIA/OpenShell, or use `rightclaw up --no-sandbox`",
+            help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
             "OpenShell is not installed"
         ),
         rightclaw::openshell::OpenShellStatus::NoGateway(_) => miette::miette!(
-            help = "Run `openshell gateway start`, or use `rightclaw up --no-sandbox`",
+            help = "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
             "OpenShell gateway is not running"
         ),
         rightclaw::openshell::OpenShellStatus::BrokenGateway(mtls_dir) => miette::miette!(
             help = "Try `openshell gateway destroy && openshell gateway start` to recreate,\n  \
-                    or use `rightclaw up --no-sandbox`",
+                    or set `sandbox: mode: none` in agent.yaml",
             "OpenShell gateway exists but mTLS certificates are missing at {}\n\n  \
              The gateway may be in a broken state.",
             mtls_dir.display()
