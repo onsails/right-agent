@@ -188,16 +188,16 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
     let mut out = Vec::new();
 
     // Photo: array of sizes, last = highest resolution. Always JPEG.
-    if let Some(sizes) = msg.photo() {
-        if let Some(best) = sizes.last() {
-            out.push(InboundAttachment {
-                file_id: best.file.id.0.clone(),
-                kind: AttachmentKind::Photo,
-                mime_type: Some("image/jpeg".to_owned()),
-                filename: None,
-                file_size: Some(best.file.size),
-            });
-        }
+    if let Some(sizes) = msg.photo()
+        && let Some(best) = sizes.last()
+    {
+        out.push(InboundAttachment {
+            file_id: best.file.id.0.clone(),
+            kind: AttachmentKind::Photo,
+            mime_type: Some("image/jpeg".to_owned()),
+            filename: None,
+            file_size: Some(best.file.size),
+        });
     }
 
     // Document
@@ -288,6 +288,7 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
 }
 
 /// Download inbound attachments from Telegram, save to disk, optionally upload to sandbox.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_attachments(
     attachments: &[InboundAttachment],
     message_id: i32,
@@ -314,18 +315,18 @@ pub async fn download_attachments(
 
     for (idx, att) in attachments.iter().enumerate() {
         // Check size limit
-        if let Some(size) = att.file_size {
-            if u64::from(size) > TELEGRAM_DOWNLOAD_LIMIT {
-                let msg = format!(
-                    "Skipping {} attachment ({:.1} MB) — exceeds 20 MB Telegram download limit.",
-                    att.kind.as_str(),
-                    f64::from(size) / (1024.0 * 1024.0),
-                );
-                if let Err(e) = super::worker::send_tg(bot, chat_id, eff_thread_id, &msg).await {
-                    tracing::warn!("Failed to notify user about oversized attachment: {e}");
-                }
-                continue;
+        if let Some(size) = att.file_size
+            && u64::from(size) > TELEGRAM_DOWNLOAD_LIMIT
+        {
+            let msg = format!(
+                "Skipping {} attachment ({:.1} MB) — exceeds 20 MB Telegram download limit.",
+                att.kind.as_str(),
+                f64::from(size) / (1024.0 * 1024.0),
+            );
+            if let Err(e) = super::worker::send_tg(bot, chat_id, eff_thread_id, &msg).await {
+                tracing::warn!("Failed to notify user about oversized attachment: {e}");
             }
+            continue;
         }
 
         let mime = att
@@ -612,11 +613,11 @@ async fn cleanup_local_dir(
         if !metadata.is_file() {
             continue;
         }
-        if let Ok(modified) = metadata.modified() {
-            if modified < cutoff {
-                tracing::debug!("cleaning up old attachment: {}", entry.path().display());
-                let _ = tokio::fs::remove_file(entry.path()).await;
-            }
+        if let Ok(modified) = metadata.modified()
+            && modified < cutoff
+        {
+            tracing::debug!("cleaning up old attachment: {}", entry.path().display());
+            let _ = tokio::fs::remove_file(entry.path()).await;
         }
     }
     Ok(())

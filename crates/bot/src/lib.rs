@@ -287,14 +287,14 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     };
 
     // Create inbox/outbox inside sandbox for attachment handling
-    if !args.no_sandbox {
-        if let Some(ref cfg_path) = ssh_config_path {
-            let ssh_host = rightclaw::openshell::ssh_host(&args.agent);
-            for dir in &["/sandbox/inbox", "/sandbox/outbox"] {
-                rightclaw::openshell::ssh_exec(cfg_path, &ssh_host, &["mkdir", "-p", dir], 10)
-                    .await
-                    .map_err(|e| miette::miette!("failed to create {dir} in sandbox: {e:#}"))?;
-            }
+    if !args.no_sandbox
+        && let Some(ref cfg_path) = ssh_config_path
+    {
+        let ssh_host = rightclaw::openshell::ssh_host(&args.agent);
+        for dir in &["/sandbox/inbox", "/sandbox/outbox"] {
+            rightclaw::openshell::ssh_exec(cfg_path, &ssh_host, &["mkdir", "-p", dir], 10)
+                .await
+                .map_err(|e| miette::miette!("failed to create {dir} in sandbox: {e:#}"))?;
         }
     }
 
