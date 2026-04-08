@@ -211,7 +211,7 @@ fn test_up_help_shows_new_flags() {
         .success()
         .stdout(predicate::str::contains("--agents"))
         .stdout(predicate::str::contains("--detach"))
-        .stdout(predicate::str::contains("--no-sandbox"));
+        .stdout(predicate::str::contains("--debug"));
 }
 
 #[test]
