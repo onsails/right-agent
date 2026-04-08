@@ -387,20 +387,21 @@ pub fn spawn_worker(
                     }
 
                     // Send outbound attachments
-                    if let Some(ref atts) = output.attachments {
-                        if !atts.is_empty() {
-                            if let Err(e) = super::attachments::send_attachments(
-                                atts,
-                                &ctx.bot,
-                                tg_chat_id,
-                                eff_thread_id,
-                                &ctx.agent_dir,
-                                ctx.ssh_config_path.as_deref(),
-                                &ctx.agent_name,
-                            ).await {
-                                tracing::error!(?key, "failed to send attachments: {:#}", e);
-                                let _ = send_tg(&ctx.bot, tg_chat_id, eff_thread_id, &format!("Failed to send attachments: {e}")).await;
-                            }
+                    #[allow(clippy::collapsible_if)]
+                    if let Some(ref atts) = output.attachments
+                        && !atts.is_empty()
+                    {
+                        if let Err(e) = super::attachments::send_attachments(
+                            atts,
+                            &ctx.bot,
+                            tg_chat_id,
+                            eff_thread_id,
+                            &ctx.agent_dir,
+                            ctx.ssh_config_path.as_deref(),
+                            &ctx.agent_name,
+                        ).await {
+                            tracing::error!(?key, "failed to send attachments: {:#}", e);
+                            let _ = send_tg(&ctx.bot, tg_chat_id, eff_thread_id, &format!("Failed to send attachments: {e}")).await;
                         }
                     }
                 }
