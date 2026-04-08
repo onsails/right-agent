@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use tokio::time::{Duration, interval};
+use tokio_util::sync::CancellationToken;
 
 /// Interval between sync cycles.
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
@@ -14,16 +15,23 @@ pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Resul
 }
 
 /// Run the periodic sync loop (spawned as background task after initial_sync).
-pub async fn run_sync_task(agent_dir: PathBuf, sandbox_name: String) {
+pub async fn run_sync_task(agent_dir: PathBuf, sandbox_name: String, shutdown: CancellationToken) {
     let mut tick = interval(SYNC_INTERVAL);
     tick.tick().await; // consume immediate tick
 
     loop {
-        tick.tick().await;
-        tracing::debug!(sandbox = %sandbox_name, "sync: starting cycle");
+        tokio::select! {
+            _ = tick.tick() => {
+                tracing::debug!(sandbox = %sandbox_name, "sync: starting cycle");
 
-        if let Err(e) = sync_cycle(&agent_dir, &sandbox_name).await {
-            tracing::error!(sandbox = %sandbox_name, "sync cycle failed: {e:#}");
+                if let Err(e) = sync_cycle(&agent_dir, &sandbox_name).await {
+                    tracing::error!(sandbox = %sandbox_name, "sync cycle failed: {e:#}");
+                }
+            }
+            _ = shutdown.cancelled() => {
+                tracing::info!(sandbox = %sandbox_name, "sync task shutting down");
+                break;
+            }
         }
     }
 }
