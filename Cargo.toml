@@ -44,3 +44,4 @@ tonic = { version = "0.14", features = ["tls-ring", "channel"] }
 tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
+inquire = "0.9"
