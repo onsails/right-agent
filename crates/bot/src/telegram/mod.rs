@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod bot;
 pub mod dispatch;
 pub mod filter;
