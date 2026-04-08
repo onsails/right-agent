@@ -9,9 +9,11 @@ Multi-agent runtime for Claude Code. Sandboxed. Subscription-compliant. Everythi
 **Required:**
 - [Rust](https://rustup.rs/) toolchain
 - [process-compose](https://github.com/F1bonacc1/process-compose) v1.100.0+
-- [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (authenticated for `--no-sandbox` mode; sandbox agents authenticate via Telegram login flow)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (unsandboxed agents authenticate locally; sandboxed agents authenticate via Telegram login flow)
 - Telegram bot token (via [@BotFather](https://t.me/BotFather))
+
+**For sandboxed agents:**
+- [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) (only required when agents use `sandbox: mode: openshell`)
 
 **Highly recommended:**
 - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (authenticated, with a named tunnel)
@@ -24,7 +26,9 @@ rightclaw init --telegram-token <YOUR_BOT_TOKEN>
 rightclaw up
 ```
 
-This launches your first agent inside an NVIDIA OpenShell sandbox, accessible via Telegram.
+This launches your first agent accessible via Telegram. The init wizard asks whether to run inside an OpenShell sandbox (default) or directly on the host.
+
+Add more agents with `rightclaw agent init <name>` — each agent independently chooses its sandbox mode.
 
 ## What Is This?
 
@@ -60,7 +64,8 @@ NVIDIA OpenShell containers per agent, credential isolation, declarative network
 ## Roadmap
 
 - [x] Multi-agent orchestration (process-compose)
-- [x] NVIDIA OpenShell sandbox per agent
+- [x] Per-agent sandbox configuration (OpenShell or direct host access)
+- [x] `rightclaw agent init` — add agents with independent sandbox modes
 - [x] Telegram bot interface
 - [x] Persistent memory (SQLite FTS5/BM25)
 - [x] MCP support with OAuth token refresh

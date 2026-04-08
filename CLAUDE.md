@@ -16,7 +16,7 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 - **Dependencies**: process-compose (external), OpenShell (external), Claude Code CLI (external)
 - **Platforms**: Linux and macOS
 - **Compatibility**: Drop-in compatible with OpenClaw file conventions and ClawHub SKILL.md format
-- **Security**: Every agent must run inside OpenShell sandbox — no `--dangerously-skip-permissions` without policy enforcement
+- **Security**: Agents default to OpenShell sandbox (`sandbox: mode: openshell`). Agents needing host access (computer-use, Chrome) can use `sandbox: mode: none`. Always `--dangerously-skip-permissions` — OpenShell policy is the security layer for sandboxed agents.
 - **OpenShell status**: Alpha software — may have breaking changes. Design for resilience.
 ## Technology Stack
 
