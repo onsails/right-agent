@@ -71,7 +71,7 @@ cloudflared tunnel create rightclaw
 ## Build from Source
 
 ```sh
-git clone https://github.com/anthropics/rightclaw.git
+git clone https://github.com/onsails/rightclaw.git
 cd rightclaw
 cargo install --path crates/rightclaw-cli
 ```
