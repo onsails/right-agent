@@ -32,7 +32,7 @@ fn test_init_creates_structure() {
     assert!(dir.path().join("agents/right/IDENTITY.md").exists());
     assert!(dir.path().join("agents/right/SOUL.md").exists());
     assert!(dir.path().join("agents/right/AGENTS.md").exists());
-    assert!(!dir.path().join("agents/right/policy.yaml").exists(), "policy.yaml should NOT be created");
+    assert!(dir.path().join("agents/right/policy.yaml").exists(), "policy.yaml should be created for default openshell mode");
 }
 
 #[test]
@@ -155,9 +155,9 @@ fn test_init_with_telegram_token() {
         .success()
         .stdout(predicate::str::contains("Telegram"));
 
-    // Verify agent was created (policy.yaml no longer created).
+    // Verify agent was created (policy.yaml now created for default openshell mode).
     assert!(dir.path().join("agents/right/IDENTITY.md").exists());
-    assert!(!dir.path().join("agents/right/policy.yaml").exists(), "policy.yaml should NOT be created");
+    assert!(dir.path().join("agents/right/policy.yaml").exists(), "policy.yaml should be created for default openshell mode");
 
     // Verify allowed_chat_ids written to agent.yaml
     let yaml = fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
