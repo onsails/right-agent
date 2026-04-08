@@ -76,18 +76,23 @@ pub async fn handle_message(
     auth_watcher_flag: Arc<AuthWatcherFlag>,
     auth_code_slot: Arc<AuthCodeSlot>,
 ) -> ResponseResult<()> {
-    // Only process messages with text (ignore stickers, photos, etc. in Phase 25)
-    let text = match msg.text() {
-        Some(t) => t.to_string(),
-        None => return Ok(()),
-    };
+    // Extract text from message body OR caption (media messages use captions)
+    let text = msg.text().or(msg.caption()).map(|t| t.to_string());
+
+    // Extract attachments from all media types
+    let attachments = super::attachments::extract_attachments(&msg);
+
+    // Skip messages with neither text nor attachments
+    if text.is_none() && attachments.is_empty() {
+        return Ok(());
+    }
 
     // Intercept auth code: if login flow is waiting for a code, forward this message.
-    {
+    if let Some(ref text_val) = text {
         let mut slot = auth_code_slot.0.lock().await;
         if let Some(sender) = slot.take() {
             tracing::info!("handle_message: forwarding message as auth code");
-            let _ = sender.send(text);
+            let _ = sender.send(text_val.clone());
             return Ok(());
         }
     }
@@ -96,13 +101,13 @@ pub async fn handle_message(
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
     let worker_exists = worker_map.contains_key(&key);
-    tracing::info!(?key, worker_exists, "handle_message: routing");
+    tracing::info!(?key, worker_exists, has_text = text.is_some(), attachment_count = attachments.len(), "handle_message: routing");
 
     let debounce_msg = DebounceMsg {
         message_id: msg.id.0,
-        text: Some(text),
+        text,
         timestamp: chrono::Utc::now(),
-        attachments: vec![],
+        attachments,
     };
 
     // Check for existing worker or spawn a new one.
