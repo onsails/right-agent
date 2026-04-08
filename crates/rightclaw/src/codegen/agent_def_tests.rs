@@ -144,14 +144,10 @@ fn soul_present_user_absent_skips_user() {
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(result.contains("soul-text"), "must contain soul section");
-    // Body should be identity + soul only — two sections
-    let after_frontmatter_end = result.find("---\n\n").unwrap();
-    let body = &result[after_frontmatter_end + 5..];
-    assert_eq!(
-        body,
-        "identity-text\n\n---\n\nsoul-text",
-        "body should be identity + soul only"
-    );
+    assert!(result.contains("## Message Input Format"), "must contain attachment format docs");
+    let soul_pos = result.find("soul-text").unwrap();
+    let format_pos = result.find("## Message Input Format").unwrap();
+    assert!(format_pos > soul_pos, "attachment format docs must come after body sections");
 }
 
 /// Test 6: REPLY_SCHEMA_JSON has typed attachments (not media_paths)
@@ -198,6 +194,33 @@ fn reply_schema_json_is_valid_and_has_attachments() {
     // required must include "content"
     let required = value["required"].as_array().expect("required must be an array");
     assert!(required.iter().any(|v| v.as_str() == Some("content")));
+}
+
+/// Test: generated agent definition includes message input/output format documentation
+#[test]
+fn agent_definition_includes_attachment_format_docs() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(tmp.path(), "IDENTITY.md", "identity-text");
+
+    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false);
+    let result = generate_agent_definition(&agent).unwrap();
+
+    assert!(
+        result.contains("## Message Input Format"),
+        "must contain input format section"
+    );
+    assert!(
+        result.contains("## Sending Attachments"),
+        "must contain output format section"
+    );
+    assert!(
+        result.contains("/sandbox/outbox/"),
+        "must mention outbox directory"
+    );
+    assert!(
+        result.contains("Photos: max 10MB"),
+        "must mention photo size limit"
+    );
 }
 
 /// Test that frontmatter does NOT contain a tools: field (per D-05)
