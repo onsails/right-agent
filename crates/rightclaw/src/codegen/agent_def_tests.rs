@@ -56,6 +56,7 @@ impl TestAgent {
             restart: Default::default(),
             max_restarts: 3,
             backoff_seconds: 5,
+            network_policy: Default::default(),
             sandbox: None,
             telegram_token: None,
             allowed_chat_ids: vec![],

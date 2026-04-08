@@ -37,6 +37,57 @@ Each agent gets a generated policy file controlling:
 
 Policies are regenerated on each `rightclaw up` from `agent.yaml` configuration and sandbox override settings.
 
+## Configuring Policies
+
+**Default behavior:** Out of the box with `network_policy: permissive`, agents can reach any HTTPS endpoint. All traffic still goes through OpenShell's proxy with TLS termination for inspection — but no domain restrictions apply.
+
+With `network_policy: restrictive`, only Anthropic and Claude domains are allowed:
+- `*.anthropic.com`, `anthropic.com`
+- `*.claude.com`, `claude.com`
+- `*.claude.ai`
+
+**Setting during init:**
+
+`rightclaw init` prompts for this choice interactively. You can also pass it directly:
+
+```sh
+rightclaw init --network-policy restrictive
+```
+
+**Changing after init:**
+
+Edit `network_policy` in your agent's `agent.yaml`:
+
+```yaml
+network_policy: restrictive   # or: permissive
+```
+
+Then run `rightclaw up` to regenerate and apply the policy.
+
+**Custom domain allowlists:**
+
+For fine-grained control beyond restrictive/permissive, edit the generated policy directly:
+
+```
+~/.rightclaw/run/policies/<agent>.yaml
+```
+
+Add endpoint entries under `network_policies` following OpenShell's format. For example, to allow an MCP server in restrictive mode:
+
+```yaml
+  notion_mcp:
+    endpoints:
+      - host: "mcp.notion.com"
+        port: 443
+        protocol: rest
+        access: full
+        tls: terminate
+    binaries:
+      - path: "**"
+```
+
+> **Note:** `rightclaw up` regenerates policy files on every launch. Manual edits will be overwritten. Edit the policy after `rightclaw up` completes for each run.
+
 ## Prompt Injection Guard
 
 The memory store (SQLite) runs incoming content through pattern matching based on OWASP prompt injection vectors before insert. Detected injection attempts are rejected before they reach the database.

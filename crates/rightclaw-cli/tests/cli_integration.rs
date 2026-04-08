@@ -323,7 +323,10 @@ fn test_init_always_writes_config() {
 #[ignore = "requires live OpenShell sandbox"]
 fn test_policy_validates_against_openshell() {
     let policy_yaml =
-        rightclaw::codegen::policy::generate_policy(rightclaw::runtime::MCP_HTTP_PORT);
+        rightclaw::codegen::policy::generate_policy(
+            rightclaw::runtime::MCP_HTTP_PORT,
+            &rightclaw::agent::types::NetworkPolicy::Permissive,
+        );
     let tmpfile = tempdir().unwrap();
     let policy_path = tmpfile.path().join("test-policy.yaml");
     fs::write(&policy_path, &policy_yaml).unwrap();

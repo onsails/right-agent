@@ -79,6 +79,7 @@ mod tests {
             env: HashMap::new(),
             secret: None,
             attachments: Default::default(),
+            network_policy: Default::default(),
         }
     }
 

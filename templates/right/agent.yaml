@@ -13,6 +13,9 @@ max_restarts: 5
 # Seconds to wait between restarts
 backoff_seconds: 10
 
+# Network policy: restrictive = Anthropic/Claude only, permissive = all HTTPS
+# network_policy: restrictive
+
 # Per-agent environment variables injected before exec claude.
 # Values are single-quoted literals — no shell expansion, no host variable forwarding.
 # WARNING: values are stored in plaintext in agent.yaml. Do not store secrets here.

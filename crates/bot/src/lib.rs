@@ -83,6 +83,7 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             env: Default::default(),
             secret: None,
             attachments: Default::default(),
+            network_policy: Default::default(),
         }
     });
 
