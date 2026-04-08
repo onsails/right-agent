@@ -288,34 +288,256 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
 }
 
 /// Download inbound attachments from Telegram, save to disk, optionally upload to sandbox.
-///
-/// Stub -- real implementation in Task 8.
 pub async fn download_attachments(
-    _attachments: &[InboundAttachment],
-    _message_id: i32,
-    _bot: &super::BotType,
-    _agent_dir: &std::path::Path,
-    _ssh_config_path: Option<&std::path::Path>,
-    _agent_name: &str,
-    _chat_id: teloxide::types::ChatId,
-    _eff_thread_id: i64,
+    attachments: &[InboundAttachment],
+    message_id: i32,
+    bot: &super::BotType,
+    agent_dir: &std::path::Path,
+    ssh_config_path: Option<&std::path::Path>,
+    agent_name: &str,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
 ) -> Result<Vec<ResolvedAttachment>, Box<dyn std::error::Error + Send + Sync>> {
-    Err("download_attachments not yet implemented".into())
+    use teloxide::net::Download;
+    use teloxide::requests::Requester;
+    use tokio::io::AsyncWriteExt;
+
+    let tmp_dir = agent_dir.join("tmp/inbox");
+    tokio::fs::create_dir_all(&tmp_dir).await?;
+
+    let sandboxed = ssh_config_path.is_some();
+    if !sandboxed {
+        tokio::fs::create_dir_all(agent_dir.join("inbox")).await?;
+    }
+
+    let mut resolved = Vec::with_capacity(attachments.len());
+
+    for (idx, att) in attachments.iter().enumerate() {
+        // Check size limit
+        if let Some(size) = att.file_size {
+            if u64::from(size) > TELEGRAM_DOWNLOAD_LIMIT {
+                let msg = format!(
+                    "Skipping {} attachment ({:.1} MB) — exceeds 20 MB Telegram download limit.",
+                    att.kind.as_str(),
+                    f64::from(size) / (1024.0 * 1024.0),
+                );
+                if let Err(e) = super::worker::send_tg(bot, chat_id, eff_thread_id, &msg).await {
+                    tracing::warn!("Failed to notify user about oversized attachment: {e}");
+                }
+                continue;
+            }
+        }
+
+        let mime = att
+            .mime_type
+            .as_deref()
+            .unwrap_or("application/octet-stream");
+        let ext = mime_to_extension(mime);
+        let file_name = format!("{}_{message_id}_{idx}.{ext}", att.kind.as_str());
+
+        // Download from Telegram
+        let file = bot
+            .get_file(teloxide::types::FileId(att.file_id.clone()))
+            .await?;
+        let host_path = tmp_dir.join(&file_name);
+        let mut dst = tokio::fs::File::create(&host_path).await?;
+        bot.download_file(&file.path, &mut dst).await?;
+        dst.flush().await?;
+
+        let final_path = if sandboxed {
+            // Upload to sandbox, then clean up host temp file
+            let sandbox_path = format!("{SANDBOX_INBOX}/{file_name}");
+            rightclaw::openshell::upload_file(agent_name, &host_path, &sandbox_path).await?;
+            if let Err(e) = tokio::fs::remove_file(&host_path).await {
+                tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
+            }
+            PathBuf::from(sandbox_path)
+        } else {
+            // Move to inbox
+            let dest = agent_dir.join("inbox").join(&file_name);
+            tokio::fs::rename(&host_path, &dest).await?;
+            dest
+        };
+
+        resolved.push(ResolvedAttachment {
+            kind: att.kind,
+            path: final_path,
+            mime_type: mime.to_owned(),
+            filename: att.filename.clone(),
+        });
+    }
+
+    Ok(resolved)
 }
 
 /// Download outbound attachments from sandbox and send to Telegram.
-///
-/// Stub -- real implementation in Task 9.
 pub async fn send_attachments(
-    _attachments: &[OutboundAttachment],
-    _bot: &super::BotType,
-    _chat_id: teloxide::types::ChatId,
-    _eff_thread_id: i64,
-    _agent_dir: &std::path::Path,
-    _ssh_config_path: Option<&std::path::Path>,
-    _agent_name: &str,
+    attachments: &[OutboundAttachment],
+    bot: &super::BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    agent_dir: &std::path::Path,
+    ssh_config_path: Option<&std::path::Path>,
+    agent_name: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    Err("send_attachments not yet implemented".into())
+    use teloxide::payloads::{
+        SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
+        SendStickerSetters, SendVideoNoteSetters, SendVideoSetters, SendVoiceSetters,
+    };
+    use teloxide::requests::Requester;
+    use teloxide::types::{InputFile, MessageId, ThreadId};
+
+    let sandboxed = ssh_config_path.is_some();
+    let outbox_prefix = if sandboxed {
+        SANDBOX_OUTBOX.to_owned()
+    } else {
+        agent_dir.join("outbox").to_string_lossy().into_owned()
+    };
+
+    for att in attachments {
+        // Validate path is within outbox
+        if !att.path.starts_with(&outbox_prefix) {
+            tracing::warn!(
+                "Outbound attachment path {} is outside outbox prefix {outbox_prefix} — skipping",
+                att.path,
+            );
+            continue;
+        }
+
+        // Resolve to host path
+        let host_path = if sandboxed {
+            let tmp_dir = agent_dir.join("tmp/outbox");
+            tokio::fs::create_dir_all(&tmp_dir).await?;
+            let file_name = std::path::Path::new(&att.path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let dest = tmp_dir.join(&file_name);
+            rightclaw::openshell::download_file(agent_name, &att.path, &dest).await?;
+            dest
+        } else {
+            PathBuf::from(&att.path)
+        };
+
+        // Check file size against limits
+        let metadata = tokio::fs::metadata(&host_path).await?;
+        let size = metadata.len();
+        let limit = match att.kind {
+            OutboundKind::Photo => TELEGRAM_PHOTO_UPLOAD_LIMIT,
+            _ => TELEGRAM_FILE_UPLOAD_LIMIT,
+        };
+        if size > limit {
+            tracing::warn!(
+                "Outbound {} ({:.1} MB) exceeds upload limit — skipping",
+                att.path,
+                size as f64 / (1024.0 * 1024.0),
+            );
+            if sandboxed {
+                let _ = tokio::fs::remove_file(&host_path).await;
+            }
+            continue;
+        }
+
+        let input_file = InputFile::file(&host_path);
+        let thread_id = if eff_thread_id != 0 {
+            Some(ThreadId(MessageId(eff_thread_id as i32)))
+        } else {
+            None
+        };
+
+        // Kinds that support captions
+        let caption = att.caption.as_deref();
+
+        let send_result: Result<_, teloxide::RequestError> = match att.kind {
+            OutboundKind::Photo => {
+                let mut req = bot.send_photo(chat_id, input_file);
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+            OutboundKind::Document => {
+                let mut req = bot.send_document(chat_id, input_file);
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+            OutboundKind::Video => {
+                let mut req = bot.send_video(chat_id, input_file);
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+            OutboundKind::Audio => {
+                let mut req = bot.send_audio(chat_id, input_file);
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+            OutboundKind::Voice => {
+                let mut req = bot.send_voice(chat_id, input_file);
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+            OutboundKind::Animation => {
+                let mut req = bot.send_animation(chat_id, input_file);
+                if let Some(cap) = caption {
+                    req = req.caption(cap);
+                }
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+            // video_note and sticker don't support captions
+            OutboundKind::VideoNote => {
+                let mut req = bot.send_video_note(chat_id, input_file);
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+            OutboundKind::Sticker => {
+                let mut req = bot.send_sticker(chat_id, input_file);
+                if let Some(tid) = thread_id {
+                    req = req.message_thread_id(tid);
+                }
+                req.await.map(|_| ())
+            }
+        };
+
+        if let Err(e) = send_result {
+            tracing::error!("Failed to send {:?} attachment {}: {e}", att.kind, att.path);
+        }
+
+        // Clean up temp file if sandboxed
+        if sandboxed {
+            let _ = tokio::fs::remove_file(&host_path).await;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
