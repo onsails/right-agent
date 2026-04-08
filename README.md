@@ -10,7 +10,7 @@ Multi-agent runtime for Claude Code. Sandboxed. Subscription-compliant. Everythi
 - [Rust](https://rustup.rs/) toolchain
 - [process-compose](https://github.com/F1bonacc1/process-compose) v1.100.0+
 - [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (authenticated)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (authenticated for `--no-sandbox` mode; sandbox agents authenticate via Telegram login flow)
 - Telegram bot token (via [@BotFather](https://t.me/BotFather))
 
 **Highly recommended:**
