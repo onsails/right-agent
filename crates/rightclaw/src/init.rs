@@ -29,7 +29,7 @@ pub fn init_rightclaw_home(
 
     if agents_dir.exists() {
         return Err(miette::miette!(
-            "RightClaw home already initialized at {}. Use --force to reinitialize.",
+            "RightClaw home already initialized at {}. Use `rightclaw config` to change settings.",
             agents_dir.display()
         ));
     }
