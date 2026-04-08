@@ -781,33 +781,42 @@ fn check_mcp_tokens_pass_when_bearer_present() {
     assert_eq!(result.name, "mcp-tokens");
 }
 
-// ── tunnel-credentials checks ────────────────────────────────────────────────
+// ── tunnel state checks (unified) ───────────────────────────────────────────
 
 #[test]
-fn tunnel_credentials_file_present_passes() {
+fn tunnel_state_credentials_present_passes() {
     let dir = tempdir().unwrap();
     let creds_file = dir.path().join("creds.json");
     std::fs::write(&creds_file, "{}").unwrap();
-    let cfg = crate::config::TunnelConfig {
-        tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
-        credentials_file: creds_file,
-        hostname: "example.com".to_string(),
+    let config = crate::config::GlobalConfig {
+        tunnel: Some(crate::config::TunnelConfig {
+            tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
+            credentials_file: creds_file,
+            hostname: "example.com".to_string(),
+        }),
     };
-    let check = check_tunnel_credentials_file(&cfg);
-    assert_eq!(check.status, CheckStatus::Pass);
-    assert!(check.detail.contains("credentials file present"), "detail: {}", check.detail);
+    crate::config::write_global_config(dir.path(), &config).unwrap();
+    let checks = check_tunnel_state(dir.path());
+    let creds_check = checks.iter().find(|c| c.name == "tunnel-credentials").unwrap();
+    assert_eq!(creds_check.status, CheckStatus::Pass);
+    assert!(creds_check.detail.contains("credentials file present"), "detail: {}", creds_check.detail);
 }
 
 #[test]
-fn tunnel_credentials_file_missing_warns() {
-    let cfg = crate::config::TunnelConfig {
-        tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
-        credentials_file: std::path::PathBuf::from("/nonexistent/creds.json"),
-        hostname: "example.com".to_string(),
+fn tunnel_state_credentials_missing_warns() {
+    let dir = tempdir().unwrap();
+    let config = crate::config::GlobalConfig {
+        tunnel: Some(crate::config::TunnelConfig {
+            tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
+            credentials_file: std::path::PathBuf::from("/nonexistent/creds.json"),
+            hostname: "example.com".to_string(),
+        }),
     };
-    let check = check_tunnel_credentials_file(&cfg);
-    assert_eq!(check.status, CheckStatus::Warn);
-    assert!(check.detail.contains("credentials file missing"), "detail: {}", check.detail);
+    crate::config::write_global_config(dir.path(), &config).unwrap();
+    let checks = check_tunnel_state(dir.path());
+    let creds_check = checks.iter().find(|c| c.name == "tunnel-credentials").unwrap();
+    assert_eq!(creds_check.status, CheckStatus::Warn);
+    assert!(creds_check.detail.contains("credentials file missing"), "detail: {}", creds_check.detail);
 }
 
 // ---------------------------------------------------------------------------

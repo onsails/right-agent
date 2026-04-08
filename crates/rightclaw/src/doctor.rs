@@ -118,15 +118,8 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // cloudflared binary check — Warn severity (D-03, OAUTH-04)
     checks.push(check_cloudflared_binary());
 
-    // Tunnel config presence check — Warn severity (D-03)
-    checks.push(check_tunnel_config(home));
-
-    // Tunnel credentials file check — only when tunnel is configured
-    if let Ok(global_cfg) = crate::config::read_global_config(home)
-        && let Some(ref tunnel_cfg) = global_cfg.tunnel
-    {
-        checks.push(check_tunnel_credentials_file(tunnel_cfg));
-    }
+    // Tunnel config + credentials checks (unified).
+    checks.extend(check_tunnel_state(home));
 
     // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
     checks.push(check_mcp_tokens(home));
@@ -630,38 +623,41 @@ fn check_cloudflared_binary() -> DoctorCheck {
 ///
 /// Warn severity — tunnel is optional for bots that don't use MCP OAuth.
 /// When tunnel is absent, `/mcp auth` will fail at runtime but other commands work.
-fn check_tunnel_config(home: &Path) -> DoctorCheck {
-    match crate::config::read_global_config(home) {
-        Ok(cfg) if cfg.tunnel.is_some() => DoctorCheck {
-            name: "tunnel-config".to_string(),
-            status: CheckStatus::Pass,
-            detail: "tunnel configured in config.yaml".to_string(),
-            fix: None,
-        },
-        Ok(_) => DoctorCheck {
-            name: "tunnel-config".to_string(),
-            status: CheckStatus::Warn,
-            detail: "no tunnel configured".to_string(),
-            fix: Some(
-                "run `rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME` to configure tunnel"
-                    .to_string(),
-            ),
-        },
-        Err(e) => DoctorCheck {
-            name: "tunnel-config".to_string(),
-            status: CheckStatus::Warn,
-            detail: format!("failed to read config.yaml: {e:#}"),
-            fix: None,
-        },
-    }
-}
+/// Unified tunnel config + credentials check.
+fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
+    let config = match crate::config::read_global_config(home) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return vec![DoctorCheck {
+                name: "tunnel-config".to_string(),
+                status: CheckStatus::Warn,
+                detail: format!("failed to read config.yaml: {e:#}"),
+                fix: None,
+            }];
+        }
+    };
 
-/// Check that the credentials file stored in TunnelConfig actually exists on disk.
-///
-/// Warn severity — missing file means cloudflared will fail at `rightclaw up` time.
-fn check_tunnel_credentials_file(tunnel_cfg: &crate::config::TunnelConfig) -> DoctorCheck {
+    let tunnel_cfg = match &config.tunnel {
+        Some(t) => t,
+        None => {
+            return vec![DoctorCheck {
+                name: "tunnel-config".to_string(),
+                status: CheckStatus::Warn,
+                detail: "no tunnel configured".to_string(),
+                fix: Some("run `rightclaw config set` to configure tunnel".to_string()),
+            }];
+        }
+    };
+
+    let mut checks = vec![DoctorCheck {
+        name: "tunnel-config".to_string(),
+        status: CheckStatus::Pass,
+        detail: format!("tunnel configured: {}", tunnel_cfg.hostname),
+        fix: None,
+    }];
+
     if tunnel_cfg.credentials_file.exists() {
-        DoctorCheck {
+        checks.push(DoctorCheck {
             name: "tunnel-credentials".to_string(),
             status: CheckStatus::Pass,
             detail: format!(
@@ -669,21 +665,20 @@ fn check_tunnel_credentials_file(tunnel_cfg: &crate::config::TunnelConfig) -> Do
                 tunnel_cfg.credentials_file.display()
             ),
             fix: None,
-        }
+        });
     } else {
-        DoctorCheck {
+        checks.push(DoctorCheck {
             name: "tunnel-credentials".to_string(),
             status: CheckStatus::Warn,
             detail: format!(
                 "credentials file missing: {}",
                 tunnel_cfg.credentials_file.display()
             ),
-            fix: Some(
-                "re-run `rightclaw init --tunnel-name NAME --tunnel-hostname HOSTNAME` to regenerate tunnel credentials"
-                    .to_string(),
-            ),
-        }
+            fix: Some("run `rightclaw config set` to reconfigure tunnel".to_string()),
+        });
     }
+
+    checks
 }
 
 /// Check MCP OAuth token status across all agents. (REFRESH-03)
