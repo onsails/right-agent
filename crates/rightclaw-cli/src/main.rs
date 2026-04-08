@@ -2,6 +2,16 @@ use std::path::Path;
 
 use clap::{Parser, Subcommand};
 
+fn parse_network_policy(s: &str) -> Result<rightclaw::agent::types::NetworkPolicy, String> {
+    match s {
+        "restrictive" => Ok(rightclaw::agent::types::NetworkPolicy::Restrictive),
+        "permissive" => Ok(rightclaw::agent::types::NetworkPolicy::Permissive),
+        other => Err(format!(
+            "invalid network policy: '{other}'. Expected 'restrictive' or 'permissive'."
+        )),
+    }
+}
+
 mod memory_server;
 mod memory_server_http;
 mod wizard;
@@ -135,6 +145,9 @@ pub enum Commands {
         /// Non-interactive mode — skip all prompts (requires --tunnel-hostname when cloudflared login detected)
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Network policy: restrictive (Anthropic/Claude only) or permissive (all HTTPS)
+        #[arg(long, value_parser = parse_network_policy)]
+        network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
     },
     /// List discovered agents and their status
     List,
@@ -306,8 +319,8 @@ async fn main() -> miette::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_name, tunnel_hostname, yes } => {
-            cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, &tunnel_name, tunnel_hostname.as_deref(), yes)
+        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_name, tunnel_hostname, yes, network_policy } => {
+            cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, &tunnel_name, tunnel_hostname.as_deref(), yes, network_policy)
         }
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home),
@@ -404,6 +417,7 @@ fn cmd_init(
     tunnel_name: &str,
     tunnel_hostname: Option<&str>,
     yes: bool,
+    network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
 ) -> miette::Result<()> {
     let interactive = !yes;
 
@@ -426,7 +440,14 @@ fn cmd_init(
         vec![]
     };
 
-    rightclaw::init::init_rightclaw_home(home, token.as_deref(), &chat_ids)?;
+    // Network policy: CLI flag > interactive prompt > restrictive (default for --yes).
+    let network_policy = match network_policy {
+        Some(p) => p,
+        None if !interactive => rightclaw::agent::types::NetworkPolicy::Restrictive,
+        None => rightclaw::init::prompt_network_policy()?,
+    };
+
+    rightclaw::init::init_rightclaw_home(home, token.as_deref(), &chat_ids, &network_policy)?;
 
     println!("Initialized RightClaw at {}", home.display());
     println!(
@@ -439,6 +460,13 @@ fn cmd_init(
     if !chat_ids.is_empty() {
         println!("Telegram chat ID allowlist configured.");
     }
+    let policy_label = match &network_policy {
+        rightclaw::agent::types::NetworkPolicy::Restrictive => {
+            "restrictive (Anthropic/Claude only)"
+        }
+        rightclaw::agent::types::NetworkPolicy::Permissive => "permissive (all HTTPS)",
+    };
+    println!("Network policy: {policy_label}");
 
     // Tunnel setup via wizard.
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
