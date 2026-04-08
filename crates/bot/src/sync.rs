@@ -94,32 +94,44 @@ const REVERSE_SYNC_FILES: &[&str] = &[
 
 /// Sync .md files from sandbox back to host after a `claude -p` invocation.
 ///
-/// For each file in `REVERSE_SYNC_FILES`:
-/// - Download from sandbox. If changed vs host: atomic write (tempfile + rename).
-/// - If download fails (file absent in sandbox): delete from host if it exists
-///   (handles the BOOTSTRAP.md deletion case).
-///
-/// Per-file errors are collected; the function returns an error summarizing all failures.
-/// Callers should log but not propagate — reverse sync is not on the critical path.
+/// Downloads all files concurrently. Changed files are atomically written to host.
+/// Failed downloads trigger host-side deletion (only when sandbox is confirmed reachable).
 pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
     let tmp_dir = tempfile::tempdir()
         .map_err(|e| miette::miette!("reverse sync: failed to create temp dir: {e:#}"))?;
+
+    // Download all files concurrently, each into its own subdirectory to avoid
+    // file collisions if openshell uses non-atomic writes internally.
+    let mut join_set = tokio::task::JoinSet::new();
+    for &filename in REVERSE_SYNC_FILES {
+        let sandbox = sandbox_name.to_owned();
+        let sub_dir = tmp_dir.path().join(format!("dl-{filename}"));
+        std::fs::create_dir(&sub_dir).map_err(|e| {
+            miette::miette!("reverse sync: failed to create sub dir for {filename}: {e:#}")
+        })?;
+        let sandbox_path = format!("/sandbox/{filename}");
+        join_set.spawn(async move {
+            let result =
+                rightclaw::openshell::download_file(&sandbox, &sandbox_path, &sub_dir).await;
+            (filename, sub_dir, result)
+        });
+    }
 
     let mut errors: Vec<String> = Vec::new();
     let mut any_download_ok = false;
     let mut pending_deletes: Vec<(&str, PathBuf)> = Vec::new();
 
-    for &filename in REVERSE_SYNC_FILES {
-        let sandbox_path = format!("/sandbox/{filename}");
+    // Process results sequentially.
+    while let Some(join_result) = join_set.join_next().await {
+        let (filename, sub_dir, dl_result) = join_result
+            .map_err(|e| miette::miette!("reverse sync: join error: {e:#}"))?;
         let host_path = agent_dir.join(filename);
 
-        match rightclaw::openshell::download_file(sandbox_name, &sandbox_path, tmp_dir.path()).await
-        {
+        match dl_result {
             Ok(()) => {
                 any_download_ok = true;
-                let downloaded = tmp_dir.path().join(filename);
+                let downloaded = sub_dir.join(filename);
                 if !downloaded.exists() {
-                    // download_file succeeded but no file materialized — skip
                     continue;
                 }
                 let new_content = match std::fs::read(&downloaded) {
@@ -130,17 +142,14 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
                     }
                 };
 
-                // Compare with host version — skip if identical
-                if host_path.exists() {
-                    if let Ok(existing) = std::fs::read(&host_path) {
-                        if existing == new_content {
-                            tracing::debug!(file = filename, "reverse sync: unchanged, skipping");
-                            continue;
-                        }
-                    }
+                if host_path.exists()
+                    && let Ok(existing) = std::fs::read(&host_path)
+                    && existing == new_content
+                {
+                    tracing::debug!(file = filename, "reverse sync: unchanged, skipping");
+                    continue;
                 }
 
-                // Atomic write: tempfile in agent_dir + rename
                 match atomic_write_bytes(&host_path, &new_content) {
                     Ok(()) => {
                         tracing::info!(file = filename, "reverse sync: updated on host");

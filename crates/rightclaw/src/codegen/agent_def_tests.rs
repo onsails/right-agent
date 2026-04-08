@@ -3,40 +3,79 @@ use std::path::PathBuf;
 use crate::agent::{AgentConfig, AgentDef};
 use crate::codegen::{generate_agent_definition, REPLY_SCHEMA_JSON};
 
-/// Build a minimal AgentDef pointing at `path` as agent dir.
-/// Optional files are set based on flags — paths are set but files only exist if you create them.
-fn make_agent_at(
+/// Builder for test `AgentDef` instances. All optional files default to absent.
+struct TestAgent {
     path: PathBuf,
     model: Option<String>,
-    with_soul: bool,
-    with_user: bool,
-    with_agents: bool,
-    with_bootstrap: bool,
-) -> AgentDef {
-    let config = model.map(|m| AgentConfig {
-        model: Some(m),
-        restart: Default::default(),
-        max_restarts: 3,
-        backoff_seconds: 5,
-        sandbox: None,
+    soul: bool,
+    user: bool,
+    agents: bool,
+    bootstrap: bool,
+}
 
-        telegram_token: None,
-        allowed_chat_ids: vec![],
-        env: Default::default(),
-        secret: None,
-        attachments: Default::default(),
-    });
-    AgentDef {
-        name: "testbot".to_owned(),
-        path: path.clone(),
-        identity_path: path.join("IDENTITY.md"),
-        config,
-        soul_path: if with_soul { Some(path.join("SOUL.md")) } else { None },
-        user_path: if with_user { Some(path.join("USER.md")) } else { None },
-        agents_path: if with_agents { Some(path.join("AGENTS.md")) } else { None },
-        tools_path: None,
-        bootstrap_path: if with_bootstrap { Some(path.join("BOOTSTRAP.md")) } else { None },
-        heartbeat_path: None,
+impl TestAgent {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            model: None,
+            soul: false,
+            user: false,
+            agents: false,
+            bootstrap: false,
+        }
+    }
+
+    fn model(mut self, m: impl Into<String>) -> Self {
+        self.model = Some(m.into());
+        self
+    }
+
+    fn soul(mut self) -> Self {
+        self.soul = true;
+        self
+    }
+
+    fn user(mut self) -> Self {
+        self.user = true;
+        self
+    }
+
+    fn agents(mut self) -> Self {
+        self.agents = true;
+        self
+    }
+
+    fn bootstrap(mut self) -> Self {
+        self.bootstrap = true;
+        self
+    }
+
+    fn build(self) -> AgentDef {
+        let config = self.model.map(|m| AgentConfig {
+            model: Some(m),
+            restart: Default::default(),
+            max_restarts: 3,
+            backoff_seconds: 5,
+            sandbox: None,
+            telegram_token: None,
+            allowed_chat_ids: vec![],
+            env: Default::default(),
+            secret: None,
+            attachments: Default::default(),
+        });
+        let p = &self.path;
+        AgentDef {
+            name: "testbot".to_owned(),
+            path: p.clone(),
+            identity_path: p.join("IDENTITY.md"),
+            config,
+            soul_path: if self.soul { Some(p.join("SOUL.md")) } else { None },
+            user_path: if self.user { Some(p.join("USER.md")) } else { None },
+            agents_path: if self.agents { Some(p.join("AGENTS.md")) } else { None },
+            tools_path: None,
+            bootstrap_path: if self.bootstrap { Some(p.join("BOOTSTRAP.md")) } else { None },
+            heartbeat_path: None,
+        }
     }
 }
 
@@ -54,14 +93,12 @@ fn all_files_produces_frontmatter_and_body_sections() {
     write_file(tmp.path(), "USER.md", "user-text");
     write_file(tmp.path(), "AGENTS.md", "agents-text");
 
-    let agent = make_agent_at(
-        tmp.path().to_path_buf(),
-        Some("claude-sonnet-4-5".to_owned()),
-        true,
-        true,
-        true,
-        false,
-    );
+    let agent = TestAgent::new(tmp.path().to_path_buf())
+        .model("claude-sonnet-4-5")
+        .soul()
+        .user()
+        .agents()
+        .build();
     let result = generate_agent_definition(&agent).unwrap();
 
     // Frontmatter at position 0
@@ -91,7 +128,7 @@ fn model_none_produces_inherit() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "identity-text");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
+    let agent = TestAgent::new(tmp.path().to_path_buf()).build();
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(
@@ -106,7 +143,7 @@ fn identity_only_produces_frontmatter_plus_identity() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "# My Identity\n");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
+    let agent = TestAgent::new(tmp.path().to_path_buf()).build();
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(result.starts_with("---\n"), "must start with frontmatter");
@@ -124,7 +161,7 @@ fn identity_only_produces_frontmatter_plus_identity() {
 fn missing_identity_returns_err() {
     let tmp = tempfile::tempdir().unwrap();
     // Intentionally do NOT create IDENTITY.md.
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
+    let agent = TestAgent::new(tmp.path().to_path_buf()).build();
     let result = generate_agent_definition(&agent);
 
     assert!(result.is_err(), "expected Err when IDENTITY.md is missing");
@@ -143,7 +180,7 @@ fn soul_present_user_absent_skips_user() {
     write_file(tmp.path(), "SOUL.md", "soul-text");
     // user_path is None (flag = false)
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, true, false, false, false);
+    let agent = TestAgent::new(tmp.path().to_path_buf()).soul().build();
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(result.contains("soul-text"), "must contain soul section");
@@ -205,7 +242,7 @@ fn agent_definition_includes_attachment_format_docs() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "identity-text");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
+    let agent = TestAgent::new(tmp.path().to_path_buf()).build();
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(
@@ -232,7 +269,7 @@ fn no_tools_field_in_frontmatter() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "IDENTITY.md", "identity-text");
 
-    let agent = make_agent_at(tmp.path().to_path_buf(), None, false, false, false, false);
+    let agent = TestAgent::new(tmp.path().to_path_buf()).build();
     let result = generate_agent_definition(&agent).unwrap();
 
     // Extract frontmatter between first --- and second ---
@@ -252,14 +289,10 @@ fn bootstrap_present_appears_between_identity_and_soul() {
     write_file(tmp.path(), "BOOTSTRAP.md", "bootstrap-text");
     write_file(tmp.path(), "SOUL.md", "soul-text");
 
-    let agent = make_agent_at(
-        tmp.path().to_path_buf(),
-        None,
-        true,
-        false,
-        false,
-        true,
-    );
+    let agent = TestAgent::new(tmp.path().to_path_buf())
+        .soul()
+        .bootstrap()
+        .build();
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(result.contains("bootstrap-text"), "must contain bootstrap section");
@@ -282,14 +315,9 @@ fn bootstrap_none_excluded_from_output() {
     write_file(tmp.path(), "IDENTITY.md", "identity-text");
     write_file(tmp.path(), "SOUL.md", "soul-text");
 
-    let agent = make_agent_at(
-        tmp.path().to_path_buf(),
-        None,
-        true,
-        false,
-        false,
-        false,
-    );
+    let agent = TestAgent::new(tmp.path().to_path_buf())
+        .soul()
+        .build();
     let result = generate_agent_definition(&agent).unwrap();
 
     assert!(!result.contains("bootstrap"), "must not contain bootstrap when path is None");

@@ -345,13 +345,16 @@ pub fn spawn_worker(
             // Invoke claude -p (D-13, D-14)
             let reply_result = invoke_cc(&input, chat_id, eff_thread_id, &ctx).await;
 
-            // Reverse sync: pull .md file changes from sandbox back to host.
-            // Only in sandbox mode. Best-effort — log failures, don't block reply.
+            // Reverse sync .md changes from sandbox — fire-and-forget, don't block reply.
             if ctx.ssh_config_path.is_some() {
-                let sandbox = rightclaw::openshell::sandbox_name(&ctx.agent_name);
-                if let Err(e) = crate::sync::reverse_sync_md(&ctx.agent_dir, &sandbox).await {
-                    tracing::warn!(agent = %ctx.agent_name, "reverse sync failed: {e:#}");
-                }
+                let agent_dir = ctx.agent_dir.clone();
+                let agent_name = ctx.agent_name.clone();
+                tokio::spawn(async move {
+                    let sandbox = rightclaw::openshell::sandbox_name(&agent_name);
+                    if let Err(e) = crate::sync::reverse_sync_md(&agent_dir, &sandbox).await {
+                        tracing::warn!(agent = %agent_name, "reverse sync failed: {e:#}");
+                    }
+                });
             }
 
             // Cancel typing indicator
