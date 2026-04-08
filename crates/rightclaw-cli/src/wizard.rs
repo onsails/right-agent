@@ -492,64 +492,6 @@ pub fn combined_setting_menu(home: &Path) -> miette::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Global settings menu (public)
-// ---------------------------------------------------------------------------
-
-/// Menu items for the global settings menu.
-enum GlobalMenuItem {
-    Tunnel(String),
-    Done,
-}
-
-impl fmt::Display for GlobalMenuItem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Tunnel(display) => write!(f, "{display}"),
-            Self::Done => write!(f, "Done"),
-        }
-    }
-}
-
-/// Interactive menu for editing global RightClaw settings.
-pub fn global_setting_menu(home: &Path) -> miette::Result<()> {
-    loop {
-        let config = read_global_config(home)?;
-
-        let tunnel_label = match &config.tunnel {
-            Some(t) => format!("Tunnel: {} ({})", t.hostname, &t.tunnel_uuid[..8.min(t.tunnel_uuid.len())]),
-            None => "Tunnel: (not configured)".to_string(),
-        };
-
-        let options = vec![
-            GlobalMenuItem::Tunnel(tunnel_label),
-            GlobalMenuItem::Done,
-        ];
-
-        let selection = inquire::Select::new("Global settings:", options)
-            .prompt()
-            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-
-        match selection {
-            GlobalMenuItem::Done => break,
-            GlobalMenuItem::Tunnel(_) => {
-                let tunnel_name = inquire::Text::new("Tunnel name:")
-                    .with_default("rightclaw")
-                    .prompt()
-                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-
-                let result = tunnel_setup(tunnel_name.trim(), None, true)?;
-
-                let new_config = rightclaw::config::GlobalConfig { tunnel: result };
-                write_global_config(home, &new_config)?;
-                println!("Global config saved.");
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Agent settings menu (public)
 // ---------------------------------------------------------------------------
 

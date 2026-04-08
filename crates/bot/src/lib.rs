@@ -1,3 +1,4 @@
+mod config_watcher;
 pub mod cron;
 pub mod error;
 pub mod login;
