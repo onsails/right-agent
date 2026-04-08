@@ -143,27 +143,26 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         return msgs[0].text.clone();
     }
 
-    // YAML format
-    let mut out = String::from("messages:\n");
+    // YAML format — use write! to avoid per-field allocations
+    use std::fmt::Write;
+    let mut out = String::with_capacity(256);
+    out.push_str("messages:\n");
     for m in msgs {
-        out.push_str(&format!("  - id: {}\n", m.message_id));
-        out.push_str(&format!(
-            "    ts: \"{}\"\n",
-            m.timestamp.format("%Y-%m-%dT%H:%M:%SZ")
-        ));
+        let _ = writeln!(out, "  - id: {}", m.message_id);
+        let _ = writeln!(out, "    ts: \"{}\"", m.timestamp.format("%Y-%m-%dT%H:%M:%SZ"));
         if let Some(ref text) = m.text {
             let escaped = yaml_escape_string(text);
-            out.push_str(&format!("    text: \"{escaped}\"\n"));
+            let _ = writeln!(out, "    text: \"{escaped}\"");
         }
         if !m.attachments.is_empty() {
             out.push_str("    attachments:\n");
             for att in &m.attachments {
-                out.push_str(&format!("      - type: {}\n", att.kind.as_str()));
-                out.push_str(&format!("        path: {}\n", att.path.display()));
-                out.push_str(&format!("        mime_type: {}\n", att.mime_type));
+                let _ = writeln!(out, "      - type: {}", att.kind.as_str());
+                let _ = writeln!(out, "        path: {}", att.path.display());
+                let _ = writeln!(out, "        mime_type: {}", att.mime_type);
                 if let Some(ref fname) = att.filename {
                     let escaped = yaml_escape_string(fname);
-                    out.push_str(&format!("        filename: \"{escaped}\"\n"));
+                    let _ = writeln!(out, "        filename: \"{escaped}\"");
                 }
             }
         }
@@ -395,6 +394,11 @@ pub async fn send_attachments(
         agent_dir.join("outbox").to_string_lossy().into_owned()
     };
 
+    // Pre-create tmp/outbox for sandboxed downloads (avoids repeated create_dir_all in loop)
+    if sandboxed {
+        tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await?;
+    }
+
     for att in attachments {
         // Validate path is within outbox
         if !att.path.starts_with(&outbox_prefix) {
@@ -408,7 +412,6 @@ pub async fn send_attachments(
         // Resolve to host path
         let host_path = if sandboxed {
             let tmp_dir = agent_dir.join("tmp/outbox");
-            tokio::fs::create_dir_all(&tmp_dir).await?;
             let file_name = std::path::Path::new(&att.path)
                 .file_name()
                 .unwrap_or_default()
