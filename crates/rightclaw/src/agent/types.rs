@@ -84,6 +84,31 @@ pub struct AgentConfig {
     /// Base64url-encoded, 43 characters. Auto-generated if absent.
     #[serde(default)]
     pub secret: Option<String>,
+
+    /// Attachment handling configuration.
+    #[serde(default)]
+    pub attachments: AttachmentsConfig,
+}
+
+/// Configuration for attachment handling.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentsConfig {
+    /// How long to keep inbox/outbox files before cleanup (days).
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for AttachmentsConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+fn default_retention_days() -> u32 {
+    7
 }
 
 /// A discovered agent definition from the filesystem.
@@ -295,5 +320,22 @@ sandbox:
         let yaml = "allowed_chat_ids:\n  - -100";
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.allowed_chat_ids, vec![-100_i64]);
+    }
+
+    #[test]
+    fn agent_config_with_attachments_section() {
+        let yaml = r#"
+attachments:
+  retention_days: 14
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.attachments.retention_days, 14);
+    }
+
+    #[test]
+    fn agent_config_default_attachments() {
+        let yaml = "";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.attachments.retention_days, 7);
     }
 }
