@@ -84,3 +84,9 @@ fn logs_response_handles_empty_logs() {
     let resp: LogsResponse = serde_json::from_str(json).unwrap();
     assert!(resp.logs.is_empty());
 }
+
+#[test]
+fn pc_client_has_reload_configuration_method() {
+    let client = PcClient::new(PC_PORT).unwrap();
+    let _fut = client.reload_configuration();
+}
