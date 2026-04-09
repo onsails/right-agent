@@ -317,6 +317,46 @@ fn test_init_always_writes_config() {
     );
 }
 
+// --- Task 5: Reload integration tests ---
+
+#[test]
+fn reload_fails_when_not_running() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create minimal agent structure so discovery doesn't fail first.
+    let agent_dir = dir.path().join("agents").join("test-agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("IDENTITY.md"), "# Test Agent").unwrap();
+
+    rightclaw()
+        .args(["--home", home, "reload"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nothing running"));
+}
+
+#[test]
+fn agent_init_suggests_reload() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create minimal home structure.
+    std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+    std::fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+
+    rightclaw()
+        .args([
+            "--home", home,
+            "agent", "init", "test-bot",
+            "-y",
+            "--sandbox-mode", "none",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rightclaw reload"));
+}
+
 /// Validate generated OpenShell policy against a live sandbox.
 /// Requires: running OpenShell gateway + existing `rightclaw-right` sandbox.
 #[test]
