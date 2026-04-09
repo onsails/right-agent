@@ -171,6 +171,13 @@ pub enum Commands {
     },
     /// Stop all agents
     Down,
+    /// Re-sync agent codegen and hot-update running process-compose
+    Reload {
+        /// Only re-run codegen for specific agents (comma-separated).
+        /// process-compose.yaml always includes all agents.
+        #[arg(long, value_delimiter = ',')]
+        agents: Option<Vec<String>>,
+    },
     /// Show running agent status
     Status,
     /// Restart a single agent
@@ -328,6 +335,7 @@ async fn main() -> miette::Result<()> {
             debug,
         } => cmd_up(&home, agents, detach, debug).await,
         Commands::Down => cmd_down(&home).await,
+        Commands::Reload { agents } => cmd_reload(&home, agents).await,
         Commands::Status => cmd_status(&home).await,
         Commands::Restart { agent } => cmd_restart(&home, &agent).await,
         Commands::Attach => cmd_attach(&home),
@@ -878,6 +886,85 @@ async fn cmd_down(_home: &Path) -> miette::Result<()> {
     })?;
 
     println!("All agents stopped.");
+    Ok(())
+}
+
+async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::Result<()> {
+    // 1. Verify process-compose is running.
+    let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+    client.health_check().await.map_err(|_| {
+        miette::miette!(
+            help = "Start rightclaw first with `rightclaw up`",
+            "nothing running — cannot reload"
+        )
+    })?;
+
+    // 2. Discover all agents.
+    let agents_dir = home.join("agents");
+    let all_agents = rightclaw::agent::discover_agents(&agents_dir)?;
+
+    if all_agents.is_empty() {
+        return Err(miette::miette!(
+            "no agents found. Run `rightclaw agent init <name>` to create one."
+        ));
+    }
+
+    // 3. Apply --agents filter for codegen scope.
+    let codegen_agents = if let Some(ref filter) = agents_filter {
+        let mut filtered = Vec::new();
+        for name in filter {
+            let found = all_agents.iter().find(|a| a.name == *name);
+            match found {
+                Some(agent) => filtered.push(agent.clone()),
+                None => {
+                    let available: Vec<&str> = all_agents.iter().map(|a| a.name.as_str()).collect();
+                    return Err(miette::miette!(
+                        "agent '{}' not found. Available agents: {}",
+                        name,
+                        available.join(", ")
+                    ));
+                }
+            }
+        }
+        filtered
+    } else {
+        all_agents.clone()
+    };
+
+    // 4. Run codegen (filtered agents get codegen, all agents go into PC yaml).
+    let self_exe = std::env::current_exe()
+        .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
+
+    rightclaw::codegen::run_agent_codegen(
+        home,
+        &codegen_agents,
+        &all_agents,
+        &self_exe,
+        false, // debug flag not relevant for reload
+    )?;
+
+    // 5. Hot-update process-compose.
+    client.reload_configuration().await?;
+
+    // 6. Print summary.
+    let has_bot = all_agents.iter().any(|a| {
+        a.config.as_ref().map(|c| c.telegram_token.is_some()).unwrap_or(false)
+    });
+    if !has_bot {
+        eprintln!("rightclaw: warning: no agents have Telegram tokens — nothing will run");
+    }
+
+    println!("Reloaded. Active agents:");
+    for agent in &all_agents {
+        let has_token = agent
+            .config
+            .as_ref()
+            .map(|c| c.telegram_token.is_some())
+            .unwrap_or(false);
+        let status = if has_token { "bot" } else { "no token (skipped)" };
+        println!("  {:<20} {}", agent.name, status);
+    }
+
     Ok(())
 }
 
