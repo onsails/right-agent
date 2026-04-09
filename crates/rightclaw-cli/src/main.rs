@@ -417,6 +417,29 @@ async fn main() -> miette::Result<()> {
     }
 }
 
+/// Filter agents by name, or return all if no filter provided.
+fn filter_agents(
+    all_agents: Vec<rightclaw::agent::AgentDef>,
+    filter: Option<&[String]>,
+) -> miette::Result<Vec<rightclaw::agent::AgentDef>> {
+    let Some(names) = filter else {
+        return Ok(all_agents);
+    };
+    let mut filtered = Vec::new();
+    for name in names {
+        let found = all_agents
+            .iter()
+            .find(|a| a.name == *name)
+            .cloned()
+            .ok_or_else(|| {
+                let available: Vec<&str> = all_agents.iter().map(|a| a.name.as_str()).collect();
+                miette::miette!("agent '{}' not found. Available agents: {}", name, available.join(", "))
+            })?;
+        filtered.push(found);
+    }
+    Ok(filtered)
+}
+
 fn cmd_init(
     home: &Path,
     telegram_token: Option<&str>,
@@ -642,31 +665,11 @@ async fn cmd_up(
     let agents_dir = home.join("agents");
     let all_agents = rightclaw::agent::discover_agents(&agents_dir)?;
 
-    // Apply --agents filter if provided.
-    let agents = if let Some(ref filter) = agents_filter {
-        let mut filtered = Vec::new();
-        for name in filter {
-            let found = all_agents.iter().find(|a| a.name == *name);
-            match found {
-                Some(agent) => filtered.push(agent.clone()),
-                None => {
-                    let available: Vec<&str> = all_agents.iter().map(|a| a.name.as_str()).collect();
-                    return Err(miette::miette!(
-                        "agent '{}' not found. Available agents: {}",
-                        name,
-                        available.join(", ")
-                    ));
-                }
-            }
-        }
-        filtered
-    } else {
-        all_agents
-    };
+    let agents = filter_agents(all_agents, agents_filter.as_deref())?;
 
     if agents.is_empty() {
         return Err(miette::miette!(
-            "no agents found. Run `rightclaw init` to create a default agent."
+            "no agents found. Run `rightclaw agent init <name>` to create one."
         ));
     }
 
@@ -893,7 +896,6 @@ async fn cmd_down(_home: &Path) -> miette::Result<()> {
 }
 
 async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::Result<()> {
-    // 1. Verify process-compose is running.
     let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
     client.health_check().await.map_err(|_| {
         miette::miette!(
@@ -902,7 +904,6 @@ async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::
         )
     })?;
 
-    // 2. Discover all agents.
     let agents_dir = home.join("agents");
     let all_agents = rightclaw::agent::discover_agents(&agents_dir)?;
 
@@ -912,44 +913,16 @@ async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::
         ));
     }
 
-    // 3. Apply --agents filter for codegen scope.
-    let codegen_agents = if let Some(ref filter) = agents_filter {
-        let mut filtered = Vec::new();
-        for name in filter {
-            let found = all_agents.iter().find(|a| a.name == *name);
-            match found {
-                Some(agent) => filtered.push(agent.clone()),
-                None => {
-                    let available: Vec<&str> = all_agents.iter().map(|a| a.name.as_str()).collect();
-                    return Err(miette::miette!(
-                        "agent '{}' not found. Available agents: {}",
-                        name,
-                        available.join(", ")
-                    ));
-                }
-            }
-        }
-        filtered
-    } else {
-        all_agents.clone()
-    };
+    // --agents filter controls codegen scope; PC yaml always includes all agents.
+    let codegen_agents = filter_agents(all_agents.clone(), agents_filter.as_deref())?;
 
-    // 4. Run codegen (filtered agents get codegen, all agents go into PC yaml).
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    rightclaw::codegen::run_agent_codegen(
-        home,
-        &codegen_agents,
-        &all_agents,
-        &self_exe,
-        false, // debug flag not relevant for reload
-    )?;
+    rightclaw::codegen::run_agent_codegen(home, &codegen_agents, &all_agents, &self_exe, false)?;
 
-    // 5. Hot-update process-compose.
     client.reload_configuration().await?;
 
-    // 6. Print summary.
     let has_bot = all_agents.iter().any(|a| {
         a.config.as_ref().map(|c| c.telegram_token.is_some()).unwrap_or(false)
     });
@@ -959,11 +932,7 @@ async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::
 
     println!("Reloaded. Active agents:");
     for agent in &all_agents {
-        let has_token = agent
-            .config
-            .as_ref()
-            .map(|c| c.telegram_token.is_some())
-            .unwrap_or(false);
+        let has_token = agent.config.as_ref().map(|c| c.telegram_token.is_some()).unwrap_or(false);
         let status = if has_token { "bot" } else { "no token (skipped)" };
         println!("  {:<20} {}", agent.name, status);
     }

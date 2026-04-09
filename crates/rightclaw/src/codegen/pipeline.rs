@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::agent::types::{AgentDef, SandboxMode};
@@ -25,6 +26,9 @@ pub fn run_agent_codegen(
         dirs::home_dir().ok_or_else(|| miette::miette!("cannot determine home directory"))?;
 
     let global_cfg = crate::config::read_global_config(home)?;
+
+    // Track secrets generated during this run to avoid re-reading agent.yaml in the token map.
+    let mut generated_secrets: HashMap<String, String> = HashMap::new();
 
     // Per-agent codegen loop.
     for agent in agents {
@@ -181,6 +185,7 @@ pub fn run_agent_codegen(
                     )
                 })?;
                 tracing::info!(agent = %agent.name, "generated new agent secret");
+                generated_secrets.insert(agent.name.clone(), new_secret.clone());
                 new_secret
             };
 
@@ -212,14 +217,7 @@ pub fn run_agent_codegen(
             .config
             .as_ref()
             .and_then(|c| c.secret.clone())
-            .or_else(|| {
-                // Re-read agent.yaml if secret was just generated.
-                let yaml_path = agent.path.join("agent.yaml");
-                let content = std::fs::read_to_string(&yaml_path).ok()?;
-                let config: crate::agent::AgentConfig =
-                    serde_saphyr::from_str(&content).ok()?;
-                config.secret
-            })
+            .or_else(|| generated_secrets.get(&agent.name).cloned())
             .ok_or_else(|| {
                 miette::miette!("agent '{}' has no secret after generation", agent.name)
             })?;
