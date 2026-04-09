@@ -147,6 +147,27 @@ impl PcClient {
         Ok(data.logs)
     }
 
+    /// Tell process-compose to re-read its configuration files from disk.
+    ///
+    /// Uses `POST /project/configuration` — process-compose diffs the new config
+    /// against running state and adds/updates/removes processes accordingly.
+    pub async fn reload_configuration(&self) -> miette::Result<()> {
+        let resp = self
+            .client
+            .post(format!("{}/project/configuration", self.base_url))
+            .send()
+            .await
+            .map_err(|e| miette::miette!("failed to reload process-compose configuration: {e:#}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(miette::miette!(
+                "process-compose configuration reload failed ({status}): {body}"
+            ));
+        }
+        Ok(())
+    }
+
     /// Stop all processes (shutdown process-compose).
     pub async fn shutdown(&self) -> miette::Result<()> {
         self.client
