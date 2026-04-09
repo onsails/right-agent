@@ -552,6 +552,9 @@ fn cmd_agent_init(
     if !chat_ids.is_empty() {
         println!("Telegram chat ID allowlist configured.");
     }
+    println!();
+    println!("If rightclaw is running, apply changes with:");
+    println!("  rightclaw reload");
 
     Ok(())
 }
