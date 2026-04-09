@@ -324,11 +324,18 @@ pub fn run_agent_codegen(
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
     tracing::debug!("wrote process-compose config: {}", config_path.display());
 
-    // Write runtime state.json.
+    // Write runtime state.json, preserving started_at from existing state (reload case).
+    let state_path = run_dir.join("state.json");
     let socket_path = run_dir.join("pc.sock");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| miette::miette!("system time error: {e:#}"))?;
+    let started_at = crate::runtime::read_state(&state_path)
+        .ok()
+        .map(|s| s.started_at)
+        .unwrap_or_else(|| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            format!("{}Z", now.as_secs())
+        });
     let state = crate::runtime::RuntimeState {
         agents: all_agents
             .iter()
@@ -337,9 +344,8 @@ pub fn run_agent_codegen(
             })
             .collect(),
         socket_path: socket_path.display().to_string(),
-        started_at: format!("{}Z", now.as_secs()),
+        started_at,
     };
-    let state_path = run_dir.join("state.json");
     crate::runtime::write_state(&state, &state_path)?;
 
     Ok(())

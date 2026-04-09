@@ -417,13 +417,13 @@ async fn main() -> miette::Result<()> {
     }
 }
 
-/// Filter agents by name, or return all if no filter provided.
+/// Filter agents by name, or clone all if no filter provided.
 fn filter_agents(
-    all_agents: Vec<rightclaw::agent::AgentDef>,
+    all_agents: &[rightclaw::agent::AgentDef],
     filter: Option<&[String]>,
 ) -> miette::Result<Vec<rightclaw::agent::AgentDef>> {
     let Some(names) = filter else {
-        return Ok(all_agents);
+        return Ok(all_agents.to_vec());
     };
     let mut filtered = Vec::new();
     for name in names {
@@ -665,7 +665,7 @@ async fn cmd_up(
     let agents_dir = home.join("agents");
     let all_agents = rightclaw::agent::discover_agents(&agents_dir)?;
 
-    let agents = filter_agents(all_agents, agents_filter.as_deref())?;
+    let agents = filter_agents(&all_agents, agents_filter.as_deref())?;
 
     if agents.is_empty() {
         return Err(miette::miette!(
@@ -914,7 +914,7 @@ async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::
     }
 
     // --agents filter controls codegen scope; PC yaml always includes all agents.
-    let codegen_agents = filter_agents(all_agents.clone(), agents_filter.as_deref())?;
+    let codegen_agents = filter_agents(&all_agents, agents_filter.as_deref())?;
 
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
