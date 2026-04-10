@@ -3,7 +3,7 @@
 //! Pure helpers are tested in isolation (TDD). `spawn_worker` and `invoke_cc` require
 //! live infrastructure and are covered by code review pattern only.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +17,7 @@ use tokio::time::{sleep, timeout, Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::session::{create_session, get_session, touch_session};
+use super::session::{create_session, delete_session, get_session, touch_session};
 
 /// Session key: `(chat_id, effective_thread_id)`.
 pub type SessionKey = (i64, i64);
@@ -65,6 +65,23 @@ pub struct ReplyOutput {
     pub content: Option<String>,
     pub reply_to_message_id: Option<i32>,
     pub attachments: Option<Vec<super::attachments::OutboundAttachment>>,
+    /// Bootstrap mode: `true` signals agent claims onboarding is complete.
+    /// Server-side file check (`should_accept_bootstrap`) gates actual completion.
+    pub bootstrap_complete: Option<bool>,
+}
+
+/// Required identity files that must exist for bootstrap to be accepted as complete.
+const BOOTSTRAP_REQUIRED_FILES: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md"];
+
+/// Check whether bootstrap completion should be accepted.
+///
+/// Returns `true` only when all required identity files exist in `agent_dir`.
+/// If any are missing, the agent didn't actually complete the onboarding flow
+/// and bootstrap mode should continue.
+fn should_accept_bootstrap(agent_dir: &Path) -> bool {
+    BOOTSTRAP_REQUIRED_FILES
+        .iter()
+        .all(|f| agent_dir.join(f).exists())
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -199,6 +216,7 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
             content: if text.is_empty() { None } else { Some(text.to_string()) },
             reply_to_message_id: None,
             attachments: None,
+            bootstrap_complete: None,
         }
     } else {
         serde_json::from_value(result_val.clone())
@@ -345,16 +363,65 @@ pub fn spawn_worker(
             // Invoke claude -p (D-13, D-14)
             let reply_result = invoke_cc(&input, chat_id, eff_thread_id, &ctx).await;
 
-            // Reverse sync .md changes from sandbox — fire-and-forget, don't block reply.
+            // Reverse sync .md changes from sandbox.
+            // Bootstrap mode: BLOCK so files are on host for completion check.
+            // Normal mode: fire-and-forget, don't delay reply.
+            let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
             if ctx.ssh_config_path.is_some() {
-                let agent_dir = ctx.agent_dir.clone();
-                let agent_name = ctx.agent_name.clone();
-                tokio::spawn(async move {
-                    let sandbox = rightclaw::openshell::sandbox_name(&agent_name);
-                    if let Err(e) = crate::sync::reverse_sync_md(&agent_dir, &sandbox).await {
-                        tracing::warn!(agent = %agent_name, "reverse sync failed: {e:#}");
+                let sandbox = rightclaw::openshell::sandbox_name(&ctx.agent_name);
+                if bootstrap_mode {
+                    if let Err(e) =
+                        crate::sync::reverse_sync_md(&ctx.agent_dir, &sandbox).await
+                    {
+                        tracing::warn!(
+                            agent = %ctx.agent_name,
+                            "bootstrap reverse sync failed: {e:#}"
+                        );
                     }
-                });
+                } else {
+                    let agent_dir = ctx.agent_dir.clone();
+                    let agent_name = ctx.agent_name.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            crate::sync::reverse_sync_md(&agent_dir, &sandbox).await
+                        {
+                            tracing::warn!(agent = %agent_name, "reverse sync failed: {e:#}");
+                        }
+                    });
+                }
+            }
+
+            // Bootstrap completion: check if identity files are now on host after sync.
+            // MCP tool bootstrap_done may have already deleted BOOTSTRAP.md, but
+            // we also check here as a safety net (handles no-sandbox mode too).
+            let bootstrap_signaled = matches!(
+                &reply_result,
+                Ok(Some(output)) if output.bootstrap_complete == Some(true)
+            );
+            if bootstrap_mode && bootstrap_signaled && should_accept_bootstrap(&ctx.agent_dir) {
+                tracing::info!(
+                    key = ?key,
+                    "bootstrap complete — identity files present after sync"
+                );
+                // Open a short-lived connection to delete the session.
+                if let Ok(conn) = rightclaw::memory::open_connection(&ctx.agent_dir) {
+                    delete_session(&conn, chat_id, eff_thread_id)
+                        .map_err(|e| {
+                            tracing::error!(
+                                key = ?key,
+                                "delete_session after bootstrap: {:#}",
+                                e
+                            )
+                        })
+                        .ok();
+                }
+                // BOOTSTRAP.md may already be deleted by MCP tool; ensure cleanup.
+                let bp = ctx.agent_dir.join("BOOTSTRAP.md");
+                if bp.exists() {
+                    if let Err(e) = std::fs::remove_file(&bp) {
+                        tracing::warn!(key = ?key, "failed to delete BOOTSTRAP.md: {e:#}");
+                    }
+                }
             }
 
             // Cancel typing indicator
@@ -452,6 +519,107 @@ fn shell_escape(s: &str) -> String {
     shlex::try_quote(s).expect("shlex::try_quote cannot fail for valid UTF-8").into_owned()
 }
 
+/// Generate a shell script that assembles a composite system prompt from sandbox files.
+///
+/// The script concatenates base identity + framed content files into a temp file,
+/// then runs `claude -p` with `--system-prompt-file` pointing to it.
+/// This runs as a single SSH command — no extra roundtrips, always fresh files.
+fn build_sandbox_prompt_assembly_script(
+    base_prompt: &str,
+    bootstrap_mode: bool,
+    claude_args: &[String],
+) -> String {
+    let escaped_base = base_prompt.replace('\'', "'\\''");
+    let escaped_args: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
+    let claude_cmd = escaped_args.join(" ");
+
+    let file_sections = if bootstrap_mode {
+        r#"
+if [ -f /sandbox/.claude/agents/BOOTSTRAP.md ]; then
+  printf '\n## Bootstrap Instructions\n'
+  cat /sandbox/.claude/agents/BOOTSTRAP.md
+  printf '\n'
+fi"#
+    } else {
+        r#"
+if [ -f /sandbox/IDENTITY.md ]; then
+  printf '\n## Your Identity\n'
+  cat /sandbox/IDENTITY.md
+  printf '\n'
+fi
+if [ -f /sandbox/SOUL.md ]; then
+  printf '\n## Your Personality and Values\n'
+  cat /sandbox/SOUL.md
+  printf '\n'
+fi
+if [ -f /sandbox/USER.md ]; then
+  printf '\n## Your User\n'
+  cat /sandbox/USER.md
+  printf '\n'
+fi
+if [ -f /sandbox/.claude/agents/AGENTS.md ]; then
+  printf '\n## Operating Instructions\n'
+  cat /sandbox/.claude/agents/AGENTS.md
+  printf '\n'
+fi
+if [ -f /sandbox/.claude/agents/TOOLS.md ]; then
+  printf '\n## Environment and Tools\n'
+  cat /sandbox/.claude/agents/TOOLS.md
+  printf '\n'
+fi"#
+    };
+
+    format!(
+        "{{ printf '{escaped_base}'\n{file_sections}\n}} > /tmp/rightclaw-system-prompt.md\ncd /sandbox && {claude_cmd} --system-prompt-file /tmp/rightclaw-system-prompt.md"
+    )
+}
+
+/// Assemble a composite system prompt from host-side files.
+///
+/// Used in no-sandbox mode where files are directly accessible.
+fn assemble_host_system_prompt(
+    base_prompt: &str,
+    bootstrap_mode: bool,
+    agent_dir: &Path,
+) -> String {
+    let mut prompt = base_prompt.to_string();
+
+    if bootstrap_mode {
+        if let Ok(content) = std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")) {
+            prompt.push_str("\n## Bootstrap Instructions\n");
+            prompt.push_str(&content);
+            prompt.push('\n');
+        }
+    } else {
+        let sections: &[(&str, &str)] = &[
+            ("IDENTITY.md", "## Your Identity"),
+            ("SOUL.md", "## Your Personality and Values"),
+            ("USER.md", "## Your User"),
+        ];
+        for (file, header) in sections {
+            if let Ok(content) = std::fs::read_to_string(agent_dir.join(file)) {
+                prompt.push_str(&format!("\n{header}\n"));
+                prompt.push_str(&content);
+                prompt.push('\n');
+            }
+        }
+        // AGENTS.md and TOOLS.md are in .claude/agents/
+        let agents_subdir: &[(&str, &str)] = &[
+            ("AGENTS.md", "## Operating Instructions"),
+            ("TOOLS.md", "## Environment and Tools"),
+        ];
+        for (file, header) in agents_subdir {
+            let path = agent_dir.join(".claude").join("agents").join(file);
+            if let Ok(content) = std::fs::read_to_string(path) {
+                prompt.push_str(&format!("\n{header}\n"));
+                prompt.push_str(&content);
+                prompt.push('\n');
+            }
+        }
+    }
+
+    prompt
+}
 
 /// Send a Telegram message, optionally in a thread.
 pub(crate) async fn send_tg(
@@ -607,8 +775,13 @@ async fn invoke_cc(
         }
     };
 
+    // Bootstrap mode detection: check if BOOTSTRAP.md exists in agent dir.
+    let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
+    if bootstrap_mode {
+        tracing::info!(?chat_id, "bootstrap mode: BOOTSTRAP.md present");
+    }
+
     // Build claude -p args for execution inside OpenShell sandbox
-    let reply_schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
     let mut claude_args: Vec<String> = vec![
         "claude".into(),
         "-p".into(),
@@ -636,35 +809,55 @@ async fn invoke_cc(
     claude_args.push("--output-format".into());
     claude_args.push("json".into());
 
-    // --agent only on first call (AGDEF-02); resume inherits from session (AGDEF-03)
-    if is_first_call {
-        claude_args.push("--agent".into());
-        claude_args.push(ctx.agent_name.clone());
-    }
-
-    // --json-schema on BOTH first and resume calls (D-01, Pitfall 4)
-    // CC expects inline JSON string, NOT a file path — read and inline the content
-    // Schema file lives on HOST; bot reads it before exec into sandbox.
+    // --json-schema on BOTH first and resume calls (D-01, Pitfall 4).
+    // Bootstrap mode uses bootstrap-schema (adds bootstrap_complete field).
+    let schema_filename = if bootstrap_mode {
+        "bootstrap-schema.json"
+    } else {
+        "reply-schema.json"
+    };
+    let reply_schema_path = ctx.agent_dir.join(".claude").join(schema_filename);
     let reply_schema = std::fs::read_to_string(&reply_schema_path)
-        .map_err(|e| format_error_reply(-1, &format!("reply-schema.json read failed: {:#}", e)))?;
+        .map_err(|e| format_error_reply(-1, &format!("{schema_filename} read failed: {:#}", e)))?;
     claude_args.push("--json-schema".into());
     claude_args.push(reply_schema);
 
+    // Generate base system prompt (identity-neutral — no agent name to avoid
+    // contradicting IDENTITY.md which the agent may have customized).
+    let base_prompt = rightclaw::codegen::generate_system_prompt(
+        &ctx.agent_name,
+        &if ctx.ssh_config_path.is_some() {
+            rightclaw::agent::types::SandboxMode::Openshell
+        } else {
+            rightclaw::agent::types::SandboxMode::None
+        },
+    );
+
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
-        // OpenShell sandbox: exec via SSH into the container.
-        // SSH concatenates remote args into a single string and passes to `sh -c`.
-        // Args containing JSON ({, }, ") must be shell-escaped to survive this.
+        // OpenShell sandbox: composite system prompt assembled IN the sandbox
+        // from fresh files — single SSH command, no extra roundtrips.
         let ssh_host = rightclaw::openshell::ssh_host(&ctx.agent_name);
+        let assembly_script =
+            build_sandbox_prompt_assembly_script(&base_prompt, bootstrap_mode, &claude_args);
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
         c.arg("--");
-        // Build a single shell-escaped command string for the remote shell.
-        let escaped: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
-        c.arg(escaped.join(" "));
+        c.arg(assembly_script);
         c
     } else {
-        // Direct exec (no sandbox).
+        // Direct exec (no sandbox): assemble prompt on host from local files.
+        let composite = assemble_host_system_prompt(
+            &base_prompt,
+            bootstrap_mode,
+            &ctx.agent_dir,
+        );
+        // Write composite prompt to temp file in agent dir.
+        let prompt_path = ctx.agent_dir.join(".claude").join("composite-system-prompt.md");
+        std::fs::write(&prompt_path, &composite).map_err(|e| {
+            format_error_reply(-1, &format!("failed to write composite system prompt: {e:#}"))
+        })?;
+
         let cc_bin = which::which("claude")
             .or_else(|_| which::which("claude-bun"))
             .map_err(|_| "⚠️ Agent error: claude binary not found in PATH".to_string())?;
@@ -673,6 +866,8 @@ async fn invoke_cc(
         for arg in &claude_args[1..] {
             c.arg(arg);
         }
+        c.arg("--system-prompt-file");
+        c.arg(&prompt_path);
         c.env("HOME", &ctx.agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
         c.current_dir(&ctx.agent_dir);
@@ -736,6 +931,9 @@ async fn invoke_cc(
         // Check for auth error — trigger login flow if sandboxed.
         if is_auth_error(&stdout_str) {
             tracing::warn!(?chat_id, "detected auth error from CC");
+            // Delete the session created before invoke_cc — it's from a failed auth
+            // attempt and must not be resumed. Next message will start fresh.
+            delete_session(&conn, chat_id, eff_thread_id).ok();
             if ctx.ssh_config_path.is_some() {
                 // Sandbox mode: spawn auth watcher if not already active.
                 if !ctx.auth_watcher_active.swap(true, Ordering::SeqCst) {
@@ -797,6 +995,10 @@ async fn invoke_cc(
             touch_session(&conn, chat_id, eff_thread_id)
                 .map_err(|e| tracing::error!(?chat_id, "touch_session failed: {:#}", e))
                 .ok();
+
+            // Bootstrap completion is now detected by file presence after
+            // reverse_sync in spawn_worker — no bootstrap_complete field needed.
+
             Ok(Some(reply_output))
         }
         Err(reason) => {
@@ -1130,5 +1332,172 @@ mod tests {
 
         let output = wait_with_timeout(child, 5).await.expect("should succeed");
         assert!(output.status.success());
+    }
+
+    // bootstrap mode tests
+    #[test]
+    fn parse_reply_output_bootstrap_complete_true() {
+        let json = r#"{"type":"result","result":{"content":"Done!","bootstrap_complete":true},"session_id":"abc-123"}"#;
+        let (output, _sid) = parse_reply_output(json).unwrap();
+        assert_eq!(output.content.as_deref(), Some("Done!"));
+        assert_eq!(output.bootstrap_complete, Some(true));
+    }
+
+    #[test]
+    fn parse_reply_output_bootstrap_complete_false() {
+        let json = r#"{"type":"result","result":{"content":"What's your name?","bootstrap_complete":false},"session_id":"abc-123"}"#;
+        let (output, _sid) = parse_reply_output(json).unwrap();
+        assert_eq!(output.bootstrap_complete, Some(false));
+    }
+
+    #[test]
+    fn parse_reply_output_no_bootstrap_field() {
+        let json = r#"{"type":"result","result":{"content":"Hello!"},"session_id":"abc-123"}"#;
+        let (output, _sid) = parse_reply_output(json).unwrap();
+        assert_eq!(output.bootstrap_complete, None);
+    }
+
+    #[test]
+    fn should_accept_bootstrap_all_files_present() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in BOOTSTRAP_REQUIRED_FILES {
+            std::fs::write(dir.path().join(f), "# test").unwrap();
+        }
+        assert!(should_accept_bootstrap(dir.path()));
+    }
+
+    #[test]
+    fn should_accept_bootstrap_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // No identity files created
+        assert!(!should_accept_bootstrap(dir.path()));
+    }
+
+    #[test]
+    fn should_accept_bootstrap_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only IDENTITY.md exists
+        std::fs::write(dir.path().join("IDENTITY.md"), "# test").unwrap();
+        assert!(!should_accept_bootstrap(dir.path()));
+    }
+
+    // ── Prompt assembly tests ────────────────────────────────────────────────
+
+    #[test]
+    fn sandbox_script_bootstrap_includes_bootstrap_md() {
+        let script = build_sandbox_prompt_assembly_script(
+            "Base prompt",
+            true,
+            &["claude".into(), "-p".into()],
+        );
+        assert!(script.contains("BOOTSTRAP.md"), "must reference BOOTSTRAP.md");
+        assert!(!script.contains("IDENTITY.md"), "bootstrap must not include IDENTITY.md");
+        assert!(!script.contains("SOUL.md"), "bootstrap must not include SOUL.md");
+        assert!(script.contains("claude"), "must contain claude command");
+        assert!(script.contains("--system-prompt-file"), "must pass --system-prompt-file");
+    }
+
+    #[test]
+    fn sandbox_script_normal_includes_all_identity_files() {
+        let script = build_sandbox_prompt_assembly_script(
+            "Base prompt",
+            false,
+            &["claude".into(), "-p".into()],
+        );
+        assert!(script.contains("IDENTITY.md"));
+        assert!(script.contains("SOUL.md"));
+        assert!(script.contains("USER.md"));
+        assert!(script.contains("AGENTS.md"));
+        assert!(script.contains("TOOLS.md"));
+        assert!(!script.contains("BOOTSTRAP.md"), "normal must not include BOOTSTRAP.md");
+    }
+
+    #[test]
+    fn sandbox_script_escapes_single_quotes_in_base() {
+        let script = build_sandbox_prompt_assembly_script(
+            "It's a test",
+            true,
+            &["claude".into()],
+        );
+        // Single quote must be escaped for shell: ' → '\''
+        assert!(!script.contains("It's"), "raw single quote must be escaped");
+        assert!(script.contains("It"), "content must still be present");
+    }
+
+    #[test]
+    fn sandbox_script_shell_escapes_claude_args() {
+        let script = build_sandbox_prompt_assembly_script(
+            "Base",
+            false,
+            &["claude".into(), "-p".into(), "--json-schema".into(), r#"{"type":"object"}"#.into()],
+        );
+        // JSON with braces and quotes must be shell-escaped
+        assert!(script.contains("--json-schema"));
+        assert!(script.contains("type"));
+    }
+
+    #[test]
+    fn sandbox_script_writes_to_tmp_and_uses_system_prompt_file() {
+        let script = build_sandbox_prompt_assembly_script("X", false, &["claude".into()]);
+        assert!(script.contains("/tmp/rightclaw-system-prompt.md"));
+        assert!(script.contains("--system-prompt-file /tmp/rightclaw-system-prompt.md"));
+    }
+
+    #[test]
+    fn host_prompt_bootstrap_includes_bootstrap_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("BOOTSTRAP.md"), "# Onboarding").unwrap();
+
+        let result = assemble_host_system_prompt("Base\n", true, dir.path());
+        assert!(result.contains("Base"));
+        assert!(result.contains("## Bootstrap Instructions"));
+        assert!(result.contains("# Onboarding"));
+    }
+
+    #[test]
+    fn host_prompt_normal_includes_identity_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("IDENTITY.md"), "I am Spark").unwrap();
+        std::fs::write(dir.path().join("SOUL.md"), "Snarky").unwrap();
+        std::fs::write(dir.path().join("USER.md"), "Andrey").unwrap();
+        let agents_dir = dir.path().join(".claude").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("AGENTS.md"), "Procedures").unwrap();
+        std::fs::write(agents_dir.join("TOOLS.md"), "outbox: /sandbox/outbox/").unwrap();
+
+        let result = assemble_host_system_prompt("Base\n", false, dir.path());
+        assert!(result.contains("## Your Identity"));
+        assert!(result.contains("I am Spark"));
+        assert!(result.contains("## Your Personality and Values"));
+        assert!(result.contains("Snarky"));
+        assert!(result.contains("## Your User"));
+        assert!(result.contains("Andrey"));
+        assert!(result.contains("## Operating Instructions"));
+        assert!(result.contains("Procedures"));
+        assert!(result.contains("## Environment and Tools"));
+        assert!(result.contains("outbox: /sandbox/outbox/"));
+    }
+
+    #[test]
+    fn host_prompt_normal_skips_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // No identity files — only AGENTS.md
+        let agents_dir = dir.path().join(".claude").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("AGENTS.md"), "Procedures").unwrap();
+
+        let result = assemble_host_system_prompt("Base\n", false, dir.path());
+        assert!(result.contains("Base"));
+        assert!(result.contains("Procedures"));
+        assert!(!result.contains("## Your Identity"), "missing file must be skipped");
+        assert!(!result.contains("## Your User"), "missing file must be skipped");
+    }
+
+    #[test]
+    fn host_prompt_bootstrap_skips_missing_bootstrap() {
+        let dir = tempfile::tempdir().unwrap();
+        // No BOOTSTRAP.md
+        let result = assemble_host_system_prompt("Base\n", true, dir.path());
+        assert_eq!(result, "Base\n");
     }
 }

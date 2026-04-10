@@ -98,6 +98,7 @@ fn discover_finds_valid_agent() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("test-agent");
     fs::create_dir(&agent_dir).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
     fs::write(agent_dir.join("IDENTITY.md"), "# Test Agent").unwrap();
 
     let agents = discover_agents(dir.path()).unwrap();
@@ -111,6 +112,7 @@ fn discover_accepts_agent_without_policy() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("no-policy");
     fs::create_dir(&agent_dir).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
     fs::write(agent_dir.join("IDENTITY.md"), "# No Policy").unwrap();
     // No policy.yaml -- should still be discovered
 
@@ -129,12 +131,13 @@ fn discover_skips_non_directory_entries() {
 }
 
 #[test]
-fn discover_skips_directories_without_identity() {
+fn discover_skips_directories_without_agent_yaml() {
     let dir = tempdir().unwrap();
-    let agent_dir = dir.path().join("no-identity");
+    let agent_dir = dir.path().join("no-agent-yaml");
     fs::create_dir(&agent_dir).unwrap();
 
-    // No IDENTITY.md
+    // Has IDENTITY.md but no agent.yaml — should be skipped
+    fs::write(agent_dir.join("IDENTITY.md"), "# No agent.yaml").unwrap();
 
     let agents = discover_agents(dir.path()).unwrap();
     assert!(agents.is_empty());
@@ -145,7 +148,6 @@ fn discover_parses_agent_yaml_when_present() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("configured");
     fs::create_dir(&agent_dir).unwrap();
-    fs::write(agent_dir.join("IDENTITY.md"), "# Config Test").unwrap();
 
     fs::write(
         agent_dir.join("agent.yaml"),
@@ -165,7 +167,7 @@ fn discover_detects_mcp_json() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("mcp-agent");
     fs::create_dir(&agent_dir).unwrap();
-    fs::write(agent_dir.join("IDENTITY.md"), "# MCP").unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
 
     fs::write(agent_dir.join("mcp.json"), "{}").unwrap();
 
@@ -179,6 +181,7 @@ fn discover_detects_optional_files() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("full-agent");
     fs::create_dir(&agent_dir).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
     fs::write(agent_dir.join("IDENTITY.md"), "# Full").unwrap();
 
     fs::write(agent_dir.join("SOUL.md"), "soul").unwrap();
@@ -204,7 +207,7 @@ fn discover_rejects_invalid_agent_name() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("bad.name");
     fs::create_dir(&agent_dir).unwrap();
-    fs::write(agent_dir.join("IDENTITY.md"), "# Bad").unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
 
 
     let result = discover_agents(dir.path());
@@ -217,8 +220,7 @@ fn discover_sorts_agents_by_name() {
     for name in ["zebra", "alpha", "middle"] {
         let agent_dir = dir.path().join(name);
         fs::create_dir(&agent_dir).unwrap();
-        fs::write(agent_dir.join("IDENTITY.md"), "# Agent").unwrap();
-    
+        fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
     }
 
     let agents = discover_agents(dir.path()).unwrap();

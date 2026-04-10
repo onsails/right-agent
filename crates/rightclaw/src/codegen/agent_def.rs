@@ -1,4 +1,17 @@
-use crate::agent::AgentDef;
+/// Content `.md` files that agent definitions reference via `@./FILE.md`.
+///
+/// These live at the agent root but are copied into `.claude/agents/` by codegen
+/// so CC can resolve the `@` references (which are relative to the agent def file).
+/// Also used by the bot's sync module for forward/reverse sync with the sandbox.
+pub const CONTENT_MD_FILES: &[&str] = &[
+    "BOOTSTRAP.md",
+    "AGENTS.md",
+    "TOOLS.md",
+    "IDENTITY.md",
+    "SOUL.md",
+    "USER.md",
+    "MEMORY.md",
+];
 
 /// JSON schema for the structured reply format used by teloxide agents (D-02).
 ///
@@ -6,100 +19,100 @@ use crate::agent::AgentDef;
 /// `content` is required (may be null for media-only replies).
 pub const REPLY_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]}"#;
 
-/// System prompt section describing message input/output format for CC agents.
-const ATTACHMENT_FORMAT_DOCS: &str = "\n\n## Message Input Format\n\n\
-You receive user messages via stdin in one of two formats:\n\n\
-1. **Plain text** -- a single message with no attachments\n\
-2. **YAML** -- multiple messages or messages with attachments, with a `messages:` root key\n\n\
-YAML schema:\n\
-```yaml\n\
-messages:\n\
-  - id: <telegram_message_id>\n\
-    ts: <ISO 8601 timestamp>\n\
-    text: <message text or caption>\n\
-    attachments:\n\
-      - type: photo|document|video|audio|voice|video_note|sticker|animation\n\
-        path: <absolute path to file>\n\
-        mime_type: <MIME type>\n\
-        filename: <original filename, documents only>\n\
-```\n\n\
-Use the Read tool to view images and files at the given paths.\n\n\
-## Sending Attachments\n\n\
-Write files to /sandbox/outbox/ (or the outbox/ directory in your working directory).\n\
-Include them in your JSON response under the `attachments` array.\n\n\
-Size limits enforced by the bot:\n\
-- Photos: max 10MB\n\
-- Documents, videos, audio, voice, animations: max 50MB\n\n\
-Do not produce files exceeding these limits. If you need to send large data,\n\
-split into multiple smaller files or use a different format.\n";
+/// JSON schema for bootstrap mode — adds `bootstrap_complete` field.
+///
+/// `bootstrap_complete` is required but the bot does NOT trust it alone —
+/// server-side file-presence check (`should_accept_bootstrap`) gates completion.
+pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"bootstrap_complete":{"type":"boolean"},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete"]}"#;
 
-/// Generate an agent definition `.md` file for Claude Code's native agent system (AGDEF-01).
+/// Generate a normal-mode agent definition with `@` file references.
 ///
-/// Output format:
-/// ```text
-/// ---
-/// name: <agent.name>
-/// model: <model or "inherit">
-/// description: "RightClaw agent: <agent.name>"
-/// ---
-///
-/// <identity content>
-///
-/// ---
-///
-/// <soul content>
-///
-/// ---
-///
-/// <user content>
-///
-/// ---
-///
-/// <agents content>
-/// ```
-///
-/// IDENTITY.md is required — returns Err if missing or unreadable.
-/// Optional files (soul_path, user_path, agents_path) are silently skipped if None or absent.
-/// Body sections are joined with `"\n\n---\n\n"` separator (per D-06).
-/// No `tools:` field is emitted in frontmatter (per D-05).
-pub fn generate_agent_definition(agent: &AgentDef) -> miette::Result<String> {
-    // IDENTITY.md is required — error if missing or unreadable.
-    let identity_content = std::fs::read_to_string(&agent.identity_path).map_err(|e| {
-        miette::miette!(
-            "failed to read {}: {e}",
-            agent.identity_path.display()
-        )
-    })?;
+/// Order is cache-optimized: static files first (AGENTS, SOUL), dynamic last (USER, TOOLS).
+/// CC resolves `@` references relative to the agent def file location (`.claude/agents/`).
+/// Content files are copied there by codegen, so `@./FILE.md` resolves correctly.
+pub fn generate_agent_definition(name: &str, model: Option<&str>) -> String {
+    let model = model.unwrap_or("inherit");
+    format!(
+        "\
+---
+name: {name}
+model: {model}
+description: \"RightClaw agent: {name}\"
+---
 
-    let mut sections = vec![identity_content];
+@./AGENTS.md
 
-    // Optional files: silently skip if path is None or file does not exist on disk.
-    let optional: [Option<&std::path::PathBuf>; 4] = [
-        agent.bootstrap_path.as_ref(),
-        agent.soul_path.as_ref(),
-        agent.user_path.as_ref(),
-        agent.agents_path.as_ref(),
-    ];
-    for path in optional.into_iter().flatten() {
-        if path.exists() {
-            let content = std::fs::read_to_string(path).map_err(|e| {
-                miette::miette!("failed to read {}: {e}", path.display())
-            })?;
-            sections.push(content);
-        }
-    }
+---
 
-    let body = sections.join("\n\n---\n\n");
-    let model = agent
-        .config
-        .as_ref()
-        .and_then(|c| c.model.as_deref())
-        .unwrap_or("inherit");
+@./SOUL.md
 
-    Ok(format!(
-        "---\nname: {}\nmodel: {}\ndescription: \"RightClaw agent: {}\"\n---\n\n{}{}",
-        agent.name, model, agent.name, body, ATTACHMENT_FORMAT_DOCS
-    ))
+---
+
+@./IDENTITY.md
+
+---
+
+@./USER.md
+
+---
+
+@./TOOLS.md
+"
+    )
+}
+
+/// Generate a bootstrap-mode agent definition with only the bootstrap prompt.
+///
+/// Used when BOOTSTRAP.md exists in the agent directory (first-run onboarding).
+/// No identity files — bootstrap is the sole context.
+/// Content files are copied into `.claude/agents/` by codegen.
+pub fn generate_bootstrap_definition(name: &str, model: Option<&str>) -> String {
+    let model = model.unwrap_or("inherit");
+    format!(
+        "\
+---
+name: {name}-bootstrap
+model: {model}
+description: \"RightClaw agent bootstrap: {name}\"
+---
+
+@./BOOTSTRAP.md
+"
+    )
+}
+
+/// Generate the base system prompt for all agent modes.
+///
+/// This replaces CC's default system prompt via `--system-prompt-file`.
+/// Content: agent identity, RightClaw description, sandbox info, MCP reference.
+/// Behavior-specific instructions come from the agent definition (`--agent`).
+pub fn generate_system_prompt(agent_name: &str, sandbox_mode: &crate::agent::types::SandboxMode) -> String {
+    let sandbox_desc = match sandbox_mode {
+        crate::agent::types::SandboxMode::Openshell => "OpenShell sandbox (k3s container with network and filesystem policies)",
+        crate::agent::types::SandboxMode::None => "no sandbox (direct host access)",
+    };
+
+    format!(
+        "\
+You are {agent_name}, a RightClaw agent.
+
+RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs \
+as an independent Claude Code session inside its own sandbox with declarative YAML policies. \
+Agents have persistent memory, scheduled tasks (cron), and tool management via MCP.
+
+Source: https://github.com/onsails/rightclaw
+
+## Environment
+
+- Agent name: {agent_name}
+- Sandbox: {sandbox_desc}
+
+## MCP
+
+You are connected to the `right` MCP server for persistent memory, cron job management, \
+and external MCP server management. Use `mcp_list` to see all configured servers.
+"
+    )
 }
 
 #[cfg(test)]

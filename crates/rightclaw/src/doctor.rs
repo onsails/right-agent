@@ -171,6 +171,54 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
     }
 }
 
+/// Check whether the OpenShell sandbox for a given agent exists and is READY.
+///
+/// Returns `None` when OpenShell is not ready (certs missing, not installed) —
+/// the caller skips the check silently in that case.
+fn check_sandbox_for_agent(agent_name: &str) -> Option<DoctorCheck> {
+    // Only check if OpenShell is available.
+    let mtls_dir = match crate::openshell::preflight_check() {
+        crate::openshell::OpenShellStatus::Ready(dir) => dir,
+        _ => return None, // OpenShell not ready — skip sandbox check
+    };
+
+    let sandbox = crate::openshell::sandbox_name(agent_name);
+
+    // Requires a tokio runtime — skip gracefully in sync test contexts.
+    let handle = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => return None,
+    };
+
+    let result = tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let mut client = crate::openshell::connect_grpc(&mtls_dir).await?;
+            crate::openshell::is_sandbox_ready(&mut client, &sandbox).await
+        })
+    });
+
+    match result {
+        Ok(true) => Some(DoctorCheck {
+            name: format!("sandbox/{agent_name}"),
+            status: CheckStatus::Pass,
+            detail: format!("sandbox '{sandbox}' exists and READY"),
+            fix: None,
+        }),
+        Ok(false) => Some(DoctorCheck {
+            name: format!("sandbox/{agent_name}"),
+            status: CheckStatus::Fail,
+            detail: format!("sandbox '{sandbox}' not found"),
+            fix: Some(format!("Run `rightclaw agent init {agent_name}` to create it")),
+        }),
+        Err(e) => Some(DoctorCheck {
+            name: format!("sandbox/{agent_name}"),
+            status: CheckStatus::Warn,
+            detail: format!("sandbox check failed: {e:#}"),
+            fix: None,
+        }),
+    }
+}
+
 /// Validate agent directory structure.
 ///
 /// Checks that agents/ exists and contains at least one valid agent
@@ -215,33 +263,84 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
             None => continue,
         };
 
+        let agents_md_exists = path.join("AGENTS.md").exists();
         let identity_exists = path.join("IDENTITY.md").exists();
+        let soul_exists = path.join("SOUL.md").exists();
+        let user_exists = path.join("USER.md").exists();
         let bootstrap_exists = path.join("BOOTSTRAP.md").exists();
 
-        if identity_exists {
-            valid_agents += 1;
+        // Parse agent.yaml to get config (for sandbox mode check etc.)
+        let agent_config = crate::agent::discovery::parse_agent_config(&path)
+            .ok()
+            .flatten();
+
+        if !agents_md_exists {
             checks.push(DoctorCheck {
-                name: format!("agents/{name}/"),
-                status: CheckStatus::Pass,
-                detail: "valid agent".to_string(),
-                fix: None,
-            });
-        } else {
-            checks.push(DoctorCheck {
-                name: format!("agents/{name}/"),
+                name: format!("agents/{name}/AGENTS.md"),
                 status: CheckStatus::Fail,
-                detail: "missing IDENTITY.md".to_string(),
-                fix: Some("Each agent needs IDENTITY.md".to_string()),
+                detail: "AGENTS.md missing".to_string(),
+                fix: Some("Run `rightclaw init` or create AGENTS.md manually".to_string()),
             });
         }
 
         if bootstrap_exists {
+            valid_agents += 1;
+            checks.push(DoctorCheck {
+                name: format!("agents/{name}/"),
+                status: CheckStatus::Pass,
+                detail: "valid agent (onboarding pending)".to_string(),
+                fix: None,
+            });
             checks.push(DoctorCheck {
                 name: format!("agents/{name}/BOOTSTRAP.md"),
                 status: CheckStatus::Warn,
                 detail: "first-run onboarding pending".to_string(),
-                fix: Some("Launch the agent to complete onboarding".to_string()),
+                fix: Some("Send a message to the agent to start onboarding".to_string()),
             });
+        } else {
+            // No bootstrap — check identity files.
+            if identity_exists {
+                valid_agents += 1;
+                checks.push(DoctorCheck {
+                    name: format!("agents/{name}/"),
+                    status: CheckStatus::Pass,
+                    detail: "valid agent".to_string(),
+                    fix: None,
+                });
+            }
+            if !identity_exists {
+                checks.push(DoctorCheck {
+                    name: format!("agents/{name}/IDENTITY.md"),
+                    status: CheckStatus::Warn,
+                    detail: "IDENTITY.md missing — run bootstrap or create manually".to_string(),
+                    fix: Some("Send a message to the agent to start onboarding".to_string()),
+                });
+            }
+            if !soul_exists {
+                checks.push(DoctorCheck {
+                    name: format!("agents/{name}/SOUL.md"),
+                    status: CheckStatus::Warn,
+                    detail: "SOUL.md missing — run bootstrap or create manually".to_string(),
+                    fix: Some("Send a message to the agent to start onboarding".to_string()),
+                });
+            }
+            if !user_exists {
+                checks.push(DoctorCheck {
+                    name: format!("agents/{name}/USER.md"),
+                    status: CheckStatus::Warn,
+                    detail: "USER.md missing — run bootstrap or create manually".to_string(),
+                    fix: Some("Send a message to the agent to start onboarding".to_string()),
+                });
+            }
+        }
+
+        // Check sandbox existence for openshell agents.
+        let is_openshell = agent_config
+            .as_ref()
+            .map(|c| matches!(c.sandbox_mode(), crate::agent::types::SandboxMode::Openshell))
+            .unwrap_or(true); // default sandbox mode is openshell
+        if is_openshell && let Some(check) = check_sandbox_for_agent(&name) {
+            checks.push(check);
         }
     }
 
@@ -727,16 +826,7 @@ See: https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespace
 /// Verifies ca.crt, tls.crt, tls.key in ~/.config/openshell/gateways/openshell/mtls/.
 /// Severity: Fail — without mTLS certs, gRPC connection to OpenShell gateway is impossible.
 fn check_openshell_mtls_certs() -> DoctorCheck {
-    let Some(config_dir) = dirs::config_dir() else {
-        return DoctorCheck {
-            name: "openshell-mtls".to_string(),
-            status: CheckStatus::Fail,
-            detail: "cannot determine config directory".to_string(),
-            fix: None,
-        };
-    };
-
-    let mtls_dir = config_dir.join("openshell/gateways/openshell/mtls");
+    let mtls_dir = crate::openshell::default_mtls_dir();
     let required = ["ca.crt", "tls.crt", "tls.key"];
     let missing: Vec<&str> = required
         .iter()
@@ -766,16 +856,7 @@ fn check_openshell_mtls_certs() -> DoctorCheck {
 /// Connects to 127.0.0.1:8080 with mTLS and calls Health RPC.
 /// Uses block_in_place to run async gRPC call from sync context.
 fn check_openshell_gateway_health() -> DoctorCheck {
-    let Some(config_dir) = dirs::config_dir() else {
-        return DoctorCheck {
-            name: "openshell-gateway".to_string(),
-            status: CheckStatus::Warn,
-            detail: "cannot determine config directory".to_string(),
-            fix: None,
-        };
-    };
-
-    let mtls_dir = config_dir.join("openshell/gateways/openshell/mtls");
+    let mtls_dir = crate::openshell::default_mtls_dir();
 
     // Skip if certs are missing (the mtls check already flags this)
     if !mtls_dir.join("ca.crt").exists() {

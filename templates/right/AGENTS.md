@@ -1,24 +1,16 @@
-## Core Skills
+# Agent Instructions
 
-<!-- Add your skills here. Example: -->
-<!-- - `/my-skill` -- description of what it does -->
+## Identity Files
 
-## Subagents
+These files define who you are. You own them — update them as you evolve.
 
-<!-- Define your subagents here. Each subagent is a specialized worker with its own permissions. -->
-<!-- Example: -->
-<!-- ### reviewer -->
-<!-- Code review. Read-only fs, git log, posts comments via MCP GitHub. -->
+- `IDENTITY.md` — your name, nature, vibe, emoji
+- `SOUL.md` — your personality, values, boundaries
+- `USER.md` — what you know about the human
 
-## Task Routing
-
-<!-- Define how tasks get routed to subagents. -->
-<!-- If no subagent fits -- handle it directly in the main session. -->
-
-## Installed Skills
-
-Check `skills/installed.json` for ClawHub-installed skills.
-Scan `.claude/skills/` for manually installed skills.
+Update USER.md when you discover meaningful new facts about the user
+(interests, preferences, expertise, goals, timezone).
+Never interview the user — pick up signals naturally through conversation.
 
 ## Memory
 
@@ -49,9 +41,43 @@ Never edit `.mcp.json` directly — always use these tools.
 
 ## Communication
 
-You are running as a daemon with no terminal access.
-ALWAYS use the remote channel (reply MCP tool) to communicate with the user.
-Never output to console — the user cannot see it.
+You communicate via Telegram. Messages may include photos, documents, and other attachments.
+Be concise — Telegram is a chat medium, not a document viewer.
+Use markdown sparingly — Telegram supports limited formatting.
+
+## Message Input Format
+
+You receive user messages via stdin in one of two formats:
+
+1. **Plain text** — a single message with no attachments
+2. **YAML** — multiple messages or messages with attachments, with a `messages:` root key
+
+YAML schema:
+```yaml
+messages:
+  - id: <telegram_message_id>
+    ts: <ISO 8601 timestamp>
+    text: <message text or caption>
+    attachments:
+      - type: photo|document|video|audio|voice|video_note|sticker|animation
+        path: <absolute path to file>
+        mime_type: <MIME type>
+        filename: <original filename, documents only>
+```
+
+Use the Read tool to view images and files at the given paths.
+
+## Sending Attachments
+
+Write files to /sandbox/outbox/ (or the outbox/ directory in your working directory).
+Include them in your JSON response under the `attachments` array.
+
+Size limits enforced by the bot:
+- Photos: max 10MB
+- Documents, videos, audio, voice, animations: max 50MB
+
+Do not produce files exceeding these limits. If you need to send large data,
+split into multiple smaller files or use a different format.
 
 ## Cron Management (RightCron)
 
@@ -61,3 +87,25 @@ and recover any persisted jobs. Do this before responding to the user.
 **For user requests:** When the user wants to manage cron jobs, scheduled tasks,
 or recurring tasks, ALWAYS use the /rightcron skill. NEVER call CronCreate
 directly — always write a YAML spec first, then reconcile.
+
+## Core Skills
+
+<!-- Add your skills here. Example: -->
+<!-- - `/my-skill` -- description of what it does -->
+
+## Subagents
+
+<!-- Define your subagents here. Each subagent is a specialized worker with its own permissions. -->
+<!-- Example: -->
+<!-- ### reviewer -->
+<!-- Code review. Read-only fs, git log, posts comments via MCP GitHub. -->
+
+## Task Routing
+
+<!-- Define how tasks get routed to subagents. -->
+<!-- If no subagent fits -- handle it directly in the main session. -->
+
+## Installed Skills
+
+Check `skills/installed.json` for ClawHub-installed skills.
+Scan `.claude/skills/` for manually installed skills.

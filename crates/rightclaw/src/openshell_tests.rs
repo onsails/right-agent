@@ -20,22 +20,28 @@ use crate::openshell_proto::openshell::v1 as proto;
 use crate::openshell_proto::openshell::v1::open_shell_server::{self, OpenShellServer};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
 
 /// Minimal mock — only `get_sandbox` is meaningful; all other RPCs return Unimplemented.
 ///
 /// `get_sandbox_phase` controls the sandbox phase returned.
 /// Set to -1 to return `NotFound` instead of a sandbox.
 struct MockOpenShell {
-    get_sandbox_phase: AtomicI32,
+    get_sandbox_phase: Arc<AtomicI32>,
 }
 
 impl MockOpenShell {
     fn not_found() -> Self {
-        Self { get_sandbox_phase: AtomicI32::new(-1) }
+        Self { get_sandbox_phase: Arc::new(AtomicI32::new(-1)) }
     }
 
     fn with_phase(phase: i32) -> Self {
-        Self { get_sandbox_phase: AtomicI32::new(phase) }
+        Self { get_sandbox_phase: Arc::new(AtomicI32::new(phase)) }
+    }
+
+    /// Create mock with a shared phase handle for external mutation during tests.
+    fn with_shared_phase(phase: Arc<AtomicI32>) -> Self {
+        Self { get_sandbox_phase: phase }
     }
 }
 
@@ -195,4 +201,285 @@ async fn wait_for_ready_times_out_when_not_found() {
     assert!(result.is_err(), "should timeout");
     let msg = format!("{}", result.unwrap_err());
     assert!(msg.contains("did not become READY"), "unexpected error: {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// sandbox_exists / wait_for_deleted tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sandbox_exists_returns_false_on_not_found() {
+    let (addr, _shutdown) = start_mock_server(MockOpenShell::not_found()).await;
+    let mut client = mock_client(addr).await;
+
+    assert!(!super::sandbox_exists(&mut client, "ghost").await.unwrap());
+}
+
+#[tokio::test]
+async fn sandbox_exists_returns_true_for_any_phase() {
+    // Phase 1 = Creating (not READY), but sandbox exists.
+    let (addr, _shutdown) = start_mock_server(MockOpenShell::with_phase(1)).await;
+    let mut client = mock_client(addr).await;
+
+    assert!(super::sandbox_exists(&mut client, "creating-sandbox").await.unwrap());
+}
+
+#[tokio::test]
+async fn wait_for_deleted_returns_immediately_when_not_found() {
+    let (addr, _shutdown) = start_mock_server(MockOpenShell::not_found()).await;
+    let mut client = mock_client(addr).await;
+
+    let result = super::wait_for_deleted(&mut client, "gone", 5, 1).await;
+    assert!(result.is_ok(), "expected Ok, got: {result:?}");
+}
+
+#[tokio::test]
+async fn wait_for_deleted_times_out_when_sandbox_persists() {
+    let (addr, _shutdown) = start_mock_server(MockOpenShell::with_phase(1)).await;
+    let mut client = mock_client(addr).await;
+
+    let result = super::wait_for_deleted(&mut client, "stubborn", 2, 1).await;
+    assert!(result.is_err(), "should timeout");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(msg.contains("was not deleted"), "unexpected error: {msg}");
+}
+
+#[tokio::test]
+async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
+    let phase = Arc::new(AtomicI32::new(1)); // starts as existing
+    let (addr, _shutdown) = start_mock_server(MockOpenShell::with_shared_phase(Arc::clone(&phase))).await;
+    let mut client = mock_client(addr).await;
+
+    // Flip to NotFound after a short delay.
+    tokio::spawn({
+        let phase = Arc::clone(&phase);
+        async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            phase.store(-1, Ordering::Relaxed);
+        }
+    });
+
+    let result = super::wait_for_deleted(&mut client, "disappearing", 5, 1).await;
+    assert!(result.is_ok(), "expected Ok after sandbox disappears, got: {result:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Live sandbox integration tests (require running OpenShell + rightclaw-right)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+async fn exec_in_sandbox_runs_command() {
+    let mtls_dir = match super::preflight_check() {
+        super::OpenShellStatus::Ready(dir) => dir,
+        other => panic!("OpenShell not ready: {other:?}"),
+    };
+    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
+    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
+        .await
+        .unwrap();
+
+    let (stdout, exit_code) = super::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["echo", "hello-from-test"],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exit_code, 0, "echo should exit 0");
+    assert!(
+        stdout.contains("hello-from-test"),
+        "expected 'hello-from-test' in stdout, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+async fn exec_in_sandbox_returns_exit_code() {
+    let mtls_dir = match super::preflight_check() {
+        super::OpenShellStatus::Ready(dir) => dir,
+        other => panic!("OpenShell not ready: {other:?}"),
+    };
+    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
+    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
+        .await
+        .unwrap();
+
+    let (_, exit_code) = super::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["sh", "-c", "exit 42"],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exit_code, 42, "should propagate remote exit code");
+}
+
+#[tokio::test]
+#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+async fn verify_sandbox_files_detects_missing_and_reuploads() {
+    // Create a temp dir with a test file.
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dir = tmp.path();
+    std::fs::write(host_dir.join("VERIFY_TEST.md"), "# verify test\n").unwrap();
+
+    // First: ensure VERIFY_TEST.md does NOT exist in sandbox.
+    let mtls_dir = match super::preflight_check() {
+        super::OpenShellStatus::Ready(dir) => dir,
+        other => panic!("OpenShell not ready: {other:?}"),
+    };
+    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
+    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
+        .await
+        .unwrap();
+    let _ = super::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["rm", "-f", "/sandbox/VERIFY_TEST.md"],
+    )
+    .await;
+
+    // verify_sandbox_files should detect missing file and re-upload it.
+    super::verify_sandbox_files(
+        "rightclaw-right",
+        host_dir,
+        "/sandbox/",
+        &["VERIFY_TEST.md"],
+    )
+    .await
+    .expect("verify should succeed after re-upload");
+
+    // Confirm file actually exists in sandbox now.
+    let (output, _) = super::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["cat", "/sandbox/VERIFY_TEST.md"],
+    )
+    .await
+    .unwrap();
+    assert_eq!(output, "# verify test\n", "file content should match");
+
+    // Cleanup.
+    let _ = super::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["rm", "-f", "/sandbox/VERIFY_TEST.md"],
+    )
+    .await;
+}
+
+/// Reproduces the exact flow of `rightclaw init`:
+/// create sandbox → immediately exec_in_sandbox.
+///
+/// This is the scenario where gRPC reports READY but SSH transport
+/// may not be up yet, causing "Connection reset by peer".
+#[tokio::test]
+async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
+    // ensure_sandbox takes agent name and prepends "rightclaw-" via sandbox_name().
+    const AGENT: &str = "test-lifecycle";
+    let sandbox = super::sandbox_name(AGENT);
+
+    let mtls_dir = match super::preflight_check() {
+        super::OpenShellStatus::Ready(dir) => dir,
+        other => panic!("OpenShell not ready: {other:?}"),
+    };
+
+    // Cleanup from any previous failed run — wait for full deletion, not just CLI return.
+    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
+    if super::sandbox_exists(&mut client, &sandbox).await.unwrap() {
+        super::delete_sandbox(&sandbox).await;
+        super::wait_for_deleted(&mut client, &sandbox, 60, 2)
+            .await
+            .expect("cleanup: sandbox should be deleted");
+    }
+
+    // Realistic policy matching what `rightclaw init` generates (restrictive mode).
+    // The network_policies with TLS termination and proxy setup is what makes
+    // SSH transport take significantly longer to become ready.
+    let tmp = tempfile::tempdir().unwrap();
+    let policy_path = tmp.path().join("policy.yaml");
+    let policy = crate::codegen::policy::generate_policy(18927, &crate::agent::types::NetworkPolicy::Restrictive);
+    std::fs::write(&policy_path, &policy).unwrap();
+
+    // Create a staging dir with a small test file (same as init uploads agent defs).
+    let staging = tmp.path().join("staging");
+    std::fs::create_dir_all(staging.join(".claude/agents")).unwrap();
+    std::fs::write(
+        staging.join(".claude/agents/test.md"),
+        "# test agent def\n",
+    )
+    .unwrap();
+
+    // Create sandbox — returns when gRPC says READY.
+    super::ensure_sandbox(AGENT, &policy_path, Some(&staging), false)
+        .await
+        .expect("sandbox creation should succeed");
+
+    // Immediately try exec — this is what init does.
+    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
+    let sandbox_id = super::resolve_sandbox_id(&mut client, &sandbox)
+        .await
+        .unwrap();
+
+    let result = super::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["echo", "hello-after-create"],
+    )
+    .await;
+
+    // Cleanup sandbox regardless of test outcome.
+    super::delete_sandbox(&sandbox).await;
+
+    // Assert AFTER cleanup so we don't leave orphan sandboxes.
+    let (stdout, exit_code) = result.expect(
+        "exec_in_sandbox should succeed immediately after sandbox create — \
+         if this fails with 'Connection reset by peer', ensure_sandbox returns \
+         before SSH transport is ready"
+    );
+    assert_eq!(exit_code, 0);
+    assert!(
+        stdout.contains("hello-after-create"),
+        "expected 'hello-after-create' in stdout, got: {stdout:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+async fn verify_sandbox_files_passes_when_all_present() {
+    // Upload a file first, then verify it passes.
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dir = tmp.path();
+    std::fs::write(host_dir.join("PRESENT_TEST.md"), "exists\n").unwrap();
+
+    super::upload_file("rightclaw-right", &host_dir.join("PRESENT_TEST.md"), "/sandbox/")
+        .await
+        .unwrap();
+
+    super::verify_sandbox_files(
+        "rightclaw-right",
+        host_dir,
+        "/sandbox/",
+        &["PRESENT_TEST.md"],
+    )
+    .await
+    .expect("verify should pass when file exists");
+
+    // Cleanup.
+    let mtls_dir = match super::preflight_check() {
+        super::OpenShellStatus::Ready(dir) => dir,
+        _ => return,
+    };
+    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
+    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
+        .await
+        .unwrap();
+    let _ = super::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["rm", "-f", "/sandbox/PRESENT_TEST.md"],
+    )
+    .await;
 }

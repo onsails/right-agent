@@ -59,7 +59,10 @@ fn run_doctor_with_valid_agent_reports_pass() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("right");
     std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents").unwrap();
     std::fs::write(agent_dir.join("IDENTITY.md"), "# Right").unwrap();
+    std::fs::write(agent_dir.join("SOUL.md"), "# Soul").unwrap();
+    std::fs::write(agent_dir.join("USER.md"), "# User").unwrap();
 
     let checks = run_doctor(dir.path());
 
@@ -90,7 +93,7 @@ fn run_doctor_reports_bootstrap_pending() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("right");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("IDENTITY.md"), "# Right").unwrap();
+    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents").unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "# Onboarding").unwrap();
 
     let checks = run_doctor(dir.path());
@@ -108,17 +111,19 @@ fn run_doctor_reports_missing_identity() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("broken");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    // No IDENTITY.md
+    // No IDENTITY.md — only AGENTS.md present
+    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents").unwrap();
     std::fs::write(agent_dir.join("agent.yaml"), "{}").unwrap();
 
     let checks = run_doctor(dir.path());
 
-    let agent_check = checks
+    // Without IDENTITY.md (and no BOOTSTRAP.md), doctor warns about missing IDENTITY.md
+    let identity_check = checks
         .iter()
-        .find(|c| c.name.contains("agents/broken/"))
-        .expect("should have a check for agents/broken/");
-    assert_eq!(agent_check.status, CheckStatus::Fail);
-    assert!(agent_check.detail.contains("IDENTITY.md"));
+        .find(|c| c.name.contains("IDENTITY.md"))
+        .expect("should have a check for IDENTITY.md");
+    assert_eq!(identity_check.status, CheckStatus::Warn);
+    assert!(identity_check.detail.contains("IDENTITY.md missing"));
 }
 
 #[test]
@@ -448,6 +453,7 @@ fn check_webhook_info_for_agents_skips_agents_without_token() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     // Write agent.yaml with no telegram token
     std::fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
+    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
     std::fs::write(agent_dir.join("IDENTITY.md"), "# MyBot\n").unwrap();
 
     let checks = check_webhook_info_for_agents(dir.path());
@@ -666,4 +672,69 @@ fn mcp_auth_issues_prefix_constant_matches_detail_format() {
     let stripped = detail.strip_prefix(MCP_ISSUES_PREFIX);
     assert!(stripped.is_some(), "MCP_ISSUES_PREFIX does not match detail format");
     assert_eq!(stripped.unwrap(), "agent1/notion, agent2/linear");
+}
+
+// ---- identity file checks ----
+
+#[test]
+fn doctor_warns_missing_identity_files_no_bootstrap() {
+    let dir = tempdir().unwrap();
+    let home = dir.path();
+    let agent_dir = home.join("agents").join("test");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("AGENTS.md"), "# Agent").unwrap();
+
+    let checks = check_agent_structure(home);
+    assert!(
+        checks.iter().any(|c| c.detail.contains("IDENTITY.md missing")),
+        "should warn about missing IDENTITY.md, got: {:?}",
+        checks.iter().map(|c| &c.detail).collect::<Vec<_>>()
+    );
+    assert!(
+        checks.iter().any(|c| c.detail.contains("SOUL.md missing")),
+        "should warn about missing SOUL.md"
+    );
+    assert!(
+        checks.iter().any(|c| c.detail.contains("USER.md missing")),
+        "should warn about missing USER.md"
+    );
+}
+
+#[test]
+fn doctor_passes_with_all_identity_files() {
+    let dir = tempdir().unwrap();
+    let home = dir.path();
+    let agent_dir = home.join("agents").join("test");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("AGENTS.md"), "# Agent").unwrap();
+    std::fs::write(agent_dir.join("IDENTITY.md"), "# Identity").unwrap();
+    std::fs::write(agent_dir.join("SOUL.md"), "# Soul").unwrap();
+    std::fs::write(agent_dir.join("USER.md"), "# User").unwrap();
+
+    let checks = check_agent_structure(home);
+    assert!(
+        !checks.iter().any(|c| c.detail.contains("missing")),
+        "should not warn when all files present, got: {:?}",
+        checks.iter().map(|c| &c.detail).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn doctor_bootstrap_pending_skips_identity_checks() {
+    let dir = tempdir().unwrap();
+    let home = dir.path();
+    let agent_dir = home.join("agents").join("test");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(agent_dir.join("AGENTS.md"), "# Agent").unwrap();
+    std::fs::write(agent_dir.join("BOOTSTRAP.md"), "# Bootstrap").unwrap();
+
+    let checks = check_agent_structure(home);
+    assert!(
+        checks.iter().any(|c| c.detail.contains("onboarding pending")),
+        "should show onboarding pending"
+    );
+    assert!(
+        !checks.iter().any(|c| c.detail.contains("IDENTITY.md missing")),
+        "should not check identity when bootstrap present"
+    );
 }

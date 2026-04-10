@@ -50,6 +50,12 @@ pub enum AgentCommands {
         /// Non-interactive mode
         #[arg(short = 'y', long)]
         yes: bool,
+        /// If agent exists, wipe and re-create (confirms unless -y)
+        #[arg(long)]
+        force: bool,
+        /// With --force: re-run wizard instead of reusing existing config
+        #[arg(long, requires = "force")]
+        fresh: bool,
         /// Network policy: restrictive or permissive
         #[arg(long)]
         network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
@@ -152,6 +158,12 @@ pub enum Commands {
         /// Network policy: restrictive (Anthropic/Claude only) or permissive (all HTTPS)
         #[arg(long)]
         network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
+        /// Sandbox mode: openshell or none
+        #[arg(long)]
+        sandbox_mode: Option<rightclaw::agent::types::SandboxMode>,
+        /// Recreate sandbox if it already exists (without prompting)
+        #[arg(long)]
+        force: bool,
     },
     /// List discovered agents and their status
     List,
@@ -324,8 +336,8 @@ async fn main() -> miette::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_name, tunnel_hostname, yes, network_policy } => {
-            cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, &tunnel_name, tunnel_hostname.as_deref(), yes, network_policy)
+        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_name, tunnel_hostname, yes, network_policy, sandbox_mode, force } => {
+            cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, &tunnel_name, tunnel_hostname.as_deref(), yes, network_policy, sandbox_mode, force)
         }
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home),
@@ -372,8 +384,8 @@ async fn main() -> miette::Result<()> {
             }
         },
         Commands::Agent { command } => match command {
-            AgentCommands::Init { name, yes, network_policy, sandbox_mode } => {
-                cmd_agent_init(&home, &name, yes, network_policy, sandbox_mode)
+            AgentCommands::Init { name, yes, force, fresh, network_policy, sandbox_mode } => {
+                cmd_agent_init(&home, &name, yes, force, fresh, network_policy, sandbox_mode)
             }
             AgentCommands::Config { name, key, value } => {
                 match (key, value) {
@@ -448,6 +460,8 @@ fn cmd_init(
     tunnel_hostname: Option<&str>,
     yes: bool,
     network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
+    sandbox_mode: Option<rightclaw::agent::types::SandboxMode>,
+    force: bool,
 ) -> miette::Result<()> {
     let interactive = !yes;
 
@@ -477,14 +491,103 @@ fn cmd_init(
         None => rightclaw::init::prompt_network_policy()?,
     };
 
-    // Sandbox mode: interactive prompt > openshell (default for --yes).
-    let sandbox = if !interactive {
-        rightclaw::agent::types::SandboxMode::Openshell
-    } else {
-        rightclaw::init::prompt_sandbox_mode()?
+    // Sandbox mode: CLI flag > interactive prompt > openshell (default for --yes).
+    let sandbox = match sandbox_mode {
+        Some(m) => m,
+        None if !interactive => rightclaw::agent::types::SandboxMode::Openshell,
+        None => rightclaw::init::prompt_sandbox_mode()?,
     };
 
     rightclaw::init::init_rightclaw_home(home, token.as_deref(), &chat_ids, &network_policy, &sandbox)?;
+
+    // Create sandbox for the default "right" agent if openshell mode.
+    if matches!(sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
+        let agent_dir = home.join("agents/right");
+        let self_exe = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
+        let agent_def = rightclaw::agent::AgentDef {
+            name: "right".to_string(),
+            path: agent_dir.clone(),
+            identity_path: agent_dir.join("IDENTITY.md"),
+            config: rightclaw::agent::discovery::parse_agent_config(&agent_dir)?,
+            soul_path: None,
+            user_path: None,
+            agents_path: if agent_dir.join("AGENTS.md").exists() {
+                Some(agent_dir.join("AGENTS.md"))
+            } else {
+                None
+            },
+            tools_path: None,
+            bootstrap_path: if agent_dir.join("BOOTSTRAP.md").exists() {
+                Some(agent_dir.join("BOOTSTRAP.md"))
+            } else {
+                None
+            },
+            heartbeat_path: None,
+        };
+        rightclaw::codegen::run_agent_codegen(
+            home,
+            std::slice::from_ref(&agent_def),
+            std::slice::from_ref(&agent_def),
+            &self_exe,
+            false,
+        )?;
+
+        let staging = agent_dir.join("staging");
+        rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+
+        let policy_path = agent_dir.join("policy.yaml");
+        let sb_name = rightclaw::openshell::sandbox_name("right");
+        let force_recreate = if force {
+            true
+        } else {
+            prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
+        };
+        println!("Creating OpenShell sandbox...");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rightclaw::openshell::ensure_sandbox(
+                    "right",
+                    &policy_path,
+                    Some(&staging),
+                    force_recreate,
+                )
+                .await
+            })
+        })?;
+        // Post-check: verify critical files made it into the sandbox.
+        // OpenShell has a bug where small files in directory uploads are silently dropped.
+        let expected_files: Vec<&str> = std::iter::once("right.md")
+            .chain(std::iter::once("right-bootstrap.md"))
+            .chain(rightclaw::codegen::CONTENT_MD_FILES.iter().copied()
+                .filter(|f| agent_dir.join(".claude/agents").join(f).exists()))
+            .collect();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rightclaw::openshell::verify_sandbox_files(
+                    &sb_name,
+                    &agent_dir.join(".claude/agents"),
+                    "/sandbox/.claude/agents/",
+                    &expected_files,
+                )
+                .await
+            })
+        })?;
+        println!("  Sandbox '{sb_name}' ready");
+
+        let run_dir = home.join("run");
+        std::fs::create_dir_all(run_dir.join("ssh"))
+            .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rightclaw::openshell::generate_ssh_config(
+                    &rightclaw::openshell::sandbox_name("right"),
+                    &run_dir.join("ssh"),
+                )
+                .await
+            })
+        })?;
+    }
 
     println!("Initialized RightClaw at {}", home.display());
     println!(
@@ -520,59 +623,269 @@ fn cmd_agent_init(
     home: &Path,
     name: &str,
     yes: bool,
+    force: bool,
+    fresh: bool,
     network_policy: Option<rightclaw::agent::types::NetworkPolicy>,
     sandbox_mode: Option<rightclaw::agent::types::SandboxMode>,
 ) -> miette::Result<()> {
     let interactive = !yes;
+    let agents_parent = home.join("agents");
+    let agent_dir = agents_parent.join(name);
+    let agent_existed = agent_dir.exists();
 
-    // Sandbox mode: CLI --sandbox-mode > interactive prompt > openshell default.
-    let sandbox = match sandbox_mode {
-        Some(mode) => mode,
-        None if !interactive => rightclaw::agent::types::SandboxMode::Openshell,
-        None => rightclaw::init::prompt_sandbox_mode()?,
-    };
+    // Reject if exists and --force not given.
+    if agent_dir.exists() && !force {
+        return Err(miette::miette!(
+            help = "Use --force to wipe and re-create, or `rightclaw agent config` to change settings",
+            "Agent directory already exists at {}",
+            agent_dir.display()
+        ));
+    }
 
-    // Network policy: only relevant for openshell mode.
-    let network_policy = if matches!(sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
-        match network_policy {
-            Some(p) => p,
-            None if !interactive => rightclaw::agent::types::NetworkPolicy::Restrictive,
-            None => rightclaw::init::prompt_network_policy()?,
+    // --- Force wipe logic ---
+    let saved_overrides = if force && agent_dir.exists() {
+        // Read existing config before deletion (unless --fresh).
+        let saved = if fresh {
+            None
+        } else {
+            let yaml_path = agent_dir.join("agent.yaml");
+            let yaml_str = std::fs::read_to_string(&yaml_path).map_err(|e| {
+                miette::miette!(
+                    help = "Use --fresh to reconfigure from scratch",
+                    "Could not read existing agent.yaml: {e:#}"
+                )
+            })?;
+            let config: rightclaw::agent::types::AgentConfig =
+                serde_saphyr::from_str(&yaml_str).map_err(|e| {
+                    miette::miette!(
+                        help = "Use --fresh to reconfigure from scratch",
+                        "Could not parse existing agent.yaml: {e:#}"
+                    )
+                })?;
+            Some(config)
+        };
+
+        // Check agent is not running.
+        let state_path = home.join("run/runtime-state.json");
+        if state_path.exists() {
+            let state = rightclaw::runtime::read_state(&state_path)?;
+            if state.agents.iter().any(|a| a.name == name) {
+                return Err(miette::miette!(
+                    help = "Run `rightclaw down` first",
+                    "Agent '{name}' is currently running"
+                ));
+            }
         }
-    } else {
-        // For none mode, network policy is irrelevant — default to permissive.
-        network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive)
-    };
 
-    // Telegram token: only in interactive mode.
-    let token = if interactive {
-        crate::wizard::telegram_setup(None, true)?
+        // Confirm with user.
+        if interactive {
+            use std::io::{self, Write};
+            println!("Agent \"{name}\" already exists at {}", agent_dir.display());
+            println!("This will permanently delete:");
+            println!("  - All agent files (identity, memory, skills, config)");
+            println!(
+                "  - OpenShell sandbox \"{}\" (if exists)",
+                rightclaw::openshell::sandbox_name(name)
+            );
+            print!("Continue? [y/N] ");
+            io::stdout().flush().map_err(|e| miette::miette!("stdout flush: {e}"))?;
+            let mut input = String::new();
+            io::stdin()
+                .read_line(&mut input)
+                .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+            if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+                return Err(miette::miette!("Aborted"));
+            }
+        }
+
+        // Delete sandbox (best-effort, async).
+        let sb_name = rightclaw::openshell::sandbox_name(name);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rightclaw::openshell::delete_sandbox(&sb_name).await;
+            });
+        });
+
+        // Delete SSH config.
+        let ssh_config = home.join(format!("run/ssh/{}.ssh-config", sb_name));
+        if ssh_config.exists() {
+            std::fs::remove_file(&ssh_config).ok();
+        }
+
+        // Delete agent directory.
+        std::fs::remove_dir_all(&agent_dir).map_err(|e| {
+            miette::miette!("Failed to delete agent directory {}: {e:#}", agent_dir.display())
+        })?;
+
+        tracing::info!(agent = name, "wiped agent directory and sandbox");
+
+        saved
     } else {
         None
     };
 
-    // Chat IDs: only if token is set and interactive.
-    let chat_ids: Vec<i64> = if interactive && token.is_some() {
-        crate::wizard::chat_ids_setup()?
+    // --- Build overrides ---
+    let overrides = if let Some(config) = saved_overrides {
+        // Reuse saved config from old agent.yaml.
+        rightclaw::init::InitOverrides {
+            sandbox_mode: config.sandbox_mode().clone(),
+            network_policy: config.network_policy,
+            telegram_token: config.telegram_token,
+            allowed_chat_ids: config.allowed_chat_ids,
+            model: config.model,
+            env: config.env,
+        }
     } else {
-        vec![]
+        // Fresh init: run wizard or use CLI flags.
+        let sandbox = match sandbox_mode {
+            Some(mode) => mode,
+            None if !interactive => rightclaw::agent::types::SandboxMode::Openshell,
+            None => rightclaw::init::prompt_sandbox_mode()?,
+        };
+
+        let network_policy =
+            if matches!(sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
+                match network_policy {
+                    Some(p) => p,
+                    None if !interactive => {
+                        rightclaw::agent::types::NetworkPolicy::Restrictive
+                    }
+                    None => rightclaw::init::prompt_network_policy()?,
+                }
+            } else {
+                network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive)
+            };
+
+        let token = if interactive {
+            crate::wizard::telegram_setup(None, true)?
+        } else {
+            None
+        };
+
+        let chat_ids: Vec<i64> = if interactive && token.is_some() {
+            crate::wizard::chat_ids_setup()?
+        } else {
+            vec![]
+        };
+
+        rightclaw::init::InitOverrides {
+            sandbox_mode: sandbox,
+            network_policy,
+            telegram_token: token,
+            allowed_chat_ids: chat_ids,
+            model: None,
+            env: std::collections::HashMap::new(),
+        }
     };
 
-    let agents_parent = home.join("agents");
-    let agent_dir = rightclaw::init::init_agent(
-        &agents_parent,
-        name,
-        token.as_deref(),
-        &chat_ids,
-        &network_policy,
-        &sandbox,
-    )?;
+    let agent_dir = rightclaw::init::init_agent(&agents_parent, name, Some(&overrides))?;
+
+    // Create sandbox for openshell agents.
+    if matches!(overrides.sandbox_mode, rightclaw::agent::types::SandboxMode::Openshell) {
+        // Run codegen so staging dir has agent defs, settings, schemas, skills.
+        let self_exe = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
+        let agent_def = rightclaw::agent::AgentDef {
+            name: name.to_string(),
+            path: agent_dir.clone(),
+            identity_path: agent_dir.join("IDENTITY.md"),
+            config: rightclaw::agent::discovery::parse_agent_config(&agent_dir)?,
+            soul_path: None,
+            user_path: None,
+            agents_path: if agent_dir.join("AGENTS.md").exists() {
+                Some(agent_dir.join("AGENTS.md"))
+            } else {
+                None
+            },
+            tools_path: None,
+            bootstrap_path: if agent_dir.join("BOOTSTRAP.md").exists() {
+                Some(agent_dir.join("BOOTSTRAP.md"))
+            } else {
+                None
+            },
+            heartbeat_path: None,
+        };
+        rightclaw::codegen::run_agent_codegen(
+            home,
+            std::slice::from_ref(&agent_def),
+            std::slice::from_ref(&agent_def),
+            &self_exe,
+            false,
+        )?;
+
+        let staging = agent_dir.join("staging");
+        rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+
+        let policy_path = agent_dir.join("policy.yaml");
+        let sb_name = rightclaw::openshell::sandbox_name(name);
+        // --force always recreates; fresh agent (didn't exist before) always creates;
+        // otherwise prompt if stale sandbox exists.
+        let force_recreate = if force || !agent_existed {
+            // Check if sandbox exists — if so, we need to recreate. If not, false is fine
+            // (ensure_sandbox will create fresh).
+            let exists = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    check_sandbox_exists_async(&sb_name).await
+                })
+            });
+            exists.unwrap_or(false)
+        } else {
+            prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
+        };
+        println!("Creating OpenShell sandbox...");
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rightclaw::openshell::ensure_sandbox(
+                    name,
+                    &policy_path,
+                    Some(&staging),
+                    force_recreate,
+                )
+                .await
+            })
+        })?;
+
+        // Post-check: verify critical files made it into the sandbox.
+        let agent_def_name = format!("{name}.md");
+        let bootstrap_def_name = format!("{name}-bootstrap.md");
+        let expected_files: Vec<&str> = [agent_def_name.as_str(), bootstrap_def_name.as_str()]
+            .into_iter()
+            .chain(rightclaw::codegen::CONTENT_MD_FILES.iter().copied()
+                .filter(|f| agent_dir.join(".claude/agents").join(f).exists()))
+            .collect();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rightclaw::openshell::verify_sandbox_files(
+                    &sb_name,
+                    &agent_dir.join(".claude/agents"),
+                    "/sandbox/.claude/agents/",
+                    &expected_files,
+                )
+                .await
+            })
+        })?;
+        println!("  Sandbox '{sb_name}' ready");
+
+        // Generate SSH config.
+        let run_dir = home.join("run");
+        std::fs::create_dir_all(run_dir.join("ssh"))
+            .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rightclaw::openshell::generate_ssh_config(
+                    &rightclaw::openshell::sandbox_name(name),
+                    &run_dir.join("ssh"),
+                )
+                .await
+            })
+        })?;
+    }
 
     println!("Agent '{name}' created at {}", agent_dir.display());
-    if token.is_some() {
+    if overrides.telegram_token.is_some() {
         println!("Telegram channel configured.");
     }
-    if !chat_ids.is_empty() {
+    if !overrides.allowed_chat_ids.is_empty() {
         println!("Telegram chat ID allowlist configured.");
     }
     println!();
@@ -580,6 +893,57 @@ fn cmd_agent_init(
     println!("  rightclaw reload");
 
     Ok(())
+}
+
+/// Check if a sandbox exists via gRPC. Returns Ok(bool).
+async fn check_sandbox_exists_async(sandbox_name: &str) -> miette::Result<bool> {
+    let mtls_dir = match rightclaw::openshell::preflight_check() {
+        rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
+        _ => return Ok(false), // OpenShell not available — no sandbox
+    };
+    let mut client = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
+    rightclaw::openshell::is_sandbox_ready(&mut client, sandbox_name).await
+}
+
+/// If a sandbox already exists, prompt the user to recreate or abort.
+/// Returns `true` if sandbox exists and should be recreated.
+/// Returns `false` if sandbox doesn't exist (fresh create).
+/// Errors if user declines recreate.
+fn prompt_sandbox_recreate_if_exists(sandbox_name: &str, interactive: bool) -> miette::Result<bool> {
+    let exists = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(check_sandbox_exists_async(sandbox_name))
+    })?;
+
+    if !exists {
+        return Ok(false); // No existing sandbox — fresh create
+    }
+
+    if !interactive {
+        // Non-interactive (-y): refuse to silently destroy a sandbox.
+        return Err(miette::miette!(
+            help = "Run interactively to confirm, or use `--force`",
+            "Sandbox '{sandbox_name}' already exists"
+        ));
+    }
+
+    use std::io::{self, Write};
+    println!();
+    println!("⚠ Sandbox '{sandbox_name}' already exists.");
+    println!("  1. Recreate — delete and create fresh sandbox");
+    println!("  2. Cancel — use `rightclaw agent config` to update existing agent");
+    loop {
+        print!("Choose [1/2]: ");
+        io::stdout().flush().map_err(|e| miette::miette!("stdout flush: {e}"))?;
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+        match input.trim() {
+            "1" => return Ok(true),
+            "2" => return Err(miette::miette!("Sandbox creation cancelled")),
+            _ => continue,
+        }
+    }
 }
 
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
@@ -1681,7 +2045,8 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     let claude_dir = agent.path.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent_name))?;
-    let agent_def_content = rightclaw::codegen::generate_agent_definition(agent)?;
+    let model = agent.config.as_ref().and_then(|c| c.model.as_deref());
+    let agent_def_content = rightclaw::codegen::generate_agent_definition(&agent.name, model);
     let agents_dir = claude_dir.join("agents");
     std::fs::create_dir_all(&agents_dir)
         .map_err(|e| miette::miette!("failed to create .claude/agents dir for '{}': {e:#}", agent_name))?;

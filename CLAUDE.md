@@ -118,6 +118,8 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 - **Bot-first management**: All agent/MCP configuration goes through the Telegram bot (`/mcp add`, `/mcp remove`, `/mcp auth`, etc.). Never create or edit `.mcp.json`, agent configs, or credential files manually — the bot is the control plane.
 - **Debuggability over convenience**: Always prefer direct, observable signals over indirect heuristics. If an API provides status, use it — don't infer status from side effects (e.g. SSH connectivity as a proxy for sandbox readiness). Errors must propagate to logs, never be silently swallowed.
 - **Domain research before implementation**: Always verify external tool APIs by reading source code or running `--help` before writing integration code. Never rely solely on web documentation — it may be outdated or wrong.
+- **PROMPT_SYSTEM.md**: Always keep PROMPT_SYSTEM.md in sync with the actual prompting system. When changing system prompt generation, agent definitions, JSON schemas, or MCP instructions, update PROMPT_SYSTEM.md to match.
+- **MCP with_instructions()**: When adding, removing, or renaming MCP tools, always update `with_instructions()` in both `memory_server.rs` and `memory_server_http.rs` to reflect the current tool set and descriptions.
 ## Architecture
 
 @ARCHITECTURE.md

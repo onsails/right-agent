@@ -1,39 +1,48 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::types::{NetworkPolicy, SandboxMode};
 
-const DEFAULT_IDENTITY: &str = include_str!("../../../templates/right/IDENTITY.md");
-const DEFAULT_SOUL: &str = include_str!("../../../templates/right/SOUL.md");
-const DEFAULT_USER: &str = include_str!("../../../templates/right/USER.md");
+/// Preserved config from a previous agent, used during `--force` re-init.
+pub struct InitOverrides {
+    pub sandbox_mode: SandboxMode,
+    pub network_policy: NetworkPolicy,
+    pub telegram_token: Option<String>,
+    pub allowed_chat_ids: Vec<i64>,
+    pub model: Option<String>,
+    pub env: HashMap<String, String>,
+}
+
 const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/AGENTS.md");
 const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/BOOTSTRAP.md");
 const DEFAULT_AGENT_YAML: &str = include_str!("../../../templates/right/agent.yaml");
 
 /// Initialize a single agent under `agents_parent_dir/<name>/`.
 ///
-/// Creates the agent directory with template files (IDENTITY.md, SOUL.md, USER.md,
-/// AGENTS.md, BOOTSTRAP.md, agent.yaml), installs built-in skills, generates
+/// Creates the agent directory with template files (AGENTS.md, BOOTSTRAP.md,
+/// agent.yaml), installs built-in skills, generates
 /// .claude/settings.json, writes network and sandbox config to agent.yaml,
 /// optionally generates policy.yaml for openshell mode, and sets up trust entries.
 ///
 /// Returns the absolute path to the created agent directory.
-/// Errors if the directory already exists.
+/// Callers are responsible for checking if the directory already exists.
 pub fn init_agent(
     agents_parent_dir: &Path,
     name: &str,
-    telegram_token: Option<&str>,
-    telegram_allowed_chat_ids: &[i64],
-    network_policy: &NetworkPolicy,
-    sandbox_mode: &SandboxMode,
+    overrides: Option<&InitOverrides>,
 ) -> miette::Result<PathBuf> {
-    let agents_dir = agents_parent_dir.join(name);
+    // Extract values from overrides with defaults.
+    let default_overrides = InitOverrides {
+        sandbox_mode: SandboxMode::default(),
+        network_policy: NetworkPolicy::default(),
+        telegram_token: None,
+        allowed_chat_ids: vec![],
+        model: None,
+        env: HashMap::new(),
+    };
+    let ov = overrides.unwrap_or(&default_overrides);
 
-    if agents_dir.exists() {
-        return Err(miette::miette!(
-            "Agent directory already exists at {}. Use `rightclaw agent config` to change settings.",
-            agents_dir.display()
-        ));
-    }
+    let agents_dir = agents_parent_dir.join(name);
 
     std::fs::create_dir_all(&agents_dir).map_err(|e| {
         miette::miette!("Failed to create directory {}: {}", agents_dir.display(), e)
@@ -45,9 +54,6 @@ pub fn init_agent(
         .map_err(|e| miette::miette!("Failed to create staging dir: {e}"))?;
 
     let files: &[(&str, &str)] = &[
-        ("IDENTITY.md", DEFAULT_IDENTITY),
-        ("SOUL.md", DEFAULT_SOUL),
-        ("USER.md", DEFAULT_USER),
         ("AGENTS.md", DEFAULT_AGENTS),
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
         ("agent.yaml", DEFAULT_AGENT_YAML),
@@ -89,14 +95,14 @@ pub fn init_agent(
             .map_err(|e| miette::miette!("Failed to read agent.yaml: {}", e))?;
 
         // Network policy.
-        let policy_str = match network_policy {
+        let policy_str = match ov.network_policy {
             NetworkPolicy::Restrictive => "restrictive",
             NetworkPolicy::Permissive => "permissive",
         };
         yaml.push_str(&format!("\nnetwork_policy: {policy_str}\n"));
 
         // Sandbox config.
-        match sandbox_mode {
+        match ov.sandbox_mode {
             SandboxMode::Openshell => {
                 yaml.push_str("\nsandbox:\n  mode: openshell\n  policy_file: policy.yaml\n");
             }
@@ -106,13 +112,26 @@ pub fn init_agent(
         }
 
         // Telegram token + chat IDs.
-        if let Some(token) = telegram_token {
+        if let Some(ref token) = ov.telegram_token {
             yaml.push_str(&format!("\ntelegram_token: \"{token}\"\n"));
-            if !telegram_allowed_chat_ids.is_empty() {
+            if !ov.allowed_chat_ids.is_empty() {
                 yaml.push_str("\nallowed_chat_ids:\n");
-                for id in telegram_allowed_chat_ids {
+                for id in &ov.allowed_chat_ids {
                     yaml.push_str(&format!("  - {id}\n"));
                 }
+            }
+        }
+
+        // Model (from overrides only).
+        if let Some(ref model) = ov.model {
+            yaml.push_str(&format!("\nmodel: \"{model}\"\n"));
+        }
+
+        // Environment variables (from overrides only).
+        if !ov.env.is_empty() {
+            yaml.push_str("\nenv:\n");
+            for (k, v) in &ov.env {
+                yaml.push_str(&format!("  {k}: \"{v}\"\n"));
             }
         }
 
@@ -121,10 +140,10 @@ pub fn init_agent(
     }
 
     // Generate policy.yaml when sandbox mode is openshell.
-    if matches!(sandbox_mode, SandboxMode::Openshell) {
+    if matches!(ov.sandbox_mode, SandboxMode::Openshell) {
         let policy_yaml = crate::codegen::policy::generate_policy(
             crate::runtime::MCP_HTTP_PORT,
-            network_policy,
+            &ov.network_policy,
         );
         std::fs::write(agents_dir.join("policy.yaml"), &policy_yaml)
             .map_err(|e| miette::miette!("Failed to write policy.yaml: {e}"))?;
@@ -171,19 +190,17 @@ pub fn init_rightclaw_home(
         ));
     }
 
-    let _agents_dir = init_agent(
-        &agents_parent,
-        "right",
-        telegram_token,
-        telegram_allowed_chat_ids,
-        network_policy,
-        sandbox_mode,
-    )?;
+    let overrides = InitOverrides {
+        sandbox_mode: sandbox_mode.clone(),
+        network_policy: network_policy.clone(),
+        telegram_token: telegram_token.map(|t| t.to_string()),
+        allowed_chat_ids: telegram_allowed_chat_ids.to_vec(),
+        model: None,
+        env: HashMap::new(),
+    };
+    let _agents_dir = init_agent(&agents_parent, "right", Some(&overrides))?;
 
     println!("Created RightClaw home at {}", home.display());
-    println!("  agents/right/IDENTITY.md");
-    println!("  agents/right/SOUL.md");
-    println!("  agents/right/USER.md");
     println!("  agents/right/AGENTS.md");
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/agent.yaml");
@@ -289,6 +306,8 @@ pub fn prompt_network_policy() -> miette::Result<NetworkPolicy> {
 mod tests {
     use tempfile::tempdir;
 
+    use std::collections::HashMap;
+
     use super::*;
     use crate::agent::types::{NetworkPolicy, SandboxMode};
 
@@ -298,10 +317,10 @@ mod tests {
         init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
 
         let agents_dir = dir.path().join("agents").join("right");
-        assert!(agents_dir.join("IDENTITY.md").exists());
+        assert!(!agents_dir.join("IDENTITY.md").exists(), "IDENTITY.md must not be created by init");
+        assert!(!agents_dir.join("SOUL.md").exists(), "SOUL.md must not be created by init");
+        assert!(!agents_dir.join("USER.md").exists(), "USER.md must not be created by init");
         assert!(agents_dir.join("staging").is_dir(), "staging/ dir should be created");
-        assert!(agents_dir.join("SOUL.md").exists());
-        assert!(agents_dir.join("USER.md").exists(), "USER.md should be created");
         assert!(agents_dir.join("AGENTS.md").exists());
         assert!(agents_dir.join("policy.yaml").exists(), "policy.yaml should be created for openshell mode");
         assert!(
@@ -319,19 +338,6 @@ mod tests {
         assert!(
             agents_dir.join(".claude/skills/rightcron/SKILL.md").exists(),
             "rightcron skill should be installed"
-        );
-    }
-
-    #[test]
-    fn init_identity_contains_right() {
-        let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
-
-        let content =
-            std::fs::read_to_string(dir.path().join("agents/right/IDENTITY.md")).unwrap();
-        assert!(
-            content.contains("Right"),
-            "IDENTITY.md should contain 'Right'"
         );
     }
 
@@ -601,13 +607,18 @@ mod tests {
     #[test]
     fn init_generates_policy_yaml_for_openshell_mode() {
         let dir = tempdir().unwrap();
+        let overrides = InitOverrides {
+            sandbox_mode: SandboxMode::Openshell,
+            network_policy: NetworkPolicy::Permissive,
+            telegram_token: Some("123456:ABCdef".to_string()),
+            allowed_chat_ids: vec![],
+            model: None,
+            env: HashMap::new(),
+        };
         init_agent(
             &dir.path().join("agents"),
             "test-agent",
-            Some("123456:ABCdef"),
-            &[],
-            &NetworkPolicy::Permissive,
-            &SandboxMode::Openshell,
+            Some(&overrides),
         )
         .unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
@@ -625,13 +636,18 @@ mod tests {
     #[test]
     fn init_skips_policy_yaml_for_none_mode() {
         let dir = tempdir().unwrap();
+        let overrides = InitOverrides {
+            sandbox_mode: SandboxMode::None,
+            network_policy: NetworkPolicy::Permissive,
+            telegram_token: None,
+            allowed_chat_ids: vec![],
+            model: None,
+            env: HashMap::new(),
+        };
         init_agent(
             &dir.path().join("agents"),
             "test-agent",
-            None,
-            &[],
-            &NetworkPolicy::Permissive,
-            &SandboxMode::None,
+            Some(&overrides),
         )
         .unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
@@ -644,13 +660,18 @@ mod tests {
     #[test]
     fn init_writes_sandbox_mode_to_agent_yaml() {
         let dir = tempdir().unwrap();
+        let overrides = InitOverrides {
+            sandbox_mode: SandboxMode::None,
+            network_policy: NetworkPolicy::Permissive,
+            telegram_token: None,
+            allowed_chat_ids: vec![],
+            model: None,
+            env: HashMap::new(),
+        };
         init_agent(
             &dir.path().join("agents"),
             "test-agent",
-            None,
-            &[],
-            &NetworkPolicy::Permissive,
-            &SandboxMode::None,
+            Some(&overrides),
         )
         .unwrap();
         let yaml =
@@ -658,6 +679,59 @@ mod tests {
         assert!(
             yaml.contains("mode: none"),
             "agent.yaml must contain sandbox mode: none"
+        );
+    }
+
+    #[test]
+    fn init_agent_with_overrides_applies_saved_config() {
+        let dir = tempdir().unwrap();
+        let mut env = HashMap::new();
+        env.insert("FOO".to_string(), "bar".to_string());
+
+        let overrides = InitOverrides {
+            sandbox_mode: SandboxMode::None,
+            network_policy: NetworkPolicy::Permissive,
+            telegram_token: Some("999888:XYZtoken".to_string()),
+            allowed_chat_ids: vec![111, 222],
+            model: Some("opus".to_string()),
+            env,
+        };
+        init_agent(
+            &dir.path().join("agents"),
+            "override-test",
+            Some(&overrides),
+        )
+        .unwrap();
+
+        let yaml =
+            std::fs::read_to_string(dir.path().join("agents/override-test/agent.yaml")).unwrap();
+        assert!(
+            yaml.contains("network_policy: permissive"),
+            "agent.yaml must contain network_policy: permissive, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("mode: none"),
+            "agent.yaml must contain sandbox mode: none, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("telegram_token: \"999888:XYZtoken\""),
+            "agent.yaml must contain telegram token, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("  - 111"),
+            "agent.yaml must list chat id 111, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("  - 222"),
+            "agent.yaml must list chat id 222, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("model: \"opus\""),
+            "agent.yaml must contain model: opus, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("FOO: \"bar\""),
+            "agent.yaml must contain env FOO: bar, got:\n{yaml}"
         );
     }
 }

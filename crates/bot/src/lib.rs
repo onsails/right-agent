@@ -87,6 +87,17 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
 
     let is_sandboxed = matches!(config.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell);
 
+    let bootstrap_pending = agent_dir.join("BOOTSTRAP.md").exists();
+    tracing::info!(
+        agent = %args.agent,
+        sandbox_mode = ?config.sandbox_mode(),
+        model = config.model.as_deref().unwrap_or("inherit"),
+        restart = ?config.restart,
+        network_policy = %config.network_policy,
+        bootstrap_pending,
+        "bot starting"
+    );
+
     // Open memory.db (creates if absent, applies migrations)
     let _conn = open_connection(&agent_dir)
         .map_err(|e| miette::miette!("failed to open memory.db: {:#}", e))?;
@@ -275,31 +286,14 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             // Reuse existing sandbox — just apply updated policy.
             tracing::info!(agent = %args.agent, "reusing existing sandbox");
             rightclaw::openshell::apply_policy(&sandbox, &policy_path).await?;
-        } else {
-            // Sandbox doesn't exist — create with curated staging dir.
-            tracing::info!(agent = %args.agent, "creating new sandbox");
-            let upload_dir = agent_dir.join("staging");
-            prepare_staging_dir(&agent_dir, &upload_dir)?;
+        }
 
-            let mut child = rightclaw::openshell::spawn_sandbox(&sandbox, &policy_path, Some(&upload_dir))?;
-
-            tokio::select! {
-                result = rightclaw::openshell::wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
-                    result?;
-                    // `openshell sandbox create` is a long-lived monitor process.
-                    // Drop the handle — kill_on_drop(false) keeps it alive.
-                    drop(child);
-                }
-                status = child.wait() => {
-                    let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
-                    if !status.success() {
-                        return Err(miette::miette!(
-                            "openshell sandbox create for '{}' exited with {status} before reaching READY",
-                            args.agent
-                        ));
-                    }
-                }
-            }
+        if !sandbox_exists {
+            return Err(miette::miette!(
+                help = format!("Run `rightclaw init` or `rightclaw agent init {}` to create the sandbox", args.agent),
+                "Sandbox '{}' not found",
+                sandbox
+            ));
         }
 
         // Generate SSH config.
@@ -371,6 +365,10 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
     };
 
+    // Signal cron/sync tasks to stop. The teloxide dispatcher handles SIGTERM
+    // internally but doesn't cancel this token, so we must do it here.
+    shutdown.cancel();
+
     tracing::info!("waiting for cron to finish");
     let _ = cron_handle.await;
     if let Some(handle) = sync_handle {
@@ -382,101 +380,3 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     result
 }
 
-/// Prepare the staging directory for sandbox upload.
-///
-/// Copies curated files from the agent directory into staging/,
-/// excluding credentials (sandbox gets its own via login flow) and plugins (not used).
-fn prepare_staging_dir(agent_dir: &std::path::Path, upload_dir: &std::path::Path) -> miette::Result<()> {
-    let staging_claude = upload_dir.join(".claude");
-    if staging_claude.exists() {
-        std::fs::remove_dir_all(&staging_claude)
-            .map_err(|e| miette::miette!("failed to clean staging/.claude: {e:#}"))?;
-    }
-    std::fs::create_dir_all(&staging_claude)
-        .map_err(|e| miette::miette!("failed to create staging/.claude: {e:#}"))?;
-
-    let src_claude = agent_dir.join(".claude");
-
-    // Copy individual items — NOT credentials, NOT plugins, NOT shell-snapshots
-    let copy_items: &[&str] = &[
-        "settings.json",
-        "reply-schema.json",
-        "agents", // agent definition directory
-    ];
-
-    for item in copy_items {
-        let src = src_claude.join(item);
-        let dst = staging_claude.join(item);
-        if !src.exists() {
-            continue;
-        }
-        let meta = std::fs::metadata(&src)
-            .map_err(|e| miette::miette!("failed to stat {}: {e:#}", src.display()))?;
-        if meta.is_dir() {
-            copy_dir_resolve_symlinks(&src, &dst)
-                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
-        } else {
-            std::fs::copy(&src, &dst)
-                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
-        }
-    }
-
-    // Copy only rightclaw builtin skills (not entire skills/ tree)
-    let skills_src = src_claude.join("skills");
-    if skills_src.exists() {
-        for builtin in &["rightskills", "cronsync"] {
-            let skill_src = skills_src.join(builtin);
-            let skill_dst = staging_claude.join("skills").join(builtin);
-            if skill_src.exists() {
-                copy_dir_resolve_symlinks(&skill_src, &skill_dst)
-                    .map_err(|e| miette::miette!("failed to copy skill {builtin} to staging: {e:#}"))?;
-            }
-        }
-    }
-
-    // Copy .claude.json (trust/onboarding — at agent root, not inside .claude/)
-    let claude_json_src = agent_dir.join(".claude.json");
-    let claude_json_dst = upload_dir.join(".claude.json");
-    if claude_json_src.exists() {
-        std::fs::copy(&claude_json_src, &claude_json_dst)
-            .map_err(|e| miette::miette!("failed to copy .claude.json to staging: {e:#}"))?;
-    }
-
-    // Copy mcp.json
-    let mcp_json_src = agent_dir.join("mcp.json");
-    let mcp_json_dst = upload_dir.join("mcp.json");
-    if mcp_json_src.exists() {
-        std::fs::copy(&mcp_json_src, &mcp_json_dst)
-            .map_err(|e| miette::miette!("failed to copy mcp.json to staging: {e:#}"))?;
-    }
-
-    tracing::info!("prepared staging dir for sandbox upload");
-    Ok(())
-}
-
-/// Recursively copy a directory, resolving symlinks to regular files.
-/// Skips entries that fail to read (e.g. broken symlinks).
-fn copy_dir_resolve_symlinks(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        // Resolve symlinks via entry.metadata() (follows symlinks, avoids extra syscall).
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(path = %src_path.display(), "skipping unresolvable entry: {e}");
-                continue;
-            }
-        };
-
-        if meta.is_dir() {
-            copy_dir_resolve_symlinks(&src_path, &dst_path)?;
-        } else if meta.is_file() {
-            std::fs::copy(&src_path, &dst_path)?;
-        }
-    }
-    Ok(())
-}

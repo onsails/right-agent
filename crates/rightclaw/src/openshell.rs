@@ -9,7 +9,7 @@ use tokio::process::{Child, Command};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
-use crate::openshell_proto::openshell::v1::GetSandboxRequest;
+use crate::openshell_proto::openshell::v1::{ExecSandboxRequest, GetSandboxRequest};
 
 /// SANDBOX_PHASE_READY value from openshell.datamodel.v1.SandboxPhase.
 const SANDBOX_PHASE_READY: i32 = 2;
@@ -49,6 +49,7 @@ pub fn default_mtls_dir() -> PathBuf {
 }
 
 /// Result of the OpenShell pre-flight check.
+#[derive(Debug)]
 pub enum OpenShellStatus {
     /// mTLS certs are present — sandbox mode can proceed.
     Ready(PathBuf),
@@ -132,6 +133,50 @@ pub async fn connect_grpc(
         .map_err(|e| miette::miette!("gRPC connect to 127.0.0.1:8080 failed: {e:#}"))?;
 
     Ok(OpenShellClient::new(channel))
+}
+
+/// Check if a sandbox exists (any phase). Returns `false` only on `NotFound`.
+async fn sandbox_exists(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> miette::Result<bool> {
+    match client
+        .get_sandbox(GetSandboxRequest {
+            name: name.to_owned(),
+        })
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(status) if status.code() == tonic::Code::NotFound => Ok(false),
+        Err(e) => Err(miette::miette!("GetSandbox RPC failed for '{name}': {e:#}")),
+    }
+}
+
+/// Poll until a sandbox is fully deleted (gRPC returns `NotFound`).
+pub async fn wait_for_deleted(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+    timeout_secs: u64,
+    poll_interval_secs: u64,
+) -> miette::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let interval = Duration::from_secs(poll_interval_secs);
+
+    loop {
+        if !sandbox_exists(client, name).await? {
+            tracing::info!(sandbox = name, "sandbox fully deleted");
+            return Ok(());
+        }
+
+        if tokio::time::Instant::now() + interval > deadline {
+            return Err(miette::miette!(
+                "sandbox '{name}' was not deleted within {timeout_secs}s"
+            ));
+        }
+
+        tracing::debug!(sandbox = name, "sandbox still exists, polling again in {poll_interval_secs}s");
+        tokio::time::sleep(interval).await;
+    }
 }
 
 /// Check whether a sandbox has reached READY phase.
@@ -387,6 +432,429 @@ pub async fn delete_sandbox(name: &str) {
                 "failed to run openshell sandbox delete (best-effort)"
             );
         }
+    }
+}
+
+/// Prepare the staging directory for sandbox upload.
+///
+/// Copies curated files from the agent directory into staging/,
+/// excluding credentials (sandbox gets its own via login flow) and plugins (not used).
+pub fn prepare_staging_dir(agent_dir: &Path, upload_dir: &Path) -> miette::Result<()> {
+    let staging_claude = upload_dir.join(".claude");
+    if staging_claude.exists() {
+        std::fs::remove_dir_all(&staging_claude)
+            .map_err(|e| miette::miette!("failed to clean staging/.claude: {e:#}"))?;
+    }
+    std::fs::create_dir_all(&staging_claude)
+        .map_err(|e| miette::miette!("failed to create staging/.claude: {e:#}"))?;
+
+    let src_claude = agent_dir.join(".claude");
+
+    // Copy individual items — NOT credentials, NOT plugins, NOT shell-snapshots
+    let copy_items: &[&str] = &[
+        "settings.json",
+        "reply-schema.json",
+        "agents", // agent definition directory
+    ];
+
+    for item in copy_items {
+        let src = src_claude.join(item);
+        let dst = staging_claude.join(item);
+        if !src.exists() {
+            continue;
+        }
+        let meta = std::fs::metadata(&src)
+            .map_err(|e| miette::miette!("failed to stat {}: {e:#}", src.display()))?;
+        if meta.is_dir() {
+            copy_dir_resolve_symlinks(&src, &dst)
+                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
+        } else {
+            std::fs::copy(&src, &dst)
+                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
+        }
+    }
+
+    // Copy only rightclaw builtin skills (not entire skills/ tree)
+    let skills_src = src_claude.join("skills");
+    if skills_src.exists() {
+        for builtin in &["rightskills", "cronsync"] {
+            let skill_src = skills_src.join(builtin);
+            let skill_dst = staging_claude.join("skills").join(builtin);
+            if skill_src.exists() {
+                copy_dir_resolve_symlinks(&skill_src, &skill_dst)
+                    .map_err(|e| miette::miette!("failed to copy skill {builtin} to staging: {e:#}"))?;
+            }
+        }
+    }
+
+    // Copy .claude.json (trust/onboarding — at agent root, not inside .claude/)
+    let claude_json_src = agent_dir.join(".claude.json");
+    let claude_json_dst = upload_dir.join(".claude.json");
+    if claude_json_src.exists() {
+        std::fs::copy(&claude_json_src, &claude_json_dst)
+            .map_err(|e| miette::miette!("failed to copy .claude.json to staging: {e:#}"))?;
+    }
+
+    // Copy mcp.json
+    let mcp_json_src = agent_dir.join("mcp.json");
+    let mcp_json_dst = upload_dir.join("mcp.json");
+    if mcp_json_src.exists() {
+        std::fs::copy(&mcp_json_src, &mcp_json_dst)
+            .map_err(|e| miette::miette!("failed to copy mcp.json to staging: {e:#}"))?;
+    }
+
+    tracing::info!("prepared staging dir for sandbox upload");
+    Ok(())
+}
+
+/// Recursively copy a directory, resolving symlinks to regular files.
+/// Skips entries that fail to read (e.g. broken symlinks).
+pub fn copy_dir_resolve_symlinks(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        // Resolve symlinks via entry.metadata() (follows symlinks, avoids extra syscall).
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(path = %src_path.display(), "skipping unresolvable entry: {e}");
+                continue;
+            }
+        };
+
+        if meta.is_dir() {
+            copy_dir_resolve_symlinks(&src_path, &dst_path)?;
+        } else if meta.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Outcome of `ensure_sandbox` — tells the caller what happened.
+#[derive(Debug, PartialEq)]
+pub enum SandboxOutcome {
+    Created,
+    Recreated,
+}
+
+/// Create a sandbox, handling the case where one already exists.
+///
+/// - If no sandbox exists: create it, wait for READY, return `Created`.
+/// - If sandbox exists and `force_recreate`: delete + create, return `Recreated`.
+/// - If sandbox exists and not force: return error.
+pub async fn ensure_sandbox(
+    agent_name: &str,
+    policy_path: &Path,
+    staging_dir: Option<&Path>,
+    force_recreate: bool,
+) -> miette::Result<SandboxOutcome> {
+    let sandbox = sandbox_name(agent_name);
+
+    let mtls_dir = match preflight_check() {
+        OpenShellStatus::Ready(dir) => dir,
+        OpenShellStatus::NotInstalled => {
+            return Err(miette::miette!(
+                help = "Install OpenShell and run `openshell auth login`,\n  \
+                        or use `--sandbox-mode none` to run without a sandbox",
+                "OpenShell is required for sandbox mode 'openshell'"
+            ));
+        }
+        OpenShellStatus::NoGateway(_) => {
+            return Err(miette::miette!(
+                help = "Run `openshell gateway start`,\n  \
+                        or use `--sandbox-mode none`",
+                "OpenShell gateway is not running"
+            ));
+        }
+        OpenShellStatus::BrokenGateway(dir) => {
+            return Err(miette::miette!(
+                help = "Try `openshell gateway destroy && openshell gateway start`,\n  \
+                        or use `--sandbox-mode none`",
+                "OpenShell gateway exists but mTLS certificates are missing at {}",
+                dir.display()
+            ));
+        }
+    };
+
+    let mut grpc_client = connect_grpc(&mtls_dir).await?;
+    // Use sandbox_exists (not is_sandbox_ready) to detect sandboxes in ANY phase,
+    // including DELETING — otherwise we'd skip wait_for_deleted and create would
+    // conflict with a sandbox still being torn down.
+    let exists = sandbox_exists(&mut grpc_client, &sandbox).await?;
+
+    if exists && !force_recreate {
+        return Err(miette::miette!(
+            help = "Use --force to recreate the sandbox,\n  \
+                    or `rightclaw agent config` to update an existing agent",
+            "Sandbox '{sandbox}' already exists"
+        ));
+    }
+
+    if exists {
+        tracing::info!(sandbox = %sandbox, "deleting existing sandbox for recreate");
+        delete_sandbox(&sandbox).await;
+        wait_for_deleted(&mut grpc_client, &sandbox, 60, 2).await?;
+    }
+
+    tracing::info!(sandbox = %sandbox, "creating sandbox");
+    let mut child = spawn_sandbox(&sandbox, policy_path, staging_dir)?;
+
+    tokio::select! {
+        result = wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
+            result?;
+            drop(child);
+        }
+        status = child.wait() => {
+            let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
+            if !status.success() {
+                return Err(miette::miette!(
+                    "openshell sandbox create for '{}' exited with {status} before reaching READY",
+                    agent_name
+                ));
+            }
+        }
+    }
+
+    // SSH readiness probe — gRPC READY doesn't guarantee SSH transport is up.
+    // 60s timeout: sandboxes with TLS termination + proxy can take 30-50s after READY.
+    let sandbox_id = resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
+    wait_for_ssh(&mut grpc_client, &sandbox_id, 60, 2).await?;
+
+    let outcome = if exists { SandboxOutcome::Recreated } else { SandboxOutcome::Created };
+    tracing::info!(sandbox = %sandbox, ?outcome, "sandbox ready");
+    Ok(outcome)
+}
+
+/// Resolve sandbox ID from sandbox name via gRPC `GetSandbox`.
+pub async fn resolve_sandbox_id(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> miette::Result<String> {
+    let resp = client
+        .get_sandbox(GetSandboxRequest {
+            name: name.to_owned(),
+        })
+        .await
+        .map_err(|e| miette::miette!("GetSandbox failed for '{name}': {e:#}"))?;
+
+    let sandbox = resp
+        .into_inner()
+        .sandbox
+        .ok_or_else(|| miette::miette!("GetSandbox returned empty response for '{name}'"))?;
+
+    Ok(sandbox.id)
+}
+
+/// Execute a command inside a sandbox via gRPC `ExecSandbox` (single attempt).
+///
+/// Returns `Ok((stdout, exit_code))` on success, or an error if the RPC or
+/// stream fails (e.g. SSH transport not ready yet).
+async fn exec_in_sandbox_once(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_id: &str,
+    command: &[&str],
+) -> miette::Result<(String, i32)> {
+    use crate::openshell_proto::openshell::v1::exec_sandbox_event::Payload;
+
+    let req = ExecSandboxRequest {
+        sandbox_id: sandbox_id.to_owned(),
+        command: command.iter().map(|s| s.to_string()).collect(),
+        timeout_seconds: 10,
+        ..Default::default()
+    };
+
+    let mut stream = client
+        .exec_sandbox(req)
+        .await
+        .map_err(|e| miette::miette!("ExecSandbox RPC failed: {e:#}"))?
+        .into_inner();
+
+    let mut stdout = Vec::new();
+    let mut exit_code = -1;
+
+    loop {
+        match stream.message().await {
+            Ok(Some(event)) => match event.payload {
+                Some(Payload::Stdout(chunk)) => stdout.extend_from_slice(&chunk.data),
+                Some(Payload::Exit(exit)) => exit_code = exit.exit_code,
+                _ => {}
+            },
+            Ok(None) => break,
+            Err(e) => {
+                return Err(miette::miette!("ExecSandbox stream error: {e:#}"));
+            }
+        }
+    }
+
+    let stdout_str = String::from_utf8_lossy(&stdout).to_string();
+    Ok((stdout_str, exit_code))
+}
+
+/// Execute a command inside a sandbox via gRPC `ExecSandbox` and return (stdout, exit_code).
+///
+/// Retries up to 5 times with 1s backoff if the SSH transport isn't ready yet
+/// (common immediately after sandbox creation — gRPC reports READY before SSH is up).
+/// Retries cover both RPC-level and stream-level errors.
+pub async fn exec_in_sandbox(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_id: &str,
+    command: &[&str],
+) -> miette::Result<(String, i32)> {
+    let mut last_err = String::new();
+
+    for attempt in 0..5u32 {
+        if attempt > 0 {
+            tracing::debug!(sandbox_id, attempt, "exec: retrying after SSH transport delay");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        match exec_in_sandbox_once(client, sandbox_id, command).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_err = format!("{e:#}");
+                tracing::debug!(sandbox_id, attempt, error = %last_err, "exec: attempt failed");
+            }
+        }
+    }
+
+    Err(miette::miette!(
+        "ExecSandbox failed after 5 attempts: {last_err}"
+    ))
+}
+
+/// Poll until SSH transport inside the sandbox is ready.
+///
+/// gRPC READY doesn't guarantee SSH is accepting connections — there's a gap
+/// where `ExecSandbox` fails with "Connection reset by peer". This probe
+/// runs a trivial `echo` command until it succeeds.
+async fn wait_for_ssh(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_id: &str,
+    timeout_secs: u64,
+    poll_interval_secs: u64,
+) -> miette::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let interval = Duration::from_secs(poll_interval_secs);
+
+    loop {
+        match exec_in_sandbox_once(client, sandbox_id, &["echo", "ready"]).await {
+            Ok(_) => {
+                tracing::info!(sandbox_id, "SSH transport is ready");
+                return Ok(());
+            }
+            Err(e) => {
+                if tokio::time::Instant::now() + interval > deadline {
+                    return Err(miette::miette!(
+                        "SSH transport not ready after {timeout_secs}s: {e:#}"
+                    ));
+                }
+                tracing::debug!(sandbox_id, error = %e, "SSH not ready, retrying");
+                tokio::time::sleep(interval).await;
+            }
+        }
+    }
+}
+
+/// Verify that critical files exist in the sandbox after creation/upload.
+///
+/// Uses gRPC `ExecSandbox` to check file existence (fast, no download).
+/// If any are missing, attempts individual re-upload from `host_source_dir`
+/// and re-checks. Fails with a detailed error listing all missing files.
+pub async fn verify_sandbox_files(
+    sandbox_name: &str,
+    host_source_dir: &Path,
+    sandbox_base_path: &str,
+    expected_files: &[&str],
+) -> miette::Result<()> {
+    let mtls_dir = match preflight_check() {
+        OpenShellStatus::Ready(dir) => dir,
+        _ => return Ok(()), // Can't verify without OpenShell
+    };
+    let mut client = connect_grpc(&mtls_dir).await?;
+    let sandbox_id = resolve_sandbox_id(&mut client, sandbox_name).await?;
+
+    tracing::info!(sandbox = sandbox_name, count = expected_files.len(), "verify: checking files");
+
+    // Build a single shell command to check all files at once.
+    let checks: Vec<String> = expected_files
+        .iter()
+        .map(|f| format!("test -f {sandbox_base_path}{f} && echo 'OK:{f}' || echo 'MISSING:{f}'"))
+        .collect();
+    let check_cmd = checks.join("; ");
+
+    let (output, exit_code) = exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["sh", "-c", &check_cmd],
+    )
+    .await?;
+
+    tracing::debug!(sandbox = sandbox_name, exit_code, output = %output.trim(), "verify: check result");
+
+    // Parse which files are missing.
+    let mut missing_files: Vec<&str> = Vec::new();
+    for &filename in expected_files {
+        let ok_marker = format!("OK:{filename}");
+        if !output.contains(&ok_marker) {
+            missing_files.push(filename);
+        }
+    }
+
+    if missing_files.is_empty() {
+        tracing::info!(sandbox = sandbox_name, "verify: all expected files present");
+        return Ok(());
+    }
+
+    // Re-upload missing files individually.
+    tracing::warn!(
+        sandbox = sandbox_name,
+        missing = ?missing_files,
+        "verify: some files missing, attempting individual re-upload"
+    );
+
+    for &filename in &missing_files {
+        let host_path = host_source_dir.join(filename);
+        if host_path.exists() {
+            upload_file(sandbox_name, &host_path, sandbox_base_path)
+                .await
+                .map_err(|e| miette::miette!("verify: re-upload {filename} failed: {e:#}"))?;
+            tracing::info!(file = filename, "verify: re-uploaded");
+        } else {
+            tracing::debug!(file = filename, "verify: not on host, skipping");
+        }
+    }
+
+    // Re-check after re-upload.
+    let (output2, _) = exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["sh", "-c", &check_cmd],
+    )
+    .await?;
+
+    let mut still_missing: Vec<String> = Vec::new();
+    for &filename in &missing_files {
+        let ok_marker = format!("OK:{filename}");
+        if !output2.contains(&ok_marker) {
+            still_missing.push(filename.to_string());
+        }
+    }
+
+    if still_missing.is_empty() {
+        tracing::info!(sandbox = sandbox_name, "verify: all files present after re-upload");
+        Ok(())
+    } else {
+        Err(miette::miette!(
+            help = "This is likely an OpenShell upload bug.\n  \
+                    Try running `rightclaw init` again.",
+            "Sandbox '{}' is missing critical files after re-upload: {}",
+            sandbox_name,
+            still_missing.join(", ")
+        ))
     }
 }
 

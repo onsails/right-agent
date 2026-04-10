@@ -29,9 +29,11 @@ fn test_init_creates_structure() {
         .assert()
         .success();
 
-    assert!(dir.path().join("agents/right/IDENTITY.md").exists());
-    assert!(dir.path().join("agents/right/SOUL.md").exists());
+    // Identity files are NOT created by init — bootstrap creates them.
+    assert!(!dir.path().join("agents/right/IDENTITY.md").exists());
+    assert!(!dir.path().join("agents/right/SOUL.md").exists());
     assert!(dir.path().join("agents/right/AGENTS.md").exists());
+    assert!(dir.path().join("agents/right/BOOTSTRAP.md").exists());
     assert!(dir.path().join("agents/right/policy.yaml").exists(), "policy.yaml should be created for default openshell mode");
 }
 
@@ -156,7 +158,7 @@ fn test_init_with_telegram_token() {
         .stdout(predicate::str::contains("Telegram"));
 
     // Verify agent was created (policy.yaml now created for default openshell mode).
-    assert!(dir.path().join("agents/right/IDENTITY.md").exists());
+    assert!(dir.path().join("agents/right/BOOTSTRAP.md").exists());
     assert!(dir.path().join("agents/right/policy.yaml").exists(), "policy.yaml should be created for default openshell mode");
 
     // Verify allowed_chat_ids written to agent.yaml
@@ -327,7 +329,7 @@ fn reload_fails_when_not_running() {
     // Create minimal agent structure so discovery doesn't fail first.
     let agent_dir = dir.path().join("agents").join("test-agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("IDENTITY.md"), "# Test Agent").unwrap();
+    std::fs::write(agent_dir.join("agent.yaml"), "restart: never\nsandbox:\n  mode: none\n").unwrap();
 
     rightclaw()
         .args(["--home", home, "reload"])
@@ -355,6 +357,124 @@ fn agent_init_suggests_reload() {
         .assert()
         .success()
         .stdout(predicate::str::contains("rightclaw reload"));
+}
+
+// --- Task 2: --force and --fresh flag tests ---
+
+#[test]
+fn test_agent_init_force_recreates_agent() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create minimal home structure.
+    fs::create_dir_all(dir.path().join("agents")).unwrap();
+    fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+
+    // Create agent.
+    rightclaw()
+        .args([
+            "--home", home,
+            "agent", "init", "test-agent",
+            "-y",
+            "--sandbox-mode", "none",
+        ])
+        .assert()
+        .success();
+
+    // Write a marker file in the agent dir.
+    let marker = dir.path().join("agents/test-agent/MARKER.txt");
+    fs::write(&marker, "canary").unwrap();
+    assert!(marker.exists());
+
+    // Re-init with --force.
+    rightclaw()
+        .args([
+            "--home", home,
+            "agent", "init", "test-agent",
+            "--force", "-y",
+            "--sandbox-mode", "none",
+        ])
+        .assert()
+        .success();
+
+    // Agent dir exists, MARKER.txt is gone, agent.yaml exists.
+    assert!(dir.path().join("agents/test-agent").exists());
+    assert!(!marker.exists(), "MARKER.txt should be wiped by --force");
+    assert!(dir.path().join("agents/test-agent/agent.yaml").exists());
+}
+
+#[test]
+fn test_agent_init_fresh_without_force_errors() {
+    rightclaw()
+        .args([
+            "--home", "/tmp/doesnt-matter",
+            "agent", "init", "test-agent",
+            "--fresh", "-y",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--force"));
+}
+
+#[test]
+fn test_agent_init_force_preserves_config() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create minimal home structure.
+    fs::create_dir_all(dir.path().join("agents")).unwrap();
+    fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+
+    // Create agent with specific config.
+    rightclaw()
+        .args([
+            "--home", home,
+            "agent", "init", "preserve-test",
+            "-y",
+            "--sandbox-mode", "none",
+            "--network-policy", "permissive",
+        ])
+        .assert()
+        .success();
+
+    // Re-init with --force (no --fresh) — should preserve config.
+    rightclaw()
+        .args([
+            "--home", home,
+            "agent", "init", "preserve-test",
+            "--force", "-y",
+        ])
+        .assert()
+        .success();
+
+    let yaml = fs::read_to_string(dir.path().join("agents/preserve-test/agent.yaml")).unwrap();
+    assert!(
+        yaml.contains("mode: none"),
+        "agent.yaml should preserve sandbox mode: none after --force, got:\n{yaml}"
+    );
+}
+
+#[test]
+fn test_agent_init_force_on_nonexistent_agent() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create minimal home structure.
+    fs::create_dir_all(dir.path().join("agents")).unwrap();
+    fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+
+    // --force on non-existent agent should just create it.
+    rightclaw()
+        .args([
+            "--home", home,
+            "agent", "init", "new-agent",
+            "--force", "-y",
+            "--sandbox-mode", "none",
+        ])
+        .assert()
+        .success();
+
+    assert!(dir.path().join("agents/new-agent/agent.yaml").exists());
 }
 
 /// Validate generated OpenShell policy against a live sandbox.

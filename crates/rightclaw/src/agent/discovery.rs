@@ -105,11 +105,13 @@ pub fn discover_agents(agents_dir: &Path) -> miette::Result<Vec<AgentDef>> {
 
         validate_agent_name(&name)?;
 
-        let identity_path = path.join("IDENTITY.md");
-        if !identity_path.exists() {
-            tracing::warn!(agent = %name, "Skipping directory without IDENTITY.md");
+        // An agent directory must have agent.yaml to be valid.
+        // IDENTITY.md may not exist yet (created during bootstrap).
+        if !path.join("agent.yaml").exists() {
+            tracing::warn!(agent = %name, "Skipping directory without agent.yaml");
             continue;
         }
+        let identity_path = path.join("IDENTITY.md");
 
         let config = parse_agent_config(&path)?;
 

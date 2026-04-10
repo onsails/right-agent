@@ -32,6 +32,13 @@ pub fn run_agent_codegen(
 
     // Per-agent codegen loop.
     for agent in agents {
+        // Resolve sandbox mode early — used by system-prompt, mcp, tools.
+        let agent_sandbox_mode = agent
+            .config
+            .as_ref()
+            .map(|c| c.sandbox_mode().clone())
+            .unwrap_or_default();
+
         // Generate .claude/settings.json with behavioral flags.
         let settings = crate::codegen::generate_settings()?;
         let claude_dir = agent.path.join(".claude");
@@ -39,8 +46,10 @@ pub fn run_agent_codegen(
             miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name)
         })?;
 
-        // Generate agent definition .md from present identity files.
-        let agent_def_content = crate::codegen::generate_agent_definition(agent)?;
+        // Generate agent definition .md with @ file references.
+        let model = agent.config.as_ref().and_then(|c| c.model.as_deref());
+        let agent_def_content = crate::codegen::generate_agent_definition(&agent.name, model);
+        let bootstrap_def = crate::codegen::generate_bootstrap_definition(&agent.name, model);
         let agents_dir = claude_dir.join("agents");
         std::fs::create_dir_all(&agents_dir).map_err(|e| {
             miette::miette!(
@@ -58,6 +67,31 @@ pub fn run_agent_codegen(
                 agent.name
             )
         })?;
+        std::fs::write(
+            agents_dir.join(format!("{}-bootstrap.md", agent.name)),
+            &bootstrap_def,
+        )
+        .map_err(|e| {
+            miette::miette!(
+                "failed to write bootstrap definition for '{}': {e:#}",
+                agent.name
+            )
+        })?;
+
+        // Copy content .md files into .claude/agents/ so @./FILE.md references resolve.
+        // CC resolves @ paths relative to the agent def file, not the project root.
+        for filename in crate::codegen::CONTENT_MD_FILES {
+            let src = agent.path.join(filename);
+            if src.exists() {
+                std::fs::copy(&src, agents_dir.join(filename)).map_err(|e| {
+                    miette::miette!(
+                        "failed to copy {filename} into .claude/agents/ for '{}': {e:#}",
+                        agent.name
+                    )
+                })?;
+            }
+        }
+        tracing::debug!(agent = %agent.name, "copied content .md files into .claude/agents/");
 
         // Write reply-schema.json.
         std::fs::write(
@@ -71,7 +105,31 @@ pub fn run_agent_codegen(
             )
         })?;
 
-        tracing::debug!(agent = %agent.name, "wrote agent definition + reply-schema.json");
+        // Write system-prompt.md (base identity for --system-prompt-file).
+        std::fs::write(
+            claude_dir.join("system-prompt.md"),
+            crate::codegen::generate_system_prompt(&agent.name, &agent_sandbox_mode),
+        )
+        .map_err(|e| {
+            miette::miette!(
+                "failed to write system-prompt.md for '{}': {e:#}",
+                agent.name
+            )
+        })?;
+
+        // Write bootstrap-schema.json (bootstrap mode structured output).
+        std::fs::write(
+            claude_dir.join("bootstrap-schema.json"),
+            crate::codegen::BOOTSTRAP_SCHEMA_JSON,
+        )
+        .map_err(|e| {
+            miette::miette!(
+                "failed to write bootstrap-schema.json for '{}': {e:#}",
+                agent.name
+            )
+        })?;
+
+        tracing::debug!(agent = %agent.name, "wrote agent definitions + schemas");
 
         // Pre-create shell-snapshots dir so CC Bash tool doesn't error on first run.
         std::fs::create_dir_all(claude_dir.join("shell-snapshots")).map_err(|e| {
@@ -192,11 +250,6 @@ pub fn run_agent_codegen(
         // Generate mcp.json with right HTTP MCP server entry.
         let bearer_token = crate::mcp::derive_token(&agent_secret, "right-mcp")?;
         let mcp_port = crate::runtime::MCP_HTTP_PORT;
-        let agent_sandbox_mode = agent
-            .config
-            .as_ref()
-            .map(|c| c.sandbox_mode().clone())
-            .unwrap_or_default();
         let right_mcp_url = match agent_sandbox_mode {
             SandboxMode::None => format!("http://127.0.0.1:{mcp_port}/mcp"),
             SandboxMode::Openshell => format!("http://host.docker.internal:{mcp_port}/mcp"),
@@ -208,6 +261,16 @@ pub fn run_agent_codegen(
             &bearer_token,
         )?;
         tracing::debug!(agent = %agent.name, "wrote mcp.json with right HTTP MCP entry");
+
+        // Generate TOOLS.md (environment-specific, overwritten on every up/reload).
+        let tools_md = crate::codegen::generate_tools_md(&agent.name, &agent_sandbox_mode);
+        std::fs::write(agent.path.join("TOOLS.md"), &tools_md).map_err(|e| {
+            miette::miette!(
+                "failed to write TOOLS.md for '{}': {e:#}",
+                agent.name
+            )
+        })?;
+        tracing::debug!(agent = %agent.name, "wrote TOOLS.md");
     }
 
     // Write agent token map for the HTTP MCP server process.
@@ -368,5 +431,54 @@ mod tests {
         assert!(home.join("run/process-compose.yaml").exists());
         // state.json should exist
         assert!(home.join("run/state.json").exists());
+    }
+
+    #[test]
+    fn run_agent_codegen_writes_bootstrap_definition() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
+        std::fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
+
+        let agent = crate::agent::AgentDef {
+            name: "test".to_string(),
+            path: agent_dir.clone(),
+            identity_path: agent_dir.join("IDENTITY.md"),
+            config: None,
+            soul_path: None,
+            user_path: None,
+            agents_path: None,
+            tools_path: None,
+            bootstrap_path: None,
+            heartbeat_path: None,
+        };
+
+        let self_exe = std::path::PathBuf::from("/usr/bin/rightclaw");
+        run_agent_codegen(home, &[agent.clone()], &[agent], &self_exe, false).unwrap();
+
+        // Normal agent def must exist
+        let normal_def = agent_dir.join(".claude/agents/test.md");
+        assert!(normal_def.exists(), "normal agent def must be written");
+        let content = std::fs::read_to_string(&normal_def).unwrap();
+        assert!(content.contains("@./AGENTS.md"));
+
+        // Bootstrap agent def must exist
+        let bootstrap_def = agent_dir.join(".claude/agents/test-bootstrap.md");
+        assert!(bootstrap_def.exists(), "bootstrap agent def must be written");
+        let bs_content = std::fs::read_to_string(&bootstrap_def).unwrap();
+        assert!(bs_content.contains("@./BOOTSTRAP.md"));
+        assert!(!bs_content.contains("@./AGENTS.md"));
+
+        // System prompt must exist
+        let sys_prompt = agent_dir.join(".claude/system-prompt.md");
+        assert!(sys_prompt.exists(), "system-prompt.md must be written");
+        let sys_content = std::fs::read_to_string(&sys_prompt).unwrap();
+        assert!(sys_content.contains("test"));
+
+        // Bootstrap schema must exist
+        let bs_schema = agent_dir.join(".claude/bootstrap-schema.json");
+        assert!(bs_schema.exists(), "bootstrap-schema.json must be written");
     }
 }

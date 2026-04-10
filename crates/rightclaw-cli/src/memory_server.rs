@@ -354,6 +354,33 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
+    #[tool(description = "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist.")]
+    async fn bootstrap_done(&self) -> Result<CallToolResult, McpError> {
+        let required = ["IDENTITY.md", "SOUL.md", "USER.md"];
+        let missing: Vec<&str> = required
+            .iter()
+            .filter(|f| !self.agent_dir.join(f).exists())
+            .copied()
+            .collect();
+
+        if missing.is_empty() {
+            let bootstrap_path = self.agent_dir.join("BOOTSTRAP.md");
+            if bootstrap_path.exists() {
+                std::fs::remove_file(&bootstrap_path).ok();
+            }
+            Ok(CallToolResult::success(vec![Content::text(
+                "Bootstrap complete! IDENTITY.md, SOUL.md, and USER.md verified. \
+                 Your identity files are now active.",
+            )]))
+        } else {
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Cannot complete bootstrap — missing files: {}. \
+                 Create them first, then call bootstrap_done again.",
+                missing.join(", ")
+            ))]))
+        }
+    }
+
     #[tool(description = "Discover the OAuth authorization server for an HTTP MCP server and return its authorization endpoint URL. Use this to confirm the server supports OAuth. To complete authentication, use the Telegram bot command: /mcp auth <server_name>")]
     async fn mcp_auth(
         &self,
@@ -410,7 +437,22 @@ impl rmcp::ServerHandler for MemoryServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "RightClaw tools: store_record, query_records, search_records, delete_record, cron_list_runs, cron_show_run, mcp_add, mcp_remove, mcp_list, mcp_auth",
+                "RightClaw agent MCP server.\n\n\
+                 ## Memory\n\
+                 - store_record: Store tagged records for persistent memory\n\
+                 - query_records: Query records by tag or keyword\n\
+                 - search_records: Full-text search with BM25 ranking\n\
+                 - delete_record: Soft-delete a record (preserves audit trail)\n\n\
+                 ## Cron\n\
+                 - cron_list_runs: List recent cron job executions\n\
+                 - cron_show_run: Get details of a specific cron run\n\n\
+                 ## MCP Management\n\
+                 - mcp_add: Add an external HTTP MCP server\n\
+                 - mcp_remove: Remove an MCP server (cannot remove 'right')\n\
+                 - mcp_list: List all configured MCP servers\n\
+                 - mcp_auth: Initiate OAuth for an HTTP MCP server\n\n\
+                 ## Bootstrap\n\
+                 - bootstrap_done: Signal onboarding completion. Verifies IDENTITY.md, SOUL.md, USER.md exist. Call AFTER creating all three files.",
             )
     }
 }

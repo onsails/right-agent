@@ -9,11 +9,28 @@ use tokio_util::sync::CancellationToken;
 /// Interval between sync cycles.
 const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 
+use rightclaw::codegen::CONTENT_MD_FILES;
+
 /// Run one sync cycle. Called synchronously at startup before teloxide starts,
 /// ensuring sandbox has correct config before any `claude -p` invocations.
 pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
     tracing::info!(sandbox = sandbox_name, "sync: initial cycle (blocking)");
-    sync_cycle(agent_dir, sandbox_name).await
+    sync_cycle(agent_dir, sandbox_name).await?;
+
+    // Upload content .md files into .claude/agents/ inside the sandbox.
+    // CC resolves @./FILE.md relative to the agent def file location (.claude/agents/).
+    // Only on startup — sandbox is source of truth after this point.
+    for &filename in CONTENT_MD_FILES {
+        let host_path = agent_dir.join(filename);
+        if host_path.exists() {
+            rightclaw::openshell::upload_file(sandbox_name, &host_path, "/sandbox/.claude/agents/")
+                .await
+                .map_err(|e| miette::miette!("sync {filename}: {e:#}"))?;
+            tracing::debug!(file = filename, "sync: uploaded content file to .claude/agents/");
+        }
+    }
+
+    Ok(())
 }
 
 /// Run the periodic sync loop (spawned as background task after initial_sync).
@@ -57,6 +74,33 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
         tracing::debug!("sync: uploaded reply-schema.json");
     }
 
+    // 2b. Upload system-prompt.md (base identity for --system-prompt-file)
+    let sys_prompt = agent_dir.join(".claude").join("system-prompt.md");
+    if sys_prompt.exists() {
+        rightclaw::openshell::upload_file(sandbox, &sys_prompt, "/sandbox/.claude/")
+            .await
+            .map_err(|e| miette::miette!("sync system-prompt.md: {e:#}"))?;
+        tracing::debug!("sync: uploaded system-prompt.md");
+    }
+
+    // 2c. Upload bootstrap-schema.json
+    let bs_schema = agent_dir.join(".claude").join("bootstrap-schema.json");
+    if bs_schema.exists() {
+        rightclaw::openshell::upload_file(sandbox, &bs_schema, "/sandbox/.claude/")
+            .await
+            .map_err(|e| miette::miette!("sync bootstrap-schema.json: {e:#}"))?;
+        tracing::debug!("sync: uploaded bootstrap-schema.json");
+    }
+
+    // 2d. Upload .claude/agents/ directory (agent definitions with @ references)
+    let agents_dir = agent_dir.join(".claude").join("agents");
+    if agents_dir.exists() {
+        rightclaw::openshell::upload_file(sandbox, &agents_dir, "/sandbox/.claude/")
+            .await
+            .map_err(|e| miette::miette!("sync .claude/agents/: {e:#}"))?;
+        tracing::debug!("sync: uploaded .claude/agents/");
+    }
+
     // 3. Upload mcp.json (right MCP server + external MCP servers with Bearer tokens)
     let mcp_json = agent_dir.join("mcp.json");
     if mcp_json.exists() {
@@ -83,14 +127,8 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
     Ok(())
 }
 
-/// Files that CC may modify inside the sandbox. Synced back to host after each invocation.
-const REVERSE_SYNC_FILES: &[&str] = &[
-    "IDENTITY.md",
-    "SOUL.md",
-    "USER.md",
-    "MEMORY.md",
-    "BOOTSTRAP.md",
-];
+/// Alias for reverse sync — same file list as forward sync.
+const REVERSE_SYNC_FILES: &[&str] = CONTENT_MD_FILES;
 
 /// Sync .md files from sandbox back to host after a `claude -p` invocation.
 ///
@@ -109,7 +147,7 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
         std::fs::create_dir(&sub_dir).map_err(|e| {
             miette::miette!("reverse sync: failed to create sub dir for {filename}: {e:#}")
         })?;
-        let sandbox_path = format!("/sandbox/{filename}");
+        let sandbox_path = format!("/sandbox/.claude/agents/{filename}");
         join_set.spawn(async move {
             let result =
                 rightclaw::openshell::download_file(&sandbox, &sandbox_path, &sub_dir).await;
@@ -294,4 +332,72 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that initial_sync uploads content .md files to a real OpenShell sandbox.
+    ///
+    /// Requires: running OpenShell gateway + existing `rightclaw-right` sandbox.
+    /// Run manually: `cargo test -p rightclaw-bot --lib sync::tests::initial_sync_uploads_content_md_files -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires live OpenShell sandbox"]
+    async fn initial_sync_uploads_content_md_files() {
+        let sandbox = "rightclaw-right";
+
+        // Build a fake agent dir with known content.
+        let agent_dir = tempfile::tempdir().unwrap();
+        let root = agent_dir.path();
+
+        // Content .md files with recognizable content.
+        let test_files: &[(&str, &str)] = &[
+            ("BOOTSTRAP.md", "# test bootstrap content\n"),
+            ("AGENTS.md", "# test agents content\n"),
+            ("TOOLS.md", "# test tools content\n"),
+        ];
+        for &(name, content) in test_files {
+            std::fs::write(root.join(name), content).unwrap();
+        }
+
+        // Minimal .claude/ infrastructure so sync_cycle doesn't fail on missing files.
+        let claude_dir = root.join(".claude");
+        std::fs::create_dir_all(claude_dir.join("agents")).unwrap();
+        std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
+        std::fs::write(claude_dir.join("reply-schema.json"), "{}").unwrap();
+        std::fs::write(claude_dir.join("bootstrap-schema.json"), "{}").unwrap();
+        std::fs::write(claude_dir.join("system-prompt.md"), "# test system prompt\n").unwrap();
+        std::fs::write(claude_dir.join("agents").join("test.md"), "---\nname: test\n---\n").unwrap();
+        std::fs::write(root.join("mcp.json"), "{}").unwrap();
+
+        // Run initial_sync.
+        initial_sync(root, sandbox)
+            .await
+            .expect("initial_sync should succeed");
+
+        // Download each file back and verify content.
+        for &(name, expected_content) in test_files {
+            let download_dir = tempfile::tempdir().unwrap();
+            let sandbox_path = format!("/sandbox/{name}");
+
+            rightclaw::openshell::download_file(sandbox, &sandbox_path, download_dir.path())
+                .await
+                .unwrap_or_else(|e| panic!("download {name} failed: {e:#}"));
+
+            let downloaded = download_dir.path().join(name);
+            assert!(
+                downloaded.exists(),
+                "{name} should have been downloaded from sandbox"
+            );
+
+            let actual = std::fs::read_to_string(&downloaded).unwrap();
+            assert_eq!(
+                actual, expected_content,
+                "{name} content mismatch: expected {expected_content:?}, got {actual:?}"
+            );
+        }
+
+        // Note: test files left in sandbox — overwritten by next real initial_sync.
+    }
 }

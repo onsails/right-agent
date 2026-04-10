@@ -81,6 +81,7 @@ NVIDIA OpenShell containers per agent, credential isolation, declarative network
 - [ ] Agent templates — pre-built configs with MCPs, skills, and identity presets
 - [ ] Telegram group chats
 - [ ] Telegram chat threads
+- [ ] Budget control per-turn
 - [ ] Agent-to-agent communication
 - [ ] Binary distribution (homebrew, nix, releases)
 - [ ] Google Chrome integration
