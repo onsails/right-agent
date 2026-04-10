@@ -7,6 +7,10 @@ pub mod telegram;
 
 pub use error::BotError;
 
+/// Exit code returned when bot shuts down due to config change.
+/// process-compose's `on_failure` policy will restart the bot.
+pub const CONFIG_RESTART_EXIT_CODE: i32 = 2;
+
 /// Arguments passed from the CLI `rightclaw bot` subcommand.
 #[derive(Debug, Clone)]
 pub struct BotArgs {
@@ -26,11 +30,13 @@ pub struct BotArgs {
 /// This is an async function. The caller (rightclaw-cli) runs inside a
 /// `#[tokio::main]` runtime and simply `.await`s this call. No nested
 /// runtime construction needed.
-pub async fn run(args: BotArgs) -> miette::Result<()> {
+/// Returns `true` when the bot exited due to a config change and should be
+/// restarted (the caller is expected to exit with [`CONFIG_RESTART_EXIT_CODE`]).
+pub async fn run(args: BotArgs) -> miette::Result<bool> {
     run_async(args).await
 }
 
-async fn run_async(args: BotArgs) -> miette::Result<()> {
+async fn run_async(args: BotArgs) -> miette::Result<bool> {
     use rightclaw::{
         agent::discovery::{parse_agent_config, validate_agent_name},
         config::resolve_home,
@@ -68,26 +74,6 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             .map_err(|e| miette::miette!("failed to create {}: {e:#}", dir.display()))?;
     }
 
-    // Parse agent config (needed for codegen input; re-parsed below after codegen runs).
-    let _config = parse_agent_config(&agent_dir)?.unwrap_or_else(|| {
-        rightclaw::agent::types::AgentConfig {
-            allowed_chat_ids: vec![],
-            telegram_token: None,
-            restart: Default::default(),
-            max_restarts: 3,
-            backoff_seconds: 5,
-            model: None,
-            sandbox: None,
-            env: Default::default(),
-            secret: None,
-            attachments: Default::default(),
-            network_policy: Default::default(),
-            max_turns: 30,
-            max_budget_usd: 1.0,
-            show_thinking: true,
-        }
-    });
-
     // Per-agent codegen: regenerate all derived files from agent.yaml + identity files.
     // This ensures policy.yaml, settings.json, mcp.json, etc. reflect the current config
     // even after a config change triggered restart.
@@ -97,7 +83,7 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     rightclaw::codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
     tracing::info!(agent = %args.agent, "per-agent codegen complete");
 
-    // Re-parse config after codegen (secret may have been generated/changed in agent.yaml).
+    // Parse config after codegen (secret may have been generated in agent.yaml).
     let config = parse_agent_config(&agent_dir)?.unwrap_or_else(|| {
         rightclaw::agent::types::AgentConfig {
             allowed_chat_ids: vec![],
@@ -414,12 +400,14 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     }
     tracing::info!("graceful shutdown complete");
 
-    // Config change → exit with non-zero so process-compose restarts us (on_failure policy).
-    if config_changed.load(Ordering::SeqCst) {
-        tracing::info!("config change detected — exiting with code 2 for restart");
-        std::process::exit(2);
+    // Propagate any dispatcher/axum error first, then signal config restart.
+    result?;
+
+    if config_changed.load(Ordering::Acquire) {
+        tracing::info!("config change detected — requesting restart");
+        return Ok(true);
     }
 
-    result
+    Ok(false)
 }
 

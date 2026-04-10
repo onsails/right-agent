@@ -419,12 +419,16 @@ async fn main() -> miette::Result<()> {
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
         Commands::MemoryServerHttp { .. } => unreachable!("MemoryServerHttp dispatched before tracing init"),
         Commands::Bot { agent, debug } => {
-            rightclaw_bot::run(rightclaw_bot::BotArgs {
+            let needs_restart = rightclaw_bot::run(rightclaw_bot::BotArgs {
                 agent,
                 home: cli.home,
                 debug,
             })
-            .await
+            .await?;
+            if needs_restart {
+                std::process::exit(rightclaw_bot::CONFIG_RESTART_EXIT_CODE);
+            }
+            Ok(())
         }
     }
 }

@@ -4,6 +4,36 @@ use std::path::Path;
 use crate::agent::types::{AgentDef, SandboxMode};
 use crate::codegen::cloudflared::CloudflaredCredentials;
 
+/// Inject a secret into agent.yaml if not already present.
+/// Returns the existing or newly generated secret.
+fn ensure_agent_secret(agent_path: &Path, agent_name: &str, existing: Option<&str>) -> miette::Result<String> {
+    if let Some(secret) = existing {
+        return Ok(secret.to_owned());
+    }
+
+    let new_secret = crate::mcp::generate_agent_secret();
+    let yaml_path = agent_path.join("agent.yaml");
+    let yaml_content = std::fs::read_to_string(&yaml_path).map_err(|e| {
+        miette::miette!("failed to read agent.yaml for '{agent_name}': {e:#}")
+    })?;
+    let mut doc: serde_json::Map<String, serde_json::Value> =
+        serde_saphyr::from_str(&yaml_content).map_err(|e| {
+            miette::miette!("failed to parse agent.yaml for '{agent_name}': {e:#}")
+        })?;
+    doc.insert(
+        "secret".to_owned(),
+        serde_json::Value::String(new_secret.clone()),
+    );
+    let updated_yaml = serde_saphyr::to_string(&doc).map_err(|e| {
+        miette::miette!("failed to serialize agent.yaml for '{agent_name}': {e:#}")
+    })?;
+    std::fs::write(&yaml_path, &updated_yaml).map_err(|e| {
+        miette::miette!("failed to write agent secret for '{agent_name}': {e:#}")
+    })?;
+    tracing::info!(agent = %agent_name, "generated new agent secret");
+    Ok(new_secret)
+}
+
 /// Run codegen for a single agent.
 ///
 /// Generates all per-agent artifacts: settings, agent definitions, schemas,
@@ -196,45 +226,8 @@ pub fn run_single_agent_codegen(
     tracing::debug!(agent = %agent.name, "memory.db initialized");
 
     // Ensure agent has a persistent secret for token derivation.
-    let agent_secret =
-        if let Some(ref secret) = agent.config.as_ref().and_then(|c| c.secret.clone()) {
-            secret.clone()
-        } else {
-            let new_secret = crate::mcp::generate_agent_secret();
-            // Read-modify-write agent.yaml via YAML parse to avoid duplicate keys.
-            let yaml_path = agent.path.join("agent.yaml");
-            let yaml_content = std::fs::read_to_string(&yaml_path).map_err(|e| {
-                miette::miette!(
-                    "failed to read agent.yaml for '{}': {e:#}",
-                    agent.name
-                )
-            })?;
-            let mut doc: serde_json::Map<String, serde_json::Value> =
-                serde_saphyr::from_str(&yaml_content).map_err(|e| {
-                    miette::miette!(
-                        "failed to parse agent.yaml for '{}': {e:#}",
-                        agent.name
-                    )
-                })?;
-            doc.insert(
-                "secret".to_owned(),
-                serde_json::Value::String(new_secret.clone()),
-            );
-            let updated_yaml = serde_saphyr::to_string(&doc).map_err(|e| {
-                miette::miette!(
-                    "failed to serialize agent.yaml for '{}': {e:#}",
-                    agent.name
-                )
-            })?;
-            std::fs::write(&yaml_path, &updated_yaml).map_err(|e| {
-                miette::miette!(
-                    "failed to write agent secret for '{}': {e:#}",
-                    agent.name
-                )
-            })?;
-            tracing::info!(agent = %agent.name, "generated new agent secret");
-            new_secret
-        };
+    let existing_secret = agent.config.as_ref().and_then(|c| c.secret.as_deref());
+    let agent_secret = ensure_agent_secret(&agent.path, &agent.name, existing_secret)?;
 
     // Generate policy.yaml from network_policy setting.
     let network_policy = agent
@@ -304,38 +297,8 @@ pub fn run_agent_codegen(
     // On first `up` secrets may not exist yet — generate if missing.
     let mut generated_secrets: HashMap<String, String> = HashMap::new();
     for agent in all_agents {
-        let secret = match agent.config.as_ref().and_then(|c| c.secret.clone()) {
-            Some(s) => s,
-            None => {
-                let new_secret = crate::mcp::generate_agent_secret();
-                let yaml_path = agent.path.join("agent.yaml");
-                let yaml_content = std::fs::read_to_string(&yaml_path).map_err(|e| {
-                    miette::miette!("failed to read agent.yaml for '{}': {e:#}", agent.name)
-                })?;
-                let mut doc: serde_json::Map<String, serde_json::Value> =
-                    serde_saphyr::from_str(&yaml_content).map_err(|e| {
-                        miette::miette!("failed to parse agent.yaml for '{}': {e:#}", agent.name)
-                    })?;
-                doc.insert(
-                    "secret".to_owned(),
-                    serde_json::Value::String(new_secret.clone()),
-                );
-                let updated_yaml = serde_saphyr::to_string(&doc).map_err(|e| {
-                    miette::miette!(
-                        "failed to serialize agent.yaml for '{}': {e:#}",
-                        agent.name
-                    )
-                })?;
-                std::fs::write(&yaml_path, &updated_yaml).map_err(|e| {
-                    miette::miette!(
-                        "failed to write agent secret for '{}': {e:#}",
-                        agent.name
-                    )
-                })?;
-                tracing::info!(agent = %agent.name, "generated agent secret for token map");
-                new_secret
-            }
-        };
+        let existing = agent.config.as_ref().and_then(|c| c.secret.as_deref());
+        let secret = ensure_agent_secret(&agent.path, &agent.name, existing)?;
         generated_secrets.insert(agent.name.clone(), secret);
     }
 

@@ -54,7 +54,7 @@ pub fn spawn_config_watcher(
                     });
                     if relevant {
                         tracing::info!("agent.yaml changed — initiating graceful restart");
-                        config_changed.store(true, Ordering::SeqCst);
+                        config_changed.store(true, Ordering::Release);
                         token.cancel();
                         return;
                     }
