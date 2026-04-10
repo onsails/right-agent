@@ -32,6 +32,7 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 
 [dev-dependencies]
+serial_test = "3.4.0"
 tokio-stream = { version = "0.1", features = ["net"] }
 
 [build-dependencies]

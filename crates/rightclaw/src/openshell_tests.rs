@@ -1,4 +1,5 @@
 use super::*;
+use serial_test::serial;
 
 #[test]
 fn sandbox_name_prefixes_agent_name() {
@@ -178,7 +179,27 @@ impl TestSandbox {
         // Minimal policy — no network restrictions, fast startup.
         let tmp = tempfile::tempdir().unwrap();
         let policy_path = tmp.path().join("policy.yaml");
-        let policy = "version: v1\nnetwork_policies: []\nbinaries:\n  - path: \"**\"\n";
+        let policy = "\
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_write:
+    - /tmp
+    - /sandbox
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  outbound:
+    endpoints:
+      - host: \"**.*\"
+        port: 443
+        protocol: rest
+        access: full
+        tls: terminate
+    binaries:
+      - path: \"**\"
+";
         std::fs::write(&policy_path, policy).unwrap();
 
         // spawn_sandbox uses raw sandbox name (not agent name).
@@ -188,8 +209,8 @@ impl TestSandbox {
             .await
             .expect("sandbox did not become READY");
 
-        // Reap the child process.
-        let _ = child.wait().await;
+        // Kill the create process — it doesn't exit on its own after READY.
+        let _ = child.kill().await;
 
         Self { name, _tmp: tmp }
     }
@@ -352,7 +373,7 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn exec_in_sandbox_runs_command() {
     let sbox = TestSandbox::create("exec-run").await;
     let (stdout, exit_code) = sbox.exec(&["echo", "hello-from-test"]).await;
@@ -367,7 +388,7 @@ async fn exec_in_sandbox_runs_command() {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn exec_in_sandbox_returns_exit_code() {
     let sbox = TestSandbox::create("exec-exit").await;
     let (_, exit_code) = sbox.exec(&["sh", "-c", "exit 42"]).await;
@@ -378,7 +399,7 @@ async fn exec_in_sandbox_returns_exit_code() {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn verify_sandbox_files_detects_missing_and_reuploads() {
     let sbox = TestSandbox::create("verify-missing").await;
 
@@ -407,7 +428,7 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
 /// This is the scenario where gRPC reports READY but SSH transport
 /// may not be up yet, causing "Connection reset by peer".
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     // ensure_sandbox takes agent name and prepends "rightclaw-" via sandbox_name().
     const AGENT: &str = "test-lifecycle";
@@ -479,7 +500,7 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn verify_sandbox_files_passes_when_all_present() {
     let sbox = TestSandbox::create("verify-present").await;
 
@@ -503,7 +524,7 @@ async fn verify_sandbox_files_passes_when_all_present() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn upload_file_to_directory() {
     let sbox = TestSandbox::create("upload-dir").await;
 
@@ -522,7 +543,7 @@ async fn upload_file_to_directory() {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn upload_file_overwrites_existing() {
     let sbox = TestSandbox::create("upload-overwrite").await;
 
@@ -548,7 +569,7 @@ async fn upload_file_overwrites_existing() {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell"]
+#[serial]
 async fn upload_file_to_nested_dir() {
     let sbox = TestSandbox::create("upload-nested").await;
 
@@ -571,15 +592,12 @@ async fn upload_file_to_nested_dir() {
 /// Before the fix, passing "/sandbox/mcp.json" as dest caused:
 ///   mkdir: cannot create directory '/sandbox/mcp.json': File exists
 #[tokio::test]
-#[ignore = "requires live OpenShell — will pass after upload_file API change"]
 async fn upload_file_rejects_non_directory_dest() {
-    let sbox = TestSandbox::create("upload-reject").await;
-
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("mcp.json"), "{}").unwrap();
 
     let result = super::upload_file(
-        sbox.name(),
+        "any-sandbox",
         &tmp.path().join("mcp.json"),
         "/sandbox/mcp.json",
     )
@@ -591,6 +609,4 @@ async fn upload_file_rejects_non_directory_dest() {
         msg.contains("must be a directory"),
         "error should mention directory requirement, got: {msg}"
     );
-
-    sbox.destroy().await;
 }
