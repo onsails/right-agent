@@ -45,6 +45,10 @@ pub fn generate_policy(right_mcp_port: u16, network_policy: &NetworkPolicy) -> S
         protocol: rest
         access: full
         tls: terminate
+      - host: "**.*"
+        port: 80
+        protocol: rest
+        access: full
     binaries:
       - path: "**""#
             .to_owned(),
@@ -113,10 +117,11 @@ mod tests {
     }
 
     #[test]
-    fn allows_all_outbound_https() {
+    fn allows_all_outbound_https_and_http() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive);
         assert!(policy.contains(r#"host: "**.*""#));
         assert!(policy.contains("port: 443"));
+        assert!(policy.contains("port: 80"));
         assert!(policy.contains("tls: terminate"));
         assert!(policy.contains("outbound:"));
     }
