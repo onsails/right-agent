@@ -45,8 +45,14 @@ Each cron job is a YAML file in the `crons/` directory. The filename (without `.
 |-------|------|----------|---------|-------------|
 | `schedule` | string | Yes | - | Standard 5-field cron expression (minute hour day-of-month month day-of-week). Evaluated in **UTC** by the Rust runtime. |
 | `lock_ttl` | string | No | `30m` | Duration after which a lock is considered stale (e.g., `10m`, `1h`, `30m`). |
-| `max_turns` | integer | No | - | Passed as `--max-turns` to limit Claude's execution turns. |
+| `max_budget_usd` | number | No | `1.0` | Maximum dollar spend for this cron job invocation. Claude stops gracefully when budget is reached. |
 | `prompt` | string | Yes | - | The task prompt text that Claude executes when the cron fires. |
+
+### Schedule Guidelines
+
+When the user doesn't specify exact minutes, **avoid :00 and :30** — these are peak times when many automated jobs fire simultaneously, causing API rate limit spikes. Use odd minutes like `:17`, `:43`, `:07`, `:53` to spread load.
+
+The runtime emits a warning when it detects `:00` or `:30` in the minute field.
 
 **Example specs:**
 
@@ -54,14 +60,15 @@ Each cron job is a YAML file in the `crons/` directory. The filename (without `.
 # crons/deploy-check.yaml
 schedule: "*/5 * * * *"
 lock_ttl: 10m
-max_turns: 5
+max_budget_usd: 0.25
 prompt: "Check CI status for all open PRs, post comment if broken"
 ```
 
 ```yaml
 # crons/morning-briefing.yaml
-schedule: "0 9 * * 1-5"  # 09:00 UTC weekdays
+schedule: "7 9 * * 1-5"  # 09:07 UTC weekdays (avoid :00 rate limit spikes)
 lock_ttl: 30m
+max_budget_usd: 0.50
 prompt: "Gather open PRs, failing tests, pending reviews. Post summary to Slack."
 ```
 
