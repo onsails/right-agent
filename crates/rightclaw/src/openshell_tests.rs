@@ -497,3 +497,100 @@ async fn verify_sandbox_files_passes_when_all_present() {
 
     sbox.destroy().await;
 }
+
+// ---------------------------------------------------------------------------
+// upload_file integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires live OpenShell"]
+async fn upload_file_to_directory() {
+    let sbox = TestSandbox::create("upload-dir").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("hello.txt"), "hello sandbox\n").unwrap();
+
+    super::upload_file(sbox.name(), &tmp.path().join("hello.txt"), "/sandbox/")
+        .await
+        .expect("upload to directory should succeed");
+
+    let (content, code) = sbox.exec(&["cat", "/sandbox/hello.txt"]).await;
+    assert_eq!(code, 0);
+    assert_eq!(content, "hello sandbox\n");
+
+    sbox.destroy().await;
+}
+
+#[tokio::test]
+#[ignore = "requires live OpenShell"]
+async fn upload_file_overwrites_existing() {
+    let sbox = TestSandbox::create("upload-overwrite").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("data.txt");
+
+    // First upload.
+    std::fs::write(&file, "version 1\n").unwrap();
+    super::upload_file(sbox.name(), &file, "/sandbox/")
+        .await
+        .unwrap();
+
+    // Second upload with different content.
+    std::fs::write(&file, "version 2\n").unwrap();
+    super::upload_file(sbox.name(), &file, "/sandbox/")
+        .await
+        .unwrap();
+
+    let (content, _) = sbox.exec(&["cat", "/sandbox/data.txt"]).await;
+    assert_eq!(content, "version 2\n", "second upload should overwrite");
+
+    sbox.destroy().await;
+}
+
+#[tokio::test]
+#[ignore = "requires live OpenShell"]
+async fn upload_file_to_nested_dir() {
+    let sbox = TestSandbox::create("upload-nested").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("nested.txt"), "deep\n").unwrap();
+
+    // Upload to a directory that doesn't exist yet — openshell should create it.
+    super::upload_file(sbox.name(), &tmp.path().join("nested.txt"), "/sandbox/a/b/c/")
+        .await
+        .expect("upload to nested dir should succeed");
+
+    let (content, code) = sbox.exec(&["cat", "/sandbox/a/b/c/nested.txt"]).await;
+    assert_eq!(code, 0);
+    assert_eq!(content, "deep\n");
+
+    sbox.destroy().await;
+}
+
+/// Regression test: upload_file must reject non-directory destination.
+/// Before the fix, passing "/sandbox/mcp.json" as dest caused:
+///   mkdir: cannot create directory '/sandbox/mcp.json': File exists
+#[tokio::test]
+#[ignore = "requires live OpenShell — will pass after upload_file API change"]
+async fn upload_file_rejects_non_directory_dest() {
+    let sbox = TestSandbox::create("upload-reject").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("mcp.json"), "{}").unwrap();
+
+    let result = super::upload_file(
+        sbox.name(),
+        &tmp.path().join("mcp.json"),
+        "/sandbox/mcp.json",
+    )
+    .await;
+
+    assert!(result.is_err(), "upload_file must reject file-path destination");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("must be a directory"),
+        "error should mention directory requirement, got: {msg}"
+    );
+
+    sbox.destroy().await;
+}
