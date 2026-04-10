@@ -1201,7 +1201,9 @@ async fn invoke_cc(
             tracing::warn!(?chat_id, "detected auth error from CC");
             // Deactivate the session created before invoke_cc — it's from a failed auth
             // attempt and must not be resumed. Next message will start fresh.
-            deactivate_current(&conn, chat_id, eff_thread_id).ok();
+            deactivate_current(&conn, chat_id, eff_thread_id)
+                .map_err(|e| tracing::error!(?chat_id, "deactivate_current on auth error: {:#}", e))
+                .ok();
             if ctx.ssh_config_path.is_some() {
                 // Sandbox mode: spawn auth watcher if not already active.
                 if !ctx.auth_watcher_active.swap(true, Ordering::SeqCst) {
