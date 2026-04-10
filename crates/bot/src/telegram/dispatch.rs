@@ -1,6 +1,6 @@
 //! Teloxide long-polling dispatcher with:
 //! - DashMap per-session worker map (SES-05, D-11)
-//! - BotCommand schema for /reset (SES-06)
+//! - BotCommand schema for /new, /list, /switch (multi-session)
 //! - ChatId allow-list filter (BOT-05, via filter.rs)
 //! - SIGTERM + SIGINT graceful shutdown (BOT-04)
 //! - BOT-04 subprocess cleanup via kill_on_drop(true) in each worker (no children registry)
@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, handle_stop_callback, AgentDir, AgentSettings, AuthCodeSlot, AuthWatcherFlag, DebugFlag, RefreshTx, RightclawHome, SshConfigPath};
+use super::handler::{handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthCodeSlot, AuthWatcherFlag, DebugFlag, RefreshTx, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -31,8 +31,12 @@ use super::worker::{DebounceMsg, SessionKey};
 enum BotCommand {
     #[command(description = "Start interacting with this agent")]
     Start,
-    #[command(description = "Reset conversation session for this thread")]
-    Reset,
+    #[command(description = "Start a new conversation")]
+    New(String),
+    #[command(description = "List all sessions")]
+    List,
+    #[command(description = "Switch to another session")]
+    Switch(String),
     #[command(description = "MCP server management (list/add/remove)")]
     Mcp(String),
     #[command(description = "Run diagnostics")]
@@ -43,11 +47,11 @@ enum BotCommand {
 ///
 /// - Accepts agent_dir for session DB access and CC subprocess invocation.
 /// - Creates a DashMap<SessionKey, Sender<DebounceMsg>> for per-session workers.
-/// - Schema: filter by chat_id -> branch /reset command -> dispatch text messages.
+/// - Schema: filter by chat_id -> branch /new, /list, /switch commands -> dispatch text messages.
 /// - SIGTERM/SIGINT: kill in-flight subprocesses, shutdown dispatcher.
 ///
 /// BOT-04 subprocess cleanup strategy: use kill_on_drop(true) on each Child in invoke_cc.
-/// When a worker task exits (channel closed, panic, or /reset), the Child is dropped, which
+/// When a worker task exits (channel closed, panic, or /new), the Child is dropped, which
 /// kills the subprocess. No explicit children registry is needed or maintained.
 /// Rationale: Arc<Mutex<Vec<Child>>> was rejected because invoke_cc never added children
 /// to the registry, making the kill loop dead code. kill_on_drop is sufficient.
@@ -71,7 +75,7 @@ pub async fn run_telegram(
 
     let allowed: HashSet<i64> = allowed_chat_ids.into_iter().collect();
     tracing::info!(allowed_chat_ids = ?allowed, "chat ID allow-list loaded");
-    let filter = make_chat_id_filter(allowed);
+    let filter = make_chat_id_filter(allowed.clone());
 
     // Shared state
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
@@ -99,18 +103,12 @@ pub async fn run_telegram(
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
         .filter_command::<BotCommand>()
-        .branch(
-            dptree::case![BotCommand::Start].endpoint(handle_start),
-        )
-        .branch(
-            dptree::case![BotCommand::Reset].endpoint(handle_reset),
-        )
-        .branch(
-            dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp),
-        )
-        .branch(
-            dptree::case![BotCommand::Doctor].endpoint(handle_doctor),
-        );
+        .branch(dptree::case![BotCommand::Start].endpoint(handle_start))
+        .branch(dptree::case![BotCommand::New(name)].endpoint(handle_new))
+        .branch(dptree::case![BotCommand::List].endpoint(handle_list))
+        .branch(dptree::case![BotCommand::Switch(uuid)].endpoint(handle_switch))
+        .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
+        .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor));
 
     let message_handler = Update::filter_message()
         .inspect(|msg: Message| {
@@ -179,16 +177,25 @@ pub async fn run_telegram(
         }
     });
 
-    // Register /reset command with Telegram Bot API.
-    // First delete all existing commands to clear any leftover commands from other clients
-    // (e.g., CC Telegram plugin sets /status /help /start -- these must be cleared).
-    match bot.delete_my_commands().await {
-        Ok(_) => tracing::info!("delete_my_commands succeeded"),
-        Err(e) => tracing::warn!("delete_my_commands failed (non-fatal): {e:#}"),
+    // Register commands per-chat using BotCommandScope::Chat.
+    // Per-chat scope has higher priority than default scope in Telegram's resolution,
+    // so CC Telegram plugin's default-scope commands won't overwrite ours.
+    let commands = BotCommand::bot_commands();
+    for &cid in &allowed {
+        let scope = teloxide::types::BotCommandScope::Chat {
+            chat_id: teloxide::types::Recipient::Id(teloxide::types::ChatId(cid)),
+        };
+        match bot.delete_my_commands().scope(scope.clone()).await {
+            Ok(_) => {}
+            Err(e) => tracing::warn!(chat_id = cid, "delete_my_commands(chat) failed: {e:#}"),
+        }
+        match bot.set_my_commands(commands.clone()).scope(scope).await {
+            Ok(_) => tracing::info!(chat_id = cid, "set_my_commands(chat) succeeded"),
+            Err(e) => tracing::warn!(chat_id = cid, "set_my_commands(chat) failed: {e:#}"),
+        }
     }
-    match bot.set_my_commands(BotCommand::bot_commands()).await {
-        Ok(_) => tracing::info!("set_my_commands succeeded -- commands registered"),
-        Err(e) => tracing::warn!("set_my_commands failed (non-fatal): {e:#}"),
+    if allowed.is_empty() {
+        tracing::info!("no allowed_chat_ids — skipping set_my_commands");
     }
 
     tracing::info!("teloxide dispatcher starting (long-polling)");

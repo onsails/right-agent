@@ -1,7 +1,9 @@
-//! Teloxide endpoint handlers: message dispatch + /reset command + /mcp + /doctor.
+//! Teloxide endpoint handlers: message dispatch + /new, /list, /switch + /mcp + /doctor.
 //!
 //! handle_message: routes incoming text to the per-session worker via DashMap.
-//! handle_reset: deletes the session row for the current thread.
+//! handle_new: deactivates current session, optionally creates a named one.
+//! handle_list: shows all sessions for the current chat+thread.
+//! handle_switch: switches to a different session by partial UUID match.
 //! handle_mcp: MCP server management (list/auth/add/remove).
 //! handle_doctor: runs rightclaw doctor and returns results.
 
@@ -16,7 +18,7 @@ use teloxide::types::{CallbackQuery, Message};
 use teloxide::RequestError;
 
 use super::oauth_callback::PendingAuthMap;
-use super::session::{deactivate_current, effective_thread_id};
+use super::session::{activate_session, create_session, deactivate_current, effective_thread_id, find_sessions_by_uuid, list_sessions, truncate_label};
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 use super::BotType;
 
@@ -188,17 +190,11 @@ pub async fn handle_start(
     Ok(())
 }
 
-/// Handle the /reset command.
-///
-/// Deletes the telegram_sessions row for the current (chat_id, effective_thread_id).
-/// Also removes the worker sender from DashMap so the worker task exits cleanly.
-/// Next message will create a fresh session with a new UUID (SES-06).
-///
-/// Both DB errors propagate -- a failed reset is surfaced to the caller so the dispatcher
-/// can log it and teloxide can handle the update appropriately.
-pub async fn handle_reset(
+/// Handle the /new command — start a new session.
+pub async fn handle_new(
     bot: BotType,
     msg: Message,
+    name: String,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
@@ -206,20 +202,41 @@ pub async fn handle_reset(
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
 
-    // Remove the worker sender -- channel closes, worker task exits and removes its own entry
+    let conn = rightclaw::memory::open_connection(&agent_dir.0)
+        .map_err(|e| to_request_err(format!("new: open DB: {:#}", e)))?;
+
+    let prev_uuid = deactivate_current(&conn, chat_id.0, eff_thread_id)
+        .map_err(|e| to_request_err(format!("new: deactivate: {:#}", e)))?;
+
+    // Kill worker — channel closes, CC subprocess killed via kill_on_drop
     worker_map.remove(&key);
 
-    // Delete session from DB -- errors propagate via `?` (CLAUDE.rust.md: fail fast)
-    let conn = rightclaw::memory::open_connection(&agent_dir.0)
-        .map_err(|e| to_request_err(format!("reset: open DB: {:#}", e)))?;
-    deactivate_current(&conn, chat_id.0, eff_thread_id)
-        .map_err(|e| to_request_err(format!("reset: deactivate session: {:#}", e)))?;
+    let name = name.trim().to_string();
+    let mut reply = String::new();
 
-    tracing::info!(?key, "session reset");
+    if !name.is_empty() {
+        let new_uuid = uuid::Uuid::new_v4().to_string();
+        let label = truncate_label(&name);
+        create_session(&conn, chat_id.0, eff_thread_id, &new_uuid, Some(label))
+            .map_err(|e| to_request_err(format!("new: create session: {:#}", e)))?;
+        reply.push_str(&format!("New session: {name}\n"));
+    } else {
+        reply.push_str("Session cleared.\n");
+    }
 
-    // Send confirmation reply
-    let mut send =
-        bot.send_message(chat_id, "Session reset. Next message starts a fresh conversation.");
+    if let Some(prev) = prev_uuid {
+        reply.push_str(&format!(
+            "Previous session:\n<pre>{prev}</pre>\nTap to copy, then /switch to return."
+        ));
+    }
+
+    if name.is_empty() {
+        reply.push_str("\nSend a message to start a new conversation.");
+    }
+
+    let mut send = bot
+        .send_message(chat_id, &reply)
+        .parse_mode(teloxide::types::ParseMode::Html);
     if eff_thread_id != 0 {
         send = send.message_thread_id(teloxide::types::ThreadId(
             teloxide::types::MessageId(eff_thread_id as i32),
@@ -227,6 +244,175 @@ pub async fn handle_reset(
     }
     send.await?;
 
+    tracing::info!(?key, "new session");
+    Ok(())
+}
+
+/// Handle the /list command — show all sessions for this chat+thread.
+pub async fn handle_list(
+    bot: BotType,
+    msg: Message,
+    agent_dir: Arc<AgentDir>,
+) -> ResponseResult<()> {
+    let chat_id = msg.chat.id;
+    let eff_thread_id = effective_thread_id(&msg);
+
+    let conn = rightclaw::memory::open_connection(&agent_dir.0)
+        .map_err(|e| to_request_err(format!("list: open DB: {:#}", e)))?;
+
+    let sessions = list_sessions(&conn, chat_id.0, eff_thread_id)
+        .map_err(|e| to_request_err(format!("list: query: {:#}", e)))?;
+
+    if sessions.is_empty() {
+        bot.send_message(chat_id, "No sessions yet. Send a message to start one.")
+            .await?;
+        return Ok(());
+    }
+
+    let mut text = String::from("Sessions:\n");
+    for s in &sessions {
+        let marker = if s.is_active { "●" } else { " " };
+        let label = s.label.as_deref().unwrap_or("(unnamed)");
+        let ago = format_relative_time(&s.last_used_at);
+        text.push_str(&format!(
+            "{marker} {label} — {ago}\n<pre>{}</pre>\n",
+            s.root_session_id
+        ));
+    }
+
+    let mut send = bot
+        .send_message(chat_id, &text)
+        .parse_mode(teloxide::types::ParseMode::Html);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(teloxide::types::ThreadId(
+            teloxide::types::MessageId(eff_thread_id as i32),
+        ));
+    }
+    send.await?;
+    Ok(())
+}
+
+/// Format an ISO timestamp as a relative time string.
+fn format_relative_time(iso_timestamp: &str) -> String {
+    let Ok(then) = chrono::NaiveDateTime::parse_from_str(iso_timestamp, "%Y-%m-%dT%H:%M:%SZ")
+    else {
+        return iso_timestamp.to_string();
+    };
+    let then_utc = then.and_utc();
+    let now = chrono::Utc::now();
+    let delta = now - then_utc;
+
+    if delta.num_minutes() < 1 {
+        "just now".to_string()
+    } else if delta.num_minutes() < 60 {
+        format!("{}m ago", delta.num_minutes())
+    } else if delta.num_hours() < 24 {
+        format!("{}h ago", delta.num_hours())
+    } else {
+        format!("{}d ago", delta.num_days())
+    }
+}
+
+/// Handle the /switch command — switch to a different session.
+pub async fn handle_switch(
+    bot: BotType,
+    msg: Message,
+    uuid: String,
+    worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
+    agent_dir: Arc<AgentDir>,
+) -> ResponseResult<()> {
+    let chat_id = msg.chat.id;
+    let eff_thread_id = effective_thread_id(&msg);
+    let key: SessionKey = (chat_id.0, eff_thread_id);
+    let uuid = uuid.trim().to_string();
+
+    if uuid.is_empty() {
+        bot.send_message(
+            chat_id,
+            "Usage: /switch <uuid>\nUse /list to see available sessions.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let conn = rightclaw::memory::open_connection(&agent_dir.0)
+        .map_err(|e| to_request_err(format!("switch: open DB: {:#}", e)))?;
+
+    let matches = find_sessions_by_uuid(&conn, chat_id.0, eff_thread_id, &uuid)
+        .map_err(|e| to_request_err(format!("switch: query: {:#}", e)))?;
+
+    match matches.len() {
+        0 => {
+            let mut send = bot
+                .send_message(
+                    chat_id,
+                    format!(
+                        "No session matching <pre>{uuid}</pre>. Use /list to see available sessions."
+                    ),
+                )
+                .parse_mode(teloxide::types::ParseMode::Html);
+            if eff_thread_id != 0 {
+                send = send.message_thread_id(teloxide::types::ThreadId(
+                    teloxide::types::MessageId(eff_thread_id as i32),
+                ));
+            }
+            send.await?;
+        }
+        1 => {
+            let target = &matches[0];
+            if target.is_active {
+                bot.send_message(chat_id, "Already active.").await?;
+                return Ok(());
+            }
+
+            deactivate_current(&conn, chat_id.0, eff_thread_id)
+                .map_err(|e| to_request_err(format!("switch: deactivate: {:#}", e)))?;
+            activate_session(&conn, target.id)
+                .map_err(|e| to_request_err(format!("switch: activate: {:#}", e)))?;
+
+            worker_map.remove(&key);
+
+            let label = target.label.as_deref().unwrap_or("(unnamed)");
+            let mut send = bot
+                .send_message(
+                    chat_id,
+                    format!(
+                        "Switched to: {label}\n<pre>{}</pre>",
+                        target.root_session_id
+                    ),
+                )
+                .parse_mode(teloxide::types::ParseMode::Html);
+            if eff_thread_id != 0 {
+                send = send.message_thread_id(teloxide::types::ThreadId(
+                    teloxide::types::MessageId(eff_thread_id as i32),
+                ));
+            }
+            send.await?;
+
+            tracing::info!(?key, session = %target.root_session_id, "switched session");
+        }
+        _ => {
+            let mut text = format!("Multiple sessions match <pre>{uuid}</pre>:\n\n");
+            for m in &matches {
+                let label = m.label.as_deref().unwrap_or("(unnamed)");
+                let marker = if m.is_active { "●" } else { " " };
+                text.push_str(&format!(
+                    "{marker} {label}\n<pre>{}</pre>\n",
+                    m.root_session_id
+                ));
+            }
+            text.push_str("\nBe more specific.");
+            let mut send = bot
+                .send_message(chat_id, &text)
+                .parse_mode(teloxide::types::ParseMode::Html);
+            if eff_thread_id != 0 {
+                send = send.message_thread_id(teloxide::types::ThreadId(
+                    teloxide::types::MessageId(eff_thread_id as i32),
+                ));
+            }
+            send.await?;
+        }
+    }
     Ok(())
 }
 
