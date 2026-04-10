@@ -68,6 +68,47 @@ fn optional_file(agent_dir: &Path, filename: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// Build an `AgentDef` from a single known agent directory.
+///
+/// Unlike `discover_agents()` which scans a parent directory, this takes
+/// the agent directory directly. Used by the bot at startup.
+pub fn discover_single_agent(agent_dir: &Path) -> miette::Result<AgentDef> {
+    let name = agent_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| {
+            miette::miette!(
+                "agent directory has no valid name: {}",
+                agent_dir.display()
+            )
+        })?
+        .to_string();
+
+    validate_agent_name(&name)?;
+
+    if !agent_dir.join("agent.yaml").exists() {
+        return Err(miette::miette!(
+            "agent.yaml not found in {}",
+            agent_dir.display()
+        ));
+    }
+
+    let config = parse_agent_config(agent_dir)?;
+
+    Ok(AgentDef {
+        name,
+        identity_path: agent_dir.join("IDENTITY.md"),
+        config,
+        soul_path: optional_file(agent_dir, "SOUL.md"),
+        user_path: optional_file(agent_dir, "USER.md"),
+        agents_path: optional_file(agent_dir, "AGENTS.md"),
+        tools_path: optional_file(agent_dir, "TOOLS.md"),
+        bootstrap_path: optional_file(agent_dir, "BOOTSTRAP.md"),
+        heartbeat_path: optional_file(agent_dir, "HEARTBEAT.md"),
+        path: agent_dir.to_path_buf(),
+    })
+}
+
 /// Discover all valid agents in the given agents directory.
 ///
 /// Scans `agents_dir` for subdirectories, validates each as an agent definition.

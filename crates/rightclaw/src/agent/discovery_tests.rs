@@ -214,6 +214,33 @@ fn discover_rejects_invalid_agent_name() {
     assert!(result.is_err());
 }
 
+// --- discover_single_agent ---
+
+#[test]
+fn discover_single_agent_from_dir() {
+    let dir = tempdir().unwrap();
+    let agent_dir = dir.path().join("agents").join("test");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
+    fs::write(agent_dir.join("IDENTITY.md"), "# Test Agent").unwrap();
+
+    let agent = super::discover_single_agent(&agent_dir).unwrap();
+    assert_eq!(agent.name, "test");
+    assert_eq!(agent.path, agent_dir);
+    assert!(agent.identity_path.ends_with("IDENTITY.md"));
+    assert!(agent.config.is_some());
+}
+
+#[test]
+fn discover_single_agent_without_agent_yaml_fails() {
+    let dir = tempdir().unwrap();
+    let agent_dir = dir.path().join("agents").join("test");
+    fs::create_dir_all(&agent_dir).unwrap();
+
+    let result = super::discover_single_agent(&agent_dir);
+    assert!(result.is_err());
+}
+
 #[test]
 fn discover_sorts_agents_by_name() {
     let dir = tempdir().unwrap();
