@@ -274,6 +274,16 @@ pub struct AgentDef {
     pub heartbeat_path: Option<PathBuf>,
 }
 
+impl AgentDef {
+    /// Effective sandbox mode — defaults to Openshell when `config` or `sandbox` section is absent.
+    pub fn sandbox_mode(&self) -> &SandboxMode {
+        self.config
+            .as_ref()
+            .map(|c| c.sandbox_mode())
+            .unwrap_or(&SandboxMode::Openshell)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

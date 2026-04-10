@@ -1376,12 +1376,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
         })?;
 
     // 2. Check sandbox mode
-    let is_openshell = agent
-        .config
-        .as_ref()
-        .map(|c| matches!(c.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell))
-        .unwrap_or(true); // default is Openshell when no config section
-    if !is_openshell {
+    if !matches!(agent.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell) {
         return Err(miette::miette!(
             "Agent '{}' runs without sandbox, SSH not available",
             agent_name
@@ -1394,7 +1389,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
         .await
         .map_err(|_| miette::miette!(
             help = "Start it with: rightclaw up",
-            "Agent '{}' is not running. Start it with: rightclaw up",
+            "Agent '{}' is not running",
             agent_name,
         ))?;
 
@@ -1405,7 +1400,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
         Some(p) if p.status != "Running" => {
             return Err(miette::miette!(
                 help = "Start it with: rightclaw up",
-                "Agent '{}' is not running (status: {}). Start it with: rightclaw up",
+                "Agent '{}' is not running (status: {})",
                 agent_name,
                 p.status,
             ));
@@ -1413,7 +1408,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
         None => {
             return Err(miette::miette!(
                 help = "Start it with: rightclaw up",
-                "Agent '{}' is not running. Start it with: rightclaw up",
+                "Agent '{}' is not running",
                 agent_name,
             ));
         }
