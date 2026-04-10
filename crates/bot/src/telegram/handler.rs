@@ -16,7 +16,7 @@ use teloxide::types::{CallbackQuery, Message};
 use teloxide::RequestError;
 
 use super::oauth_callback::PendingAuthMap;
-use super::session::{delete_session, effective_thread_id};
+use super::session::{deactivate_current, effective_thread_id};
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 use super::BotType;
 
@@ -212,8 +212,8 @@ pub async fn handle_reset(
     // Delete session from DB -- errors propagate via `?` (CLAUDE.rust.md: fail fast)
     let conn = rightclaw::memory::open_connection(&agent_dir.0)
         .map_err(|e| to_request_err(format!("reset: open DB: {:#}", e)))?;
-    delete_session(&conn, chat_id.0, eff_thread_id)
-        .map_err(|e| to_request_err(format!("reset: delete session: {:#}", e)))?;
+    deactivate_current(&conn, chat_id.0, eff_thread_id)
+        .map_err(|e| to_request_err(format!("reset: deactivate session: {:#}", e)))?;
 
     tracing::info!(?key, "session reset");
 

@@ -17,7 +17,9 @@ use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::session::{create_session, delete_session, get_session, touch_session};
+use super::session::{
+    SessionRow, create_session, deactivate_current, get_active_session, touch_session,
+};
 
 /// Session key: `(chat_id, effective_thread_id)`.
 pub type SessionKey = (i64, i64);
@@ -395,13 +397,13 @@ pub fn spawn_worker(
                     key = ?key,
                     "bootstrap complete — identity files present after sync"
                 );
-                // Open a short-lived connection to delete the session.
+                // Open a short-lived connection to deactivate the session.
                 if let Ok(conn) = rightclaw::memory::open_connection(&ctx.agent_dir) {
-                    delete_session(&conn, chat_id, eff_thread_id)
+                    deactivate_current(&conn, chat_id, eff_thread_id)
                         .map_err(|e| {
                             tracing::error!(
                                 key = ?key,
-                                "delete_session after bootstrap: {:#}",
+                                "deactivate_current after bootstrap: {:#}",
                                 e
                             )
                         })
@@ -769,15 +771,15 @@ async fn invoke_cc(
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
 
     // Session lookup / create (SES-02, SES-03)
-    let (cmd_args, is_first_call) = match get_session(&conn, chat_id, eff_thread_id) {
-        Ok(Some(root_id)) => {
+    let (cmd_args, is_first_call) = match get_active_session(&conn, chat_id, eff_thread_id) {
+        Ok(Some(SessionRow { root_session_id, .. })) => {
             // Resume: --resume <root_session_id>
-            (vec!["--resume".to_string(), root_id], false)
+            (vec!["--resume".to_string(), root_session_id], false)
         }
         Ok(None) => {
             // First message: generate UUID, --session-id <uuid>
             let new_uuid = Uuid::new_v4().to_string();
-            create_session(&conn, chat_id, eff_thread_id, &new_uuid)
+            create_session(&conn, chat_id, eff_thread_id, &new_uuid, None)
                 .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
             (vec!["--session-id".to_string(), new_uuid], true)
         }
@@ -1192,9 +1194,9 @@ async fn invoke_cc(
         // Check for auth error — trigger login flow if sandboxed.
         if is_auth_error(&stdout_str) {
             tracing::warn!(?chat_id, "detected auth error from CC");
-            // Delete the session created before invoke_cc — it's from a failed auth
+            // Deactivate the session created before invoke_cc — it's from a failed auth
             // attempt and must not be resumed. Next message will start fresh.
-            delete_session(&conn, chat_id, eff_thread_id).ok();
+            deactivate_current(&conn, chat_id, eff_thread_id).ok();
             if ctx.ssh_config_path.is_some() {
                 // Sandbox mode: spawn auth watcher if not already active.
                 if !ctx.auth_watcher_active.swap(true, Ordering::SeqCst) {
@@ -1242,20 +1244,22 @@ async fn invoke_cc(
         Ok((reply_output, session_id_from_cc)) => {
             // D-15: verify session_id at debug level only
             if let (Some(cc_sid), true) = (session_id_from_cc, is_first_call)
-                && let Ok(Some(stored)) = get_session(&conn, chat_id, eff_thread_id)
-                && cc_sid != stored
+                && let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id)
+                && cc_sid != active.root_session_id
             {
                 tracing::warn!(
                     ?chat_id,
                     cc_session_id = %cc_sid,
-                    stored_session_id = %stored,
+                    stored_session_id = %active.root_session_id,
                     "session_id mismatch between CC and stored — not blocking"
                 );
             }
             // Update last_used_at (non-fatal: log error but do not fail the reply)
-            touch_session(&conn, chat_id, eff_thread_id)
-                .map_err(|e| tracing::error!(?chat_id, "touch_session failed: {:#}", e))
-                .ok();
+            if let Ok(Some(active)) = get_active_session(&conn, chat_id, eff_thread_id) {
+                touch_session(&conn, active.id)
+                    .map_err(|e| tracing::error!(?chat_id, "touch_session failed: {:#}", e))
+                    .ok();
+            }
 
             // Bootstrap completion is now detected by file presence after
             // reverse_sync in spawn_worker — no bootstrap_complete field needed.
