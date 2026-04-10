@@ -102,3 +102,16 @@ fn system_prompt_mentions_right_mcp() {
     assert!(result.contains("right"));
     assert!(result.contains("MCP"));
 }
+
+#[test]
+fn system_prompt_contains_ssh_block_for_openshell() {
+    let result = generate_system_prompt("mybot", &crate::agent::types::SandboxMode::Openshell);
+    assert!(result.contains("rightclaw agent ssh mybot"), "openshell prompt must include SSH command");
+    assert!(result.contains("interactive terminal"), "openshell prompt must explain when to use SSH");
+}
+
+#[test]
+fn system_prompt_no_ssh_block_for_no_sandbox() {
+    let result = generate_system_prompt("mybot", &crate::agent::types::SandboxMode::None);
+    assert!(!result.contains("rightclaw agent ssh"), "no-sandbox prompt must NOT include SSH command");
+}

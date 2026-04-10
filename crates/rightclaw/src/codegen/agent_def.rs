@@ -92,7 +92,7 @@ pub fn generate_system_prompt(agent_name: &str, sandbox_mode: &crate::agent::typ
         crate::agent::types::SandboxMode::None => "no sandbox (direct host access)",
     };
 
-    format!(
+    let mut prompt = format!(
         "\
 You are {agent_name}, a RightClaw agent.
 
@@ -119,7 +119,32 @@ they do NOT see tool calls, intermediate text, or thinking. Never say \"see abov
 \"as shown above\", or reference previous output. If you gathered data, include it in \
 your final response.
 "
-    )
+    );
+
+    if matches!(sandbox_mode, crate::agent::types::SandboxMode::Openshell) {
+        prompt.push_str(&format!(
+            "
+## User SSH Access
+
+If an operation requires an interactive terminal (TUI, interactive prompts, \
+password input) that you cannot perform from within your sandbox — tell the \
+user to run:
+
+  rightclaw agent ssh {agent_name}
+  rightclaw agent ssh {agent_name} -- <command>
+
+Examples:
+- `gh auth login`
+- `gcloud auth login`
+- `npm login`
+- Any command with interactive prompts or TUI
+
+Always provide the exact command with the `--` separator when passing a specific command.
+"
+        ));
+    }
+
+    prompt
 }
 
 #[cfg(test)]
