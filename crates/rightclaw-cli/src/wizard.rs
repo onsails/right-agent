@@ -549,17 +549,30 @@ pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Resu
                 .join(", ")
         };
 
+        let sandbox_display = format!("{}", config.sandbox_mode());
+        let network_policy_display = format!("{}", config.network_policy);
+
         let opt_token = format!("Telegram token: {token_display}");
         let opt_model = format!("Model: {model_display}");
         let opt_chat_ids = format!("Allowed chat IDs: {chat_ids_display}");
+        let opt_sandbox = format!("Sandbox mode: {sandbox_display}");
+        let opt_network_policy = format!("Network policy: {network_policy_display}");
         let opt_done = "Done".to_string();
 
-        let options = vec![
+        let mut options = vec![
             opt_token.clone(),
             opt_model.clone(),
             opt_chat_ids.clone(),
-            opt_done.clone(),
+            opt_sandbox.clone(),
         ];
+        // Only show network policy when sandbox is openshell (no sandbox = no policy).
+        if matches!(
+            config.sandbox_mode(),
+            rightclaw::agent::types::SandboxMode::Openshell
+        ) {
+            options.push(opt_network_policy.clone());
+        }
+        options.push(opt_done.clone());
 
         let selection = inquire::Select::new(
             &format!("Agent '{}' settings:", chosen_name),
@@ -614,6 +627,34 @@ pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Resu
                     .collect::<miette::Result<Vec<_>>>()?;
                 update_agent_yaml_chat_ids(&agent_yaml_path, &ids)?;
             }
+        } else if selection == opt_sandbox {
+            let options = vec![
+                "OpenShell — run in isolated container (recommended)",
+                "None — run directly on host (for computer-use, Chrome, etc.)",
+            ];
+            let choice = inquire::Select::new("Sandbox mode:", options)
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let mode = if choice.starts_with("OpenShell") {
+                "openshell"
+            } else {
+                "none"
+            };
+            update_agent_yaml_sandbox_mode(&agent_yaml_path, mode)?;
+        } else if selection == opt_network_policy {
+            let options = vec![
+                "Restrictive — Anthropic/Claude domains only (recommended)",
+                "Permissive — all HTTPS domains allowed (needed for external MCP servers)",
+            ];
+            let choice = inquire::Select::new("Network policy for sandbox:", options)
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let policy = if choice.starts_with("Restrictive") {
+                "restrictive"
+            } else {
+                "permissive"
+            };
+            update_agent_yaml_field(&agent_yaml_path, "network_policy", policy)?;
         }
 
         println!("Saved.");
@@ -670,6 +711,50 @@ fn remove_agent_yaml_field(path: &Path, key: &str) -> miette::Result<()> {
         .lines()
         .filter(|line| !line.starts_with(&prefix))
         .collect();
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(path, &output)
+        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
+
+    Ok(())
+}
+
+/// Update the `sandbox: mode:` field in an agent.yaml file.
+///
+/// Handles the nested `sandbox:` block: updates `mode:` if it exists,
+/// or creates the block if absent. When switching to `none`, removes `policy_file`.
+/// When switching to `openshell`, adds default `policy_file: policy.yaml`.
+fn update_agent_yaml_sandbox_mode(path: &Path, mode: &str) -> miette::Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
+
+    // Remove existing sandbox block (header + indented lines).
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_sandbox_block = false;
+    for line in content.lines() {
+        if line == "sandbox:" {
+            in_sandbox_block = true;
+            continue;
+        }
+        if in_sandbox_block {
+            if line.starts_with("  ") {
+                continue;
+            }
+            in_sandbox_block = false;
+        }
+        lines.push(line.to_string());
+    }
+
+    // Append new sandbox block.
+    lines.push("sandbox:".to_string());
+    lines.push(format!("  mode: {mode}"));
+    if mode == "openshell" {
+        lines.push("  policy_file: policy.yaml".to_string());
+    }
 
     let mut output = lines.join("\n");
     if !output.ends_with('\n') {

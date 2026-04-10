@@ -68,7 +68,36 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             .map_err(|e| miette::miette!("failed to create {}: {e:#}", dir.display()))?;
     }
 
-    // Parse agent config
+    // Parse agent config (needed for codegen input; re-parsed below after codegen runs).
+    let _config = parse_agent_config(&agent_dir)?.unwrap_or_else(|| {
+        rightclaw::agent::types::AgentConfig {
+            allowed_chat_ids: vec![],
+            telegram_token: None,
+            restart: Default::default(),
+            max_restarts: 3,
+            backoff_seconds: 5,
+            model: None,
+            sandbox: None,
+            env: Default::default(),
+            secret: None,
+            attachments: Default::default(),
+            network_policy: Default::default(),
+            max_turns: 30,
+            max_budget_usd: 1.0,
+            show_thinking: true,
+        }
+    });
+
+    // Per-agent codegen: regenerate all derived files from agent.yaml + identity files.
+    // This ensures policy.yaml, settings.json, mcp.json, etc. reflect the current config
+    // even after a config change triggered restart.
+    let self_exe = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
+    let agent_def = rightclaw::agent::discover_single_agent(&agent_dir)?;
+    rightclaw::codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
+    tracing::info!(agent = %args.agent, "per-agent codegen complete");
+
+    // Re-parse config after codegen (secret may have been generated/changed in agent.yaml).
     let config = parse_agent_config(&agent_dir)?.unwrap_or_else(|| {
         rightclaw::agent::types::AgentConfig {
             allowed_chat_ids: vec![],
@@ -161,10 +190,12 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
     }
 
     // Graceful restart: config watcher cancels this token when agent.yaml changes.
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio_util::sync::CancellationToken;
     let shutdown = CancellationToken::new();
+    let config_changed = Arc::new(AtomicBool::new(false));
     let agent_yaml_path = agent_dir.join("agent.yaml");
-    config_watcher::spawn_config_watcher(&agent_yaml_path, shutdown.clone())?;
+    config_watcher::spawn_config_watcher(&agent_yaml_path, shutdown.clone(), Arc::clone(&config_changed))?;
 
     // CRON-01: spawn cron task alongside Telegram dispatcher.
     // Build bot here so cron can send replies; run_telegram builds its own independent instance.
@@ -382,6 +413,12 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
         let _ = handle.await;
     }
     tracing::info!("graceful shutdown complete");
+
+    // Config change → exit with non-zero so process-compose restarts us (on_failure policy).
+    if config_changed.load(Ordering::SeqCst) {
+        tracing::info!("config change detected — exiting with code 2 for restart");
+        std::process::exit(2);
+    }
 
     result
 }

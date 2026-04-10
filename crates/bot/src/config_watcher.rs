@@ -1,18 +1,22 @@
 //! Watch agent.yaml for changes and trigger graceful restart.
 //!
 //! Uses `notify` with debouncing (2s) to avoid reacting to partial writes.
-//! On change detection, cancels the provided `CancellationToken`.
+//! On change detection, sets a flag and cancels the provided `CancellationToken`.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Spawn a blocking thread that watches `agent.yaml` for modifications.
 ///
-/// When a change is detected (debounced 2s), the `token` is cancelled,
-/// signalling all subsystems to begin graceful shutdown.
+/// When a change is detected (debounced 2s), sets `config_changed` to true
+/// and cancels `token`, signalling all subsystems to begin graceful shutdown.
+/// The caller checks `config_changed` after shutdown to decide the exit code.
 pub fn spawn_config_watcher(
     agent_yaml: &Path,
     token: CancellationToken,
+    config_changed: Arc<AtomicBool>,
 ) -> miette::Result<()> {
     use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
     use std::sync::mpsc;
@@ -50,6 +54,7 @@ pub fn spawn_config_watcher(
                     });
                     if relevant {
                         tracing::info!("agent.yaml changed — initiating graceful restart");
+                        config_changed.store(true, Ordering::SeqCst);
                         token.cancel();
                         return;
                     }

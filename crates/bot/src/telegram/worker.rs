@@ -987,10 +987,7 @@ async fn invoke_cc(
                         }
 
                         // Update thinking message (throttled to 2s).
-                        // Only show after 2+ displayable events — single-turn responses
-                        // don't need a thinking indicator.
                         if ctx.show_thinking
-                            && total_assistant_events >= 2
                             && super::stream::format_event(&event).is_some()
                             && last_edit.elapsed() >= Duration::from_secs(2)
                         {
@@ -1035,14 +1032,6 @@ async fn invoke_cc(
                 break;
             }
         }
-    }
-
-    // If thinking message was sent but only 1 turn happened, delete it
-    // (single-turn responses don't need visible thinking).
-    if let Some(msg_id) = thinking_msg_id
-        && usage.num_turns <= 1
-    {
-        let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
     }
 
     // Wait for process exit.

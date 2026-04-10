@@ -528,7 +528,6 @@ fn cmd_init(
         rightclaw::codegen::run_agent_codegen(
             home,
             std::slice::from_ref(&agent_def),
-            std::slice::from_ref(&agent_def),
             &self_exe,
             false,
         )?;
@@ -807,7 +806,6 @@ fn cmd_agent_init(
         };
         rightclaw::codegen::run_agent_codegen(
             home,
-            std::slice::from_ref(&agent_def),
             std::slice::from_ref(&agent_def),
             &self_exe,
             false,
@@ -1105,9 +1103,9 @@ async fn cmd_up(
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    // Run the full codegen pipeline: per-agent artifacts, token map, policy validation,
+    // Run cross-agent codegen: token map, policy validation,
     // cloudflared config, process-compose.yaml, and runtime state.
-    rightclaw::codegen::run_agent_codegen(home, &agents, &agents, &self_exe, debug)?;
+    rightclaw::codegen::run_agent_codegen(home, &agents, &self_exe, debug)?;
 
     // Check that at least one agent has a Telegram token configured.
     let has_bot_agents = agents.iter().any(|a| {
@@ -1259,7 +1257,7 @@ async fn cmd_down(_home: &Path) -> miette::Result<()> {
     Ok(())
 }
 
-async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::Result<()> {
+async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette::Result<()> {
     let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
     client.health_check().await.map_err(|_| {
         miette::miette!(
@@ -1277,13 +1275,10 @@ async fn cmd_reload(home: &Path, agents_filter: Option<Vec<String>>) -> miette::
         ));
     }
 
-    // --agents filter controls codegen scope; PC yaml always includes all agents.
-    let codegen_agents = filter_agents(&all_agents, agents_filter.as_deref())?;
-
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    rightclaw::codegen::run_agent_codegen(home, &codegen_agents, &all_agents, &self_exe, false)?;
+    rightclaw::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
     client.reload_configuration().await?;
 

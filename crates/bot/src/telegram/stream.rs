@@ -94,6 +94,12 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
         }
         StreamEvent::Thinking => Some("\u{1f4ad} thinking...".to_string()),
         StreamEvent::ToolUse { tool, input_summary } => {
+            // StructuredOutput is the final reply JSON — it will be sent as a
+            // separate Telegram message, so showing it in the thinking indicator
+            // is redundant noise (and the payload is huge).
+            if tool == "StructuredOutput" {
+                return None;
+            }
             let icon = match tool.as_str() {
                 "Bash" => "\u{1f527}",
                 "Read" => "\u{1f4d6}",
@@ -307,6 +313,25 @@ mod tests {
         let usage = StreamUsage::default();
         let msg = format_thinking_message(&events, &usage, 30);
         assert!(msg.contains("starting..."));
+    }
+
+    #[test]
+    fn structured_output_excluded_from_thinking() {
+        let mut buf = EventRingBuffer::new(5);
+        buf.push(&StreamEvent::ToolUse {
+            tool: "Bash".into(),
+            input_summary: "ls".into(),
+        });
+        buf.push(&StreamEvent::ToolUse {
+            tool: "StructuredOutput".into(),
+            input_summary: r#"{"content":"big payload"}"#.into(),
+        });
+        // StructuredOutput should be filtered out by format_event → not stored in ring buffer
+        assert_eq!(buf.events().len(), 1);
+        let usage = StreamUsage { num_turns: 3, cost_usd: 0.10 };
+        let msg = format_thinking_message(buf.events(), &usage, 30);
+        assert!(!msg.contains("StructuredOutput"));
+        assert!(msg.contains("Bash"));
     }
 
     #[test]
