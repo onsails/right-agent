@@ -1109,6 +1109,7 @@ async fn invoke_cc(
             let _ = ctx.bot
                 .edit_message_text(tg_chat_id, msg_id, &text)
                 .parse_mode(teloxide::types::ParseMode::Html)
+                .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
         } else if ctx.show_thinking {
             // Normal finish with thinking — final cost/turns, remove keyboard.
@@ -1120,6 +1121,7 @@ async fn invoke_cc(
             let _ = ctx.bot
                 .edit_message_text(tg_chat_id, msg_id, &text)
                 .parse_mode(teloxide::types::ParseMode::Html)
+                .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
         } else {
             // Normal finish without thinking — delete the anchor message.

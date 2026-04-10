@@ -755,6 +755,28 @@ mod tests {
     }
 
     #[test]
+    fn stop_token_cancel_via_dashmap_lookup() {
+        use dashmap::DashMap;
+        use tokio_util::sync::CancellationToken;
+
+        let map = DashMap::new();
+        let token = CancellationToken::new();
+        let key = (12345_i64, 0_i64);
+        map.insert(key, token.clone());
+
+        // Simulate callback handler lookup + cancel
+        let entry = map.get(&key).unwrap();
+        entry.value().cancel();
+        drop(entry);
+
+        assert!(token.is_cancelled());
+
+        // After removal, lookup returns None (race: stop after finish)
+        map.remove(&key);
+        assert!(map.get(&key).is_none());
+    }
+
+    #[test]
     fn agent_dir_and_rightclaw_home_clone_independently() {
         let agent = AgentDir(PathBuf::from("/agents/myagent"));
         let home = RightclawHome(PathBuf::from("/home/user/.rightclaw"));

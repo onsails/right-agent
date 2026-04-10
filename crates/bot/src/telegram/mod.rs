@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Shared map of active CC sessions that can be stopped via inline button.
 /// Key: (chat_id, eff_thread_id). Value: CancellationToken to kill the CC process.
-pub type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
+pub(crate) type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
 
 use std::path::Path;
 use rightclaw::agent::types::AgentConfig;
