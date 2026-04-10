@@ -342,6 +342,23 @@ mod tests {
         assert_eq!(due, Duration::ZERO);
     }
 
+    /// Regression: spawn_refresh_loop passed SANDBOX_MCP_JSON_PATH ("/sandbox/mcp.json")
+    /// as the upload destination to openshell upload. The command interprets destination
+    /// as a directory and runs mkdir on it, which fails when the file already exists:
+    ///   mkdir: cannot create directory '/sandbox/mcp.json': File exists
+    ///
+    /// All upload_file() callers (handler.rs, oauth_callback.rs, sync.rs) correctly
+    /// pass "/sandbox/" — only refresh.rs was wrong.
+    #[test]
+    fn refresh_mcp_upload_dest_must_be_directory() {
+        // This is what spawn_refresh_loop currently passes as upload destination
+        let dest = crate::openshell::SANDBOX_MCP_JSON_PATH;
+        assert!(
+            dest.ends_with('/'),
+            "upload destination for mcp.json must be a directory path ending with '/', got: {dest}"
+        );
+    }
+
     #[test]
     fn refresh_due_in_within_margin() {
         let entry = OAuthServerState {
