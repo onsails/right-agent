@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use super::session::{
     SessionRow, create_session, deactivate_current, get_active_session, touch_session,
+    truncate_label,
 };
 
 /// Session key: `(chat_id, effective_thread_id)`.
@@ -355,7 +356,9 @@ pub fn spawn_worker(
             });
 
             // Invoke claude -p (D-13, D-14)
-            let reply_result = invoke_cc(&input, chat_id, eff_thread_id, &ctx).await;
+            // Pass first message text for session label (truncated 60 chars).
+            let first_text = batch.first().and_then(|m| m.text.as_deref());
+            let reply_result = invoke_cc(&input, first_text, chat_id, eff_thread_id, &ctx).await;
 
             // Reverse sync .md changes from sandbox.
             // Bootstrap mode: BLOCK so files are on host for completion check.
@@ -762,6 +765,7 @@ fn spawn_auth_watcher(
 /// `Err(error_message_for_telegram)` on subprocess failure or missing reply tool.
 async fn invoke_cc(
     input: &str,
+    first_text: Option<&str>,
     chat_id: i64,
     eff_thread_id: i64,
     ctx: &WorkerContext,
@@ -779,7 +783,8 @@ async fn invoke_cc(
         Ok(None) => {
             // First message: generate UUID, --session-id <uuid>
             let new_uuid = Uuid::new_v4().to_string();
-            create_session(&conn, chat_id, eff_thread_id, &new_uuid, None)
+            let label = first_text.map(truncate_label);
+            create_session(&conn, chat_id, eff_thread_id, &new_uuid, label)
                 .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
             (vec!["--session-id".to_string(), new_uuid], true)
         }
