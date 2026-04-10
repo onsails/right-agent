@@ -1,4 +1,5 @@
 use super::*;
+use serial_test::serial;
 
 #[test]
 fn sandbox_name_prefixes_agent_name() {
@@ -148,6 +149,97 @@ async fn mock_client(addr: SocketAddr) -> OpenShellClient<Channel> {
 }
 
 // ---------------------------------------------------------------------------
+// Ephemeral test sandbox — created per test, destroyed explicitly.
+// Leftovers from panicked tests are cleaned up by the next create() call.
+// ---------------------------------------------------------------------------
+
+struct TestSandbox {
+    name: String,
+    mtls_dir: PathBuf,
+    _tmp: tempfile::TempDir, // keeps policy file alive
+}
+
+impl TestSandbox {
+    /// Create an ephemeral sandbox for testing. Cleans up any leftover from previous runs.
+    async fn create(test_name: &str) -> Self {
+        let name = format!("rightclaw-test-{test_name}");
+
+        let mtls_dir = match super::preflight_check() {
+            super::OpenShellStatus::Ready(dir) => dir,
+            other => panic!("OpenShell not ready: {other:?}"),
+        };
+
+        // Clean up leftover from a previous failed run.
+        let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
+        if super::sandbox_exists(&mut client, &name).await.unwrap() {
+            super::delete_sandbox(&name).await;
+            super::wait_for_deleted(&mut client, &name, 60, 2)
+                .await
+                .expect("cleanup of leftover sandbox failed");
+        }
+
+        // Minimal policy — fast startup, no restrictive network rules.
+        let tmp = tempfile::tempdir().unwrap();
+        let policy_path = tmp.path().join("policy.yaml");
+        let policy = "\
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_write:
+    - /tmp
+    - /sandbox
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  outbound:
+    endpoints:
+      - host: \"**.*\"
+        port: 443
+        protocol: rest
+        access: full
+        tls: terminate
+    binaries:
+      - path: \"**\"
+";
+        std::fs::write(&policy_path, policy).unwrap();
+
+        let mut child = super::spawn_sandbox(&name, &policy_path, None)
+            .expect("failed to spawn sandbox");
+        super::wait_for_ready(&mut client, &name, 120, 2)
+            .await
+            .expect("sandbox did not become READY");
+
+        // Kill the create process — it doesn't exit on its own after READY.
+        let _ = child.kill().await;
+
+        Self { name, mtls_dir, _tmp: tmp }
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Execute a command inside the sandbox, return (stdout, exit_code).
+    async fn exec(&self, cmd: &[&str]) -> (String, i32) {
+        let mut client = super::connect_grpc(&self.mtls_dir).await.unwrap();
+        let id = super::resolve_sandbox_id(&mut client, &self.name)
+            .await
+            .unwrap();
+        super::exec_in_sandbox(&mut client, &id, cmd)
+            .await
+            .unwrap()
+    }
+
+    /// Delete the sandbox and wait for deletion to complete.
+    async fn destroy(self) {
+        super::delete_sandbox(&self.name).await;
+        let mut client = super::connect_grpc(&self.mtls_dir).await.unwrap();
+        let _ = super::wait_for_deleted(&mut client, &self.name, 60, 2).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -264,110 +356,57 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 }
 
 // ---------------------------------------------------------------------------
-// Live sandbox integration tests (require running OpenShell + rightclaw-right)
+// Live sandbox integration tests (require running OpenShell)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+#[serial]
 async fn exec_in_sandbox_runs_command() {
-    let mtls_dir = match super::preflight_check() {
-        super::OpenShellStatus::Ready(dir) => dir,
-        other => panic!("OpenShell not ready: {other:?}"),
-    };
-    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
-    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
-        .await
-        .unwrap();
-
-    let (stdout, exit_code) = super::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &["echo", "hello-from-test"],
-    )
-    .await
-    .unwrap();
+    let sbox = TestSandbox::create("exec-run").await;
+    let (stdout, exit_code) = sbox.exec(&["echo", "hello-from-test"]).await;
 
     assert_eq!(exit_code, 0, "echo should exit 0");
     assert!(
         stdout.contains("hello-from-test"),
         "expected 'hello-from-test' in stdout, got: {stdout:?}"
     );
+
+    sbox.destroy().await;
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+#[serial]
 async fn exec_in_sandbox_returns_exit_code() {
-    let mtls_dir = match super::preflight_check() {
-        super::OpenShellStatus::Ready(dir) => dir,
-        other => panic!("OpenShell not ready: {other:?}"),
-    };
-    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
-    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
-        .await
-        .unwrap();
-
-    let (_, exit_code) = super::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &["sh", "-c", "exit 42"],
-    )
-    .await
-    .unwrap();
+    let sbox = TestSandbox::create("exec-exit").await;
+    let (_, exit_code) = sbox.exec(&["sh", "-c", "exit 42"]).await;
 
     assert_eq!(exit_code, 42, "should propagate remote exit code");
+
+    sbox.destroy().await;
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+#[serial]
 async fn verify_sandbox_files_detects_missing_and_reuploads() {
-    // Create a temp dir with a test file.
+    let sbox = TestSandbox::create("verify-missing").await;
+
     let tmp = tempfile::tempdir().unwrap();
     let host_dir = tmp.path();
     std::fs::write(host_dir.join("VERIFY_TEST.md"), "# verify test\n").unwrap();
 
-    // First: ensure VERIFY_TEST.md does NOT exist in sandbox.
-    let mtls_dir = match super::preflight_check() {
-        super::OpenShellStatus::Ready(dir) => dir,
-        other => panic!("OpenShell not ready: {other:?}"),
-    };
-    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
-    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
-        .await
-        .unwrap();
-    let _ = super::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &["rm", "-f", "/sandbox/VERIFY_TEST.md"],
-    )
-    .await;
+    // Ensure file does NOT exist in sandbox.
+    sbox.exec(&["rm", "-f", "/sandbox/VERIFY_TEST.md"]).await;
 
     // verify_sandbox_files should detect missing file and re-upload it.
-    super::verify_sandbox_files(
-        "rightclaw-right",
-        host_dir,
-        "/sandbox/",
-        &["VERIFY_TEST.md"],
-    )
-    .await
-    .expect("verify should succeed after re-upload");
+    super::verify_sandbox_files(sbox.name(), host_dir, "/sandbox/", &["VERIFY_TEST.md"])
+        .await
+        .expect("verify should succeed after re-upload");
 
     // Confirm file actually exists in sandbox now.
-    let (output, _) = super::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &["cat", "/sandbox/VERIFY_TEST.md"],
-    )
-    .await
-    .unwrap();
+    let (output, _) = sbox.exec(&["cat", "/sandbox/VERIFY_TEST.md"]).await;
     assert_eq!(output, "# verify test\n", "file content should match");
 
-    // Cleanup.
-    let _ = super::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &["rm", "-f", "/sandbox/VERIFY_TEST.md"],
-    )
-    .await;
+    sbox.destroy().await;
 }
 
 /// Reproduces the exact flow of `rightclaw init`:
@@ -376,6 +415,7 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
 /// This is the scenario where gRPC reports READY but SSH transport
 /// may not be up yet, causing "Connection reset by peer".
 #[tokio::test]
+#[serial]
 async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     // ensure_sandbox takes agent name and prepends "rightclaw-" via sandbox_name().
     const AGENT: &str = "test-lifecycle";
@@ -447,39 +487,113 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
 }
 
 #[tokio::test]
-#[ignore = "requires live OpenShell sandbox 'rightclaw-right'"]
+#[serial]
 async fn verify_sandbox_files_passes_when_all_present() {
-    // Upload a file first, then verify it passes.
+    let sbox = TestSandbox::create("verify-present").await;
+
     let tmp = tempfile::tempdir().unwrap();
     let host_dir = tmp.path();
     std::fs::write(host_dir.join("PRESENT_TEST.md"), "exists\n").unwrap();
 
-    super::upload_file("rightclaw-right", &host_dir.join("PRESENT_TEST.md"), "/sandbox/")
+    super::upload_file(sbox.name(), &host_dir.join("PRESENT_TEST.md"), "/sandbox/")
         .await
         .unwrap();
 
-    super::verify_sandbox_files(
-        "rightclaw-right",
-        host_dir,
-        "/sandbox/",
-        &["PRESENT_TEST.md"],
-    )
-    .await
-    .expect("verify should pass when file exists");
+    super::verify_sandbox_files(sbox.name(), host_dir, "/sandbox/", &["PRESENT_TEST.md"])
+        .await
+        .expect("verify should pass when file exists");
 
-    // Cleanup.
-    let mtls_dir = match super::preflight_check() {
-        super::OpenShellStatus::Ready(dir) => dir,
-        _ => return,
-    };
-    let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
-    let sandbox_id = super::resolve_sandbox_id(&mut client, "rightclaw-right")
+    sbox.destroy().await;
+}
+
+// ---------------------------------------------------------------------------
+// upload_file integration tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn upload_file_to_directory() {
+    let sbox = TestSandbox::create("upload-dir").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("hello.txt"), "hello sandbox\n").unwrap();
+
+    super::upload_file(sbox.name(), &tmp.path().join("hello.txt"), "/sandbox/")
+        .await
+        .expect("upload to directory should succeed");
+
+    let (content, code) = sbox.exec(&["cat", "/sandbox/hello.txt"]).await;
+    assert_eq!(code, 0);
+    assert_eq!(content, "hello sandbox\n");
+
+    sbox.destroy().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn upload_file_overwrites_existing() {
+    let sbox = TestSandbox::create("upload-overwrite").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("data.txt");
+
+    // First upload.
+    std::fs::write(&file, "version 1\n").unwrap();
+    super::upload_file(sbox.name(), &file, "/sandbox/")
         .await
         .unwrap();
-    let _ = super::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
-        &["rm", "-f", "/sandbox/PRESENT_TEST.md"],
+
+    // Second upload with different content.
+    std::fs::write(&file, "version 2\n").unwrap();
+    super::upload_file(sbox.name(), &file, "/sandbox/")
+        .await
+        .unwrap();
+
+    let (content, _) = sbox.exec(&["cat", "/sandbox/data.txt"]).await;
+    assert_eq!(content, "version 2\n", "second upload should overwrite");
+
+    sbox.destroy().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn upload_file_to_nested_dir() {
+    let sbox = TestSandbox::create("upload-nested").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("nested.txt"), "deep\n").unwrap();
+
+    // Upload to a directory that doesn't exist yet — openshell should create it.
+    super::upload_file(sbox.name(), &tmp.path().join("nested.txt"), "/sandbox/a/b/c/")
+        .await
+        .expect("upload to nested dir should succeed");
+
+    let (content, code) = sbox.exec(&["cat", "/sandbox/a/b/c/nested.txt"]).await;
+    assert_eq!(code, 0);
+    assert_eq!(content, "deep\n");
+
+    sbox.destroy().await;
+}
+
+/// Regression test: upload_file must reject non-directory destination.
+/// Before the fix, passing "/sandbox/mcp.json" as dest caused:
+///   mkdir: cannot create directory '/sandbox/mcp.json': File exists
+#[tokio::test]
+async fn upload_file_rejects_non_directory_dest() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("mcp.json"), "{}").unwrap();
+
+    let result = super::upload_file(
+        "any-sandbox",
+        &tmp.path().join("mcp.json"),
+        "/sandbox/mcp.json",
     )
     .await;
+
+    assert!(result.is_err(), "upload_file must reject file-path destination");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("must be a directory"),
+        "error should mention directory requirement, got: {msg}"
+    );
 }

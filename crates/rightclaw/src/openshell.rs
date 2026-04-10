@@ -370,11 +370,20 @@ pub async fn ssh_exec(
 }
 
 /// Upload a file from host into a running sandbox.
-pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_path: &str) -> miette::Result<()> {
+///
+/// `sandbox_dir` must be a directory path ending with `/`.
+/// The file lands in `sandbox_dir` with its original name from `host_path`.
+pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> miette::Result<()> {
+    if !sandbox_dir.ends_with('/') {
+        miette::bail!(
+            "upload destination must be a directory path ending with '/', got: {sandbox_dir}"
+        );
+    }
+
     let output = Command::new("openshell")
         .args(["sandbox", "upload", sandbox])
         .arg(host_path)
-        .arg(sandbox_path)
+        .arg(sandbox_dir)
         .output()
         .await
         .map_err(|e| miette::miette!("openshell upload failed: {e:#}"))?;

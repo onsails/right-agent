@@ -115,8 +115,8 @@ pub const DEFAULT_RETENTION_DAYS: u32 = 7;
 pub const CLEANUP_INTERVAL_SECS: u64 = 3600; // 1 hour
 
 /// Fixed sandbox paths.
-pub const SANDBOX_INBOX: &str = "/sandbox/inbox";
-pub const SANDBOX_OUTBOX: &str = "/sandbox/outbox";
+pub const SANDBOX_INBOX: &str = "/sandbox/inbox/";
+pub const SANDBOX_OUTBOX: &str = "/sandbox/outbox/";
 
 /// Message in a debounce batch -- text and/or attachments.
 #[derive(Debug, Clone)]
@@ -351,13 +351,12 @@ pub async fn download_attachments(
 
         let final_path = if sandboxed {
             // Upload to sandbox, then clean up host temp file
-            let sandbox_path = format!("{SANDBOX_INBOX}/{file_name}");
             let sandbox = rightclaw::openshell::sandbox_name(agent_name);
-            rightclaw::openshell::upload_file(&sandbox, &host_path, &sandbox_path).await?;
+            rightclaw::openshell::upload_file(&sandbox, &host_path, SANDBOX_INBOX).await?;
             if let Err(e) = tokio::fs::remove_file(&host_path).await {
                 tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
             }
-            PathBuf::from(sandbox_path)
+            PathBuf::from(format!("{SANDBOX_INBOX}{file_name}"))
         } else {
             // Move to inbox
             let dest = agent_dir.join("inbox").join(&file_name);
