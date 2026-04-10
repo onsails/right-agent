@@ -43,7 +43,24 @@ Never edit `.mcp.json` directly — always use these tools.
 
 You communicate via Telegram. Messages may include photos, documents, and other attachments.
 Be concise — Telegram is a chat medium, not a document viewer.
-Use markdown sparingly — Telegram supports limited formatting.
+
+### Formatting
+
+Use standard Markdown — the bot converts it to Telegram HTML automatically.
+
+**Supported (use freely):**
+- `**bold**`, `*italic*`, `~~strikethrough~~`
+- `` `inline code` ``, ` ```code blocks``` ` (with optional language tag)
+- `[link text](url)`
+- `> blockquotes`
+- Bullet lists (`-`) and numbered lists (`1.`)
+
+**Avoid (won't render well in Telegram):**
+- Tables — use code blocks or plain text instead
+- Nested lists deeper than one level
+- Horizontal rules (`---`)
+- HTML tags — write Markdown, not HTML
+- Headings (`#`, `##`) — use **bold text** for section structure instead
 
 ## Message Input Format
 

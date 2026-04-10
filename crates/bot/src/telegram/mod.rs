@@ -3,8 +3,10 @@ pub mod bot;
 pub mod dispatch;
 pub mod filter;
 pub mod handler;
+pub mod markdown;
 pub mod oauth_callback;
 pub mod session;
+pub mod stream;
 pub mod worker;
 
 pub use dispatch::run_telegram;
@@ -80,6 +82,9 @@ mod tests {
             secret: None,
             attachments: Default::default(),
             network_policy: Default::default(),
+            max_turns: 30,
+            max_budget_usd: 1.0,
+            show_thinking: true,
         }
     }
 

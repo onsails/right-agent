@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, MessageId, ReplyParameters, ThreadId};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -26,7 +26,7 @@ pub type SessionKey = (i64, i64);
 const DEBOUNCE_MS: u64 = 500;
 
 /// Maximum time to wait for a CC subprocess to complete.
-const CC_TIMEOUT_SECS: u64 = 120;
+const CC_TIMEOUT_SECS: u64 = 600;
 
 /// A single Telegram message queued into the debounce channel.
 #[derive(Clone)]
@@ -57,6 +57,12 @@ pub struct WorkerContext {
     /// Slot for auth code sender — when login flow is waiting for a code from Telegram,
     /// the oneshot::Sender is stored here. Message handler checks this before routing to worker.
     pub auth_code_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    /// Max CC turns per invocation (passed as --max-turns).
+    pub max_turns: u32,
+    /// Max dollar spend per CC invocation (passed as --max-budget-usd).
+    pub max_budget_usd: f64,
+    /// Show live thinking indicator in Telegram.
+    pub show_thinking: bool,
 }
 
 /// Parsed output from CC structured JSON response (`result` field per D-03).
@@ -86,32 +92,22 @@ fn should_accept_bootstrap(agent_dir: &Path) -> bool {
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
-const TELEGRAM_LIMIT: usize = 4096;
-
-/// Split a message at the 4096-char Telegram limit (D-17).
-///
-/// Splits at the last `\n` in the final 200 chars before the boundary.
-/// Hard-cuts at 4096 if no `\n` found there.
-pub fn split_message(text: &str) -> Vec<String> {
-    if text.len() <= TELEGRAM_LIMIT {
-        return vec![text.to_string()];
+/// Strip HTML tags for plain-text fallback when Telegram rejects HTML.
+/// Also decodes common entities back to their characters.
+fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
     }
-    let mut parts = Vec::new();
-    let mut remaining = text;
-    while remaining.len() > TELEGRAM_LIMIT {
-        let cut = &remaining[..TELEGRAM_LIMIT];
-        let window_start = TELEGRAM_LIMIT.saturating_sub(200);
-        let split_pos = cut[window_start..]
-            .rfind('\n')
-            .map(|p| window_start + p + 1)
-            .unwrap_or(TELEGRAM_LIMIT);
-        parts.push(remaining[..split_pos].to_string());
-        remaining = &remaining[split_pos..];
-    }
-    if !remaining.is_empty() {
-        parts.push(remaining.to_string());
-    }
-    parts
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
 }
 
 /// Format a CC subprocess error as a Telegram message (D-16).
@@ -226,24 +222,6 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
     Ok((output, session_id))
 }
 
-/// Wait for a child process to complete, killing it if `timeout_secs` elapses.
-///
-/// On timeout, `tokio::time::timeout` cancels the inner `wait_with_output` future.
-/// When that future is dropped it drops the `Child`, and `kill_on_drop(true)` issues
-/// the OS-level kill.  Returns a formatted error string on both timeout and wait
-/// failure so callers can forward it straight to Telegram.
-async fn wait_with_timeout(
-    child: tokio::process::Child,
-    timeout_secs: u64,
-) -> Result<std::process::Output, String> {
-    timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-        .await
-        .map_err(|_| {
-            format_error_reply(-1, &format!("CC subprocess timed out after {timeout_secs}s"))
-        })?
-        .map_err(|e| format_error_reply(-1, &format!("wait failed: {:#}", e)))
-}
-
 // ── Async worker ─────────────────────────────────────────────────────────────
 
 /// Spawn a per-session worker task.
@@ -340,7 +318,7 @@ pub fn spawn_worker(
                 continue;
             };
 
-            // Typing indicator: spawn task, cancel after subprocess completes (D-10)
+            // Typing indicator: always active until reply is sent (D-10).
             let cancel_token = CancellationToken::new();
             let cancel_clone = cancel_token.clone();
             let bot_clone = ctx.bot.clone();
@@ -352,7 +330,7 @@ pub fn spawn_worker(
                         action =
                             action.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
                     }
-                    action.await.ok(); // best-effort; ignore errors
+                    action.await.ok();
                     tokio::select! {
                         _ = cancel_clone.cancelled() => break,
                         _ = sleep(Duration::from_secs(4)) => {}
@@ -417,10 +395,10 @@ pub fn spawn_worker(
                 }
                 // BOOTSTRAP.md may already be deleted by MCP tool; ensure cleanup.
                 let bp = ctx.agent_dir.join("BOOTSTRAP.md");
-                if bp.exists() {
-                    if let Err(e) = std::fs::remove_file(&bp) {
-                        tracing::warn!(key = ?key, "failed to delete BOOTSTRAP.md: {e:#}");
-                    }
+                if bp.exists()
+                    && let Err(e) = std::fs::remove_file(&bp)
+                {
+                    tracing::warn!(key = ?key, "failed to delete BOOTSTRAP.md: {e:#}");
                 }
             }
 
@@ -438,16 +416,19 @@ pub fn spawn_worker(
                     };
 
                     if let Some(content) = output.content {
-                        let parts = split_message(&content);
+                        let html = super::markdown::md_to_telegram_html(&content);
+                        let parts = super::markdown::split_html_message(&html);
                         tracing::info!(
                             ?key,
                             content_len = content.len(),
+                            html_len = html.len(),
                             parts = parts.len(),
                             ?reply_to,
                             "sending reply to Telegram"
                         );
-                        for part in parts {
-                            let mut send = ctx.bot.send_message(tg_chat_id, &part);
+                        for part in &parts {
+                            let mut send = ctx.bot.send_message(tg_chat_id, part);
+                            send = send.parse_mode(teloxide::types::ParseMode::Html);
                             if eff_thread_id != 0 {
                                 send = send.message_thread_id(ThreadId(MessageId(
                                     eff_thread_id as i32,
@@ -460,7 +441,23 @@ pub fn spawn_worker(
                                 });
                             }
                             if let Err(e) = send.await {
-                                tracing::error!(?key, "failed to send Telegram reply: {:#}", e);
+                                tracing::warn!(?key, "HTML send failed, retrying plain text: {:#}", e);
+                                let plain = strip_html_tags(part);
+                                let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
+                                if eff_thread_id != 0 {
+                                    fallback = fallback.message_thread_id(ThreadId(MessageId(
+                                        eff_thread_id as i32,
+                                    )));
+                                }
+                                if let Some(ref_id) = reply_to {
+                                    fallback = fallback.reply_parameters(ReplyParameters {
+                                        message_id: MessageId(ref_id),
+                                        ..Default::default()
+                                    });
+                                }
+                                if let Err(e2) = fallback.await {
+                                    tracing::error!(?key, "plain text fallback also failed: {:#}", e2);
+                                }
                             }
                         }
                     } else {
@@ -799,15 +796,16 @@ async fn invoke_cc(
     claude_args.push(mcp_config_path);
     claude_args.push("--strict-mcp-config".into());
 
-    // NOTE: --verbose is intentionally NOT passed even in debug mode.
-    // --verbose combined with --output-format json switches CC to stream-json array output,
-    // breaking parse_reply_output which expects a single JSON object.
-    // CC stderr is already captured and logged at debug level below.
     for arg in &cmd_args {
         claude_args.push(arg.clone());
     }
+    claude_args.push("--verbose".into());
     claude_args.push("--output-format".into());
-    claude_args.push("json".into());
+    claude_args.push("stream-json".into());
+    claude_args.push("--max-turns".into());
+    claude_args.push(ctx.max_turns.to_string());
+    claude_args.push("--max-budget-usd".into());
+    claude_args.push(format!("{:.2}", ctx.max_budget_usd));
 
     // --json-schema on BOTH first and resume calls (D-01, Pitfall 4).
     // Bootstrap mode uses bootstrap-schema (adds bootstrap_complete field).
@@ -894,31 +892,205 @@ async fn invoke_cc(
     // Write input to stdin, then drop to signal EOF.
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
-        stdin.write_all(input.as_bytes()).await
+        stdin
+            .write_all(input.as_bytes())
+            .await
             .map_err(|e| format_error_reply(-1, &format!("stdin write failed: {:#}", e)))?;
     }
 
-    let output = wait_with_timeout(child, CC_TIMEOUT_SECS).await?;
+    // Stream stdout line-by-line: log to file, parse events, update thinking message.
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format_error_reply(-1, "no stdout handle"))?;
 
-    let exit_code = output.status.code().unwrap_or(-1);
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
-    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut lines = BufReader::new(stdout).lines();
 
-    // Always log outcome — debuggability over brevity.
+    // Per-session stream log file.
+    let stream_log_dir = ctx
+        .agent_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(&ctx.agent_dir)
+        .join("logs")
+        .join("streams");
+    std::fs::create_dir_all(&stream_log_dir).ok();
+    let session_id_for_log = cmd_args
+        .first()
+        .filter(|a| a.contains('-') && a.len() > 30)
+        .or(cmd_args.get(1))
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let stream_log_path = stream_log_dir.join(format!("{session_id_for_log}.ndjson"));
+    let mut stream_log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stream_log_path)
+        .ok();
+
+    let mut ring_buffer = super::stream::EventRingBuffer::new(5);
+    let mut usage = super::stream::StreamUsage::default();
+    let mut result_line: Option<String> = None;
+    let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
+    let mut last_edit = tokio::time::Instant::now();
+    let mut total_assistant_events: u32 = 0;
+    let tg_chat_id = ctx.chat_id;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(CC_TIMEOUT_SECS);
+    let mut timed_out = false;
+
+    loop {
+        tokio::select! {
+            line_result = lines.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        // Write to stream log file.
+                        if let Some(ref mut log) = stream_log {
+                            use std::io::Write;
+                            let _ = writeln!(log, "{line}");
+                        }
+
+                        let event = super::stream::parse_stream_event(&line);
+
+                        match &event {
+                            super::stream::StreamEvent::Result(json) => {
+                                usage = super::stream::parse_usage(json);
+                                result_line = Some(json.clone());
+                                // Final update of thinking message with real cost.
+                                if let Some(msg_id) = thinking_msg_id {
+                                    let text = super::stream::format_thinking_message(
+                                        ring_buffer.events(),
+                                        &usage,
+                                        ctx.max_turns,
+                                    );
+                                    let _ = ctx
+                                        .bot
+                                        .edit_message_text(tg_chat_id, msg_id, &text)
+                                        .parse_mode(teloxide::types::ParseMode::Html)
+                                        .await;
+                                }
+                            }
+                            _ => {
+                                if let Some(formatted) = super::stream::format_event(&event) {
+                                    total_assistant_events += 1;
+                                    tracing::info!(?chat_id, turn = total_assistant_events, "{formatted}");
+                                }
+                                ring_buffer.push(&event);
+                                // Update turn count from assistant events.
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
+                                    && v.pointer("/message/usage/output_tokens").is_some()
+                                {
+                                    usage.num_turns = usage.num_turns.max(1);
+                                }
+                            }
+                        }
+
+                        // Update thinking message (throttled to 2s).
+                        // Only show after 2+ displayable events — single-turn responses
+                        // don't need a thinking indicator.
+                        if ctx.show_thinking
+                            && total_assistant_events >= 2
+                            && super::stream::format_event(&event).is_some()
+                            && last_edit.elapsed() >= Duration::from_secs(2)
+                        {
+                            let text = super::stream::format_thinking_message(
+                                ring_buffer.events(),
+                                &usage,
+                                ctx.max_turns,
+                            );
+                            if let Some(msg_id) = thinking_msg_id {
+                                let _ = ctx
+                                    .bot
+                                    .edit_message_text(tg_chat_id, msg_id, &text)
+                                    .parse_mode(teloxide::types::ParseMode::Html)
+                                    .await;
+                            } else {
+                                let mut send = ctx.bot.send_message(tg_chat_id, &text)
+                                    .parse_mode(teloxide::types::ParseMode::Html);
+                                if eff_thread_id != 0 {
+                                    send = send.message_thread_id(
+                                        teloxide::types::ThreadId(
+                                            teloxide::types::MessageId(eff_thread_id as i32),
+                                        ),
+                                    );
+                                }
+                                if let Ok(msg) = send.await {
+                                    thinking_msg_id = Some(msg.id);
+                                }
+                            }
+                            last_edit = tokio::time::Instant::now();
+                        }
+                    }
+                    Ok(None) => break, // stdout closed — process exited
+                    Err(e) => {
+                        tracing::warn!(?chat_id, "stream read error: {e:#}");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                timed_out = true;
+                child.kill().await.ok();
+                break;
+            }
+        }
+    }
+
+    // If thinking message was sent but only 1 turn happened, delete it
+    // (single-turn responses don't need visible thinking).
+    if let Some(msg_id) = thinking_msg_id
+        && usage.num_turns <= 1
+    {
+        let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
+    }
+
+    // Wait for process exit.
+    let exit_status = child.wait().await.ok();
+    let exit_code = exit_status.and_then(|s| s.code()).unwrap_or(-1);
+
+    // Read any remaining stderr.
+    let stderr_str = if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = String::new();
+        use tokio::io::AsyncReadExt;
+        let _ = stderr.read_to_string(&mut buf).await;
+        buf
+    } else {
+        String::new()
+    };
+
     tracing::info!(
         ?chat_id,
         exit_code,
-        stdout_len = stdout_str.len(),
-        stderr_len = stderr_str.len(),
+        timed_out,
+        stream_log = %stream_log_path.display(),
         sandboxed,
         "claude -p finished"
     );
+
     if !stderr_str.is_empty() {
         tracing::warn!(?chat_id, stderr = %stderr_str, "CC stderr");
     }
 
+    // Handle timeout.
+    if timed_out {
+        let mut timeout_msg = format!(
+            "⚠️ Agent timed out ({CC_TIMEOUT_SECS}s safety limit). Last activity:\n─────────────\n"
+        );
+        for event in ring_buffer.events() {
+            if let Some(formatted) = super::stream::format_event(event) {
+                timeout_msg.push_str(&formatted);
+                timeout_msg.push('\n');
+            }
+        }
+        timeout_msg.push_str(&format!("\nStream log: {}", stream_log_path.display()));
+        return Err(timeout_msg);
+    }
+
+    let stdout_str = result_line.unwrap_or_default();
+
     // DIS-06: non-zero exit → error reply
-    if !output.status.success() {
+    if exit_code != 0 {
         // Log full output on failure for debuggability.
         tracing::error!(
             ?chat_id,
@@ -1017,38 +1189,6 @@ async fn invoke_cc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // split_message tests
-    #[test]
-    fn split_short_message() {
-        let text = "hello world";
-        let parts = split_message(text);
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0], text);
-    }
-
-    #[test]
-    fn split_at_newline() {
-        // Build a 4100-char string with \n at position 4090 (within last 200 chars)
-        let mut text = "a".repeat(4090);
-        text.push('\n');
-        text.push_str(&"b".repeat(9));
-        assert!(text.len() > 4096);
-        let parts = split_message(&text);
-        assert_eq!(parts.len(), 2);
-        // First part ends with \n (split at newline boundary)
-        assert!(parts[0].ends_with('\n'));
-    }
-
-    #[test]
-    fn split_hard_cut() {
-        // 4200 chars of 'a' — no newlines
-        let text = "a".repeat(4200);
-        let parts = split_message(&text);
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].len(), 4096);
-        assert_eq!(parts[1].len(), 104);
-    }
-
     // format_error_reply tests
     #[test]
     fn error_reply_contains_exit_code_and_stderr() {
@@ -1177,24 +1317,6 @@ mod tests {
         assert!(output.attachments.is_none());
     }
 
-    // wait_with_timeout tests
-    #[tokio::test]
-    async fn wait_with_timeout_fires_before_slow_process_exits() {
-        let child = tokio::process::Command::new("sleep")
-            .arg("999")
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("sleep should be available");
-
-        let err = wait_with_timeout(child, 1).await.unwrap_err();
-        assert!(
-            err.contains("timed out after 1s"),
-            "expected timeout message, got: {err}"
-        );
-    }
 
     // is_auth_error tests
     #[test]
@@ -1320,19 +1442,6 @@ mod tests {
         assert!(!url.contains(" to continue"));
     }
 
-    #[tokio::test]
-    async fn wait_with_timeout_returns_output_for_fast_process() {
-        let child = tokio::process::Command::new("true")
-            .kill_on_drop(true)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("true should be available");
-
-        let output = wait_with_timeout(child, 5).await.expect("should succeed");
-        assert!(output.status.success());
-    }
 
     // bootstrap mode tests
     #[test]

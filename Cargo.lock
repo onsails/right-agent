@@ -2614,6 +2614,7 @@ dependencies = [
  "miette",
  "notify",
  "notify-debouncer-mini",
+ "pulldown-cmark",
  "reqwest 0.13.2",
  "rightclaw",
  "rusqlite",

@@ -52,6 +52,18 @@ pub struct AuthCodeSlot(pub Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::
 #[derive(Clone)]
 pub struct RefreshTx(pub tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>);
 
+/// Max CC turns per invocation.
+#[derive(Clone)]
+pub struct MaxTurns(pub u32);
+
+/// Max dollar spend per CC invocation.
+#[derive(Clone)]
+pub struct MaxBudgetUsd(pub f64);
+
+/// Show live thinking indicator in Telegram.
+#[derive(Clone)]
+pub struct ShowThinking(pub bool);
+
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
 fn to_request_err(e: impl std::fmt::Display) -> RequestError {
     RequestError::Io(std::io::Error::other(e.to_string()).into())
@@ -75,6 +87,9 @@ pub async fn handle_message(
     ssh_config: Arc<SshConfigPath>,
     auth_watcher_flag: Arc<AuthWatcherFlag>,
     auth_code_slot: Arc<AuthCodeSlot>,
+    max_turns: Arc<MaxTurns>,
+    max_budget_usd: Arc<MaxBudgetUsd>,
+    show_thinking: Arc<ShowThinking>,
 ) -> ResponseResult<()> {
     // Extract text from message body OR caption (media messages use captions)
     let text = msg.text().or(msg.caption()).map(|t| t.to_string());
@@ -144,6 +159,9 @@ pub async fn handle_message(
                     ssh_config_path: ssh_config.0.clone(),
                     auth_watcher_active: Arc::clone(&auth_watcher_flag.0),
                     auth_code_tx: Arc::clone(&auth_code_slot.0),
+                    max_turns: max_turns.0,
+                    max_budget_usd: max_budget_usd.0,
+                    show_thinking: show_thinking.0,
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());

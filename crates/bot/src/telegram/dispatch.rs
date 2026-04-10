@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, AgentDir, AuthCodeSlot, AuthWatcherFlag, DebugFlag, RefreshTx, RightclawHome, SshConfigPath};
+use super::handler::{handle_doctor, handle_mcp, handle_message, handle_reset, handle_start, AgentDir, AuthCodeSlot, AuthWatcherFlag, DebugFlag, MaxBudgetUsd, MaxTurns, RefreshTx, RightclawHome, ShowThinking, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -61,6 +61,9 @@ pub async fn run_telegram(
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
     refresh_tx: tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>,
+    max_turns: u32,
+    max_budget_usd: f64,
+    show_thinking: bool,
     shutdown: CancellationToken,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
@@ -84,6 +87,9 @@ pub async fn run_telegram(
         Arc::new(tokio::sync::Mutex::new(None)),
     ));
     let refresh_tx_arc: Arc<RefreshTx> = Arc::new(RefreshTx(refresh_tx));
+    let max_turns_arc: Arc<MaxTurns> = Arc::new(MaxTurns(max_turns));
+    let max_budget_arc: Arc<MaxBudgetUsd> = Arc::new(MaxBudgetUsd(max_budget_usd));
+    let show_thinking_arc: Arc<ShowThinking> = Arc::new(ShowThinking(show_thinking));
 
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
@@ -121,7 +127,10 @@ pub async fn run_telegram(
             Arc::clone(&ssh_config_arc),
             Arc::clone(&auth_watcher_flag_arc),
             Arc::clone(&auth_code_slot_arc),
-            Arc::clone(&refresh_tx_arc)
+            Arc::clone(&refresh_tx_arc),
+            Arc::clone(&max_turns_arc),
+            Arc::clone(&max_budget_arc),
+            Arc::clone(&show_thinking_arc)
         ])
         .build();
 

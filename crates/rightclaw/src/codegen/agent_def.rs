@@ -111,6 +111,13 @@ Source: https://github.com/onsails/rightclaw
 
 You are connected to the `right` MCP server for persistent memory, cron job management, \
 and external MCP server management. Use `mcp_list` to see all configured servers.
+
+## Response Rules
+
+Your final response MUST be self-contained. The user ONLY sees your final response — \
+they do NOT see tool calls, intermediate text, or thinking. Never say \"see above\", \
+\"as shown above\", or reference previous output. If you gathered data, include it in \
+your final response.
 "
     )
 }

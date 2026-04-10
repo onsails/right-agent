@@ -220,6 +220,19 @@ Prompt caching is critical — avoid per-message tool calls to read identity fil
 
 See PROMPT_SYSTEM.md for full documentation.
 
+### Stream Logging
+
+CC is invoked with `--verbose --output-format stream-json`. Worker reads stdout
+line-by-line via `tokio::io::AsyncBufReadExt`. Each event is written to a per-session
+NDJSON log at `~/.rightclaw/logs/streams/<session-uuid>.ndjson`.
+
+When `show_thinking: true` (default), a live thinking message in Telegram shows
+the last 5 events (tool calls, text) with turn counter and cost. Updated every 2s
+via `editMessageText`. Stays in chat after completion.
+
+CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 1.0)
+from agent.yaml. Process timeout (600s) is a safety net only.
+
 ### Configuration Hierarchy
 
 | Scope | File | Source of Truth |

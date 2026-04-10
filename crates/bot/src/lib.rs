@@ -82,6 +82,9 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             secret: None,
             attachments: Default::default(),
             network_policy: Default::default(),
+            max_turns: 30,
+            max_budget_usd: 1.0,
+            show_thinking: true,
         }
     });
 
@@ -359,6 +362,9 @@ async fn run_async(args: BotArgs) -> miette::Result<()> {
             home.clone(),
             ssh_config_path,
             refresh_tx_for_handler,
+            config.max_turns,
+            config.max_budget_usd,
+            config.show_thinking,
             shutdown.clone(),
         ) => result,
         result = axum_handle => result
