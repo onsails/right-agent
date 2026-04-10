@@ -125,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_3() {
+    fn user_version_is_4() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
@@ -133,7 +133,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3, "user_version should be 3 after V3 migration");
+        assert_eq!(version, 4, "user_version should be 4 after V4 migration");
     }
 
     #[test]
@@ -196,35 +196,35 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_telegram_sessions_table() {
+    fn schema_has_sessions_table() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
         let count: i64 = conn
             .query_row(
-                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='telegram_sessions'",
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1, "telegram_sessions table should exist after V2 migration");
+        assert_eq!(count, 1, "sessions table should exist after V4 migration");
     }
 
     #[test]
-    fn telegram_sessions_unique_chat_thread() {
+    fn sessions_partial_unique_active() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
         conn.execute(
-            "INSERT INTO telegram_sessions (chat_id, thread_id, root_session_id) VALUES (42, 0, 'uuid-1')",
+            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) VALUES (42, 0, 'uuid-1', 1)",
             [],
         )
         .unwrap();
         let result = conn.execute(
-            "INSERT INTO telegram_sessions (chat_id, thread_id, root_session_id) VALUES (42, 0, 'uuid-2')",
+            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) VALUES (42, 0, 'uuid-2', 1)",
             [],
         );
-        assert!(result.is_err(), "UNIQUE(chat_id, thread_id) should reject duplicate insert");
+        assert!(result.is_err(), "partial unique index should prevent two active sessions per (chat_id, thread_id)");
     }
 
     #[test]
