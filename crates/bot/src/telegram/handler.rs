@@ -18,7 +18,7 @@ use teloxide::types::{CallbackQuery, Message};
 use teloxide::RequestError;
 
 use super::oauth_callback::PendingAuthMap;
-use super::session::{activate_session, create_session, deactivate_current, effective_thread_id, find_sessions_by_uuid, list_sessions, touch_session, truncate_label};
+use super::session::{activate_session, create_session, deactivate_current, effective_thread_id, find_sessions_by_uuid, list_sessions, truncate_label};
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 use super::BotType;
 
@@ -67,6 +67,24 @@ pub struct AgentSettings {
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
 fn to_request_err(e: impl std::fmt::Display) -> RequestError {
     RequestError::Io(std::io::Error::other(e.to_string()).into())
+}
+
+/// Send an HTML-formatted message, respecting thread_id for topic replies.
+async fn send_html_reply(
+    bot: &BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    text: &str,
+) -> Result<teloxide::types::Message, RequestError> {
+    let mut send = bot
+        .send_message(chat_id, text)
+        .parse_mode(teloxide::types::ParseMode::Html);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(teloxide::types::ThreadId(
+            teloxide::types::MessageId(eff_thread_id as i32),
+        ));
+    }
+    send.await
 }
 
 /// Handle an incoming text message.
@@ -234,15 +252,7 @@ pub async fn handle_new(
         reply.push_str("\nSend a message to start a new conversation.");
     }
 
-    let mut send = bot
-        .send_message(chat_id, &reply)
-        .parse_mode(teloxide::types::ParseMode::Html);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(
-            teloxide::types::MessageId(eff_thread_id as i32),
-        ));
-    }
-    send.await?;
+    send_html_reply(&bot, chat_id, eff_thread_id, &reply).await?;
 
     tracing::info!(?key, "new session");
     Ok(())
@@ -271,25 +281,19 @@ pub async fn handle_list(
 
     let mut text = String::from("Sessions:\n");
     for s in &sessions {
-        let marker = if s.is_active { "●" } else { " " };
-        let label = s.label.as_deref().unwrap_or("(unnamed)");
-        let ago = format_relative_time(&s.last_used_at);
-        text.push_str(&format!(
-            "{marker} {label} — {ago}\n<pre>{}</pre>\n",
-            s.root_session_id
-        ));
+        text.push_str(&format_session_line(s));
     }
 
-    let mut send = bot
-        .send_message(chat_id, &text)
-        .parse_mode(teloxide::types::ParseMode::Html);
-    if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(
-            teloxide::types::MessageId(eff_thread_id as i32),
-        ));
-    }
-    send.await?;
+    send_html_reply(&bot, chat_id, eff_thread_id, &text).await?;
     Ok(())
+}
+
+/// Format a session row as an HTML line for /list and /switch display.
+fn format_session_line(s: &super::session::SessionRow) -> String {
+    let marker = if s.is_active { "●" } else { " " };
+    let label = s.label.as_deref().unwrap_or("(unnamed)");
+    let ago = format_relative_time(&s.last_used_at);
+    format!("{marker} {label} — {ago}\n<pre>{}</pre>\n", s.root_session_id)
 }
 
 /// Format an ISO timestamp as a relative time string.
@@ -343,20 +347,13 @@ pub async fn handle_switch(
 
     match matches.len() {
         0 => {
-            let mut send = bot
-                .send_message(
-                    chat_id,
-                    format!(
-                        "No session matching <pre>{uuid}</pre>. Use /list to see available sessions."
-                    ),
-                )
-                .parse_mode(teloxide::types::ParseMode::Html);
-            if eff_thread_id != 0 {
-                send = send.message_thread_id(teloxide::types::ThreadId(
-                    teloxide::types::MessageId(eff_thread_id as i32),
-                ));
-            }
-            send.await?;
+            send_html_reply(
+                &bot,
+                chat_id,
+                eff_thread_id,
+                &format!("No session matching <pre>{uuid}</pre>. Use /list to see available sessions."),
+            )
+            .await?;
         }
         1 => {
             let target = &matches[0];
@@ -368,50 +365,27 @@ pub async fn handle_switch(
             // activate_session atomically deactivates any other active session
             activate_session(&conn, target.id)
                 .map_err(|e| to_request_err(format!("switch: activate: {:#}", e)))?;
-            touch_session(&conn, target.id)
-                .map_err(|e| to_request_err(format!("switch: touch: {:#}", e)))?;
 
             worker_map.remove(&key);
 
             let label = target.label.as_deref().unwrap_or("(unnamed)");
-            let mut send = bot
-                .send_message(
-                    chat_id,
-                    format!(
-                        "Switched to: {label}\n<pre>{}</pre>",
-                        target.root_session_id
-                    ),
-                )
-                .parse_mode(teloxide::types::ParseMode::Html);
-            if eff_thread_id != 0 {
-                send = send.message_thread_id(teloxide::types::ThreadId(
-                    teloxide::types::MessageId(eff_thread_id as i32),
-                ));
-            }
-            send.await?;
+            send_html_reply(
+                &bot,
+                chat_id,
+                eff_thread_id,
+                &format!("Switched to: {label}\n<pre>{}</pre>", target.root_session_id),
+            )
+            .await?;
 
             tracing::info!(?key, session = %target.root_session_id, "switched session");
         }
         _ => {
             let mut text = format!("Multiple sessions match <pre>{uuid}</pre>:\n\n");
             for m in &matches {
-                let label = m.label.as_deref().unwrap_or("(unnamed)");
-                let marker = if m.is_active { "●" } else { " " };
-                text.push_str(&format!(
-                    "{marker} {label}\n<pre>{}</pre>\n",
-                    m.root_session_id
-                ));
+                text.push_str(&format_session_line(m));
             }
             text.push_str("\nBe more specific.");
-            let mut send = bot
-                .send_message(chat_id, &text)
-                .parse_mode(teloxide::types::ParseMode::Html);
-            if eff_thread_id != 0 {
-                send = send.message_thread_id(teloxide::types::ThreadId(
-                    teloxide::types::MessageId(eff_thread_id as i32),
-                ));
-            }
-            send.await?;
+            send_html_reply(&bot, chat_id, eff_thread_id, &text).await?;
         }
     }
     Ok(())
