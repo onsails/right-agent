@@ -486,6 +486,7 @@ fn test_policy_validates_against_openshell() {
         rightclaw::codegen::policy::generate_policy(
             rightclaw::runtime::MCP_HTTP_PORT,
             &rightclaw::agent::types::NetworkPolicy::Permissive,
+            None,
         );
     let tmpfile = tempdir().unwrap();
     let policy_path = tmpfile.path().join("test-policy.yaml");

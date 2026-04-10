@@ -236,7 +236,7 @@ pub fn run_single_agent_codegen(
         .map(|c| c.network_policy.clone())
         .unwrap_or_default();
     let mcp_port = crate::runtime::MCP_HTTP_PORT;
-    let policy_content = crate::codegen::policy::generate_policy(mcp_port, &network_policy);
+    let policy_content = crate::codegen::policy::generate_policy(mcp_port, &network_policy, None);
     std::fs::write(agent.path.join("policy.yaml"), &policy_content).map_err(|e| {
         miette::miette!(
             "failed to write policy.yaml for '{}': {e:#}",

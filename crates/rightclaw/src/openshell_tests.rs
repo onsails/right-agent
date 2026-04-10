@@ -400,7 +400,7 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     // SSH transport take significantly longer to become ready.
     let tmp = tempfile::tempdir().unwrap();
     let policy_path = tmp.path().join("policy.yaml");
-    let policy = crate::codegen::policy::generate_policy(18927, &crate::agent::types::NetworkPolicy::Restrictive);
+    let policy = crate::codegen::policy::generate_policy(18927, &crate::agent::types::NetworkPolicy::Restrictive, None);
     std::fs::write(&policy_path, &policy).unwrap();
 
     // Create a staging dir with a small test file (same as init uploads agent defs).

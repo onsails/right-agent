@@ -302,12 +302,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
         let sandbox_exists = rightclaw::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
 
-        if sandbox_exists {
-            // Reuse existing sandbox — just apply updated policy.
-            tracing::info!(agent = %args.agent, "reusing existing sandbox");
-            rightclaw::openshell::apply_policy(&sandbox, &policy_path).await?;
-        }
-
         if !sandbox_exists {
             return Err(miette::miette!(
                 help = format!("Run `rightclaw init` or `rightclaw agent init {}` to create the sandbox", args.agent),
@@ -315,6 +309,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 sandbox
             ));
         }
+
+        // Resolve host IP from inside sandbox for policy allowed_ips.
+        let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
+        let host_ip = rightclaw::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
+
+        // Regenerate policy with resolved host IP and apply.
+        let network_policy = config.network_policy.clone();
+        let policy_content = rightclaw::codegen::policy::generate_policy(
+            rightclaw::runtime::MCP_HTTP_PORT,
+            &network_policy,
+            host_ip,
+        );
+        std::fs::write(&policy_path, &policy_content)
+            .map_err(|e| miette::miette!("failed to write policy.yaml: {e:#}"))?;
+        tracing::info!(agent = %args.agent, "reusing existing sandbox, applying policy with host_ip={:?}", host_ip);
+        rightclaw::openshell::apply_policy(&sandbox, &policy_path).await?;
 
         // Generate SSH config.
         let ssh_config_dir = home.join("run").join("ssh");

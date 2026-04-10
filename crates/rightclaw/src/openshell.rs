@@ -759,6 +759,50 @@ async fn wait_for_ssh(
     }
 }
 
+/// Resolve the host IP as seen from inside a sandbox.
+///
+/// Runs `getent ahostsv4 host.docker.internal` inside the sandbox via gRPC exec
+/// and parses the first IPv4 address from the output.
+///
+/// This IP varies by platform:
+/// - macOS Docker Desktop: `192.168.65.254`
+/// - Linux Docker bridge: `172.17.0.1`
+/// - Custom networks: varies
+///
+/// Returns `None` if `host.docker.internal` doesn't resolve (e.g. Linux without
+/// `--add-host` flag), or if the sandbox exec fails.
+pub async fn resolve_host_ip(
+    client: &mut OpenShellClient<Channel>,
+    sandbox_id: &str,
+) -> miette::Result<Option<std::net::IpAddr>> {
+    let (stdout, exit_code) = exec_in_sandbox(
+        client,
+        sandbox_id,
+        &["getent", "ahostsv4", "host.docker.internal"],
+    )
+    .await?;
+
+    if exit_code != 0 || stdout.trim().is_empty() {
+        tracing::warn!(sandbox_id, exit_code, "host.docker.internal not resolvable in sandbox");
+        return Ok(None);
+    }
+
+    // Output format: "192.168.65.254  STREAM host.docker.internal\n192.168.65.254  DGRAM\n..."
+    // Take the first token of the first line.
+    let ip_str = stdout
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .ok_or_else(|| miette::miette!("unexpected getent output: {stdout}"))?;
+
+    let ip: std::net::IpAddr = ip_str
+        .parse()
+        .map_err(|e| miette::miette!("failed to parse host IP '{ip_str}': {e}"))?;
+
+    tracing::info!(sandbox_id, %ip, "resolved host.docker.internal");
+    Ok(Some(ip))
+}
+
 /// Verify that critical files exist in the sandbox after creation/upload.
 ///
 /// Uses gRPC `ExecSandbox` to check file existence (fast, no download).

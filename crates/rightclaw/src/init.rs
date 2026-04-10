@@ -144,6 +144,7 @@ pub fn init_agent(
         let policy_yaml = crate::codegen::policy::generate_policy(
             crate::runtime::MCP_HTTP_PORT,
             &ov.network_policy,
+            None,
         );
         std::fs::write(agents_dir.join("policy.yaml"), &policy_yaml)
             .map_err(|e| miette::miette!("Failed to write policy.yaml: {e}"))?;
