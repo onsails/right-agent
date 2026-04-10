@@ -84,22 +84,23 @@ pub fn deactivate_current(
 
 /// Re-activate a session by row id.
 ///
-/// Atomically deactivates any other active session for the same (chat_id, thread_id)
-/// before activating the target. Uses a transaction to prevent partial state.
+/// Atomically deactivates any other active session for the same (chat_id, thread_id),
+/// activates the target, and updates its `last_used_at`. Single transaction, two statements.
 pub fn activate_session(
     conn: &rusqlite::Connection,
     session_id: i64,
 ) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
-    // Deactivate any currently active session for the same (chat_id, thread_id)
+    // Deactivate others via a CTE to avoid double subquery
     tx.execute(
-        "UPDATE sessions SET is_active = 0 WHERE is_active = 1 AND \
-         chat_id = (SELECT chat_id FROM sessions WHERE id = ?1) AND \
-         thread_id = (SELECT thread_id FROM sessions WHERE id = ?1)",
+        "WITH target AS (SELECT chat_id, thread_id FROM sessions WHERE id = ?1) \
+         UPDATE sessions SET is_active = 0 WHERE is_active = 1 AND \
+         chat_id = (SELECT chat_id FROM target) AND \
+         thread_id = (SELECT thread_id FROM target)",
         rusqlite::params![session_id],
     )?;
     tx.execute(
-        "UPDATE sessions SET is_active = 1 WHERE id = ?1",
+        "UPDATE sessions SET is_active = 1, last_used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1",
         rusqlite::params![session_id],
     )?;
     tx.commit()?;
