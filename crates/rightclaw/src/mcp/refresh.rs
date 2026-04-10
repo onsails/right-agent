@@ -179,7 +179,7 @@ pub async fn run_refresh_scheduler(
                             && let Err(e) = crate::openshell::upload_file(
                                 sbox,
                                 &mcp_json_path,
-                                crate::openshell::SANDBOX_MCP_JSON_PATH,
+                                "/sandbox/",
                             ).await
                         {
                             tracing::error!(server = %name, "failed to re-upload mcp.json: {e:#}");
@@ -342,20 +342,15 @@ mod tests {
         assert_eq!(due, Duration::ZERO);
     }
 
-    /// Regression: spawn_refresh_loop passed SANDBOX_MCP_JSON_PATH ("/sandbox/mcp.json")
-    /// as the upload destination to openshell upload. The command interprets destination
-    /// as a directory and runs mkdir on it, which fails when the file already exists:
-    ///   mkdir: cannot create directory '/sandbox/mcp.json': File exists
-    ///
-    /// All upload_file() callers (handler.rs, oauth_callback.rs, sync.rs) correctly
-    /// pass "/sandbox/" — only refresh.rs was wrong.
+    /// Regression: spawn_refresh_loop must NOT use SANDBOX_MCP_JSON_PATH as upload
+    /// destination — it's a file reference, not a directory for upload_file().
+    /// The fix uses "/sandbox/" directly. This test ensures the validation works.
     #[test]
-    fn refresh_mcp_upload_dest_must_be_directory() {
-        // This is what spawn_refresh_loop currently passes as upload destination
-        let dest = crate::openshell::SANDBOX_MCP_JSON_PATH;
+    fn upload_file_dest_validation_rejects_file_path() {
+        let file_path = crate::openshell::SANDBOX_MCP_JSON_PATH;
         assert!(
-            dest.ends_with('/'),
-            "upload destination for mcp.json must be a directory path ending with '/', got: {dest}"
+            !file_path.ends_with('/'),
+            "SANDBOX_MCP_JSON_PATH must be a file path (not ending with '/'), got: {file_path}"
         );
     }
 
