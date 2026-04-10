@@ -799,6 +799,26 @@ async fn invoke_cc(
         "--dangerously-skip-permissions".into(),
     ];
 
+    // Disable CC built-in tools that conflict with our MCP equivalents.
+    // --disallowedTools removes them from the model's context entirely.
+    claude_args.push("--disallowedTools".into());
+    for tool in [
+        "CronCreate",
+        "CronList",
+        "CronDelete",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+        "TaskOutput",
+        "TaskStop",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "RemoteTrigger",
+    ] {
+        claude_args.push(tool.into());
+    }
+
     // MCP isolation: only use servers from our mcp.json, block cloud MCPs.
     // Path differs by execution mode: /sandbox/ inside container, agent_dir on host.
     let mcp_config_path = if ctx.ssh_config_path.is_some() {
