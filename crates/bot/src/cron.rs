@@ -69,6 +69,13 @@ pub fn parse_lock_ttl(s: &str) -> Result<chrono::Duration, CronError> {
     Err(CronError::InvalidLockTtl(s.to_string()))
 }
 
+/// Check if a cron schedule's minute field is exactly 0, 00, or 30.
+/// These fire at popular intervals and risk API rate limit spikes.
+pub fn is_round_minutes(schedule: &str) -> bool {
+    let minute_field = schedule.split_whitespace().next().unwrap_or("");
+    matches!(minute_field, "0" | "00" | "30")
+}
+
 /// Check if a lock file exists and its heartbeat is within the TTL.
 ///
 /// Returns `true` if the previous run is still considered active (skip this run).
@@ -116,6 +123,13 @@ pub fn load_specs(agent_dir: &std::path::Path) -> HashMap<String, CronSpec> {
         };
         match serde_saphyr::from_str::<CronSpec>(&raw) {
             Ok(spec) => {
+                if is_round_minutes(&spec.schedule) {
+                    tracing::warn!(
+                        job = %stem,
+                        schedule = %spec.schedule,
+                        "cron schedule uses :00 or :30 minutes — consider offset to avoid API rate limits"
+                    );
+                }
                 map.insert(stem.to_string(), spec);
             }
             Err(e) => tracing::warn!(job = %stem, "failed to parse cron spec: {e:#}"),
@@ -655,5 +669,23 @@ prompt: "Do stuff"
         let json = r#"{"result":"ignored","structured_output":{"content":"from structured","reply_to_message_id":null,"media_paths":null}}"#;
         let result = parse_cron_reply_content(json.as_bytes(), true);
         assert_eq!(result.as_deref(), Some("from structured"));
+    }
+
+    #[test]
+    fn test_is_round_minutes_detects_zero() {
+        assert!(is_round_minutes("0 9 * * *"));
+        assert!(is_round_minutes("00 9 * * *"));
+    }
+
+    #[test]
+    fn test_is_round_minutes_detects_thirty() {
+        assert!(is_round_minutes("30 9 * * *"));
+    }
+
+    #[test]
+    fn test_is_round_minutes_allows_offset() {
+        assert!(!is_round_minutes("17 9 * * *"));
+        assert!(!is_round_minutes("*/5 * * * *"));
+        assert!(!is_round_minutes("43 */8 * * *"));
     }
 }
