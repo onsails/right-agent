@@ -225,7 +225,7 @@ fn check_sandbox_for_agent(agent_name: &str) -> Option<DoctorCheck> {
 /// (directory with IDENTITY.md).
 fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let agents_dir = home.join("agents");
+    let agents_dir = crate::config::agents_dir(home);
 
     if !agents_dir.exists() {
         checks.push(DoctorCheck {
@@ -460,7 +460,7 @@ fn check_managed_settings(path: &str) -> Option<DoctorCheck> {
 ///
 /// Agents without a telegram token produce no check (silent skip, PC-05).
 fn check_webhook_info_for_agents(home: &Path) -> Vec<DoctorCheck> {
-    let agents_dir = home.join("agents");
+    let agents_dir = crate::config::agents_dir(home);
     if !agents_dir.exists() {
         return vec![];
     }
@@ -695,7 +695,7 @@ fn check_tunnel_health(home: &Path) -> DoctorCheck {
 /// Tokens with expires_at=0 (non-expiring) count as ok (REFRESH-04).
 /// Only synchronous file I/O — no HTTP calls.
 fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
-    let agents_dir = home.join("agents");
+    let agents_dir = crate::config::agents_dir(home);
 
     if !agents_dir.exists() {
         return DoctorCheck {

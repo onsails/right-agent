@@ -477,6 +477,79 @@ fn test_agent_init_force_on_nonexistent_agent() {
     assert!(dir.path().join("agents/new-agent/agent.yaml").exists());
 }
 
+// --- Agent SSH regression tests ---
+
+/// Regression: cmd_agent_ssh must discover agents correctly.
+/// Previously it passed `home` instead of `home/agents` to discover_agents,
+/// so no agents were ever found.
+#[test]
+fn test_agent_ssh_finds_agent() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create minimal agent structure with openshell sandbox.
+    let agent_dir = dir.path().join("agents").join("test-agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "restart: never\nsandbox:\n  mode: openshell\n",
+    )
+    .unwrap();
+
+    // SSH should fail because process-compose isn't running — but NOT because
+    // the agent wasn't found. The old bug would give "Agent 'test-agent' not found".
+    rightclaw()
+        .args(["--home", home, "agent", "ssh", "test-agent"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not running").or(predicate::str::contains("SSH config")))
+        .stderr(predicate::str::contains("not found").not());
+}
+
+/// Agent SSH must reject agents without openshell sandbox.
+#[test]
+fn test_agent_ssh_rejects_no_sandbox() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    let agent_dir = dir.path().join("agents").join("local-agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "restart: never\nsandbox:\n  mode: none\n",
+    )
+    .unwrap();
+
+    rightclaw()
+        .args(["--home", home, "agent", "ssh", "local-agent"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("without sandbox"));
+}
+
+/// `rightclaw agent list` should work the same as `rightclaw list`.
+#[test]
+fn test_agent_list() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create agent directory manually (avoids sandbox creation side effects).
+    let agent_dir = dir.path().join("agents").join("myagent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "restart: never\nsandbox:\n  mode: none\n",
+    )
+    .unwrap();
+
+    rightclaw()
+        .args(["--home", home, "agent", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("myagent"))
+        .stdout(predicate::str::contains("1 agent"));
+}
+
 /// Validate generated OpenShell policy against a live sandbox.
 /// Requires: running OpenShell gateway + existing `rightclaw-right` sandbox.
 #[test]

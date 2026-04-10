@@ -54,6 +54,13 @@ struct RawTunnelConfig {
     hostname: String,
 }
 
+/// Path to the agents directory within a RightClaw home.
+///
+/// Single source of truth for `<home>/agents` — avoids scattered `home.join("agents")`.
+pub fn agents_dir(home: &Path) -> PathBuf {
+    home.join("agents")
+}
+
 /// Read global config from `<home>/config.yaml`.
 ///
 /// Returns `Ok(GlobalConfig::default())` if the file does not exist.

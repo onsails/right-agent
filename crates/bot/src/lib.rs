@@ -57,7 +57,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let agent_dir: PathBuf = if let Ok(dir) = std::env::var("RC_AGENT_DIR") {
         PathBuf::from(dir)
     } else {
-        let dir = home.join("agents").join(&args.agent);
+        let dir = rightclaw::config::agents_dir(&home).join(&args.agent);
         if !dir.exists() {
             return Err(miette::miette!(
                 "agent directory not found: {}",

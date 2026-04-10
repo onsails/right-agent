@@ -451,7 +451,7 @@ pub fn combined_setting_menu(home: &Path) -> miette::Result<()> {
             None => "Tunnel: (not configured)".to_string(),
         };
 
-        let agents_dir = home.join("agents");
+        let agents_dir = rightclaw::config::agents_dir(home);
         let agents = if agents_dir.exists() {
             discover_agents(&agents_dir).unwrap_or_default()
         } else {
@@ -499,7 +499,7 @@ pub fn combined_setting_menu(home: &Path) -> miette::Result<()> {
 ///
 /// If `agent_name` is `None`, presents a picker to choose from discovered agents.
 pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
-    let agents_dir = home.join("agents");
+    let agents_dir = rightclaw::config::agents_dir(home);
 
     let chosen_name = match agent_name {
         Some(name) => name.to_string(),

@@ -183,7 +183,7 @@ pub fn init_rightclaw_home(
     network_policy: &NetworkPolicy,
     sandbox_mode: &SandboxMode,
 ) -> miette::Result<()> {
-    let agents_parent = home.join("agents");
+    let agents_parent = crate::config::agents_dir(home);
     if agents_parent.join("right").exists() {
         return Err(miette::miette!(
             "RightClaw home already initialized at {}. Use `rightclaw config` to change settings.",

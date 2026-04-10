@@ -72,6 +72,8 @@ pub enum AgentCommands {
         /// New value (omit to print current)
         value: Option<String>,
     },
+    /// List discovered agents
+    List,
     /// SSH into an agent's sandbox
     Ssh {
         /// Agent name
@@ -271,7 +273,7 @@ async fn main() -> miette::Result<()> {
             cli.home.as_deref(),
             std::env::var("RIGHTCLAW_HOME").ok().as_deref(),
         )?;
-        let agents_dir = home.join("agents");
+        let agents_dir = rightclaw::config::agents_dir(&home);
 
         // Load token map from file
         let token_map_content = std::fs::read_to_string(token_map)
@@ -395,6 +397,7 @@ async fn main() -> miette::Result<()> {
             AgentCommands::Init { name, yes, force, fresh, network_policy, sandbox_mode } => {
                 cmd_agent_init(&home, &name, yes, force, fresh, network_policy, sandbox_mode)
             }
+            AgentCommands::List => cmd_list(&home),
             AgentCommands::Config { name, key, value } => {
                 match (key, value) {
                     (None, None) => crate::wizard::agent_setting_menu(&home, name.as_deref())?,
@@ -643,7 +646,7 @@ fn cmd_agent_init(
     sandbox_mode: Option<rightclaw::agent::types::SandboxMode>,
 ) -> miette::Result<()> {
     let interactive = !yes;
-    let agents_parent = home.join("agents");
+    let agents_parent = rightclaw::config::agents_dir(home);
     let agent_dir = agents_parent.join(name);
     let agent_existed = agent_dir.exists();
 
@@ -986,7 +989,7 @@ fn cmd_doctor(home: &Path) -> miette::Result<()> {
 }
 
 fn cmd_list(home: &Path) -> miette::Result<()> {
-    let agents_dir = home.join("agents");
+    let agents_dir = rightclaw::config::agents_dir(home);
     if !agents_dir.exists() {
         println!("No agents directory found. Run `rightclaw init` first.");
         return Ok(());
@@ -1039,7 +1042,7 @@ async fn cmd_up(
     check_port_available(rightclaw::runtime::MCP_HTTP_PORT).await?;
 
     // Discover agents.
-    let agents_dir = home.join("agents");
+    let agents_dir = rightclaw::config::agents_dir(home);
     let all_agents = rightclaw::agent::discover_agents(&agents_dir)?;
 
     let agents = filter_agents(&all_agents, agents_filter.as_deref())?;
@@ -1281,7 +1284,7 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
         )
     })?;
 
-    let agents_dir = home.join("agents");
+    let agents_dir = rightclaw::config::agents_dir(home);
     let all_agents = rightclaw::agent::discover_agents(&agents_dir)?;
 
     if all_agents.is_empty() {
@@ -1366,7 +1369,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     use std::os::unix::process::CommandExt;
 
     // 1. Discover agent
-    let agents = rightclaw::agent::discover_agents(home)?;
+    let agents = rightclaw::agent::discover_agents(&rightclaw::config::agents_dir(home))?;
     let agent = agents
         .iter()
         .find(|a| a.name == agent_name)
@@ -1886,7 +1889,7 @@ fn format_size(bytes: u64) -> String {
 ///
 /// Returns a live `Connection` or a fatal miette error.
 fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<rusqlite::Connection> {
-    let agent_path = home.join("agents").join(agent);
+    let agent_path = rightclaw::config::agents_dir(home).join(agent);
     if !agent_path.exists() {
         return Err(miette::miette!(
             "agent '{}' not found at {}",
@@ -1967,7 +1970,7 @@ fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> 
     let conn = resolve_agent_db(home, agent)?;
 
     // db_path needed only for fs metadata (file size) — derive from home, not conn.
-    let db_path = home.join("agents").join(agent).join("memory.db");
+    let db_path = rightclaw::config::agents_dir(home).join(agent).join("memory.db");
     let db_size = std::fs::metadata(&db_path)
         .map_err(|e| miette::miette!("failed to stat memory.db: {e:#}"))?
         .len();
@@ -2113,7 +2116,7 @@ fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
 fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     let agent_name = agent_name.unwrap_or("right");
 
-    let agents_dir = home.join("agents");
+    let agents_dir = rightclaw::config::agents_dir(home);
     let all_agents = rightclaw::agent::discover_agents(&agents_dir)?;
 
     let agent = all_agents
@@ -2165,7 +2168,7 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
 fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
     use rightclaw::mcp::detect::mcp_auth_status;
 
-    let agents_dir = home.join("agents");
+    let agents_dir = rightclaw::config::agents_dir(home);
     // Collect agent dirs -- either all or filtered to one
     let entries: Vec<std::path::PathBuf> = if let Some(name) = agent_filter {
         let dir = agents_dir.join(name);
