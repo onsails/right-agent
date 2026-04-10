@@ -63,6 +63,8 @@ pub struct WorkerContext {
     pub max_budget_usd: f64,
     /// Show live thinking indicator in Telegram.
     pub show_thinking: bool,
+    /// Shared map for stop button — worker inserts token before CC, removes after exit.
+    pub stop_tokens: super::StopTokens,
 }
 
 /// Parsed output from CC structured JSON response (`result` field per D-03).

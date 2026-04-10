@@ -16,6 +16,14 @@ pub use session::effective_thread_id;
 /// Ordering: CacheMe<Throttle<Bot>> per BOT-03 (Throttle inner, CacheMe outer).
 pub type BotType = teloxide::adaptors::CacheMe<teloxide::adaptors::throttle::Throttle<teloxide::Bot>>;
 
+use std::sync::Arc;
+use dashmap::DashMap;
+use tokio_util::sync::CancellationToken;
+
+/// Shared map of active CC sessions that can be stopped via inline button.
+/// Key: (chat_id, eff_thread_id). Value: CancellationToken to kill the CC process.
+pub type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
+
 use std::path::Path;
 use rightclaw::agent::types::AgentConfig;
 

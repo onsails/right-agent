@@ -90,6 +90,7 @@ pub async fn run_telegram(
     let max_turns_arc: Arc<MaxTurns> = Arc::new(MaxTurns(max_turns));
     let max_budget_arc: Arc<MaxBudgetUsd> = Arc::new(MaxBudgetUsd(max_budget_usd));
     let show_thinking_arc: Arc<ShowThinking> = Arc::new(ShowThinking(show_thinking));
+    let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
 
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
@@ -130,7 +131,8 @@ pub async fn run_telegram(
             Arc::clone(&refresh_tx_arc),
             Arc::clone(&max_turns_arc),
             Arc::clone(&max_budget_arc),
-            Arc::clone(&show_thinking_arc)
+            Arc::clone(&show_thinking_arc),
+            Arc::clone(&stop_tokens)
         ])
         .build();
 

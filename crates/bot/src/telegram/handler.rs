@@ -90,6 +90,7 @@ pub async fn handle_message(
     max_turns: Arc<MaxTurns>,
     max_budget_usd: Arc<MaxBudgetUsd>,
     show_thinking: Arc<ShowThinking>,
+    stop_tokens: super::StopTokens,
 ) -> ResponseResult<()> {
     // Extract text from message body OR caption (media messages use captions)
     let text = msg.text().or(msg.caption()).map(|t| t.to_string());
@@ -162,6 +163,7 @@ pub async fn handle_message(
                     max_turns: max_turns.0,
                     max_budget_usd: max_budget_usd.0,
                     show_thinking: show_thinking.0,
+                    stop_tokens: Arc::clone(&stop_tokens),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());
