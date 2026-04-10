@@ -72,6 +72,14 @@ pub enum AgentCommands {
         /// New value (omit to print current)
         value: Option<String>,
     },
+    /// SSH into an agent's sandbox
+    Ssh {
+        /// Agent name
+        name: String,
+        /// Command to run inside the sandbox (optional)
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
 }
 
 /// Subcommands for `rightclaw memory`.
@@ -400,6 +408,9 @@ async fn main() -> miette::Result<()> {
                     }
                 }
                 Ok(())
+            }
+            AgentCommands::Ssh { name, command } => {
+                cmd_agent_ssh(&home, &name, &command).await
             }
         },
         Commands::Memory { command } => match command {
@@ -1349,6 +1360,88 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
         .exec();
 
     Err(miette::miette!("Failed to attach: {err}"))
+}
+
+async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> miette::Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    // 1. Discover agent
+    let agents = rightclaw::agent::discover_agents(home)?;
+    let agent = agents
+        .iter()
+        .find(|a| a.name == agent_name)
+        .ok_or_else(|| {
+            let available: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+            miette::miette!("Agent '{}' not found. Available: {}", agent_name, available.join(", "))
+        })?;
+
+    // 2. Check sandbox mode
+    let is_openshell = agent
+        .config
+        .as_ref()
+        .map(|c| matches!(c.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell))
+        .unwrap_or(true); // default is Openshell when no config section
+    if !is_openshell {
+        return Err(miette::miette!(
+            "Agent '{}' runs without sandbox, SSH not available",
+            agent_name
+        ));
+    }
+
+    // 3. Check agent is running via process-compose
+    let pc = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+    pc.health_check()
+        .await
+        .map_err(|_| miette::miette!(
+            help = "Start it with: rightclaw up",
+            "Agent '{}' is not running. Start it with: rightclaw up",
+            agent_name,
+        ))?;
+
+    let processes = pc.list_processes().await?;
+    let pc_process_name = format!("{}-bot", agent_name);
+    let proc = processes.iter().find(|p| p.name == pc_process_name);
+    match proc {
+        Some(p) if p.status != "Running" => {
+            return Err(miette::miette!(
+                help = "Start it with: rightclaw up",
+                "Agent '{}' is not running (status: {}). Start it with: rightclaw up",
+                agent_name,
+                p.status,
+            ));
+        }
+        None => {
+            return Err(miette::miette!(
+                help = "Start it with: rightclaw up",
+                "Agent '{}' is not running. Start it with: rightclaw up",
+                agent_name,
+            ));
+        }
+        Some(_) => {} // Running — continue
+    }
+
+    // 4. Locate SSH config
+    let sb_name = rightclaw::openshell::sandbox_name(agent_name);
+    let ssh_config = home.join(format!("run/ssh/{}.ssh-config", sb_name));
+    if !ssh_config.exists() {
+        return Err(miette::miette!(
+            help = "Try restarting the agent",
+            "SSH config not found at {}. Try restarting the agent.",
+            ssh_config.display(),
+        ));
+    }
+
+    // 5. exec into SSH
+    let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg("-F").arg(&ssh_config);
+    cmd.arg(&ssh_host);
+    if !command.is_empty() {
+        cmd.arg(command.join(" "));
+    }
+
+    let err = cmd.exec();
+    Err(miette::miette!("Failed to exec ssh: {err}"))
 }
 
 #[cfg(test)]
