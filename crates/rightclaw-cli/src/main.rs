@@ -307,7 +307,6 @@ async fn main() -> miette::Result<()> {
             dispatcher.agents.insert(name.clone(), aggregator::BackendRegistry {
                 right,
                 proxies,
-                agent_name: name.clone(),
                 agent_dir,
             });
         }
