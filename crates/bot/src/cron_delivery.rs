@@ -129,23 +129,23 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
                 content.replace('"', "\\\"")
             ));
         }
-        if let Some(atts) = notify.get("attachments").and_then(|v| v.as_array()) {
-            if !atts.is_empty() {
-                yaml.push_str("      attachments:\n");
-                for att in atts {
-                    let att_type = att
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("document");
-                    let path = att.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                    yaml.push_str(&format!("        - type: {att_type}\n"));
-                    yaml.push_str(&format!("          path: {path}\n"));
-                    if let Some(caption) = att.get("caption").and_then(|v| v.as_str()) {
-                        yaml.push_str(&format!(
-                            "          caption: \"{}\"\n",
-                            caption.replace('"', "\\\"")
-                        ));
-                    }
+        if let Some(atts) = notify.get("attachments").and_then(|v| v.as_array())
+            && !atts.is_empty()
+        {
+            yaml.push_str("      attachments:\n");
+            for att in atts {
+                let att_type = att
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("document");
+                let path = att.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                yaml.push_str(&format!("        - type: {att_type}\n"));
+                yaml.push_str(&format!("          path: {path}\n"));
+                if let Some(caption) = att.get("caption").and_then(|v| v.as_str()) {
+                    yaml.push_str(&format!(
+                        "          caption: \"{}\"\n",
+                        caption.replace('"', "\\\"")
+                    ));
                 }
             }
         }
@@ -249,10 +249,10 @@ pub async fn run_delivery_loop(
                     tracing::error!(run_id = %to_deliver.id, "mark_delivered failed: {e:#}");
                 }
                 let outbox_dir = agent_dir.join("outbox").join("cron").join(&to_deliver.id);
-                if outbox_dir.exists() {
-                    if let Err(e) = std::fs::remove_dir_all(&outbox_dir) {
-                        tracing::warn!(run_id = %to_deliver.id, "outbox cleanup failed: {e:#}");
-                    }
+                if outbox_dir.exists()
+                    && let Err(e) = std::fs::remove_dir_all(&outbox_dir)
+                {
+                    tracing::warn!(run_id = %to_deliver.id, "outbox cleanup failed: {e:#}");
                 }
                 idle_ts
                     .0
@@ -360,22 +360,22 @@ async fn deliver_through_session(
         }
     }
 
-    if let Some(ref atts) = reply.attachments {
-        if !atts.is_empty() {
-            for &cid in notify_chat_ids {
-                if let Err(e) = crate::telegram::attachments::send_attachments(
-                    atts,
-                    bot,
-                    teloxide::types::ChatId(cid),
-                    0,
-                    agent_dir,
-                    ssh_config_path,
-                    agent_name,
-                )
-                .await
-                {
-                    tracing::error!(chat_id = cid, "cron delivery: attachment send failed: {e:#}");
-                }
+    if let Some(ref atts) = reply.attachments
+        && !atts.is_empty()
+    {
+        for &cid in notify_chat_ids {
+            if let Err(e) = crate::telegram::attachments::send_attachments(
+                atts,
+                bot,
+                teloxide::types::ChatId(cid),
+                0,
+                agent_dir,
+                ssh_config_path,
+                agent_name,
+            )
+            .await
+            {
+                tracing::error!(chat_id = cid, "cron delivery: attachment send failed: {e:#}");
             }
         }
     }
