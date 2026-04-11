@@ -61,6 +61,18 @@ cron_delete(job_name: "health-check")
 
 Confirm: "Job removed. The runtime drops it within ~60 seconds."
 
+## Triggering a Cron Job Manually
+
+Use the `cron_trigger` MCP tool to run a job immediately:
+
+```
+cron_trigger(job_name: "health-check")
+```
+
+The job is queued and executes on the next engine tick (≤30s). Lock check still applies — if the job is currently running, the trigger is skipped. The result is delivered through the normal delivery loop.
+
+Confirm: "Job triggered. Execution starts within ~30 seconds."
+
 ## Listing Current Cron Jobs
 
 Use the `cron_list` MCP tool to see all configured jobs:
@@ -133,3 +145,4 @@ User: "Why did morning-briefing fail?"
 
 1. **UTC schedules**: Cron expressions are evaluated in UTC by the Rust runtime.
 2. **60-second polling**: The runtime re-reads specs every 60 seconds. After creating, editing, or deleting a spec, changes take effect within ~1 minute.
+3. **Manual triggers**: `cron_trigger` queues the job; it runs on the next 60-second engine tick. If the job is locked (still running from a previous invocation), the trigger is skipped.
