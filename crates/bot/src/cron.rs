@@ -51,6 +51,15 @@ pub struct CronNotify {
     pub attachments: Option<Vec<crate::telegram::attachments::OutboundAttachment>>,
 }
 
+/// Extract the filename component from a sandbox attachment path.
+fn attachment_filename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Convert a 5-field user expression to the 7-field format required by the cron crate.
 ///
 /// The cron crate requires: `<sec> <min> <hour> <dom> <mon> <dow> <year>`
@@ -317,12 +326,7 @@ async fn execute_job(
                         } else if ssh_config_path.is_some() {
                             let sandbox = rightclaw::openshell::sandbox_name(agent_name);
                             for att in atts {
-                                let file_name = std::path::Path::new(&att.path)
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned();
-                                let dest = outbox_dir.join(&file_name);
+                                let dest = outbox_dir.join(attachment_filename(&att.path));
                                 if let Err(e) = rightclaw::openshell::download_file(
                                     &sandbox, &att.path, &dest,
                                 )
@@ -344,15 +348,10 @@ async fn execute_job(
                             attachments: Some(
                                 atts.iter()
                                     .map(|att| {
-                                        let file_name = std::path::Path::new(&att.path)
-                                            .file_name()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .into_owned();
                                         crate::telegram::attachments::OutboundAttachment {
                                             kind: att.kind,
                                             path: outbox_dir
-                                                .join(&file_name)
+                                                .join(attachment_filename(&att.path))
                                                 .to_string_lossy()
                                                 .into_owned(),
                                             filename: att.filename.clone(),
@@ -362,9 +361,21 @@ async fn execute_job(
                                     .collect(),
                             ),
                         };
-                        serde_json::to_string(&host_notify).ok()
+                        match serde_json::to_string(&host_notify) {
+                            Ok(json) => Some(json),
+                            Err(e) => {
+                                tracing::error!(job = %job_name, "failed to serialize notify_json: {e:#}");
+                                None
+                            }
+                        }
                     } else {
-                        serde_json::to_string(notify).ok()
+                        match serde_json::to_string(notify) {
+                            Ok(json) => Some(json),
+                            Err(e) => {
+                                tracing::error!(job = %job_name, "failed to serialize notify_json: {e:#}");
+                                None
+                            }
+                        }
                     }
                 } else {
                     None

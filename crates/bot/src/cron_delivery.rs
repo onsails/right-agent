@@ -40,31 +40,6 @@ pub fn fetch_pending(
     }
 }
 
-/// Fetch a specific cron result by ID.
-pub fn fetch_by_id(
-    conn: &rusqlite::Connection,
-    id: &str,
-) -> Result<Option<PendingCronResult>, rusqlite::Error> {
-    let result = conn.query_row(
-        "SELECT id, job_name, notify_json, summary, finished_at FROM cron_runs WHERE id = ?1",
-        rusqlite::params![id],
-        |row| {
-            Ok(PendingCronResult {
-                id: row.get(0)?,
-                job_name: row.get(1)?,
-                notify_json: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                finished_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            })
-        },
-    );
-    match result {
-        Ok(r) => Ok(Some(r)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
 /// Mark a cron run as delivered.
 pub fn mark_delivered(
     conn: &rusqlite::Connection,
@@ -79,22 +54,30 @@ pub fn mark_delivered(
 }
 
 /// Deduplicate: for a given job, find the latest undelivered result and mark all
-/// older undelivered results as delivered. Returns (latest_id, skipped_count).
+/// older undelivered results as delivered. Returns (latest_result, skipped_count).
 pub fn deduplicate_job(
     conn: &rusqlite::Connection,
     job_name: &str,
-) -> Result<Option<(String, u32)>, rusqlite::Error> {
-    let latest_id: Option<String> = conn
+) -> Result<Option<(PendingCronResult, u32)>, rusqlite::Error> {
+    let latest = conn
         .query_row(
-            "SELECT id FROM cron_runs \
+            "SELECT id, job_name, notify_json, summary, finished_at FROM cron_runs \
              WHERE job_name = ?1 AND status = 'success' AND notify_json IS NOT NULL AND delivered_at IS NULL \
              ORDER BY finished_at DESC LIMIT 1",
             rusqlite::params![job_name],
-            |row| row.get(0),
+            |row| {
+                Ok(PendingCronResult {
+                    id: row.get(0)?,
+                    job_name: row.get(1)?,
+                    notify_json: row.get(2)?,
+                    summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    finished_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                })
+            },
         )
         .optional()?;
 
-    let Some(latest_id) = latest_id else {
+    let Some(latest) = latest else {
         return Ok(None);
     };
 
@@ -103,10 +86,17 @@ pub fn deduplicate_job(
         "UPDATE cron_runs SET delivered_at = ?1 \
          WHERE job_name = ?2 AND id != ?3 \
          AND status = 'success' AND notify_json IS NOT NULL AND delivered_at IS NULL",
-        rusqlite::params![now, job_name, latest_id],
+        rusqlite::params![now, job_name, latest.id],
     )?;
 
-    Ok(Some((latest_id, count as u32)))
+    Ok(Some((latest, count as u32)))
+}
+
+/// Escape a string for use inside YAML double-quoted scalars.
+fn yaml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Format a pending cron result as YAML for the main CC session.
@@ -114,7 +104,7 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
     let total = skipped + 1;
     let mut yaml = String::new();
     yaml.push_str("cron_result:\n");
-    yaml.push_str(&format!("  job: {}\n", pending.job_name));
+    yaml.push_str(&format!("  job: \"{}\"\n", yaml_escape(&pending.job_name)));
     yaml.push_str(&format!("  runs_total: {total}\n"));
     if skipped > 0 {
         yaml.push_str(&format!("  skipped_runs: {skipped}\n"));
@@ -126,7 +116,7 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
         if let Some(content) = notify.get("content").and_then(|v| v.as_str()) {
             yaml.push_str(&format!(
                 "      content: \"{}\"\n",
-                content.replace('"', "\\\"")
+                yaml_escape(content)
             ));
         }
         if let Some(atts) = notify.get("attachments").and_then(|v| v.as_array())
@@ -139,19 +129,25 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
                     .and_then(|v| v.as_str())
                     .unwrap_or("document");
                 let path = att.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                yaml.push_str(&format!("        - type: {att_type}\n"));
-                yaml.push_str(&format!("          path: {path}\n"));
+                yaml.push_str(&format!(
+                    "        - type: \"{}\"\n",
+                    yaml_escape(att_type)
+                ));
+                yaml.push_str(&format!(
+                    "          path: \"{}\"\n",
+                    yaml_escape(path)
+                ));
                 if let Some(caption) = att.get("caption").and_then(|v| v.as_str()) {
                     yaml.push_str(&format!(
                         "          caption: \"{}\"\n",
-                        caption.replace('"', "\\\"")
+                        yaml_escape(caption)
                     ));
                 }
             }
         }
         yaml.push_str(&format!(
             "    summary: \"{}\"\n",
-            pending.summary.replace('"', "\\\"")
+            yaml_escape(&pending.summary)
         ));
     }
 
@@ -207,20 +203,11 @@ pub async fn run_delivery_loop(
             }
         };
 
-        let (latest_id, skipped) = match deduplicate_job(&conn, &pending.job_name) {
-            Ok(Some((id, s))) => (id, s),
+        let (to_deliver, skipped) = match deduplicate_job(&conn, &pending.job_name) {
+            Ok(Some((result, s))) => (result, s),
             Ok(None) => continue,
             Err(e) => {
                 tracing::error!("cron delivery: deduplicate failed: {e:#}");
-                continue;
-            }
-        };
-
-        let to_deliver = match fetch_by_id(&conn, &latest_id) {
-            Ok(Some(p)) => p,
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::error!("cron delivery: fetch_by_id failed: {e:#}");
                 continue;
             }
         };
@@ -295,33 +282,67 @@ async fn deliver_through_session(
         .map_err(|e| format!("session lookup: {e:#}"))?
         .map(|s| s.root_session_id);
 
-    let cc_bin = which::which("claude")
-        .or_else(|_| which::which("claude-bun"))
-        .map_err(|_| "claude binary not found in PATH".to_string())?;
-
-    let mut cmd = tokio::process::Command::new(&cc_bin);
-    cmd.arg("-p");
-    cmd.arg("--dangerously-skip-permissions");
-    cmd.arg("--agent").arg(agent_name);
+    // Build the list of claude CLI arguments (first element is "claude" for SSH mode).
+    let mut claude_args: Vec<String> = vec![
+        "claude".into(),
+        "-p".into(),
+        "--dangerously-skip-permissions".into(),
+        "--agent".into(),
+        agent_name.into(),
+    ];
     if let Some(m) = model {
-        cmd.arg("--model").arg(m);
+        claude_args.push("--model".into());
+        claude_args.push(m.into());
     }
-    cmd.arg("--max-budget-usd").arg("0.05");
-    cmd.arg("--max-turns").arg("3");
-    cmd.arg("--output-format").arg("json");
+    claude_args.push("--max-budget-usd".into());
+    claude_args.push("0.05".into());
+    claude_args.push("--max-turns".into());
+    claude_args.push("3".into());
+    claude_args.push("--output-format".into());
+    claude_args.push("json".into());
 
     if let Some(ref sid) = session_id {
-        cmd.arg("--resume").arg(sid);
+        claude_args.push("--resume".into());
+        claude_args.push(sid.clone());
     }
 
     let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
     if let Ok(schema) = std::fs::read_to_string(&reply_schema_path) {
-        cmd.arg("--json-schema").arg(schema);
+        claude_args.push("--json-schema".into());
+        claude_args.push(schema);
     }
 
-    cmd.env("HOME", agent_dir);
-    cmd.env("USE_BUILTIN_RIPGREP", "0");
-    cmd.current_dir(agent_dir);
+    let mut cmd = if let Some(ssh_config) = ssh_config_path {
+        // Sandbox mode: route through SSH like worker.rs does.
+        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let escaped_args: Vec<String> = claude_args
+            .iter()
+            .map(|a| shlex::try_quote(a).expect("valid UTF-8").into_owned())
+            .collect();
+        let claude_cmd = escaped_args.join(" ");
+        let script = format!("cd /sandbox && {claude_cmd}");
+
+        let mut c = tokio::process::Command::new("ssh");
+        c.arg("-F").arg(ssh_config);
+        c.arg(&ssh_host);
+        c.arg("--");
+        c.arg(script);
+        c
+    } else {
+        // Direct exec (no sandbox).
+        let cc_bin = which::which("claude")
+            .or_else(|_| which::which("claude-bun"))
+            .map_err(|_| "claude binary not found in PATH".to_string())?;
+        let mut c = tokio::process::Command::new(&cc_bin);
+        // Skip "claude" (first element) — it's the binary name for SSH mode.
+        for arg in &claude_args[1..] {
+            c.arg(arg);
+        }
+        c.env("HOME", agent_dir);
+        c.env("USE_BUILTIN_RIPGREP", "0");
+        c.current_dir(agent_dir);
+        c
+    };
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -452,8 +473,8 @@ mod tests {
              VALUES ('b', 'job1', '2026-01-01T00:05:00Z', '2026-01-01T00:06:00Z', 'success', '/log', 'sum2', '{\"content\":\"new\"}')",
             [],
         ).unwrap();
-        let (latest_id, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
-        assert_eq!(latest_id, "b");
+        let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
+        assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
         let delivered: Option<String> = conn
             .query_row(
@@ -486,8 +507,8 @@ mod tests {
              VALUES ('b', 'job2', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"y\"}')",
             [],
         ).unwrap();
-        let (latest_id, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
-        assert_eq!(latest_id, "a");
+        let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
+        assert_eq!(latest.id, "a");
         assert_eq!(skipped, 0);
     }
 
@@ -501,7 +522,7 @@ mod tests {
             finished_at: "2026-01-01T00:01:00Z".into(),
         };
         let yaml = format_cron_yaml(&pending, 2);
-        assert!(yaml.contains("job: health-check"));
+        assert!(yaml.contains("job: \"health-check\""));
         assert!(yaml.contains("runs_total: 3"));
         assert!(yaml.contains("skipped_runs: 2"));
         assert!(yaml.contains("BTC up 2%"));
