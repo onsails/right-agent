@@ -25,6 +25,10 @@ rand = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
 owo-colors = { workspace = true }
+rmcp = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+sse-stream = { workspace = true }
 chrono = { workspace = true }
 cron = { workspace = true }
 cron-descriptor = { workspace = true }
@@ -32,6 +36,7 @@ tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
 serial_test = "3.4"
