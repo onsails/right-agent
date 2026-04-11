@@ -316,9 +316,9 @@ On transient errors during periodic `tools_list` refresh: keep stale cached tool
 
 Claude Code CLI does **not** maintain persistent SSE connections for HTTP MCP servers. The current server runs in stateless mode (`with_stateful_mode(false)`, `with_json_response(true)`). Server-initiated notifications like `notify_tool_list_changed` cannot be delivered.
 
-**Consequence:** after `mcp_add` or `mcp_remove`, Claude sees updated tools only on the next `claude -p` invocation (new `initialize` + `tools/list`). This is acceptable — `mcp_add` is a setup operation, not something that needs instant mid-conversation effect.
+**Consequence:** after `/mcp add` or `/mcp remove` (via Telegram), Claude sees updated tools only on the next `claude -p` invocation (new `initialize` + `tools/list`). This is acceptable — MCP management is a setup operation, not something that needs instant mid-conversation effect.
 
-The `mcp_add` tool response should explicitly tell the agent: "Server registered. New tools will be available on your next session."
+The bot's Telegram reply should tell the user: "Server registered. New tools will be available on the agent's next session."
 
 **Future:** if Claude Code adds persistent SSE support, enable `stateful_mode(true)` and `notify_tool_list_changed`. The `peers` map in `BackendRegistry` is designed for this. No architectural change needed — just a config flag.
 
@@ -401,32 +401,34 @@ The refresh scheduler runs **in the Aggregator process**, not the bot. The bot o
 
 ### Request routing (axum)
 
-```rust
-let app = axum::Router::new()
-    .nest_service("/mcp", mcp_service)                    // MCP protocol (Claude)
-    .route("/internal/mcp-add", post(handle_mcp_add))     // REST (bot)
-    .route("/internal/mcp-remove", post(handle_mcp_remove))
-    .route("/internal/set-token", post(handle_set_token))
-    .layer(/* Bearer auth middleware for /mcp only */);
-```
-
-**Security:** The HTTP server binds `0.0.0.0:8100` (required for sandbox access via `host.docker.internal`). This means `/internal` routes are reachable from inside the sandbox. Protection via source IP check:
+Two separate routers on separate listeners:
 
 ```rust
-// Middleware for /internal routes: reject non-loopback source IPs
-async fn loopback_only(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    req: Request,
-    next: Next,
-) -> Response {
-    if !addr.ip().is_loopback() {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    next.run(req).await
-}
+// MCP router — TCP :8100, Bearer auth middleware
+let mcp_router = axum::Router::new()
+    .nest_service("/mcp", mcp_service)
+    .layer(bearer_auth_middleware);
+
+// Internal router — Unix socket, no auth needed (FS-level isolation)
+let internal_router = axum::Router::new()
+    .route("/mcp-add", post(handle_mcp_add))
+    .route("/mcp-remove", post(handle_mcp_remove))
+    .route("/set-token", post(handle_set_token));
 ```
 
-This ensures only the bot process (running on the same host) can reach `/internal`. Sandbox traffic arrives from Docker bridge IPs (172.x), not loopback — rejected.
+**Security:** The internal API is served on a **Unix domain socket**, not TCP. The MCP endpoint remains on TCP `0.0.0.0:8100` (for sandbox access). Two separate listeners:
+
+```rust
+// TCP listener for MCP protocol (Claude from sandbox)
+let tcp = TcpListener::bind("0.0.0.0:8100").await?;
+axum::serve(tcp, mcp_router);
+
+// Unix socket for internal API (bot on same host)
+let uds = UnixListener::bind(internal_socket_path)?;
+axum::serve(uds, internal_router);
+```
+
+Socket path: `~/.rightclaw/run/internal.sock`. Sandbox cannot access host filesystem — complete isolation without IP checks or shared secrets. Bot connects via `reqwest` with Unix socket transport (or `hyper-unix-connector`).
 
 ## Security
 
@@ -651,13 +653,19 @@ Only `rightmeta__mcp_list` is exposed as an MCP tool. It returns the list of reg
 
 ## Impact on System Prompt and Skills
 
-### PROMPT_SYSTEM.md
+### PROMPT_SYSTEM.md / AGENTS.md
 
 Update to describe:
-- `right` is an aggregator, tools are prefixed (`right__`, `rightmeta__`, `<server>__`)
-- `rightmeta__` tools for MCP management
-- Credentials not accessible to agent
-- No `.mcp.json` manipulation by agent
+- `right` is an aggregator; external MCP tools are prefixed with `{server}__`, built-in tools are unprefixed
+- `rightmeta__mcp_list` — check which MCP servers are configured and their status
+- Agent **cannot** add/remove/authenticate MCP servers directly
+- Agent should advise the user to use Telegram commands when MCP management is needed:
+  - `/mcp add <name> <url>` — register a new MCP server
+  - `/mcp remove <name>` — remove a server
+  - `/mcp auth <name>` — authenticate with a server (OAuth)
+  - `/mcp list` — show configured servers and status
+- Credentials are not accessible to the agent — managed by the host
+- New tools from `/mcp add` become available on the agent's next session
 
 ### TOOLS.md
 
