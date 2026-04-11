@@ -17,13 +17,13 @@ Proxy all MCP traffic through a single rightclaw HTTP endpoint. The agent sees o
 The Aggregator runs as a **shared process** (current `rightclaw memory-server-http` in process-compose), serving all agents from one HTTP endpoint on port 8100. This is the same hosting model as the current `HttpMemoryServer` — no architectural change in process topology.
 
 ```
-Claude (sandbox) ──HTTP──▶ Aggregator (:8100/mcp)
+Claude (sandbox) ──TCP──▶ Aggregator (:8100/mcp, MCP protocol, Bearer auth)
                               ├── RightBackend (in-process: memory, cron, bootstrap)
                               ├── ProxyBackend("notion", upstream HTTP MCP)
                               └── ProxyBackend("github", upstream HTTP MCP)
 
-Telegram Bot ──HTTP──▶ Aggregator (:8100/mcp)
-  (for /mcp add, /mcp remove — calls rightmeta__* tools via MCP protocol)
+Telegram Bot ──UDS──▶ Aggregator (internal.sock, REST API)
+  (for /mcp add, /mcp remove, /mcp auth — set-token)
 ```
 
 Claude (from sandbox) interacts with the Aggregator through the MCP HTTP endpoint using Bearer tokens. The Telegram bot (from host) interacts with the Aggregator through an **internal REST API** on the same HTTP server — separate from the MCP endpoint, bound to localhost only.
@@ -124,7 +124,14 @@ if let Some((prefix, tool)) = split_prefix(tool_name) {
     // Has "__" → external backend or management (read-only)
     match prefix {
         "rightmeta" => registry.handle_read_only_tool(tool, args).await, // only mcp_list
-        other => registry.dispatch_to_proxy(other, tool, args).await,
+        other => match registry.dispatch_to_proxy(other, tool, args).await {
+            Ok(result) => Ok(result),
+            Err(ProxyNotFound(name)) => {
+                // Server was removed between sessions, or cron job hit stale tool cache
+                Err(tool_error!("Server '{name}' not found. It may have been removed."))
+            }
+            Err(e) => Err(e),
+        }
     }
 } else {
     // No "__" → RightBackend (unprefixed)
@@ -201,10 +208,28 @@ struct ProxyBackend {
     /// Dynamic auth token — shared with DynamicAuthClient
     token: Arc<tokio::sync::RwLock<Option<String>>>,
 
+    /// Current status — used by rightmeta__mcp_list
+    status: RwLock<BackendStatus>,
+
     /// Last successful tool list refresh timestamp
     last_refresh: RwLock<Instant>,
 }
 ```
+
+```rust
+enum BackendStatus {
+    Connected,    // initialize + tools/list succeeded
+    NeedsAuth,    // got 401, token is None or expired
+    Unreachable,  // transient error, retrying
+}
+```
+
+State transitions:
+- `mcp-add` → `Connected` (if upstream reachable) or `Unreachable`
+- `set-token` → re-initialize → `Connected` or `Unreachable`
+- 401 from upstream → `NeedsAuth`
+- Transient error → `Unreachable`, retry with backoff → `Connected` on success
+- `mcp_list` reads `status` + `cached_tools.len()` for each proxy
 
 ### Credential injection: DynamicAuthClient
 
@@ -428,7 +453,9 @@ let uds = UnixListener::bind(internal_socket_path)?;
 axum::serve(uds, internal_router);
 ```
 
-Socket path: `~/.rightclaw/run/internal.sock`. Sandbox cannot access host filesystem — complete isolation without IP checks or shared secrets. Bot connects via `reqwest` with Unix socket transport (or `hyper-unix-connector`).
+Socket path: `~/.rightclaw/run/internal.sock`. Sandbox cannot access host filesystem — complete isolation without IP checks or shared secrets.
+
+**Bot client:** `reqwest` does not support Unix sockets natively. For 3 simple POST endpoints, use raw `hyper` client with `tokio::net::UnixStream` — minimal code, no extra crates. Wrap in a small `InternalClient` struct with typed methods (`mcp_add`, `mcp_remove`, `set_token`).
 
 ## Security
 
@@ -717,7 +744,7 @@ New types live in existing crates:
 - Upstream error taxonomy (transient/auth/session errors)
 - Peer lifecycle management (replace on reconnect, graceful stale handling)
 - Hot-reload via `notify_tool_list_changed`
-- Telegram `/mcp` commands routed through MCP protocol
+- Telegram `/mcp` commands routed through internal REST API (Unix socket)
 - System prompt / skills / ARCHITECTURE.md updates
 - Deprecate stdio MCP server
 
