@@ -2,19 +2,7 @@ use std::collections::HashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-/// Deserialized from crons/*.yaml
-#[derive(Debug, Clone, serde::Deserialize, PartialEq)]
-pub struct CronSpec {
-    pub schedule: String,
-    pub prompt: String,
-    pub lock_ttl: Option<String>, // default "30m"
-    #[serde(default = "default_cron_max_budget_usd")]
-    pub max_budget_usd: f64,
-}
-
-fn default_cron_max_budget_usd() -> f64 {
-    1.0
-}
+use rightclaw::cron_spec::CronSpec;
 
 /// Lock file JSON: {"heartbeat": "2026-...Z"}
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -89,13 +77,6 @@ pub fn parse_lock_ttl(s: &str) -> Result<chrono::Duration, CronError> {
     Err(CronError::InvalidLockTtl(s.to_string()))
 }
 
-/// Check if a cron schedule's minute field is exactly 0, 00, or 30.
-/// These fire at popular intervals and risk API rate limit spikes.
-pub fn is_round_minutes(schedule: &str) -> bool {
-    let minute_field = schedule.split_whitespace().next().unwrap_or("");
-    matches!(minute_field, "0" | "00" | "30")
-}
-
 /// Check if a lock file exists and its heartbeat is within the TTL.
 ///
 /// Returns `true` if the previous run is still considered active (skip this run).
@@ -113,49 +94,6 @@ pub fn is_lock_fresh(agent_dir: &std::path::Path, job_name: &str, lock_ttl_str: 
     };
     let ttl = parse_lock_ttl(lock_ttl_str).unwrap_or(chrono::Duration::minutes(30));
     chrono::Utc::now() - lock.heartbeat < ttl
-}
-
-/// Scan `agent_dir/crons/*.yaml` and return a map of job_name -> CronSpec.
-///
-/// The job_name is the YAML file stem (e.g. "deploy-check" from "deploy-check.yaml").
-/// Files that fail to parse are skipped with a `tracing::warn`.
-pub fn load_specs(agent_dir: &std::path::Path) -> HashMap<String, CronSpec> {
-    let crons_dir = agent_dir.join("crons");
-    let mut map = HashMap::new();
-    for entry in walkdir::WalkDir::new(&crons_dir)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let raw = match std::fs::read_to_string(path) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(job = %stem, "failed to read cron spec: {e:#}");
-                continue;
-            }
-        };
-        match serde_saphyr::from_str::<CronSpec>(&raw) {
-            Ok(spec) => {
-                if is_round_minutes(&spec.schedule) {
-                    tracing::warn!(
-                        job = %stem,
-                        schedule = %spec.schedule,
-                        "cron schedule uses :00 or :30 minutes — consider offset to avoid API rate limits"
-                    );
-                }
-                map.insert(stem.to_string(), spec);
-            }
-            Err(e) => tracing::warn!(job = %stem, "failed to parse cron spec: {e:#}"),
-        }
-    }
-    map
 }
 
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
@@ -452,17 +390,26 @@ pub async fn run_cron_task(
     shutdown: CancellationToken,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
+
+    let conn = match rightclaw::memory::open_connection(&agent_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(agent = %agent_name, "cron task: DB open failed: {e:#}");
+            return;
+        }
+    };
+
     let mut handles: HashMap<String, (CronSpec, JoinHandle<()>)> = HashMap::new();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &agent_dir, &agent_name, &model, &ssh_config_path).await;
+    reconcile_jobs(&mut handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &agent_dir, &agent_name, &model, &ssh_config_path).await;
+                reconcile_jobs(&mut handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path);
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler, waiting for running jobs");
@@ -479,14 +426,15 @@ pub async fn run_cron_task(
     tracing::info!(agent = %agent_name, "cron shutdown complete — all jobs finished");
 }
 
-async fn reconcile_jobs(
+fn reconcile_jobs(
     handles: &mut HashMap<String, (CronSpec, JoinHandle<()>)>,
+    conn: &rusqlite::Connection,
     agent_dir: &std::path::Path,
     agent_name: &str,
     model: &Option<String>,
     ssh_config_path: &Option<std::path::PathBuf>,
 ) {
-    let new_specs = load_specs(agent_dir);
+    let new_specs = rightclaw::cron_spec::load_specs_from_db(conn);
 
     // Abort handles for removed or changed jobs (CRON-06)
     let to_remove: Vec<String> = handles
@@ -642,54 +590,6 @@ mod tests {
         assert!(!is_lock_fresh(dir.path(), "my-job", "30m"));
     }
 
-    #[test]
-    fn test_load_specs_empty_dir() {
-        let dir = tempdir().unwrap();
-        // crons/ dir doesn't exist → empty map
-        let specs = load_specs(dir.path());
-        assert!(specs.is_empty());
-    }
-
-    #[test]
-    fn test_load_specs_valid_yaml() {
-        let dir = tempdir().unwrap();
-        let crons_dir = dir.path().join("crons");
-        std::fs::create_dir_all(&crons_dir).unwrap();
-
-        let yaml = r#"
-schedule: "*/5 * * * *"
-prompt: "Check system health"
-lock_ttl: "1h"
-max_budget_usd: 0.50
-"#;
-        std::fs::write(crons_dir.join("health-check.yaml"), yaml).unwrap();
-
-        let specs = load_specs(dir.path());
-        assert_eq!(specs.len(), 1);
-        let spec = specs.get("health-check").expect("health-check spec should exist");
-        assert_eq!(spec.schedule, "*/5 * * * *");
-        assert_eq!(spec.prompt, "Check system health");
-        assert_eq!(spec.lock_ttl.as_deref(), Some("1h"));
-        assert_eq!(spec.max_budget_usd, 0.50);
-    }
-
-    #[test]
-    fn test_load_specs_default_budget() {
-        let dir = tempdir().unwrap();
-        let crons_dir = dir.path().join("crons");
-        std::fs::create_dir_all(&crons_dir).unwrap();
-
-        let yaml = r#"
-schedule: "17 9 * * *"
-prompt: "Do stuff"
-"#;
-        std::fs::write(crons_dir.join("simple.yaml"), yaml).unwrap();
-
-        let specs = load_specs(dir.path());
-        let spec = specs.get("simple").unwrap();
-        assert_eq!(spec.max_budget_usd, 1.0, "default budget should be 1.0");
-    }
-
     // -- CronReplyOutput parser tests --
 
     #[test]
@@ -732,21 +632,4 @@ prompt: "Do stuff"
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_is_round_minutes_detects_zero() {
-        assert!(is_round_minutes("0 9 * * *"));
-        assert!(is_round_minutes("00 9 * * *"));
-    }
-
-    #[test]
-    fn test_is_round_minutes_detects_thirty() {
-        assert!(is_round_minutes("30 9 * * *"));
-    }
-
-    #[test]
-    fn test_is_round_minutes_allows_offset() {
-        assert!(!is_round_minutes("17 9 * * *"));
-        assert!(!is_round_minutes("*/5 * * * *"));
-        assert!(!is_round_minutes("43 */8 * * *"));
-    }
 }

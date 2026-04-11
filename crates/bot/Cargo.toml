@@ -19,8 +19,6 @@ which = { workspace = true }
 dirs = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
-serde-saphyr = { workspace = true }
-walkdir = { workspace = true }
 cron = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
