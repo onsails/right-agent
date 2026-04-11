@@ -379,6 +379,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_shutdown).await;
     });
 
+    // Shared idle timestamp: tracks last handler/worker interaction for cron delivery gating.
+    use crate::telegram::handler::IdleTimestamp;
+    let idle_timestamp = Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(
+        chrono::Utc::now().timestamp(),
+    ))));
+
     let result = tokio::select! {
         result = telegram::run_telegram(
             token,
@@ -394,6 +400,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             config.show_thinking,
             config.model.clone(),
             shutdown.clone(),
+            Arc::clone(&idle_timestamp),
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,

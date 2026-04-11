@@ -80,6 +80,8 @@ pub struct WorkerContext {
     pub model: Option<String>,
     /// Shared map for stop button — worker inserts token before CC, removes after exit.
     pub stop_tokens: super::StopTokens,
+    /// Shared idle timestamp — worker updates after each reply sent.
+    pub idle_timestamp: Arc<std::sync::atomic::AtomicI64>,
 }
 
 /// Parsed output from CC structured JSON response (`result` field per D-03).
@@ -520,6 +522,8 @@ pub fn spawn_worker(
                     }
                 }
             }
+
+            ctx.idle_timestamp.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
         }
 
         // Worker exiting — remove DashMap entry to prevent stale sender (Pitfall 3)
