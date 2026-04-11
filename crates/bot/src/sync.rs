@@ -74,6 +74,15 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
         tracing::debug!("sync: uploaded reply-schema.json");
     }
 
+    // 2a. Upload cron-schema.json
+    let cron_schema = agent_dir.join(".claude").join("cron-schema.json");
+    if cron_schema.exists() {
+        rightclaw::openshell::upload_file(sandbox, &cron_schema, "/sandbox/.claude/")
+            .await
+            .map_err(|e| miette::miette!("sync cron-schema.json: {e:#}"))?;
+        tracing::debug!("sync: uploaded cron-schema.json");
+    }
+
     // 2b. Upload system-prompt.md (base identity for --system-prompt-file)
     let sys_prompt = agent_dir.join(".claude").join("system-prompt.md");
     if sys_prompt.exists() {
@@ -366,6 +375,7 @@ mod tests {
         std::fs::create_dir_all(claude_dir.join("agents")).unwrap();
         std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
         std::fs::write(claude_dir.join("reply-schema.json"), "{}").unwrap();
+        std::fs::write(claude_dir.join("cron-schema.json"), "{}").unwrap();
         std::fs::write(claude_dir.join("bootstrap-schema.json"), "{}").unwrap();
         std::fs::write(claude_dir.join("system-prompt.md"), "# test system prompt\n").unwrap();
         std::fs::write(claude_dir.join("agents").join("test.md"), "---\nname: test\n---\n").unwrap();

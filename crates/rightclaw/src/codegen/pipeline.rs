@@ -125,6 +125,18 @@ pub fn run_single_agent_codegen(
         )
     })?;
 
+    // Write cron-schema.json.
+    std::fs::write(
+        claude_dir.join("cron-schema.json"),
+        crate::codegen::CRON_SCHEMA_JSON,
+    )
+    .map_err(|e| {
+        miette::miette!(
+            "failed to write cron-schema.json for '{}': {e:#}",
+            agent.name
+        )
+    })?;
+
     // Write system-prompt.md (base identity for --system-prompt-file).
     std::fs::write(
         claude_dir.join("system-prompt.md"),
@@ -466,6 +478,7 @@ mod tests {
         assert!(agent_dir.join(".claude/agents/test-bootstrap.md").exists());
         assert!(agent_dir.join(".claude/system-prompt.md").exists());
         assert!(agent_dir.join(".claude/reply-schema.json").exists());
+        assert!(agent_dir.join(".claude/cron-schema.json").exists());
         assert!(agent_dir.join(".claude/bootstrap-schema.json").exists());
         assert!(agent_dir.join("TOOLS.md").exists());
         assert!(agent_dir.join("mcp.json").exists());

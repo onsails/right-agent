@@ -2148,6 +2148,10 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     std::fs::write(claude_dir.join("reply-schema.json"), rightclaw::codegen::REPLY_SCHEMA_JSON)
         .map_err(|e| miette::miette!("failed to write reply-schema.json for '{}': {e:#}", agent_name))?;
 
+    // Write cron-schema.json.
+    std::fs::write(claude_dir.join("cron-schema.json"), rightclaw::codegen::CRON_SCHEMA_JSON)
+        .map_err(|e| miette::miette!("failed to write cron-schema.json for '{}': {e:#}", agent_name))?;
+
     let claude_bin = which::which("claude")
         .or_else(|_| which::which("claude-bun"))
         .map_err(|_| {

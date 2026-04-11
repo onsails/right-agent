@@ -463,6 +463,7 @@ pub fn prepare_staging_dir(agent_dir: &Path, upload_dir: &Path) -> miette::Resul
     let copy_items: &[&str] = &[
         "settings.json",
         "reply-schema.json",
+        "cron-schema.json",
         "agents", // agent definition directory
     ];
 
