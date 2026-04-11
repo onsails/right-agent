@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,8 @@ pub enum RefreshMessage {
     NewEntry {
         server_name: String,
         state: OAuthServerState,
+        /// Shared token handle — scheduler writes new tokens here.
+        token: Arc<tokio::sync::RwLock<Option<String>>>,
     },
     /// Server removed — cancel timer and clean up state.
     RemoveServer { server_name: String },
@@ -87,12 +90,10 @@ pub fn refresh_due_in(entry: &OAuthServerState) -> Duration {
 /// Run the OAuth token refresh scheduler.
 ///
 /// Listens for `RefreshMessage` messages (new tokens or removals) and maintains
-/// timers for each server. On successful refresh: updates Bearer in `mcp_json_path`,
-/// re-uploads into sandbox, updates `oauth_state_path`.
+/// timers for each server. On successful refresh: writes new token to ProxyBackend's
+/// shared `Arc<RwLock>` in-memory, and persists state to `oauth_state_path`.
 pub async fn run_refresh_scheduler(
     oauth_state_path: std::path::PathBuf,
-    mcp_json_path: std::path::PathBuf,
-    sandbox_name: Option<String>,
     mut rx: tokio::sync::mpsc::Receiver<RefreshMessage>,
     notify_tx: tokio::sync::mpsc::Sender<String>,
 ) {
@@ -106,6 +107,10 @@ pub async fn run_refresh_scheduler(
             OAuthState::default()
         }
     };
+
+    // Shared token handles per server — written on refresh success
+    let mut token_handles: HashMap<String, Arc<tokio::sync::RwLock<Option<String>>>> =
+        HashMap::new();
 
     // Build initial timer set
     let mut timers: HashMap<String, tokio::time::Instant> = HashMap::new();
@@ -127,10 +132,11 @@ pub async fn run_refresh_scheduler(
             // Message from handler or OAuth callback
             Some(msg) = rx.recv() => {
                 match msg {
-                    RefreshMessage::NewEntry { server_name, state: entry_state } => {
+                    RefreshMessage::NewEntry { server_name, state: entry_state, token } => {
                         let due = refresh_due_in(&entry_state);
                         timers.insert(server_name.clone(), tokio::time::Instant::now() + due);
                         state.servers.insert(server_name.clone(), entry_state);
+                        token_handles.insert(server_name.clone(), token);
                         if let Err(e) = save_oauth_state(&oauth_state_path, &state) {
                             tracing::error!("failed to save oauth state: {e:#}");
                         }
@@ -139,6 +145,7 @@ pub async fn run_refresh_scheduler(
                     RefreshMessage::RemoveServer { server_name } => {
                         timers.remove(&server_name);
                         state.servers.remove(&server_name);
+                        token_handles.remove(&server_name);
                         if let Err(e) = save_oauth_state(&oauth_state_path, &state) {
                             tracing::error!("failed to save oauth state: {e:#}");
                         }
@@ -164,25 +171,10 @@ pub async fn run_refresh_scheduler(
 
                 match do_refresh(&http_client, &entry, MAX_RETRIES).await {
                     Ok((new_entry, access_token)) => {
-                        // Update Bearer in mcp.json with the NEW access token
-                        if let Err(e) = crate::mcp::credentials::set_server_header(
-                            &mcp_json_path,
-                            &name,
-                            "Authorization",
-                            &format!("Bearer {access_token}"),
-                        ) {
-                            tracing::error!(server = %name, "failed to update mcp.json: {e:#}");
-                        }
-
-                        // Re-upload mcp.json into sandbox (skip when no sandbox)
-                        if let Some(ref sbox) = sandbox_name
-                            && let Err(e) = crate::openshell::upload_file(
-                                sbox,
-                                &mcp_json_path,
-                                "/sandbox/",
-                            ).await
-                        {
-                            tracing::error!(server = %name, "failed to re-upload mcp.json: {e:#}");
+                        // Write token directly to ProxyBackend's shared state
+                        if let Some(token_arc) = token_handles.get(&name) {
+                            *token_arc.write().await = Some(access_token.clone());
+                            tracing::info!(server = %name, "token refreshed in-memory");
                         }
 
                         // Schedule next refresh
@@ -340,18 +332,6 @@ mod tests {
         };
         let due = refresh_due_in(&entry);
         assert_eq!(due, Duration::ZERO);
-    }
-
-    /// Regression: spawn_refresh_loop must NOT use SANDBOX_MCP_JSON_PATH as upload
-    /// destination — it's a file reference, not a directory for upload_file().
-    /// The fix uses "/sandbox/" directly. This test ensures the validation works.
-    #[test]
-    fn upload_file_dest_validation_rejects_file_path() {
-        let file_path = crate::openshell::SANDBOX_MCP_JSON_PATH;
-        assert!(
-            !file_path.ends_with('/'),
-            "SANDBOX_MCP_JSON_PATH must be a file path (not ending with '/'), got: {file_path}"
-        );
     }
 
     #[test]
