@@ -88,8 +88,8 @@ install_rightclaw() {
   local download_url
 
   case "${PLATFORM}-${ARCH}" in
-    linux-x86_64)   target="rightclaw-x86_64-unknown-linux-musl" ;;
-    linux-aarch64)  target="rightclaw-aarch64-unknown-linux-musl" ;;
+    linux-x86_64)   target="rightclaw-x86_64-unknown-linux-gnu" ;;
+    linux-aarch64)  target="rightclaw-aarch64-unknown-linux-gnu" ;;
     darwin-x86_64)  target="rightclaw-x86_64-apple-darwin" ;;
     darwin-aarch64) target="rightclaw-aarch64-apple-darwin" ;;
     *)              die "No prebuilt binary for ${PLATFORM}-${ARCH}" ;;
@@ -157,7 +157,27 @@ install_process_compose() {
   fi
 }
 
-# ── Step 3: Install sandbox dependencies (Linux only) ─────────────
+# ── Step 3: Install OpenShell ──────────────────────────────────────
+
+install_openshell() {
+  info "Installing OpenShell..."
+
+  if command -v openshell >/dev/null 2>&1; then
+    ok "OpenShell already installed: $(command -v openshell)"
+    return 0
+  fi
+
+  echo "  using official installer..."
+  curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+
+  if command -v openshell >/dev/null 2>&1; then
+    ok "OpenShell installed"
+  else
+    fail "OpenShell installation failed — install manually: https://github.com/NVIDIA/OpenShell"
+  fi
+}
+
+# ── Step 4: Install sandbox dependencies (Linux only) ─────────────
 
 install_sandbox_deps() {
   if [ "$PLATFORM" = "darwin" ]; then
@@ -194,7 +214,7 @@ install_sandbox_deps() {
   ok "sandbox dependencies installed"
 }
 
-# ── Step 4: Run rightclaw init ─────────────────────────────────────
+# ── Step 5: Run rightclaw init ─────────────────────────────────────
 
 run_init() {
   info "Running rightclaw init..."
@@ -203,7 +223,7 @@ run_init() {
   "$INSTALL_DIR/rightclaw" init
 }
 
-# ── Step 5: Run rightclaw doctor ───────────────────────────────────
+# ── Step 6: Run rightclaw doctor ───────────────────────────────────
 
 run_doctor() {
   info "Running rightclaw doctor..."
@@ -238,6 +258,7 @@ main() {
   echo ""
   install_rightclaw
   install_process_compose
+  install_openshell
   install_sandbox_deps
 
   echo ""

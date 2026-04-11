@@ -1,0 +1,14 @@
+[workspace]
+changelog_config = "cliff.toml"
+changelog_update = true
+dependencies_update = false
+git_release_enable = false
+publish = false
+semver_check = false
+
+[[package]]
+name = "rightclaw-cli"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+git_tag_name = "v{{ version }}"
+changelog_path = "CHANGELOG.md"
