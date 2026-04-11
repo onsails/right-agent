@@ -1,4 +1,4 @@
-//! Teloxide endpoint handlers: message dispatch + /new, /list, /switch + /mcp + /doctor.
+//! Teloxide endpoint handlers: message dispatch + /new, /list, /switch + /mcp + /cron + /doctor.
 //!
 //! handle_message: routes incoming text to the per-session worker via DashMap.
 //! handle_new: deactivates current session, optionally creates a named one.
@@ -792,6 +792,157 @@ async fn handle_mcp_remove(
 }
 
 // ---------------------------------------------------------------------------
+// /cron command handler
+// ---------------------------------------------------------------------------
+
+/// Handle the /cron command — routes to list (no args) or detail (job name).
+pub async fn handle_cron(
+    bot: BotType,
+    msg: Message,
+    args: String,
+    agent_dir: Arc<AgentDir>,
+) -> ResponseResult<()> {
+    let result = if args.trim().is_empty() {
+        handle_cron_list(&bot, &msg, &agent_dir.0).await
+    } else {
+        handle_cron_detail(&bot, &msg, args.trim(), &agent_dir.0).await
+    };
+    result.map_err(|e| to_request_err(format!("{e:#}")))?;
+    Ok(())
+}
+
+/// `/cron` — list all cron jobs with human-readable schedule and last run status.
+async fn handle_cron_list(
+    bot: &BotType,
+    msg: &Message,
+    agent_dir: &Path,
+) -> Result<(), RequestError> {
+    let conn = rightclaw::memory::open_connection(agent_dir)
+        .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
+
+    let specs = rightclaw::cron_spec::load_specs_from_db(&conn)
+        .map_err(|e| to_request_err(format!("load specs failed: {e:#}")))?;
+
+    if specs.is_empty() {
+        bot.send_message(msg.chat.id, "No cron jobs configured.")
+            .await?;
+        return Ok(());
+    }
+
+    let mut text = String::from("Cron Jobs:\n\n");
+    let mut names: Vec<&String> = specs.keys().collect();
+    names.sort();
+
+    for name in names {
+        let spec = &specs[name];
+        let desc = rightclaw::cron_spec::describe_schedule(&spec.schedule);
+
+        let last_run = rightclaw::cron_spec::get_recent_runs(&conn, name, 1).unwrap_or_default();
+
+        let status_str = match last_run.first() {
+            Some(run) => {
+                let icon = match run.status.as_str() {
+                    "success" => "\u{2705}",
+                    "failed" => "\u{274c}",
+                    "running" => "\u{23f3}",
+                    _ => "?",
+                };
+                let ago = format_relative_time(&run.started_at);
+                format!("last: {ago} {icon}")
+            }
+            None => "never run".to_string(),
+        };
+
+        text.push_str(&format!(
+            "\u{2022} {name} \u{2014} {desc} \u{2014} {status_str}\n"
+        ));
+    }
+
+    let eff_thread_id = effective_thread_id(msg);
+    send_html_reply(bot, msg.chat.id, eff_thread_id, &text).await?;
+    Ok(())
+}
+
+/// `/cron <job-name>` — show job detail + last 5 runs.
+async fn handle_cron_detail(
+    bot: &BotType,
+    msg: &Message,
+    job_name: &str,
+    agent_dir: &Path,
+) -> Result<(), RequestError> {
+    let conn = rightclaw::memory::open_connection(agent_dir)
+        .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
+
+    let detail = rightclaw::cron_spec::get_spec_detail(&conn, job_name)
+        .map_err(|e| to_request_err(format!("query failed: {e:#}")))?;
+
+    let Some(detail) = detail else {
+        bot.send_message(msg.chat.id, format!("Cron job '{job_name}' not found."))
+            .await?;
+        return Ok(());
+    };
+
+    let desc = rightclaw::cron_spec::describe_schedule(&detail.schedule);
+    let mut text = format!(
+        "<b>{}</b>\nSchedule: {} (<code>{}</code>)\nBudget: ${:.2}",
+        detail.job_name, desc, detail.schedule, detail.max_budget_usd,
+    );
+    if let Some(ref ttl) = detail.lock_ttl {
+        text.push_str(&format!("\nLock TTL: {ttl}"));
+    }
+    if detail.triggered_at.is_some() {
+        text.push_str("\n\u{26a1} Trigger pending");
+    }
+
+    let runs =
+        rightclaw::cron_spec::get_recent_runs(&conn, job_name, 5).unwrap_or_default();
+
+    if runs.is_empty() {
+        text.push_str("\n\nNo runs yet.");
+    } else {
+        text.push_str("\n\nRecent runs:");
+        for (i, run) in runs.iter().enumerate() {
+            let icon = match run.status.as_str() {
+                "success" => "\u{2705}",
+                "failed" => "\u{274c}",
+                "running" => "\u{23f3}",
+                _ => "?",
+            };
+            let ago = format_relative_time(&run.started_at);
+            let duration = match &run.finished_at {
+                Some(end) => format_duration(&run.started_at, end),
+                None => String::new(),
+            };
+            text.push_str(&format!(
+                "\n  {}. {ago} \u{2014} {icon} {}{duration}",
+                i + 1,
+                run.status
+            ));
+        }
+    }
+
+    let eff_thread_id = effective_thread_id(msg);
+    send_html_reply(bot, msg.chat.id, eff_thread_id, &text).await?;
+    Ok(())
+}
+
+/// Format duration between two ISO 8601 timestamps (e.g. " (12s)", " (2m 30s)").
+fn format_duration(start_iso: &str, end_iso: &str) -> String {
+    let Ok(start) = chrono::NaiveDateTime::parse_from_str(start_iso, "%Y-%m-%dT%H:%M:%SZ") else {
+        return String::new();
+    };
+    let Ok(end) = chrono::NaiveDateTime::parse_from_str(end_iso, "%Y-%m-%dT%H:%M:%SZ") else {
+        return String::new();
+    };
+    let secs = (end - start).num_seconds();
+    if secs < 60 {
+        format!(" ({secs}s)")
+    } else {
+        format!(" ({}m {}s)", secs / 60, secs % 60)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // /doctor command handler
 // ---------------------------------------------------------------------------
 
@@ -988,5 +1139,26 @@ mod tests {
     #[test]
     fn format_relative_time_malformed() {
         assert_eq!(format_relative_time("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(
+            format_duration("2026-04-11T10:00:00Z", "2026-04-11T10:00:12Z"),
+            " (12s)"
+        );
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(
+            format_duration("2026-04-11T10:00:00Z", "2026-04-11T10:02:30Z"),
+            " (2m 30s)"
+        );
+    }
+
+    #[test]
+    fn format_duration_malformed() {
+        assert_eq!(format_duration("bad", "2026-04-11T10:00:00Z"), "");
     }
 }

@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthCodeSlot, AuthWatcherFlag, DebugFlag, IdleTimestamp, RefreshTx, RightclawHome, SshConfigPath};
+use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthCodeSlot, AuthWatcherFlag, DebugFlag, IdleTimestamp, RefreshTx, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -41,6 +41,8 @@ enum BotCommand {
     Mcp(String),
     #[command(description = "Run diagnostics")]
     Doctor,
+    #[command(description = "Cron job status (list or detail)")]
+    Cron(String),
 }
 
 /// Run the teloxide long-polling dispatcher.
@@ -109,7 +111,8 @@ pub async fn run_telegram(
         .branch(dptree::case![BotCommand::List].endpoint(handle_list))
         .branch(dptree::case![BotCommand::Switch(uuid)].endpoint(handle_switch))
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
-        .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor));
+        .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
+        .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron));
 
     let message_handler = Update::filter_message()
         .inspect(|msg: Message| {
