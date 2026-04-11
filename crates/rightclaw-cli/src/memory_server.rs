@@ -53,6 +53,29 @@ pub struct CronShowRunParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronCreateParams {
+    #[schemars(description = "Job name (lowercase alphanumeric and hyphens, e.g. 'health-check')")]
+    pub job_name: String,
+    #[schemars(description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5')")]
+    pub schedule: String,
+    #[schemars(description = "Task prompt that Claude executes when the cron fires")]
+    pub prompt: String,
+    #[schemars(description = "Lock TTL duration (e.g. '30m', '1h'). Default: 30m")]
+    pub lock_ttl: Option<String>,
+    #[schemars(description = "Maximum dollar spend per invocation. Default: 1.0")]
+    pub max_budget_usd: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronDeleteParams {
+    #[schemars(description = "Job name to delete")]
+    pub job_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronListParams {}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct McpAddParams {
     #[schemars(description = "MCP server identifier (e.g. 'notion', 'linear')")]
     pub name: String,
@@ -270,6 +293,205 @@ impl MemoryServer {
         }
     }
 
+    #[tool(description = "Create a new cron job spec. The job will be picked up by the cron engine on its next reload cycle.")]
+    async fn cron_create(
+        &self,
+        Parameters(params): Parameters<CronCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        rightclaw::cron_spec::validate_job_name(&params.job_name)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let schedule_warning = rightclaw::cron_spec::validate_schedule(&params.schedule)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        if params.prompt.trim().is_empty() {
+            return Err(McpError::invalid_params("prompt must not be empty", None));
+        }
+        if let Some(ref ttl) = params.lock_ttl {
+            rightclaw::cron_spec::validate_lock_ttl(ttl)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+        }
+        if let Some(budget) = params.max_budget_usd {
+            if budget <= 0.0 {
+                return Err(McpError::invalid_params(
+                    "max_budget_usd must be greater than 0",
+                    None,
+                ));
+            }
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let budget = params.max_budget_usd.unwrap_or(1.0);
+        let result = conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                params.job_name,
+                params.schedule,
+                params.prompt,
+                params.lock_ttl,
+                budget,
+                now,
+                now,
+            ],
+        );
+
+        match result {
+            Ok(_) => {
+                let mut msg = format!("Created cron job '{}'.", params.job_name);
+                if let Some(warning) = schedule_warning {
+                    msg.push_str(&format!(" Warning: {warning}"));
+                }
+                Ok(CallToolResult::success(vec![Content::text(msg)]))
+            }
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
+            {
+                Err(McpError::invalid_params(
+                    format!("job '{}' already exists", params.job_name),
+                    None,
+                ))
+            }
+            Err(e) => Err(McpError::internal_error(format!("insert failed: {e:#}"), None)),
+        }
+    }
+
+    #[tool(description = "Update an existing cron job spec (full replacement). All fields are overwritten.")]
+    async fn cron_update(
+        &self,
+        Parameters(params): Parameters<CronCreateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        rightclaw::cron_spec::validate_job_name(&params.job_name)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let schedule_warning = rightclaw::cron_spec::validate_schedule(&params.schedule)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        if params.prompt.trim().is_empty() {
+            return Err(McpError::invalid_params("prompt must not be empty", None));
+        }
+        if let Some(ref ttl) = params.lock_ttl {
+            rightclaw::cron_spec::validate_lock_ttl(ttl)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+        }
+        if let Some(budget) = params.max_budget_usd {
+            if budget <= 0.0 {
+                return Err(McpError::invalid_params(
+                    "max_budget_usd must be greater than 0",
+                    None,
+                ));
+            }
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let budget = params.max_budget_usd.unwrap_or(1.0);
+        let rows = conn
+            .execute(
+                "UPDATE cron_specs SET schedule = ?2, prompt = ?3, lock_ttl = ?4, max_budget_usd = ?5, updated_at = ?6 \
+                 WHERE job_name = ?1",
+                rusqlite::params![
+                    params.job_name,
+                    params.schedule,
+                    params.prompt,
+                    params.lock_ttl,
+                    budget,
+                    now,
+                ],
+            )
+            .map_err(|e| McpError::internal_error(format!("update failed: {e:#}"), None))?;
+
+        if rows == 0 {
+            return Err(McpError::invalid_params(
+                format!("job '{}' not found", params.job_name),
+                None,
+            ));
+        }
+
+        let mut msg = format!("Updated cron job '{}'.", params.job_name);
+        if let Some(warning) = schedule_warning {
+            msg.push_str(&format!(" Warning: {warning}"));
+        }
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
+    }
+
+    #[tool(description = "Delete a cron job spec. Also removes its lock file if present.")]
+    async fn cron_delete(
+        &self,
+        Parameters(params): Parameters<CronDeleteParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let rows = conn
+            .execute(
+                "DELETE FROM cron_specs WHERE job_name = ?1",
+                rusqlite::params![params.job_name],
+            )
+            .map_err(|e| McpError::internal_error(format!("delete failed: {e:#}"), None))?;
+
+        if rows == 0 {
+            return Err(McpError::invalid_params(
+                format!("job '{}' not found", params.job_name),
+                None,
+            ));
+        }
+
+        // Best-effort lock file removal.
+        let lock_path = self
+            .agent_dir
+            .join("crons")
+            .join(".locks")
+            .join(format!("{}.json", params.job_name));
+        if lock_path.exists() {
+            let _ = std::fs::remove_file(&lock_path);
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Deleted cron job '{}'.",
+            params.job_name
+        ))]))
+    }
+
+    #[tool(description = "List all current cron job specs. Returns a JSON array of all configured cron jobs.")]
+    async fn cron_list(
+        &self,
+        Parameters(_params): Parameters<CronListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at \
+                 FROM cron_specs ORDER BY job_name",
+            )
+            .map_err(|e| McpError::internal_error(format!("prepare failed: {e:#}"), None))?;
+        let rows: Vec<serde_json::Value> = stmt
+            .query_map([], |row| {
+                Ok(serde_json::json!({
+                    "job_name": row.get::<_, String>(0)?,
+                    "schedule": row.get::<_, String>(1)?,
+                    "prompt": row.get::<_, String>(2)?,
+                    "lock_ttl": row.get::<_, Option<String>>(3)?,
+                    "max_budget_usd": row.get::<_, f64>(4)?,
+                    "created_at": row.get::<_, String>(5)?,
+                    "updated_at": row.get::<_, String>(6)?,
+                }))
+            })
+            .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let output = serde_json::to_string_pretty(&rows)
+            .map_err(|e| McpError::internal_error(format!("serialization error: {e:#}"), None))?;
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
     #[tool(description = "Add an HTTP MCP server to this agent's mcp.json. Use /mcp auth <name> in Telegram to complete OAuth if the server requires authentication.")]
     async fn mcp_add(
         &self,
@@ -444,6 +666,10 @@ impl rmcp::ServerHandler for MemoryServer {
                  - search_records: Full-text search with BM25 ranking\n\
                  - delete_record: Soft-delete a record (preserves audit trail)\n\n\
                  ## Cron\n\
+                 - cron_create: Create a new cron job spec\n\
+                 - cron_update: Update an existing cron job spec (full replacement)\n\
+                 - cron_delete: Delete a cron job spec\n\
+                 - cron_list: List all current cron job specs\n\
                  - cron_list_runs: List recent cron job executions\n\
                  - cron_show_run: Get details of a specific cron run\n\n\
                  ## MCP Management\n\
