@@ -740,7 +740,7 @@ async fn handle_mcp_add(
             send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
         }
         Err(e) => {
-            send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e}")).await?;
+            send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}")).await?;
         }
     }
     Ok(())
@@ -788,7 +788,7 @@ async fn handle_mcp_remove(
                 bot,
                 msg.chat.id,
                 eff_thread_id,
-                &format!("Failed: {e}"),
+                &format!("Failed: {e:#}"),
             )
             .await?;
         }

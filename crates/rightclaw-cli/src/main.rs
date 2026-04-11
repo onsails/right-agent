@@ -301,7 +301,7 @@ async fn main() -> miette::Result<()> {
 
         for (name, _token) in &raw_map {
             let agent_dir = agents_dir.join(name);
-            let right = right_backend::RightBackend::new(agents_dir.clone(), home.clone());
+            let right = right_backend::RightBackend::new(agents_dir.clone());
             let proxies = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
 
             dispatcher.agents.insert(name.clone(), aggregator::BackendRegistry {

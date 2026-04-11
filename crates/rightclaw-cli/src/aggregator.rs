@@ -375,13 +375,16 @@ pub(crate) async fn run_aggregator_http(
         "MCP Aggregator listening"
     );
 
-    let ct2 = ct.clone();
+    let ct_uds_shutdown = ct.clone();
+    let ct_uds_fail = ct.clone();
     tokio::spawn(async move {
-        axum::serve(uds_listener, internal_app.into_make_service())
-            .with_graceful_shutdown(async move { ct2.cancelled().await })
+        if let Err(e) = axum::serve(uds_listener, internal_app.into_make_service())
+            .with_graceful_shutdown(async move { ct_uds_shutdown.cancelled().await })
             .await
-            .map_err(|e| tracing::error!("UDS server error: {e:#}"))
-            .ok();
+        {
+            tracing::error!("UDS server error: {e:#}");
+            ct_uds_fail.cancel(); // propagate failure — shut down the whole aggregator
+        }
     });
 
     axum::serve(listener, app)
@@ -399,7 +402,7 @@ mod tests {
         let agent_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
 
-        let right = RightBackend::new(agents_dir, tmp.to_path_buf());
+        let right = RightBackend::new(agents_dir);
         BackendRegistry {
             right,
             proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
