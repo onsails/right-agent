@@ -7,7 +7,7 @@
 //! MCP servers.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
@@ -40,8 +40,10 @@ impl RightBackend {
     }
 
     /// Return static tool definitions for all built-in tools.
+    /// Cached after first call — schemas are computed once via OnceLock.
     pub fn tools_list(&self) -> Vec<Tool> {
-        vec![
+        static TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
+        TOOLS.get_or_init(|| vec![
             // Memory tools
             Tool::new(
                 "store_record",
@@ -126,7 +128,7 @@ impl RightBackend {
                 "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist.",
                 schema_for_type::<CronListParams>(), // empty schema — no params
             ),
-        ]
+        ]).clone()
     }
 
     /// Dispatch a tool call by name.
@@ -373,8 +375,7 @@ impl RightBackend {
                     &row.get::<_, String>(6)?,
                 ))
             })?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         let output = serde_json::to_string_pretty(&rows)?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }

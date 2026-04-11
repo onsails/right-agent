@@ -10,7 +10,7 @@ use rightclaw::mcp::credentials::{self, CredentialError};
 use rightclaw::mcp::proxy::ProxyBackend;
 use serde::{Deserialize, Serialize};
 
-use crate::aggregator::{ProxyHandle, ToolDispatcher};
+use crate::aggregator::ToolDispatcher;
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -154,7 +154,7 @@ async fn handle_mcp_add(
     // Create ProxyBackend with Unreachable status
     let token = Arc::new(tokio::sync::RwLock::new(None));
     let backend = ProxyBackend::new(req.name.clone(), req.url.clone(), token);
-    let handle = Arc::new(ProxyHandle { backend });
+    let handle = Arc::new(backend);
 
     // Insert into proxies map (clone Arc<RwLock> to avoid holding DashMap guard across await)
     let proxies_lock = {
@@ -270,8 +270,8 @@ async fn handle_set_token(
 
     // Update the token in the shared Arc<RwLock<Option<String>>>
     {
-        let mut token_guard = handle.backend.token().write().await;
-        *token_guard = Some(format!("Bearer {}", req.access_token));
+        let mut token_guard = handle.token().write().await;
+        *token_guard = Some(req.access_token.clone());
     }
 
     // Save OAuth state to oauth-state.json
@@ -294,7 +294,7 @@ async fn handle_set_token(
             client_id: req.client_id,
             client_secret: req.client_secret,
             expires_at,
-            server_url: handle.backend.url().to_owned(),
+            server_url: handle.url().to_owned(),
         },
     );
 
@@ -338,7 +338,6 @@ mod tests {
         let registry = BackendRegistry {
             right,
             proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            agent_name: "test-agent".into(),
             agent_dir,
         };
 

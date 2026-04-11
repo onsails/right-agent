@@ -37,16 +37,10 @@ pub(crate) fn split_prefix(tool_name: &str) -> Option<(&str, &str)> {
     tool_name.split_once("__")
 }
 
-/// Handle wrapping a `ProxyBackend` for registration in `BackendRegistry`.
-pub(crate) struct ProxyHandle {
-    pub backend: ProxyBackend,
-}
-
-/// Per-agent backend management: built-in tools + external proxy handles.
+/// Per-agent backend management: built-in tools + external proxy backends.
 pub(crate) struct BackendRegistry {
     pub right: RightBackend,
-    pub proxies: Arc<tokio::sync::RwLock<HashMap<String, Arc<ProxyHandle>>>>,
-    pub agent_name: String,
+    pub proxies: Arc<tokio::sync::RwLock<HashMap<String, Arc<ProxyBackend>>>>,
     pub agent_dir: PathBuf,
 }
 
@@ -76,7 +70,7 @@ impl BackendRegistry {
                 "Server '{proxy_name}' not found. It may have been removed."
             )
         })?;
-        Ok(proxy.backend.tools_call(tool, args).await?)
+        Ok(proxy.tools_call(tool, args).await?)
     }
 
     /// List all registered proxy backends with status info.
@@ -90,8 +84,8 @@ impl BackendRegistry {
 
         let mut lines = Vec::with_capacity(proxies.len());
         for (name, handle) in proxies.iter() {
-            let status = handle.backend.status().await;
-            let tool_count = handle.backend.tools().await.len();
+            let status = handle.status().await;
+            let tool_count = handle.tools().await.len();
             let status_str = match status {
                 BackendStatus::Connected => "connected",
                 BackendStatus::NeedsAuth => "needs_auth",
@@ -99,7 +93,7 @@ impl BackendRegistry {
             };
             lines.push(format!(
                 "- {name}: {status_str} ({tool_count} tools) url={url}",
-                url = handle.backend.url()
+                url = handle.url()
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
@@ -123,7 +117,7 @@ impl BackendRegistry {
 
         let proxies = self.proxies.read().await;
         for (name, handle) in proxies.iter() {
-            if let Some(ref instr) = handle.backend.instructions().await {
+            if let Some(ref instr) = handle.instructions().await {
                 let truncated = if instr.len() > INSTRUCTIONS_TRUNCATION_LIMIT {
                     format!(
                         "## {name}\n{}... (truncated)",
@@ -196,7 +190,7 @@ impl ToolDispatcher {
             // We read the tools using try_read on the internal lock via a
             // synchronous accessor. tools_list is not async to keep the
             // ServerHandler impl simple. Fallback: skip if lock is contended.
-            if let Some(proxy_tools) = handle.backend.try_tools() {
+            if let Some(proxy_tools) = handle.try_tools() {
                 for t in proxy_tools.iter() {
                     let prefixed_name = format!("{proxy_name}__{}", t.name);
                     let mut prefixed = t.clone();
@@ -409,7 +403,6 @@ mod tests {
         BackendRegistry {
             right,
             proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            agent_name: "test-agent".into(),
             agent_dir,
         }
     }
