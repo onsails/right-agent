@@ -26,6 +26,7 @@ base64 = { workspace = true }
 subtle = { workspace = true }
 owo-colors = { workspace = true }
 chrono = { workspace = true }
+cron = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }

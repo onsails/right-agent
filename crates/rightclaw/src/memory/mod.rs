@@ -1,7 +1,7 @@
 pub mod error;
 pub mod guard;
 pub mod store;
-mod migrations;
+pub(crate) mod migrations;
 
 pub use error::MemoryError;
 pub use store::{

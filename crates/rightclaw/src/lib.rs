@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod codegen;
 pub mod config;
+pub mod cron_spec;
 pub mod doctor;
 pub mod error;
 pub mod init;
