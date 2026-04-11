@@ -78,7 +78,7 @@ src/
 │   └── oauth_callback.rs  # Axum OAuth redirect server
 ├── login.rs            # PTY-driven Claude login flow (expectrl) — menu navigation, URL extraction, code submission
 ├── sync.rs             # Background file sync: settings, schema, skills, .claude.json verification
-├── cron.rs             # Cron engine: load specs, lock check, invoke CC, persist results to DB
+├── cron.rs             # Cron engine: load specs from cron_specs table, lock check, invoke CC, persist results
 ├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery, cleanup
 └── error.rs            # BotError types
 ```
@@ -263,6 +263,7 @@ memories        (id, content, tags, stored_by, source_tool, created_at, deleted_
 memory_events   (memory_id, event_type, actor, timestamp)
 memories_fts    (FTS5 virtual table — BM25 ranking)
 telegram_sessions (chat_id, effective_thread_id, session_uuid, created_at)
+cron_specs      (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at)
 cron_runs       (id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at)
 ```
 
