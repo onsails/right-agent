@@ -2573,6 +2573,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "cron",
  "dirs",
  "hmac",
  "miette",
@@ -2620,7 +2621,6 @@ dependencies = [
  "rightclaw",
  "rusqlite",
  "serde",
- "serde-saphyr",
  "serde_json",
  "shlex",
  "teloxide",
@@ -2630,7 +2630,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "walkdir",
  "which",
 ]
 
@@ -2640,6 +2639,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "axum",
+ "chrono",
  "clap",
  "dashmap",
  "dirs",

@@ -110,34 +110,31 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
         yaml.push_str(&format!("  skipped_runs: {skipped}\n"));
     }
 
-    if let Ok(notify) = serde_json::from_str::<serde_json::Value>(&pending.notify_json) {
+    if let Ok(notify) = serde_json::from_str::<crate::cron::CronNotify>(&pending.notify_json) {
         yaml.push_str("  result:\n");
         yaml.push_str("    notify:\n");
-        if let Some(content) = notify.get("content").and_then(|v| v.as_str()) {
-            yaml.push_str(&format!(
-                "      content: \"{}\"\n",
-                yaml_escape(content)
-            ));
-        }
-        if let Some(atts) = notify.get("attachments").and_then(|v| v.as_array())
+        yaml.push_str(&format!(
+            "      content: \"{}\"\n",
+            yaml_escape(&notify.content)
+        ));
+        if let Some(ref atts) = notify.attachments
             && !atts.is_empty()
         {
             yaml.push_str("      attachments:\n");
             for att in atts {
-                let att_type = att
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("document");
-                let path = att.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let kind_str = serde_json::to_value(att.kind)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "document".to_string());
                 yaml.push_str(&format!(
                     "        - type: \"{}\"\n",
-                    yaml_escape(att_type)
+                    yaml_escape(&kind_str)
                 ));
                 yaml.push_str(&format!(
                     "          path: \"{}\"\n",
-                    yaml_escape(path)
+                    yaml_escape(&att.path)
                 ));
-                if let Some(caption) = att.get("caption").and_then(|v| v.as_str()) {
+                if let Some(ref caption) = att.caption {
                     yaml.push_str(&format!(
                         "          caption: \"{}\"\n",
                         yaml_escape(caption)
@@ -171,6 +168,14 @@ pub async fn run_delivery_loop(
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
+    let conn = match rightclaw::memory::open_connection(&agent_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("cron delivery: DB open failed: {e:#}");
+            return;
+        }
+    };
+
     loop {
         tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
@@ -185,14 +190,6 @@ pub async fn run_delivery_loop(
         if now - last < IDLE_THRESHOLD_SECS {
             continue;
         }
-
-        let conn = match rightclaw::memory::open_connection(&agent_dir) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("cron delivery: DB open failed: {e:#}");
-                continue;
-            }
-        };
 
         let pending = match fetch_pending(&conn) {
             Ok(Some(p)) => p,

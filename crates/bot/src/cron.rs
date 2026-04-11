@@ -162,37 +162,69 @@ async fn execute_job(
         return;
     }
 
-    // Resolve CC binary (same as worker.rs)
-    let cc_bin = match which::which("claude").or_else(|_| which::which("claude-bun")) {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::error!(job = %job_name, "claude binary not found in PATH");
-            update_run_record(&conn, &run_id, None, "failed");
-            std::fs::remove_file(&lock_path).ok();
-            return;
-        }
-    };
-
-    // Build command (D-01: --agent <name>, --output-format json for structured reply parsing)
-    let mut cmd = tokio::process::Command::new(&cc_bin);
-    cmd.arg("-p");
-    cmd.arg("--dangerously-skip-permissions");
-    cmd.arg("--agent").arg(agent_name);
+    // Build claude CLI arguments (first element is "claude" for SSH mode).
+    let mut claude_args: Vec<String> = vec![
+        "claude".into(),
+        "-p".into(),
+        "--dangerously-skip-permissions".into(),
+        "--agent".into(),
+        agent_name.into(),
+    ];
     if let Some(model) = model {
-        cmd.arg("--model").arg(model);
+        claude_args.push("--model".into());
+        claude_args.push(model.into());
     }
-    cmd.arg("--max-budget-usd").arg(format!("{:.2}", spec.max_budget_usd));
-    cmd.arg("--output-format").arg("json");
-    cmd.arg("--json-schema").arg(rightclaw::codegen::CRON_SCHEMA_JSON);
-    cmd.arg("--").arg(&spec.prompt);
-    cmd.env("HOME", agent_dir);
-    // CC internal env var — "0" = skip bundled rg, use system rg from PATH (D-05, D-06, SBOX-02).
-    // Counterintuitive: A_("0")=true means "builtin disabled" -> falls through to system rg.
-    // "1" = use CC's vendored rg (default; broken in nix — vendor binary lacks execute bit).
-    // UNDOCUMENTED: re-verify after CC version bumps.
-    // See: https://github.com/anthropics/claude-code/issues/6415
-    cmd.env("USE_BUILTIN_RIPGREP", "0");
-    cmd.current_dir(agent_dir);
+    claude_args.push("--max-budget-usd".into());
+    claude_args.push(format!("{:.2}", spec.max_budget_usd));
+    claude_args.push("--output-format".into());
+    claude_args.push("json".into());
+    claude_args.push("--json-schema".into());
+    claude_args.push(rightclaw::codegen::CRON_SCHEMA_JSON.into());
+    claude_args.push("--".into());
+    claude_args.push(spec.prompt.clone());
+
+    let mut cmd = if let Some(ssh_config) = ssh_config_path {
+        // Sandbox mode: route through SSH like deliver_through_session does.
+        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let escaped_args: Vec<String> = claude_args
+            .iter()
+            .map(|a| shlex::try_quote(a).expect("valid UTF-8").into_owned())
+            .collect();
+        let claude_cmd = escaped_args.join(" ");
+        let script = format!("cd /sandbox && {claude_cmd}");
+
+        let mut c = tokio::process::Command::new("ssh");
+        c.arg("-F").arg(ssh_config);
+        c.arg(&ssh_host);
+        c.arg("--");
+        c.arg(script);
+        c
+    } else {
+        // Direct exec (no sandbox).
+        let cc_bin = match which::which("claude").or_else(|_| which::which("claude-bun")) {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::error!(job = %job_name, "claude binary not found in PATH");
+                update_run_record(&conn, &run_id, None, "failed");
+                std::fs::remove_file(&lock_path).ok();
+                return;
+            }
+        };
+        let mut c = tokio::process::Command::new(&cc_bin);
+        // Skip "claude" (first element) — it's the binary name for SSH mode.
+        for arg in &claude_args[1..] {
+            c.arg(arg);
+        }
+        c.env("HOME", agent_dir);
+        // CC internal env var — "0" = skip bundled rg, use system rg from PATH (D-05, D-06, SBOX-02).
+        // Counterintuitive: A_("0")=true means "builtin disabled" -> falls through to system rg.
+        // "1" = use CC's vendored rg (default; broken in nix — vendor binary lacks execute bit).
+        // UNDOCUMENTED: re-verify after CC version bumps.
+        // See: https://github.com/anthropics/claude-code/issues/6415
+        c.env("USE_BUILTIN_RIPGREP", "0");
+        c.current_dir(agent_dir);
+        c
+    };
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -434,7 +466,13 @@ fn reconcile_jobs(
     model: &Option<String>,
     ssh_config_path: &Option<std::path::PathBuf>,
 ) {
-    let new_specs = rightclaw::cron_spec::load_specs_from_db(conn);
+    let new_specs = match rightclaw::cron_spec::load_specs_from_db(conn) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to load cron specs from DB: {e}");
+            return;
+        }
+    };
 
     // Abort handles for removed or changed jobs (CRON-06)
     let to_remove: Vec<String> = handles

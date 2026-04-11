@@ -298,64 +298,22 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronCreateParams>,
     ) -> Result<CallToolResult, McpError> {
-        rightclaw::cron_spec::validate_job_name(&params.job_name)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        let schedule_warning = rightclaw::cron_spec::validate_schedule(&params.schedule)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        if params.prompt.trim().is_empty() {
-            return Err(McpError::invalid_params("prompt must not be empty", None));
-        }
-        if let Some(ref ttl) = params.lock_ttl {
-            rightclaw::cron_spec::validate_lock_ttl(ttl)
-                .map_err(|e| McpError::invalid_params(e, None))?;
-        }
-        if let Some(budget) = params.max_budget_usd
-            && budget <= 0.0
-        {
-            return Err(McpError::invalid_params(
-                "max_budget_usd must be greater than 0",
-                None,
-            ));
-        }
-
         let conn = self
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let budget = params.max_budget_usd.unwrap_or(1.0);
-        let result = conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                params.job_name,
-                params.schedule,
-                params.prompt,
-                params.lock_ttl,
-                budget,
-                now,
-                now,
-            ],
-        );
-
-        match result {
-            Ok(_) => {
-                let mut msg = format!("Created cron job '{}'.", params.job_name);
-                if let Some(warning) = schedule_warning {
-                    msg.push_str(&format!(" Warning: {warning}"));
-                }
-                Ok(CallToolResult::success(vec![Content::text(msg)]))
-            }
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
-            {
-                Err(McpError::invalid_params(
-                    format!("job '{}' already exists", params.job_name),
-                    None,
-                ))
-            }
-            Err(e) => Err(McpError::internal_error(format!("insert failed: {e:#}"), None)),
-        }
+        let result = rightclaw::cron_spec::create_spec(
+            &conn,
+            &params.job_name,
+            &params.schedule,
+            &params.prompt,
+            params.lock_ttl.as_deref(),
+            params.max_budget_usd,
+        )
+        .map_err(|e| McpError::invalid_params(e, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            rightclaw::cron_spec::format_result(&result),
+        )]))
     }
 
     #[tool(description = "Update an existing cron job spec (full replacement). All fields are overwritten.")]
@@ -363,59 +321,22 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CronCreateParams>,
     ) -> Result<CallToolResult, McpError> {
-        rightclaw::cron_spec::validate_job_name(&params.job_name)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        let schedule_warning = rightclaw::cron_spec::validate_schedule(&params.schedule)
-            .map_err(|e| McpError::invalid_params(e, None))?;
-        if params.prompt.trim().is_empty() {
-            return Err(McpError::invalid_params("prompt must not be empty", None));
-        }
-        if let Some(ref ttl) = params.lock_ttl {
-            rightclaw::cron_spec::validate_lock_ttl(ttl)
-                .map_err(|e| McpError::invalid_params(e, None))?;
-        }
-        if let Some(budget) = params.max_budget_usd
-            && budget <= 0.0
-        {
-            return Err(McpError::invalid_params(
-                "max_budget_usd must be greater than 0",
-                None,
-            ));
-        }
-
         let conn = self
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let budget = params.max_budget_usd.unwrap_or(1.0);
-        let rows = conn
-            .execute(
-                "UPDATE cron_specs SET schedule = ?2, prompt = ?3, lock_ttl = ?4, max_budget_usd = ?5, updated_at = ?6 \
-                 WHERE job_name = ?1",
-                rusqlite::params![
-                    params.job_name,
-                    params.schedule,
-                    params.prompt,
-                    params.lock_ttl,
-                    budget,
-                    now,
-                ],
-            )
-            .map_err(|e| McpError::internal_error(format!("update failed: {e:#}"), None))?;
-
-        if rows == 0 {
-            return Err(McpError::invalid_params(
-                format!("job '{}' not found", params.job_name),
-                None,
-            ));
-        }
-
-        let mut msg = format!("Updated cron job '{}'.", params.job_name);
-        if let Some(warning) = schedule_warning {
-            msg.push_str(&format!(" Warning: {warning}"));
-        }
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
+        let result = rightclaw::cron_spec::update_spec(
+            &conn,
+            &params.job_name,
+            &params.schedule,
+            &params.prompt,
+            params.lock_ttl.as_deref(),
+            params.max_budget_usd,
+        )
+        .map_err(|e| McpError::invalid_params(e, None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            rightclaw::cron_spec::format_result(&result),
+        )]))
     }
 
     #[tool(description = "Delete a cron job spec. Also removes its lock file if present.")]
@@ -427,34 +348,9 @@ impl MemoryServer {
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let rows = conn
-            .execute(
-                "DELETE FROM cron_specs WHERE job_name = ?1",
-                rusqlite::params![params.job_name],
-            )
-            .map_err(|e| McpError::internal_error(format!("delete failed: {e:#}"), None))?;
-
-        if rows == 0 {
-            return Err(McpError::invalid_params(
-                format!("job '{}' not found", params.job_name),
-                None,
-            ));
-        }
-
-        // Best-effort lock file removal.
-        let lock_path = self
-            .agent_dir
-            .join("crons")
-            .join(".locks")
-            .join(format!("{}.json", params.job_name));
-        if lock_path.exists() {
-            let _ = std::fs::remove_file(&lock_path);
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Deleted cron job '{}'.",
-            params.job_name
-        ))]))
+        let msg = rightclaw::cron_spec::delete_spec(&conn, &params.job_name, &self.agent_dir)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
     #[tool(description = "List all current cron job specs. Returns a JSON array of all configured cron jobs.")]
@@ -466,29 +362,8 @@ impl MemoryServer {
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at \
-                 FROM cron_specs ORDER BY job_name",
-            )
-            .map_err(|e| McpError::internal_error(format!("prepare failed: {e:#}"), None))?;
-        let rows: Vec<serde_json::Value> = stmt
-            .query_map([], |row| {
-                Ok(serde_json::json!({
-                    "job_name": row.get::<_, String>(0)?,
-                    "schedule": row.get::<_, String>(1)?,
-                    "prompt": row.get::<_, String>(2)?,
-                    "lock_ttl": row.get::<_, Option<String>>(3)?,
-                    "max_budget_usd": row.get::<_, f64>(4)?,
-                    "created_at": row.get::<_, String>(5)?,
-                    "updated_at": row.get::<_, String>(6)?,
-                }))
-            })
-            .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
-            .filter_map(|r| r.ok())
-            .collect();
-        let output = serde_json::to_string_pretty(&rows)
-            .map_err(|e| McpError::internal_error(format!("serialization error: {e:#}"), None))?;
+        let output = rightclaw::cron_spec::list_specs(&conn)
+            .map_err(|e| McpError::internal_error(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
