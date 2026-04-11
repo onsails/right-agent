@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthCodeSlot, AuthWatcherFlag, DebugFlag, RefreshTx, RightclawHome, SshConfigPath};
+use super::handler::{handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthCodeSlot, AuthWatcherFlag, DebugFlag, IdleTimestamp, RefreshTx, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -70,6 +70,7 @@ pub async fn run_telegram(
     show_thinking: bool,
     model: Option<String>,
     shutdown: CancellationToken,
+    idle_ts: Arc<IdleTimestamp>,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
@@ -137,7 +138,8 @@ pub async fn run_telegram(
             Arc::clone(&auth_code_slot_arc),
             Arc::clone(&refresh_tx_arc),
             Arc::clone(&settings_arc),
-            Arc::clone(&stop_tokens)
+            Arc::clone(&stop_tokens),
+            Arc::clone(&idle_ts)
         ])
         .build();
 

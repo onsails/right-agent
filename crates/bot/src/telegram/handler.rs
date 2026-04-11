@@ -54,6 +54,11 @@ pub struct AuthCodeSlot(pub Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::
 #[derive(Clone)]
 pub struct RefreshTx(pub tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>);
 
+/// Shared timestamp of last interaction (unix seconds).
+/// Updated by handler on incoming messages and by worker after sending replies.
+#[derive(Clone)]
+pub struct IdleTimestamp(pub Arc<std::sync::atomic::AtomicI64>);
+
 /// Bundled agent invocation settings (reduces dptree injectable arity).
 #[derive(Clone)]
 pub struct AgentSettings {
@@ -107,7 +112,10 @@ pub async fn handle_message(
     auth_code_slot: Arc<AuthCodeSlot>,
     settings: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
+    idle_ts: Arc<IdleTimestamp>,
 ) -> ResponseResult<()> {
+    idle_ts.0.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+
     // Extract text from message body OR caption (media messages use captions)
     let text = msg.text().or(msg.caption()).map(|t| t.to_string());
 
@@ -181,6 +189,7 @@ pub async fn handle_message(
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
                     stop_tokens: Arc::clone(&stop_tokens),
+                    idle_timestamp: Arc::clone(&idle_ts.0),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());
