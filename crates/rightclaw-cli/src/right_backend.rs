@@ -1,0 +1,569 @@
+//! Standalone dispatch layer for RightClaw's built-in MCP tools.
+//!
+//! [`RightBackend`] extracts the tool logic from [`HttpMemoryServer`] into a
+//! struct that accepts `(agent_name, agent_dir, tool_name, args)` and dispatches
+//! manually — no rmcp macro-generated parameter parsing required.
+//! The Aggregator uses this to expose rightclaw tools alongside proxied external
+//! MCP servers.
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, bail};
+use dashmap::DashMap;
+use rmcp::handler::server::tool::schema_for_type;
+use rmcp::model::{CallToolResult, Content, Tool};
+
+use crate::memory_server::{
+    CronCreateParams, CronDeleteParams, CronListParams, CronListRunsParams, CronShowRunParams,
+    CronTriggerParams, DeleteRecordParams, McpAddParams, McpAuthParams, McpListParams,
+    McpRemoveParams, QueryRecordsParams, SearchRecordsParams, StoreRecordParams, cron_run_to_json,
+    entry_to_json,
+};
+
+/// Connection cache keyed by agent name.
+type ConnCache = Arc<DashMap<String, Arc<Mutex<rusqlite::Connection>>>>;
+
+pub struct RightBackend {
+    conn_cache: ConnCache,
+    agents_dir: PathBuf,
+    rightclaw_home: PathBuf,
+}
+
+impl RightBackend {
+    pub fn new(agents_dir: PathBuf, rightclaw_home: PathBuf) -> Self {
+        Self {
+            conn_cache: Arc::new(DashMap::new()),
+            agents_dir,
+            rightclaw_home,
+        }
+    }
+
+    /// Return static tool definitions for all built-in tools.
+    pub fn tools_list(&self) -> Vec<Tool> {
+        vec![
+            // Memory tools
+            Tool::new(
+                "store_record",
+                "Store a tagged record. Content is scanned for prompt injection. Use for structured data (cron results, audit entries, explicit facts) — not for general conversation context. Returns record ID.",
+                schema_for_type::<StoreRecordParams>(),
+            ),
+            Tool::new(
+                "query_records",
+                "Look up records by tag or keyword. Returns matching active records.",
+                schema_for_type::<QueryRecordsParams>(),
+            ),
+            Tool::new(
+                "search_records",
+                "Full-text search records using FTS5. Returns BM25-ranked results.",
+                schema_for_type::<SearchRecordsParams>(),
+            ),
+            Tool::new(
+                "delete_record",
+                "Soft-delete a record by ID. Entry is excluded from queries but preserved in audit log.",
+                schema_for_type::<DeleteRecordParams>(),
+            ),
+            // Cron tools
+            Tool::new(
+                "cron_create",
+                "Create a new cron job spec. The job will be picked up by the cron engine on its next reload cycle.",
+                schema_for_type::<CronCreateParams>(),
+            ),
+            Tool::new(
+                "cron_update",
+                "Update an existing cron job spec (full replacement). All fields are overwritten.",
+                schema_for_type::<CronCreateParams>(),
+            ),
+            Tool::new(
+                "cron_delete",
+                "Delete a cron job spec. Also removes its lock file if present.",
+                schema_for_type::<CronDeleteParams>(),
+            ),
+            Tool::new(
+                "cron_list",
+                "List all current cron job specs. Returns a JSON array of all configured cron jobs.",
+                schema_for_type::<CronListParams>(),
+            ),
+            Tool::new(
+                "cron_list_runs",
+                "List recent cron job runs. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes log_path -- use bash to read the log file directly.",
+                schema_for_type::<CronListRunsParams>(),
+            ),
+            Tool::new(
+                "cron_show_run",
+                "Get full metadata for a single cron job run by its run_id (UUID). Returns the same fields as cron_list_runs. Use log_path with bash to read subprocess output.",
+                schema_for_type::<CronShowRunParams>(),
+            ),
+            Tool::new(
+                "cron_trigger",
+                "Trigger a cron job for immediate execution. The job is queued and will run on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped.",
+                schema_for_type::<CronTriggerParams>(),
+            ),
+            // MCP management tools
+            Tool::new(
+                "mcp_add",
+                "Add an HTTP MCP server to this agent's mcp.json. Use /mcp auth <name> in Telegram to complete OAuth if the server requires authentication.",
+                schema_for_type::<McpAddParams>(),
+            ),
+            Tool::new(
+                "mcp_remove",
+                "Remove an HTTP MCP server from this agent's mcp.json. The 'right' server is protected and cannot be removed.",
+                schema_for_type::<McpRemoveParams>(),
+            ),
+            Tool::new(
+                "mcp_list",
+                "List all configured MCP servers for this agent. Shows name, URL, auth state (present/auth required), source (.claude.json or mcp.json), and kind (http/stdio). Never exposes token values.",
+                schema_for_type::<McpListParams>(),
+            ),
+            Tool::new(
+                "mcp_auth",
+                "Discover the OAuth authorization server for an HTTP MCP server and return its authorization endpoint URL. Use this to confirm the server supports OAuth. To complete authentication, use the Telegram bot command: /mcp auth <server_name>",
+                schema_for_type::<McpAuthParams>(),
+            ),
+            // Bootstrap
+            Tool::new(
+                "bootstrap_done",
+                "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist.",
+                schema_for_type::<CronListParams>(), // empty schema — no params
+            ),
+        ]
+    }
+
+    /// Dispatch a tool call by name.
+    ///
+    /// Returns `Ok(CallToolResult)` on success (including tool-level errors
+    /// surfaced as `CallToolResult::error`). Returns `Err` only for
+    /// infrastructure failures (DB open, mutex poisoned, unknown tool, etc.).
+    pub async fn tools_call(
+        &self,
+        agent_name: &str,
+        agent_dir: &Path,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        match tool_name {
+            "store_record" => self.call_store_record(agent_name, &args),
+            "query_records" => self.call_query_records(agent_name, &args),
+            "search_records" => self.call_search_records(agent_name, &args),
+            "delete_record" => self.call_delete_record(agent_name, &args),
+            "cron_create" => self.call_cron_create(agent_name, &args),
+            "cron_update" => self.call_cron_update(agent_name, &args),
+            "cron_delete" => self.call_cron_delete(agent_name, agent_dir, &args),
+            "cron_list" => self.call_cron_list(agent_name),
+            "cron_list_runs" => self.call_cron_list_runs(agent_name, &args),
+            "cron_show_run" => self.call_cron_show_run(agent_name, &args),
+            "cron_trigger" => self.call_cron_trigger(agent_name, &args),
+            "mcp_add" => self.call_mcp_add(agent_dir, &args),
+            "mcp_remove" => self.call_mcp_remove(agent_dir, &args),
+            "mcp_list" => self.call_mcp_list(agent_dir),
+            "mcp_auth" => self.call_mcp_auth(agent_dir, &args).await,
+            "bootstrap_done" => self.call_bootstrap_done(agent_name),
+            other => bail!("unknown tool: {other}"),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Connection helpers
+    // ------------------------------------------------------------------
+
+    fn get_conn(&self, agent_name: &str) -> Result<Arc<Mutex<rusqlite::Connection>>, anyhow::Error> {
+        if let Some(entry) = self.conn_cache.get(agent_name) {
+            return Ok(Arc::clone(entry.value()));
+        }
+        let db_dir = self.agents_dir.join(agent_name);
+        let conn = rightclaw::memory::open_connection(&db_dir)
+            .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
+        let conn = Arc::new(Mutex::new(conn));
+        self.conn_cache.insert(agent_name.to_owned(), Arc::clone(&conn));
+        Ok(conn)
+    }
+
+    fn lock_conn(
+        conn_arc: &Arc<Mutex<rusqlite::Connection>>,
+    ) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, anyhow::Error> {
+        conn_arc
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poisoned: {e}"))
+    }
+
+    // ------------------------------------------------------------------
+    // Memory tools
+    // ------------------------------------------------------------------
+
+    fn call_store_record(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: StoreRecordParams =
+            serde_json::from_value(args.clone()).context("invalid store_record params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        match rightclaw::memory::store::store_memory(
+            &conn,
+            &params.content,
+            params.tags.as_deref(),
+            Some(agent_name),
+            Some("mcp:store_record"),
+        ) {
+            Ok(id) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "stored record id={id}"
+            ))])),
+            Err(rightclaw::memory::MemoryError::InjectionDetected) => {
+                Ok(CallToolResult::error(vec![Content::text(
+                    "content rejected: possible prompt injection detected",
+                )]))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn call_query_records(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: QueryRecordsParams =
+            serde_json::from_value(args.clone()).context("invalid query_records params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let entries = rightclaw::memory::store::recall_memories(&conn, &params.query)?;
+        let json_values: Vec<serde_json::Value> = entries.iter().map(entry_to_json).collect();
+        let output = serde_json::to_string_pretty(&json_values)?;
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    fn call_search_records(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: SearchRecordsParams =
+            serde_json::from_value(args.clone()).context("invalid search_records params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let entries = rightclaw::memory::store::search_memories(&conn, &params.query)?;
+        let json_values: Vec<serde_json::Value> = entries.iter().map(entry_to_json).collect();
+        let output = serde_json::to_string_pretty(&json_values)?;
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    fn call_delete_record(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: DeleteRecordParams =
+            serde_json::from_value(args.clone()).context("invalid delete_record params")?;
+        let id = params.id;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        match rightclaw::memory::store::forget_memory(&conn, id, Some(agent_name)) {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "deleted record id={id}"
+            ))])),
+            Err(rightclaw::memory::MemoryError::NotFound(_)) => {
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "record id={id} not found or already deleted"
+                ))]))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Cron tools
+    // ------------------------------------------------------------------
+
+    fn call_cron_create(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronCreateParams =
+            serde_json::from_value(args.clone()).context("invalid cron_create params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let result = rightclaw::cron_spec::create_spec(
+            &conn,
+            &params.job_name,
+            &params.schedule,
+            &params.prompt,
+            params.lock_ttl.as_deref(),
+            params.max_budget_usd,
+        )
+        .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            rightclaw::cron_spec::format_result(&result),
+        )]))
+    }
+
+    fn call_cron_update(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronCreateParams =
+            serde_json::from_value(args.clone()).context("invalid cron_update params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let result = rightclaw::cron_spec::update_spec(
+            &conn,
+            &params.job_name,
+            &params.schedule,
+            &params.prompt,
+            params.lock_ttl.as_deref(),
+            params.max_budget_usd,
+        )
+        .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            rightclaw::cron_spec::format_result(&result),
+        )]))
+    }
+
+    fn call_cron_delete(
+        &self,
+        agent_name: &str,
+        agent_dir: &Path,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronDeleteParams =
+            serde_json::from_value(args.clone()).context("invalid cron_delete params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let msg = rightclaw::cron_spec::delete_spec(&conn, &params.job_name, agent_dir)
+            .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
+    }
+
+    fn call_cron_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let output = rightclaw::cron_spec::list_specs(&conn)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    fn call_cron_list_runs(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronListRunsParams =
+            serde_json::from_value(args.clone()).context("invalid cron_list_runs params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let limit = params.limit.unwrap_or(20);
+        let mut stmt = conn.prepare(
+            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path
+             FROM cron_runs
+             WHERE (?1 IS NULL OR job_name = ?1)
+             ORDER BY started_at DESC
+             LIMIT ?2",
+        )?;
+        let rows: Vec<serde_json::Value> = stmt
+            .query_map(rusqlite::params![params.job_name, limit], |row| {
+                Ok(cron_run_to_json(
+                    &row.get::<_, String>(0)?,
+                    &row.get::<_, String>(1)?,
+                    &row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?.as_deref(),
+                    row.get::<_, Option<i64>>(4)?,
+                    &row.get::<_, String>(5)?,
+                    &row.get::<_, String>(6)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        let output = serde_json::to_string_pretty(&rows)?;
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    fn call_cron_show_run(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronShowRunParams =
+            serde_json::from_value(args.clone()).context("invalid cron_show_run params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let result = conn.query_row(
+            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path
+             FROM cron_runs WHERE id = ?1",
+            rusqlite::params![params.run_id],
+            |row| {
+                Ok(cron_run_to_json(
+                    &row.get::<_, String>(0)?,
+                    &row.get::<_, String>(1)?,
+                    &row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?.as_deref(),
+                    row.get::<_, Option<i64>>(4)?,
+                    &row.get::<_, String>(5)?,
+                    &row.get::<_, String>(6)?,
+                ))
+            },
+        );
+        match result {
+            Ok(val) => {
+                let output = serde_json::to_string_pretty(&val)?;
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(CallToolResult::success(vec![
+                Content::text(format!("cron run '{}' not found", params.run_id)),
+            ])),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn call_cron_trigger(
+        &self,
+        agent_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: CronTriggerParams =
+            serde_json::from_value(args.clone()).context("invalid cron_trigger params")?;
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let msg = rightclaw::cron_spec::trigger_spec(&conn, &params.job_name)
+            .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
+        Ok(CallToolResult::success(vec![Content::text(msg)]))
+    }
+
+    // ------------------------------------------------------------------
+    // MCP management tools
+    // ------------------------------------------------------------------
+
+    fn call_mcp_add(
+        &self,
+        agent_dir: &Path,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: McpAddParams =
+            serde_json::from_value(args.clone()).context("invalid mcp_add params")?;
+        if !params.url.starts_with("https://") {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "URL must start with 'https://' -- got: {}",
+                params.url
+            ))]));
+        }
+        let mcp_json_path = agent_dir.join("mcp.json");
+        rightclaw::mcp::credentials::add_http_server(&mcp_json_path, &params.name, &params.url)?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Added MCP server '{}' ({}).",
+            params.name, params.url
+        ))]))
+    }
+
+    fn call_mcp_remove(
+        &self,
+        agent_dir: &Path,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: McpRemoveParams =
+            serde_json::from_value(args.clone()).context("invalid mcp_remove params")?;
+        if params.name == rightclaw::mcp::PROTECTED_MCP_SERVER {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Cannot remove '{}' -- required for core agent functionality",
+                params.name
+            ))]));
+        }
+        let mcp_json_path = agent_dir.join("mcp.json");
+        match rightclaw::mcp::credentials::remove_http_server(&mcp_json_path, &params.name) {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Removed MCP server '{}'.",
+                params.name
+            ))])),
+            Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Server '{}' not found in mcp.json.",
+                    params.name
+                ))]))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn call_mcp_list(&self, agent_dir: &Path) -> Result<CallToolResult, anyhow::Error> {
+        let statuses = rightclaw::mcp::detect::mcp_auth_status(agent_dir)?;
+        let items: Vec<serde_json::Value> = statuses
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "url": s.url,
+                    "auth": s.state.to_string(),
+                    "source": s.source.to_string(),
+                    "kind": s.kind.to_string(),
+                })
+            })
+            .collect();
+        let output = serde_json::to_string_pretty(&items)?;
+        Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    async fn call_mcp_auth(
+        &self,
+        agent_dir: &Path,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: McpAuthParams =
+            serde_json::from_value(args.clone()).context("invalid mcp_auth params")?;
+        let mcp_json_path = agent_dir.join("mcp.json");
+        let servers = rightclaw::mcp::credentials::list_http_servers(&mcp_json_path)?;
+        let server_url = servers
+            .iter()
+            .find(|(name, _)| name == &params.server_name)
+            .map(|(_, url)| url.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Server '{}' not found in mcp.json. Add it first with mcp_add.",
+                    params.server_name
+                )
+            })?;
+
+        let http_client = reqwest::Client::new();
+        let metadata = rightclaw::mcp::oauth::discover_as(&http_client, &server_url).await?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Server '{}' supports OAuth. Authorization endpoint: {}\n\nTo authenticate, run in Telegram: /mcp auth {}",
+            params.server_name, metadata.authorization_endpoint, params.server_name
+        ))]))
+    }
+
+    // ------------------------------------------------------------------
+    // Bootstrap
+    // ------------------------------------------------------------------
+
+    fn call_bootstrap_done(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
+        let agent_dir = self.agents_dir.join(agent_name);
+        let required = ["IDENTITY.md", "SOUL.md", "USER.md"];
+        let missing: Vec<&str> = required
+            .iter()
+            .filter(|f| !agent_dir.join(f).exists())
+            .copied()
+            .collect();
+
+        if missing.is_empty() {
+            let bootstrap_path = agent_dir.join("BOOTSTRAP.md");
+            if bootstrap_path.exists() {
+                std::fs::remove_file(&bootstrap_path)
+                    .context("failed to remove BOOTSTRAP.md")?;
+            }
+            Ok(CallToolResult::success(vec![Content::text(
+                "Bootstrap complete! IDENTITY.md, SOUL.md, and USER.md verified. \
+                 Your identity files are now active.",
+            )]))
+        } else {
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Cannot complete bootstrap — missing files: {}. \
+                 Create them first, then call bootstrap_done again.",
+                missing.join(", ")
+            ))]))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "right_backend_tests.rs"]
+mod tests;

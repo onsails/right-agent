@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod memory_server;
 mod memory_server_http;
+pub(crate) mod right_backend;
 mod wizard;
 
 #[derive(Parser)]

@@ -28,6 +28,7 @@ rusqlite = { workspace = true }
 axum = { workspace = true }
 dashmap = { workspace = true }
 tokio-util = { workspace = true }
+anyhow = { workspace = true }
 http = "1.0"
 subtle = { workspace = true }
 inquire = { workspace = true }
