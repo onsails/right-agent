@@ -17,10 +17,15 @@ use rmcp::model::{
     PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService,
+    session::local::LocalSessionManager,
+};
 use rmcp::ErrorData as McpError;
 use rightclaw::mcp::proxy::BackendStatus;
+use tokio_util::sync::CancellationToken;
 
-use crate::memory_server_http::AgentInfo;
+use crate::memory_server_http::{AgentInfo, AgentTokenMap, bearer_auth_middleware};
 use crate::right_backend::RightBackend;
 
 /// Maximum characters per backend in merged instructions.
@@ -227,7 +232,7 @@ impl Aggregator {
     /// In stateless mode, each HTTP POST creates a fresh `Aggregator`.
     pub(crate) fn factory(
         dispatcher: Arc<ToolDispatcher>,
-    ) -> impl FnMut() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> + Clone {
+    ) -> impl Fn() -> Result<Self, std::io::Error> + Send + Sync + 'static {
         move || {
             Ok(Self {
                 dispatcher: dispatcher.clone(),
@@ -306,6 +311,59 @@ impl rmcp::ServerHandler for Aggregator {
         let _ = name;
         None
     }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP entry point
+// ---------------------------------------------------------------------------
+
+/// Run the MCP Aggregator over HTTP with per-agent Bearer authentication.
+///
+/// Replaces `run_memory_server_http` — same auth middleware, but dispatches
+/// through the prefix-based `ToolDispatcher` instead of `HttpMemoryServer`.
+pub(crate) async fn run_aggregator_http(
+    port: u16,
+    token_map: AgentTokenMap,
+    dispatcher: Arc<ToolDispatcher>,
+    agents_dir: PathBuf,
+) -> miette::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let ct = CancellationToken::new();
+
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_sse_keep_alive(None)
+        .with_cancellation_token(ct.clone());
+
+    let session_manager = Arc::new(LocalSessionManager::default());
+    let factory = Aggregator::factory(dispatcher);
+
+    let mcp_service = StreamableHttpService::new(factory, session_manager, config);
+
+    let app = axum::Router::new()
+        .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn_with_state(
+            token_map,
+            bearer_auth_middleware,
+        ));
+
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .map_err(|e| miette::miette!("bind to 0.0.0.0:{port} failed: {e:#}"))?;
+
+    tracing::info!(port, agents = ?agents_dir, "MCP Aggregator listening");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { ct.cancelled().await })
+        .await
+        .map_err(|e| miette::miette!("HTTP server error: {e:#}"))
 }
 
 #[cfg(test)]

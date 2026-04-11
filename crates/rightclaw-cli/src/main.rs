@@ -284,20 +284,38 @@ async fn main() -> miette::Result<()> {
             .map_err(|e| miette::miette!("failed to parse token map: {e:#}"))?;
 
         let mut agent_map = std::collections::HashMap::new();
-        for (name, token) in raw_map {
-            let dir = agents_dir.join(&name);
-            agent_map.insert(token, memory_server_http::AgentInfo {
-                name,
+        for (name, token) in &raw_map {
+            let dir = agents_dir.join(name);
+            agent_map.insert(token.clone(), memory_server_http::AgentInfo {
+                name: name.clone(),
                 dir,
             });
         }
         let token_map = std::sync::Arc::new(tokio::sync::RwLock::new(agent_map));
 
-        return memory_server_http::run_memory_server_http(
+        // Build ToolDispatcher with a BackendRegistry per agent
+        let dispatcher = std::sync::Arc::new(aggregator::ToolDispatcher {
+            agents: dashmap::DashMap::new(),
+        });
+
+        for (name, _token) in &raw_map {
+            let agent_dir = agents_dir.join(name);
+            let right = right_backend::RightBackend::new(agents_dir.clone(), home.clone());
+            let proxies = std::collections::HashMap::new(); // ProxyBackend added in Task 8
+
+            dispatcher.agents.insert(name.clone(), aggregator::BackendRegistry {
+                right,
+                proxies,
+                agent_name: name.clone(),
+                agent_dir,
+            });
+        }
+
+        return aggregator::run_aggregator_http(
             port,
             token_map,
+            dispatcher,
             agents_dir,
-            home,
         ).await;
     }
 

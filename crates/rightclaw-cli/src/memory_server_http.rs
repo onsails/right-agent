@@ -543,7 +543,7 @@ impl rmcp::ServerHandler for HttpMemoryServer {
 // Bearer auth middleware
 // ---------------------------------------------------------------------------
 
-async fn bearer_auth_middleware(
+pub(crate) async fn bearer_auth_middleware(
     axum::extract::State(token_map): axum::extract::State<AgentTokenMap>,
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
