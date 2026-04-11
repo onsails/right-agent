@@ -156,7 +156,7 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
         std::fs::create_dir(&sub_dir).map_err(|e| {
             miette::miette!("reverse sync: failed to create sub dir for {filename}: {e:#}")
         })?;
-        let sandbox_path = format!("/sandbox/.claude/agents/{filename}");
+        let sandbox_path = format!("/sandbox/{filename}");
         join_set.spawn(async move {
             let result =
                 rightclaw::openshell::download_file(&sandbox, &sandbox_path, &sub_dir).await;
