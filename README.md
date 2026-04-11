@@ -7,13 +7,8 @@ Multi-agent runtime for Claude Code. Sandboxed. Subscription-compliant. Everythi
 > Full installation guide: [docs/INSTALL.md](docs/INSTALL.md)
 
 **Required:**
-- [Rust](https://rustup.rs/) toolchain
-- [process-compose](https://github.com/F1bonacc1/process-compose) v1.100.0+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (unsandboxed agents authenticate locally; sandboxed agents authenticate via Telegram login flow)
 - Telegram bot token (via [@BotFather](https://t.me/BotFather))
-
-**For sandboxed agents:**
-- [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) (only required when agents use `sandbox: mode: openshell`)
 
 **Highly recommended:**
 - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) (authenticated, with a named tunnel)
@@ -21,7 +16,7 @@ Multi-agent runtime for Claude Code. Sandboxed. Subscription-compliant. Everythi
 ## Quick Start
 
 ```sh
-cargo install --path crates/rightclaw-cli
+curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
 rightclaw init --telegram-token <YOUR_BOT_TOKEN>
 rightclaw up
 ```

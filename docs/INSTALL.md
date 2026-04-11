@@ -68,6 +68,14 @@ cloudflared tunnel login
 cloudflared tunnel create rightclaw
 ```
 
+## Quick Install
+
+Installs RightClaw, process-compose, and OpenShell:
+
+```sh
+curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
+```
+
 ## Build from Source
 
 ```sh
@@ -75,8 +83,6 @@ git clone https://github.com/onsails/rightclaw.git
 cd rightclaw
 cargo install --path crates/rightclaw-cli
 ```
-
-> Binary distribution via homebrew, nix, and GitHub releases is coming soon.
 
 ## Setup
 
