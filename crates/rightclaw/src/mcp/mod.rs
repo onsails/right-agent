@@ -1,6 +1,7 @@
 pub mod credentials;
 pub mod detect;
 pub mod oauth;
+pub mod proxy;
 pub mod refresh;
 
 /// Name of the built-in MCP server that rightclaw manages.
