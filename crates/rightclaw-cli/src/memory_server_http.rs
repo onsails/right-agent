@@ -283,13 +283,13 @@ impl HttpMemoryServer {
             rightclaw::cron_spec::validate_lock_ttl(ttl)
                 .map_err(|e| McpError::invalid_params(e, None))?;
         }
-        if let Some(budget) = params.max_budget_usd {
-            if budget <= 0.0 {
-                return Err(McpError::invalid_params(
-                    "max_budget_usd must be greater than 0",
-                    None,
-                ));
-            }
+        if let Some(budget) = params.max_budget_usd
+            && budget <= 0.0
+        {
+            return Err(McpError::invalid_params(
+                "max_budget_usd must be greater than 0",
+                None,
+            ));
         }
 
         let conn_arc = self.get_conn_for_agent(&agent)?;
@@ -349,13 +349,13 @@ impl HttpMemoryServer {
             rightclaw::cron_spec::validate_lock_ttl(ttl)
                 .map_err(|e| McpError::invalid_params(e, None))?;
         }
-        if let Some(budget) = params.max_budget_usd {
-            if budget <= 0.0 {
-                return Err(McpError::invalid_params(
-                    "max_budget_usd must be greater than 0",
-                    None,
-                ));
-            }
+        if let Some(budget) = params.max_budget_usd
+            && budget <= 0.0
+        {
+            return Err(McpError::invalid_params(
+                "max_budget_usd must be greater than 0",
+                None,
+            ));
         }
 
         let conn_arc = self.get_conn_for_agent(&agent)?;
