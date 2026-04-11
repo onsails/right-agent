@@ -11,7 +11,7 @@ fn make_backend() -> (RightBackend, PathBuf, TempDir) {
     let tmp = TempDir::new().expect("tempdir");
     let agents_dir = tmp.path().join("agents");
     std::fs::create_dir_all(&agents_dir).expect("create agents dir");
-    let backend = RightBackend::new(agents_dir.clone(), tmp.path().to_path_buf());
+    let backend = RightBackend::new(agents_dir.clone());
     (backend, agents_dir, tmp)
 }
 

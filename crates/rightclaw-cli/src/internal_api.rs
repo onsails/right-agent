@@ -158,7 +158,9 @@ async fn handle_mcp_add(
 
     // Insert into proxies map (clone Arc<RwLock> to avoid holding DashMap guard across await)
     let proxies_lock = {
-        let registry = dispatcher.agents.get(&req.agent).unwrap();
+        let Some(registry) = dispatcher.agents.get(&req.agent) else {
+            return not_found("agent_not_found").into_response();
+        };
         Arc::clone(&registry.proxies)
     };
     {
@@ -334,7 +336,7 @@ mod tests {
         let agent_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
 
-        let right = RightBackend::new(agents_dir, tmp.to_path_buf());
+        let right = RightBackend::new(agents_dir);
         let registry = BackendRegistry {
             right,
             proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
