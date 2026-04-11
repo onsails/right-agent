@@ -25,6 +25,12 @@ pub const REPLY_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":
 /// server-side file-presence check (`should_accept_bootstrap`) gates completion.
 pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"bootstrap_complete":{"type":"boolean"},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content","bootstrap_complete"]}"#;
 
+/// JSON schema for cron job structured output.
+///
+/// `summary` is always required. `notify` is null when the cron ran silently
+/// (no user notification needed). When `notify` is present, `content` is required.
+pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"type":["object","null"],"properties":{"content":{"type":"string"},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]},"summary":{"type":"string"}},"required":["summary"]}"#;
+
 /// Generate a normal-mode agent definition with `@` file references.
 ///
 /// Order is cache-optimized: static files first (AGENTS, SOUL), dynamic last (USER, TOOLS).
