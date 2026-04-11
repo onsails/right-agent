@@ -1,4 +1,9 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use rusqlite::OptionalExtension as _;
+
+use crate::telegram::handler::IdleTimestamp;
 
 /// A pending cron result ready for delivery.
 #[derive(Debug)]
@@ -151,6 +156,231 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
     }
 
     yaml
+}
+
+const IDLE_THRESHOLD_SECS: i64 = 300; // 5 minutes
+const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
+
+/// Main delivery loop. Runs as a tokio task.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_delivery_loop(
+    agent_dir: PathBuf,
+    agent_name: String,
+    model: Option<String>,
+    bot: crate::telegram::BotType,
+    notify_chat_ids: Vec<i64>,
+    idle_ts: Arc<IdleTimestamp>,
+    ssh_config_path: Option<PathBuf>,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    tracing::info!(agent = %agent_name, "cron delivery loop started");
+
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
+            () = shutdown.cancelled() => {
+                tracing::info!("cron delivery loop shutting down");
+                return;
+            }
+        }
+
+        let last = idle_ts.0.load(std::sync::atomic::Ordering::Relaxed);
+        let now = chrono::Utc::now().timestamp();
+        if now - last < IDLE_THRESHOLD_SECS {
+            continue;
+        }
+
+        let conn = match rightclaw::memory::open_connection(&agent_dir) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("cron delivery: DB open failed: {e:#}");
+                continue;
+            }
+        };
+
+        let pending = match fetch_pending(&conn) {
+            Ok(Some(p)) => p,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::error!("cron delivery: fetch_pending failed: {e:#}");
+                continue;
+            }
+        };
+
+        let (latest_id, skipped) = match deduplicate_job(&conn, &pending.job_name) {
+            Ok(Some((id, s))) => (id, s),
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::error!("cron delivery: deduplicate failed: {e:#}");
+                continue;
+            }
+        };
+
+        let to_deliver = match fetch_by_id(&conn, &latest_id) {
+            Ok(Some(p)) => p,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::error!("cron delivery: fetch_by_id failed: {e:#}");
+                continue;
+            }
+        };
+
+        let yaml = format_cron_yaml(&to_deliver, skipped);
+        tracing::info!(
+            job = %to_deliver.job_name,
+            run_id = %to_deliver.id,
+            skipped,
+            "delivering cron result through main session"
+        );
+
+        match deliver_through_session(
+            &yaml,
+            &agent_dir,
+            &agent_name,
+            model.as_deref(),
+            &bot,
+            &notify_chat_ids,
+            ssh_config_path.as_deref(),
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Err(e) = mark_delivered(&conn, &to_deliver.id) {
+                    tracing::error!(run_id = %to_deliver.id, "mark_delivered failed: {e:#}");
+                }
+                let outbox_dir = agent_dir.join("outbox").join("cron").join(&to_deliver.id);
+                if outbox_dir.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&outbox_dir) {
+                        tracing::warn!(run_id = %to_deliver.id, "outbox cleanup failed: {e:#}");
+                    }
+                }
+                idle_ts
+                    .0
+                    .store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(e) => {
+                tracing::error!(
+                    job = %to_deliver.job_name,
+                    run_id = %to_deliver.id,
+                    "cron delivery failed: {e:#}"
+                );
+            }
+        }
+    }
+}
+
+/// Invoke the main CC session with cron result YAML and send the reply to Telegram.
+async fn deliver_through_session(
+    yaml_input: &str,
+    agent_dir: &Path,
+    agent_name: &str,
+    model: Option<&str>,
+    bot: &crate::telegram::BotType,
+    notify_chat_ids: &[i64],
+    ssh_config_path: Option<&Path>,
+) -> Result<(), String> {
+    use std::process::Stdio;
+
+    if notify_chat_ids.is_empty() {
+        return Err("no notify_chat_ids configured".into());
+    }
+
+    let chat_id = notify_chat_ids[0];
+    let eff_thread_id: i64 = 0;
+
+    let conn = rightclaw::memory::open_connection(agent_dir)
+        .map_err(|e| format!("DB open: {e:#}"))?;
+
+    let session_id = crate::telegram::session::get_active_session(&conn, chat_id, eff_thread_id)
+        .map_err(|e| format!("session lookup: {e:#}"))?
+        .map(|s| s.root_session_id);
+
+    let cc_bin = which::which("claude")
+        .or_else(|_| which::which("claude-bun"))
+        .map_err(|_| "claude binary not found in PATH".to_string())?;
+
+    let mut cmd = tokio::process::Command::new(&cc_bin);
+    cmd.arg("-p");
+    cmd.arg("--dangerously-skip-permissions");
+    cmd.arg("--agent").arg(agent_name);
+    if let Some(m) = model {
+        cmd.arg("--model").arg(m);
+    }
+    cmd.arg("--max-budget-usd").arg("0.05");
+    cmd.arg("--max-turns").arg("3");
+    cmd.arg("--output-format").arg("json");
+
+    if let Some(ref sid) = session_id {
+        cmd.arg("--resume").arg(sid);
+    }
+
+    let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
+    if let Ok(schema) = std::fs::read_to_string(&reply_schema_path) {
+        cmd.arg("--json-schema").arg(schema);
+    }
+
+    cmd.env("HOME", agent_dir);
+    cmd.env("USE_BUILTIN_RIPGREP", "0");
+    cmd.current_dir(agent_dir);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.kill_on_drop(true);
+
+    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e:#}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(yaml_input.as_bytes())
+            .await
+            .map_err(|e| format!("stdin write: {e:#}"))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("wait_with_output: {e:#}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("CC exited with {}: {stderr}", output.status));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let (reply, _) =
+        crate::telegram::worker::parse_reply_output(&raw).map_err(|e| format!("reply parse: {e}"))?;
+
+    if let Some(ref content) = reply.content {
+        use teloxide::prelude::Requester as _;
+        for &cid in notify_chat_ids {
+            if let Err(e) = bot.send_message(teloxide::types::ChatId(cid), content).await {
+                tracing::error!(chat_id = cid, "cron delivery: Telegram send failed: {e:#}");
+            }
+        }
+    }
+
+    if let Some(ref atts) = reply.attachments {
+        if !atts.is_empty() {
+            for &cid in notify_chat_ids {
+                if let Err(e) = crate::telegram::attachments::send_attachments(
+                    atts,
+                    bot,
+                    teloxide::types::ChatId(cid),
+                    0,
+                    agent_dir,
+                    ssh_config_path,
+                    agent_name,
+                )
+                .await
+                {
+                    tracing::error!(chat_id = cid, "cron delivery: attachment send failed: {e:#}");
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
