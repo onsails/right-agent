@@ -22,7 +22,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
 };
 use rmcp::ErrorData as McpError;
-use rightclaw::mcp::proxy::BackendStatus;
+use rightclaw::mcp::proxy::{BackendStatus, ProxyBackend};
 use tokio_util::sync::CancellationToken;
 
 use crate::memory_server_http::{AgentInfo, AgentTokenMap, bearer_auth_middleware};
@@ -37,14 +37,9 @@ pub(crate) fn split_prefix(tool_name: &str) -> Option<(&str, &str)> {
     tool_name.split_once("__")
 }
 
-/// Lightweight handle for a registered external MCP server.
-/// Full `ProxyBackend` functionality (connect, `tools_call`) added in Task 8.
+/// Handle wrapping a `ProxyBackend` for registration in `BackendRegistry`.
 pub(crate) struct ProxyHandle {
-    pub name: String,
-    pub url: String,
-    pub status: tokio::sync::RwLock<BackendStatus>,
-    pub tools: tokio::sync::RwLock<Vec<Tool>>,
-    pub instructions: tokio::sync::RwLock<Option<String>>,
+    pub backend: ProxyBackend,
 }
 
 /// Per-agent backend management: built-in tools + external proxy handles.
@@ -72,16 +67,15 @@ impl BackendRegistry {
     pub(crate) async fn dispatch_to_proxy(
         &self,
         proxy_name: &str,
-        _tool: &str,
-        _args: serde_json::Value,
+        tool: &str,
+        args: serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
-        if !self.proxies.contains_key(proxy_name) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+        let proxy = self.proxies.get(proxy_name).ok_or_else(|| {
+            anyhow::anyhow!(
                 "Server '{proxy_name}' not found. It may have been removed."
-            ))]));
-        }
-        // Full proxy dispatch implemented in Task 8.
-        bail!("proxy dispatch not yet implemented for '{proxy_name}'")
+            )
+        })?;
+        Ok(proxy.backend.tools_call(tool, args).await?)
     }
 
     /// List all registered proxy backends with status info.
@@ -94,8 +88,8 @@ impl BackendRegistry {
 
         let mut lines = Vec::with_capacity(self.proxies.len());
         for (name, handle) in &self.proxies {
-            let status = *handle.status.read().await;
-            let tool_count = handle.tools.read().await.len();
+            let status = handle.backend.status().await;
+            let tool_count = handle.backend.tools().await.len();
             let status_str = match status {
                 BackendStatus::Connected => "connected",
                 BackendStatus::NeedsAuth => "needs_auth",
@@ -103,7 +97,7 @@ impl BackendRegistry {
             };
             lines.push(format!(
                 "- {name}: {status_str} ({tool_count} tools) url={url}",
-                url = handle.url
+                url = handle.backend.url()
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
@@ -126,8 +120,7 @@ impl BackendRegistry {
         parts.push("## RightClaw Built-in Tools\nMemory, cron, and MCP management tools.".into());
 
         for (name, handle) in &self.proxies {
-            let instr_guard = handle.instructions.read().await;
-            if let Some(instr) = instr_guard.as_deref() {
+            if let Some(ref instr) = handle.backend.instructions().await {
                 let truncated = if instr.len() > INSTRUCTIONS_TRUNCATION_LIMIT {
                     format!(
                         "## {name}\n{}... (truncated)",
@@ -194,9 +187,10 @@ impl ToolDispatcher {
 
         // Add prefixed proxy tools
         for (proxy_name, handle) in &registry.proxies {
-            // We read the tools under a blocking lock which is fine for RwLock
-            // since tools_list is not async. Use try_read to avoid blocking.
-            if let Ok(proxy_tools) = handle.tools.try_read() {
+            // We read the tools using try_read on the internal lock via a
+            // synchronous accessor. tools_list is not async to keep the
+            // ServerHandler impl simple. Fallback: skip if lock is contended.
+            if let Some(proxy_tools) = handle.backend.try_tools() {
                 for t in proxy_tools.iter() {
                     let prefixed_name = format!("{proxy_name}__{}", t.name);
                     let mut prefixed = t.clone();
@@ -465,15 +459,11 @@ mod tests {
             .dispatch("test-agent", "notion__search", serde_json::json!({}))
             .await;
 
-        let ctr = result.unwrap();
-        assert_eq!(ctr.is_error, Some(true));
-        let text = match &ctr.content[0].raw {
-            rmcp::model::RawContent::Text(t) => t.text.as_str(),
-            _ => panic!("expected text content"),
-        };
+        let err = result.unwrap_err();
+        let msg = format!("{err:#}");
         assert!(
-            text.contains("Server 'notion' not found"),
-            "unexpected error: {text}"
+            msg.contains("Server 'notion' not found"),
+            "unexpected error: {msg}"
         );
     }
 

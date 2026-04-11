@@ -5,12 +5,51 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
-use rmcp::model::ClientJsonRpcMessage;
+use rmcp::model::{CallToolRequestParams, CallToolResult, ClientJsonRpcMessage, Tool};
+use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::{
-    StreamableHttpClient, StreamableHttpError, StreamableHttpPostResponse,
+    StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+    StreamableHttpError, StreamableHttpPostResponse,
 };
+use rmcp::ServiceExt as _;
 use sse_stream::{Error as SseError, Sse};
+use thiserror::Error;
 use tokio::sync::RwLock;
+
+/// Errors from proxy backend operations.
+#[derive(Debug, Error)]
+pub enum ProxyError {
+    #[error("MCP client initialization failed for '{server}': {source}")]
+    InitFailed {
+        server: String,
+        #[source]
+        source: rmcp::service::ClientInitializeError,
+    },
+
+    #[error("list_tools failed for '{server}': {source}")]
+    ListToolsFailed {
+        server: String,
+        #[source]
+        source: rmcp::service::ServiceError,
+    },
+
+    #[error("call_tool '{tool}' failed on '{server}': {source}")]
+    CallToolFailed {
+        server: String,
+        tool: String,
+        #[source]
+        source: rmcp::service::ServiceError,
+    },
+
+    #[error("Authentication required for '{server}'. Use /mcp auth {server} in Telegram.")]
+    NeedsAuth { server: String },
+
+    #[error("Server '{server}' is currently unreachable.")]
+    Unreachable { server: String },
+
+    #[error("No active MCP session for '{server}'")]
+    NoSession { server: String },
+}
 
 /// Status of a ProxyBackend connection to an upstream MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,9 +142,233 @@ impl StreamableHttpClient for DynamicAuthClient {
     }
 }
 
+/// MCP client backend that connects to a single upstream HTTP MCP server.
+///
+/// Manages the client session lifecycle, caches the upstream tool list and
+/// instructions, and forwards tool calls through the MCP client session.
+pub struct ProxyBackend {
+    server_name: String,
+    url: String,
+    cached_tools: RwLock<Vec<Tool>>,
+    cached_instructions: RwLock<Option<String>>,
+    status: RwLock<BackendStatus>,
+    token: Arc<RwLock<Option<String>>>,
+    /// Active MCP client session handle.
+    client: RwLock<Option<RunningService<RoleClient, ()>>>,
+}
+
+impl ProxyBackend {
+    pub fn new(server_name: String, url: String, token: Arc<RwLock<Option<String>>>) -> Self {
+        Self {
+            server_name,
+            url,
+            cached_tools: RwLock::new(Vec::new()),
+            cached_instructions: RwLock::new(None),
+            status: RwLock::new(BackendStatus::Unreachable),
+            token,
+            client: RwLock::new(None),
+        }
+    }
+
+    /// Connect to upstream, initialize the MCP session, and fetch tools.
+    pub async fn connect(&self, http_client: reqwest::Client) -> Result<(), ProxyError> {
+        let dynamic = DynamicAuthClient::new(http_client, self.token.clone());
+        let config = StreamableHttpClientTransportConfig::with_uri(self.url.clone());
+        let transport =
+            StreamableHttpClientTransport::<DynamicAuthClient>::with_client(dynamic, config);
+
+        // `()` is a minimal no-op ClientHandler — we don't need server→client notifications.
+        let client: RunningService<RoleClient, ()> =
+            ().serve(transport).await.map_err(|e| ProxyError::InitFailed {
+                server: self.server_name.clone(),
+                source: e,
+            })?;
+
+        // Extract server instructions from the initialize response.
+        if let Some(server_info) = client.peer().peer_info() {
+            if let Some(ref instructions) = server_info.instructions {
+                *self.cached_instructions.write().await = Some(instructions.clone());
+            }
+        }
+
+        // Fetch and cache upstream tools, filtering out internal tools (contain `__`).
+        let tools = client
+            .peer()
+            .list_all_tools()
+            .await
+            .map_err(|e| ProxyError::ListToolsFailed {
+                server: self.server_name.clone(),
+                source: e,
+            })?;
+
+        let filtered: Vec<Tool> = tools
+            .into_iter()
+            .filter(|t| !t.name.contains("__"))
+            .collect();
+
+        *self.cached_tools.write().await = filtered;
+        *self.client.write().await = Some(client);
+        *self.status.write().await = BackendStatus::Connected;
+
+        tracing::info!(
+            server = %self.server_name,
+            tool_count = self.cached_tools.read().await.len(),
+            "upstream MCP server connected"
+        );
+
+        Ok(())
+    }
+
+    /// Forward a tool call to the upstream MCP server.
+    pub async fn tools_call(
+        &self,
+        tool_name: &str,
+        args: serde_json::Value,
+    ) -> Result<CallToolResult, ProxyError> {
+        let status = *self.status.read().await;
+        match status {
+            BackendStatus::NeedsAuth => {
+                return Err(ProxyError::NeedsAuth {
+                    server: self.server_name.clone(),
+                });
+            }
+            BackendStatus::Unreachable => {
+                return Err(ProxyError::Unreachable {
+                    server: self.server_name.clone(),
+                });
+            }
+            BackendStatus::Connected => {}
+        }
+
+        let client_guard = self.client.read().await;
+        let client = client_guard.as_ref().ok_or_else(|| ProxyError::NoSession {
+            server: self.server_name.clone(),
+        })?;
+
+        let arguments = match args {
+            serde_json::Value::Object(map) => Some(map),
+            _ => None,
+        };
+
+        let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(
+            arguments.unwrap_or_default(),
+        );
+
+        let result = client
+            .peer()
+            .call_tool(params)
+            .await
+            .map_err(|e| ProxyError::CallToolFailed {
+                server: self.server_name.clone(),
+                tool: tool_name.to_owned(),
+                source: e,
+            })?;
+
+        Ok(result)
+    }
+
+    /// Get cached tool list.
+    pub async fn tools(&self) -> Vec<Tool> {
+        self.cached_tools.read().await.clone()
+    }
+
+    /// Get cached instructions.
+    pub async fn instructions(&self) -> Option<String> {
+        self.cached_instructions.read().await.clone()
+    }
+
+    /// Non-blocking attempt to read cached tools. Returns `None` if the lock
+    /// is currently held by a writer (e.g., during a concurrent `connect`).
+    pub fn try_tools(&self) -> Option<Vec<Tool>> {
+        self.cached_tools.try_read().ok().map(|g| g.clone())
+    }
+
+    /// Current connection status.
+    pub async fn status(&self) -> BackendStatus {
+        *self.status.read().await
+    }
+
+    /// Set the connection status (e.g., after an auth failure or reconnect).
+    pub async fn set_status(&self, status: BackendStatus) {
+        *self.status.write().await = status;
+    }
+
+    /// Server name this backend connects to.
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// Upstream URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn proxy_backend_new_starts_unreachable() {
+        let token = Arc::new(RwLock::new(None));
+        let backend = ProxyBackend::new(
+            "test-server".into(),
+            "http://localhost:9999/mcp".into(),
+            token,
+        );
+
+        assert_eq!(backend.status().await, BackendStatus::Unreachable);
+        assert!(backend.tools().await.is_empty());
+        assert!(backend.instructions().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn proxy_backend_needs_auth_rejects_calls() {
+        let token = Arc::new(RwLock::new(None));
+        let backend = ProxyBackend::new(
+            "notion".into(),
+            "http://localhost:9999/mcp".into(),
+            token,
+        );
+        backend.set_status(BackendStatus::NeedsAuth).await;
+
+        let result = backend
+            .tools_call("search", serde_json::json!({}))
+            .await;
+
+        let err = result.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Authentication required"),
+            "expected auth error, got: {msg}"
+        );
+        assert!(
+            msg.contains("/mcp auth notion"),
+            "expected auth instructions, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_backend_unreachable_rejects_calls() {
+        let token = Arc::new(RwLock::new(None));
+        let backend = ProxyBackend::new(
+            "notion".into(),
+            "http://localhost:9999/mcp".into(),
+            token,
+        );
+        // Status is Unreachable by default from `new()`.
+
+        let result = backend
+            .tools_call("search", serde_json::json!({}))
+            .await;
+
+        let err = result.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unreachable"),
+            "expected unreachable error, got: {msg}"
+        );
+    }
 
     #[tokio::test]
     async fn dynamic_auth_reads_from_shared_state() {
