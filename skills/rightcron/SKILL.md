@@ -1,14 +1,14 @@
 ---
 name: rightcron
 description: >-
-  Manages cron job spec files for this RightClaw agent. Creates, edits, and
-  deletes YAML spec files in the crons/ directory. The Rust runtime handles
+  Manages cron jobs for this RightClaw agent via MCP tools. Creates, updates,
+  and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, RightCron, or recurring tasks.
-version: 1.0.0
+version: 2.0.0
 ---
 
-# /rightcron -- Cron Job File Manager
+# /rightcron -- Cron Job Manager
 
 ## When to Activate
 
@@ -19,58 +19,73 @@ Activate this skill when:
 
 ## How It Works
 
-Cron specs are YAML files in `crons/`. The Rust runtime (`rightclaw bot`) polls this directory every 60 seconds and schedules jobs automatically. Creating, editing, or deleting a YAML file is all the agent needs to do — no API calls, no manual sync, no state tracking. The runtime handles lock files, log capture, and run history via the database.
+Cron specs are stored in the agent database. The Rust runtime polls specs every 60 seconds and schedules jobs automatically. Use MCP tools to manage specs — no file creation needed.
 
 ## Creating a Cron Job
 
-1. `mkdir -p crons` if the directory doesn't exist
-2. Write a YAML spec to `crons/<job-name>.yaml`
-3. Confirm to the user: "Job created. The runtime picks up new specs within ~60 seconds."
+Use the `cron_create` MCP tool:
+
+```
+cron_create(
+  job_name: "health-check",
+  schedule: "17 9 * * 1-5",
+  prompt: "Check system health and report status",
+  max_budget_usd: 0.50
+)
+```
+
+Confirm to the user: "Job created. The runtime picks up new specs within ~60 seconds."
 
 ## Editing a Cron Job
 
-1. Edit the YAML file with the new schedule, prompt, or other fields
-2. Confirm: "Job updated. Changes take effect within ~60 seconds."
+Use the `cron_update` MCP tool (full replacement — all fields required):
+
+```
+cron_update(
+  job_name: "health-check",
+  schedule: "43 */4 * * *",
+  prompt: "Check system health, alert on degradation",
+  max_budget_usd: 0.75
+)
+```
+
+Confirm: "Job updated. Changes take effect within ~60 seconds."
 
 ## Removing a Cron Job
 
-1. Delete the YAML file: `rm crons/<job-name>.yaml`
-2. Confirm: "Job removed. The runtime drops it within ~60 seconds."
+Use the `cron_delete` MCP tool:
 
-## YAML Spec Format
+```
+cron_delete(job_name: "health-check")
+```
 
-Each cron job is a YAML file in the `crons/` directory. The filename (without `.yaml`) is the job name.
+Confirm: "Job removed. The runtime drops it within ~60 seconds."
 
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `schedule` | string | Yes | - | Standard 5-field cron expression (minute hour day-of-month month day-of-week). Evaluated in **UTC** by the Rust runtime. |
-| `lock_ttl` | string | No | `30m` | Duration after which a lock is considered stale (e.g., `10m`, `1h`, `30m`). |
-| `max_budget_usd` | number | No | `1.0` | Maximum dollar spend for this cron job invocation. Claude stops gracefully when budget is reached. |
-| `prompt` | string | Yes | - | The task prompt text that Claude executes when the cron fires. |
+## Listing Current Cron Jobs
+
+Use the `cron_list` MCP tool to see all configured jobs:
+
+```
+cron_list()
+```
+
+Returns: job_name, schedule, prompt, lock_ttl, max_budget_usd for each job.
+
+## Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `job_name` | string | Yes | - | Lowercase alphanumeric and hyphens (e.g. `health-check`). |
+| `schedule` | string | Yes | - | Standard 5-field cron expression (minute hour day-of-month month day-of-week). Evaluated in **UTC**. |
+| `prompt` | string | Yes | - | The task prompt that Claude executes when the cron fires. |
+| `lock_ttl` | string | No | `30m` | Duration after which a lock is considered stale (e.g. `10m`, `1h`). |
+| `max_budget_usd` | number | No | `1.0` | Maximum dollar spend per invocation. Claude stops gracefully when budget is reached. |
 
 ### Schedule Guidelines
 
 When the user doesn't specify exact minutes, **avoid :00 and :30** — these are peak times when many automated jobs fire simultaneously, causing API rate limit spikes. Use odd minutes like `:17`, `:43`, `:07`, `:53` to spread load.
 
-The runtime emits a warning when it detects `:00` or `:30` in the minute field.
-
-**Example specs:**
-
-```yaml
-# crons/deploy-check.yaml
-schedule: "*/5 * * * *"
-lock_ttl: 10m
-max_budget_usd: 0.25
-prompt: "Check CI status for all open PRs, post comment if broken"
-```
-
-```yaml
-# crons/morning-briefing.yaml
-schedule: "7 9 * * 1-5"  # 09:07 UTC weekdays (avoid :00 rate limit spikes)
-lock_ttl: 30m
-max_budget_usd: 0.50
-prompt: "Gather open PRs, failing tests, pending reviews. Post summary to Slack."
-```
+The tool returns a warning when it detects `:00` or `:30` in the minute field.
 
 ## Checking Run History
 
@@ -93,17 +108,13 @@ Returns full metadata for a single run.
 Parameters:
 - `run_id` (string, UUID) — run to retrieve
 
-Returns the same fields as `cron_list_runs`. Returns a "not found" message for unknown IDs (not an error).
-
 ### Reading logs
 
-The `log_path` field in each run record points to the log file with full stdout and stderr output from the subprocess. Read it directly:
+The `log_path` field in each run record points to the log file. Read it directly:
 
 ```
 cat <log_path>
 ```
-
-No MCP tool is needed for log content — direct file access via bash.
 
 ### Debugging example
 
@@ -120,5 +131,5 @@ User: "Why did morning-briefing fail?"
 
 ## Constraints
 
-1. **UTC schedules**: Cron expressions are evaluated in UTC by the Rust runtime. Write specs accordingly (e.g., `0 9 * * 1-5` fires at 09:00 UTC, not local time).
-2. **60-second polling**: The runtime re-reads `crons/*.yaml` every 60 seconds. After creating, editing, or deleting a spec file, changes take effect within ~1 minute.
+1. **UTC schedules**: Cron expressions are evaluated in UTC by the Rust runtime.
+2. **60-second polling**: The runtime re-reads specs every 60 seconds. After creating, editing, or deleting a spec, changes take effect within ~1 minute.
