@@ -121,9 +121,9 @@ Each agent has its own `BackendRegistry`. Bearer token resolves agent identity (
 **`tools/call`:**
 ```rust
 if let Some((prefix, tool)) = split_prefix(tool_name) {
-    // Has "__" → external backend or management
+    // Has "__" → external backend or management (read-only)
     match prefix {
-        "rightmeta" => registry.handle_management_tool(tool, args).await,
+        "rightmeta" => registry.handle_read_only_tool(tool, args).await, // only mcp_list
         other => registry.dispatch_to_proxy(other, tool, args).await,
     }
 } else {
@@ -143,10 +143,7 @@ Merged instructions example:
 RightClaw MCP Aggregator.
 
 ## Management (rightmeta)
-- rightmeta__mcp_add: Add an external HTTP MCP server
-- rightmeta__mcp_remove: Remove an MCP server
-- rightmeta__mcp_list: List all configured MCP servers
-- rightmeta__mcp_auth: Discover OAuth endpoint for a server
+- rightmeta__mcp_list: List all configured MCP servers and their status
 
 ## Built-in tools (unprefixed)
 - store_record: Store tagged records for persistent memory
@@ -167,7 +164,7 @@ External backend tools are prefixed with `{backend_name}__`. RightBackend tools 
 | Prefix | Source | Examples | Claude sees (with MCP namespace) |
 |--------|--------|----------|----------------------------------|
 | *(none)* | RightBackend (in-process) | `store_record`, `cron_create` | `mcp__right__store_record` |
-| `rightmeta__` | Aggregator management | `rightmeta__mcp_add` | `mcp__right__rightmeta__mcp_add` |
+| `rightmeta__` | Aggregator management (read-only) | `rightmeta__mcp_list` | `mcp__right__rightmeta__mcp_list` |
 | `notion__` | ProxyBackend | `notion__search` | `mcp__right__notion__search` |
 | `github__` | ProxyBackend | `github__create_issue` | `mcp__right__github__create_issue` |
 
@@ -190,7 +187,8 @@ struct ProxyBackend {
     /// Upstream MCP endpoint URL
     url: String,
 
-    /// Cached tool list from upstream (excludes tools with __ in name)
+    /// Cached tool list from upstream (excludes tools with __ in name).
+    /// Full rmcp::Tool objects including inputSchema — forwarded verbatim to Claude.
     cached_tools: RwLock<Vec<Tool>>,
 
     /// Cached instructions from upstream initialize response
@@ -399,6 +397,8 @@ The refresh scheduler runs **in the Aggregator process**, not the bot. The bot o
 - Updates `DynamicAuthClient.token` on refresh
 - On refresh failure after retries: marks server as `needs_auth`, can optionally notify bot to alert user
 
+**Token Arc registration:** when `set-token` or `mcp-add` creates a ProxyBackend, the `RefreshMessage::NewEntry` sent to the scheduler includes the `Arc<RwLock<Option<String>>>` token handle. The scheduler maintains `HashMap<(agent, server), Arc<RwLock<Option<String>>>>` — on refresh, it writes the new token directly to the ProxyBackend's shared Arc. No file-based indirection.
+
 ### Request routing (axum)
 
 ```rust
@@ -410,7 +410,23 @@ let app = axum::Router::new()
     .layer(/* Bearer auth middleware for /mcp only */);
 ```
 
-The `/internal` routes have no auth middleware — they are protected by being localhost-only. In sandbox mode, OpenShell network policy blocks agent access to localhost on the host.
+**Security:** The HTTP server binds `0.0.0.0:8100` (required for sandbox access via `host.docker.internal`). This means `/internal` routes are reachable from inside the sandbox. Protection via source IP check:
+
+```rust
+// Middleware for /internal routes: reject non-loopback source IPs
+async fn loopback_only(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !addr.ip().is_loopback() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(req).await
+}
+```
+
+This ensures only the bot process (running on the same host) can reach `/internal`. Sandbox traffic arrives from Docker bridge IPs (172.x), not loopback — rejected.
 
 ## Security
 
@@ -491,7 +507,7 @@ External server entries **never** appear in `.mcp.json`. Tokens **never** enter 
 | Component | Current | New |
 |-----------|---------|-----|
 | `credentials.rs` | Read/write `.mcp.json` for externals | Read/write `mcp_servers` SQLite table |
-| `mcp_config.rs` | Generates `.mcp.json` with right + externals | Generates `.mcp.json` with only right (simplified) |
+| `mcp_config.rs` | Generates `.mcp.json` with right + externals (merge) | Writes `.mcp.json` from scratch with only right (no merge — strips stale external entries on migration) |
 | `refresh.rs` | In bot process, writes Bearer to `.mcp.json` + uploads to sandbox | Moves to Aggregator process. Updates `DynamicAuthClient.token` in-memory + `oauth-state.json` |
 | `memory_server_http.rs` | `HttpMemoryServer` with 19 tools | Replaced by `Aggregator` (decomposed into 3 structs) |
 | `memory_server.rs` (stdio) | Standalone stdio server | Deprecated — not used in production (bot always HTTP) |
@@ -580,36 +596,11 @@ Both sandbox and no-sandbox modes use HTTP transport:
 5. Return to Claude
 ```
 
-### Runtime mcp_add
+### MCP management tools (agent-callable)
 
-```
-1. Claude → tools/call "rightmeta__mcp_add" {name: "linear", url: "https://..."}
-2. ToolDispatcher: prefix="rightmeta" → BackendRegistry.handle_management_tool("mcp_add", args)
-3. BackendRegistry:
-   a. Validate name: not "right"/"rightmeta", no "__"
-   b. Validate URL: SSRF checks (no RFC1918, no localhost, HTTPS only in prod)
-   c. INSERT OR REPLACE INTO mcp_servers (name, url)
-   d. Create DynamicAuthClient + ProxyBackend
-   e. Connect → initialize → tools/list → cache
-      - On failure: persist anyway, return warning, start retry
-   f. proxies.insert(name, Arc::new(proxy))
-   g. peer.notify_tool_list_changed() (with error logging on failure)
-4. Claude receives notification → tools/list → sees linear__* tools
-```
+Only `rightmeta__mcp_list` is exposed as an MCP tool. It returns the list of registered servers with their status (connected, needs_auth, unreachable) and tool counts. Read-only — cannot modify state.
 
-### Runtime mcp_remove
-
-```
-1. Claude → tools/call "rightmeta__mcp_remove" {name: "notion"}
-2. BackendRegistry:
-   a. Validate: name != "right", name != "rightmeta"
-   b. proxies.remove("notion") → Arc<ProxyBackend> dropped
-      (if in-flight tools_call holds Arc clone, it completes before drop)
-   c. DELETE FROM mcp_servers WHERE name = "notion"
-   d. Send RefreshMessage::RemoveServer to refresh scheduler
-   e. peer.notify_tool_list_changed()
-3. Claude receives notification → tools/list → notion tools gone
-```
+`mcp_add`, `mcp_remove`, and `mcp_auth` are **not** MCP tools. They are only available through the internal REST API (Telegram `/mcp` commands). This prevents sandbox agents from using the Aggregator as a proxy to bypass network policy.
 
 ### Telegram /mcp add
 
@@ -675,9 +666,9 @@ Bare minimum template. Agent populates it during conversations with user. Does n
 ### Skills (rightskills)
 
 MCP management skill updated:
-- Tool names: `rightmeta__mcp_add`, `rightmeta__mcp_auth`
-- Same UX: "add server, then /mcp auth in Telegram"
-- Underlying mechanism changed but user-facing flow identical
+- Agent can only call `rightmeta__mcp_list` (read-only)
+- Adding/removing/authenticating servers: only via Telegram `/mcp add`, `/mcp remove`, `/mcp auth`
+- Same UX for the user, but agent cannot self-modify MCP configuration
 
 ### ARCHITECTURE.md
 
