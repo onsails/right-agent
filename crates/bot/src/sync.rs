@@ -136,8 +136,16 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
     Ok(())
 }
 
-/// Alias for reverse sync — same file list as forward sync.
-const REVERSE_SYNC_FILES: &[&str] = CONTENT_MD_FILES;
+/// Files that CC creates/modifies inside the sandbox and should be synced back to host.
+/// Excludes codegen-only files (AGENTS.md, BOOTSTRAP.md) — those are uploaded by
+/// forward sync and never modified by CC.
+const REVERSE_SYNC_FILES: &[&str] = &[
+    "TOOLS.md",
+    "IDENTITY.md",
+    "SOUL.md",
+    "USER.md",
+    "MEMORY.md",
+];
 
 /// Sync .md files from sandbox back to host after a `claude -p` invocation.
 ///
