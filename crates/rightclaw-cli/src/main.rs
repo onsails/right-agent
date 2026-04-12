@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -233,6 +233,15 @@ pub enum Commands {
     },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
+    /// Run MCP Aggregator HTTP server (multi-agent, Bearer token auth)
+    McpServer {
+        /// Port to listen on
+        #[arg(long, default_value = "8100")]
+        port: u16,
+        /// Path to agent-tokens.json (agent name → Bearer token map)
+        #[arg(long)]
+        token_map: PathBuf,
+    },
     /// Inspect MCP OAuth token status
     Mcp {
         #[command(subcommand)]
@@ -394,6 +403,49 @@ async fn main() -> miette::Result<()> {
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
+        Commands::McpServer { port, ref token_map } => {
+            let agents_dir = rightclaw::config::agents_dir(&home);
+            let token_map_content = std::fs::read_to_string(token_map)
+                .map_err(|e| miette::miette!("failed to read token map: {e:#}"))?;
+            let token_entries: std::collections::HashMap<String, String> =
+                serde_json::from_str(&token_map_content)
+                    .map_err(|e| miette::miette!("failed to parse token map: {e:#}"))?;
+
+            let token_map = {
+                let mut map = std::collections::HashMap::new();
+                for (agent_name, token) in &token_entries {
+                    let agent_dir = agents_dir.join(agent_name);
+                    map.insert(
+                        token.clone(),
+                        aggregator::AgentInfo {
+                            name: agent_name.clone(),
+                            dir: agent_dir,
+                        },
+                    );
+                }
+                std::sync::Arc::new(tokio::sync::RwLock::new(map))
+            };
+
+            let dispatcher = std::sync::Arc::new(aggregator::ToolDispatcher {
+                agents: dashmap::DashMap::new(),
+            });
+
+            // Register agents in dispatcher
+            for (agent_name, _token) in &token_entries {
+                let agent_dir = agents_dir.join(agent_name);
+                let right = right_backend::RightBackend::new(agents_dir.clone());
+                let registry = aggregator::BackendRegistry {
+                    right,
+                    proxies: std::sync::Arc::new(tokio::sync::RwLock::new(
+                        std::collections::HashMap::new(),
+                    )),
+                    agent_dir,
+                };
+                dispatcher.agents.insert(agent_name.clone(), registry);
+            }
+
+            aggregator::run_aggregator_http(port, token_map, dispatcher, agents_dir, home).await
+        }
         Commands::Bot { agent, debug } => {
             let needs_restart = rightclaw_bot::run(rightclaw_bot::BotArgs {
                 agent,

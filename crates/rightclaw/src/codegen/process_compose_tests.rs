@@ -502,7 +502,7 @@ fn right_mcp_server_process_included_when_token_map_provided() {
     )
     .unwrap();
     assert!(yaml.contains("right-mcp-server:"), "must have right-mcp-server process");
-    assert!(yaml.contains("memory-server-http"), "must run memory-server-http command");
+    assert!(yaml.contains("mcp-server"), "must run mcp-server command");
     assert!(yaml.contains("--port 8100"), "must specify port");
     assert!(yaml.contains("depends_on:"), "bot must depend on mcp server");
 }
