@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -408,6 +409,15 @@ fn update_run_record(
     }
 }
 
+/// Timeout for waiting on in-flight execute_job tasks during shutdown.
+const SHUTDOWN_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Shared storage for in-flight execute_job handles.
+///
+/// `run_job_loop` and triggered job spawns push handles here.
+/// Shutdown collects and awaits them with a timeout.
+type ExecuteHandles = Arc<std::sync::Mutex<Vec<(String, JoinHandle<()>)>>>;
+
 /// Main reconciler loop. Polls `crons/*.yaml` every 60s, spawning per-job loops.
 ///
 /// Cron results are persisted to DB. A separate delivery loop reads pending rows
@@ -431,36 +441,82 @@ pub async fn run_cron_task(
         }
     };
 
+    let execute_handles: ExecuteHandles = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut handles: HashMap<String, (CronSpec, JoinHandle<()>)> = HashMap::new();
     let mut triggered_handles: Vec<JoinHandle<()>> = Vec::new();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path);
+    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &execute_handles);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &execute_handles);
             }
             _ = shutdown.cancelled() => {
-                tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler, waiting for running jobs");
+                tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
                 break;
             }
         }
     }
 
-    // Wait for all running job handles (don't abort — let in-flight jobs finish)
+    // Phase 1: Abort all job scheduler loops (sleeping until next fire time).
+    // This does NOT kill in-flight execute_job tasks — they are separate spawns.
+    let scheduler_count = handles.len();
     for (name, (_, handle)) in handles {
-        tracing::info!(job = %name, "cron shutdown: waiting for job to finish");
-        let _ = handle.await;
+        handle.abort();
+        tracing::info!(job = %name, "cron shutdown: aborted job scheduler");
     }
     for handle in triggered_handles {
-        tracing::info!("cron shutdown: waiting for triggered job to finish");
-        let _ = handle.await;
+        // Triggered handles are one-shot execute_job spawns, not loops.
+        // Don't abort — they'll be collected from execute_handles below.
+        handle.abort();
     }
-    tracing::info!(agent = %agent_name, "cron shutdown complete — all jobs finished");
+    tracing::info!(agent = %agent_name, aborted = scheduler_count, "cron shutdown: all job schedulers aborted");
+
+    // Phase 2: Wait for in-flight execute_job tasks with timeout.
+    // Clean up finished handles first.
+    let pending: Vec<(String, JoinHandle<()>)> = {
+        let mut guard = execute_handles.lock().expect("execute_handles mutex poisoned");
+        guard.drain(..).filter(|(_, h)| !h.is_finished()).collect()
+    };
+
+    if pending.is_empty() {
+        tracing::info!(agent = %agent_name, "cron shutdown: no running jobs");
+    } else {
+        let names: Vec<&str> = pending.iter().map(|(n, _)| n.as_str()).collect();
+        tracing::info!(
+            agent = %agent_name,
+            count = pending.len(),
+            jobs = ?names,
+            "cron shutdown: waiting for running job(s) (timeout {}s)",
+            SHUTDOWN_JOB_TIMEOUT.as_secs()
+        );
+
+        for (name, handle) in pending {
+            match tokio::time::timeout(SHUTDOWN_JOB_TIMEOUT, handle).await {
+                Ok(Ok(())) => {
+                    tracing::info!(job = %name, "cron shutdown: job finished cleanly");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(job = %name, "cron shutdown: job panicked: {e}");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        job = %name,
+                        timeout_secs = SHUTDOWN_JOB_TIMEOUT.as_secs(),
+                        "cron shutdown: job timed out, aborting"
+                    );
+                    // handle is dropped here → task continues as orphan
+                    // (abort requires owning the handle, which timeout consumed)
+                }
+            }
+        }
+    }
+
+    tracing::info!(agent = %agent_name, "cron shutdown complete");
 }
 
 fn reconcile_jobs(
@@ -471,6 +527,7 @@ fn reconcile_jobs(
     agent_name: &str,
     model: &Option<String>,
     ssh_config_path: &Option<std::path::PathBuf>,
+    execute_handles: &ExecuteHandles,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -507,9 +564,10 @@ fn reconcile_jobs(
         let job_agent_name = agent_name.to_string();
         let job_model = model.clone();
         let job_ssh_config = ssh_config_path.clone();
+        let job_execute_handles = Arc::clone(execute_handles);
 
         let handle = tokio::spawn(async move {
-            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config)
+            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_execute_handles)
                 .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
@@ -539,15 +597,23 @@ fn reconcile_jobs(
             let md = model.clone();
             let sc = ssh_config_path.clone();
             tracing::info!(job = %name, "executing triggered job");
+            let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
                 execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref()).await;
             });
-            triggered_handles.push(handle);
+            // Register for shutdown tracking
+            if let Ok(mut guard) = execute_handles.lock() {
+                guard.push((trigger_name, handle));
+            } else {
+                triggered_handles.push(handle);
+            }
         }
     }
 }
 
 /// Per-job loop: sleep until next scheduled time, then execute. (CRON-03, D-03)
+///
+/// Execute handles are pushed to `execute_handles` so shutdown can await them.
 async fn run_job_loop(
     job_name: String,
     spec: CronSpec,
@@ -555,6 +621,7 @@ async fn run_job_loop(
     agent_name: String,
     model: Option<String>,
     ssh_config_path: Option<std::path::PathBuf>,
+    execute_handles: ExecuteHandles,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -583,18 +650,21 @@ async fn run_job_loop(
 
         // Spawn execution so the loop continues counting ticks while the job runs.
         // The lock in execute_job prevents concurrent executions of the same job.
-        // Note: if reconcile_jobs aborts this loop handle (spec changed/removed), any
-        // in-flight execute_job spawn runs to completion as an orphan — this is intentional.
-        // The lock expires naturally and the next reconcile tick picks up the updated spec.
         let jn = job_name.clone();
         let sp = spec.clone();
         let ad = agent_dir.clone();
         let an = agent_name.clone();
         let md = model.clone();
         let sc = ssh_config_path.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref()).await;
         });
+        // Register for shutdown tracking. Lock is brief — just a Vec push.
+        if let Ok(mut guard) = execute_handles.lock() {
+            // Clean up finished handles to prevent unbounded growth
+            guard.retain(|(_, h)| !h.is_finished());
+            guard.push((job_name.clone(), handle));
+        }
     }
 }
 

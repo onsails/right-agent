@@ -44,7 +44,7 @@ processes:
       max_restarts: {{ agent.max_restarts }}
     shutdown:
       signal: 15
-      timeout_seconds: 30
+      timeout_seconds: 70
 {% if right_mcp_server %}
     depends_on:
       right-mcp-server:
