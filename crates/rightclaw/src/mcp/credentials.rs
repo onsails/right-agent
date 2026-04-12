@@ -1,5 +1,4 @@
 use std::io::Write as _;
-use std::net::IpAddr;
 use std::path::Path;
 
 use rusqlite::Connection;
@@ -239,6 +238,14 @@ pub fn validate_server_url(url_str: &str) -> Result<(), CredentialError> {
     Ok(())
 }
 
+/// Entry returned by `db_list_servers`.
+#[derive(Debug, Clone)]
+pub struct McpServerEntry {
+    pub name: String,
+    pub url: String,
+    pub instructions: Option<String>,
+}
+
 /// Register (or update) an external MCP server in the SQLite registry.
 pub fn db_add_server(
     conn: &Connection,
@@ -249,7 +256,7 @@ pub fn db_add_server(
     validate_server_url(url)?;
 
     conn.execute(
-        "INSERT OR REPLACE INTO mcp_servers (name, url) VALUES (?1, ?2)",
+        "INSERT INTO mcp_servers (name, url) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET url = excluded.url",
         rusqlite::params![name, url],
     )
     .map_err(map_db_err)?;
@@ -274,16 +281,40 @@ pub fn db_remove_server(conn: &Connection, name: &str) -> Result<(), CredentialE
     Ok(())
 }
 
-/// List all registered external MCP servers, sorted by name.
+/// Update the instructions for an external MCP server in the SQLite registry.
 ///
-/// Returns `(name, url)` pairs.
-pub fn db_list_servers(conn: &Connection) -> Result<Vec<(String, String)>, CredentialError> {
+/// Returns `CredentialError::ServerNotFound` if no matching row exists.
+pub fn db_update_instructions(
+    conn: &Connection,
+    name: &str,
+    instructions: Option<&str>,
+) -> Result<(), CredentialError> {
+    let changed = conn
+        .execute(
+            "UPDATE mcp_servers SET instructions = ?1 WHERE name = ?2",
+            rusqlite::params![instructions, name],
+        )
+        .map_err(map_db_err)?;
+    if changed == 0 {
+        return Err(CredentialError::ServerNotFound(name.to_string()));
+    }
+    Ok(())
+}
+
+/// List all registered external MCP servers, sorted by name.
+pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
     let mut stmt = conn
-        .prepare("SELECT name, url FROM mcp_servers ORDER BY name")
+        .prepare("SELECT name, url, instructions FROM mcp_servers ORDER BY name")
         .map_err(map_db_err)?;
 
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok(McpServerEntry {
+                name: row.get(0)?,
+                url: row.get(1)?,
+                instructions: row.get(2)?,
+            })
+        })
         .map_err(map_db_err)?;
 
     let mut result = Vec::new();
@@ -312,10 +343,10 @@ mod db_tests {
 
         let servers = db_list_servers(&conn).unwrap();
         assert_eq!(servers.len(), 2);
-        assert_eq!(servers[0].0, "linear");
-        assert_eq!(servers[0].1, "https://mcp.linear.app/mcp");
-        assert_eq!(servers[1].0, "notion");
-        assert_eq!(servers[1].1, "https://mcp.notion.com/mcp");
+        assert_eq!(servers[0].name, "linear");
+        assert_eq!(servers[0].url, "https://mcp.linear.app/mcp");
+        assert_eq!(servers[1].name, "notion");
+        assert_eq!(servers[1].url, "https://mcp.notion.com/mcp");
     }
 
     #[test]
@@ -343,7 +374,7 @@ mod db_tests {
 
         let servers = db_list_servers(&conn).unwrap();
         assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0].1, "https://new.notion.com/mcp");
+        assert_eq!(servers[0].url, "https://new.notion.com/mcp");
     }
 
     #[test]
@@ -408,6 +439,44 @@ mod db_tests {
         assert!(validate_server_url("https://localhost/mcp").is_err());
         // IPv6 loopback
         assert!(validate_server_url("https://[::1]/mcp").is_err());
+    }
+
+    #[test]
+    fn update_and_list_instructions() {
+        let conn = setup_db();
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        assert!(servers[0].instructions.is_none());
+
+        db_update_instructions(&conn, "notion", Some("Use Notion tools")).unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        assert_eq!(servers[0].instructions.as_deref(), Some("Use Notion tools"));
+
+        db_update_instructions(&conn, "notion", None).unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        assert!(servers[0].instructions.is_none());
+    }
+
+    #[test]
+    fn upsert_preserves_instructions() {
+        let conn = setup_db();
+        db_add_server(&conn, "notion", "https://old.notion.com/mcp").unwrap();
+        db_update_instructions(&conn, "notion", Some("Notion instructions")).unwrap();
+
+        db_add_server(&conn, "notion", "https://new.notion.com/mcp").unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        assert_eq!(servers[0].url, "https://new.notion.com/mcp");
+        assert_eq!(
+            servers[0].instructions.as_deref(),
+            Some("Notion instructions")
+        );
+    }
+
+    #[test]
+    fn update_instructions_nonexistent_server() {
+        let conn = setup_db();
+        let err = db_update_instructions(&conn, "ghost", Some("instructions")).unwrap_err();
+        assert!(matches!(err, CredentialError::ServerNotFound(_)));
     }
 }
 
