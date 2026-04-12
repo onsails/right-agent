@@ -440,11 +440,11 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: McpAddParams =
             serde_json::from_value(args.clone()).context("invalid mcp_add params")?;
-        if !params.url.starts_with("https://") {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "URL must start with 'https://' -- got: {}",
-                params.url
-            ))]));
+        if let Err(e) = rightclaw::mcp::credentials::validate_server_name(&params.name) {
+            return Ok(CallToolResult::error(vec![Content::text(format!("{e}"))]));
+        }
+        if let Err(e) = rightclaw::mcp::credentials::validate_server_url(&params.url) {
+            return Ok(CallToolResult::error(vec![Content::text(format!("{e}"))]));
         }
         let mcp_json_path = agent_dir.join("mcp.json");
         rightclaw::mcp::credentials::add_http_server(&mcp_json_path, &params.name, &params.url)?;
