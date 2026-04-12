@@ -432,9 +432,14 @@ pub async fn handle_mcp(
     internal: Arc<InternalApi>,
 ) -> ResponseResult<()> {
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
+    let agent_name = agent_dir.0
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
     let parts: Vec<&str> = args.split_whitespace().collect();
     let result = match parts.first().copied() {
-        None | Some("list") => handle_mcp_list(&bot, &msg, &agent_dir.0).await,
+        None | Some("list") => handle_mcp_list(&bot, &msg, agent_name, &internal.0).await,
         Some("auth") => {
             let server = match parts.get(1) {
                 Some(s) => *s,
@@ -472,49 +477,34 @@ pub async fn handle_mcp(
     Ok(())
 }
 
-/// `/mcp list` -- show all MCP servers from .claude.json and mcp.json.
+/// `/mcp list` -- show all MCP servers via the internal aggregator API.
 async fn handle_mcp_list(
     bot: &BotType,
     msg: &Message,
-    agent_dir: &Path,
+    agent_name: &str,
+    internal: &rightclaw::mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
-    tracing::info!(agent_dir = %agent_dir.display(), "mcp list");
+    tracing::info!(agent = %agent_name, "mcp list");
 
-    let statuses = match rightclaw::mcp::detect::mcp_auth_status(agent_dir) {
-        Ok(s) => s,
+    let result = match internal.mcp_list(agent_name).await {
+        Ok(r) => r,
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("Error reading MCP status: {e:#}"))
+            bot.send_message(msg.chat.id, format!("Error listing MCP servers: {e:#}"))
                 .await?;
             return Ok(());
         }
     };
 
-    if statuses.is_empty() {
+    if result.servers.is_empty() {
         bot.send_message(msg.chat.id, "No MCP servers configured.")
             .await?;
         return Ok(());
     }
 
     let mut text = String::from("MCP Servers:\n\n");
-    for s in &statuses {
-        let icon = match s.state {
-            rightclaw::mcp::detect::AuthState::Present => "ok",
-            rightclaw::mcp::detect::AuthState::Missing => "needs auth",
-        };
-        match s.kind {
-            rightclaw::mcp::detect::ServerKind::Http => {
-                text.push_str(&format!(
-                    "  {} ({}) -- {} [{}]\n",
-                    s.name, s.source, icon, s.url
-                ));
-            }
-            rightclaw::mcp::detect::ServerKind::Stdio => {
-                text.push_str(&format!(
-                    "  {} ({}) -- stdio\n",
-                    s.name, s.source
-                ));
-            }
-        }
+    for s in &result.servers {
+        let url_part = s.url.as_deref().map(|u| format!(" [{u}]")).unwrap_or_default();
+        text.push_str(&format!("  {} -- {} ({} tools){}\n", s.name, s.status, s.tool_count, url_part));
     }
     bot.send_message(msg.chat.id, text).await?;
     Ok(())
@@ -700,6 +690,23 @@ async fn handle_mcp_auth(
     Ok(())
 }
 
+/// Sync MCP_INSTRUCTIONS.md to .claude/agents/ for @ ref resolution.
+///
+/// The periodic background sync handles sandbox upload, so we only do the
+/// local copy here to avoid needing sandbox name / SSH config in these handlers.
+fn sync_mcp_instructions(agent_dir: &Path) {
+    let src = agent_dir.join("MCP_INSTRUCTIONS.md");
+    if !src.exists() {
+        return;
+    }
+    let agents_subdir = agent_dir.join(".claude/agents");
+    if agents_subdir.exists() {
+        if let Err(e) = std::fs::copy(&src, agents_subdir.join("MCP_INSTRUCTIONS.md")) {
+            tracing::warn!("failed to copy MCP_INSTRUCTIONS.md to .claude/agents/: {e:#}");
+        }
+    }
+}
+
 /// `/mcp add <name> <url>` -- add an MCP server via the internal aggregator API.
 async fn handle_mcp_add(
     bot: &BotType,
@@ -738,6 +745,7 @@ async fn handle_mcp_add(
             }
             reply.push_str("\nTools available on agent's next session.");
             send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
+            sync_mcp_instructions(agent_dir);
         }
         Err(e) => {
             send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}")).await?;
@@ -782,6 +790,7 @@ async fn handle_mcp_remove(
                 &format!("Removed MCP server <b>{escaped_name}</b>."),
             )
             .await?;
+            sync_mcp_instructions(agent_dir);
         }
         Err(e) => {
             send_html_reply(
