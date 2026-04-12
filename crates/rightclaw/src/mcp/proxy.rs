@@ -1,6 +1,7 @@
 //! MCP proxy types for aggregating external MCP servers.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
@@ -148,9 +149,9 @@ impl StreamableHttpClient for DynamicAuthClient {
 /// instructions, and forwards tool calls through the MCP client session.
 pub struct ProxyBackend {
     server_name: String,
+    agent_dir: PathBuf,
     url: String,
     cached_tools: RwLock<Vec<Tool>>,
-    cached_instructions: RwLock<Option<String>>,
     status: RwLock<BackendStatus>,
     token: Arc<RwLock<Option<String>>>,
     /// Active MCP client session handle.
@@ -158,12 +159,17 @@ pub struct ProxyBackend {
 }
 
 impl ProxyBackend {
-    pub fn new(server_name: String, url: String, token: Arc<RwLock<Option<String>>>) -> Self {
+    pub fn new(
+        server_name: String,
+        agent_dir: PathBuf,
+        url: String,
+        token: Arc<RwLock<Option<String>>>,
+    ) -> Self {
         Self {
             server_name,
+            agent_dir,
             url,
             cached_tools: RwLock::new(Vec::new()),
-            cached_instructions: RwLock::new(None),
             status: RwLock::new(BackendStatus::Unreachable),
             token,
             client: RwLock::new(None),
@@ -171,7 +177,12 @@ impl ProxyBackend {
     }
 
     /// Connect to upstream, initialize the MCP session, and fetch tools.
-    pub async fn connect(&self, http_client: reqwest::Client) -> Result<(), ProxyError> {
+    ///
+    /// Returns the server's instructions string (if any) after writing it to SQLite.
+    pub async fn connect(
+        &self,
+        http_client: reqwest::Client,
+    ) -> Result<Option<String>, ProxyError> {
         let dynamic = DynamicAuthClient::new(http_client, self.token.clone());
         let config = StreamableHttpClientTransportConfig::with_uri(self.url.clone());
         let transport =
@@ -183,13 +194,6 @@ impl ProxyBackend {
                 server: self.server_name.clone(),
                 source: e,
             })?;
-
-        // Extract server instructions from the initialize response.
-        if let Some(server_info) = client.peer().peer_info() {
-            if let Some(ref instructions) = server_info.instructions {
-                *self.cached_instructions.write().await = Some(instructions.clone());
-            }
-        }
 
         // Fetch and cache upstream tools, filtering out internal tools (contain `__`).
         let tools = client
@@ -207,6 +211,22 @@ impl ProxyBackend {
             .collect();
 
         *self.cached_tools.write().await = filtered;
+
+        // Extract server instructions and write to SQLite.
+        let instructions = client
+            .peer()
+            .peer_info()
+            .and_then(|info| info.instructions.clone());
+        if let Ok(conn) = crate::memory::open_connection(&self.agent_dir) {
+            if let Err(e) = crate::mcp::credentials::db_update_instructions(
+                &conn,
+                &self.server_name,
+                instructions.as_deref(),
+            ) {
+                tracing::warn!(server = %self.server_name, "failed to cache instructions: {e:#}");
+            }
+        }
+
         *self.client.write().await = Some(client);
         *self.status.write().await = BackendStatus::Connected;
 
@@ -216,7 +236,7 @@ impl ProxyBackend {
             "upstream MCP server connected"
         );
 
-        Ok(())
+        Ok(instructions)
     }
 
     /// Forward a tool call to the upstream MCP server.
@@ -272,11 +292,6 @@ impl ProxyBackend {
         self.cached_tools.read().await.clone()
     }
 
-    /// Get cached instructions.
-    pub async fn instructions(&self) -> Option<String> {
-        self.cached_instructions.read().await.clone()
-    }
-
     /// Non-blocking attempt to read cached tools. Returns `None` if the lock
     /// is currently held by a writer (e.g., during a concurrent `connect`).
     pub fn try_tools(&self) -> Option<Vec<Tool>> {
@@ -315,23 +330,26 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_backend_new_starts_unreachable() {
+        let tmp = tempfile::tempdir().unwrap();
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "test-server".into(),
+            tmp.path().to_path_buf(),
             "http://localhost:9999/mcp".into(),
             token,
         );
 
         assert_eq!(backend.status().await, BackendStatus::Unreachable);
         assert!(backend.tools().await.is_empty());
-        assert!(backend.instructions().await.is_none());
     }
 
     #[tokio::test]
     async fn proxy_backend_needs_auth_rejects_calls() {
+        let tmp = tempfile::tempdir().unwrap();
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "notion".into(),
+            tmp.path().to_path_buf(),
             "http://localhost:9999/mcp".into(),
             token,
         );
@@ -355,9 +373,11 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_backend_unreachable_rejects_calls() {
+        let tmp = tempfile::tempdir().unwrap();
         let token = Arc::new(RwLock::new(None));
         let backend = ProxyBackend::new(
             "notion".into(),
+            tmp.path().to_path_buf(),
             "http://localhost:9999/mcp".into(),
             token,
         );
