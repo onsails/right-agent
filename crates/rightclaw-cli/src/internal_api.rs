@@ -63,6 +63,25 @@ pub(crate) struct SetTokenResponse {
     pub warning: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct McpListRequest {
+    pub agent: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct McpListResponse {
+    pub servers: Vec<McpServerStatus>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct McpServerStatus {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub status: String,
+    pub tool_count: usize,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -79,6 +98,7 @@ pub(crate) fn internal_router(dispatcher: Arc<ToolDispatcher>) -> Router {
         .route("/mcp-add", post(handle_mcp_add))
         .route("/mcp-remove", post(handle_mcp_remove))
         .route("/set-token", post(handle_set_token))
+        .route("/mcp-list", post(handle_mcp_list))
         .with_state(dispatcher)
 }
 
@@ -318,6 +338,45 @@ async fn handle_set_token(
         }),
     )
         .into_response()
+}
+
+async fn handle_mcp_list(
+    State(dispatcher): State<Arc<ToolDispatcher>>,
+    Json(req): Json<McpListRequest>,
+) -> axum::response::Response {
+    let Some(registry) = dispatcher.agents.get(&req.agent) else {
+        return not_found(format!("agent '{}' not found", req.agent)).into_response();
+    };
+
+    let mut servers = Vec::new();
+
+    // Right backend (always connected)
+    servers.push(McpServerStatus {
+        name: "right".into(),
+        url: None,
+        status: "connected".into(),
+        tool_count: registry.right.tools_list().len(),
+    });
+
+    // External proxy backends
+    let proxies = registry.proxies.read().await;
+    for (name, proxy) in proxies.iter() {
+        let status = proxy.status().await;
+        let tool_count = proxy.try_tools().map(|t| t.len()).unwrap_or(0);
+        servers.push(McpServerStatus {
+            name: name.clone(),
+            url: Some(proxy.url().to_string()),
+            status: match status {
+                rightclaw::mcp::proxy::BackendStatus::Connected => "connected",
+                rightclaw::mcp::proxy::BackendStatus::NeedsAuth => "needs_auth",
+                rightclaw::mcp::proxy::BackendStatus::Unreachable => "unreachable",
+            }
+            .into(),
+            tool_count,
+        });
+    }
+
+    Json(McpListResponse { servers }).into_response()
 }
 
 #[cfg(test)]
@@ -600,6 +659,49 @@ mod tests {
                 "name": "notion",
                 "url": "https://mcp.notion.com/mcp"
             }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn mcp_list_returns_right_backend() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_test_dispatcher(tmp.path());
+        let app = internal_router(dispatcher);
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-list",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let servers = body["servers"].as_array().unwrap();
+        assert!(!servers.is_empty(), "expected at least one server");
+
+        let right = &servers[0];
+        assert_eq!(right["name"], "right");
+        assert_eq!(right["status"], "connected");
+        assert!(
+            right["tool_count"].as_u64().unwrap() > 0,
+            "right backend should have tools"
+        );
+        assert!(right["url"].is_null(), "right backend should not have a url");
+    }
+
+    #[tokio::test]
+    async fn mcp_list_unknown_agent_returns_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_test_dispatcher(tmp.path());
+        let app = internal_router(dispatcher);
+
+        let (status, _body) = send_json(
+            app,
+            "/mcp-list",
+            serde_json::json!({ "agent": "nonexistent" }),
         )
         .await;
 
