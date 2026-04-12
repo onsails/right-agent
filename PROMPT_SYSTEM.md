@@ -54,9 +54,13 @@ Built by `assemble_host_system_prompt()` in `worker.rs`.
 
 ## Environment and Tools
 {TOOLS.md — sandbox paths, inbox/outbox, MCP notes}
+
+## MCP Server Instructions  (if any external MCP servers have instructions)
+{fetched from aggregator via POST /mcp-instructions at prompt assembly time}
 ```
 
-Missing files are silently skipped (e.g. IDENTITY.md before bootstrap).
+Missing files are silently skipped. MCP instructions are fetched from the aggregator's
+internal API (non-fatal if unavailable).
 
 ### Bootstrap mode
 
@@ -141,6 +145,17 @@ memory (store/query/search/delete), cron (list/show runs), MCP management
 
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
 whenever tools change.
+
+## Upstream MCP Server Instructions
+
+When external MCP servers are registered (via `/mcp add`), their usage instructions are
+fetched from the aggregator's internal API (`POST /mcp-instructions`) at prompt assembly
+time and inlined into the composite system prompt. This replaces the previous file-based
+approach (MCP_INSTRUCTIONS.md).
+
+Instructions are persisted in SQLite (`mcp_servers.instructions` column) by ProxyBackend
+on each `connect()`. The endpoint reads from SQLite via `db_list_servers()` and generates
+markdown via `generate_mcp_instructions_md()`.
 
 ## Bootstrap Completion Flow
 
