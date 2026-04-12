@@ -134,6 +134,12 @@ impl InternalClient {
         .await
     }
 
+    /// List MCP servers for the given agent.
+    pub async fn mcp_list(&self, agent: &str) -> Result<McpListResponse, InternalClientError> {
+        self.post("/mcp-list", &serde_json::json!({"agent": agent}))
+            .await
+    }
+
     /// Set OAuth token for an MCP server.
     pub async fn set_token(
         &self,
@@ -158,6 +164,19 @@ pub struct McpAddResponse {
 #[derive(Debug, Deserialize)]
 pub struct McpRemoveResponse {
     pub removed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpListResponse {
+    pub servers: Vec<McpServerStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpServerStatus {
+    pub name: String,
+    pub url: Option<String>,
+    pub status: String,
+    pub tool_count: usize,
 }
 
 #[derive(Debug, Serialize)]
