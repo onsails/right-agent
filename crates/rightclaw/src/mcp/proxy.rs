@@ -27,6 +27,12 @@ pub enum ProxyError {
         source: rmcp::service::ClientInitializeError,
     },
 
+    #[error("instructions cache failed for '{server}': {source}")]
+    InstructionsCacheFailed {
+        server: String,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[error("list_tools failed for '{server}': {source}")]
     ListToolsFailed {
         server: String,
@@ -228,15 +234,20 @@ impl ProxyBackend {
             .peer()
             .peer_info()
             .and_then(|info| info.instructions.clone());
-        if let Ok(conn) = crate::memory::open_connection(&self.agent_dir) {
-            if let Err(e) = crate::mcp::credentials::db_update_instructions(
-                &conn,
-                &self.server_name,
-                instructions.as_deref(),
-            ) {
-                tracing::warn!(server = %self.server_name, "failed to cache instructions: {e:#}");
-            }
-        }
+        let conn = crate::memory::open_connection(&self.agent_dir)
+            .map_err(|e| ProxyError::InstructionsCacheFailed {
+                server: self.server_name.clone(),
+                source: e.into(),
+            })?;
+        crate::mcp::credentials::db_update_instructions(
+            &conn,
+            &self.server_name,
+            instructions.as_deref(),
+        )
+        .map_err(|e| ProxyError::InstructionsCacheFailed {
+            server: self.server_name.clone(),
+            source: e.into(),
+        })?;
 
         *self.client.write().await = Some(client);
         *self.status.write().await = BackendStatus::Connected;
