@@ -32,12 +32,14 @@ not for general conversation context (Claude handles that).
 
 To install, remove, or authorize MCP servers at runtime, use the `right` MCP tools:
 
-- `mcp_add(name, url)` — add an HTTP MCP server to `.mcp.json`
-- `mcp_remove(name)` — remove an MCP server (`right` itself is protected)
-- `mcp_list()` — list all configured MCP servers (no tokens exposed)
-- `mcp_auth(server_name)` — get the OAuth authorization URL for a server; send the link to the user via Telegram to complete auth
+- `mcp_add(name, url)` — register an external MCP server with the Aggregator
+- `mcp_remove(name)` — unregister an MCP server (`right` is protected)
+- `mcp_list()` — list all MCP servers with connection status and tool count
+- `mcp_auth(server_name)` — get the OAuth authorization URL; send the link to the user via Telegram
 
-Never edit `.mcp.json` directly — always use these tools.
+MCP servers are proxied through the Aggregator — credentials never enter the sandbox.
+Usage instructions from connected servers are automatically included in your context
+via MCP_INSTRUCTIONS.md.
 
 ## Communication
 
