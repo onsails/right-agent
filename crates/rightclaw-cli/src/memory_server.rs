@@ -398,6 +398,14 @@ impl MemoryServer {
                 None,
             ));
         }
+        // Register in SQLite (source of truth for mcp_list)
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        rightclaw::mcp::credentials::db_add_server(&conn, &params.name, &params.url)
+            .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
+        // Also write to mcp.json for backwards compat
         let mcp_json_path = self.agent_dir.join("mcp.json");
         rightclaw::mcp::credentials::add_http_server(
             &mcp_json_path,
@@ -425,6 +433,14 @@ impl MemoryServer {
                 None,
             ));
         }
+        // Remove from SQLite (source of truth for mcp_list)
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
+        let _ = rightclaw::mcp::credentials::db_remove_server(&conn, &params.name);
+        drop(conn);
+        // Also remove from mcp.json for backwards compat
         let mcp_json_path = self.agent_dir.join("mcp.json");
         match rightclaw::mcp::credentials::remove_http_server(
             &mcp_json_path,
