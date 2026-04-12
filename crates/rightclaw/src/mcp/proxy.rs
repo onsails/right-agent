@@ -60,6 +60,16 @@ pub enum BackendStatus {
     Unreachable,
 }
 
+impl std::fmt::Display for BackendStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendStatus::Connected => f.write_str("connected"),
+            BackendStatus::NeedsAuth => f.write_str("needs_auth"),
+            BackendStatus::Unreachable => f.write_str("unreachable"),
+        }
+    }
+}
+
 /// Wraps `reqwest::Client` with dynamic Bearer token injection.
 ///
 /// The `StreamableHttpClient` trait passes an `auth_token` parameter per-request,
@@ -210,6 +220,7 @@ impl ProxyBackend {
             .filter(|t| !t.name.contains("__"))
             .collect();
 
+        let tool_count = filtered.len();
         *self.cached_tools.write().await = filtered;
 
         // Extract server instructions and write to SQLite.
@@ -232,7 +243,7 @@ impl ProxyBackend {
 
         tracing::info!(
             server = %self.server_name,
-            tool_count = self.cached_tools.read().await.len(),
+            tool_count,
             "upstream MCP server connected"
         );
 

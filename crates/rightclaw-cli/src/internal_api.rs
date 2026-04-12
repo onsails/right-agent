@@ -366,12 +366,7 @@ async fn handle_mcp_list(
         servers.push(McpServerStatus {
             name: name.clone(),
             url: Some(proxy.url().to_string()),
-            status: match status {
-                rightclaw::mcp::proxy::BackendStatus::Connected => "connected",
-                rightclaw::mcp::proxy::BackendStatus::NeedsAuth => "needs_auth",
-                rightclaw::mcp::proxy::BackendStatus::Unreachable => "unreachable",
-            }
-            .into(),
+            status: status.to_string(),
             tool_count,
         });
     }

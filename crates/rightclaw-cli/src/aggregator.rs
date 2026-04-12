@@ -141,14 +141,9 @@ impl BackendRegistry {
         let mut lines = Vec::with_capacity(proxies.len());
         for (name, handle) in proxies.iter() {
             let status = handle.status().await;
-            let tool_count = handle.tools().await.len();
-            let status_str = match status {
-                BackendStatus::Connected => "connected",
-                BackendStatus::NeedsAuth => "needs_auth",
-                BackendStatus::Unreachable => "unreachable",
-            };
+            let tool_count = handle.try_tools().map(|t| t.len()).unwrap_or(0);
             lines.push(format!(
-                "- {name}: {status_str} ({tool_count} tools) url={url}",
+                "- {name}: {status} ({tool_count} tools) url={url}",
                 url = handle.url()
             ));
         }
@@ -361,13 +356,6 @@ pub(crate) async fn run_aggregator_http(
     agents_dir: PathBuf,
     home: PathBuf,
 ) -> miette::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
     let ct = CancellationToken::new();
 
     let config = StreamableHttpServerConfig::default()
