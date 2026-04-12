@@ -7,19 +7,17 @@ fn agent_definition_has_at_references_in_cache_order() {
     assert!(result.contains("model: sonnet"));
     assert!(result.contains("description: \"RightClaw agent: myagent\""));
 
-    // Verify order: AGENTS → SOUL → IDENTITY → USER → TOOLS → MCP_INSTRUCTIONS
+    // Verify order: AGENTS → SOUL → IDENTITY → USER → TOOLS
     let agents_pos = result.find("@./AGENTS.md").expect("missing @./AGENTS.md");
     let soul_pos = result.find("@./SOUL.md").expect("missing @./SOUL.md");
     let identity_pos = result.find("@./IDENTITY.md").expect("missing @./IDENTITY.md");
     let user_pos = result.find("@./USER.md").expect("missing @./USER.md");
     let tools_pos = result.find("@./TOOLS.md").expect("missing @./TOOLS.md");
-    let mcp_instr_pos = result.find("@./MCP_INSTRUCTIONS.md").expect("missing @./MCP_INSTRUCTIONS.md");
 
     assert!(agents_pos < soul_pos, "AGENTS must come before SOUL");
     assert!(soul_pos < identity_pos, "SOUL must come before IDENTITY");
     assert!(identity_pos < user_pos, "IDENTITY must come before USER");
     assert!(user_pos < tools_pos, "USER must come before TOOLS");
-    assert!(tools_pos < mcp_instr_pos, "TOOLS must come before MCP_INSTRUCTIONS");
 }
 
 #[test]

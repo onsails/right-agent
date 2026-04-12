@@ -280,18 +280,6 @@ pub fn run_single_agent_codegen(
         tracing::debug!(agent = %agent.name, "created empty TOOLS.md (agent-owned)");
     }
 
-    // Create MCP_INSTRUCTIONS.md if missing (agent-owned, never overwritten by codegen).
-    let mcp_instr_path = agent.path.join("MCP_INSTRUCTIONS.md");
-    if !mcp_instr_path.exists() {
-        std::fs::write(&mcp_instr_path, "# MCP Server Instructions\n").map_err(|e| {
-            miette::miette!(
-                "failed to create MCP_INSTRUCTIONS.md for '{}': {e:#}",
-                agent.name
-            )
-        })?;
-        tracing::debug!(agent = %agent.name, "created empty MCP_INSTRUCTIONS.md");
-    }
-
     Ok(agent_secret)
 }
 
@@ -586,68 +574,6 @@ mod tests {
 
         let content = std::fs::read_to_string(agent_dir.join("TOOLS.md")).unwrap();
         assert_eq!(content, "", "TOOLS.md must be created empty");
-    }
-
-    #[test]
-    fn mcp_instructions_md_created_if_missing() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-        let agent_dir = home.join("agents").join("test");
-        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
-        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
-        std::fs::write(
-            agent_dir.join("agent.yaml"),
-            "restart: never\nnetwork_policy: permissive\n",
-        )
-        .unwrap();
-        assert!(!agent_dir.join("MCP_INSTRUCTIONS.md").exists());
-
-        let agent = crate::agent::discover_single_agent(&agent_dir).unwrap();
-        let self_exe = std::path::PathBuf::from("/usr/bin/rightclaw");
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
-
-        let content = std::fs::read_to_string(agent_dir.join("MCP_INSTRUCTIONS.md")).unwrap();
-        assert_eq!(content, "# MCP Server Instructions\n");
-    }
-
-    #[test]
-    fn mcp_instructions_md_not_overwritten_if_exists() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-        let agent_dir = home.join("agents").join("test");
-        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
-        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
-        std::fs::write(
-            agent_dir.join("agent.yaml"),
-            "restart: never\nnetwork_policy: permissive\n",
-        )
-        .unwrap();
-        let custom = "# MCP Server Instructions\n\n## notion\n\nCustom instructions.\n";
-        std::fs::write(agent_dir.join("MCP_INSTRUCTIONS.md"), custom).unwrap();
-
-        let agent = crate::agent::discover_single_agent(&agent_dir).unwrap();
-        let self_exe = std::path::PathBuf::from("/usr/bin/rightclaw");
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
-
-        let after = std::fs::read_to_string(agent_dir.join("MCP_INSTRUCTIONS.md")).unwrap();
-        assert_eq!(after, custom, "MCP_INSTRUCTIONS.md must not be overwritten");
-    }
-
-    #[test]
-    fn mcp_instructions_in_content_md_files() {
-        assert!(
-            crate::codegen::CONTENT_MD_FILES.contains(&"MCP_INSTRUCTIONS.md"),
-            "CONTENT_MD_FILES must include MCP_INSTRUCTIONS.md"
-        );
-    }
-
-    #[test]
-    fn agent_def_includes_mcp_instructions_ref() {
-        let def = crate::codegen::generate_agent_definition("test", None);
-        assert!(
-            def.contains("@./MCP_INSTRUCTIONS.md"),
-            "agent definition must reference MCP_INSTRUCTIONS.md"
-        );
     }
 
     #[test]
