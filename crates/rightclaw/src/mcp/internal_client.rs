@@ -140,6 +140,18 @@ impl InternalClient {
             .await
     }
 
+    /// Fetch MCP server instructions markdown for the given agent.
+    pub async fn mcp_instructions(
+        &self,
+        agent: &str,
+    ) -> Result<McpInstructionsResponse, InternalClientError> {
+        self.post(
+            "/mcp-instructions",
+            &serde_json::json!({"agent": agent}),
+        )
+        .await
+    }
+
     /// Set OAuth token for an MCP server.
     pub async fn set_token(
         &self,
@@ -198,6 +210,11 @@ pub struct SetTokenResponse {
     pub warning: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct McpInstructionsResponse {
+    pub instructions: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -249,5 +266,12 @@ mod tests {
         assert_eq!(json["expires_in"], 3600);
         // client_secret should be skipped when None
         assert!(!json.as_object().unwrap().contains_key("client_secret"));
+    }
+
+    #[test]
+    fn mcp_instructions_response_deserializes() {
+        let json = "{\"instructions\":\"# MCP Server Instructions\\n\\n## composio\\n\\nConnect apps.\\n\"}";
+        let resp: McpInstructionsResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.instructions.contains("composio"));
     }
 }
