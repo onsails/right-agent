@@ -474,31 +474,6 @@ fn check_webhook_info_for_agents_skips_when_no_agents_dir() {
 
 // ---- check_mcp_tokens tests (REFRESH-03, REFRESH-04) ----
 
-/// Helper: write a minimal mcp.json with one HTTP server entry.
-fn write_mcp_json_for_doctor(agent_dir: &std::path::Path, server_name: &str, server_url: &str) {
-    let content = format!(
-        r#"{{"mcpServers": {{"{server_name}": {{"url": "{server_url}"}}}}}}"#,
-    );
-    std::fs::write(agent_dir.join("mcp.json"), content).unwrap();
-}
-
-/// Helper: write a Bearer token into the agent's mcp.json Authorization header.
-fn write_bearer_for_doctor(
-    agent_dir: &std::path::Path,
-    server_name: &str,
-    _server_url: &str,
-) {
-    let mcp_path = agent_dir.join("mcp.json");
-    let content = std::fs::read_to_string(&mcp_path).unwrap();
-    let mut root: serde_json::Value = serde_json::from_str(&content).unwrap();
-    let entry = root["mcpServers"][server_name].as_object_mut().unwrap();
-    entry.insert(
-        "headers".to_string(),
-        serde_json::json!({ "Authorization": "Bearer test-token" }),
-    );
-    std::fs::write(&mcp_path, serde_json::to_string_pretty(&root).unwrap()).unwrap();
-}
-
 #[test]
 fn check_mcp_tokens_pass_no_agents_dir() {
     // No agents/ dir at all — should Pass
