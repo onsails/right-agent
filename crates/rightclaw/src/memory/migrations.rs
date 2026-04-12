@@ -8,6 +8,7 @@ const V5_SCHEMA: &str = include_str!("sql/v5_cron_feedback.sql");
 const V6_SCHEMA: &str = include_str!("sql/v6_cron_specs.sql");
 const V7_SCHEMA: &str = include_str!("sql/v7_cron_trigger.sql");
 const V8_SCHEMA: &str = include_str!("sql/v8_mcp_servers.sql");
+const V9_SCHEMA: &str = include_str!("sql/v9_mcp_instructions.sql");
 
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
     std::sync::LazyLock::new(|| {
@@ -20,6 +21,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
             M::up(V6_SCHEMA),
             M::up(V7_SCHEMA),
             M::up(V8_SCHEMA),
+            M::up(V9_SCHEMA),
         ])
     });
 
@@ -156,6 +158,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(url, "https://new-url.com/mcp");
+    }
+
+    #[test]
+    fn v9_mcp_servers_has_instructions_column() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO mcp_servers (name, url) VALUES (?1, ?2)",
+            ("test-server", "https://example.com/mcp"),
+        )
+        .unwrap();
+
+        let instructions: Option<String> = conn
+            .query_row(
+                "SELECT instructions FROM mcp_servers WHERE name = ?1",
+                ["test-server"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            instructions.is_none(),
+            "instructions should be NULL by default"
+        );
     }
 
     #[test]
