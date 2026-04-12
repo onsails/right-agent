@@ -130,15 +130,16 @@ async fn handle_mcp_add(
         return validation_error(format!("{e}")).into_response();
     }
 
-    // Get DB connection and add to SQLite (scope DashMap ref guard before await)
-    let conn_arc = {
+    // Get DB connection and agent_dir, add to SQLite (scope DashMap ref guard before await)
+    let (conn_arc, agent_dir) = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
-        match registry.right.get_conn(&req.agent) {
+        let conn = match registry.right.get_conn(&req.agent) {
             Ok(c) => c,
             Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
-        }
+        };
+        (conn, registry.agent_dir.clone())
     };
 
     {
@@ -153,7 +154,7 @@ async fn handle_mcp_add(
 
     // Create ProxyBackend with Unreachable status
     let token = Arc::new(tokio::sync::RwLock::new(None));
-    let backend = ProxyBackend::new(req.name.clone(), req.url.clone(), token);
+    let backend = ProxyBackend::new(req.name.clone(), agent_dir, req.url.clone(), token);
     let handle = Arc::new(backend);
 
     // Insert into proxies map (clone Arc<RwLock> to avoid holding DashMap guard across await)

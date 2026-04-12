@@ -87,9 +87,6 @@ pub(crate) async fn bearer_auth_middleware(
     next.run(req).await
 }
 
-/// Maximum characters per backend in merged instructions.
-const INSTRUCTIONS_TRUNCATION_LIMIT: usize = 4000;
-
 /// Split tool name on first `__` delimiter.
 /// Returns `None` if no `__` found (tool belongs to RightBackend, unprefixed).
 pub(crate) fn split_prefix(tool_name: &str) -> Option<(&str, &str)> {
@@ -167,29 +164,19 @@ impl BackendRegistry {
         )
     }
 
-    /// Merge instructions from all backends, truncating each to [`INSTRUCTIONS_TRUNCATION_LIMIT`].
-    pub(crate) async fn build_instructions(&self) -> String {
-        let mut parts: Vec<String> = Vec::new();
-
-        // Right backend instructions (static).
-        parts.push("## RightClaw Built-in Tools\nMemory, cron, and MCP management tools.".into());
-
-        let proxies = self.proxies.read().await;
-        for (name, handle) in proxies.iter() {
-            if let Some(ref instr) = handle.instructions().await {
-                let truncated = if instr.len() > INSTRUCTIONS_TRUNCATION_LIMIT {
-                    format!(
-                        "## {name}\n{}... (truncated)",
-                        &instr[..INSTRUCTIONS_TRUNCATION_LIMIT]
-                    )
-                } else {
-                    format!("## {name}\n{instr}")
-                };
-                parts.push(truncated);
-            }
+    /// Regenerate MCP_INSTRUCTIONS.md from SQLite-cached instructions.
+    pub(crate) fn regenerate_mcp_instructions(&self) -> Result<(), anyhow::Error> {
+        let conn = rightclaw::memory::open_connection(&self.agent_dir)?;
+        let servers = rightclaw::mcp::credentials::db_list_servers(&conn)?;
+        let content = rightclaw::codegen::generate_mcp_instructions_md(&servers);
+        std::fs::write(self.agent_dir.join("MCP_INSTRUCTIONS.md"), &content)?;
+        // Also copy to .claude/agents/ for @ ref resolution
+        let agents_dir = self.agent_dir.join(".claude/agents");
+        if agents_dir.exists() {
+            std::fs::write(agents_dir.join("MCP_INSTRUCTIONS.md"), &content)?;
         }
-
-        parts.join("\n\n")
+        tracing::debug!(agent_dir = %self.agent_dir.display(), "regenerated MCP_INSTRUCTIONS.md");
+        Ok(())
     }
 }
 
@@ -262,13 +249,6 @@ impl ToolDispatcher {
         tools
     }
 
-    /// Build merged instructions for a given agent.
-    pub(crate) async fn instructions(&self, agent_name: &str) -> String {
-        let Some(registry) = self.agents.get(agent_name) else {
-            return String::new();
-        };
-        registry.build_instructions().await
-    }
 }
 
 /// Top-level aggregator: rmcp `ServerHandler` backed by prefix-based tool routing.
