@@ -501,32 +501,8 @@ fn write_bearer_for_doctor(
 
 #[test]
 fn check_mcp_tokens_pass_no_agents_dir() {
-    // No agents/ dir at all — should Pass with "all present"
+    // No agents/ dir at all — should Pass
     let dir = tempdir().unwrap();
-    // Do NOT create agents/ subdir
-
-    let result = check_mcp_tokens_impl(dir.path());
-    assert_eq!(result.status, CheckStatus::Pass);
-    assert_eq!(result.name, "mcp-tokens");
-    assert!(
-        result.detail.contains("all present"),
-        "detail must be 'all present', got: {}",
-        result.detail
-    );
-}
-
-#[test]
-fn check_mcp_tokens_pass_when_all_present() {
-    // Agent with a valid non-expired credential -- Pass
-    let dir = tempdir().unwrap();
-    let agent_dir = dir.path().join("agents").join("agent1");
-    std::fs::create_dir_all(&agent_dir).unwrap();
-
-    let server_url = "https://mcp.notion.com/mcp";
-    write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
-
-    // Write Bearer token into mcp.json
-    write_bearer_for_doctor(&agent_dir, "notion", server_url);
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);
@@ -534,37 +510,40 @@ fn check_mcp_tokens_pass_when_all_present() {
 }
 
 #[test]
-fn check_mcp_tokens_warn_on_missing_token() {
-    // Agent with mcp.json but no credential → Missing → Warn listing agent1/notion
+fn check_mcp_tokens_counts_registered_servers() {
+    // Agent with servers in SQLite — doctor reports count
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("agent1");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
-    let server_url = "https://mcp.notion.com/mcp";
-    write_mcp_json_for_doctor(&agent_dir, "notion", server_url);
+    // Create memory.db with a registered server
+    let conn = crate::memory::open_connection(&agent_dir).unwrap();
+    crate::mcp::credentials::db_add_server(
+        &conn,
+        "notion",
+        "https://mcp.notion.com/mcp",
+    )
+    .unwrap();
 
-    // No Bearer token written → Missing state
     let result = check_mcp_tokens_impl(dir.path());
-    assert_eq!(result.status, CheckStatus::Warn);
+    assert_eq!(result.status, CheckStatus::Pass);
     assert_eq!(result.name, "mcp-tokens");
     assert!(
-        result.detail.contains("agent1/notion"),
-        "detail must contain 'agent1/notion', got: {}",
+        result.detail.contains("1 server(s) registered"),
+        "detail must contain server count, got: {}",
         result.detail
     );
-    assert!(result.fix.is_some(), "Warn must have a fix hint");
 }
 
 #[test]
-fn check_mcp_tokens_pass_when_bearer_present() {
-    // Agent with Bearer header in mcp.json -- Present -- Pass
+fn check_mcp_tokens_pass_no_servers() {
+    // Agent dir exists but no servers registered — 0 servers
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("agent1");
     std::fs::create_dir_all(&agent_dir).unwrap();
 
-    let server_url = "https://mcp.linear.app/mcp";
-    write_mcp_json_for_doctor(&agent_dir, "linear", server_url);
-    write_bearer_for_doctor(&agent_dir, "linear", server_url);
+    // Create memory.db but register no servers
+    let _conn = crate::memory::open_connection(&agent_dir).unwrap();
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);
