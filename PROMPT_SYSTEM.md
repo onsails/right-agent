@@ -139,7 +139,7 @@ The `right` MCP server provides `with_instructions()` describing all tools:
 memory (store/query/search/delete), cron (list/show runs), MCP management
 (add/remove/list/auth), and bootstrap (bootstrap_done).
 
-Update `with_instructions()` in both `memory_server.rs` and `memory_server_http.rs`
+Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
 whenever tools change.
 
 ## Bootstrap Completion Flow
