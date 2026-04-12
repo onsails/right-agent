@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 pub(crate) mod aggregator;
 pub(crate) mod internal_api;
 mod memory_server;
-mod memory_server_http;
 pub(crate) mod right_backend;
 mod wizard;
 
@@ -234,15 +233,6 @@ pub enum Commands {
     },
     /// Run MCP memory server (stdio transport, launched by Claude Code)
     MemoryServer,
-    /// Run HTTP MCP memory server (multi-agent, Bearer token auth)
-    MemoryServerHttp {
-        /// Port to listen on
-        #[arg(long, default_value = "8100")]
-        port: u16,
-        /// Path to agent-tokens.json (agent name → Bearer token map)
-        #[arg(long)]
-        token_map: std::path::PathBuf,
-    },
     /// Inspect MCP OAuth token status
     Mcp {
         #[command(subcommand)]
@@ -271,54 +261,6 @@ async fn main() -> miette::Result<()> {
         return memory_server::run_memory_server().await;
     }
 
-    if let Commands::MemoryServerHttp { port, ref token_map } = cli.command {
-        let home = rightclaw::config::resolve_home(
-            cli.home.as_deref(),
-            std::env::var("RIGHTCLAW_HOME").ok().as_deref(),
-        )?;
-        let agents_dir = rightclaw::config::agents_dir(&home);
-
-        // Load token map from file
-        let token_map_content = std::fs::read_to_string(token_map)
-            .map_err(|e| miette::miette!("failed to read token map {}: {e:#}", token_map.display()))?;
-        let raw_map: std::collections::HashMap<String, String> = serde_json::from_str(&token_map_content)
-            .map_err(|e| miette::miette!("failed to parse token map: {e:#}"))?;
-
-        let mut agent_map = std::collections::HashMap::new();
-        for (name, token) in &raw_map {
-            let dir = agents_dir.join(name);
-            agent_map.insert(token.clone(), aggregator::AgentInfo {
-                name: name.clone(),
-                dir,
-            });
-        }
-        let token_map = std::sync::Arc::new(tokio::sync::RwLock::new(agent_map));
-
-        // Build ToolDispatcher with a BackendRegistry per agent
-        let dispatcher = std::sync::Arc::new(aggregator::ToolDispatcher {
-            agents: dashmap::DashMap::new(),
-        });
-
-        for (name, _token) in &raw_map {
-            let agent_dir = agents_dir.join(name);
-            let right = right_backend::RightBackend::new(agents_dir.clone());
-            let proxies = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
-
-            dispatcher.agents.insert(name.clone(), aggregator::BackendRegistry {
-                right,
-                proxies,
-                agent_dir,
-            });
-        }
-
-        return aggregator::run_aggregator_http(
-            port,
-            token_map,
-            dispatcher,
-            agents_dir,
-            home,
-        ).await;
-    }
 
     let filter = if cli.verbose {
         "rightclaw=debug"
@@ -450,9 +392,8 @@ async fn main() -> miette::Result<()> {
         Commands::Mcp { command } => match command {
             McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()),
         },
-        // Unreachable: MemoryServer/MemoryServerHttp are dispatched before reaching here.
+        // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
-        Commands::MemoryServerHttp { .. } => unreachable!("MemoryServerHttp dispatched before tracing init"),
         Commands::Bot { agent, debug } => {
             let needs_restart = rightclaw_bot::run(rightclaw_bot::BotArgs {
                 agent,
