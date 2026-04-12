@@ -60,7 +60,7 @@ src/
 src/
 ├── main.rs               # CLI dispatcher
 ├── aggregator.rs         # MCP Aggregator: Aggregator + ToolDispatcher + BackendRegistry
-├── right_backend.rs      # RightBackend: 16 built-in tools (memory, cron, bootstrap)
+├── right_backend.rs      # RightBackend: 13 built-in tools (memory, cron, mcp_list, bootstrap)
 ├── internal_api.rs       # Internal REST API on Unix socket (mcp-add, mcp-remove, set-token)
 └── memory_server.rs      # MCP stdio server (CLI-only, deprecated)
 ```
@@ -329,6 +329,7 @@ LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 - **Prompt injection detection**: Pattern matching in memory guard before SQLite insert
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent in agent.yaml
 - **Protected MCP**: "right" cannot be removed via `/mcp remove`
+- **MCP tool restriction**: Agents cannot register/remove external MCP servers — `mcp_add`, `mcp_remove`, `mcp_auth` are not exposed as MCP tools. Only the user can manage servers via Telegram `/mcp` commands routed through the internal Unix socket API. This prevents sandbox escape via data exfiltration to attacker-controlled MCP endpoints.
 - **OAuth CSRF**: Token matching in callback server
 
 ## OpenShell Integration Conventions

@@ -82,27 +82,7 @@ pub struct CronTriggerParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct McpAddParams {
-    #[schemars(description = "MCP server identifier (e.g. 'notion', 'linear')")]
-    pub name: String,
-    #[schemars(description = "HTTP MCP server URL (must start with https://)")]
-    pub url: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct McpRemoveParams {
-    #[schemars(description = "MCP server name to remove from .claude.json")]
-    pub name: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct McpListParams {}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct McpAuthParams {
-    #[schemars(description = "MCP server name to initiate OAuth for (must exist in .claude.json)")]
-    pub server_name: String,
-}
 
 // --- Server struct ---
 
@@ -387,83 +367,6 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "Add an HTTP MCP server to this agent's mcp.json. Use /mcp auth <name> in Telegram to complete OAuth if the server requires authentication.")]
-    async fn mcp_add(
-        &self,
-        Parameters(params): Parameters<McpAddParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if !params.url.starts_with("https://") {
-            return Err(McpError::invalid_params(
-                format!("URL must start with 'https://' — got: {}", params.url),
-                None,
-            ));
-        }
-        // Register in SQLite (source of truth for mcp_list)
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        rightclaw::mcp::credentials::db_add_server(&conn, &params.name, &params.url)
-            .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-        // Also write to mcp.json for backwards compat
-        let mcp_json_path = self.agent_dir.join("mcp.json");
-        rightclaw::mcp::credentials::add_http_server(
-            &mcp_json_path,
-            &params.name,
-            &params.url,
-        )
-        .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Added MCP server '{}' ({}).",
-            params.name, params.url
-        ))]))
-    }
-
-    #[tool(description = "Remove an HTTP MCP server from this agent's mcp.json. The 'right' server is protected and cannot be removed.")]
-    async fn mcp_remove(
-        &self,
-        Parameters(params): Parameters<McpRemoveParams>,
-    ) -> Result<CallToolResult, McpError> {
-        if params.name == rightclaw::mcp::PROTECTED_MCP_SERVER {
-            return Err(McpError::invalid_params(
-                format!(
-                    "Cannot remove '{}' — required for core agent functionality",
-                    params.name
-                ),
-                None,
-            ));
-        }
-        // Remove from SQLite (source of truth for mcp_list)
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        rightclaw::mcp::credentials::db_remove_server(&conn, &params.name)
-            .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-        drop(conn);
-        // Also remove from mcp.json for backwards compat
-        let mcp_json_path = self.agent_dir.join("mcp.json");
-        match rightclaw::mcp::credentials::remove_http_server(
-            &mcp_json_path,
-            &params.name,
-        ) {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Removed MCP server '{}'.",
-                params.name
-            ))])),
-            Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
-                Err(McpError::invalid_params(
-                    format!(
-                        "Server '{}' not found in mcp.json.",
-                        params.name
-                    ),
-                    None,
-                ))
-            }
-            Err(e) => Err(McpError::internal_error(format!("{e:#}"), None)),
-        }
-    }
-
     #[tool(description = "List all registered MCP servers for this agent. Shows name, URL, and optional instructions.")]
     async fn mcp_list(
         &self,
@@ -516,51 +419,6 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "Discover the OAuth authorization server for an HTTP MCP server and return its authorization endpoint URL. Use this to confirm the server supports OAuth. To complete authentication, use the Telegram bot command: /mcp auth <server_name>")]
-    async fn mcp_auth(
-        &self,
-        Parameters(params): Parameters<McpAuthParams>,
-    ) -> Result<CallToolResult, McpError> {
-        // Guard: check tunnel state before attempting OAuth discovery.
-        let pc_port = std::env::var("RC_PC_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(rightclaw::runtime::pc_client::PC_PORT);
-        let tunnel_state =
-            rightclaw::tunnel::health::check_tunnel(&self.rightclaw_home, pc_port).await;
-        if let Some(err_msg) = tunnel_state.error_message() {
-            return Ok(CallToolResult::error(vec![Content::text(err_msg)]));
-        }
-
-        let mcp_json_path = self.agent_dir.join("mcp.json");
-        let servers = rightclaw::mcp::credentials::list_http_servers(
-            &mcp_json_path,
-        )
-        .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-        let server_url = servers
-            .iter()
-            .find(|(name, _)| name == &params.server_name)
-            .map(|(_, url)| url.clone())
-            .ok_or_else(|| {
-                McpError::invalid_params(
-                    format!(
-                        "Server '{}' not found in mcp.json. Add it first with mcp_add.",
-                        params.server_name
-                    ),
-                    None,
-                )
-            })?;
-
-        let http_client = reqwest::Client::new();
-        let metadata = rightclaw::mcp::oauth::discover_as(&http_client, &server_url)
-            .await
-            .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Server '{}' supports OAuth. Authorization endpoint: {}\n\nTo authenticate, run in Telegram: /mcp auth {}",
-            params.server_name, metadata.authorization_endpoint, params.server_name
-        ))]))
-    }
 }
 
 #[tool_handler]
@@ -587,10 +445,7 @@ impl rmcp::ServerHandler for MemoryServer {
                  - cron_show_run: Get details of a specific cron run\n\
                  - cron_trigger: Trigger a cron job for immediate execution\n\n\
                  ## MCP Management\n\
-                 - mcp_add: Add an external HTTP MCP server\n\
-                 - mcp_remove: Remove an MCP server (cannot remove 'right')\n\
-                 - mcp_list: List all registered MCP servers\n\
-                 - mcp_auth: Initiate OAuth for an HTTP MCP server\n\n\
+                 - mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\
                  ## Bootstrap\n\
                  - bootstrap_done: Signal onboarding completion. Verifies IDENTITY.md, SOUL.md, USER.md exist. Call AFTER creating all three files.",
             )

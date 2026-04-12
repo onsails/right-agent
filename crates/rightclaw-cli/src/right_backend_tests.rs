@@ -28,11 +28,11 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 4 memory + 7 cron + 4 mcp + 1 bootstrap = 16
+    // 4 memory + 7 cron + 1 mcp + 1 bootstrap = 13
     assert_eq!(
         tools.len(),
-        16,
-        "expected 16 tools, got {}: {:?}",
+        13,
+        "expected 13 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );

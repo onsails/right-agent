@@ -16,8 +16,8 @@ use rmcp::model::{CallToolResult, Content, Tool};
 
 use crate::memory_server::{
     CronCreateParams, CronDeleteParams, CronListParams, CronListRunsParams, CronShowRunParams,
-    CronTriggerParams, DeleteRecordParams, McpAddParams, McpAuthParams, McpListParams,
-    McpRemoveParams, QueryRecordsParams, SearchRecordsParams, StoreRecordParams, cron_run_to_json,
+    CronTriggerParams, DeleteRecordParams, McpListParams,
+    QueryRecordsParams, SearchRecordsParams, StoreRecordParams, cron_run_to_json,
     entry_to_json,
 };
 
@@ -99,26 +99,11 @@ impl RightBackend {
                 "Trigger a cron job for immediate execution. The job is queued and will run on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped.",
                 schema_for_type::<CronTriggerParams>(),
             ),
-            // MCP management tools
-            Tool::new(
-                "mcp_add",
-                "Add an HTTP MCP server to this agent's mcp.json. Use /mcp auth <name> in Telegram to complete OAuth if the server requires authentication.",
-                schema_for_type::<McpAddParams>(),
-            ),
-            Tool::new(
-                "mcp_remove",
-                "Remove an HTTP MCP server from this agent's mcp.json. The 'right' server is protected and cannot be removed.",
-                schema_for_type::<McpRemoveParams>(),
-            ),
+            // MCP management tools (read-only — write ops are user-only via Telegram /mcp)
             Tool::new(
                 "mcp_list",
                 "List all registered MCP servers for this agent. Shows name, URL, and optional instructions.",
                 schema_for_type::<McpListParams>(),
-            ),
-            Tool::new(
-                "mcp_auth",
-                "Discover the OAuth authorization server for an HTTP MCP server and return its authorization endpoint URL. Use this to confirm the server supports OAuth. To complete authentication, use the Telegram bot command: /mcp auth <server_name>",
-                schema_for_type::<McpAuthParams>(),
             ),
             // Bootstrap
             Tool::new(
@@ -153,10 +138,7 @@ impl RightBackend {
             "cron_list_runs" => self.call_cron_list_runs(agent_name, &args),
             "cron_show_run" => self.call_cron_show_run(agent_name, &args),
             "cron_trigger" => self.call_cron_trigger(agent_name, &args),
-            "mcp_add" => self.call_mcp_add(agent_dir, &args),
-            "mcp_remove" => self.call_mcp_remove(agent_dir, &args),
             "mcp_list" => self.call_mcp_list(agent_name),
-            "mcp_auth" => self.call_mcp_auth(agent_dir, &args).await,
             "bootstrap_done" => self.call_bootstrap_done(agent_name),
             other => bail!("unknown tool: {other}"),
         }
@@ -433,56 +415,6 @@ impl RightBackend {
     // MCP management tools
     // ------------------------------------------------------------------
 
-    fn call_mcp_add(
-        &self,
-        agent_dir: &Path,
-        args: &serde_json::Value,
-    ) -> Result<CallToolResult, anyhow::Error> {
-        let params: McpAddParams =
-            serde_json::from_value(args.clone()).context("invalid mcp_add params")?;
-        if let Err(e) = rightclaw::mcp::credentials::validate_server_name(&params.name) {
-            return Ok(CallToolResult::error(vec![Content::text(format!("{e}"))]));
-        }
-        if let Err(e) = rightclaw::mcp::credentials::validate_server_url(&params.url) {
-            return Ok(CallToolResult::error(vec![Content::text(format!("{e}"))]));
-        }
-        let mcp_json_path = agent_dir.join("mcp.json");
-        rightclaw::mcp::credentials::add_http_server(&mcp_json_path, &params.name, &params.url)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Added MCP server '{}' ({}).",
-            params.name, params.url
-        ))]))
-    }
-
-    fn call_mcp_remove(
-        &self,
-        agent_dir: &Path,
-        args: &serde_json::Value,
-    ) -> Result<CallToolResult, anyhow::Error> {
-        let params: McpRemoveParams =
-            serde_json::from_value(args.clone()).context("invalid mcp_remove params")?;
-        if params.name == rightclaw::mcp::PROTECTED_MCP_SERVER {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Cannot remove '{}' -- required for core agent functionality",
-                params.name
-            ))]));
-        }
-        let mcp_json_path = agent_dir.join("mcp.json");
-        match rightclaw::mcp::credentials::remove_http_server(&mcp_json_path, &params.name) {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Removed MCP server '{}'.",
-                params.name
-            ))])),
-            Err(rightclaw::mcp::credentials::CredentialError::ServerNotFound(_)) => {
-                Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Server '{}' not found in mcp.json.",
-                    params.name
-                ))]))
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
     fn call_mcp_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
@@ -499,35 +431,6 @@ impl RightBackend {
             .collect();
         let output = serde_json::to_string_pretty(&items)?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
-    }
-
-    async fn call_mcp_auth(
-        &self,
-        agent_dir: &Path,
-        args: &serde_json::Value,
-    ) -> Result<CallToolResult, anyhow::Error> {
-        let params: McpAuthParams =
-            serde_json::from_value(args.clone()).context("invalid mcp_auth params")?;
-        let mcp_json_path = agent_dir.join("mcp.json");
-        let servers = rightclaw::mcp::credentials::list_http_servers(&mcp_json_path)?;
-        let server_url = servers
-            .iter()
-            .find(|(name, _)| name == &params.server_name)
-            .map(|(_, url)| url.clone())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Server '{}' not found in mcp.json. Add it first with mcp_add.",
-                    params.server_name
-                )
-            })?;
-
-        let http_client = reqwest::Client::new();
-        let metadata = rightclaw::mcp::oauth::discover_as(&http_client, &server_url).await?;
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Server '{}' supports OAuth. Authorization endpoint: {}\n\nTo authenticate, run in Telegram: /mcp auth {}",
-            params.server_name, metadata.authorization_endpoint, params.server_name
-        ))]))
     }
 
     // ------------------------------------------------------------------
