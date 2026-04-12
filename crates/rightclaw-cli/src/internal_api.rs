@@ -82,6 +82,16 @@ pub(crate) struct McpServerStatus {
     pub tool_count: usize,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct McpInstructionsRequest {
+    pub agent: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct McpInstructionsResponse {
+    pub instructions: String,
+}
+
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -99,6 +109,7 @@ pub(crate) fn internal_router(dispatcher: Arc<ToolDispatcher>) -> Router {
         .route("/mcp-remove", post(handle_mcp_remove))
         .route("/set-token", post(handle_set_token))
         .route("/mcp-list", post(handle_mcp_list))
+        .route("/mcp-instructions", post(handle_mcp_instructions))
         .with_state(dispatcher)
 }
 
@@ -372,6 +383,38 @@ async fn handle_mcp_list(
     }
 
     Json(McpListResponse { servers }).into_response()
+}
+
+async fn handle_mcp_instructions(
+    State(dispatcher): State<Arc<ToolDispatcher>>,
+    Json(req): Json<McpInstructionsRequest>,
+) -> axum::response::Response {
+    let conn_arc = {
+        let Some(registry) = dispatcher.agents.get(&req.agent) else {
+            return not_found(format!("agent '{}' not found", req.agent)).into_response();
+        };
+        match registry.right.get_conn(&req.agent) {
+            Ok(c) => c,
+            Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
+        }
+    };
+
+    let servers = {
+        let conn = match conn_arc.lock() {
+            Ok(c) => c,
+            Err(e) => return internal_error(format!("mutex poisoned: {e}")).into_response(),
+        };
+        match credentials::db_list_servers(&conn) {
+            Ok(s) => s,
+            Err(e) => return internal_error(format!("db_list_servers: {e:#}")).into_response(),
+        }
+    };
+
+    let content = rightclaw::codegen::generate_mcp_instructions_md(&servers);
+    Json(McpInstructionsResponse {
+        instructions: content,
+    })
+    .into_response()
 }
 
 #[cfg(test)]
@@ -696,6 +739,40 @@ mod tests {
         let (status, _body) = send_json(
             app,
             "/mcp-list",
+            serde_json::json!({ "agent": "nonexistent" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn mcp_instructions_returns_header_for_no_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_test_dispatcher(tmp.path());
+        let app = internal_router(dispatcher);
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-instructions",
+            serde_json::json!({ "agent": "test-agent" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let instructions = body["instructions"].as_str().unwrap();
+        assert_eq!(instructions, "# MCP Server Instructions\n");
+    }
+
+    #[tokio::test]
+    async fn mcp_instructions_unknown_agent_returns_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_test_dispatcher(tmp.path());
+        let app = internal_router(dispatcher);
+
+        let (status, _body) = send_json(
+            app,
+            "/mcp-instructions",
             serde_json::json!({ "agent": "nonexistent" }),
         )
         .await;
