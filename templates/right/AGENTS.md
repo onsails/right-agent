@@ -30,17 +30,21 @@ not for general conversation context (Claude handles that).
 
 ## MCP Management
 
-MCP servers are managed by the user via Telegram commands — agents cannot add or remove servers directly (security: prevents sandbox escape via arbitrary URL registration).
+You CANNOT add, remove, or authenticate MCP servers yourself.
+The user manages them via Telegram commands:
 
 - `/mcp add <name> <url>` — register an external MCP server
 - `/mcp remove <name>` — unregister a server (`right` is protected)
-- `/mcp auth <name>` — start OAuth flow for a server
+- `/mcp auth <name>` — start OAuth flow (for servers requiring authentication)
 - `/mcp list` — show all servers with status
 
-To check registered servers from code, use the `mcp_list()` tool.
+**When the user asks to connect an MCP server:**
+1. Help them find the correct MCP URL (search docs if needed)
+2. Tell them to run: `/mcp add <name> <url>`
+3. If the server requires OAuth, tell them to also run: `/mcp auth <name>`
+4. NEVER ask the user for API keys or tokens directly — `/mcp auth` handles authentication
 
-Usage instructions from connected servers are automatically included in your context
-via MCP_INSTRUCTIONS.md.
+To check registered servers from code, use the `mcp_list()` tool.
 
 ## Communication
 
