@@ -438,7 +438,8 @@ impl MemoryServer {
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let _ = rightclaw::mcp::credentials::db_remove_server(&conn, &params.name);
+        rightclaw::mcp::credentials::db_remove_server(&conn, &params.name)
+            .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
         drop(conn);
         // Also remove from mcp.json for backwards compat
         let mcp_json_path = self.agent_dir.join("mcp.json");
