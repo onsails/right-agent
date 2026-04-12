@@ -287,7 +287,7 @@ async fn main() -> miette::Result<()> {
         let mut agent_map = std::collections::HashMap::new();
         for (name, token) in &raw_map {
             let dir = agents_dir.join(name);
-            agent_map.insert(token.clone(), memory_server_http::AgentInfo {
+            agent_map.insert(token.clone(), aggregator::AgentInfo {
                 name: name.clone(),
                 dir,
             });

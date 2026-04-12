@@ -25,8 +25,67 @@ use rmcp::ErrorData as McpError;
 use rightclaw::mcp::proxy::{BackendStatus, ProxyBackend};
 use tokio_util::sync::CancellationToken;
 
-use crate::memory_server_http::{AgentInfo, AgentTokenMap, bearer_auth_middleware};
 use crate::right_backend::RightBackend;
+
+// ---------------------------------------------------------------------------
+// Auth types & middleware (moved from memory_server_http.rs)
+// ---------------------------------------------------------------------------
+
+/// Token -> agent mapping for multi-agent HTTP mode.
+pub(crate) type AgentTokenMap = Arc<tokio::sync::RwLock<HashMap<String, AgentInfo>>>;
+
+/// Agent identity resolved from a Bearer token.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentInfo {
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+pub(crate) async fn bearer_auth_middleware(
+    axum::extract::State(token_map): axum::extract::State<AgentTokenMap>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let auth = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    let Some(token) = auth else {
+        return (axum::http::StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response();
+    };
+
+    let map = token_map.read().await;
+    let agent = {
+        use subtle::ConstantTimeEq;
+        let token_bytes = token.as_bytes();
+        let mut found: Option<AgentInfo> = None;
+        for (candidate, agent_name) in map.iter() {
+            let candidate_bytes = candidate.as_bytes();
+            // Pad to equal length so ct_eq doesn't leak length via short-circuit.
+            // A mismatch in length still results in 0, but we always iterate all entries.
+            let eq = if candidate_bytes.len() == token_bytes.len() {
+                candidate_bytes.ct_eq(token_bytes).into()
+            } else {
+                false
+            };
+            if eq {
+                found = Some(agent_name.clone());
+            }
+        }
+        found
+    };
+    let Some(agent) = agent else {
+        return (axum::http::StatusCode::UNAUTHORIZED, "Invalid Bearer token").into_response();
+    };
+    drop(map);
+
+    req.extensions_mut().insert(agent);
+    next.run(req).await
+}
 
 /// Maximum characters per backend in merged instructions.
 const INSTRUCTIONS_TRUNCATION_LIMIT: usize = 4000;
