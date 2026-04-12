@@ -754,4 +754,58 @@ mod tests {
             "triggered_at should be cleared"
         );
     }
+
+    /// Regression: run_cron_task must exit promptly when shutdown token is cancelled.
+    ///
+    /// Before the fix, run_job_loop tasks sleep until next fire time (potentially hours).
+    /// Shutdown awaited these handles with `handle.await`, causing a hang until
+    /// process-compose SIGKILL'd the process after timeout_seconds (10s).
+    #[tokio::test]
+    async fn shutdown_completes_promptly_with_scheduled_jobs() {
+        let dir = tempdir().unwrap();
+        let agent_dir = dir.path().to_path_buf();
+
+        // Create DB and register a job with a far-future schedule (once per year)
+        let conn = rightclaw::memory::open_connection(&agent_dir).unwrap();
+        rightclaw::cron_spec::create_spec(
+            &conn,
+            "slow-job",
+            "0 0 1 1 *",  // Jan 1st at midnight — won't fire during test
+            "echo test",
+            None,
+            None,
+        )
+        .unwrap();
+        drop(conn);
+
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+
+        let cron_handle = tokio::spawn(run_cron_task(
+            agent_dir,
+            "test-agent".to_string(),
+            None,
+            None,
+            shutdown_clone,
+        ));
+
+        // Give cron engine time to reconcile and spawn the job loop
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Signal shutdown
+        shutdown.cancel();
+
+        // Must complete within 2 seconds — if it hangs, the bug is present
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cron_handle,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "run_cron_task must exit within 2s of shutdown — \
+             job loop handles are likely blocking (not aborted on shutdown)"
+        );
+    }
 }
