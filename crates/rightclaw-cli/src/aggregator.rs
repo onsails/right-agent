@@ -159,20 +159,6 @@ impl BackendRegistry {
         )
     }
 
-    /// Regenerate MCP_INSTRUCTIONS.md from SQLite-cached instructions.
-    pub(crate) fn regenerate_mcp_instructions(&self) -> Result<(), anyhow::Error> {
-        let conn = rightclaw::memory::open_connection(&self.agent_dir)?;
-        let servers = rightclaw::mcp::credentials::db_list_servers(&conn)?;
-        let content = rightclaw::codegen::generate_mcp_instructions_md(&servers);
-        std::fs::write(self.agent_dir.join("MCP_INSTRUCTIONS.md"), &content)?;
-        // Also copy to .claude/agents/ for @ ref resolution
-        let agents_dir = self.agent_dir.join(".claude/agents");
-        if agents_dir.exists() {
-            std::fs::write(agents_dir.join("MCP_INSTRUCTIONS.md"), &content)?;
-        }
-        tracing::debug!(agent_dir = %self.agent_dir.display(), "regenerated MCP_INSTRUCTIONS.md");
-        Ok(())
-    }
 }
 
 /// Prefix-based tool routing across per-agent backend registries.

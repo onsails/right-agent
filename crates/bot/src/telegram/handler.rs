@@ -692,22 +692,6 @@ async fn handle_mcp_auth(
     Ok(())
 }
 
-/// Sync MCP_INSTRUCTIONS.md to .claude/agents/ for @ ref resolution.
-///
-/// The periodic background sync handles sandbox upload, so we only do the
-/// local copy here to avoid needing sandbox name / SSH config in these handlers.
-fn sync_mcp_instructions(agent_dir: &Path) -> Result<(), std::io::Error> {
-    let src = agent_dir.join("MCP_INSTRUCTIONS.md");
-    if !src.exists() {
-        return Ok(());
-    }
-    let agents_subdir = agent_dir.join(".claude/agents");
-    if agents_subdir.exists() {
-        std::fs::copy(&src, agents_subdir.join("MCP_INSTRUCTIONS.md"))?;
-    }
-    Ok(())
-}
-
 /// `/mcp add <name> <url>` -- add an MCP server via the internal aggregator API.
 async fn handle_mcp_add(
     bot: &BotType,
@@ -746,10 +730,6 @@ async fn handle_mcp_add(
             }
             reply.push_str("\nTools available on agent's next session.");
             send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
-            // Non-fatal: background sync will catch up if local copy fails.
-            if let Err(e) = sync_mcp_instructions(agent_dir) {
-                tracing::warn!("sync MCP_INSTRUCTIONS.md failed: {e:#}");
-            }
         }
         Err(e) => {
             send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}")).await?;
@@ -794,10 +774,6 @@ async fn handle_mcp_remove(
                 &format!("Removed MCP server <b>{escaped_name}</b>."),
             )
             .await?;
-            // Non-fatal: background sync will catch up if local copy fails.
-            if let Err(e) = sync_mcp_instructions(agent_dir) {
-                tracing::warn!("sync MCP_INSTRUCTIONS.md failed: {e:#}");
-            }
         }
         Err(e) => {
             send_html_reply(
