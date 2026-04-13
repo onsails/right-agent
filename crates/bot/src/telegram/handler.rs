@@ -506,7 +506,8 @@ async fn handle_mcp_list(
     let mut text = String::from("MCP Servers:\n\n");
     for s in &result.servers {
         let url_part = s.url.as_deref().map(|u| format!(" [{u}]")).unwrap_or_default();
-        text.push_str(&format!("  {} -- {} ({} tools){}\n", s.name, s.status, s.tool_count, url_part));
+        let auth_part = s.auth_type.as_deref().map(|a| format!(" [{a}]")).unwrap_or_default();
+        text.push_str(&format!("  {} -- {} ({} tools){}{}\n", s.name, s.status, s.tool_count, auth_part, url_part));
     }
     bot.send_message(msg.chat.id, text).await?;
     Ok(())
