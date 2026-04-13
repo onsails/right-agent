@@ -120,7 +120,8 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 - **Domain research before implementation**: Always verify external tool APIs by reading source code or running `--help` before writing integration code. Never rely solely on web documentation — it may be outdated or wrong.
 - **PROMPT_SYSTEM.md**: Always keep PROMPT_SYSTEM.md in sync with the actual prompting system. When changing system prompt generation, agent definitions, JSON schemas, or MCP instructions, update PROMPT_SYSTEM.md to match.
 - **MCP with_instructions()**: When adding, removing, or renaming MCP tools, always update `with_instructions()` in both `memory_server.rs` and `aggregator.rs` to reflect the current tool set and descriptions.
-- **Self-healing platform**: Never manually fix agent sandboxes, configs, or state. If a platform change breaks an agent, the platform code must detect and recover automatically (e.g. recreate sandbox if policy is stale, re-upload if files are missing). Manual fixes mask bugs and prevent proper testing.
+- **Self-healing platform**: Never manually fix agent sandboxes, configs, or state. If a platform change breaks an agent, the platform code must detect and recover automatically (re-upload if files are missing, adjust policy, etc.). Manual fixes mask bugs and prevent proper testing.
+- **Never delete sandboxes for recovery**: Sandboxes contain agent data (credentials, installed tools, agent-created files). Deleting a sandbox destroys this data. Platform changes must be designed to work with existing sandboxes — never require sandbox recreation as a migration path.
 ## Architecture
 
 @ARCHITECTURE.md
