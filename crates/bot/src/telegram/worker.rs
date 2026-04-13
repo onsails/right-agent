@@ -612,7 +612,8 @@ fi"#
 
 /// Assemble a composite system prompt from host-side files.
 ///
-/// Used in no-sandbox mode where files are directly accessible.
+/// Uses compiled-in constants for operating instructions and bootstrap content.
+/// Agent-owned files (IDENTITY, SOUL, USER, AGENTS, TOOLS) are read from disk.
 fn assemble_host_system_prompt(
     base_prompt: &str,
     bootstrap_mode: bool,
@@ -622,36 +623,43 @@ fn assemble_host_system_prompt(
     let mut prompt = base_prompt.to_string();
 
     if bootstrap_mode {
-        if let Ok(content) = std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")) {
-            prompt.push_str("\n## Bootstrap Instructions\n");
-            prompt.push_str(&content);
-            prompt.push('\n');
-        }
+        prompt.push_str("\n## Bootstrap Instructions\n");
+        prompt.push_str(rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS);
+        prompt.push('\n');
     } else {
-        let sections: &[(&str, &str)] = &[
+        // Compiled-in operating instructions (platform-owned, always fresh)
+        prompt.push_str("\n## Operating Instructions\n");
+        prompt.push_str(rightclaw::codegen::OPERATING_INSTRUCTIONS);
+        prompt.push('\n');
+
+        // Agent-owned identity files (from disk)
+        let identity_sections: &[(&str, &str)] = &[
             ("IDENTITY.md", "## Your Identity"),
             ("SOUL.md", "## Your Personality and Values"),
             ("USER.md", "## Your User"),
         ];
-        for (file, header) in sections {
+        for (file, header) in identity_sections {
             if let Ok(content) = std::fs::read_to_string(agent_dir.join(file)) {
                 prompt.push_str(&format!("\n{header}\n"));
                 prompt.push_str(&content);
                 prompt.push('\n');
             }
         }
-        // AGENTS.md and TOOLS.md are in .claude/agents/
-        let agents_subdir: &[(&str, &str)] = &[
-            ("AGENTS.md", "## Operating Instructions"),
-            ("TOOLS.md", "## Environment and Tools"),
-        ];
-        for (file, header) in agents_subdir {
-            let path = agent_dir.join(".claude").join("agents").join(file);
-            if let Ok(content) = std::fs::read_to_string(path) {
-                prompt.push_str(&format!("\n{header}\n"));
-                prompt.push_str(&content);
-                prompt.push('\n');
-            }
+
+        // Per-agent configuration (from .claude/agents/)
+        let agents_path = agent_dir.join(".claude").join("agents").join("AGENTS.md");
+        if let Ok(content) = std::fs::read_to_string(&agents_path) {
+            prompt.push_str("\n## Agent Configuration\n");
+            prompt.push_str(&content);
+            prompt.push('\n');
+        }
+
+        // Agent-owned tools notes (from .claude/agents/)
+        let tools_path = agent_dir.join(".claude").join("agents").join("TOOLS.md");
+        if let Ok(content) = std::fs::read_to_string(&tools_path) {
+            prompt.push_str("\n## Environment and Tools\n");
+            prompt.push_str(&content);
+            prompt.push('\n');
         }
     }
 
@@ -1705,12 +1713,13 @@ mod tests {
     #[test]
     fn host_prompt_bootstrap_includes_bootstrap_md() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("BOOTSTRAP.md"), "# Onboarding").unwrap();
+        // File exists as flag only — content comes from constant
+        std::fs::write(dir.path().join("BOOTSTRAP.md"), "ignored").unwrap();
 
         let result = assemble_host_system_prompt("Base\n", true, dir.path(), None);
         assert!(result.contains("Base"));
         assert!(result.contains("## Bootstrap Instructions"));
-        assert!(result.contains("# Onboarding"));
+        assert!(result.contains("First-Time Setup"), "must use compiled-in content");
     }
 
     #[test]
@@ -1721,18 +1730,20 @@ mod tests {
         std::fs::write(dir.path().join("USER.md"), "Andrey").unwrap();
         let agents_dir = dir.path().join(".claude").join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("AGENTS.md"), "Procedures").unwrap();
+        std::fs::write(agents_dir.join("AGENTS.md"), "## Subagents\n").unwrap();
         std::fs::write(agents_dir.join("TOOLS.md"), "outbox: /sandbox/outbox/").unwrap();
 
         let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
+        assert!(result.contains("## Operating Instructions"), "must have compiled-in Operating Instructions");
+        assert!(result.contains("## Your Files"), "Operating Instructions must contain Your Files");
         assert!(result.contains("## Your Identity"));
         assert!(result.contains("I am Spark"));
         assert!(result.contains("## Your Personality and Values"));
         assert!(result.contains("Snarky"));
         assert!(result.contains("## Your User"));
         assert!(result.contains("Andrey"));
-        assert!(result.contains("## Operating Instructions"));
-        assert!(result.contains("Procedures"));
+        assert!(result.contains("## Agent Configuration"), "AGENTS.md section renamed to Agent Configuration");
+        assert!(result.contains("## Subagents"));
         assert!(result.contains("## Environment and Tools"));
         assert!(result.contains("outbox: /sandbox/outbox/"));
     }
@@ -1753,11 +1764,13 @@ mod tests {
     }
 
     #[test]
-    fn host_prompt_bootstrap_skips_missing_bootstrap() {
+    fn host_prompt_bootstrap_always_emits_content() {
         let dir = tempfile::tempdir().unwrap();
-        // No BOOTSTRAP.md
+        // No BOOTSTRAP.md — but function is called with bootstrap_mode=true
+        // (caller is responsible for mode detection, not this function)
         let result = assemble_host_system_prompt("Base\n", true, dir.path(), None);
-        assert_eq!(result, "Base\n");
+        assert!(result.contains("## Bootstrap Instructions"));
+        assert!(result.contains("First-Time Setup"));
     }
 
     #[test]
@@ -1808,6 +1821,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
         assert!(!result.contains("MCP Server Instructions"));
+    }
+
+    #[test]
+    fn host_prompt_bootstrap_uses_compiled_constant() {
+        let dir = tempfile::tempdir().unwrap();
+        // BOOTSTRAP.md file exists (flag) but we don't read its content
+        std::fs::write(dir.path().join("BOOTSTRAP.md"), "old content").unwrap();
+
+        let result = assemble_host_system_prompt("Base\n", true, dir.path(), None);
+        assert!(result.contains("First-Time Setup"), "must use compiled-in bootstrap content");
+        assert!(!result.contains("old content"), "must NOT read file content");
+    }
+
+    #[test]
+    fn host_prompt_normal_has_operating_instructions_before_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("IDENTITY.md"), "I am Test").unwrap();
+
+        let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
+        let op_instr_pos = result.find("## Operating Instructions").expect("must have Operating Instructions");
+        let identity_pos = result.find("## Your Identity").expect("must have Your Identity");
+        assert!(op_instr_pos < identity_pos, "Operating Instructions must come before identity");
+    }
+
+    #[test]
+    fn host_prompt_normal_has_agent_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents_dir = dir.path().join(".claude").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("AGENTS.md"), "## Subagents\n\n### reviewer\n").unwrap();
+
+        let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
+        assert!(result.contains("## Agent Configuration"), "must have Agent Configuration header");
+        assert!(result.contains("### reviewer"), "must include per-agent content");
     }
 
     #[test]
