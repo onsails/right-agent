@@ -1,10 +1,12 @@
-/// Content `.md` files that agent definitions reference via `@./FILE.md`.
+/// Content `.md` files synced to `.claude/agents/` in sandbox.
 ///
-/// These live at the agent root but are copied into `.claude/agents/` by codegen
-/// so CC can resolve the `@` references (which are relative to the agent def file).
+/// These live at the agent root and are copied into `.claude/agents/` by codegen
+/// so CC can resolve `@` references (which are relative to the agent def file).
 /// Also used by the bot's sync module for forward/reverse sync with the sandbox.
+///
+/// BOOTSTRAP.md is excluded — its content comes from the compiled-in
+/// `BOOTSTRAP_INSTRUCTIONS` constant; the on-disk file is only an existence flag.
 pub const CONTENT_MD_FILES: &[&str] = &[
-    "BOOTSTRAP.md",
     "AGENTS.md",
     "TOOLS.md",
     "IDENTITY.md",
@@ -12,6 +14,22 @@ pub const CONTENT_MD_FILES: &[&str] = &[
     "USER.md",
     "MEMORY.md",
 ];
+
+/// Platform operating instructions, compiled into the binary.
+///
+/// Injected directly into the system prompt at assembly time.
+/// Source: `templates/right/prompt/OPERATING_INSTRUCTIONS.md`
+pub const OPERATING_INSTRUCTIONS: &str =
+    include_str!("../../../../templates/right/prompt/OPERATING_INSTRUCTIONS.md");
+
+/// Bootstrap instructions, compiled into the binary.
+///
+/// Injected into the system prompt when bootstrap mode is active
+/// (BOOTSTRAP.md exists in agent dir). The on-disk file is only
+/// an existence flag — content always comes from this constant.
+/// Source: `templates/right/agent/BOOTSTRAP.md`
+pub const BOOTSTRAP_INSTRUCTIONS: &str =
+    include_str!("../../../../templates/right/agent/BOOTSTRAP.md");
 
 /// JSON schema for the structured reply format used by teloxide agents (D-02).
 ///

@@ -13,7 +13,8 @@ pub mod skills;
 pub mod telegram;
 pub use agent_def::{
     generate_agent_definition, generate_bootstrap_definition, generate_system_prompt,
-    BOOTSTRAP_SCHEMA_JSON, CONTENT_MD_FILES, CRON_SCHEMA_JSON, REPLY_SCHEMA_JSON,
+    BOOTSTRAP_INSTRUCTIONS, BOOTSTRAP_SCHEMA_JSON, CONTENT_MD_FILES, CRON_SCHEMA_JSON,
+    OPERATING_INSTRUCTIONS, REPLY_SCHEMA_JSON,
 };
 pub use claude_json::{create_credential_symlink, generate_agent_claude_json};
 pub use mcp_config::generate_mcp_config;

@@ -13,9 +13,9 @@ pub struct InitOverrides {
     pub env: HashMap<String, String>,
 }
 
-const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/AGENTS.md");
-const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/BOOTSTRAP.md");
-const DEFAULT_AGENT_YAML: &str = include_str!("../../../templates/right/agent.yaml");
+const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/agent/AGENTS.md");
+const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/agent/BOOTSTRAP.md");
+const DEFAULT_AGENT_YAML: &str = include_str!("../../../templates/right/agent/agent.yaml");
 
 /// Initialize a single agent under `agents_parent_dir/<name>/`.
 ///
@@ -56,6 +56,7 @@ pub fn init_agent(
     let files: &[(&str, &str)] = &[
         ("AGENTS.md", DEFAULT_AGENTS),
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
+        ("TOOLS.md", ""),
         ("agent.yaml", DEFAULT_AGENT_YAML),
     ];
 
@@ -204,6 +205,7 @@ pub fn init_rightclaw_home(
     println!("Created RightClaw home at {}", home.display());
     println!("  agents/right/AGENTS.md");
     println!("  agents/right/BOOTSTRAP.md");
+    println!("  agents/right/TOOLS.md");
     println!("  agents/right/agent.yaml");
     println!("  agents/right/.claude/skills/rightskills/SKILL.md  (skills.sh manager)");
     println!("  agents/right/.claude/skills/rightcron/SKILL.md");
@@ -323,6 +325,9 @@ mod tests {
         assert!(!agents_dir.join("USER.md").exists(), "USER.md must not be created by init");
         assert!(agents_dir.join("staging").is_dir(), "staging/ dir should be created");
         assert!(agents_dir.join("AGENTS.md").exists());
+        assert!(agents_dir.join("TOOLS.md").exists(), "TOOLS.md must be created by init");
+        let tools_content = std::fs::read_to_string(agents_dir.join("TOOLS.md")).unwrap();
+        assert_eq!(tools_content, "", "TOOLS.md must be created empty");
         assert!(agents_dir.join("policy.yaml").exists(), "policy.yaml should be created for openshell mode");
         assert!(
             agents_dir.join("BOOTSTRAP.md").exists(),
