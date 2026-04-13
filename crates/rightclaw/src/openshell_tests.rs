@@ -153,7 +153,7 @@ async fn mock_client(addr: SocketAddr) -> OpenShellClient<Channel> {
 // Leftovers from panicked tests are cleaned up by the next create() call.
 // ---------------------------------------------------------------------------
 
-struct TestSandbox {
+pub(crate) struct TestSandbox {
     name: String,
     mtls_dir: PathBuf,
     _tmp: tempfile::TempDir, // keeps policy file alive
@@ -161,7 +161,7 @@ struct TestSandbox {
 
 impl TestSandbox {
     /// Create an ephemeral sandbox for testing. Cleans up any leftover from previous runs.
-    async fn create(test_name: &str) -> Self {
+    pub(crate) async fn create(test_name: &str) -> Self {
         let name = format!("rightclaw-test-{test_name}");
 
         let mtls_dir = match super::preflight_check() {
@@ -216,12 +216,12 @@ network_policies:
         Self { name, mtls_dir, _tmp: tmp }
     }
 
-    fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
     /// Execute a command inside the sandbox, return (stdout, exit_code).
-    async fn exec(&self, cmd: &[&str]) -> (String, i32) {
+    pub(crate) async fn exec(&self, cmd: &[&str]) -> (String, i32) {
         let mut client = super::connect_grpc(&self.mtls_dir).await.unwrap();
         let id = super::resolve_sandbox_id(&mut client, &self.name)
             .await
@@ -232,7 +232,7 @@ network_policies:
     }
 
     /// Delete the sandbox and wait for deletion to complete.
-    async fn destroy(self) {
+    pub(crate) async fn destroy(self) {
         super::delete_sandbox(&self.name).await;
         let mut client = super::connect_grpc(&self.mtls_dir).await.unwrap();
         let _ = super::wait_for_deleted(&mut client, &self.name, 60, 2).await;
