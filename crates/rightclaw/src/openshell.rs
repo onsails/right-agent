@@ -380,6 +380,15 @@ pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> 
         );
     }
 
+    if host_path.is_dir() {
+        return upload_directory(sandbox, host_path, sandbox_dir).await;
+    }
+
+    upload_single_file(sandbox, host_path, sandbox_dir).await
+}
+
+/// Upload a single file to a sandbox directory.
+async fn upload_single_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> miette::Result<()> {
     let output = Command::new("openshell")
         .args(["sandbox", "upload", sandbox])
         .arg(host_path)
@@ -391,6 +400,54 @@ pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(miette::miette!("openshell upload failed: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Upload a directory by individually uploading each file in parallel.
+///
+/// OpenShell CLI has a known bug where directory uploads silently drop files.
+/// Workaround: walk the directory tree and upload each file individually.
+async fn upload_directory(sandbox: &str, host_dir: &Path, sandbox_dir: &str) -> miette::Result<()> {
+    use futures::stream::{self, StreamExt};
+
+    let dir_name = host_dir
+        .file_name()
+        .ok_or_else(|| miette::miette!("directory has no name: {}", host_dir.display()))?
+        .to_string_lossy();
+
+    let mut uploads = Vec::new();
+    for entry in walkdir::WalkDir::new(host_dir) {
+        let entry = entry.map_err(|e| miette::miette!("walkdir error: {e:#}"))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(host_dir)
+            .map_err(|e| miette::miette!("strip_prefix failed: {e:#}"))?;
+        // Destination: sandbox_dir + dir_name + relative path's parent
+        let dest_dir = std::path::Path::new(sandbox_dir)
+            .join(&*dir_name)
+            .join(rel.parent().unwrap_or(std::path::Path::new("")));
+        let dest = format!("{}/", dest_dir.display());
+        uploads.push((entry.path().to_path_buf(), dest));
+    }
+
+    if uploads.is_empty() {
+        return Ok(());
+    }
+
+    let results: Vec<miette::Result<()>> = stream::iter(uploads.into_iter().map(|(path, dest)| {
+        let sandbox = sandbox.to_owned();
+        async move { upload_single_file(&sandbox, &path, &dest).await }
+    }))
+    .buffer_unordered(10)
+    .collect()
+    .await;
+
+    for result in results {
+        result?;
     }
     Ok(())
 }
