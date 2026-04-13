@@ -45,17 +45,21 @@ in Telegram.
 
 **When the user asks to connect an MCP server:**
 
-1. **Find the MCP endpoint.** Search for the service's Claude Code, Codex,
-   or Claude Desktop integration docs — these typically describe an MCP endpoint
-   (streamable HTTP or SSE). Search queries like
-   `"<service> MCP Claude Code"` or `"<service> MCP server"` work best.
+1. **Find the OAuth endpoint first.** Search for the service's Claude Code, Codex,
+   or Claude Desktop integration docs — these typically describe an OAuth-capable
+   MCP endpoint (streamable HTTP or SSE). Search queries like
+   `"<service> MCP Claude Code"` or `"<service> MCP OAuth"` work best.
 
-2. **Tell the user to run:** `/mcp add <name> <url>`
-   The system auto-detects the authentication method (OAuth, Bearer token,
-   custom header, or API key in URL) and handles the setup flow.
+2. **If OAuth endpoint found** — tell the user to run:
+   `/mcp add <name> <url>` then `/mcp auth <name>`
 
-3. **NEVER ask the user for API keys or tokens directly** — the `/mcp add` flow
-   handles credential collection when needed.
+3. **If no OAuth endpoint exists** — look for an API-key endpoint
+   (a URL that embeds or requires a key/token). Tell the user to run:
+   `/mcp add <name> <url>`
+   The system will prompt for credentials if needed.
+
+4. **NEVER ask the user for API keys or tokens directly** — either `/mcp auth`
+   handles authentication, or the key is part of the URL the user provides.
 
 To check registered servers from code, use the `mcp_list()` tool.
 

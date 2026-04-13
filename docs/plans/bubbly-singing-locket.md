@@ -1,76 +1,73 @@
-# Early URL parsing in `handle_mcp_add`
+# Prioritize OAuth endpoints in MCP search instructions
 
 ## Context
 
-The `/mcp add` handler in `handler.rs` receives a raw URL string from the user and uses it in multiple places (OAuth discovery, haiku AI classification, internal API registration) before it's ever validated. URL validation (`Url::parse` + scheme/host checks) only happens deep in the internal API handler (`internal_api.rs:168`), meaning:
+When a user asks the agent to add an MCP server (e.g. "add Composio MCP"), the agent
+searches the web and picks the first URL it finds. For Composio, this is the API-key
+endpoint (`backend.composio.dev/v3/mcp/{SERVER_ID}?user_id=...`) rather than the
+OAuth-capable endpoint (`mcp.composio.dev`).
 
-1. Invalid URLs waste a haiku call and OAuth discovery HTTP requests before being rejected
-2. Query string stripping uses naive `find('?')` instead of proper URL parsing
-3. The `is_public_url` check parses the URL again redundantly
+The agent correctly follows its instructions — but those instructions say "find the MCP
+endpoint" generically, without prioritizing OAuth. Since `handle_mcp_add` short-circuits
+to `query_string` auth when the URL has `?params`, OAuth discovery is never attempted.
 
-The fix: parse the URL once at the top of `handle_mcp_add` with `url::Url`, derive `bare_url` and `has_query` from the parsed result, validate early, and pass strings downstream.
+A spec already exists: `docs/superpowers/specs/2026-04-13-mcp-search-strategy-design.md`.
+This plan applies it.
 
-## Files
+## File
 
-- **Modify:** `crates/bot/src/telegram/handler.rs` — `handle_mcp_add` function (lines 735-894)
-- **Read-only:** `crates/rightclaw/src/mcp/credentials.rs` — `validate_server_url`, `is_public_url`
-- **Read-only:** `crates/rightclaw-cli/src/internal_api.rs` — `validate_server_url` call (stays as defense-in-depth)
+**Modify:** `templates/right/prompt/OPERATING_INSTRUCTIONS.md` — lines 46-58
 
-## Changes
+## Change
 
-### `handle_mcp_add` in `handler.rs`
+Replace the current "When the user asks to connect an MCP server" block:
 
-Replace lines 752-764 (current):
-```rust
-let original_url = parts[1];
-// ...
-let bare_url = match original_url.find('?') {
-    Some(pos) => &original_url[..pos],
-    None => original_url,
-};
+```markdown
+**When the user asks to connect an MCP server:**
+
+1. **Find the MCP endpoint.** Search for the service's Claude Code, Codex,
+   or Claude Desktop integration docs — these typically describe an MCP endpoint
+   (streamable HTTP or SSE). Search queries like
+   `"<service> MCP Claude Code"` or `"<service> MCP server"` work best.
+
+2. **Tell the user to run:** `/mcp add <name> <url>`
+   The system auto-detects the authentication method (OAuth, Bearer token,
+   custom header, or API key in URL) and handles the setup flow.
+
+3. **NEVER ask the user for API keys or tokens directly** — the `/mcp add` flow
+   handles credential collection when needed.
 ```
 
 With:
-```rust
-let original_url = parts[1];
 
-// Parse URL early — reject garbage before any network calls
-let parsed = match url::Url::parse(original_url) {
-    Ok(u) => u,
-    Err(e) => {
-        bot.send_message(msg.chat.id, format!("Invalid URL: {e}"))
-            .await?;
-        return Ok(());
-    }
-};
+```markdown
+**When the user asks to connect an MCP server:**
 
-// Derive bare URL (without query string) and query presence from parsed URL
-let has_query = parsed.query().is_some();
-let bare_url = {
-    let mut clean = parsed.clone();
-    clean.set_query(None);
-    clean.to_string()
-};
+1. **Find the OAuth endpoint first.** Search for the service's Claude Code, Codex,
+   or Claude Desktop integration docs — these typically describe an OAuth-capable
+   MCP endpoint (streamable HTTP or SSE). Search queries like
+   `"<service> MCP Claude Code"` or `"<service> MCP OAuth"` work best.
+
+2. **If OAuth endpoint found** — tell the user to run:
+   `/mcp add <name> <url>` then `/mcp auth <name>`
+
+3. **If no OAuth endpoint exists** — look for an API-key endpoint
+   (a URL that embeds or requires a key/token). Tell the user to run:
+   `/mcp add <name> <url>`
+   The system will prompt for credentials if needed.
+
+4. **NEVER ask the user for API keys or tokens directly** — either `/mcp auth`
+   handles authentication, or the key is part of the URL the user provides.
 ```
 
-Then update downstream references:
-- `bare_url` is now `String` not `&str` — use `&bare_url` where needed
-- Remove `let has_query = original_url.contains('?');` (line 798) — already derived above
-- Replace `is_public_url(bare_url)` (line 799) with `is_public_url(&bare_url)` — no behavior change, still branches haiku vs bearer-default
-- `url_to_register` (line 861-865): use `original_url` for query_string, `&bare_url` for others — same logic, just using properly parsed values
+## What stays the same
 
-### What stays the same
-
-- `validate_server_url` in `internal_api.rs:168` stays — defense-in-depth, also does scheme+host validation that we don't duplicate in handler
-- `is_public_url` stays as the haiku gate — it's a semantic check (public vs private), not just URL parsing
-- `redact_url` in `aggregator.rs` stays — it operates on stored URLs from DB, not user input
+- Compiled-in via `include_str!` in `agent_def.rs:23` — no code changes needed
+- Existing test (`operating_instructions_constant_is_non_empty`) checks for `## MCP Management` header — unaffected
+- `PROMPT_SYSTEM.md` references the file path, doesn't duplicate content — no update needed
+- `handle_mcp_add` logic unchanged — this is purely a prompt/instruction fix
 
 ## Verification
 
-1. `devenv shell -- cargo check --workspace` — no compilation errors
-2. `devenv shell -- cargo test -p rightclaw --lib` — existing tests pass
-3. Manual test scenarios (mental walkthrough):
-   - `https://mcp.example.com/mcp` → parsed OK, no query, bare_url same as original
-   - `https://mcp.example.com/mcp?key=secret` → parsed OK, has_query=true, bare_url strips `?key=secret`
-   - `not-a-url` → `Url::parse` fails, user sees error immediately, no haiku/OAuth wasted
-   - `http://mcp.example.com/mcp` → parsed OK, passes handler (scheme not checked here), rejected by `validate_server_url` in internal API
+1. `devenv shell -- cargo test -p rightclaw --lib` — existing tests pass
+2. Deploy and ask agent "add Composio MCP" — it should search for OAuth endpoint first, find `mcp.composio.dev`, and suggest `/mcp add composio <oauth-url>` + `/mcp auth composio`
