@@ -228,6 +228,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
     let _ = axum_ready_rx.await;
 
+    // One-time migration: oauth-state.json → SQLite
+    migrate_oauth_state_to_db(&agent_dir);
+
     // Spawn OAuth refresh scheduler
     tokio::spawn(rightclaw::mcp::refresh::run_refresh_scheduler(
         agent_dir.clone(),
@@ -447,5 +450,59 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     }
 
     Ok(false)
+}
+
+/// Migrate OAuth state from oauth-state.json to SQLite (one-time).
+/// Non-fatal — logs warnings and continues on error.
+fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
+    let json_path = agent_dir.join("oauth-state.json");
+    if !json_path.exists() {
+        return;
+    }
+
+    let content = match std::fs::read_to_string(&json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to read oauth-state.json for migration: {e:#}");
+            return;
+        }
+    };
+    let state: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("failed to parse oauth-state.json: {e:#}");
+            return;
+        }
+    };
+
+    let conn = match rightclaw::memory::open_connection(agent_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to open DB for oauth-state migration: {e:#}");
+            return;
+        }
+    };
+
+    if let Some(servers) = state.get("servers").and_then(|s| s.as_object()) {
+        for (name, entry) in servers {
+            let token_endpoint = entry.get("token_endpoint").and_then(|v| v.as_str()).unwrap_or("");
+            let client_id = entry.get("client_id").and_then(|v| v.as_str()).unwrap_or("");
+            let client_secret = entry.get("client_secret").and_then(|v| v.as_str());
+            let refresh_token = entry.get("refresh_token").and_then(|v| v.as_str());
+            let expires_at = entry.get("expires_at").and_then(|v| v.as_str()).unwrap_or("");
+
+            if let Err(e) = rightclaw::mcp::credentials::db_set_oauth_state(
+                &conn, name, "", refresh_token, token_endpoint, client_id, client_secret, expires_at,
+            ) {
+                tracing::warn!(server = %name, "skipping oauth-state migration: {e:#}");
+            }
+        }
+    }
+
+    if let Err(e) = std::fs::remove_file(&json_path) {
+        tracing::warn!("failed to remove oauth-state.json after migration: {e:#}");
+    } else {
+        tracing::info!("migrated oauth-state.json to SQLite and removed file");
+    }
 }
 
