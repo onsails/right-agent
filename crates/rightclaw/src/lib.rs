@@ -8,6 +8,7 @@ pub mod init;
 pub mod mcp;
 pub mod memory;
 pub mod openshell;
+pub mod platform_store;
 pub mod runtime;
 pub mod tunnel;
 
