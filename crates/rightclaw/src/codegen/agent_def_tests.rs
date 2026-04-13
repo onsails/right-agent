@@ -115,3 +115,39 @@ fn system_prompt_no_ssh_block_for_no_sandbox() {
     let result = generate_system_prompt("mybot", &crate::agent::types::SandboxMode::None);
     assert!(!result.contains("rightclaw agent ssh"), "no-sandbox prompt must NOT include SSH command");
 }
+
+#[test]
+fn operating_instructions_constant_is_non_empty() {
+    assert!(
+        !crate::codegen::OPERATING_INSTRUCTIONS.is_empty(),
+        "OPERATING_INSTRUCTIONS must not be empty"
+    );
+    assert!(
+        crate::codegen::OPERATING_INSTRUCTIONS.contains("## Your Files"),
+        "OPERATING_INSTRUCTIONS must contain Your Files section"
+    );
+    assert!(
+        crate::codegen::OPERATING_INSTRUCTIONS.contains("## MCP Management"),
+        "OPERATING_INSTRUCTIONS must contain MCP Management section"
+    );
+}
+
+#[test]
+fn bootstrap_instructions_constant_is_non_empty() {
+    assert!(
+        !crate::codegen::BOOTSTRAP_INSTRUCTIONS.is_empty(),
+        "BOOTSTRAP_INSTRUCTIONS must not be empty"
+    );
+    assert!(
+        crate::codegen::BOOTSTRAP_INSTRUCTIONS.contains("First-Time Setup"),
+        "BOOTSTRAP_INSTRUCTIONS must contain bootstrap header"
+    );
+    assert!(
+        crate::codegen::BOOTSTRAP_INSTRUCTIONS.contains("### IDENTITY.md"),
+        "BOOTSTRAP_INSTRUCTIONS must contain IDENTITY.md structure"
+    );
+    assert!(
+        crate::codegen::BOOTSTRAP_INSTRUCTIONS.contains("### SOUL.md"),
+        "BOOTSTRAP_INSTRUCTIONS must contain SOUL.md structure"
+    );
+}
