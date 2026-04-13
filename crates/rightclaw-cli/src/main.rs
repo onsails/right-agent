@@ -430,15 +430,39 @@ async fn main() -> miette::Result<()> {
                 agents: dashmap::DashMap::new(),
             });
 
-            // Register agents in dispatcher
+            // Register agents in dispatcher, restoring proxy backends from SQLite
             for (agent_name, _token) in &token_entries {
                 let agent_dir = agents_dir.join(agent_name);
                 let right = right_backend::RightBackend::new(agents_dir.clone());
+
+                // Load existing MCP servers from SQLite and create ProxyBackends
+                let mut proxies = std::collections::HashMap::new();
+                if let Ok(conn) = rightclaw::memory::open_connection(&agent_dir) {
+                    if let Ok(servers) = rightclaw::mcp::credentials::db_list_servers(&conn) {
+                        for s in servers {
+                            let auth_method = match s.auth_type.as_deref() {
+                                Some("header") => rightclaw::mcp::proxy::AuthMethod::Header(
+                                    s.auth_header.clone().unwrap_or_default(),
+                                ),
+                                Some("query_string") => rightclaw::mcp::proxy::AuthMethod::QueryString,
+                                _ => rightclaw::mcp::proxy::AuthMethod::Bearer,
+                            };
+                            let token = std::sync::Arc::new(tokio::sync::RwLock::new(s.auth_token.clone()));
+                            let backend = rightclaw::mcp::proxy::ProxyBackend::new(
+                                s.name.clone(),
+                                agent_dir.clone(),
+                                s.url.clone(),
+                                token,
+                                auth_method,
+                            );
+                            proxies.insert(s.name, std::sync::Arc::new(backend));
+                        }
+                    }
+                }
+
                 let registry = aggregator::BackendRegistry {
                     right,
-                    proxies: std::sync::Arc::new(tokio::sync::RwLock::new(
-                        std::collections::HashMap::new(),
-                    )),
+                    proxies: std::sync::Arc::new(tokio::sync::RwLock::new(proxies)),
                     agent_dir,
                 };
                 dispatcher.agents.insert(agent_name.clone(), registry);
