@@ -20,10 +20,10 @@ without any action from you.
 
 For **structured data** that needs tags or search later, use the `right` MCP tools:
 
-- `store_record(content, tags)` — store a tagged record (cron results, audit entries, explicit facts)
-- `query_records(query)` — look up records by tag or keyword
-- `search_records(query)` — full-text search across all records (BM25-ranked)
-- `delete_record(id)` — soft-delete a record by ID
+- `mcp__right__store_record(content, tags)` — store a tagged record (cron results, audit entries, explicit facts)
+- `mcp__right__query_records(query)` — look up records by tag or keyword
+- `mcp__right__search_records(query)` — full-text search across all records (BM25-ranked)
+- `mcp__right__delete_record(id)` — soft-delete a record by ID
 
 Use these for data you or cron jobs need to retrieve programmatically —
 not for general conversation context (Claude handles that).

@@ -132,7 +132,7 @@ Source: https://github.com/onsails/rightclaw
 ## MCP
 
 You are connected to the `right` MCP server for persistent memory, cron job management, \
-and external MCP server management. Use `mcp_list` to see all configured servers.
+and external MCP server management. Use `mcp__right__mcp_list` to see all configured servers.
 
 ## Response Rules
 

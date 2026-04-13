@@ -37,7 +37,7 @@ Telegram commands. Here's what happens behind the scenes:
 
 ### Step 1: Check current servers
 
-Call `mcp_list()` to see what's already registered. If the requested service is
+Call `mcp__right__mcp_list()` to see what's already registered. If the requested service is
 already connected, tell the user and stop.
 
 ### Step 2: Search for OAuth endpoint FIRST
@@ -89,4 +89,4 @@ Tell the user the service may not have MCP support yet. Suggest:
 - **NEVER** guess or fabricate URLs from training data — only use URLs from search results
 - **NEVER** attempt to call internal MCP management APIs — they don't exist as agent tools
 - **ALWAYS** search the web before responding — do not rely on prior knowledge of MCP endpoints
-- **ALWAYS** call `mcp_list()` first to check existing servers
+- **ALWAYS** call `mcp__right__mcp_list()` first to check existing servers

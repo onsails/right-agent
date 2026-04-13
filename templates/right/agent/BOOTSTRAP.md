@@ -60,4 +60,4 @@ What you learned about the human. Start with:
 
 Set to `false` until ALL THREE files are written.
 Set to `true` ONLY after creating IDENTITY.md, SOUL.md, and USER.md.
-After writing files, also call `bootstrap_done` tool.
+After writing files, also call `mcp__right__bootstrap_done` tool.

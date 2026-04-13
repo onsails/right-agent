@@ -431,24 +431,24 @@ impl rmcp::ServerHandler for MemoryServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "RightClaw agent MCP server.\n\n\
+                "RightClaw agent MCP server. CC exposes these tools with `mcp__right__` prefix.\n\n\
                  ## Memory\n\
-                 - store_record: Store tagged records for persistent memory\n\
-                 - query_records: Query records by tag or keyword\n\
-                 - search_records: Full-text search with BM25 ranking\n\
-                 - delete_record: Soft-delete a record (preserves audit trail)\n\n\
+                 - mcp__right__store_record: Store tagged records for persistent memory\n\
+                 - mcp__right__query_records: Query records by tag or keyword\n\
+                 - mcp__right__search_records: Full-text search with BM25 ranking\n\
+                 - mcp__right__delete_record: Soft-delete a record (preserves audit trail)\n\n\
                  ## Cron\n\
-                 - cron_create: Create a new cron job spec\n\
-                 - cron_update: Update an existing cron job spec (full replacement)\n\
-                 - cron_delete: Delete a cron job spec\n\
-                 - cron_list: List all current cron job specs\n\
-                 - cron_list_runs: List recent cron job executions\n\
-                 - cron_show_run: Get details of a specific cron run\n\
-                 - cron_trigger: Trigger a cron job for immediate execution\n\n\
+                 - mcp__right__cron_create: Create a new cron job spec\n\
+                 - mcp__right__cron_update: Update an existing cron job spec (full replacement)\n\
+                 - mcp__right__cron_delete: Delete a cron job spec\n\
+                 - mcp__right__cron_list: List all current cron job specs\n\
+                 - mcp__right__cron_list_runs: List recent cron job executions\n\
+                 - mcp__right__cron_show_run: Get details of a specific cron run\n\
+                 - mcp__right__cron_trigger: Trigger a cron job for immediate execution\n\n\
                  ## MCP Management\n\
-                 - mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\
+                 - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\
                  ## Bootstrap\n\
-                 - bootstrap_done: Signal onboarding completion. Verifies IDENTITY.md, SOUL.md, USER.md exist. Call AFTER creating all three files.",
+                 - mcp__right__bootstrap_done: Signal onboarding completion. Verifies IDENTITY.md, SOUL.md, USER.md exist. Call AFTER creating all three files.",
             )
     }
 }

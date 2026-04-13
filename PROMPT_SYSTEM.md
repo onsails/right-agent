@@ -159,7 +159,7 @@ SOUL.md, USER.md all exist on the host after reverse_sync.
 
 The `right` MCP server provides `with_instructions()` describing all tools:
 memory (store/query/search/delete), cron (list/show runs), MCP management
-(add/remove/list/auth), and bootstrap (bootstrap_done).
+(add/remove/list/auth), and bootstrap (mcp__right__bootstrap_done).
 
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
 whenever tools change.
@@ -183,5 +183,5 @@ markdown via `generate_mcp_instructions_md()`.
 4. If all present → delete session, delete BOOTSTRAP.md → normal mode
 5. If missing → ignore bootstrap_complete, continue bootstrap mode
 
-Additionally, `bootstrap_done` MCP tool provides in-session feedback: agent calls it
+Additionally, `mcp__right__bootstrap_done` MCP tool provides in-session feedback: agent calls it
 after creating files, gets immediate success/error response with missing file list.

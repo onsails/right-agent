@@ -23,10 +23,10 @@ Cron specs are stored in the agent database. The Rust runtime polls specs every 
 
 ## Creating a Cron Job
 
-Use the `cron_create` MCP tool:
+Use the `mcp__right__cron_create` MCP tool:
 
 ```
-cron_create(
+mcp__right__cron_create(
   job_name: "health-check",
   schedule: "17 9 * * 1-5",
   prompt: "Check system health and report status",
@@ -38,10 +38,10 @@ Confirm to the user: "Job created. The runtime picks up new specs within ~60 sec
 
 ## Editing a Cron Job
 
-Use the `cron_update` MCP tool (full replacement — all fields required):
+Use the `mcp__right__cron_update` MCP tool (full replacement — all fields required):
 
 ```
-cron_update(
+mcp__right__cron_update(
   job_name: "health-check",
   schedule: "43 */4 * * *",
   prompt: "Check system health, alert on degradation",
@@ -53,20 +53,20 @@ Confirm: "Job updated. Changes take effect within ~60 seconds."
 
 ## Removing a Cron Job
 
-Use the `cron_delete` MCP tool:
+Use the `mcp__right__cron_delete` MCP tool:
 
 ```
-cron_delete(job_name: "health-check")
+mcp__right__cron_delete(job_name: "health-check")
 ```
 
 Confirm: "Job removed. The runtime drops it within ~60 seconds."
 
 ## Triggering a Cron Job Manually
 
-Use the `cron_trigger` MCP tool to run a job immediately:
+Use the `mcp__right__cron_trigger` MCP tool to run a job immediately:
 
 ```
-cron_trigger(job_name: "health-check")
+mcp__right__cron_trigger(job_name: "health-check")
 ```
 
 The job is queued and executes on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped. The result is delivered through the normal delivery loop.
@@ -75,10 +75,10 @@ Confirm: "Job triggered. Execution starts within ~60 seconds."
 
 ## Listing Current Cron Jobs
 
-Use the `cron_list` MCP tool to see all configured jobs:
+Use the `mcp__right__cron_list` MCP tool to see all configured jobs:
 
 ```
-cron_list()
+mcp__right__cron_list()
 ```
 
 Returns: job_name, schedule, prompt, lock_ttl, max_budget_usd for each job.
@@ -103,7 +103,7 @@ The tool returns a warning when it detects `:00` or `:30` in the minute field.
 
 Use the `rightclaw` MCP server tools to check cron job execution history.
 
-### cron_list_runs
+### mcp__right__cron_list_runs
 
 Returns recent runs sorted by `started_at` descending.
 
@@ -113,7 +113,7 @@ Parameters:
 
 Each run record contains: `id`, `job_name`, `started_at`, `finished_at`, `exit_code`, `status`, `log_path`
 
-### cron_show_run
+### mcp__right__cron_show_run
 
 Returns full metadata for a single run.
 
@@ -133,9 +133,9 @@ cat <log_path>
 ```
 User: "Why did morning-briefing fail?"
 
-1. cron_list_runs(job_name="morning-briefing", limit=5)
+1. mcp__right__cron_list_runs(job_name="morning-briefing", limit=5)
    -> Find the failed run (status="failed")
-2. cron_show_run(run_id="<run_id from step 1>")
+2. mcp__right__cron_show_run(run_id="<run_id from step 1>")
    -> Get full metadata including log_path
 3. cat <log_path>
    -> Read the subprocess output to diagnose the failure
@@ -145,4 +145,4 @@ User: "Why did morning-briefing fail?"
 
 1. **UTC schedules**: Cron expressions are evaluated in UTC by the Rust runtime.
 2. **60-second polling**: The runtime re-reads specs every 60 seconds. After creating, editing, or deleting a spec, changes take effect within ~1 minute.
-3. **Manual triggers**: `cron_trigger` queues the job; it runs on the next 60-second engine tick. If the job is locked (still running from a previous invocation), the trigger is skipped.
+3. **Manual triggers**: `mcp__right__cron_trigger` queues the job; it runs on the next 60-second engine tick. If the job is locked (still running from a previous invocation), the trigger is skipped.
