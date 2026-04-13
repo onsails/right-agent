@@ -266,13 +266,13 @@ pub async fn deploy_directory(
     sandbox: &str,
     name: &str,
     host_dir: &std::path::Path,
+    hash: &str,
     link_path: &str,
     platform_prefix: &str,
 ) -> miette::Result<String> {
     use crate::openshell::{exec_command, upload_file};
 
-    let hash = directory_hash(host_dir)?;
-    let addressed_name = platform_path(name, &hash);
+    let addressed_name = platform_path(name, hash);
     let full_platform_path = format!("{PLATFORM_DIR}/{platform_prefix}{addressed_name}");
 
     // Check if content-addressed directory already exists (dedup).
@@ -424,6 +424,7 @@ pub async fn deploy_manifest(sandbox: &str, manifest: &Manifest) -> miette::Resu
                 sandbox,
                 &entry.name,
                 &entry.host_path,
+                &entry.hash,
                 &entry.link_path,
                 &entry.platform_prefix,
             )
