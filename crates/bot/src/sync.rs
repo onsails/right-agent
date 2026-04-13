@@ -370,7 +370,6 @@ mod tests {
 
         // Content .md files with recognizable content.
         let test_files: &[(&str, &str)] = &[
-            ("BOOTSTRAP.md", "# test bootstrap content\n"),
             ("AGENTS.md", "# test agents content\n"),
             ("TOOLS.md", "# test tools content\n"),
         ];

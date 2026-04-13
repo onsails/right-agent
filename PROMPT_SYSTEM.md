@@ -125,7 +125,7 @@ Agents with `sandbox: mode: none` (no sandbox, direct host access) do NOT includ
 | USER.md | `/sandbox/USER.md` | Agent during bootstrap |
 | AGENTS.md | `/sandbox/.claude/agents/AGENTS.md` | Codegen + sync (per-agent config only) |
 | TOOLS.md | `/sandbox/.claude/agents/TOOLS.md` | Codegen + sync |
-| BOOTSTRAP.md | `/sandbox/.claude/agents/BOOTSTRAP.md` | Codegen + sync |
+| BOOTSTRAP.md | N/A (not synced to sandbox) | Content from compiled-in constant; on-disk file is host-side flag only |
 
 ### Host (`agent_dir/`)
 

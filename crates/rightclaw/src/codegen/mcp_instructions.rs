@@ -1,11 +1,15 @@
 use crate::mcp::credentials::McpServerEntry;
 
-/// Generate `MCP_INSTRUCTIONS.md` content from registered MCP servers.
+/// Header emitted by [`generate_mcp_instructions_md`] even when no servers
+/// have instructions. Used by callers to detect "header-only" responses.
+pub const MCP_INSTRUCTIONS_HEADER: &str = "# MCP Server Instructions\n";
+
+/// Generate MCP instructions markdown from registered MCP servers.
 ///
 /// Only includes servers that have cached instructions (non-None).
 /// Returns just the heading if no servers have instructions.
 pub fn generate_mcp_instructions_md(servers: &[McpServerEntry]) -> String {
-    let mut out = String::from("# MCP Server Instructions\n");
+    let mut out = String::from(MCP_INSTRUCTIONS_HEADER);
     for server in servers {
         if let Some(ref instructions) = server.instructions {
             out.push_str(&format!("\n## {}\n\n{}\n", server.name, instructions));

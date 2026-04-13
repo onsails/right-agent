@@ -1,5 +1,3 @@
-# Operating Instructions
-
 ## Your Files
 
 These files are yours. Update them as you evolve.
