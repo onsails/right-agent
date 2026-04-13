@@ -170,16 +170,10 @@ async fn handle_mcp_add(
     }
 
     // Determine AuthMethod from request fields
-    let auth_method = match req.auth_type.as_deref() {
-        Some("header") => {
-            AuthMethod::Header(req.auth_header.clone().unwrap_or_else(|| "Authorization".into()))
-        }
-        Some("query_string") => AuthMethod::QueryString,
-        _ => AuthMethod::Bearer,
-    };
+    let auth_method = AuthMethod::from_db(req.auth_type.as_deref(), req.auth_header.as_deref());
 
-    // Get DB connection and agent_dir, add to SQLite (scope DashMap ref guard before await)
-    let (conn_arc, agent_dir) = {
+    // Get DB connection, agent_dir, and proxies from DashMap (single lookup, scope guard before await)
+    let (conn_arc, agent_dir, proxies_lock) = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
         };
@@ -187,7 +181,7 @@ async fn handle_mcp_add(
             Ok(c) => c,
             Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
         };
-        (conn, registry.agent_dir.clone())
+        (conn, registry.agent_dir.clone(), Arc::clone(&registry.proxies))
     };
 
     {
@@ -199,8 +193,7 @@ async fn handle_mcp_add(
             return internal_error(format!("db_add_server: {e:#}")).into_response();
         }
         // Persist auth fields if provided
-        if req.auth_type.is_some() {
-            let auth_type_str = req.auth_type.as_deref().unwrap_or("bearer");
+        if let Some(ref auth_type_str) = req.auth_type {
             if let Err(e) = credentials::db_set_auth(
                 &conn,
                 &req.name,
@@ -229,13 +222,7 @@ async fn handle_mcp_add(
         Ok(_instructions) => {
             let tools_count = handle.try_tools().map(|t| t.len()).unwrap_or(0);
 
-            // Insert into proxies map
-            let proxies_lock = {
-                let Some(registry) = dispatcher.agents.get(&req.agent) else {
-                    return not_found("agent_not_found").into_response();
-                };
-                Arc::clone(&registry.proxies)
-            };
+            // Insert into proxies map (proxies_lock extracted from initial DashMap lookup)
             {
                 let mut proxies = proxies_lock.write().await;
                 proxies.insert(req.name.clone(), Arc::clone(&handle));
@@ -252,19 +239,7 @@ async fn handle_mcp_add(
                 .into_response()
         }
         Err(e) => {
-            // Remove from SQLite on connection failure
-            let conn_arc = {
-                let Some(registry) = dispatcher.agents.get(&req.agent) else {
-                    return not_found("agent_not_found").into_response();
-                };
-                match registry.right.get_conn(&req.agent) {
-                    Ok(c) => c,
-                    Err(db_err) => {
-                        return internal_error(format!("db open for rollback: {db_err:#}"))
-                            .into_response()
-                    }
-                }
-            };
+            // Remove from SQLite on connection failure (reuse conn_arc from initial lookup)
             {
                 let conn = match conn_arc.lock() {
                     Ok(c) => c,

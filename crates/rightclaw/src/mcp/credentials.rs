@@ -239,7 +239,7 @@ pub fn validate_server_url(url_str: &str) -> Result<(), CredentialError> {
 }
 
 /// Entry returned by `db_list_servers`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct McpServerEntry {
     pub name: String,
     pub url: String,
@@ -309,16 +309,12 @@ pub fn db_update_instructions(
     Ok(())
 }
 
-/// List all registered external MCP servers, sorted by name.
-pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT name, url, instructions, auth_type, auth_header, auth_token, \
-             refresh_token, token_endpoint, client_id, client_secret, expires_at \
-             FROM mcp_servers ORDER BY name",
-        )
-        .map_err(map_db_err)?;
+/// Shared SELECT columns for server queries.
+const SERVER_COLUMNS: &str = "name, url, instructions, auth_type, auth_header, auth_token, \
+    refresh_token, token_endpoint, client_id, client_secret, expires_at";
 
+/// Collect rows from a prepared statement into `McpServerEntry` values.
+fn collect_server_rows(stmt: &mut rusqlite::Statement<'_>) -> Result<Vec<McpServerEntry>, CredentialError> {
     let rows = stmt
         .query_map([], |row| {
             Ok(McpServerEntry {
@@ -337,11 +333,15 @@ pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, Credent
         })
         .map_err(map_db_err)?;
 
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row.map_err(map_db_err)?);
-    }
-    Ok(result)
+    rows.map(|r| r.map_err(map_db_err)).collect()
+}
+
+/// List all registered external MCP servers, sorted by name.
+pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
+    let mut stmt = conn
+        .prepare(&format!("SELECT {SERVER_COLUMNS} FROM mcp_servers ORDER BY name"))
+        .map_err(map_db_err)?;
+    collect_server_rows(&mut stmt)
 }
 
 /// Update auth fields for an MCP server.
@@ -427,38 +427,13 @@ pub fn db_update_oauth_token(
 /// List OAuth servers that have a refresh token (candidates for token refresh).
 pub fn db_list_oauth_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
     let mut stmt = conn
-        .prepare(
-            "SELECT name, url, instructions, auth_type, auth_header, auth_token, \
-             refresh_token, token_endpoint, client_id, client_secret, expires_at \
-             FROM mcp_servers \
+        .prepare(&format!(
+            "SELECT {SERVER_COLUMNS} FROM mcp_servers \
              WHERE auth_type = 'oauth' AND refresh_token IS NOT NULL \
-             ORDER BY name",
-        )
+             ORDER BY name"
+        ))
         .map_err(map_db_err)?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(McpServerEntry {
-                name: row.get(0)?,
-                url: row.get(1)?,
-                instructions: row.get(2)?,
-                auth_type: row.get(3)?,
-                auth_header: row.get(4)?,
-                auth_token: row.get(5)?,
-                refresh_token: row.get(6)?,
-                token_endpoint: row.get(7)?,
-                client_id: row.get(8)?,
-                client_secret: row.get(9)?,
-                expires_at: row.get(10)?,
-            })
-        })
-        .map_err(map_db_err)?;
-
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row.map_err(map_db_err)?);
-    }
-    Ok(result)
+    collect_server_rows(&mut stmt)
 }
 
 /// Redact query parameters from a URL.

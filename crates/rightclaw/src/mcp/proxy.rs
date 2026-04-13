@@ -93,6 +93,17 @@ impl Default for AuthMethod {
     }
 }
 
+impl AuthMethod {
+    /// Parse from DB string fields (auth_type + optional auth_header).
+    pub fn from_db(auth_type: Option<&str>, auth_header: Option<&str>) -> Self {
+        match auth_type {
+            Some("header") => Self::Header(auth_header.unwrap_or("Authorization").to_string()),
+            Some("query_string") => Self::QueryString,
+            _ => Self::Bearer,
+        }
+    }
+}
+
 impl std::fmt::Display for AuthMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -437,6 +448,21 @@ mod tests {
             "header"
         );
         assert_eq!(AuthMethod::QueryString.to_string(), "query_string");
+    }
+
+    #[test]
+    fn auth_method_from_db() {
+        assert_eq!(AuthMethod::from_db(None, None), AuthMethod::Bearer);
+        assert_eq!(AuthMethod::from_db(Some("bearer"), None), AuthMethod::Bearer);
+        assert_eq!(
+            AuthMethod::from_db(Some("header"), Some("X-Api-Key")),
+            AuthMethod::Header("X-Api-Key".into())
+        );
+        assert_eq!(
+            AuthMethod::from_db(Some("header"), None),
+            AuthMethod::Header("Authorization".into())
+        );
+        assert_eq!(AuthMethod::from_db(Some("query_string"), None), AuthMethod::QueryString);
     }
 
     #[tokio::test]

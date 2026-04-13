@@ -483,6 +483,7 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
         }
     };
 
+    let mut all_succeeded = true;
     if let Some(servers) = state.get("servers").and_then(|s| s.as_object()) {
         for (name, entry) in servers {
             let token_endpoint = entry.get("token_endpoint").and_then(|v| v.as_str()).unwrap_or("");
@@ -495,8 +496,14 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 &conn, name, "", refresh_token, token_endpoint, client_id, client_secret, expires_at,
             ) {
                 tracing::warn!(server = %name, "skipping oauth-state migration: {e:#}");
+                all_succeeded = false;
             }
         }
+    }
+
+    if !all_succeeded {
+        tracing::warn!("keeping oauth-state.json — some server migrations failed");
+        return;
     }
 
     if let Err(e) = std::fs::remove_file(&json_path) {

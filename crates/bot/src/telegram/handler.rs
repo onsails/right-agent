@@ -45,11 +45,6 @@ pub struct DebugFlag(pub bool);
 #[derive(Clone)]
 pub struct AuthWatcherFlag(pub Arc<AtomicBool>);
 
-/// Shared slot for auth code sender. When login flow waits for a code,
-/// a oneshot::Sender is placed here. Message handler checks before routing to worker.
-#[derive(Clone)]
-pub struct AuthCodeSlot(pub Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>);
-
 /// Shared slot for pending MCP token requests. When /mcp add needs a token,
 /// a oneshot::Sender is placed here. Message handler checks before routing to worker.
 #[derive(Clone)]
@@ -932,17 +927,13 @@ async fn detect_auth_type_via_haiku(
 
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         let ssh_host = rightclaw::openshell::ssh_host(agent_name);
-        let escaped_prompt = prompt.replace('\'', "'\\''");
-        let script = format!(
-            "echo '{}' | {} 2>/dev/null",
-            escaped_prompt,
-            claude_args.join(" ")
-        );
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
         c.arg("--");
-        c.arg(script);
+        for arg in &claude_args {
+            c.arg(arg);
+        }
         c
     } else {
         let cc_bin = which::which("claude")
@@ -964,15 +955,12 @@ async fn detect_auth_type_via_haiku(
         .spawn()
         .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
 
-    // Write prompt to stdin for the non-SSH (local) case
-    if ssh_config_path.is_none() {
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .map_err(|e| format!("stdin write failed: {e:#}"))?;
-        }
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|e| format!("stdin write failed: {e:#}"))?;
     }
 
     let output = tokio::time::timeout(
