@@ -217,8 +217,14 @@ async fn handle_mcp_add(
     );
     let handle = Arc::new(backend);
 
-    // Attempt connection
-    match handle.connect(reqwest::Client::new()).await {
+    // Attempt connection (with timeout to prevent hanging on slow upstreams)
+    tracing::info!(server = %req.name, url = %req.url, "mcp-add: connecting to upstream MCP server");
+    let connect_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    match handle.connect(connect_client).await {
         Ok(_instructions) => {
             let tools_count = handle.try_tools().map(|t| t.len()).unwrap_or(0);
 

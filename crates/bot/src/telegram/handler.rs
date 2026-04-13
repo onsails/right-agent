@@ -787,6 +787,7 @@ async fn handle_mcp_add(
 
     if oauth_discovered {
         // OAuth server — register without auth, tell user to run /mcp auth
+        tracing::info!(agent = agent_name, server = name, url = %bare_url, "mcp add: registering OAuth server via internal API");
         match internal
             .mcp_add(agent_name, name, &bare_url, None, None, None)
             .await
