@@ -40,6 +40,9 @@ Built by `assemble_host_system_prompt()` in `worker.rs`.
 ```
 [Base: RightClaw agent description, sandbox info, MCP reference]
 
+## Operating Instructions
+{compiled-in from templates/right/prompt/OPERATING_INSTRUCTIONS.md}
+
 ## Your Identity
 {IDENTITY.md — name, creature, vibe, emoji, principles}
 
@@ -49,18 +52,19 @@ Built by `assemble_host_system_prompt()` in `worker.rs`.
 ## Your User
 {USER.md — user name, timezone, preferences}
 
-## Operating Instructions
-{AGENTS.md — procedures, session routine}
+## Agent Configuration
+{AGENTS.md — per-agent: subagents, task routing, installed skills}
 
 ## Environment and Tools
-{TOOLS.md — sandbox paths, inbox/outbox, MCP notes}
+{TOOLS.md — agent-owned tools and environment notes}
 
 ## MCP Server Instructions  (if any external MCP servers have instructions)
 {fetched from aggregator via POST /mcp-instructions at prompt assembly time}
 ```
 
-Missing files are silently skipped. MCP instructions are fetched from the aggregator's
-internal API (non-fatal if unavailable).
+Missing agent-owned files are silently skipped. Operating instructions and bootstrap
+content are compiled into the binary — no file sync needed. MCP instructions are
+fetched from the aggregator's internal API (non-fatal if unavailable).
 
 ### Bootstrap mode
 
@@ -68,8 +72,16 @@ internal API (non-fatal if unavailable).
 [Base: RightClaw agent description, sandbox info, MCP reference]
 
 ## Bootstrap Instructions
-{BOOTSTRAP.md — onboarding flow, identity setup conversation}
+{compiled-in from templates/right/agent/BOOTSTRAP.md}
 ```
+
+### Compiled-in Content
+
+Operating instructions and bootstrap content are compiled into the binary via
+`include_str!()` from `templates/right/prompt/` and `templates/right/agent/`.
+Changes to these files take effect on `cargo build` + restart — no file sync needed.
+This eliminates the stale-template problem where changes to platform instructions
+required manual re-init of existing agents.
 
 ## Base Prompt
 
@@ -111,7 +123,7 @@ Agents with `sandbox: mode: none` (no sandbox, direct host access) do NOT includ
 | IDENTITY.md | `/sandbox/IDENTITY.md` | Agent during bootstrap |
 | SOUL.md | `/sandbox/SOUL.md` | Agent during bootstrap |
 | USER.md | `/sandbox/USER.md` | Agent during bootstrap |
-| AGENTS.md | `/sandbox/.claude/agents/AGENTS.md` | Codegen + sync |
+| AGENTS.md | `/sandbox/.claude/agents/AGENTS.md` | Codegen + sync (per-agent config only) |
 | TOOLS.md | `/sandbox/.claude/agents/TOOLS.md` | Codegen + sync |
 | BOOTSTRAP.md | `/sandbox/.claude/agents/BOOTSTRAP.md` | Codegen + sync |
 
@@ -122,7 +134,7 @@ Agents with `sandbox: mode: none` (no sandbox, direct host access) do NOT includ
 | IDENTITY.md | `agent_dir/IDENTITY.md` | reverse_sync (5 min + blocking post-bootstrap) |
 | SOUL.md | `agent_dir/SOUL.md` | reverse_sync |
 | USER.md | `agent_dir/USER.md` | reverse_sync |
-| AGENTS.md | `agent_dir/.claude/agents/AGENTS.md` | codegen |
+| AGENTS.md | `agent_dir/.claude/agents/AGENTS.md` | codegen (per-agent config only) |
 | TOOLS.md | `agent_dir/.claude/agents/TOOLS.md` | codegen |
 | BOOTSTRAP.md | `agent_dir/BOOTSTRAP.md` | template (deleted after bootstrap) |
 
