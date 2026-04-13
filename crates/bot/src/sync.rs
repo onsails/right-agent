@@ -13,16 +13,19 @@ use rightclaw::codegen::CONTENT_MD_FILES;
 
 /// Run one sync cycle. Called synchronously at startup before teloxide starts,
 /// ensuring sandbox has correct config before any `claude -p` invocations.
-pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
-    tracing::info!(sandbox = sandbox_name, "sync: initial cycle (blocking)");
-    sync_cycle(agent_dir, sandbox_name).await?;
+pub async fn initial_sync(
+    agent_dir: &Path,
+    sbox: &rightclaw::sandbox_exec::SandboxExec,
+) -> miette::Result<()> {
+    tracing::info!(sandbox = sbox.sandbox_name(), "sync: initial cycle (blocking)");
+    sync_cycle(agent_dir, sbox).await?;
 
     // Upload content .md files (IDENTITY.md, SOUL.md, USER.md, MEMORY.md) to sandbox root.
     // These are overwritten every startup — sandbox is source of truth after this point.
     for &filename in CONTENT_MD_FILES {
         let host_path = agent_dir.join(filename);
         if host_path.exists() {
-            rightclaw::openshell::upload_file(sandbox_name, &host_path, "/sandbox/")
+            rightclaw::openshell::upload_file(sbox.sandbox_name(), &host_path, "/sandbox/")
                 .await
                 .map_err(|e| miette::miette!("sync {filename}: {e:#}"))?;
             tracing::debug!(file = filename, "sync: uploaded content file to sandbox root");
@@ -31,7 +34,7 @@ pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Resul
 
     // Ensure /sandbox/.local/bin is in PATH for agent-installed CLI tools.
     // Idempotent: only patches .bashrc if the path isn't already present.
-    ensure_local_bin_in_path(sandbox_name).await?;
+    ensure_local_bin_in_path(sbox).await?;
 
     // Upload agent-owned files (AGENTS.md, TOOLS.md) to sandbox root only if missing.
     // Preserves agent edits on subsequent boots.
@@ -41,13 +44,13 @@ pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Resul
             continue;
         }
         let sandbox_path = format!("/sandbox/{filename}");
-        let (_stdout, exit_code) =
-            rightclaw::openshell::exec_command(sandbox_name, &["test", "-f", &sandbox_path])
-                .await
-                .map_err(|e| miette::miette!("sync: exec_command test -f {sandbox_path}: {e:#}"))?;
+        let (_stdout, exit_code) = sbox
+            .exec(&["test", "-f", &sandbox_path])
+            .await
+            .map_err(|e| miette::miette!("sync: exec test -f {sandbox_path}: {e:#}"))?;
         if exit_code != 0 {
             // File missing in sandbox — upload from host
-            rightclaw::openshell::upload_file(sandbox_name, &host_path, "/sandbox/")
+            rightclaw::openshell::upload_file(sbox.sandbox_name(), &host_path, "/sandbox/")
                 .await
                 .map_err(|e| miette::miette!("sync {filename}: {e:#}"))?;
             tracing::info!(file = filename, "sync: uploaded agent-owned file (was missing in sandbox)");
@@ -60,36 +63,43 @@ pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Resul
 }
 
 /// Run the periodic sync loop (spawned as background task after initial_sync).
-pub async fn run_sync_task(agent_dir: PathBuf, sandbox_name: String, shutdown: CancellationToken) {
+pub async fn run_sync_task(
+    agent_dir: PathBuf,
+    sbox: rightclaw::sandbox_exec::SandboxExec,
+    shutdown: CancellationToken,
+) {
     let mut tick = interval(SYNC_INTERVAL);
     tick.tick().await; // consume immediate tick
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                tracing::debug!(sandbox = %sandbox_name, "sync: starting cycle");
+                tracing::debug!(sandbox = %sbox.sandbox_name(), "sync: starting cycle");
 
-                if let Err(e) = sync_cycle(&agent_dir, &sandbox_name).await {
-                    tracing::error!(sandbox = %sandbox_name, "sync cycle failed: {e:#}");
+                if let Err(e) = sync_cycle(&agent_dir, &sbox).await {
+                    tracing::error!(sandbox = %sbox.sandbox_name(), "sync cycle failed: {e:#}");
                 }
             }
             _ = shutdown.cancelled() => {
-                tracing::info!(sandbox = %sandbox_name, "sync task shutting down");
+                tracing::info!(sandbox = %sbox.sandbox_name(), "sync task shutting down");
                 break;
             }
         }
     }
 }
 
-async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
+async fn sync_cycle(
+    agent_dir: &Path,
+    sbox: &rightclaw::sandbox_exec::SandboxExec,
+) -> miette::Result<()> {
     // Build manifest of platform-managed files
     let manifest = rightclaw::platform_store::build_manifest(agent_dir)?;
 
     // Deploy to /platform/ with content-addressed names + symlinks
-    rightclaw::platform_store::deploy_manifest(sandbox, &manifest).await?;
+    rightclaw::platform_store::deploy_manifest(sbox, &manifest).await?;
 
     // Verify .claude.json (separate flow — not content-addressed)
-    verify_claude_json(agent_dir, sandbox).await?;
+    verify_claude_json(agent_dir, sbox.sandbox_name()).await?;
 
     tracing::debug!("sync: cycle complete");
     Ok(())
@@ -315,34 +325,25 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
 ///
 /// Agents install CLI tools (gh extensions, etc.) to `$HOME/.local/bin` which maps
 /// to `/sandbox/.local/bin`. This is already writable, but not in PATH by default.
-async fn ensure_local_bin_in_path(sandbox: &str) -> miette::Result<()> {
-    let (bashrc, code) = rightclaw::openshell::exec_command(
-        sandbox,
-        &["cat", "/sandbox/.bashrc"],
-    )
-    .await?;
+async fn ensure_local_bin_in_path(
+    sbox: &rightclaw::sandbox_exec::SandboxExec,
+) -> miette::Result<()> {
+    let (bashrc, code) = sbox.exec(&["cat", "/sandbox/.bashrc"]).await?;
 
     if code != 0 || !bashrc.contains("/sandbox/.local/bin") {
         // Prepend to PATH in .bashrc
-        rightclaw::openshell::exec_command(
-            sandbox,
-            &[
-                "sed",
-                "-i",
-                r#"s|export PATH="/sandbox/.venv/bin:|export PATH="/sandbox/.local/bin:/sandbox/.venv/bin:|"#,
-                "/sandbox/.bashrc",
-            ],
-        )
+        sbox.exec(&[
+            "sed",
+            "-i",
+            r#"s|export PATH="/sandbox/.venv/bin:|export PATH="/sandbox/.local/bin:/sandbox/.venv/bin:|"#,
+            "/sandbox/.bashrc",
+        ])
         .await?;
         tracing::info!("sync: added /sandbox/.local/bin to PATH in .bashrc");
     }
 
     // Ensure the directory exists
-    rightclaw::openshell::exec_command(
-        sandbox,
-        &["mkdir", "-p", "/sandbox/.local/bin"],
-    )
-    .await?;
+    sbox.exec(&["mkdir", "-p", "/sandbox/.local/bin"]).await?;
 
     Ok(())
 }
