@@ -22,9 +22,12 @@ pub fn content_hash(data: &[u8]) -> String {
 /// hashes (path + content) for each.
 pub fn directory_hash(dir: &Path) -> miette::Result<String> {
     let mut hasher = Sha256::new();
-    let mut entries: Vec<_> = walkdir::WalkDir::new(dir)
+    let all_entries: Vec<walkdir::DirEntry> = walkdir::WalkDir::new(dir)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| miette::miette!("walkdir error in {}: {e:#}", dir.display()))?;
+    let mut entries: Vec<_> = all_entries
+        .into_iter()
         .filter(|e| e.file_type().is_file())
         .collect();
     entries.sort_by_key(|e| e.path().to_path_buf());
