@@ -2,16 +2,18 @@ use std::path::Path;
 
 const SKILL_RIGHTSKILLS: &str = include_str!("../../../../skills/rightskills/SKILL.md");
 const SKILL_RIGHTCRON: &str = include_str!("../../../../skills/rightcron/SKILL.md");
+const SKILL_RIGHTMCP: &str = include_str!("../../../../skills/rightmcp/SKILL.md");
 
 /// Install RightClaw built-in skills into an agent's `.claude/skills/` directory.
 ///
-/// Writes `rightskills/SKILL.md`, `rightcron/SKILL.md`, and `installed.json`.
+/// Writes `rightskills/SKILL.md`, `rightcron/SKILL.md`, `rightmcp/SKILL.md`, and `installed.json`.
 /// Always overwrites — ensures agents get the latest built-in skill content after upgrades.
 /// Only writes to named built-in paths; other directories under `.claude/skills/` are untouched.
 pub fn install_builtin_skills(agent_path: &Path) -> miette::Result<()> {
     let built_in_skills: &[(&str, &str)] = &[
         ("rightskills/SKILL.md", SKILL_RIGHTSKILLS),
         ("rightcron/SKILL.md", SKILL_RIGHTCRON),
+        ("rightmcp/SKILL.md", SKILL_RIGHTMCP),
     ];
     let claude_skills_dir = agent_path.join(".claude").join("skills");
     for (skill_path, content) in built_in_skills {
@@ -52,6 +54,16 @@ mod tests {
         assert!(
             dir.path().join(".claude/skills/rightcron/SKILL.md").exists(),
             "rightcron/SKILL.md should exist"
+        );
+    }
+
+    #[test]
+    fn installs_rightmcp_skill() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path()).unwrap();
+        assert!(
+            dir.path().join(".claude/skills/rightmcp/SKILL.md").exists(),
+            "rightmcp/SKILL.md should exist"
         );
     }
 
