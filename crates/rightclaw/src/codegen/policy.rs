@@ -88,6 +88,7 @@ filesystem_policy:
   read_write:
     - /tmp
     - /sandbox
+    - /platform
 
 landlock:
   compatibility: best_effort
