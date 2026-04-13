@@ -38,14 +38,14 @@ Three-tier determination:
 
 1. **OAuth discovery** (Rust, deterministic): existing `discover_as()` tries RFC 9728, RFC 8414, OIDC discovery. If any endpoint found → OAuth.
 
-2. **Haiku web search** (AI, for public domains only): `claude -p --bare -m haiku` with web search. Receives the bare URL (query stripped). Structured JSON output schema:
+2. **Haiku web search** (AI, for public domains only): runs inside the agent's sandbox via SSH, same as regular `claude -p` invocations. Command: `claude -p --bare -m haiku` with web search enabled. Receives the bare URL (query stripped). Structured JSON output schema:
    ```json
    // One of:
    {"auth_type": "bearer"}
    {"auth_type": "header", "header_name": "X-Api-Key"}
    {"auth_type": "query_string"}
    ```
-   Prompt asks haiku to search for the MCP server's documentation and determine its authentication method.
+   Prompt asks haiku to search for the MCP server's documentation and determine its authentication method. Runs in sandbox to maintain the security model — no host-side Claude invocations.
 
 3. **Fallback** (local/private domains): assume Bearer token auth.
 
