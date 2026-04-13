@@ -226,6 +226,7 @@ async fn handle_mcp_add(
         .unwrap_or_else(|_| reqwest::Client::new());
     match handle.connect(connect_client).await {
         Ok(_instructions) => {
+            tracing::info!(server = %req.name, "mcp-add: upstream connection successful");
             let tools_count = handle.try_tools().map(|t| t.len()).unwrap_or(0);
 
             // Insert into proxies map (proxies_lock extracted from initial DashMap lookup)
@@ -262,6 +263,7 @@ async fn handle_mcp_add(
                 }
             }
 
+            tracing::warn!(server = %req.name, err = %format!("{e:#}"), "mcp-add: upstream connection failed");
             error_response(
                 StatusCode::BAD_GATEWAY,
                 format!("connection failed: {e:#}"),
