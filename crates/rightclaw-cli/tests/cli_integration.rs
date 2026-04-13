@@ -57,9 +57,9 @@ fn test_init_generates_per_agent_codegen() {
     assert!(agents_dir.join("right.md").exists(), "missing .claude/agents/right.md");
     assert!(agents_dir.join("right-bootstrap.md").exists(), "missing .claude/agents/right-bootstrap.md");
 
-    // Content .md files copied into .claude/agents/ for @ reference resolution
-    assert!(agents_dir.join("AGENTS.md").exists(), "missing .claude/agents/AGENTS.md");
-    assert!(agents_dir.join("TOOLS.md").exists(), "missing .claude/agents/TOOLS.md");
+    // AGENTS.md and TOOLS.md live at agent root, not in .claude/agents/
+    assert!(dir.path().join("agents/right/AGENTS.md").exists(), "missing AGENTS.md at agent root");
+    assert!(dir.path().join("agents/right/TOOLS.md").exists(), "missing TOOLS.md at agent root");
 
     // Schema and prompt files
     assert!(claude_dir.join("system-prompt.md").exists(), "missing .claude/system-prompt.md");

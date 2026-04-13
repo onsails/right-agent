@@ -584,14 +584,14 @@ if [ -f /sandbox/USER.md ]; then
   cat /sandbox/USER.md
   printf '\n'
 fi
-if [ -f /sandbox/.claude/agents/AGENTS.md ]; then
+if [ -f /sandbox/AGENTS.md ]; then
   printf '\n## Agent Configuration\n'
-  cat /sandbox/.claude/agents/AGENTS.md
+  cat /sandbox/AGENTS.md
   printf '\n'
 fi
-if [ -f /sandbox/.claude/agents/TOOLS.md ]; then
+if [ -f /sandbox/TOOLS.md ]; then
   printf '\n## Environment and Tools\n'
-  cat /sandbox/.claude/agents/TOOLS.md
+  cat /sandbox/TOOLS.md
   printf '\n'
 fi"#
         )
@@ -646,16 +646,16 @@ fn assemble_host_system_prompt(
             }
         }
 
-        // Per-agent configuration (from .claude/agents/)
-        let agents_path = agent_dir.join(".claude").join("agents").join("AGENTS.md");
+        // Per-agent configuration (from agent root)
+        let agents_path = agent_dir.join("AGENTS.md");
         if let Ok(content) = std::fs::read_to_string(&agents_path) {
             prompt.push_str("\n## Agent Configuration\n");
             prompt.push_str(&content);
             prompt.push('\n');
         }
 
-        // Agent-owned tools notes (from .claude/agents/)
-        let tools_path = agent_dir.join(".claude").join("agents").join("TOOLS.md");
+        // Agent-owned tools notes (from agent root)
+        let tools_path = agent_dir.join("TOOLS.md");
         if let Ok(content) = std::fs::read_to_string(&tools_path) {
             prompt.push_str("\n## Environment and Tools\n");
             prompt.push_str(&content);
@@ -1728,10 +1728,8 @@ mod tests {
         std::fs::write(dir.path().join("IDENTITY.md"), "I am Spark").unwrap();
         std::fs::write(dir.path().join("SOUL.md"), "Snarky").unwrap();
         std::fs::write(dir.path().join("USER.md"), "Andrey").unwrap();
-        let agents_dir = dir.path().join(".claude").join("agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("AGENTS.md"), "## Subagents\n").unwrap();
-        std::fs::write(agents_dir.join("TOOLS.md"), "outbox: /sandbox/outbox/").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "## Subagents\n").unwrap();
+        std::fs::write(dir.path().join("TOOLS.md"), "outbox: /sandbox/outbox/").unwrap();
 
         let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
         assert!(result.contains("## Operating Instructions"), "must have compiled-in Operating Instructions");
@@ -1752,9 +1750,7 @@ mod tests {
     fn host_prompt_normal_skips_missing_files() {
         let dir = tempfile::tempdir().unwrap();
         // No identity files — only AGENTS.md
-        let agents_dir = dir.path().join(".claude").join("agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("AGENTS.md"), "Procedures").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Procedures").unwrap();
 
         let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
         assert!(result.contains("Base"));
@@ -1801,9 +1797,7 @@ mod tests {
     #[test]
     fn host_prompt_includes_mcp_instructions() {
         let dir = tempfile::tempdir().unwrap();
-        let agents_dir = dir.path().join(".claude").join("agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("AGENTS.md"), "Procedures").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Procedures").unwrap();
 
         let result = assemble_host_system_prompt(
             "Base\n",
@@ -1848,9 +1842,7 @@ mod tests {
     #[test]
     fn host_prompt_normal_has_agent_configuration() {
         let dir = tempfile::tempdir().unwrap();
-        let agents_dir = dir.path().join(".claude").join("agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("AGENTS.md"), "## Subagents\n\n### reviewer\n").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "## Subagents\n\n### reviewer\n").unwrap();
 
         let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
         assert!(result.contains("## Agent Configuration"), "must have Agent Configuration header");
@@ -1893,7 +1885,7 @@ mod tests {
             None,
         );
         assert!(script.contains("Agent Configuration"), "must have Agent Configuration section for per-agent AGENTS.md");
-        assert!(script.contains("cat /sandbox/.claude/agents/AGENTS.md"), "must still cat AGENTS.md from sandbox");
+        assert!(script.contains("cat /sandbox/AGENTS.md"), "must cat AGENTS.md from sandbox root");
     }
 
     #[test]

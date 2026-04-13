@@ -7,8 +7,6 @@
 /// BOOTSTRAP.md is excluded — its content comes from the compiled-in
 /// `BOOTSTRAP_INSTRUCTIONS` constant; the on-disk file is only an existence flag.
 pub const CONTENT_MD_FILES: &[&str] = &[
-    "AGENTS.md",
-    "TOOLS.md",
     "IDENTITY.md",
     "SOUL.md",
     "USER.md",

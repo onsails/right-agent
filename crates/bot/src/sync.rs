@@ -30,6 +30,18 @@ pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Resul
         }
     }
 
+    // Upload agent-owned files (AGENTS.md, TOOLS.md) to sandbox root.
+    // These are read directly by the prompt assembly script, not via @ references.
+    for &filename in &["AGENTS.md", "TOOLS.md"] {
+        let host_path = agent_dir.join(filename);
+        if host_path.exists() {
+            rightclaw::openshell::upload_file(sandbox_name, &host_path, "/sandbox/")
+                .await
+                .map_err(|e| miette::miette!("sync {filename}: {e:#}"))?;
+            tracing::debug!(file = filename, "sync: uploaded agent-owned file to sandbox root");
+        }
+    }
+
     Ok(())
 }
 
@@ -137,9 +149,10 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
 }
 
 /// Files that CC creates/modifies inside the sandbox and should be synced back to host.
-/// Excludes codegen-only files (AGENTS.md, BOOTSTRAP.md) — those are uploaded by
+/// Excludes codegen-only files (BOOTSTRAP.md) — those are uploaded by
 /// forward sync and never modified by CC.
 const REVERSE_SYNC_FILES: &[&str] = &[
+    "AGENTS.md",
     "TOOLS.md",
     "IDENTITY.md",
     "SOUL.md",
