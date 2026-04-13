@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod memory;
 pub mod openshell;
 pub mod platform_store;
+pub mod sandbox_exec;
 pub mod runtime;
 pub mod tunnel;
 
