@@ -9,6 +9,7 @@ const V6_SCHEMA: &str = include_str!("sql/v6_cron_specs.sql");
 const V7_SCHEMA: &str = include_str!("sql/v7_cron_trigger.sql");
 const V8_SCHEMA: &str = include_str!("sql/v8_mcp_servers.sql");
 const V9_SCHEMA: &str = include_str!("sql/v9_mcp_instructions.sql");
+const V10_SCHEMA: &str = include_str!("sql/v10_mcp_auth.sql");
 
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
     std::sync::LazyLock::new(|| {
@@ -22,6 +23,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
             M::up(V7_SCHEMA),
             M::up(V8_SCHEMA),
             M::up(V9_SCHEMA),
+            M::up(V10_SCHEMA),
         ])
     });
 
@@ -182,6 +184,48 @@ mod tests {
             instructions.is_none(),
             "instructions should be NULL by default"
         );
+    }
+
+    #[test]
+    fn v10_mcp_servers_has_auth_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO mcp_servers (name, url, auth_type, auth_token) VALUES (?1, ?2, ?3, ?4)",
+            ("test", "https://example.com/mcp", "bearer", "sk-123"),
+        )
+        .unwrap();
+
+        let auth_type: Option<String> = conn
+            .query_row(
+                "SELECT auth_type FROM mcp_servers WHERE name = ?1",
+                ["test"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(auth_type.as_deref(), Some("bearer"));
+
+        // Verify all new columns exist
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('mcp_servers')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for col in [
+            "auth_type",
+            "auth_header",
+            "auth_token",
+            "refresh_token",
+            "token_endpoint",
+            "client_id",
+            "client_secret",
+            "expires_at",
+        ] {
+            assert!(cols.contains(&col.to_string()), "{col} column missing");
+        }
     }
 
     #[test]
