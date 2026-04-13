@@ -189,6 +189,8 @@ pub struct McpServerStatus {
     pub url: Option<String>,
     pub status: String,
     pub tool_count: usize,
+    #[serde(default)]
+    pub auth_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

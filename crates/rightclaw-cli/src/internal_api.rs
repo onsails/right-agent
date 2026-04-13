@@ -80,6 +80,8 @@ pub(crate) struct McpServerStatus {
     pub url: Option<String>,
     pub status: String,
     pub tool_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -371,6 +373,7 @@ async fn handle_mcp_list(
         url: None,
         status: "connected".into(),
         tool_count: registry.right.tools_list().len(),
+        auth_type: None,
     });
 
     // External proxy backends
@@ -383,6 +386,7 @@ async fn handle_mcp_list(
             url: Some(proxy.url().to_string()),
             status: status.to_string(),
             tool_count,
+            auth_type: Some(proxy.auth_method().to_string()),
         });
     }
 
