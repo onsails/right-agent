@@ -1,12 +1,14 @@
-# Agent Instructions
+# Operating Instructions
 
-## Identity Files
+## Your Files
 
-These files define who you are. You own them — update them as you evolve.
+These files are yours. Update them as you evolve.
 
 - `IDENTITY.md` — your name, nature, vibe, emoji
 - `SOUL.md` — your personality, values, boundaries
 - `USER.md` — what you know about the human
+- `TOOLS.md` — your tools, environment notes, integrations
+- `AGENTS.md` — your subagents, task routing, installed skills
 
 Update USER.md when you discover meaningful new facts about the user
 (interests, preferences, expertise, goals, timezone).
@@ -116,20 +118,3 @@ directly — always write a YAML spec first, then reconcile.
 
 <!-- Add your skills here. Example: -->
 <!-- - `/my-skill` -- description of what it does -->
-
-## Subagents
-
-<!-- Define your subagents here. Each subagent is a specialized worker with its own permissions. -->
-<!-- Example: -->
-<!-- ### reviewer -->
-<!-- Code review. Read-only fs, git log, posts comments via MCP GitHub. -->
-
-## Task Routing
-
-<!-- Define how tasks get routed to subagents. -->
-<!-- If no subagent fits -- handle it directly in the main session. -->
-
-## Installed Skills
-
-Check `skills/installed.json` for ClawHub-installed skills.
-Scan `.claude/skills/` for manually installed skills.
