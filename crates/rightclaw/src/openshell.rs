@@ -534,13 +534,9 @@ pub fn prepare_staging_dir(agent_dir: &Path, upload_dir: &Path) -> miette::Resul
 
     let src_claude = agent_dir.join(".claude");
 
-    // Copy individual items — NOT credentials, NOT plugins, NOT shell-snapshots
-    let copy_items: &[&str] = &[
-        "settings.json",
-        "reply-schema.json",
-        "cron-schema.json",
-        "agents", // agent definition directory
-    ];
+    // Minimal CC bootstrap files only — agent defs, skills, and schemas
+    // are deployed via /platform/ store during initial_sync.
+    let copy_items: &[&str] = &["settings.json", "reply-schema.json"];
 
     for item in copy_items {
         let src = src_claude.join(item);
@@ -548,28 +544,8 @@ pub fn prepare_staging_dir(agent_dir: &Path, upload_dir: &Path) -> miette::Resul
         if !src.exists() {
             continue;
         }
-        let meta = std::fs::metadata(&src)
-            .map_err(|e| miette::miette!("failed to stat {}: {e:#}", src.display()))?;
-        if meta.is_dir() {
-            copy_dir_resolve_symlinks(&src, &dst)
-                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
-        } else {
-            std::fs::copy(&src, &dst)
-                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
-        }
-    }
-
-    // Copy only rightclaw builtin skills (not entire skills/ tree)
-    let skills_src = src_claude.join("skills");
-    if skills_src.exists() {
-        for builtin in &["rightskills", "rightcron", "rightmcp"] {
-            let skill_src = skills_src.join(builtin);
-            let skill_dst = staging_claude.join("skills").join(builtin);
-            if skill_src.exists() {
-                copy_dir_resolve_symlinks(&skill_src, &skill_dst)
-                    .map_err(|e| miette::miette!("failed to copy skill {builtin} to staging: {e:#}"))?;
-            }
-        }
+        std::fs::copy(&src, &dst)
+            .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", item))?;
     }
 
     // Copy .claude.json (trust/onboarding — at agent root, not inside .claude/)
