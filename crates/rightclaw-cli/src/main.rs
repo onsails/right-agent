@@ -554,8 +554,10 @@ fn cmd_init(
 
     rightclaw::init::init_rightclaw_home(home, token.as_deref(), &chat_ids, &network_policy, &sandbox)?;
 
-    // Create sandbox for the default "right" agent if openshell mode.
-    if matches!(sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
+    // Run codegen for the default "right" agent.
+    // Per-agent codegen was moved to bot startup (59243d0) but init needs it
+    // to populate .claude/agents/ before sandbox staging upload.
+    {
         let agent_dir = home.join("agents/right");
         let self_exe = std::env::current_exe()
             .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
@@ -585,61 +587,65 @@ fn cmd_init(
             &self_exe,
             false,
         )?;
+        rightclaw::codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
 
-        let staging = agent_dir.join("staging");
-        rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+        // Create sandbox if openshell mode.
+        if matches!(sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
+            let staging = agent_dir.join("staging");
+            rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
-        let policy_path = agent_dir.join("policy.yaml");
-        let sb_name = rightclaw::openshell::sandbox_name("right");
-        let force_recreate = if force {
-            true
-        } else {
-            prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
-        };
-        println!("Creating OpenShell sandbox...");
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                rightclaw::openshell::ensure_sandbox(
-                    "right",
-                    &policy_path,
-                    Some(&staging),
-                    force_recreate,
-                )
-                .await
-            })
-        })?;
-        // Post-check: verify critical files made it into the sandbox.
-        // OpenShell has a bug where small files in directory uploads are silently dropped.
-        let expected_files: Vec<&str> = std::iter::once("right.md")
-            .chain(std::iter::once("right-bootstrap.md"))
-            .chain(rightclaw::codegen::CONTENT_MD_FILES.iter().copied()
-                .filter(|f| agent_dir.join(".claude/agents").join(f).exists()))
-            .collect();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                rightclaw::openshell::verify_sandbox_files(
-                    &sb_name,
-                    &agent_dir.join(".claude/agents"),
-                    "/sandbox/.claude/agents/",
-                    &expected_files,
-                )
-                .await
-            })
-        })?;
-        println!("  Sandbox '{sb_name}' ready");
+            let policy_path = agent_dir.join("policy.yaml");
+            let sb_name = rightclaw::openshell::sandbox_name("right");
+            let force_recreate = if force {
+                true
+            } else {
+                prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
+            };
+            println!("Creating OpenShell sandbox...");
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    rightclaw::openshell::ensure_sandbox(
+                        "right",
+                        &policy_path,
+                        Some(&staging),
+                        force_recreate,
+                    )
+                    .await
+                })
+            })?;
+            // Post-check: verify critical files made it into the sandbox.
+            // OpenShell has a bug where small files in directory uploads are silently dropped.
+            let expected_files: Vec<&str> = std::iter::once("right.md")
+                .chain(std::iter::once("right-bootstrap.md"))
+                .chain(rightclaw::codegen::CONTENT_MD_FILES.iter().copied()
+                    .filter(|f| agent_dir.join(".claude/agents").join(f).exists()))
+                .collect();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    rightclaw::openshell::verify_sandbox_files(
+                        &sb_name,
+                        &agent_dir.join(".claude/agents"),
+                        "/sandbox/.claude/agents/",
+                        &expected_files,
+                    )
+                    .await
+                })
+            })?;
+            println!("  Sandbox '{sb_name}' ready");
 
-        let run_dir = home.join("run");
-        std::fs::create_dir_all(run_dir.join("ssh"))
-            .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                rightclaw::openshell::generate_ssh_config(
-                    &rightclaw::openshell::sandbox_name("right"),
-                    &run_dir.join("ssh"),
-                )
-                .await
-            })
-        })?;
+            let run_dir = home.join("run");
+            std::fs::create_dir_all(run_dir.join("ssh"))
+                .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    rightclaw::openshell::generate_ssh_config(
+                        &rightclaw::openshell::sandbox_name("right"),
+                        &run_dir.join("ssh"),
+                    )
+                    .await
+                })
+            })?;
+        }
     }
 
     println!("Initialized RightClaw at {}", home.display());
@@ -833,9 +839,10 @@ fn cmd_agent_init(
 
     let agent_dir = rightclaw::init::init_agent(&agents_parent, name, Some(&overrides))?;
 
-    // Create sandbox for openshell agents.
-    if matches!(overrides.sandbox_mode, rightclaw::agent::types::SandboxMode::Openshell) {
-        // Run codegen so staging dir has agent defs, settings, schemas, skills.
+    // Run codegen so agent defs, settings, schemas, skills are generated.
+    // Per-agent codegen was moved to bot startup (59243d0) but init/agent-init
+    // need it to populate .claude/agents/ before sandbox staging upload.
+    {
         let self_exe = std::env::current_exe()
             .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
         let agent_def = rightclaw::agent::AgentDef {
@@ -864,7 +871,11 @@ fn cmd_agent_init(
             &self_exe,
             false,
         )?;
+        rightclaw::codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+    }
 
+    // Create sandbox for openshell agents.
+    if matches!(overrides.sandbox_mode, rightclaw::agent::types::SandboxMode::Openshell) {
         let staging = agent_dir.join("staging");
         rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
