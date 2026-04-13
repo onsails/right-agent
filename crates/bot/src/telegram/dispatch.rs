@@ -124,9 +124,33 @@ pub async fn run_telegram(
 
     let message_handler = Update::filter_message()
         .inspect(|msg: Message| {
-            tracing::info!(chat_id = msg.chat.id.0, "message update received by dispatcher");
+            let text_preview = msg.text().or(msg.caption()).map(|t| {
+                let trimmed: String = t.chars().take(80).collect();
+                trimmed
+            });
+            let entities = msg.entities().map(|e| e.len()).unwrap_or(0);
+            tracing::info!(
+                chat_id = msg.chat.id.0,
+                ?text_preview,
+                entities,
+                "message update received by dispatcher"
+            );
         })
         .filter_map(filter)
+        .inspect(|msg: Message| {
+            // Log after allow-list filter, before command parsing.
+            // If this appears but no command/handle_message log follows,
+            // the message was swallowed by filter_command (e.g. /command with
+            // formatting entities that prevent parsing).
+            let starts_with_slash = msg.text().is_some_and(|t| t.starts_with('/'));
+            if starts_with_slash {
+                tracing::info!(
+                    chat_id = msg.chat.id.0,
+                    text = msg.text().unwrap_or(""),
+                    "pre-command: message starts with /, attempting command parse"
+                );
+            }
+        })
         .branch(command_handler)
         .endpoint(handle_message);
 
