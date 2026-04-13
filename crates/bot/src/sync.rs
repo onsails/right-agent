@@ -120,7 +120,7 @@ async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
     }
 
     // 4. Upload rightclaw builtin skills
-    for skill_name in &["rightskills", "rightcron"] {
+    for skill_name in &["rightskills", "rightcron", "rightmcp"] {
         let skill_dir = agent_dir.join(".claude").join("skills").join(skill_name);
         if skill_dir.exists() {
             rightclaw::openshell::upload_file(sandbox, &skill_dir, "/sandbox/.claude/skills/")

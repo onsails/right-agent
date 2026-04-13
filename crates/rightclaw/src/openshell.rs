@@ -487,7 +487,7 @@ pub fn prepare_staging_dir(agent_dir: &Path, upload_dir: &Path) -> miette::Resul
     // Copy only rightclaw builtin skills (not entire skills/ tree)
     let skills_src = src_claude.join("skills");
     if skills_src.exists() {
-        for builtin in &["rightskills", "rightcron"] {
+        for builtin in &["rightskills", "rightcron", "rightmcp"] {
             let skill_src = skills_src.join(builtin);
             let skill_dst = staging_claude.join("skills").join(builtin);
             if skill_src.exists() {

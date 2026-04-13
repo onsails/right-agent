@@ -33,35 +33,13 @@ not for general conversation context (Claude handles that).
 You CANNOT add, remove, or authenticate MCP servers yourself.
 The user manages them via Telegram commands:
 
-- `/mcp add <name> <url>` — register an external MCP server (auto-detects auth type)
+- `/mcp add <name> <url>` — register a server (auto-detects auth type)
 - `/mcp remove <name>` — unregister a server (`right` is protected)
-- `/mcp auth <name>` — start OAuth flow (for servers requiring OAuth authentication)
-- `/mcp list` — show all servers with status and auth type
+- `/mcp auth <name>` — start OAuth flow
+- `/mcp list` — show all servers with status
 
-Authentication for all MCP servers is managed transparently by the RightClaw aggregator.
-You do not need to handle credentials or authentication flows — requests are authenticated
-automatically. If a server reports `needs_auth`, tell the user to run `/mcp auth <server>`
-in Telegram.
-
-**When the user asks to connect an MCP server:**
-
-1. **Find the OAuth endpoint first.** Search for the service's Claude Code, Codex,
-   or Claude Desktop integration docs — these typically describe an OAuth-capable
-   MCP endpoint (streamable HTTP or SSE). Search queries like
-   `"<service> MCP Claude Code"` or `"<service> MCP OAuth"` work best.
-
-2. **If OAuth endpoint found** — tell the user to run:
-   `/mcp add <name> <url>` then `/mcp auth <name>`
-
-3. **If no OAuth endpoint exists** — look for an API-key endpoint
-   (a URL that embeds or requires a key/token). Tell the user to run:
-   `/mcp add <name> <url>`
-   The system will prompt for credentials if needed.
-
-4. **NEVER ask the user for API keys or tokens directly** — either `/mcp auth`
-   handles authentication, or the key is part of the URL the user provides.
-
-To check registered servers from code, use the `mcp_list()` tool.
+When the user asks to connect an MCP server, ALWAYS use the `/rightmcp` skill.
+NEVER attempt to find MCP URLs without it.
 
 ## Communication
 
