@@ -143,19 +143,24 @@ pub async fn run_refresh_scheduler(
                         let current_token = token.read().await.clone().unwrap_or_default();
 
                         // Persist to SQLite
-                        if let Ok(conn) = crate::memory::open_connection(&agent_dir) {
-                            let expires_at = entry_state.expires_at.to_rfc3339();
-                            if let Err(e) = crate::mcp::credentials::db_set_oauth_state(
-                                &conn,
-                                &server_name,
-                                &current_token,
-                                entry_state.refresh_token.as_deref(),
-                                &entry_state.token_endpoint,
-                                &entry_state.client_id,
-                                entry_state.client_secret.as_deref(),
-                                &expires_at,
-                            ) {
-                                tracing::error!("failed to persist OAuth state: {e:#}");
+                        match crate::memory::open_connection(&agent_dir) {
+                            Ok(conn) => {
+                                let expires_at = entry_state.expires_at.to_rfc3339();
+                                if let Err(e) = crate::mcp::credentials::db_set_oauth_state(
+                                    &conn,
+                                    &server_name,
+                                    &current_token,
+                                    entry_state.refresh_token.as_deref(),
+                                    &entry_state.token_endpoint,
+                                    &entry_state.client_id,
+                                    entry_state.client_secret.as_deref(),
+                                    &expires_at,
+                                ) {
+                                    tracing::error!("failed to persist OAuth state: {e:#}");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("failed to open memory DB for OAuth state persistence: {e:#}");
                             }
                         }
 
@@ -200,15 +205,20 @@ pub async fn run_refresh_scheduler(
                         timers.insert(name.clone(), tokio::time::Instant::now() + due);
 
                         // Persist refreshed token to SQLite
-                        if let Ok(conn) = crate::memory::open_connection(&agent_dir) {
-                            let expires_at = new_entry.expires_at.to_rfc3339();
-                            if let Err(e) = crate::mcp::credentials::db_update_oauth_token(
-                                &conn,
-                                &name,
-                                &access_token,
-                                &expires_at,
-                            ) {
-                                tracing::error!("failed to persist refreshed token: {e:#}");
+                        match crate::memory::open_connection(&agent_dir) {
+                            Ok(conn) => {
+                                let expires_at = new_entry.expires_at.to_rfc3339();
+                                if let Err(e) = crate::mcp::credentials::db_update_oauth_token(
+                                    &conn,
+                                    &name,
+                                    &access_token,
+                                    &expires_at,
+                                ) {
+                                    tracing::error!("failed to persist refreshed token: {e:#}");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("failed to open memory DB for token refresh persistence: {e:#}");
                             }
                         }
                         entries.insert(name.clone(), new_entry);

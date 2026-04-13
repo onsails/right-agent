@@ -440,13 +440,10 @@ async fn main() -> miette::Result<()> {
                 if let Ok(conn) = rightclaw::memory::open_connection(&agent_dir) {
                     if let Ok(servers) = rightclaw::mcp::credentials::db_list_servers(&conn) {
                         for s in servers {
-                            let auth_method = match s.auth_type.as_deref() {
-                                Some("header") => rightclaw::mcp::proxy::AuthMethod::Header(
-                                    s.auth_header.clone().unwrap_or_default(),
-                                ),
-                                Some("query_string") => rightclaw::mcp::proxy::AuthMethod::QueryString,
-                                _ => rightclaw::mcp::proxy::AuthMethod::Bearer,
-                            };
+                            let auth_method = rightclaw::mcp::proxy::AuthMethod::from_db(
+                                s.auth_type.as_deref(),
+                                s.auth_header.as_deref(),
+                            );
                             let token = std::sync::Arc::new(tokio::sync::RwLock::new(s.auth_token.clone()));
                             let backend = rightclaw::mcp::proxy::ProxyBackend::new(
                                 s.name.clone(),

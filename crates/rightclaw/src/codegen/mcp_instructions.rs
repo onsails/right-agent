@@ -33,15 +33,7 @@ mod tests {
         let servers = vec![McpServerEntry {
             name: "notion".into(),
             url: "https://mcp.notion.com/mcp".into(),
-            instructions: None,
-            auth_type: None,
-            auth_header: None,
-            auth_token: None,
-            refresh_token: None,
-            token_endpoint: None,
-            client_id: None,
-            client_secret: None,
-            expires_at: None,
+            ..Default::default()
         }];
         let result = generate_mcp_instructions_md(&servers);
         assert_eq!(result, "# MCP Server Instructions\n");
@@ -53,14 +45,7 @@ mod tests {
             name: "notion".into(),
             url: "https://mcp.notion.com/mcp".into(),
             instructions: Some("Search and update Notion pages.".into()),
-            auth_type: None,
-            auth_header: None,
-            auth_token: None,
-            refresh_token: None,
-            token_endpoint: None,
-            client_id: None,
-            client_secret: None,
-            expires_at: None,
+            ..Default::default()
         }];
         let result = generate_mcp_instructions_md(&servers);
         assert!(result.contains("## notion"));
@@ -74,40 +59,18 @@ mod tests {
                 name: "composio".into(),
                 url: "https://connect.composio.dev/mcp".into(),
                 instructions: Some("Connect with 250+ apps.".into()),
-                auth_type: None,
-                auth_header: None,
-                auth_token: None,
-                refresh_token: None,
-                token_endpoint: None,
-                client_id: None,
-                client_secret: None,
-                expires_at: None,
+                ..Default::default()
             },
             McpServerEntry {
                 name: "linear".into(),
                 url: "https://mcp.linear.app/mcp".into(),
-                instructions: None,
-                auth_type: None,
-                auth_header: None,
-                auth_token: None,
-                refresh_token: None,
-                token_endpoint: None,
-                client_id: None,
-                client_secret: None,
-                expires_at: None,
+                ..Default::default()
             },
             McpServerEntry {
                 name: "notion".into(),
                 url: "https://mcp.notion.com/mcp".into(),
                 instructions: Some("Notion tools.".into()),
-                auth_type: None,
-                auth_header: None,
-                auth_token: None,
-                refresh_token: None,
-                token_endpoint: None,
-                client_id: None,
-                client_secret: None,
-                expires_at: None,
+                ..Default::default()
             },
         ];
         let result = generate_mcp_instructions_md(&servers);
