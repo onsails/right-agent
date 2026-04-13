@@ -560,14 +560,14 @@ fn build_sandbox_prompt_assembly_script(
         let escaped_bootstrap =
             rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
         format!(
-            "\nprintf '%s\\n' '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'"
+            "\nprintf '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'"
         )
     } else {
         let escaped_ops =
             rightclaw::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
         format!(
             r#"
-printf '%s\n' '\n## Operating Instructions\n'
+printf '\n## Operating Instructions\n'
 printf '%s\n' '{escaped_ops}'
 if [ -f /sandbox/IDENTITY.md ]; then
   printf '\n## Your Identity\n'
@@ -600,7 +600,7 @@ fi"#
     let mcp_section = match mcp_instructions {
         Some(instr) => {
             let escaped = instr.replace('\'', "'\\''");
-            format!("\nprintf '%s\\n' '{escaped}'")
+            format!("\nprintf '\\n'\nprintf '%s\\n' '{escaped}'")
         }
         None => String::new(),
     };
