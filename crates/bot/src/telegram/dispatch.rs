@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthCodeSlot, AuthWatcherFlag, DebugFlag, IdleTimestamp, InternalApi, RefreshTx, RightclawHome, SshConfigPath};
+use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthWatcherFlag, DebugFlag, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RefreshTx, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -92,8 +92,14 @@ pub async fn run_telegram(
     let auth_watcher_flag_arc: Arc<AuthWatcherFlag> = Arc::new(AuthWatcherFlag(
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
     ));
-    let auth_code_slot_arc: Arc<AuthCodeSlot> = Arc::new(AuthCodeSlot(
-        Arc::new(tokio::sync::Mutex::new(None)),
+    let auth_code_arc = Arc::new(tokio::sync::Mutex::new(None));
+    let pending_token_arc = Arc::new(tokio::sync::Mutex::new(None));
+    let intercept_slots_arc: Arc<InterceptSlots> = Arc::new(InterceptSlots {
+        auth_code: Arc::clone(&auth_code_arc),
+        pending_token: Arc::clone(&pending_token_arc),
+    });
+    let pending_token_slot_arc: Arc<PendingTokenSlot> = Arc::new(PendingTokenSlot(
+        pending_token_arc,
     ));
     let refresh_tx_arc: Arc<RefreshTx> = Arc::new(RefreshTx(refresh_tx));
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
@@ -140,7 +146,8 @@ pub async fn run_telegram(
             Arc::clone(&home_arc),
             Arc::clone(&ssh_config_arc),
             Arc::clone(&auth_watcher_flag_arc),
-            Arc::clone(&auth_code_slot_arc),
+            Arc::clone(&intercept_slots_arc),
+            Arc::clone(&pending_token_slot_arc),
             Arc::clone(&refresh_tx_arc),
             Arc::clone(&internal_api_arc),
             Arc::clone(&settings_arc),

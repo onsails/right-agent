@@ -50,6 +50,26 @@ pub struct AuthWatcherFlag(pub Arc<AtomicBool>);
 #[derive(Clone)]
 pub struct AuthCodeSlot(pub Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>);
 
+/// Shared slot for pending MCP token requests. When /mcp add needs a token,
+/// a oneshot::Sender is placed here. Message handler checks before routing to worker.
+#[derive(Clone)]
+pub struct PendingTokenSlot(pub Arc<tokio::sync::Mutex<Option<PendingTokenRequest>>>);
+
+/// Pending token request from /mcp add flow.
+pub struct PendingTokenRequest {
+    pub chat_id: i64,
+    pub thread_id: i64,
+    pub sender: tokio::sync::oneshot::Sender<String>,
+}
+
+/// Bundle of message-intercept slots to reduce dptree DI parameter count.
+/// Contains both auth code and MCP token intercept slots.
+#[derive(Clone)]
+pub struct InterceptSlots {
+    pub auth_code: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    pub pending_token: Arc<tokio::sync::Mutex<Option<PendingTokenRequest>>>,
+}
+
 /// Channel sender for notifying the refresh scheduler about server removals.
 #[derive(Clone)]
 pub struct RefreshTx(pub tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>);
@@ -113,7 +133,7 @@ pub async fn handle_message(
     debug_flag: Arc<DebugFlag>,
     ssh_config: Arc<SshConfigPath>,
     auth_watcher_flag: Arc<AuthWatcherFlag>,
-    auth_code_slot: Arc<AuthCodeSlot>,
+    intercept_slots: Arc<InterceptSlots>,
     settings: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
     idle_ts: Arc<IdleTimestamp>,
@@ -134,7 +154,7 @@ pub async fn handle_message(
 
     // Intercept auth code: if login flow is waiting for a code, forward this message.
     if let Some(ref text_val) = text {
-        let mut slot = auth_code_slot.0.lock().await;
+        let mut slot = intercept_slots.auth_code.lock().await;
         if let Some(sender) = slot.take() {
             tracing::info!("handle_message: forwarding message as auth code");
             let _ = sender.send(text_val.clone());
@@ -144,6 +164,20 @@ pub async fn handle_message(
 
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
+
+    // Intercept pending MCP token: if /mcp add is waiting for a token, forward this message.
+    if let Some(ref text_val) = text {
+        let mut slot = intercept_slots.pending_token.lock().await;
+        if let Some(ref pending) = *slot {
+            if pending.chat_id == chat_id.0 && pending.thread_id == eff_thread_id {
+                if let Some(pending) = slot.take() {
+                    tracing::info!("handle_message: forwarding message as MCP token");
+                    let _ = pending.sender.send(text_val.clone());
+                    return Ok(());
+                }
+            }
+        }
+    }
     let key: SessionKey = (chat_id.0, eff_thread_id);
     let worker_exists = worker_map.contains_key(&key);
     tracing::info!(?key, worker_exists, has_text = text.is_some(), attachment_count = attachments.len(), "handle_message: routing");
@@ -188,7 +222,7 @@ pub async fn handle_message(
                     debug: debug_flag.0,
                     ssh_config_path: ssh_config.0.clone(),
                     auth_watcher_active: Arc::clone(&auth_watcher_flag.0),
-                    auth_code_tx: Arc::clone(&auth_code_slot.0),
+                    auth_code_tx: Arc::clone(&intercept_slots.auth_code),
                     max_turns: settings.max_turns,
                     max_budget_usd: settings.max_budget_usd,
                     show_thinking: settings.show_thinking,
@@ -432,6 +466,8 @@ pub async fn handle_mcp(
     pending_auth: PendingAuthMap,
     home: Arc<RightclawHome>,
     internal: Arc<InternalApi>,
+    pending_token_slot: Arc<PendingTokenSlot>,
+    ssh_config: Arc<SshConfigPath>,
 ) -> ResponseResult<()> {
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
     let agent_name = agent_dir.0
@@ -454,7 +490,7 @@ pub async fn handle_mcp(
         }
         Some("add") => {
             let rest = parts[1..].join(" ");
-            handle_mcp_add(&bot, &msg, &rest, &agent_dir.0, &internal.0).await
+            handle_mcp_add(&bot, &msg, &rest, &agent_dir.0, &internal.0, &pending_token_slot, ssh_config.0.as_deref()).await
         }
         Some("remove") => {
             let server = match parts.get(1) {
@@ -694,12 +730,21 @@ async fn handle_mcp_auth(
 }
 
 /// `/mcp add <name> <url>` -- add an MCP server via the internal aggregator API.
+///
+/// Flow:
+/// 1. Strip query string, try OAuth AS discovery on bare URL
+/// 2. If OAuth found: register without auth, tell user to `/mcp auth`
+/// 3. Otherwise determine auth type (query_string / haiku detection / bearer default)
+/// 4. If bearer/header: ask user for token via `PendingTokenSlot`
+/// 5. Register server with auth fields (connection verified server-side)
 async fn handle_mcp_add(
     bot: &BotType,
     msg: &Message,
     config_str: &str,
     agent_dir: &Path,
     internal: &rightclaw::mcp::internal_client::InternalClient,
+    pending_token_slot: &PendingTokenSlot,
+    ssh_config_path: Option<&Path>,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), "mcp add");
     let parts: Vec<&str> = config_str.split_whitespace().collect();
@@ -709,27 +754,141 @@ async fn handle_mcp_add(
         return Ok(());
     }
     let name = parts[0];
-    let url = parts[1];
+    let original_url = parts[1];
 
     let agent_name = agent_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
-
     let eff_thread_id = effective_thread_id(msg);
 
-    match internal.mcp_add(agent_name, name, url, None, None, None).await {
+    // Strip query string for OAuth discovery
+    let bare_url = match original_url.find('?') {
+        Some(pos) => &original_url[..pos],
+        None => original_url,
+    };
+
+    // Step 1: Try OAuth AS discovery
+    let http_client = reqwest::Client::new();
+    let oauth_discovered = rightclaw::mcp::oauth::discover_as(&http_client, bare_url)
+        .await
+        .is_ok();
+
+    if oauth_discovered {
+        // OAuth server — register without auth, tell user to run /mcp auth
+        match internal
+            .mcp_add(agent_name, name, bare_url, None, None, None)
+            .await
+        {
+            Ok(resp) => {
+                let escaped = super::markdown::html_escape(name);
+                let mut reply = format!("Added MCP server <b>{escaped}</b> (OAuth detected).");
+                if let Some(ref w) = resp.warning {
+                    reply.push_str(&format!("\n{}", super::markdown::html_escape(w)));
+                }
+                reply.push_str(&format!(
+                    "\nRun <code>/mcp auth {name}</code> to authenticate."
+                ));
+                send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
+            }
+            Err(e) => {
+                send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}"))
+                    .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    // Step 2: Determine auth type for non-OAuth servers
+    let has_query = original_url.contains('?');
+    let is_public = rightclaw::mcp::credentials::is_public_url(bare_url);
+
+    let (auth_type, auth_header): (String, Option<String>) = if has_query {
+        ("query_string".into(), None)
+    } else if is_public {
+        // Public URL — dispatch haiku for classification
+        bot.send_message(msg.chat.id, "Detecting authentication method...")
+            .await?;
+
+        match detect_auth_type_via_haiku(bare_url, agent_name, ssh_config_path).await {
+            Ok(result) => {
+                tracing::info!(auth_type = %result.auth_type, header = ?result.header_name, "haiku detected auth type");
+                (result.auth_type, result.header_name)
+            }
+            Err(e) => {
+                tracing::warn!("haiku auth detection failed: {e}, falling back to bearer");
+                ("bearer".into(), None)
+            }
+        }
+    } else {
+        // Private/local — assume bearer
+        ("bearer".into(), None)
+    };
+
+    // Step 3: If bearer or header — ask user for token
+    let final_token = if auth_type == "bearer" || auth_type == "header" {
+        let header_desc = auth_header.as_deref().unwrap_or("Bearer token");
+        bot.send_message(
+            msg.chat.id,
+            format!("Send the {header_desc} for {name}:"),
+        )
+        .await?;
+
+        // Place a oneshot sender in the slot; message handler will consume it
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        {
+            let mut slot = pending_token_slot.0.lock().await;
+            *slot = Some(PendingTokenRequest {
+                chat_id: msg.chat.id.0,
+                thread_id: eff_thread_id,
+                sender: tx,
+            });
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+            Ok(Ok(token)) => Some(token),
+            _ => {
+                // Clean up slot on timeout
+                pending_token_slot.0.lock().await.take();
+                bot.send_message(
+                    msg.chat.id,
+                    "Timed out waiting for token. /mcp add cancelled.",
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+    } else {
+        None // query_string
+    };
+
+    // Step 4: Register server with auth fields (connection verified server-side)
+    let url_to_register = if auth_type == "query_string" {
+        original_url
+    } else {
+        bare_url
+    };
+
+    match internal
+        .mcp_add(
+            agent_name,
+            name,
+            url_to_register,
+            Some(&auth_type),
+            auth_header.as_deref(),
+            final_token.as_deref(),
+        )
+        .await
+    {
         Ok(resp) => {
-            let escaped_name = super::markdown::html_escape(name);
-            let mut reply = format!("Added MCP server <b>{escaped_name}</b>.");
+            let escaped = super::markdown::html_escape(name);
+            let mut reply = format!("Added MCP server <b>{escaped}</b>.");
             if resp.tools_count > 0 {
                 reply.push_str(&format!(" {} tools available.", resp.tools_count));
             }
-            if let Some(ref warning) = resp.warning {
-                let escaped_warning = super::markdown::html_escape(warning);
-                reply.push_str(&format!("\n{escaped_warning}"));
+            if let Some(ref w) = resp.warning {
+                reply.push_str(&format!("\n{}", super::markdown::html_escape(w)));
             }
-            reply.push_str("\nTools available on agent's next session.");
             send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
         }
         Err(e) => {
@@ -737,6 +896,100 @@ async fn handle_mcp_add(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AuthDetectionResult {
+    auth_type: String,
+    #[serde(default)]
+    header_name: Option<String>,
+}
+
+/// Run haiku in sandbox (or locally) to detect MCP server auth type.
+async fn detect_auth_type_via_haiku(
+    bare_url: &str,
+    agent_name: &str,
+    ssh_config_path: Option<&Path>,
+) -> Result<AuthDetectionResult, String> {
+    let prompt = format!(
+        "What authentication method does the MCP server at {bare_url} use? \
+         Search the web for its documentation. Respond with ONLY a JSON object, no other text. \
+         One of:\n\
+         {{\"auth_type\": \"bearer\"}} — if it uses Authorization: Bearer header\n\
+         {{\"auth_type\": \"header\", \"header_name\": \"X-Custom-Header\"}} — if it uses a custom header\n\
+         {{\"auth_type\": \"query_string\"}} — if the API key goes in the URL query string\n\
+         If you cannot determine, default to: {{\"auth_type\": \"bearer\"}}"
+    );
+
+    let claude_args = [
+        "claude",
+        "-p",
+        "--bare",
+        "--dangerously-skip-permissions",
+        "-m",
+        "haiku",
+    ];
+
+    let mut cmd = if let Some(ssh_config) = ssh_config_path {
+        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let escaped_prompt = prompt.replace('\'', "'\\''");
+        let script = format!(
+            "echo '{}' | {} 2>/dev/null",
+            escaped_prompt,
+            claude_args.join(" ")
+        );
+        let mut c = tokio::process::Command::new("ssh");
+        c.arg("-F").arg(ssh_config);
+        c.arg(&ssh_host);
+        c.arg("--");
+        c.arg(script);
+        c
+    } else {
+        let cc_bin = which::which("claude")
+            .or_else(|_| which::which("claude-bun"))
+            .map_err(|_| "claude binary not found".to_string())?;
+        let mut c = tokio::process::Command::new(cc_bin);
+        for arg in &claude_args[1..] {
+            c.arg(arg);
+        }
+        c
+    };
+
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
+
+    // Write prompt to stdin for the non-SSH (local) case
+    if ssh_config_path.is_none() {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| format!("stdin write failed: {e:#}"))?;
+        }
+    }
+
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "haiku timed out after 60s".to_string())?
+    .map_err(|e| format!("haiku failed: {e:#}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_start = stdout.find('{').ok_or("no JSON in haiku output")?;
+    let json_end = stdout.rfind('}').ok_or("no closing brace in haiku output")? + 1;
+    let json_str = &stdout[json_start..json_end];
+
+    serde_json::from_str::<AuthDetectionResult>(json_str)
+        .map_err(|e| format!("failed to parse haiku response: {e:#}\nRaw: {json_str}"))
 }
 
 /// `/mcp remove <server>` -- remove an MCP server via the internal aggregator API.
