@@ -775,10 +775,15 @@ async fn handle_mcp_add(
     let eff_thread_id = effective_thread_id(msg);
 
     // Step 1: Try OAuth AS discovery
-    let http_client = reqwest::Client::new();
-    let oauth_discovered = rightclaw::mcp::oauth::discover_as(&http_client, &bare_url)
-        .await
-        .is_ok();
+    tracing::info!(url = %bare_url, "mcp add: starting OAuth AS discovery");
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let oauth_result = rightclaw::mcp::oauth::discover_as(&http_client, &bare_url).await;
+    let oauth_discovered = oauth_result.is_ok();
+    tracing::info!(url = %bare_url, oauth_discovered, err = ?oauth_result.err(), "mcp add: OAuth AS discovery complete");
 
     if oauth_discovered {
         // OAuth server — register without auth, tell user to run /mcp auth
@@ -806,6 +811,7 @@ async fn handle_mcp_add(
     }
 
     // Step 2: Determine auth type for non-OAuth servers
+    tracing::info!(url = %bare_url, "mcp add: determining auth type (non-OAuth path)");
     let is_public = rightclaw::mcp::credentials::is_public_url(&bare_url);
 
     let (auth_type, auth_header): (String, Option<String>) = if has_query {
@@ -868,6 +874,7 @@ async fn handle_mcp_add(
     };
 
     // Step 4: Register server with auth fields (connection verified server-side)
+    tracing::info!(url = %bare_url, %auth_type, has_token = final_token.is_some(), "mcp add: registering server");
     let url_to_register: &str = if auth_type == "query_string" {
         original_url
     } else {
