@@ -116,26 +116,32 @@ Agents with `sandbox: mode: none` (no sandbox, direct host access) do NOT includ
 
 ## File Locations
 
-### Sandbox (`/sandbox/`)
+### Sandbox
 
-| File | Path | Created by |
-|------|------|-----------|
-| IDENTITY.md | `/sandbox/IDENTITY.md` | Agent during bootstrap |
-| SOUL.md | `/sandbox/SOUL.md` | Agent during bootstrap |
-| USER.md | `/sandbox/USER.md` | Agent during bootstrap |
-| AGENTS.md | `/sandbox/.claude/agents/AGENTS.md` | Codegen + sync (per-agent config only) |
-| TOOLS.md | `/sandbox/.claude/agents/TOOLS.md` | Codegen + sync |
+Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/platform/`
+(content-addressed, read-only) and are symlinked from their expected paths.
+
+| File | Path | Owner |
+|------|------|-------|
+| IDENTITY.md | `/sandbox/IDENTITY.md` | Agent (bootstrap) |
+| SOUL.md | `/sandbox/SOUL.md` | Agent (bootstrap) |
+| USER.md | `/sandbox/USER.md` | Agent (bootstrap) |
+| AGENTS.md | `/sandbox/AGENTS.md` | Agent (editable) |
+| TOOLS.md | `/sandbox/TOOLS.md` | Agent (editable) |
+| settings.json | `/sandbox/.claude/settings.json` → `/platform/settings.json.<hash>` | Platform (symlink) |
+| reply-schema.json | `/sandbox/.claude/reply-schema.json` → `/platform/...` | Platform (symlink) |
+| skills/ | `/sandbox/.claude/skills/rightmcp` → `/platform/skills/rightmcp.<hash>` | Platform (symlink) |
 | BOOTSTRAP.md | N/A (not synced to sandbox) | Content from compiled-in constant; on-disk file is host-side flag only |
 
 ### Host (`agent_dir/`)
 
 | File | Path | Synced by |
 |------|------|----------|
-| IDENTITY.md | `agent_dir/IDENTITY.md` | reverse_sync (5 min + blocking post-bootstrap) |
+| IDENTITY.md | `agent_dir/IDENTITY.md` | reverse_sync |
 | SOUL.md | `agent_dir/SOUL.md` | reverse_sync |
 | USER.md | `agent_dir/USER.md` | reverse_sync |
-| AGENTS.md | `agent_dir/.claude/agents/AGENTS.md` | codegen (per-agent config only) |
-| TOOLS.md | `agent_dir/.claude/agents/TOOLS.md` | codegen |
+| AGENTS.md | `agent_dir/AGENTS.md` | reverse_sync |
+| TOOLS.md | `agent_dir/TOOLS.md` | reverse_sync |
 | BOOTSTRAP.md | `agent_dir/BOOTSTRAP.md` | template (deleted after bootstrap) |
 
 ## JSON Schemas
