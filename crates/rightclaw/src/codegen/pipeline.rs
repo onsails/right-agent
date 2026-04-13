@@ -271,15 +271,6 @@ pub fn run_single_agent_codegen(
     )?;
     tracing::debug!(agent = %agent.name, "wrote mcp.json with right HTTP MCP entry");
 
-    // Create TOOLS.md if missing (agent-owned, never overwritten by codegen).
-    let tools_path = agent.path.join("TOOLS.md");
-    if !tools_path.exists() {
-        std::fs::write(&tools_path, "").map_err(|e| {
-            miette::miette!("failed to create TOOLS.md for '{}': {e:#}", agent.name)
-        })?;
-        tracing::debug!(agent = %agent.name, "created empty TOOLS.md (agent-owned)");
-    }
-
     Ok(agent_secret)
 }
 
@@ -479,7 +470,6 @@ mod tests {
         assert!(agent_dir.join(".claude/reply-schema.json").exists());
         assert!(agent_dir.join(".claude/cron-schema.json").exists());
         assert!(agent_dir.join(".claude/bootstrap-schema.json").exists());
-        assert!(agent_dir.join("TOOLS.md").exists());
         assert!(agent_dir.join("mcp.json").exists());
         assert!(agent_dir.join("memory.db").exists());
         // Policy must be generated
@@ -554,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_md_created_empty_if_missing() {
+    fn tools_md_not_created_by_codegen_if_missing() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
         let agent_dir = home.join("agents").join("test");
@@ -572,8 +562,8 @@ mod tests {
         let self_exe = std::path::PathBuf::from("/usr/bin/rightclaw");
         run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
 
-        let content = std::fs::read_to_string(agent_dir.join("TOOLS.md")).unwrap();
-        assert_eq!(content, "", "TOOLS.md must be created empty");
+        // Codegen no longer creates TOOLS.md — that's init's responsibility
+        assert!(!agent_dir.join("TOOLS.md").exists(), "codegen must not create TOOLS.md");
     }
 
     #[test]
