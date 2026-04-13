@@ -751,28 +751,39 @@ async fn handle_mcp_add(
     let name = parts[0];
     let original_url = parts[1];
 
+    // Parse URL early — reject garbage before any network calls
+    let parsed = match reqwest::Url::parse(original_url) {
+        Ok(u) => u,
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("Invalid URL: {e}"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let has_query = parsed.query().is_some();
+    let bare_url = {
+        let mut clean = parsed.clone();
+        clean.set_query(None);
+        clean.to_string()
+    };
+
     let agent_name = agent_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
     let eff_thread_id = effective_thread_id(msg);
 
-    // Strip query string for OAuth discovery
-    let bare_url = match original_url.find('?') {
-        Some(pos) => &original_url[..pos],
-        None => original_url,
-    };
-
     // Step 1: Try OAuth AS discovery
     let http_client = reqwest::Client::new();
-    let oauth_discovered = rightclaw::mcp::oauth::discover_as(&http_client, bare_url)
+    let oauth_discovered = rightclaw::mcp::oauth::discover_as(&http_client, &bare_url)
         .await
         .is_ok();
 
     if oauth_discovered {
         // OAuth server — register without auth, tell user to run /mcp auth
         match internal
-            .mcp_add(agent_name, name, bare_url, None, None, None)
+            .mcp_add(agent_name, name, &bare_url, None, None, None)
             .await
         {
             Ok(resp) => {
@@ -795,8 +806,7 @@ async fn handle_mcp_add(
     }
 
     // Step 2: Determine auth type for non-OAuth servers
-    let has_query = original_url.contains('?');
-    let is_public = rightclaw::mcp::credentials::is_public_url(bare_url);
+    let is_public = rightclaw::mcp::credentials::is_public_url(&bare_url);
 
     let (auth_type, auth_header): (String, Option<String>) = if has_query {
         ("query_string".into(), None)
@@ -805,7 +815,7 @@ async fn handle_mcp_add(
         bot.send_message(msg.chat.id, "Detecting authentication method...")
             .await?;
 
-        match detect_auth_type_via_haiku(bare_url, agent_name, ssh_config_path).await {
+        match detect_auth_type_via_haiku(&bare_url, agent_name, ssh_config_path).await {
             Ok(result) => {
                 tracing::info!(auth_type = %result.auth_type, header = ?result.header_name, "haiku detected auth type");
                 (result.auth_type, result.header_name)
@@ -858,10 +868,10 @@ async fn handle_mcp_add(
     };
 
     // Step 4: Register server with auth fields (connection verified server-side)
-    let url_to_register = if auth_type == "query_string" {
+    let url_to_register: &str = if auth_type == "query_string" {
         original_url
     } else {
-        bare_url
+        &bare_url
     };
 
     match internal
