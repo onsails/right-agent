@@ -557,14 +557,18 @@ fn build_sandbox_prompt_assembly_script(
     let claude_cmd = escaped_args.join(" ");
 
     let file_sections = if bootstrap_mode {
-        r#"
-if [ -f /sandbox/.claude/agents/BOOTSTRAP.md ]; then
-  printf '\n## Bootstrap Instructions\n'
-  cat /sandbox/.claude/agents/BOOTSTRAP.md
-  printf '\n'
-fi"#
+        let escaped_bootstrap =
+            rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
+        format!(
+            "\nprintf '%s\\n' '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'"
+        )
     } else {
-        r#"
+        let escaped_ops =
+            rightclaw::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
+        format!(
+            r#"
+printf '%s\n' '\n## Operating Instructions\n'
+printf '%s\n' '{escaped_ops}'
 if [ -f /sandbox/IDENTITY.md ]; then
   printf '\n## Your Identity\n'
   cat /sandbox/IDENTITY.md
@@ -581,7 +585,7 @@ if [ -f /sandbox/USER.md ]; then
   printf '\n'
 fi
 if [ -f /sandbox/.claude/agents/AGENTS.md ]; then
-  printf '\n## Operating Instructions\n'
+  printf '\n## Agent Configuration\n'
   cat /sandbox/.claude/agents/AGENTS.md
   printf '\n'
 fi
@@ -590,12 +594,13 @@ if [ -f /sandbox/.claude/agents/TOOLS.md ]; then
   cat /sandbox/.claude/agents/TOOLS.md
   printf '\n'
 fi"#
+        )
     };
 
     let mcp_section = match mcp_instructions {
         Some(instr) => {
             let escaped = instr.replace('\'', "'\\''");
-            format!("\nprintf '\\n{escaped}\\n'")
+            format!("\nprintf '%s\\n' '{escaped}'")
         }
         None => String::new(),
     };
@@ -891,7 +896,7 @@ async fn invoke_cc(
     let mcp_instructions: Option<String> = match ctx.internal_client.mcp_instructions(&ctx.agent_name).await {
         Ok(resp) => {
             // Only include if there's actual content beyond the header
-            if resp.instructions.trim().len() > "# MCP Server Instructions".len() {
+            if resp.instructions.trim().len() > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER.trim().len() {
                 Some(resp.instructions)
             } else {
                 None
@@ -1639,9 +1644,10 @@ mod tests {
             &["claude".into(), "-p".into()],
             None,
         );
-        assert!(script.contains("BOOTSTRAP.md"), "must reference BOOTSTRAP.md");
-        assert!(!script.contains("IDENTITY.md"), "bootstrap must not include IDENTITY.md");
-        assert!(!script.contains("SOUL.md"), "bootstrap must not include SOUL.md");
+        assert!(script.contains("Bootstrap Instructions"), "must have Bootstrap Instructions header");
+        assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
+        assert!(!script.contains("cat /sandbox/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
+        assert!(!script.contains("cat /sandbox/SOUL.md"), "bootstrap must not cat SOUL.md");
         assert!(script.contains("claude"), "must contain claude command");
         assert!(script.contains("--system-prompt-file"), "must pass --system-prompt-file");
     }
@@ -1659,7 +1665,8 @@ mod tests {
         assert!(script.contains("USER.md"));
         assert!(script.contains("AGENTS.md"));
         assert!(script.contains("TOOLS.md"));
-        assert!(!script.contains("BOOTSTRAP.md"), "normal must not include BOOTSTRAP.md");
+        assert!(script.contains("Operating Instructions"), "must have compiled-in Operating Instructions");
+        assert!(!script.contains("cat /sandbox/.claude/agents/BOOTSTRAP.md"), "normal must not cat BOOTSTRAP.md");
     }
 
     #[test]
@@ -1763,6 +1770,8 @@ mod tests {
         );
         assert!(script.contains("MCP Server Instructions"));
         assert!(script.contains("composio"));
+        // Must use printf '%s' to prevent format string injection
+        assert!(script.contains("printf '%s\\n'"));
     }
 
     #[test]
@@ -1799,6 +1808,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
         assert!(!result.contains("MCP Server Instructions"));
+    }
+
+    #[test]
+    fn sandbox_script_bootstrap_uses_compiled_constant() {
+        let script = build_sandbox_prompt_assembly_script(
+            "Base prompt",
+            true,
+            &["claude".into(), "-p".into()],
+            None,
+        );
+        // Bootstrap uses compiled-in constant, NOT cat of file
+        assert!(!script.contains("cat /sandbox"), "bootstrap must not cat any sandbox file");
+        assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
+        assert!(!script.contains("cat /sandbox/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
+    }
+
+    #[test]
+    fn sandbox_script_normal_has_operating_instructions_before_identity() {
+        let script = build_sandbox_prompt_assembly_script(
+            "Base prompt",
+            false,
+            &["claude".into()],
+            None,
+        );
+        let op_instr_pos = script.find("Operating Instructions").expect("must have Operating Instructions");
+        let identity_pos = script.find("IDENTITY.md").expect("must have IDENTITY.md");
+        assert!(op_instr_pos < identity_pos, "Operating Instructions must come before IDENTITY.md");
+    }
+
+    #[test]
+    fn sandbox_script_normal_has_agent_configuration_section() {
+        let script = build_sandbox_prompt_assembly_script(
+            "Base prompt",
+            false,
+            &["claude".into()],
+            None,
+        );
+        assert!(script.contains("Agent Configuration"), "must have Agent Configuration section for per-agent AGENTS.md");
+        assert!(script.contains("cat /sandbox/.claude/agents/AGENTS.md"), "must still cat AGENTS.md from sandbox");
     }
 
     #[test]
