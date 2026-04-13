@@ -17,28 +17,38 @@ pub async fn initial_sync(agent_dir: &Path, sandbox_name: &str) -> miette::Resul
     tracing::info!(sandbox = sandbox_name, "sync: initial cycle (blocking)");
     sync_cycle(agent_dir, sandbox_name).await?;
 
-    // Upload content .md files into .claude/agents/ inside the sandbox.
-    // CC resolves @./FILE.md relative to the agent def file location (.claude/agents/).
-    // Only on startup — sandbox is source of truth after this point.
+    // Upload content .md files (IDENTITY.md, SOUL.md, USER.md, MEMORY.md) to sandbox root.
+    // These are overwritten every startup — sandbox is source of truth after this point.
     for &filename in CONTENT_MD_FILES {
-        let host_path = agent_dir.join(filename);
-        if host_path.exists() {
-            rightclaw::openshell::upload_file(sandbox_name, &host_path, "/sandbox/.claude/agents/")
-                .await
-                .map_err(|e| miette::miette!("sync {filename}: {e:#}"))?;
-            tracing::debug!(file = filename, "sync: uploaded content file to .claude/agents/");
-        }
-    }
-
-    // Upload agent-owned files (AGENTS.md, TOOLS.md) to sandbox root.
-    // These are read directly by the prompt assembly script, not via @ references.
-    for &filename in &["AGENTS.md", "TOOLS.md"] {
         let host_path = agent_dir.join(filename);
         if host_path.exists() {
             rightclaw::openshell::upload_file(sandbox_name, &host_path, "/sandbox/")
                 .await
                 .map_err(|e| miette::miette!("sync {filename}: {e:#}"))?;
-            tracing::debug!(file = filename, "sync: uploaded agent-owned file to sandbox root");
+            tracing::debug!(file = filename, "sync: uploaded content file to sandbox root");
+        }
+    }
+
+    // Upload agent-owned files (AGENTS.md, TOOLS.md) to sandbox root only if missing.
+    // Preserves agent edits on subsequent boots.
+    for &filename in &["AGENTS.md", "TOOLS.md"] {
+        let host_path = agent_dir.join(filename);
+        if !host_path.exists() {
+            continue;
+        }
+        let sandbox_path = format!("/sandbox/{filename}");
+        let (_stdout, exit_code) =
+            rightclaw::openshell::exec_command(sandbox_name, &["test", "-f", &sandbox_path])
+                .await
+                .map_err(|e| miette::miette!("sync: exec_command test -f {sandbox_path}: {e:#}"))?;
+        if exit_code != 0 {
+            // File missing in sandbox — upload from host
+            rightclaw::openshell::upload_file(sandbox_name, &host_path, "/sandbox/")
+                .await
+                .map_err(|e| miette::miette!("sync {filename}: {e:#}"))?;
+            tracing::info!(file = filename, "sync: uploaded agent-owned file (was missing in sandbox)");
+        } else {
+            tracing::debug!(file = filename, "sync: agent-owned file exists in sandbox, preserving");
         }
     }
 
@@ -68,80 +78,13 @@ pub async fn run_sync_task(agent_dir: PathBuf, sandbox_name: String, shutdown: C
 }
 
 async fn sync_cycle(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
-    // 1. Upload settings.json
-    let settings = agent_dir.join(".claude").join("settings.json");
-    if settings.exists() {
-        rightclaw::openshell::upload_file(sandbox, &settings, "/sandbox/.claude/")
-            .await
-            .map_err(|e| miette::miette!("sync settings.json: {e:#}"))?;
-        tracing::debug!("sync: uploaded settings.json");
-    }
+    // Build manifest of platform-managed files
+    let manifest = rightclaw::platform_store::build_manifest(agent_dir)?;
 
-    // 2. Upload reply-schema.json
-    let schema = agent_dir.join(".claude").join("reply-schema.json");
-    if schema.exists() {
-        rightclaw::openshell::upload_file(sandbox, &schema, "/sandbox/.claude/")
-            .await
-            .map_err(|e| miette::miette!("sync reply-schema.json: {e:#}"))?;
-        tracing::debug!("sync: uploaded reply-schema.json");
-    }
+    // Deploy to /platform/ with content-addressed names + symlinks
+    rightclaw::platform_store::deploy_manifest(sandbox, &manifest).await?;
 
-    // 2a. Upload cron-schema.json
-    let cron_schema = agent_dir.join(".claude").join("cron-schema.json");
-    if cron_schema.exists() {
-        rightclaw::openshell::upload_file(sandbox, &cron_schema, "/sandbox/.claude/")
-            .await
-            .map_err(|e| miette::miette!("sync cron-schema.json: {e:#}"))?;
-        tracing::debug!("sync: uploaded cron-schema.json");
-    }
-
-    // 2b. Upload system-prompt.md (base identity for --system-prompt-file)
-    let sys_prompt = agent_dir.join(".claude").join("system-prompt.md");
-    if sys_prompt.exists() {
-        rightclaw::openshell::upload_file(sandbox, &sys_prompt, "/sandbox/.claude/")
-            .await
-            .map_err(|e| miette::miette!("sync system-prompt.md: {e:#}"))?;
-        tracing::debug!("sync: uploaded system-prompt.md");
-    }
-
-    // 2c. Upload bootstrap-schema.json
-    let bs_schema = agent_dir.join(".claude").join("bootstrap-schema.json");
-    if bs_schema.exists() {
-        rightclaw::openshell::upload_file(sandbox, &bs_schema, "/sandbox/.claude/")
-            .await
-            .map_err(|e| miette::miette!("sync bootstrap-schema.json: {e:#}"))?;
-        tracing::debug!("sync: uploaded bootstrap-schema.json");
-    }
-
-    // 2d. Upload .claude/agents/ directory (agent definitions with @ references)
-    let agents_dir = agent_dir.join(".claude").join("agents");
-    if agents_dir.exists() {
-        rightclaw::openshell::upload_file(sandbox, &agents_dir, "/sandbox/.claude/")
-            .await
-            .map_err(|e| miette::miette!("sync .claude/agents/: {e:#}"))?;
-        tracing::debug!("sync: uploaded .claude/agents/");
-    }
-
-    // 3. Upload mcp.json (right MCP server + external MCP servers with Bearer tokens)
-    let mcp_json = agent_dir.join("mcp.json");
-    if mcp_json.exists() {
-        rightclaw::openshell::upload_file(sandbox, &mcp_json, "/sandbox/")
-            .await
-            .map_err(|e| miette::miette!("sync mcp.json: {e:#}"))?;
-        tracing::debug!("sync: uploaded mcp.json");
-    }
-
-    // 4. Upload rightclaw builtin skills
-    for skill_name in &["rightskills", "rightcron", "rightmcp"] {
-        let skill_dir = agent_dir.join(".claude").join("skills").join(skill_name);
-        if skill_dir.exists() {
-            rightclaw::openshell::upload_file(sandbox, &skill_dir, "/sandbox/.claude/skills/")
-                .await
-                .map_err(|e| miette::miette!("sync skill {skill_name}: {e:#}"))?;
-        }
-    }
-
-    // 5. Verify .claude.json -- download, check rightclaw keys, fix if needed
+    // Verify .claude.json (separate flow — not content-addressed)
     verify_claude_json(agent_dir, sandbox).await?;
 
     tracing::debug!("sync: cycle complete");
