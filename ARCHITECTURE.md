@@ -217,13 +217,24 @@ When `claude -p` returns 403/401 (no credentials in sandbox):
 ```
 OAuth callback (bot) → POST /set-token to Aggregator (Unix socket)
   → Aggregator updates DynamicAuthClient.token in-memory
-  → Aggregator saves to oauth-state.json
+  → Aggregator saves to mcp_servers SQLite table (auth_token, expires_at, etc.)
   → Aggregator starts refresh timer (expires_at - 10 min)
   → on timer: POST refresh_token to token_endpoint
   → update DynamicAuthClient.token in-memory
-  → save to oauth-state.json
+  → save refreshed token to SQLite (db_update_oauth_token)
   → no .mcp.json writes, no sandbox uploads
 ```
+
+### MCP Auth Types
+
+Four auth methods supported (detected automatically by `/mcp add`):
+
+| auth_type | How token is injected | Detection |
+|-----------|----------------------|-----------|
+| `oauth` | `Authorization: Bearer` via DynamicAuthClient | OAuth AS discovery (RFC 9728/8414/OIDC) |
+| `bearer` | `Authorization: Bearer` header | Haiku classification or fallback for private URLs |
+| `header` | Custom header (e.g. `X-Api-Key`) | Haiku classification |
+| `query_string` | Embedded in URL | URL contains `?` query string |
 
 ### MCP Aggregator
 
@@ -294,7 +305,7 @@ memories_fts    (FTS5 virtual table — BM25 ranking)
 telegram_sessions (chat_id, effective_thread_id, session_uuid, created_at)
 cron_specs      (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at)
 cron_runs       (id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at)
-mcp_servers     (name, url, instructions TEXT, created_at)
+mcp_servers     (name, url, instructions, auth_type, auth_header, auth_token, refresh_token, token_endpoint, client_id, client_secret, expires_at, created_at)
 ```
 
 ## Key Types
@@ -364,8 +375,7 @@ LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 │   ├── IDENTITY.md, SOUL.md, USER.md  # created by bootstrap CC session, not init
 │   ├── TOOLS.md                       # agent-owned (created empty on init, then agent-edited)
 │   ├── policy.yaml          # OpenShell sandbox policy (openshell agents only)
-│   ├── memory.db
-│   ├── oauth-state.json
+│   ├── memory.db            # SQLite: memories, sessions, cron, MCP servers + auth state
 │   ├── oauth-callback.sock
 │   ├── crons/*.yaml
 │   ├── inbox/          # Received Telegram attachments (no-sandbox mode)
