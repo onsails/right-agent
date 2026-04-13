@@ -244,6 +244,14 @@ pub struct McpServerEntry {
     pub name: String,
     pub url: String,
     pub instructions: Option<String>,
+    pub auth_type: Option<String>,
+    pub auth_header: Option<String>,
+    pub auth_token: Option<String>,
+    pub refresh_token: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 /// Register (or update) an external MCP server in the SQLite registry.
@@ -304,7 +312,11 @@ pub fn db_update_instructions(
 /// List all registered external MCP servers, sorted by name.
 pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
     let mut stmt = conn
-        .prepare("SELECT name, url, instructions FROM mcp_servers ORDER BY name")
+        .prepare(
+            "SELECT name, url, instructions, auth_type, auth_header, auth_token, \
+             refresh_token, token_endpoint, client_id, client_secret, expires_at \
+             FROM mcp_servers ORDER BY name",
+        )
         .map_err(map_db_err)?;
 
     let rows = stmt
@@ -313,6 +325,14 @@ pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, Credent
                 name: row.get(0)?,
                 url: row.get(1)?,
                 instructions: row.get(2)?,
+                auth_type: row.get(3)?,
+                auth_header: row.get(4)?,
+                auth_token: row.get(5)?,
+                refresh_token: row.get(6)?,
+                token_endpoint: row.get(7)?,
+                client_id: row.get(8)?,
+                client_secret: row.get(9)?,
+                expires_at: row.get(10)?,
             })
         })
         .map_err(map_db_err)?;
@@ -322,6 +342,139 @@ pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, Credent
         result.push(row.map_err(map_db_err)?);
     }
     Ok(result)
+}
+
+/// Update auth fields for an MCP server.
+///
+/// Returns `CredentialError::ServerNotFound` if no matching row exists.
+pub fn db_set_auth(
+    conn: &Connection,
+    name: &str,
+    auth_type: &str,
+    auth_header: Option<&str>,
+    auth_token: Option<&str>,
+) -> Result<(), CredentialError> {
+    let changed = conn
+        .execute(
+            "UPDATE mcp_servers SET auth_type = ?1, auth_header = ?2, auth_token = ?3 WHERE name = ?4",
+            rusqlite::params![auth_type, auth_header, auth_token, name],
+        )
+        .map_err(map_db_err)?;
+    if changed == 0 {
+        return Err(CredentialError::ServerNotFound(name.to_string()));
+    }
+    Ok(())
+}
+
+/// Set full OAuth state for an MCP server.
+///
+/// Sets `auth_type` to `"oauth"`. Returns `CredentialError::ServerNotFound` if
+/// no matching row exists.
+pub fn db_set_oauth_state(
+    conn: &Connection,
+    name: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    token_endpoint: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    expires_at: &str,
+) -> Result<(), CredentialError> {
+    let changed = conn
+        .execute(
+            "UPDATE mcp_servers SET auth_type = 'oauth', auth_token = ?1, refresh_token = ?2, \
+             token_endpoint = ?3, client_id = ?4, client_secret = ?5, expires_at = ?6 \
+             WHERE name = ?7",
+            rusqlite::params![
+                access_token,
+                refresh_token,
+                token_endpoint,
+                client_id,
+                client_secret,
+                expires_at,
+                name
+            ],
+        )
+        .map_err(map_db_err)?;
+    if changed == 0 {
+        return Err(CredentialError::ServerNotFound(name.to_string()));
+    }
+    Ok(())
+}
+
+/// Update just the access token and expiry for an OAuth MCP server (used by
+/// the refresh scheduler).
+///
+/// Returns `CredentialError::ServerNotFound` if no matching row exists.
+pub fn db_update_oauth_token(
+    conn: &Connection,
+    name: &str,
+    access_token: &str,
+    expires_at: &str,
+) -> Result<(), CredentialError> {
+    let changed = conn
+        .execute(
+            "UPDATE mcp_servers SET auth_token = ?1, expires_at = ?2 WHERE name = ?3",
+            rusqlite::params![access_token, expires_at, name],
+        )
+        .map_err(map_db_err)?;
+    if changed == 0 {
+        return Err(CredentialError::ServerNotFound(name.to_string()));
+    }
+    Ok(())
+}
+
+/// List OAuth servers that have a refresh token (candidates for token refresh).
+pub fn db_list_oauth_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, url, instructions, auth_type, auth_header, auth_token, \
+             refresh_token, token_endpoint, client_id, client_secret, expires_at \
+             FROM mcp_servers \
+             WHERE auth_type = 'oauth' AND refresh_token IS NOT NULL \
+             ORDER BY name",
+        )
+        .map_err(map_db_err)?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(McpServerEntry {
+                name: row.get(0)?,
+                url: row.get(1)?,
+                instructions: row.get(2)?,
+                auth_type: row.get(3)?,
+                auth_header: row.get(4)?,
+                auth_token: row.get(5)?,
+                refresh_token: row.get(6)?,
+                token_endpoint: row.get(7)?,
+                client_id: row.get(8)?,
+                client_secret: row.get(9)?,
+                expires_at: row.get(10)?,
+            })
+        })
+        .map_err(map_db_err)?;
+
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(map_db_err)?);
+    }
+    Ok(result)
+}
+
+/// Redact query parameters from a URL.
+///
+/// If the URL contains a `?`, returns `scheme://host/path?<redacted>`.
+/// Otherwise returns the URL as-is.
+pub fn redact_url(url: &str) -> String {
+    match url.find('?') {
+        Some(idx) => format!("{}?<redacted>", &url[..idx]),
+        None => url.to_string(),
+    }
+}
+
+/// Check whether a URL is a valid public HTTPS URL (not localhost/private IP).
+pub fn is_public_url(url: &str) -> bool {
+    validate_server_url(url).is_ok()
 }
 
 #[cfg(test)]
@@ -477,6 +630,111 @@ mod db_tests {
         let conn = setup_db();
         let err = db_update_instructions(&conn, "ghost", Some("instructions")).unwrap_err();
         assert!(matches!(err, CredentialError::ServerNotFound(_)));
+    }
+
+    #[test]
+    fn db_add_server_with_auth() {
+        let conn = setup_db();
+        db_add_server(&conn, "test", "https://example.com/mcp").unwrap();
+        db_set_auth(&conn, "test", "bearer", None, Some("sk-123")).unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].auth_type.as_deref(), Some("bearer"));
+        assert_eq!(servers[0].auth_token.as_deref(), Some("sk-123"));
+    }
+
+    #[test]
+    fn db_set_auth_nonexistent_server() {
+        let conn = setup_db();
+        let err = db_set_auth(&conn, "ghost", "bearer", None, Some("tok")).unwrap_err();
+        assert!(matches!(err, CredentialError::ServerNotFound(_)));
+    }
+
+    #[test]
+    fn db_set_oauth_state_test() {
+        let conn = setup_db();
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "access-tok",
+            Some("refresh-tok"),
+            "https://accounts.notion.com/oauth/token",
+            "client-123",
+            None,
+            "2026-04-13T12:00:00Z",
+        )
+        .unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        let s = &servers[0];
+        assert_eq!(s.auth_type.as_deref(), Some("oauth"));
+        assert_eq!(s.auth_token.as_deref(), Some("access-tok"));
+        assert_eq!(s.refresh_token.as_deref(), Some("refresh-tok"));
+    }
+
+    #[test]
+    fn db_update_oauth_token_test() {
+        let conn = setup_db();
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "old",
+            Some("rt"),
+            "https://ex.com/token",
+            "c",
+            None,
+            "2026-04-13T12:00:00Z",
+        )
+        .unwrap();
+        db_update_oauth_token(&conn, "notion", "new-tok", "2026-04-13T13:00:00Z").unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        assert_eq!(servers[0].auth_token.as_deref(), Some("new-tok"));
+        assert_eq!(
+            servers[0].expires_at.as_deref(),
+            Some("2026-04-13T13:00:00Z")
+        );
+    }
+
+    #[test]
+    fn db_list_oauth_servers_test() {
+        let conn = setup_db();
+        db_add_server(&conn, "oauth-srv", "https://a.com/mcp").unwrap();
+        db_set_oauth_state(
+            &conn,
+            "oauth-srv",
+            "tok",
+            Some("rt"),
+            "https://a.com/token",
+            "c",
+            None,
+            "2026-04-13T12:00:00Z",
+        )
+        .unwrap();
+        db_add_server(&conn, "bearer-srv", "https://b.com/mcp").unwrap();
+        db_set_auth(&conn, "bearer-srv", "bearer", None, Some("key")).unwrap();
+        let oauth = db_list_oauth_servers(&conn).unwrap();
+        assert_eq!(oauth.len(), 1);
+        assert_eq!(oauth[0].name, "oauth-srv");
+    }
+
+    #[test]
+    fn redact_url_strips_query() {
+        assert_eq!(
+            redact_url("https://example.com/mcp?key=secret&foo=bar"),
+            "https://example.com/mcp?<redacted>"
+        );
+        assert_eq!(
+            redact_url("https://example.com/mcp"),
+            "https://example.com/mcp"
+        );
+    }
+
+    #[test]
+    fn is_public_url_test() {
+        assert!(is_public_url("https://mcp.notion.com/mcp"));
+        assert!(!is_public_url("https://localhost/mcp"));
+        assert!(!is_public_url("https://192.168.1.1/mcp"));
     }
 }
 
