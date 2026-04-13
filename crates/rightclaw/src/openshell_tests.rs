@@ -597,3 +597,32 @@ async fn upload_file_rejects_non_directory_dest() {
         "error should mention directory requirement, got: {msg}"
     );
 }
+
+/// Regression test: upload_file with a directory (not a single file) as source.
+/// This is how sync.rs uploads builtin skills (e.g. rightcron/, rightmcp/).
+/// OpenShell has a known bug where directory uploads silently drop small files.
+#[tokio::test]
+#[serial]
+async fn upload_directory_preserves_files() {
+    let sbox = TestSandbox::create("upload-dir-tree").await;
+
+    // Create a directory tree mimicking a skill: rightmcp/SKILL.md
+    let tmp = tempfile::tempdir().unwrap();
+    let skill_dir = tmp.path().join("rightmcp");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "# test skill\n").unwrap();
+
+    // Upload directory — same call pattern as sync.rs uses for builtin skills
+    super::upload_file(sbox.name(), &skill_dir, "/sandbox/.claude/skills/")
+        .await
+        .expect("directory upload should succeed");
+
+    // Verify the file actually landed (not silently dropped)
+    let (content, code) = sbox
+        .exec(&["cat", "/sandbox/.claude/skills/rightmcp/SKILL.md"])
+        .await;
+    assert_eq!(code, 0, "SKILL.md must exist after directory upload");
+    assert_eq!(content, "# test skill\n", "file content must match");
+
+    sbox.destroy().await;
+}
