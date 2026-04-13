@@ -1,0 +1,19 @@
+# Known MCP endpoints for popular services.
+# Checked BEFORE web search — if service matches, skip search entirely.
+#
+# Fields:
+#   name  — server name for /mcp add
+#   url   — streamable HTTP endpoint
+#   auth  — oauth | query_string | bearer | header
+#   note  — one-line description
+
+endpoints:
+  - name: composio
+    url: https://connect.composio.dev/mcp
+    auth: oauth
+    note: "Composio Tool Router — 850+ apps via single endpoint"
+
+  - name: notion
+    url: https://mcp.notion.com/mcp
+    auth: oauth
+    note: "Official Notion MCP — workspace access"

@@ -9,6 +9,8 @@ description: >-
 version: 0.1.0
 ---
 
+@known-endpoints.yaml
+
 # /rightmcp -- Add MCP Server
 
 ## When to Activate
@@ -40,8 +42,14 @@ Telegram commands. Here's what happens behind the scenes:
 Call `mcp__right__mcp_list()` to see what's already registered. If the requested service is
 already connected, tell the user and stop.
 
-### Step 2: Search for OAuth endpoint FIRST
+### Step 2: Check known endpoints
 
+Check `known-endpoints.yaml` for the requested service. If a match exists,
+skip web search entirely and go straight to Step 3 with the URL from the file.
+
+### Step 3: Search for OAuth endpoint FIRST
+
+If the service is NOT in known endpoints, search the web.
 Your first search query MUST target Claude Code or Codex integration docs.
 These describe OAuth-capable MCP endpoints that work with `/mcp auth`.
 
@@ -57,7 +65,7 @@ Look for streamable HTTP or SSE URLs like:
 
 **DO NOT** use URLs from your training data. Only use URLs found in search results.
 
-### Step 3: If OAuth URL found
+### Step 4: If OAuth URL found
 
 Give the user the Telegram command:
 ```
@@ -65,7 +73,7 @@ Give the user the Telegram command:
 ```
 The bot detects OAuth automatically and will prompt for `/mcp auth <name>`.
 
-### Step 4: If no OAuth endpoint found
+### Step 5: If no OAuth endpoint found
 
 Search more broadly for any MCP endpoint:
 1. `"<service> MCP server URL"`
@@ -77,7 +85,7 @@ If you find an API-key URL (token in query string or requires header), give:
 ```
 The bot will determine the auth method and ask the user for credentials if needed.
 
-### Step 5: If no MCP endpoint found
+### Step 6: If no MCP endpoint found
 
 Tell the user the service may not have MCP support yet. Suggest:
 - Checking the service's docs or integrations page directly
@@ -86,7 +94,7 @@ Tell the user the service may not have MCP support yet. Suggest:
 ## Constraints
 
 - **NEVER** ask the user for API keys or tokens — the bot handles credential collection
-- **NEVER** guess or fabricate URLs from training data — only use URLs from search results
+- **NEVER** guess or fabricate URLs from training data — only use URLs from known-endpoints.yaml or search results
 - **NEVER** attempt to call internal MCP management APIs — they don't exist as agent tools
-- **ALWAYS** search the web before responding — do not rely on prior knowledge of MCP endpoints
+- **ALWAYS** check known-endpoints.yaml first, then search the web if no match — do not rely on prior knowledge of MCP endpoints
 - **ALWAYS** call `mcp__right__mcp_list()` first to check existing servers
