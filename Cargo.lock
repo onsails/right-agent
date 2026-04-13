@@ -2703,6 +2703,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "include_dir",
  "miette",
  "minijinja",
  "owo-colors",
