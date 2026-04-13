@@ -361,6 +361,23 @@ mod tests {
     async fn initial_sync_uploads_content_md_files() {
         let sandbox = "rightclaw-right";
 
+        // Connect to live OpenShell to get sandbox_id for SandboxExec.
+        let mtls_dir = match rightclaw::openshell::preflight_check() {
+            rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
+            other => panic!("OpenShell not ready: {other:?}"),
+        };
+        let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir)
+            .await
+            .expect("gRPC connect");
+        let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox)
+            .await
+            .expect("resolve sandbox_id");
+        let sbox = rightclaw::sandbox_exec::SandboxExec::new(
+            mtls_dir,
+            sandbox.to_owned(),
+            sandbox_id,
+        );
+
         // Build a fake agent dir with known content.
         let agent_dir = tempfile::tempdir().unwrap();
         let root = agent_dir.path();
@@ -386,7 +403,7 @@ mod tests {
         std::fs::write(root.join("mcp.json"), "{}").unwrap();
 
         // Run initial_sync.
-        initial_sync(root, sandbox)
+        initial_sync(root, &sbox)
             .await
             .expect("initial_sync should succeed");
 
