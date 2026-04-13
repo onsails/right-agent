@@ -468,24 +468,6 @@ pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) 
     Ok(())
 }
 
-/// Execute a command inside a sandbox via CLI. Returns (stdout, exit_code).
-pub async fn exec_command(sandbox: &str, cmd: &[&str]) -> miette::Result<(String, i32)> {
-    let mut command = Command::new("openshell");
-    command.args(["sandbox", "exec", sandbox, "--"]);
-    command.args(cmd);
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-
-    let output = command
-        .output()
-        .await
-        .map_err(|e| miette::miette!("openshell exec failed: {e:#}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let code = output.status.code().unwrap_or(-1);
-    Ok((stdout, code))
-}
-
 /// Delete a sandbox. Best-effort — logs a warning on failure but does not
 /// propagate the error (stale sandboxes that don't exist shouldn't block callers).
 pub async fn delete_sandbox(name: &str) {
