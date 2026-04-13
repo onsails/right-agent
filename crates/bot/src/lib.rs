@@ -251,7 +251,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     });
 
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
-    let ssh_config_path: Option<std::path::PathBuf> = if is_sandboxed {
+    let (ssh_config_path, sandbox_ctx): (Option<std::path::PathBuf>, Option<(std::path::PathBuf, String)>) = if is_sandboxed {
         // Resolve policy path from agent.yaml sandbox config.
         let policy_path = config.resolve_policy_path(&agent_dir)?
             .ok_or_else(|| miette::miette!(
@@ -320,9 +320,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let config_path = rightclaw::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
         tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
 
-        Some(config_path)
+        (Some(config_path), Some((mtls_dir, sandbox_id)))
     } else {
-        None
+        (None, None)
     };
 
     // Create inbox/outbox inside sandbox for attachment handling
@@ -341,13 +341,17 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Sync config files to sandbox before starting teloxide.
     // Blocks until first sync completes — ensures sandbox has correct .claude.json,
     // settings.json, etc. before any claude -p invocations.
-    let sync_handle = if is_sandboxed {
-        let sync_sandbox = rightclaw::openshell::sandbox_name(&args.agent);
-        sync::initial_sync(&agent_dir, &sync_sandbox).await?;
+    let sync_handle = if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
+        let sandbox = rightclaw::openshell::sandbox_name(&args.agent);
+        let sbox = rightclaw::sandbox_exec::SandboxExec::new(
+            mtls_dir.clone(),
+            sandbox,
+            sandbox_id.clone(),
+        );
+        sync::initial_sync(&agent_dir, &sbox).await?;
         let sync_agent_dir = agent_dir.clone();
-        let sync_sandbox_bg = sync_sandbox;
         let sync_shutdown = shutdown.clone();
-        Some(tokio::spawn(sync::run_sync_task(sync_agent_dir, sync_sandbox_bg, sync_shutdown)))
+        Some(tokio::spawn(sync::run_sync_task(sync_agent_dir, sbox, sync_shutdown)))
     } else {
         None
     };
