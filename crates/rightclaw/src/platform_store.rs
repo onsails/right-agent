@@ -217,13 +217,13 @@ pub async fn deploy_file(
     sandbox: &str,
     name: &str,
     content: &[u8],
+    hash: &str,
     link_path: &str,
     platform_prefix: &str,
 ) -> miette::Result<String> {
     use crate::openshell::{exec_command, upload_file};
 
-    let hash = content_hash(content);
-    let addressed_name = platform_path(name, &hash);
+    let addressed_name = platform_path(name, hash);
     let full_platform_path = format!("{PLATFORM_DIR}/{platform_prefix}{addressed_name}");
 
     // Check if content-addressed file already exists (dedup).
@@ -436,6 +436,7 @@ pub async fn deploy_manifest(sandbox: &str, manifest: &Manifest) -> miette::Resu
                 sandbox,
                 &entry.name,
                 content,
+                &entry.hash,
                 &entry.link_path,
                 &entry.platform_prefix,
             )
