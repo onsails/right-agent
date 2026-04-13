@@ -144,7 +144,7 @@ impl BackendRegistry {
             let tool_count = handle.try_tools().map(|t| t.len()).unwrap_or(0);
             lines.push(format!(
                 "- {name}: {status} ({tool_count} tools) url={url}",
-                url = handle.url()
+                url = rightclaw::mcp::credentials::redact_url(handle.url())
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
