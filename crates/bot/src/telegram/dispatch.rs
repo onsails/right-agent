@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
 use super::filter::make_chat_id_filter;
-use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthWatcherFlag, DebugFlag, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RefreshTx, RightclawHome, SshConfigPath};
+use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthWatcherFlag, DebugFlag, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -66,7 +66,6 @@ pub async fn run_telegram(
     pending_auth: PendingAuthMap,
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
-    refresh_tx: tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>,
     max_turns: u32,
     max_budget_usd: f64,
     show_thinking: bool,
@@ -101,7 +100,6 @@ pub async fn run_telegram(
     let pending_token_slot_arc: Arc<PendingTokenSlot> = Arc::new(PendingTokenSlot(
         pending_token_arc,
     ));
-    let refresh_tx_arc: Arc<RefreshTx> = Arc::new(RefreshTx(refresh_tx));
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         max_turns,
@@ -172,7 +170,6 @@ pub async fn run_telegram(
             Arc::clone(&auth_watcher_flag_arc),
             Arc::clone(&intercept_slots_arc),
             Arc::clone(&pending_token_slot_arc),
-            Arc::clone(&refresh_tx_arc),
             Arc::clone(&internal_api_arc),
             Arc::clone(&settings_arc),
             Arc::clone(&stop_tokens),

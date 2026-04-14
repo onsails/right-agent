@@ -198,12 +198,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let notify_chat_ids = config.allowed_chat_ids.clone();
     let agent_name = args.agent.clone();
 
-    // Create refresh scheduler channels
-    let (refresh_tx, refresh_rx) = tokio::sync::mpsc::channel::<rightclaw::mcp::refresh::RefreshMessage>(32);
-    let (notify_refresh_tx, mut notify_refresh_rx) = tokio::sync::mpsc::channel::<String>(32);
-
-    let refresh_tx_for_handler = refresh_tx.clone();
-
     // Internal API client for bot→aggregator IPC (MCP add/remove/set-token)
     let internal_socket = home.join("run/internal.sock");
     let internal_client = Arc::new(rightclaw::mcp::internal_client::InternalClient::new(internal_socket));
@@ -231,24 +225,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // One-time migration: oauth-state.json → SQLite
     migrate_oauth_state_to_db(&agent_dir);
-
-    // Spawn OAuth refresh scheduler
-    tokio::spawn(rightclaw::mcp::refresh::run_refresh_scheduler(
-        agent_dir.clone(),
-        refresh_rx,
-    ));
-
-    // Forward refresh error notifications to Telegram
-    let bot_for_notify = teloxide::Bot::new(token.clone());
-    let ids_for_notify: Vec<i64> = config.allowed_chat_ids.clone();
-    tokio::spawn(async move {
-        use teloxide::requests::Requester as _;
-        while let Some(msg) = notify_refresh_rx.recv().await {
-            for &chat_id in &ids_for_notify {
-                let _ = bot_for_notify.send_message(teloxide::types::ChatId(chat_id), &msg).await;
-            }
-        }
-    });
 
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
     let (ssh_config_path, sandbox_ctx): (Option<std::path::PathBuf>, Option<(std::path::PathBuf, String)>) = if is_sandboxed {
@@ -427,7 +403,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&pending_auth),
             home.clone(),
             ssh_config_path,
-            refresh_tx_for_handler,
             config.max_turns,
             config.max_budget_usd,
             config.show_thinking,

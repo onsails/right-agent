@@ -65,10 +65,6 @@ pub struct InterceptSlots {
     pub pending_token: Arc<tokio::sync::Mutex<Option<PendingTokenRequest>>>,
 }
 
-/// Channel sender for notifying the refresh scheduler about server removals.
-#[derive(Clone)]
-pub struct RefreshTx(pub tokio::sync::mpsc::Sender<rightclaw::mcp::refresh::RefreshMessage>);
-
 /// Newtype wrapper for the InternalClient used to communicate with the MCP aggregator.
 #[derive(Clone)]
 pub struct InternalApi(pub Arc<rightclaw::mcp::internal_client::InternalClient>);
