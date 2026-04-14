@@ -10,7 +10,8 @@ use rightclaw::mcp::credentials::{self, CredentialError};
 use rightclaw::mcp::proxy::{AuthMethod, ProxyBackend};
 use serde::{Deserialize, Serialize};
 
-use crate::aggregator::ToolDispatcher;
+use crate::aggregator::{RefreshSenders, ToolDispatcher};
+use rightclaw::mcp::refresh::{OAuthServerState, RefreshMessage};
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -111,14 +112,21 @@ struct ErrorResponse {
 // Router
 // ---------------------------------------------------------------------------
 
-pub(crate) fn internal_router(dispatcher: Arc<ToolDispatcher>) -> Router {
+#[derive(Clone)]
+pub(crate) struct InternalState {
+    pub dispatcher: Arc<ToolDispatcher>,
+    pub refresh_senders: RefreshSenders,
+}
+
+pub(crate) fn internal_router(dispatcher: Arc<ToolDispatcher>, refresh_senders: RefreshSenders) -> Router {
+    let state = InternalState { dispatcher, refresh_senders };
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
         .route("/mcp-remove", post(handle_mcp_remove))
         .route("/set-token", post(handle_set_token))
         .route("/mcp-list", post(handle_mcp_list))
         .route("/mcp-instructions", post(handle_mcp_instructions))
-        .with_state(dispatcher)
+        .with_state(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,9 +164,10 @@ fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
 // ---------------------------------------------------------------------------
 
 async fn handle_mcp_add(
-    State(dispatcher): State<Arc<ToolDispatcher>>,
+    State(state): State<InternalState>,
     Json(req): Json<McpAddRequest>,
 ) -> axum::response::Response {
+    let dispatcher = &state.dispatcher;
     // Validate name
     if let Err(e) = credentials::validate_server_name(&req.name) {
         return validation_error(format!("{e}")).into_response();
@@ -295,9 +304,10 @@ async fn handle_mcp_add(
 }
 
 async fn handle_mcp_remove(
-    State(dispatcher): State<Arc<ToolDispatcher>>,
+    State(state): State<InternalState>,
     Json(req): Json<McpRemoveRequest>,
 ) -> axum::response::Response {
+    let dispatcher = &state.dispatcher;
     // Reject protected names
     if req.name == rightclaw::mcp::PROTECTED_MCP_SERVER || req.name == "rightmeta" {
         return validation_error(format!(
@@ -351,9 +361,10 @@ async fn handle_mcp_remove(
 }
 
 async fn handle_set_token(
-    State(dispatcher): State<Arc<ToolDispatcher>>,
+    State(state): State<InternalState>,
     Json(req): Json<SetTokenRequest>,
 ) -> axum::response::Response {
+    let dispatcher = &state.dispatcher;
     // Extract what we need from DashMap guard (scope guard before await)
     let proxies_lock = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
@@ -428,6 +439,25 @@ async fn handle_set_token(
         }
     });
 
+    // Notify refresh scheduler so it schedules future token refreshes
+    if let Some(tx) = state.refresh_senders.get(&req.agent) {
+        let entry = OAuthServerState {
+            refresh_token: Some(req.refresh_token.clone()),
+            token_endpoint: req.token_endpoint.clone(),
+            client_id: req.client_id.clone(),
+            client_secret: req.client_secret.clone(),
+            expires_at,
+            server_url: handle.url().to_string(),
+        };
+        let _ = tx
+            .send(RefreshMessage::NewEntry {
+                server_name: req.server.clone(),
+                state: entry,
+                token: handle.token().clone(),
+            })
+            .await;
+    }
+
     (
         StatusCode::OK,
         Json(SetTokenResponse {
@@ -439,9 +469,10 @@ async fn handle_set_token(
 }
 
 async fn handle_mcp_list(
-    State(dispatcher): State<Arc<ToolDispatcher>>,
+    State(state): State<InternalState>,
     Json(req): Json<McpListRequest>,
 ) -> axum::response::Response {
+    let dispatcher = &state.dispatcher;
     let Some(registry) = dispatcher.agents.get(&req.agent) else {
         return not_found(format!("agent '{}' not found", req.agent)).into_response();
     };
@@ -495,9 +526,10 @@ async fn handle_mcp_list(
 }
 
 async fn handle_mcp_instructions(
-    State(dispatcher): State<Arc<ToolDispatcher>>,
+    State(state): State<InternalState>,
     Json(req): Json<McpInstructionsRequest>,
 ) -> axum::response::Response {
+    let dispatcher = &state.dispatcher;
     let conn_arc = {
         let Some(registry) = dispatcher.agents.get(&req.agent) else {
             return not_found(format!("agent '{}' not found", req.agent)).into_response();
@@ -555,6 +587,12 @@ mod tests {
         Arc::new(ToolDispatcher { agents })
     }
 
+    fn make_test_router(tmp: &std::path::Path) -> Router {
+        let dispatcher = make_test_dispatcher(tmp);
+        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
+        internal_router(dispatcher, refresh_senders)
+    }
+
     async fn send_json(
         app: Router,
         path: &str,
@@ -579,8 +617,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_validates_name_reserved() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, body) = send_json(
             app,
@@ -603,8 +640,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_validates_name_double_underscore() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -623,8 +659,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_validates_url_non_https() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, body) = send_json(
             app,
@@ -647,8 +682,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_validates_url_private_ip() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -667,8 +701,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_protected_name_right() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, body) = send_json(
             app,
@@ -690,8 +723,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_protected_name_rightmeta() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -709,8 +741,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_agent_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -728,8 +759,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_remove_server_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -747,8 +777,7 @@ mod tests {
     #[tokio::test]
     async fn set_token_agent_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -771,8 +800,7 @@ mod tests {
     #[tokio::test]
     async fn set_token_server_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -795,8 +823,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_add_agent_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -815,8 +842,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_list_returns_right_backend() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, body) = send_json(
             app,
@@ -842,8 +868,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_list_unknown_agent_returns_404() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
@@ -858,8 +883,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_instructions_returns_header_for_no_servers() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, body) = send_json(
             app,
@@ -876,8 +900,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_instructions_unknown_agent_returns_404() {
         let tmp = tempfile::tempdir().unwrap();
-        let dispatcher = make_test_dispatcher(tmp.path());
-        let app = internal_router(dispatcher);
+        let app = make_test_router(tmp.path());
 
         let (status, _body) = send_json(
             app,
