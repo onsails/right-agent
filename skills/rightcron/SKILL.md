@@ -113,7 +113,12 @@ Parameters:
 - `job_name` (optional string) — filter by job name; omit to return all jobs
 - `limit` (optional integer) — max runs to return; default 20
 
-Each run record contains: `id`, `job_name`, `started_at`, `finished_at`, `exit_code`, `status`, `log_path`
+Each run record contains: `id`, `job_name`, `started_at`, `finished_at`, `exit_code`, `status`, `log_path`, `summary`, `notify`, `delivered_at`, `delivery_status`, `no_notify_reason`
+
+**Delivery diagnostics:**
+- `delivery_status`: lifecycle state — `silent` (CC decided nothing to report), `pending` (awaiting delivery), `delivered` (sent to Telegram), `superseded` (newer run replaced this one), `failed` (delivery gave up after retries)
+- `no_notify_reason`: CC's explanation when `notify` is null (e.g. "No changes since last run")
+- `delivered_at`: timestamp when the result was delivered, or null
 
 ### mcp__right__cron_show_run
 
@@ -142,6 +147,22 @@ User: "Why did morning-briefing fail?"
 3. cat <log_path>
    -> Read the subprocess output to diagnose the failure
 ```
+
+### Diagnosing missing notifications
+
+When the user asks "why wasn't I notified?", check `delivery_status` and `no_notify_reason`:
+
+```
+1. mcp__right__cron_list_runs(job_name="github-tracker", limit=5)
+   -> Check delivery_status for each run:
+      - "silent" + no_notify_reason → CC decided nothing to report, reason explains why
+      - "pending" → notification waiting for chat idle (3 min threshold)
+      - "superseded" → newer run replaced this one before delivery
+      - "failed" → delivery failed after 3 attempts, check logs
+      - "delivered" → was sent to Telegram successfully
+```
+
+Never guess at delivery issues — always check the actual `delivery_status` field.
 
 ## Constraints
 
