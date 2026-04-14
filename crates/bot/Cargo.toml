@@ -27,6 +27,5 @@ tempfile = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 pulldown-cmark = { workspace = true }
-urlencoding = { workspace = true }
 
 [dev-dependencies]
