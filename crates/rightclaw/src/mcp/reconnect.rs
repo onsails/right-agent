@@ -438,4 +438,101 @@ mod tests {
         );
     }
 
+    /// When refresh succeeds, the token_arc is updated and a NewEntry is sent
+    /// to the refresh scheduler.
+    #[tokio::test]
+    async fn successful_refresh_writes_token_and_sends_new_entry() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "new-access-tok",
+                    "refresh_token": "new-refresh-tok",
+                    "expires_in": 3600,
+                    "token_type": "Bearer"
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let entry = OAuthServerState {
+            refresh_token: Some("old-refresh-tok".into()),
+            token_endpoint: format!("{}/token", server.uri()),
+            client_id: "test-client".into(),
+            client_secret: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            server_url: "https://example.com/mcp".into(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Initialize schema and insert the server row that db_update_oauth_token requires.
+        let conn = crate::memory::open_connection(tmp.path()).unwrap();
+        conn.execute(
+            "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', 'https://example.com/mcp', 'oauth')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let token_arc: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+        let backend = Arc::new(ProxyBackend::new(
+            "composio".into(),
+            tmp.path().to_path_buf(),
+            // Fake URL — connect() will fail, which is expected.
+            "https://example.com/mcp".into(),
+            token_arc.clone(),
+            crate::mcp::proxy::AuthMethod::Bearer,
+        ));
+
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let client = reqwest::Client::new();
+
+        let result = reconnect_task(
+            "composio".into(),
+            backend,
+            entry,
+            token_arc.clone(),
+            client,
+            tmp.path().to_path_buf(),
+            refresh_tx,
+            cancel,
+        )
+        .await;
+
+        // Connect to a fake URL will fail — that's expected and is non-fatal for this test.
+        // We only care that token and refresh scheduler were updated before connect was attempted.
+        match &result {
+            Ok(()) => {} // Unexpected success — still fine for our assertions
+            Err(ReconnectError::ConnectFailed(_)) => {} // Expected
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+
+        // Token must have been written to shared state.
+        assert_eq!(
+            *token_arc.read().await,
+            Some("new-access-tok".to_string()),
+            "token_arc must contain the refreshed access token"
+        );
+
+        // NewEntry must have been sent to refresh scheduler.
+        let msg = refresh_rx
+            .try_recv()
+            .expect("expected RefreshMessage::NewEntry on refresh_rx");
+        match msg {
+            RefreshMessage::NewEntry {
+                server_name,
+                state,
+                ..
+            } => {
+                assert_eq!(server_name, "composio");
+                assert_eq!(
+                    state.refresh_token.as_deref(),
+                    Some("new-refresh-tok"),
+                    "new refresh token must be carried in NewEntry"
+                );
+            }
+            other => panic!("expected NewEntry, got {other:?}"),
+        }
+    }
 }
