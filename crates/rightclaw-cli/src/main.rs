@@ -553,7 +553,7 @@ async fn main() -> miette::Result<()> {
                     .map(|(name, state, token_arc)| (name, (state, token_arc)))
                     .collect();
 
-                // Send NewEntry only for non-expired OAuth servers. Expired tokens
+                // Send NewEntry for non-expired OAuth servers. Expired tokens
                 // are handled by the reconnect task which sends NewEntry after refresh.
                 for (name, (state, token_arc)) in &oauth_map {
                     if state.refresh_token.is_some() {
@@ -610,6 +610,7 @@ async fn main() -> miette::Result<()> {
                                                     &conn,
                                                     &sn,
                                                     &access_token,
+                                                    new_state.refresh_token.as_deref(),
                                                     &new_state.expires_at.to_rfc3339(),
                                                 ) {
                                                     tracing::warn!(server = sn.as_str(), "failed to persist refreshed token: {e:#}");
