@@ -104,36 +104,6 @@ pub fn build_manifest(agent_dir: &Path) -> miette::Result<Manifest> {
         }
     }
 
-    // Agent def files in .claude/agents/ (skip agent-owned AGENTS.md/TOOLS.md)
-    let agents_dir = claude_dir.join("agents");
-    if agents_dir.exists() {
-        for entry in std::fs::read_dir(&agents_dir)
-            .map_err(|e| miette::miette!("read agents dir: {e:#}"))?
-        {
-            let entry = entry.map_err(|e| miette::miette!("readdir: {e:#}"))?;
-            let name_os = entry.file_name();
-            let name = name_os.to_string_lossy();
-            if name == "AGENTS.md" || name == "TOOLS.md" {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_file() {
-                let content = std::fs::read(&path)
-                    .map_err(|e| miette::miette!("read agent def {name}: {e:#}"))?;
-                let hash = content_hash(&content);
-                entries.push(ManifestEntry {
-                    name: name.to_string(),
-                    host_path: path,
-                    hash,
-                    link_path: format!("/sandbox/.claude/agents/{name}"),
-                    platform_prefix: "agents/".to_owned(),
-                    content: Some(content),
-                    is_dir: false,
-                });
-            }
-        }
-    }
-
     // mcp.json at agent root
     let mcp_json = agent_dir.join("mcp.json");
     if mcp_json.exists() {
