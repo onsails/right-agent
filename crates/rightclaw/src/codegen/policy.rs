@@ -84,8 +84,8 @@ filesystem_policy:
     - /etc
     - /proc
     - /dev/urandom
-    - /dev/null
   read_write:
+    - /dev/null
     - /tmp
     - /sandbox
     - /platform
