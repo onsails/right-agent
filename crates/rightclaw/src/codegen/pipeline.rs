@@ -66,53 +66,6 @@ pub fn run_single_agent_codegen(
         miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name)
     })?;
 
-    // Generate agent definition .md with @ file references.
-    let model = agent.config.as_ref().and_then(|c| c.model.as_deref());
-    let agent_def_content = crate::codegen::generate_agent_definition(&agent.name, model);
-    let bootstrap_def = crate::codegen::generate_bootstrap_definition(&agent.name, model);
-    let agents_dir = claude_dir.join("agents");
-    std::fs::create_dir_all(&agents_dir).map_err(|e| {
-        miette::miette!(
-            "failed to create .claude/agents dir for '{}': {e:#}",
-            agent.name
-        )
-    })?;
-    std::fs::write(
-        agents_dir.join(format!("{}.md", agent.name)),
-        &agent_def_content,
-    )
-    .map_err(|e| {
-        miette::miette!(
-            "failed to write agent definition for '{}': {e:#}",
-            agent.name
-        )
-    })?;
-    std::fs::write(
-        agents_dir.join(format!("{}-bootstrap.md", agent.name)),
-        &bootstrap_def,
-    )
-    .map_err(|e| {
-        miette::miette!(
-            "failed to write bootstrap definition for '{}': {e:#}",
-            agent.name
-        )
-    })?;
-
-    // Copy content .md files into .claude/agents/ so @./FILE.md references resolve.
-    // CC resolves @ paths relative to the agent def file, not the project root.
-    for filename in crate::codegen::CONTENT_MD_FILES {
-        let src = agent.path.join(filename);
-        if src.exists() {
-            std::fs::copy(&src, agents_dir.join(filename)).map_err(|e| {
-                miette::miette!(
-                    "failed to copy {filename} into .claude/agents/ for '{}': {e:#}",
-                    agent.name
-                )
-            })?;
-        }
-    }
-    tracing::debug!(agent = %agent.name, "copied content .md files into .claude/agents/");
-
     // Write reply-schema.json.
     std::fs::write(
         claude_dir.join("reply-schema.json"),
@@ -161,7 +114,7 @@ pub fn run_single_agent_codegen(
         )
     })?;
 
-    tracing::debug!(agent = %agent.name, "wrote agent definitions + schemas");
+    tracing::debug!(agent = %agent.name, "wrote schemas");
 
     // Pre-create shell-snapshots dir so CC Bash tool doesn't error on first run.
     std::fs::create_dir_all(claude_dir.join("shell-snapshots")).map_err(|e| {
@@ -464,8 +417,6 @@ mod tests {
 
         // Core files must exist
         assert!(agent_dir.join(".claude/settings.json").exists());
-        assert!(agent_dir.join(".claude/agents/test.md").exists());
-        assert!(agent_dir.join(".claude/agents/test-bootstrap.md").exists());
         assert!(agent_dir.join(".claude/system-prompt.md").exists());
         assert!(agent_dir.join(".claude/reply-schema.json").exists());
         assert!(agent_dir.join(".claude/cron-schema.json").exists());
@@ -566,53 +517,4 @@ mod tests {
         assert!(!agent_dir.join("TOOLS.md").exists(), "codegen must not create TOOLS.md");
     }
 
-    #[test]
-    fn run_agent_codegen_writes_bootstrap_definition() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let home = dir.path();
-        let agent_dir = home.join("agents").join("test");
-        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
-        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
-        std::fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
-
-        let agent = crate::agent::AgentDef {
-            name: "test".to_string(),
-            path: agent_dir.clone(),
-            identity_path: agent_dir.join("IDENTITY.md"),
-            config: None,
-            soul_path: None,
-            user_path: None,
-            agents_path: None,
-            tools_path: None,
-            bootstrap_path: None,
-            heartbeat_path: None,
-        };
-
-        let self_exe = std::path::PathBuf::from("/usr/bin/rightclaw");
-        // Use run_single_agent_codegen — run_agent_codegen no longer does per-agent codegen.
-        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
-
-        // Normal agent def must exist
-        let normal_def = agent_dir.join(".claude/agents/test.md");
-        assert!(normal_def.exists(), "normal agent def must be written");
-        let content = std::fs::read_to_string(&normal_def).unwrap();
-        assert!(content.contains("@./AGENTS.md"));
-
-        // Bootstrap agent def must exist
-        let bootstrap_def = agent_dir.join(".claude/agents/test-bootstrap.md");
-        assert!(bootstrap_def.exists(), "bootstrap agent def must be written");
-        let bs_content = std::fs::read_to_string(&bootstrap_def).unwrap();
-        assert!(bs_content.contains("@./BOOTSTRAP.md"));
-        assert!(!bs_content.contains("@./AGENTS.md"));
-
-        // System prompt must exist
-        let sys_prompt = agent_dir.join(".claude/system-prompt.md");
-        assert!(sys_prompt.exists(), "system-prompt.md must be written");
-        let sys_content = std::fs::read_to_string(&sys_prompt).unwrap();
-        assert!(sys_content.contains("test"));
-
-        // Bootstrap schema must exist
-        let bs_schema = agent_dir.join(".claude/bootstrap-schema.json");
-        assert!(bs_schema.exists(), "bootstrap-schema.json must be written");
-    }
 }
