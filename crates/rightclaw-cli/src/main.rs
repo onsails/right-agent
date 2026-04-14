@@ -556,7 +556,7 @@ fn cmd_init(
 
     // Run codegen for the default "right" agent.
     // Per-agent codegen was moved to bot startup (59243d0) but init needs it
-    // to populate .claude/agents/ before sandbox staging upload.
+    // for schemas and settings before sandbox staging upload.
     {
         let agent_dir = home.join("agents/right");
         let self_exe = std::env::current_exe()
@@ -609,24 +609,6 @@ fn cmd_init(
                         &policy_path,
                         Some(&staging),
                         force_recreate,
-                    )
-                    .await
-                })
-            })?;
-            // Post-check: verify critical files made it into the sandbox.
-            // OpenShell has a bug where small files in directory uploads are silently dropped.
-            let expected_files: Vec<&str> = std::iter::once("right.md")
-                .chain(std::iter::once("right-bootstrap.md"))
-                .chain(rightclaw::codegen::CONTENT_MD_FILES.iter().copied()
-                    .filter(|f| agent_dir.join(".claude/agents").join(f).exists()))
-                .collect();
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    rightclaw::openshell::verify_sandbox_files(
-                        &sb_name,
-                        &agent_dir.join(".claude/agents"),
-                        "/sandbox/.claude/agents/",
-                        &expected_files,
                     )
                     .await
                 })
@@ -839,9 +821,9 @@ fn cmd_agent_init(
 
     let agent_dir = rightclaw::init::init_agent(&agents_parent, name, Some(&overrides))?;
 
-    // Run codegen so agent defs, settings, schemas, skills are generated.
+    // Run codegen so settings, schemas, skills are generated.
     // Per-agent codegen was moved to bot startup (59243d0) but init/agent-init
-    // need it to populate .claude/agents/ before sandbox staging upload.
+    // need it for schemas and settings before sandbox staging upload.
     {
         let self_exe = std::env::current_exe()
             .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
@@ -908,25 +890,6 @@ fn cmd_agent_init(
             })
         })?;
 
-        // Post-check: verify critical files made it into the sandbox.
-        let agent_def_name = format!("{name}.md");
-        let bootstrap_def_name = format!("{name}-bootstrap.md");
-        let expected_files: Vec<&str> = [agent_def_name.as_str(), bootstrap_def_name.as_str()]
-            .into_iter()
-            .chain(rightclaw::codegen::CONTENT_MD_FILES.iter().copied()
-                .filter(|f| agent_dir.join(".claude/agents").join(f).exists()))
-            .collect();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                rightclaw::openshell::verify_sandbox_files(
-                    &sb_name,
-                    &agent_dir.join(".claude/agents"),
-                    "/sandbox/.claude/agents/",
-                    &expected_files,
-                )
-                .await
-            })
-        })?;
         println!("  Sandbox '{sb_name}' ready");
 
         // Generate SSH config.
@@ -2178,25 +2141,40 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
             )
         })?;
 
-    // Generate agent definition .md before exec (function may run without prior cmd_up).
+    // Ensure schemas exist (function may run without prior cmd_up).
     let claude_dir = agent.path.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent_name))?;
-    let model = agent.config.as_ref().and_then(|c| c.model.as_deref());
-    let agent_def_content = rightclaw::codegen::generate_agent_definition(&agent.name, model);
-    let agents_dir = claude_dir.join("agents");
-    std::fs::create_dir_all(&agents_dir)
-        .map_err(|e| miette::miette!("failed to create .claude/agents dir for '{}': {e:#}", agent_name))?;
-    std::fs::write(agents_dir.join(format!("{}.md", agent.name)), &agent_def_content)
-        .map_err(|e| miette::miette!("failed to write agent definition for '{}': {e:#}", agent_name))?;
-
-    // Write reply-schema.json (D-01).
     std::fs::write(claude_dir.join("reply-schema.json"), rightclaw::codegen::REPLY_SCHEMA_JSON)
         .map_err(|e| miette::miette!("failed to write reply-schema.json for '{}': {e:#}", agent_name))?;
-
-    // Write cron-schema.json.
     std::fs::write(claude_dir.join("cron-schema.json"), rightclaw::codegen::CRON_SCHEMA_JSON)
         .map_err(|e| miette::miette!("failed to write cron-schema.json for '{}': {e:#}", agent_name))?;
+
+    // Assemble system prompt on host.
+    let sandbox_mode = agent.config.as_ref()
+        .map(|c| c.sandbox_mode().clone())
+        .unwrap_or_default();
+    let base_prompt = rightclaw::codegen::generate_system_prompt(&agent.name, &sandbox_mode);
+    let mut prompt = base_prompt;
+    prompt.push_str("\n## Operating Instructions\n");
+    prompt.push_str(rightclaw::codegen::OPERATING_INSTRUCTIONS);
+    prompt.push('\n');
+    for (file, header) in [
+        ("IDENTITY.md", "## Your Identity"),
+        ("SOUL.md", "## Your Personality and Values"),
+        ("USER.md", "## Your User"),
+        ("AGENTS.md", "## Agent Configuration"),
+        ("TOOLS.md", "## Environment and Tools"),
+    ] {
+        if let Ok(content) = std::fs::read_to_string(agent.path.join(file)) {
+            prompt.push_str(&format!("\n{header}\n"));
+            prompt.push_str(&content);
+            prompt.push('\n');
+        }
+    }
+    let prompt_path = claude_dir.join("composite-system-prompt.md");
+    std::fs::write(&prompt_path, &prompt)
+        .map_err(|e| miette::miette!("failed to write system prompt for '{}': {e:#}", agent_name))?;
 
     let claude_bin = which::which("claude")
         .or_else(|_| which::which("claude-bun"))
@@ -2206,11 +2184,10 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
 
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(claude_bin)
-        .arg("--agent")
-        .arg(&agent.name)
+        .arg("--system-prompt-file")
+        .arg(&prompt_path)
         .arg("--dangerously-skip-permissions")
-        .arg("-p")
-        .arg(&agent.path)
+        .current_dir(&agent.path)
         .exec();
 
     Err(miette::miette!("failed to launch claude: {err}"))
