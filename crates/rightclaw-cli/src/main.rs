@@ -433,7 +433,18 @@ async fn main() -> miette::Result<()> {
             // Register agents in dispatcher, restoring proxy backends from SQLite
             for (agent_name, _token) in &token_entries {
                 let agent_dir = agents_dir.join(agent_name);
-                let right = right_backend::RightBackend::new(agents_dir.clone());
+                let mtls_dir = match rightclaw::agent::discovery::parse_agent_config(&agent_dir) {
+                    Ok(Some(config))
+                        if *config.sandbox_mode() == rightclaw::agent::SandboxMode::Openshell =>
+                    {
+                        match rightclaw::openshell::preflight_check() {
+                            rightclaw::openshell::OpenShellStatus::Ready(dir) => Some(dir),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let right = right_backend::RightBackend::new(agents_dir.clone(), mtls_dir);
 
                 // Load existing MCP servers from SQLite and create ProxyBackends
                 let mut proxies = std::collections::HashMap::new();

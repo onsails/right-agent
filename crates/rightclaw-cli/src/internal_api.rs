@@ -543,7 +543,7 @@ mod tests {
         let agent_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
 
-        let right = RightBackend::new(agents_dir);
+        let right = RightBackend::new(agents_dir, None);
         let registry = BackendRegistry {
             right,
             proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),

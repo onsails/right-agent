@@ -27,13 +27,15 @@ type ConnCache = Arc<DashMap<String, Arc<Mutex<rusqlite::Connection>>>>;
 pub struct RightBackend {
     conn_cache: ConnCache,
     agents_dir: PathBuf,
+    mtls_dir: Option<PathBuf>,
 }
 
 impl RightBackend {
-    pub fn new(agents_dir: PathBuf) -> Self {
+    pub fn new(agents_dir: PathBuf, mtls_dir: Option<PathBuf>) -> Self {
         Self {
             conn_cache: Arc::new(DashMap::new()),
             agents_dir,
+            mtls_dir,
         }
     }
 
