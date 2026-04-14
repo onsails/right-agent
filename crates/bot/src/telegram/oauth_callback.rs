@@ -197,6 +197,8 @@ async fn complete_oauth_flow(
     tracing::info!(
         agent = %agent_name,
         server = %pending.server_name,
+        expires_in = token_resp.expires_in,
+        has_refresh_token = token_resp.refresh_token.is_some(),
         "token exchange succeeded"
     );
 
