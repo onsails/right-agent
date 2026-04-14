@@ -354,35 +354,92 @@ mod tests {
 
     /// Verify that initial_sync uploads content .md files to a real OpenShell sandbox.
     ///
-    /// Requires: running OpenShell gateway + existing `rightclaw-right` sandbox.
-    /// Run manually: `cargo test -p rightclaw-bot --lib sync::tests::initial_sync_uploads_content_md_files -- --ignored`
+    /// Creates an ephemeral sandbox, runs initial_sync, verifies uploaded files,
+    /// then destroys the sandbox — no shared state with other tests.
+    ///
+    /// Requires: running OpenShell gateway.
     #[tokio::test]
-    #[ignore = "requires live OpenShell sandbox"]
     async fn initial_sync_uploads_content_md_files() {
-        let sandbox = "rightclaw-right";
+        let sandbox_name = "rightclaw-test-sync-upload";
 
-        // Connect to live OpenShell to get sandbox_id for SandboxExec.
         let mtls_dir = match rightclaw::openshell::preflight_check() {
             rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
             other => panic!("OpenShell not ready: {other:?}"),
         };
+
+        // Clean up leftover from a previous failed run.
         let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir)
             .await
             .expect("gRPC connect");
-        let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox)
+        if rightclaw::openshell::sandbox_exists(&mut grpc_client, sandbox_name)
             .await
-            .expect("resolve sandbox_id");
+            .unwrap()
+        {
+            rightclaw::openshell::delete_sandbox(sandbox_name).await;
+            rightclaw::openshell::wait_for_deleted(&mut grpc_client, sandbox_name, 60, 2)
+                .await
+                .expect("cleanup of leftover sandbox failed");
+        }
+
+        // Create a fresh sandbox with minimal policy.
+        let policy_dir = tempfile::tempdir().unwrap();
+        let policy_path = policy_dir.path().join("policy.yaml");
+        std::fs::write(
+            &policy_path,
+            "\
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_write:
+    - /tmp
+    - /sandbox
+    - /platform
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  outbound:
+    endpoints:
+      - host: \"**.*\"
+        port: 443
+        protocol: rest
+        access: full
+        tls: terminate
+    binaries:
+      - path: \"**\"
+",
+        )
+        .unwrap();
+
+        let _child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+            .expect("failed to spawn sandbox");
+        rightclaw::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
+            .await
+            .expect("sandbox did not become READY");
+
+        let sandbox_id =
+            rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
+                .await
+                .expect("resolve sandbox_id");
+
+        // Poll exec until it succeeds — OpenShell reports READY before exec transport is available.
         let sbox = rightclaw::sandbox_exec::SandboxExec::new(
             mtls_dir,
-            sandbox.to_owned(),
+            sandbox_name.to_owned(),
             sandbox_id,
         );
+        for attempt in 1..=20 {
+            match sbox.exec(&["echo", "ready"]).await {
+                Ok((out, 0)) if out.trim() == "ready" => break,
+                _ if attempt == 20 => panic!("exec not ready after 20 attempts"),
+                _ => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
+            }
+        }
 
         // Build a fake agent dir with known content.
         let agent_dir = tempfile::tempdir().unwrap();
         let root = agent_dir.path();
 
-        // Content .md files with recognizable content.
         let test_files: &[(&str, &str)] = &[
             ("AGENTS.md", "# test agents content\n"),
             ("TOOLS.md", "# test tools content\n"),
@@ -391,15 +448,23 @@ mod tests {
             std::fs::write(root.join(name), content).unwrap();
         }
 
-        // Minimal .claude/ infrastructure so sync_cycle doesn't fail on missing files.
+        // Minimal .claude/ infrastructure so initial_sync doesn't fail on missing files.
         let claude_dir = root.join(".claude");
         std::fs::create_dir_all(claude_dir.join("agents")).unwrap();
         std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
         std::fs::write(claude_dir.join("reply-schema.json"), "{}").unwrap();
         std::fs::write(claude_dir.join("cron-schema.json"), "{}").unwrap();
         std::fs::write(claude_dir.join("bootstrap-schema.json"), "{}").unwrap();
-        std::fs::write(claude_dir.join("system-prompt.md"), "# test system prompt\n").unwrap();
-        std::fs::write(claude_dir.join("agents").join("test.md"), "---\nname: test\n---\n").unwrap();
+        std::fs::write(
+            claude_dir.join("system-prompt.md"),
+            "# test system prompt\n",
+        )
+        .unwrap();
+        std::fs::write(
+            claude_dir.join("agents").join("test.md"),
+            "---\nname: test\n---\n",
+        )
+        .unwrap();
         std::fs::write(root.join("mcp.json"), "{}").unwrap();
 
         // Run initial_sync.
@@ -412,7 +477,7 @@ mod tests {
             let download_dir = tempfile::tempdir().unwrap();
             let sandbox_path = format!("/sandbox/{name}");
 
-            rightclaw::openshell::download_file(sandbox, &sandbox_path, download_dir.path())
+            rightclaw::openshell::download_file(sandbox_name, &sandbox_path, download_dir.path())
                 .await
                 .unwrap_or_else(|e| panic!("download {name} failed: {e:#}"));
 
@@ -429,6 +494,7 @@ mod tests {
             );
         }
 
-        // Note: test files left in sandbox — overwritten by next real initial_sync.
+        // Clean up.
+        rightclaw::openshell::delete_sandbox(sandbox_name).await;
     }
 }

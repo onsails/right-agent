@@ -63,6 +63,7 @@ let _ = operation();  // Explicitly ignores
 ### 5. Testing
 - **NEVER** use `std::env::set_var()` in tests (pollutes environment)
 - **ALWAYS** pass config through function parameters
+- **NEVER** use `#[ignore]` on integration tests that require OpenShell or other external services. Dev machines have OpenShell running — these tests must run with `cargo test`. If a test needs a live sandbox, it runs against the live sandbox.
 - Tests in same file using `#[cfg(test)]` module
 - **Large files**: If file exceeds 800 LoC and tests are >50% of content, extract tests to separate file:
   ```rust
