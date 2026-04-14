@@ -71,6 +71,7 @@ src/
 src/
 ├── lib.rs              # Entry: resolve agent dir, open data.db, sandbox lifecycle, start teloxide
 ├── telegram/
+│   ├── prompt.rs       # Shared prompt assembly: build_prompt_assembly_script, shell helpers
 │   ├── attachments.rs  # Attachment extraction, download/upload, send, cleanup, YAML formatting
 │   ├── mod.rs          # Token resolution (env > file > yaml)
 │   ├── bot.rs          # Bot adaptor: CacheMe<Throttle<Bot>>
@@ -82,8 +83,8 @@ src/
 │   └── oauth_callback.rs  # Axum OAuth redirect server
 ├── login.rs            # Token-based Claude login flow — setup-token request, DB persistence, env var injection
 ├── sync.rs             # Background file sync: settings, schema, skills, .claude.json verification
-├── cron.rs             # Cron engine: load specs from cron_specs table, lock check, invoke CC, persist results
-├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery, cleanup
+├── cron.rs             # Cron engine: load specs, lock check, invoke CC with system prompt, persist results
+├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery (haiku), cleanup
 └── error.rs            # BotError types
 ```
 

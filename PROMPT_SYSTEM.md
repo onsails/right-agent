@@ -20,7 +20,7 @@ identity files — this breaks CC's prompt caching and adds latency.
 
 ## Prompt Assembly
 
-A single function `build_prompt_assembly_script()` in `worker.rs` generates a
+A single function `build_prompt_assembly_script()` in `telegram/prompt.rs` generates a
 parameterized shell script that assembles the composite prompt. The script is
 identical for both modes — only the `root_path` parameter differs:
 
@@ -29,6 +29,16 @@ identical for both modes — only the `root_path` parameter differs:
 
 The script `cat`s compiled-in content and agent-owned files at `root_path`,
 producing the composite prompt in microseconds. Files are always fresh (no sync delay).
+
+### Callers
+
+All three CC invocation paths use `build_prompt_assembly_script()`:
+
+| Caller | Module | bootstrap_mode | Schema | Model |
+|--------|--------|---------------|--------|-------|
+| Worker (Telegram messages) | `telegram/worker.rs` | true/false | reply-schema.json | agent config |
+| Cron (scheduled jobs) | `cron.rs` | false | CRON_SCHEMA_JSON | agent config |
+| Delivery (cron result relay) | `cron_delivery.rs` | false | reply-schema.json | claude-haiku-4-5-20251001 |
 
 ## Prompt Structure
 
