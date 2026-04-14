@@ -39,9 +39,10 @@ Telegram commands. Here's what happens behind the scenes:
 
 ### Step 1: Check current servers
 
-Call `mcp__right__mcp_list()` DIRECTLY — do NOT delegate to a subagent (subagents
-have no MCP access). If the requested service is already connected, tell the user
-and stop. If the tool call fails, skip this step and continue.
+Call `mcp__right__mcp_list()` DIRECTLY by name — do NOT use ToolSearch (it does not
+index MCP tools) and do NOT delegate to a subagent (subagents have no MCP access).
+If the requested service is already connected, tell the user and stop.
+If the tool call fails, skip this step and continue.
 
 ### Step 2: Check known endpoints
 

@@ -18,7 +18,8 @@ Claude Code manages your conversation memory automatically.
 Important context, user preferences, and decisions persist across sessions
 without any action from you.
 
-For **structured data** that needs tags or search later, use the `right` MCP tools:
+For **structured data** that needs tags or search later, use the `right` MCP tools.
+**Call them directly by name — do NOT use ToolSearch to discover them.**
 
 - `mcp__right__store_record(content, tags)` — store a tagged record (cron results, audit entries, explicit facts)
 - `mcp__right__query_records(query)` — look up records by tag or keyword
