@@ -433,6 +433,7 @@ async fn main() -> miette::Result<()> {
             // Register agents in dispatcher, restoring proxy backends from SQLite.
             // Also create per-agent refresh schedulers and spawn reconnect tasks.
             let mut refresh_senders_map = std::collections::HashMap::new();
+            let http_client = reqwest::Client::new();
 
             for (agent_name, _token) in &token_entries {
                 let agent_dir = agents_dir.join(agent_name);
@@ -534,7 +535,6 @@ async fn main() -> miette::Result<()> {
                             state: state.clone(),
                             token: token_arc.clone(),
                         };
-                        // Channel just created, should not be full.
                         if let Err(e) = refresh_tx.send(msg).await {
                             tracing::warn!(
                                 agent = agent_name.as_str(),
@@ -546,7 +546,6 @@ async fn main() -> miette::Result<()> {
                 }
 
                 // Spawn background reconnect tasks (fire-and-forget).
-                let http_client = reqwest::Client::new();
                 let oauth_map: std::collections::HashMap<String, _> = oauth_entries
                     .into_iter()
                     .map(|(name, state, token_arc)| (name, (state, token_arc)))

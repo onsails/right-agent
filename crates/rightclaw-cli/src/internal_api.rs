@@ -114,8 +114,8 @@ struct ErrorResponse {
 
 #[derive(Clone)]
 pub(crate) struct InternalState {
-    pub dispatcher: Arc<ToolDispatcher>,
-    pub refresh_senders: RefreshSenders,
+    dispatcher: Arc<ToolDispatcher>,
+    refresh_senders: RefreshSenders,
 }
 
 pub(crate) fn internal_router(dispatcher: Arc<ToolDispatcher>, refresh_senders: RefreshSenders) -> Router {
@@ -449,13 +449,16 @@ async fn handle_set_token(
             expires_at,
             server_url: handle.url().to_string(),
         };
-        let _ = tx
+        if let Err(e) = tx
             .send(RefreshMessage::NewEntry {
                 server_name: req.server.clone(),
                 state: entry,
                 token: handle.token().clone(),
             })
-            .await;
+            .await
+        {
+            tracing::warn!(agent = req.agent.as_str(), server = req.server.as_str(), "failed to notify refresh scheduler: {e:#}");
+        }
     }
 
     (
