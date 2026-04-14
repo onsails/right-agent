@@ -44,7 +44,19 @@ pub async fn run_login(
 ) {
     let ssh_host = rightclaw::openshell::ssh_host(agent_name);
 
-    // Step 1: Start auth session, extract URL and state
+    // Step 1: Snapshot baseline ports before starting auth
+    let baseline_ports = match get_listen_ports(ssh_config_path, &ssh_host).await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = event_tx
+                .send(LoginEvent::Error(format!("failed to get baseline ports: {e:#}")))
+                .await;
+            return;
+        }
+    };
+    tracing::info!(agent = agent_name, ?baseline_ports, "login: baseline ports snapshot");
+
+    // Step 2: Start auth session, extract URL and state
     let mut auth_session = match start_auth_session(ssh_config_path, &ssh_host, agent_name).await {
         Ok(s) => s,
         Err(e) => {
@@ -57,11 +69,11 @@ pub async fn run_login(
         }
     };
 
-    // Step 2: Send URL to caller
+    // Step 3: Send URL to caller
     let _ = event_tx.send(LoginEvent::Url(auth_session.url.clone())).await;
 
-    // Step 3: Discover callback port
-    let port = match discover_callback_port(ssh_config_path, &ssh_host, agent_name).await {
+    // Step 4: Discover callback port by diffing against baseline
+    let port = match discover_new_port(ssh_config_path, &ssh_host, agent_name, &baseline_ports).await {
         Ok(p) => p,
         Err(e) => {
             let _ = event_tx
@@ -72,10 +84,6 @@ pub async fn run_login(
             return;
         }
     };
-
-    // Check child is alive after port discovery
-    let alive_after_discover = auth_session.child.try_wait().map_or(true, |s| s.is_none());
-    tracing::info!(agent = agent_name, alive_after_discover, "login: child status after port discovery");
 
     // Step 4: Signal waiting for code
     let _ = event_tx.send(LoginEvent::WaitingForCode).await;
@@ -183,61 +191,51 @@ async fn start_auth_session(
     Ok(AuthSession { url, state, child, _stdout: reader })
 }
 
-/// Discover the callback port that `claude auth login` is listening on.
+/// Get all LISTEN ports inside the sandbox via `ss -tln`.
+async fn get_listen_ports(ssh_config_path: &Path, ssh_host: &str) -> Result<Vec<u16>, miette::Report> {
+    let output = rightclaw::openshell::ssh_exec(ssh_config_path, ssh_host, &["ss", "-tln"], 10)
+        .await
+        .map_err(|e| miette::miette!("ss -tln failed: {e}"))?;
+    Ok(parse_listen_ports(&output))
+}
+
+/// Discover the callback port by comparing current LISTEN ports against a
+/// baseline snapshot taken before `claude auth login` was started.
 ///
-/// Process names are not visible across SSH sessions in the sandbox (PID
-/// namespace isolation), so we cannot use `ss -tlnp` to identify the owner.
-/// Instead, list all LISTEN ports via `ss -tln`, then probe each with
-/// `curl /callback` — claude's server responds HTTP 400, others give 000
-/// (connection refused or non-HTTP).
-async fn discover_callback_port(
+/// Polls up to 5 times with 1s delays. Any port present now but absent from
+/// the baseline must have been opened by `claude auth login`.
+async fn discover_new_port(
     ssh_config_path: &Path,
     ssh_host: &str,
     agent_name: &str,
+    baseline: &[u16],
 ) -> Result<u16, miette::Report> {
     for attempt in 1..=5 {
-        tracing::debug!(agent = agent_name, attempt, "login: probing for callback port");
-        let ss_output =
-            match rightclaw::openshell::ssh_exec(ssh_config_path, ssh_host, &["ss", "-tln"], 10)
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    tracing::debug!(agent = agent_name, attempt, error = %e, "login: ss failed");
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-
-        let ports = parse_listen_ports(&ss_output);
-        tracing::info!(agent = agent_name, attempt, ?ports, ss_output = %ss_output.trim(), "login: found LISTEN ports");
-        for port in &ports {
-            let url = format!("http://localhost:{port}/");
-            if let Ok(status) = rightclaw::openshell::ssh_exec(
-                ssh_config_path,
-                ssh_host,
-                &["curl", "-s", "-m", "2", "-I", "-o", "/dev/null", "-w", "%{http_code}", &url],
-                5,
-            )
-            .await
-            {
-                let code = status.trim();
-                tracing::info!(agent = agent_name, port, http_status = %code, "login: probe result");
-                // Any HTTP response means this is a live HTTP server
-                if code != "000" {
+        match get_listen_ports(ssh_config_path, ssh_host).await {
+            Ok(current) => {
+                let new_ports = diff_ports(&current, baseline);
+                tracing::info!(agent = agent_name, attempt, ?current, ?new_ports, "login: port diff");
+                if let Some(&port) = new_ports.first() {
                     tracing::info!(agent = agent_name, port, "login: discovered callback port");
-                    return Ok(*port);
+                    return Ok(port);
                 }
             }
+            Err(e) => {
+                tracing::debug!(agent = agent_name, attempt, error = %e, "login: ss failed");
+            }
         }
-
         if attempt < 5 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
     Err(miette::miette!(
-        "failed to discover claude callback port after 5 attempts"
+        "no new ports appeared after starting claude auth login"
     ))
+}
+
+/// Return ports present in `current` but not in `baseline`.
+pub fn diff_ports(current: &[u16], baseline: &[u16]) -> Vec<u16> {
+    current.iter().copied().filter(|p| !baseline.contains(p)).collect()
 }
 
 /// Submit the auth code to the callback server and wait for the process to exit.
@@ -458,5 +456,39 @@ LISTEN 0      512            [::1]:44901         [::]:*    users:((\"node\",pid=
     fn parse_listen_ports_ipv4() {
         let ss_output = "LISTEN 0 512 127.0.0.1:42000 0.0.0.0:*\n";
         assert_eq!(parse_listen_ports(ss_output), vec![42000]);
+    }
+
+    #[test]
+    fn diff_ports_finds_new() {
+        let baseline = vec![8080, 3000];
+        let current = vec![8080, 3000, 42561];
+        assert_eq!(diff_ports(&current, &baseline), vec![42561]);
+    }
+
+    #[test]
+    fn diff_ports_no_change() {
+        let baseline = vec![8080, 3000];
+        let current = vec![8080, 3000];
+        assert!(diff_ports(&current, &baseline).is_empty());
+    }
+
+    #[test]
+    fn diff_ports_removed_port_ignored() {
+        let baseline = vec![8080, 3000];
+        let current = vec![8080, 42561];
+        assert_eq!(diff_ports(&current, &baseline), vec![42561]);
+    }
+
+    #[test]
+    fn diff_ports_empty_baseline() {
+        let current = vec![42561];
+        assert_eq!(diff_ports(&current, &[]), vec![42561]);
+    }
+
+    #[test]
+    fn diff_ports_multiple_new() {
+        let baseline = vec![8080];
+        let current = vec![8080, 42561, 43000];
+        assert_eq!(diff_ports(&current, &baseline), vec![42561, 43000]);
     }
 }
