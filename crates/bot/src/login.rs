@@ -27,6 +27,8 @@ struct AuthSession {
     url: String,
     state: String,
     child: tokio::process::Child,
+    /// Keep stdout pipe alive so the SSH process doesn't get SIGPIPE.
+    _stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
 }
 
 /// Orchestrate the Claude login flow via SSH exec and local HTTP callback.
@@ -163,7 +165,7 @@ async fn start_auth_session(
 
     tracing::info!(agent = agent_name, url_len = url.len(), state = %state, "login: OAuth URL extracted");
 
-    Ok(AuthSession { url, state, child })
+    Ok(AuthSession { url, state, child, _stdout: reader })
 }
 
 /// Discover the callback port that `claude auth login` is listening on.
@@ -193,6 +195,7 @@ async fn discover_callback_port(
             };
 
         let ports = parse_listen_ports(&ss_output);
+        tracing::info!(agent = agent_name, attempt, ?ports, ss_output = %ss_output.trim(), "login: found LISTEN ports");
         for port in &ports {
             let url = format!("http://localhost:{port}/callback");
             if let Ok(status) = rightclaw::openshell::ssh_exec(
@@ -204,7 +207,7 @@ async fn discover_callback_port(
             .await
             {
                 let code = status.trim();
-                tracing::debug!(agent = agent_name, port, http_status = %code, "login: probe result");
+                tracing::info!(agent = agent_name, port, http_status = %code, "login: probe result");
                 if code == "400" || code == "404" || code == "200" || code == "302" {
                     tracing::info!(agent = agent_name, port, "login: discovered callback port");
                     return Ok(*port);
@@ -237,16 +240,40 @@ async fn submit_auth_code(
         "http://localhost:{port}/callback?code={encoded_code}&state={encoded_state}"
     );
 
-    tracing::info!(agent = agent_name, port, "login: submitting auth code via curl");
+    // Check if auth process is still alive before submitting
+    let child_alive = child.try_wait().map_or(true, |s| s.is_none());
+    tracing::info!(
+        agent = agent_name,
+        port,
+        child_alive,
+        callback_url = %callback_url,
+        code_len = code.len(),
+        "login: submitting auth code via curl"
+    );
 
+    // First check if the port is still listening
+    let port_check = rightclaw::openshell::ssh_exec(
+        ssh_config_path,
+        ssh_host,
+        &["ss", "-tln"],
+        5,
+    )
+    .await;
+    tracing::info!(
+        agent = agent_name,
+        ss_output = %port_check.as_deref().unwrap_or("FAILED"),
+        "login: port check before curl"
+    );
+
+    // Use -v for verbose curl output on stderr, capture both stdout and stderr
     let output = rightclaw::openshell::ssh_exec(
         ssh_config_path,
         ssh_host,
-        &["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", &callback_url],
+        &["curl", "-sv", "-o", "/dev/null", "-w", "%{http_code}", &callback_url],
         30,
     )
     .await
-    .map_err(|e| miette::miette!("curl callback failed: {e}"))?;
+    .map_err(|e| miette::miette!("curl callback failed: {e:#}"))?;
 
     let status_code = output.trim();
     tracing::info!(agent = agent_name, status = %status_code, "login: callback HTTP status");
