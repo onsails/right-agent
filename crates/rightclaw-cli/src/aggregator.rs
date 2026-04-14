@@ -23,6 +23,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::ErrorData as McpError;
 use rightclaw::mcp::proxy::ProxyBackend;
+use rightclaw::mcp::refresh::RefreshMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::right_backend::RightBackend;
@@ -33,6 +34,9 @@ use crate::right_backend::RightBackend;
 
 /// Token -> agent mapping for multi-agent HTTP mode.
 pub(crate) type AgentTokenMap = Arc<tokio::sync::RwLock<HashMap<String, AgentInfo>>>;
+
+/// Per-agent refresh scheduler sender map.
+pub(crate) type RefreshSenders = Arc<HashMap<String, tokio::sync::mpsc::Sender<RefreshMessage>>>;
 
 /// Agent identity resolved from a Bearer token.
 #[derive(Clone, Debug)]
@@ -344,6 +348,7 @@ pub(crate) async fn run_aggregator_http(
     dispatcher: Arc<ToolDispatcher>,
     agents_dir: PathBuf,
     home: PathBuf,
+    refresh_senders: RefreshSenders,
 ) -> miette::Result<()> {
     let ct = CancellationToken::new();
 
@@ -380,7 +385,7 @@ pub(crate) async fn run_aggregator_http(
             .map_err(|e| miette::miette!("create UDS parent dir: {e:#}"))?;
     }
 
-    let internal_app = crate::internal_api::internal_router(dispatcher);
+    let internal_app = crate::internal_api::internal_router(dispatcher, refresh_senders);
     let uds_listener = tokio::net::UnixListener::bind(&socket_path)
         .map_err(|e| miette::miette!("bind UDS {}: {e:#}", socket_path.display()))?;
 
