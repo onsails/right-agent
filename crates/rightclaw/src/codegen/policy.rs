@@ -87,6 +87,8 @@ filesystem_policy:
     - /dev/urandom
   read_write:
     - /dev/null
+    - /dev/tty
+    - /dev/pts
     - /tmp
     - /sandbox
     - /platform
@@ -241,5 +243,12 @@ mod tests {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, Some(ip));
         let _parsed: serde_json::Value = serde_saphyr::from_str(&policy)
             .expect("policy with dynamic IP must be valid YAML");
+    }
+
+    #[test]
+    fn policy_allows_dev_tty_and_pts() {
+        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        assert!(policy.contains("/dev/tty"), "must allow /dev/tty for script PTY");
+        assert!(policy.contains("/dev/pts"), "must allow /dev/pts for PTY devices");
     }
 }
