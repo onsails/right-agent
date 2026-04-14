@@ -1,109 +1,96 @@
-# Login Flow Redesign: PTY-free OAuth via Local Callback
+# Login Flow Redesign: setup-token via Telegram
 
 ## Problem
 
-Claude Code CLI auto-updated its login TUI, breaking the PTY-driven login flow in `login.rs`. The old flow uses `expectrl` to navigate a multi-step interactive TUI (`claude -- /login`), which is fragile — any UI change breaks regex matching. The new CLI TUI changed its output format, causing step 7 (success detection) to fail silently.
+Claude Code CLI's interactive login (`claude auth login`) uses an ink-based TUI that cannot be driven programmatically — PTY writes are ignored, and the local callback server's OAuth codes are bound to a mismatched redirect_uri. Every approach to automate the interactive flow has failed.
 
-## Key Discovery
+## Solution
 
-`claude auth login` starts a local HTTP callback server on a random port inside the sandbox (e.g., `[::1]:36275`). The server accepts `GET /callback?code=CODE&state=STATE` and forwards the code to Anthropic's token exchange endpoint. This means we can complete the OAuth flow by curling localhost — no PTY interaction needed.
+Use `claude setup-token` — a CLI command that generates a long-lived (1-year) OAuth token. The user runs it on their own machine (where they have a browser), copies the token, and sends it to the Telegram bot. The bot stores the token and passes it as `CLAUDE_CODE_OAUTH_TOKEN` env var to all subsequent `claude -p` invocations.
 
-### Verified Behavior
-
-| Step | Observation |
-|------|-------------|
-| `claude auth login` output | Plain text: URL on stdout, no TUI |
-| Local callback server | Listens on `[::1]:RANDOM_PORT`, discoverable via `ss -tlnp` |
-| `GET /callback?code=X&state=Y` | Returns 302 → success page. CLI exchanges code for token. |
-| Fake code | CLI responds "Login failed: Request failed with status code 400" — mechanism works, just invalid code |
-| Process lifecycle | CLI exits after callback received (success or failure) |
-
-### Policy Prerequisite
-
-No policy changes needed. `claude auth login` runs without `script`/PTY — it outputs the URL to stdout and starts a local callback server without requiring `/dev/tty` or `/dev/pts`.
+No PTY, no callback server, no port discovery, no sandbox policy changes.
 
 ## Design
 
-### New Login Flow
+### User Flow
 
-```
-Bot detects auth error (403/401 from claude -p)
-  │
-  ├─ Phase 1: Start auth session
-  │   SSH exec: script -q -c "claude auth login" /dev/null
-  │   (background, keep process alive)
-  │   Parse URL from stdout
-  │   Extract state= parameter from URL
-  │
-  ├─ Phase 2: Discover callback port
-  │   SSH exec: ss -tlnp | grep claude
-  │   Extract port number
-  │
-  ├─ Phase 3: User interaction (Telegram)
-  │   Send OAuth URL to user
-  │   Wait for user to send auth code
-  │
-  └─ Phase 4: Complete auth
-      SSH exec: curl "http://[::1]:$PORT/callback?code=$CODE&state=$STATE"
-      Monitor auth process exit
-      Exit 0 → success, nonzero → report error to user
-```
+1. User sends a message to the bot
+2. `claude -p` returns auth error (401/403 / "Not logged in")
+3. Bot checks `auth_tokens` table — if token exists, it's stale: delete it
+4. Bot sends Telegram message:
+   > To authenticate, run this on your machine:
+   > ```
+   > claude setup-token
+   > ```
+   > Then send me the token it prints.
+5. User runs `claude setup-token`, completes OAuth in browser, copies token
+6. User pastes token in Telegram
+7. Bot intercepts message as token (via existing `auth_code_tx` intercept slot)
+8. Bot saves token to `auth_tokens` table in memory.db
+9. Bot retries the original request with `CLAUDE_CODE_OAUTH_TOKEN` set
 
-### Changes
+### Storage
 
-#### `crates/bot/src/login.rs` — Full Rewrite
+New table in memory.db (via rusqlite_migration):
 
-Replace expectrl-based PTY flow with async SSH exec:
-
-1. **`start_auth_session()`**: Spawn `ssh ... -- 'script -q -c "claude auth login" /dev/null'` via `tokio::process::Command` with piped stdout. Read stdout until URL appears. Extract URL and `state` parameter. Return handle to keep process alive.
-
-2. **`discover_callback_port()`**: `ssh ... -- 'ss -tlnp'` → parse port from line containing `claude`. Retry up to 5 times with 1s backoff (process may need time to bind).
-
-3. **`submit_auth_code()`**: `ssh ... -- 'curl -s -o /dev/null -w "%{http_code}" "http://[::1]:$PORT/callback?code=$CODE&state=$STATE"'` → check HTTP status. 302 = code accepted (token exchange in progress). Wait for auth process to exit — exit 0 = success.
-
-#### `crates/bot/src/telegram/worker.rs` — Adapt Auth Watcher
-
-Replace `spawn_auth_watcher()` to use new login functions instead of `run_login_pty()`. Same Telegram interaction pattern: send URL, wait for code, submit code.
-
-#### `crates/rightclaw/src/codegen/policy.rs` — Add /dev/tty and /dev/pts
-
-Add to `read_write` section:
-```yaml
-read_write:
-    - /dev/null
-    - /dev/tty
-    - /dev/pts
-    - /tmp
-    - /sandbox
-    - /platform
+```sql
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    token TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
 
-#### Dependencies — Remove expectrl
+Single row per agent (one agent = one memory.db). UPSERT on save: delete all + insert.
 
-If `expectrl` is not used elsewhere, remove from `Cargo.toml`.
+### invoke_cc Changes
 
-### What Stays the Same
+In `invoke_cc()` (worker.rs), before spawning `claude -p` via SSH:
 
-- Auth error detection in worker (`is_auth_error()`)
-- Telegram flow: URL sent to user, code received from user
-- `LoginEvent` enum (Url, WaitingForCode, Done, Error)
-- OAuth callback server (`oauth_callback.rs`) — unrelated, handles MCP OAuth
+1. Open DB, query `SELECT token FROM auth_tokens LIMIT 1`
+2. If token exists, add `CLAUDE_CODE_OAUTH_TOKEN=<token>` to the SSH command env
+
+For sandbox mode, the env var is passed through SSH: `ssh ... -- env CLAUDE_CODE_OAUTH_TOKEN=<token> claude -p ...`
+
+For no-sandbox mode, set it on the `Command` directly.
+
+### Auth Error Handling Changes
+
+Replace `spawn_auth_watcher()` (which spawned PTY login) with `spawn_token_request()`:
+
+1. Check `auth_tokens` — if exists, delete (token is stale)
+2. Send instruction message to Telegram
+3. Store oneshot sender in `auth_code_tx` intercept slot (reuse existing mechanism)
+4. Wait for token from Telegram (with 5-min timeout)
+5. Save token to `auth_tokens`
+6. Send "Token saved. You can continue chatting." to Telegram
+
+### What Gets Deleted
+
+- `login.rs` — entire file gutted. Keep `LoginEvent` enum (simplified), remove everything else (PTY helper, callback server, port discovery, URL parsing)
+- `/dev/tty` and `/dev/pts` from policy — not needed
+- `urlencoding` dependency — not needed
+- All the callback/curl/ss infrastructure
+
+### What Stays
+
+- `is_auth_error()` detection in worker.rs
+- `auth_watcher_active` flag (prevents duplicate requests)
+- `auth_code_tx` / `InterceptSlots` mechanism in handler.rs (reused for token intercept)
+- `LoginEvent` enum (simplified to just Done/Error)
 
 ### Edge Cases
 
 | Case | Handling |
 |------|----------|
-| Port not found in 10s | Error: "Claude auth server didn't start" |
-| Auth process exits before code sent | Error: "Auth session terminated prematurely" |
-| Invalid code (400 from Anthropic) | CLI prints error, exits nonzero → relay to user |
-| Timeout (user never sends code) | Kill auth process after configurable timeout (default 5min) |
-| Multiple concurrent logins | Not supported (same as before) — one login per agent at a time |
-| `curl` not in sandbox | It is — verified. Fallback: use `python3 urllib` |
-| `ss` not in sandbox | Fallback: parse `/proc/net/tcp6` directly |
+| Token expired (1 year) | Next `claude -p` returns auth error → bot deletes stale token, requests new one |
+| User sends invalid token | `claude -p` will fail with auth error on next invocation → same flow |
+| User sends message before token | Normal message routing (auth_code_tx slot is empty) |
+| Multiple auth errors in parallel | `auth_watcher_active` flag prevents duplicates (existing) |
+| No-sandbox mode | Same flow, env var set on Command directly instead of SSH |
 
 ### Security
 
-- Auth code passes through Telegram (same as before) — user-initiated, user-visible
-- Code submitted via localhost curl inside sandbox — no network exposure
-- State parameter validated by Claude CLI's callback server (CSRF protection)
-- No credentials file manipulation — Claude CLI handles token storage
+- Token stored in agent's memory.db (per-agent isolation)
+- Token never logged (only length logged)
+- Token passed via env var, not command-line arg (not visible in `ps`)
+- memory.db has mode 0600 on Linux
