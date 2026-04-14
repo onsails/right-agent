@@ -451,9 +451,14 @@ async fn execute_job(
                     None
                 };
 
+                let delivery_status = if cron_output.notify.is_some() {
+                    "pending"
+                } else {
+                    "silent"
+                };
                 if let Err(e) = conn.execute(
-                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2 WHERE id = ?3",
-                    rusqlite::params![cron_output.summary, notify_json, run_id],
+                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2, delivery_status = ?3, no_notify_reason = ?4 WHERE id = ?5",
+                    rusqlite::params![cron_output.summary, notify_json, delivery_status, cron_output.no_notify_reason, run_id],
                 ) {
                     tracing::error!(job = %job_name, "failed to persist cron output to DB: {e:#}");
                 }
@@ -461,6 +466,8 @@ async fn execute_job(
                 tracing::info!(
                     job = %job_name,
                     has_notify = cron_output.notify.is_some(),
+                    delivery_status,
+                    no_notify_reason = cron_output.no_notify_reason.as_deref().unwrap_or("-"),
                     "cron output persisted to DB"
                 );
             }
@@ -489,7 +496,7 @@ async fn execute_job(
         match serde_json::to_string(&notify) {
             Ok(json) => {
                 if let Err(e) = conn.execute(
-                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2 WHERE id = ?3",
+                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2, delivery_status = 'pending' WHERE id = ?3",
                     rusqlite::params!["failed", json, run_id],
                 ) {
                     tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
