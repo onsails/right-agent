@@ -249,27 +249,9 @@ fn env_contains_enable_claudeai_mcp_servers_false() {
     );
 }
 
-#[test]
-fn env_contains_enable_tool_search_false() {
-    let agents = vec![make_bot_agent("myagent", "123:tok")];
-    let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        output.contains("ENABLE_TOOL_SEARCH=false"),
-        "expected ENABLE_TOOL_SEARCH=false in:\n{output}"
-    );
-}
-
-#[test]
-fn env_contains_mcp_connection_nonblocking() {
-    let agents = vec![make_bot_agent("myagent", "123:tok")];
-    let exe = Path::new(EXE_PATH);
-    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        output.contains("MCP_CONNECTION_NONBLOCKING=1"),
-        "expected MCP_CONNECTION_NONBLOCKING=1 in:\n{output}"
-    );
-}
+// ENABLE_TOOL_SEARCH and MCP_CONNECTION_NONBLOCKING were removed:
+// - ENABLE_TOOL_SEARCH=false blocked ToolSearch for all tools including MCP discovery
+// - MCP_CONNECTION_NONBLOCKING=1 is unnecessary — synchronous MCP connect is preferred
 
 // ── Header and version ───────────────────────────────────────────────────────
 

@@ -136,7 +136,7 @@ pub async fn connect_grpc(
 }
 
 /// Check if a sandbox exists (any phase). Returns `false` only on `NotFound`.
-async fn sandbox_exists(
+pub async fn sandbox_exists(
     client: &mut OpenShellClient<Channel>,
     name: &str,
 ) -> miette::Result<bool> {

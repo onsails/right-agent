@@ -586,9 +586,8 @@ fn test_agent_list() {
 }
 
 /// Validate generated OpenShell policy against a live sandbox.
-/// Requires: running OpenShell gateway + existing `rightclaw-right` sandbox.
+/// Requires: running OpenShell gateway + existing `rightclaw-rightclaw-test-lifecycle` sandbox.
 #[test]
-#[ignore = "requires live OpenShell sandbox"]
 fn test_policy_validates_against_openshell() {
     let policy_yaml =
         rightclaw::codegen::policy::generate_policy(
@@ -607,7 +606,7 @@ fn test_policy_validates_against_openshell() {
             "--policy",
             policy_path.to_str().unwrap(),
             "--wait",
-            "rightclaw-right",
+            "rightclaw-rightclaw-test-lifecycle",
         ])
         .output()
         .expect("openshell binary must be in PATH");

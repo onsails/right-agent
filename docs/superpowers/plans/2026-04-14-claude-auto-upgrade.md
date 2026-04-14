@@ -247,7 +247,7 @@ Create `crates/bot/tests/sandbox_upgrade.rs`:
 //! named `rightclaw-rightclaw-test-lifecycle` with `storage.googleapis.com`
 //! in its network policy.
 //!
-//! Run with: cargo test -p rightclaw-bot --test sandbox_upgrade -- --ignored
+//! Run with: cargo test -p rightclaw-bot --test sandbox_upgrade
 
 use std::process::Command;
 
@@ -262,7 +262,6 @@ fn sandbox_exec(args: &[&str]) -> std::process::Output {
 
 /// `claude upgrade` completes without error.
 #[test]
-#[ignore = "requires live OpenShell sandbox with storage.googleapis.com in policy"]
 fn claude_upgrade_succeeds() {
     let output = sandbox_exec(&["claude", "upgrade"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -280,7 +279,6 @@ fn claude_upgrade_succeeds() {
 
 /// After upgrade, the binary exists in `.local/bin`.
 #[test]
-#[ignore = "requires live OpenShell sandbox with storage.googleapis.com in policy"]
 fn upgraded_binary_exists_in_local_bin() {
     let output = sandbox_exec(&["test", "-L", "/sandbox/.local/bin/claude"]);
     assert!(
@@ -291,7 +289,6 @@ fn upgraded_binary_exists_in_local_bin() {
 
 /// The upgraded binary reports a valid version.
 #[test]
-#[ignore = "requires live OpenShell sandbox with storage.googleapis.com in policy"]
 fn upgraded_binary_reports_version() {
     let output = sandbox_exec(&["/sandbox/.local/bin/claude", "--version"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -304,7 +301,6 @@ fn upgraded_binary_reports_version() {
 
 /// With `.local/bin` in PATH (via .bashrc), `which claude` resolves to the upgraded path.
 #[test]
-#[ignore = "requires live OpenShell sandbox with .bashrc PATH setup from sync"]
 fn path_precedence_favors_local_bin() {
     let output = sandbox_exec(&["bash", "-lc", "which claude"]);
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();

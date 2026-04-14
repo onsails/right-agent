@@ -153,10 +153,12 @@ impl BackendRegistry {
 
     /// Return the tool definition for `rightmeta__mcp_list`.
     pub(crate) fn mcp_list_tool_def() -> Tool {
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".into(), serde_json::Value::String("object".into()));
         Tool::new(
             "rightmeta__mcp_list",
             "List all registered external MCP servers with connection status, tool count, and URL.",
-            serde_json::Map::new(),
+            schema,
         )
     }
 
@@ -511,6 +513,39 @@ mod tests {
             msg.contains("Server 'notion' not found"),
             "unexpected error: {msg}"
         );
+    }
+
+    // ---- inputSchema validation ----
+
+    /// CC silently drops ALL MCP tools if any tool has an invalid inputSchema.
+    /// An empty `{}` is invalid — every schema must have `"type": "object"`.
+    #[test]
+    fn all_tools_have_valid_input_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_dispatcher(tmp.path());
+        let tools = dispatcher.tools_list("test-agent");
+
+        for tool in &tools {
+            let schema = &tool.input_schema;
+            assert!(
+                !schema.is_empty(),
+                "tool '{}' has empty inputSchema — CC will silently drop ALL tools",
+                tool.name
+            );
+            assert!(
+                schema.contains_key("type"),
+                "tool '{}' inputSchema missing 'type' field — must be {{\"type\": \"object\"}}",
+                tool.name
+            );
+            let type_val = &schema["type"];
+            assert_eq!(
+                type_val.as_str(),
+                Some("object"),
+                "tool '{}' inputSchema 'type' must be \"object\", got {:?}",
+                tool.name,
+                type_val
+            );
+        }
     }
 
     // ---- mcp_list tests ----

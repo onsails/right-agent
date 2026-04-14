@@ -1,64 +1,58 @@
-# Finding: CC does not load HTTP MCP servers from --mcp-config
+# Finding: CC silently drops all MCP tools if any tool has invalid inputSchema
 
 ## Date
 2026-04-14
 
 ## Problem
-Claude Code (`claude -p`) does not load MCP tools from HTTP MCP servers
-specified via `--mcp-config` or `.mcp.json`. The aggregator at
-`http://host.docker.internal:8100/mcp` is reachable (verified via curl
-through OpenShell proxy), but CC never registers its tools.
+Claude Code (`claude -p`) connected to our MCP aggregator (status: "connected")
+but registered 0 tools. All 14 tools from `tools/list` were silently dropped.
 
-## Evidence
+## Root Cause
 
-1. `--mcp-config /sandbox/mcp.json --strict-mcp-config` with valid
-   `{"mcpServers":{"right":{"type":"http","url":"http://...","headers":{...}}}}`
-   → CC starts, but `mcp__right__*` tools are absent. ToolSearch returns
-   `total_deferred_tools: 7` (only CC built-in deferred tools).
+**Invalid `inputSchema` on `rightmeta__mcp_list` tool.** The tool definition had
+`"inputSchema": {}` (empty object) instead of a valid JSON Schema with
+`"type": "object"`. CC validates the entire `tools/list` response and silently
+drops ALL tools if ANY tool has an invalid schema.
 
-2. Same config as inline JSON string via `--mcp-config '{...}'` → same result.
+## Investigation Timeline
 
-3. `.mcp.json` in project root (without `--strict-mcp-config`) → CC loads
-   cloud MCP servers (Blockscout, Crypto.com — all HTTPS) but NOT our HTTP server.
+1. Initial hypothesis: CC refuses plain `http://` MCP servers — **WRONG**.
+   Tested on host and in sandbox: CC connects to HTTP MCP servers fine.
 
-4. `curl` from sandbox through OpenShell proxy reaches aggregator fine
-   (401 without auth, 405 with auth — expected for GET on MCP endpoint).
+2. Protocol version mismatch: rmcp 1.3.0 defaults to `protocolVersion: 2025-06-18`,
+   CC sends `2025-03-26`. Tested explicitly: CC loads tools fine with 2025-06-18.
+   **Not the issue.**
 
-## Likely cause
+3. SSE vs JSON response format: Tested both `with_json_response(true)` and
+   `with_json_response(false)`. No difference — CC handles both.
 
-CC refuses to connect to plain `http://` MCP servers. All working MCP
-servers in tests use `https://`. The sandbox sets `HTTP_PROXY`, `HTTPS_PROXY`,
-`ALL_PROXY` to `http://10.200.0.1:3128` — CC routes all traffic through
-OpenShell proxy. The proxy passes HTTP through (verified), but CC itself
-may reject non-TLS MCP connections.
+4. Stateful vs stateless mode: No difference.
 
-## Sandbox proxy environment
+5. **Empty `inputSchema: {}`**: The `rightmeta__mcp_list` tool was defined with
+   `Tool::new("rightmeta__mcp_list", "...", serde_json::Map::new())` — producing
+   `"inputSchema": {}`. CC expects `"type": "object"` at minimum. Fixing this
+   to `{"type": "object"}` immediately loaded all 14 tools.
+
+## Fix
+
+```rust
+// Before (broken):
+Tool::new("rightmeta__mcp_list", "...", serde_json::Map::new())
+// → "inputSchema": {}
+
+// After (fixed):
+let mut schema = serde_json::Map::new();
+schema.insert("type".into(), serde_json::Value::String("object".into()));
+Tool::new("rightmeta__mcp_list", "...", schema)
+// → "inputSchema": {"type": "object"}
 ```
-HTTP_PROXY=http://10.200.0.1:3128
-HTTPS_PROXY=http://10.200.0.1:3128
-ALL_PROXY=http://10.200.0.1:3128
-no_proxy=127.0.0.1,localhost,::1
-```
 
-`host.docker.internal` is NOT in `no_proxy`.
+## Key Lessons
 
-## Options to investigate
-
-1. **Add HTTPS to aggregator** — self-signed cert, CC trusts sandbox CA
-   (`/etc/openshell-tls/ca-bundle.pem`). Most aligned with sandbox security model.
-
-2. **Add `host.docker.internal` to `no_proxy`** — bypasses proxy for
-   aggregator traffic. May not help if CC rejects HTTP regardless of proxy.
-
-3. **CC env var or config to allow HTTP MCP** — check if CC has a flag
-   to permit plain HTTP MCP connections (e.g. for local development).
-
-4. **Tunnel aggregator through cloudflared** — gives HTTPS endpoint but
-   adds latency and complexity.
-
-## What works now
-
-- Bot Telegram commands (`/mcp add`, `/mcp auth`, `/mcp list`) work correctly
-- Aggregator connects to upstream MCP servers (Composio OAuth flow works)
-- Token refresh works
-- The only broken link: CC inside sandbox → aggregator HTTP MCP connection
+- CC silently drops ALL MCP tools if any single tool in `tools/list` has an
+  invalid `inputSchema`. No error, no warning, no partial loading.
+- `"inputSchema": {}` is not valid — must have `"type": "object"` at minimum.
+- rmcp's `Tool::new()` accepts any `serde_json::Map` without validation.
+- Always test MCP tool loading after adding new tool definitions.
+- Protocol version 2025-06-18 works fine with CC 2.1.91.
+- HTTP MCP servers work fine — no HTTPS requirement.
