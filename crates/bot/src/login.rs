@@ -195,7 +195,7 @@ async fn discover_callback_port(
         let ports = parse_listen_ports(&ss_output);
         for port in &ports {
             let probe = format!(
-                "curl -s -m 2 -o /dev/null -w '%{{http_code}}' 'http://[::1]:{port}/callback'"
+                "curl -s -m 2 -o /dev/null -w \"%{{http_code}}\" http://[::1]:{port}/callback"
             );
             if let Ok(status) = rightclaw::openshell::ssh_exec(
                 ssh_config_path,
@@ -236,7 +236,7 @@ async fn submit_auth_code(
     let encoded_code = urlencoding::encode(code);
     let encoded_state = urlencoding::encode(state);
     let curl_cmd = format!(
-        "curl -s -o /dev/null -w '%{{http_code}}' 'http://[::1]:{port}/callback?code={encoded_code}&state={encoded_state}'"
+        "curl -s -o /dev/null -w \"%{{http_code}}\" \"http://[::1]:{port}/callback?code={encoded_code}&state={encoded_state}\""
     );
 
     tracing::info!(agent = agent_name, port, "login: submitting auth code via curl");
