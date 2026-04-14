@@ -99,8 +99,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             secret: None,
             attachments: Default::default(),
             network_policy: Default::default(),
-            max_turns: 30,
-            max_budget_usd: 1.0,
             show_thinking: true,
         }
     });
@@ -404,8 +402,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&pending_auth),
             home.clone(),
             ssh_config_path,
-            config.max_turns,
-            config.max_budget_usd,
             config.show_thinking,
             config.model.clone(),
             shutdown.clone(),

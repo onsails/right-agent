@@ -70,10 +70,6 @@ pub struct WorkerContext {
     /// Slot for auth code sender — when login flow is waiting for a code from Telegram,
     /// the oneshot::Sender is stored here. Message handler checks this before routing to worker.
     pub auth_code_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
-    /// Max CC turns per invocation (passed as --max-turns).
-    pub max_turns: u32,
-    /// Max dollar spend per CC invocation (passed as --max-budget-usd).
-    pub max_budget_usd: f64,
     /// Show live thinking indicator in Telegram.
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
@@ -732,10 +728,6 @@ async fn invoke_cc(
     claude_args.push("--verbose".into());
     claude_args.push("--output-format".into());
     claude_args.push("stream-json".into());
-    claude_args.push("--max-turns".into());
-    claude_args.push(ctx.max_turns.to_string());
-    claude_args.push("--max-budget-usd".into());
-    claude_args.push(format!("{:.2}", ctx.max_budget_usd));
     if let Some(ref model) = ctx.model {
         claude_args.push("--model".into());
         claude_args.push(model.clone());
@@ -952,7 +944,6 @@ async fn invoke_cc(
                                     super::stream::format_thinking_message(
                                         ring_buffer.events(),
                                         &usage,
-                                        ctx.max_turns,
                                     )
                                 } else {
                                     "\u{23f3} Working...".to_string()
@@ -976,7 +967,6 @@ async fn invoke_cc(
                                 let text = super::stream::format_thinking_message(
                                     ring_buffer.events(),
                                     &usage,
-                                    ctx.max_turns,
                                 );
                                 if let Some(msg_id) = thinking_msg_id {
                                     let _ = ctx
@@ -1049,7 +1039,6 @@ async fn invoke_cc(
                 let mut msg = super::stream::format_thinking_message(
                     ring_buffer.events(),
                     &usage,
-                    ctx.max_turns,
                 );
                 msg.push_str("\n\u{26d4} Stopped");
                 msg
@@ -1066,7 +1055,6 @@ async fn invoke_cc(
             let text = super::stream::format_thinking_message(
                 ring_buffer.events(),
                 &usage,
-                ctx.max_turns,
             );
             let _ = ctx.bot
                 .edit_message_text(tg_chat_id, msg_id, &text)

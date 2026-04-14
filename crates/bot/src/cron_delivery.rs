@@ -152,7 +152,7 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
     yaml
 }
 
-const IDLE_THRESHOLD_SECS: i64 = 300; // 5 minutes
+const IDLE_THRESHOLD_SECS: i64 = 180; // 3 minutes — within CC's 5-min prompt cache TTL
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 
 /// Main delivery loop. Runs as a tokio task.
@@ -196,12 +196,6 @@ pub async fn run_delivery_loop(
             }
         }
 
-        let last = idle_ts.0.load(std::sync::atomic::Ordering::Relaxed);
-        let now = chrono::Utc::now().timestamp();
-        if now - last < IDLE_THRESHOLD_SECS {
-            continue;
-        }
-
         let pending = match fetch_pending(&conn) {
             Ok(Some(p)) => p,
             Ok(None) => continue,
@@ -210,6 +204,21 @@ pub async fn run_delivery_loop(
                 continue;
             }
         };
+
+        let last = idle_ts.0.load(std::sync::atomic::Ordering::Relaxed);
+        let now = chrono::Utc::now().timestamp();
+        let idle_for = now - last;
+        if idle_for < IDLE_THRESHOLD_SECS {
+            let wait = IDLE_THRESHOLD_SECS - idle_for;
+            tracing::info!(
+                job = %pending.job_name,
+                run_id = %pending.id,
+                idle_secs = idle_for,
+                wait_secs = wait,
+                "cron delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
+            );
+            continue;
+        }
 
         let (to_deliver, skipped) = match deduplicate_job(&conn, &pending.job_name) {
             Ok(Some((result, s))) => (result, s),
@@ -329,10 +338,6 @@ async fn deliver_through_session(
         "--model".into(),
         DELIVERY_MODEL.into(),
     ];
-    claude_args.push("--max-budget-usd".into());
-    claude_args.push("0.05".into());
-    claude_args.push("--max-turns".into());
-    claude_args.push("3".into());
     claude_args.push("--output-format".into());
     claude_args.push("json".into());
 

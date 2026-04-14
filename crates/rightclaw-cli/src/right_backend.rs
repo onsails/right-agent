@@ -88,12 +88,12 @@ impl RightBackend {
             ),
             Tool::new(
                 "cron_list_runs",
-                "List recent cron job runs. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes log_path -- use bash to read the log file directly.",
+                "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes summary and notify (the structured output produced by the cron session).",
                 schema_for_type::<CronListRunsParams>(),
             ),
             Tool::new(
                 "cron_show_run",
-                "Get full metadata for a single cron job run by its run_id (UUID). Returns the same fields as cron_list_runs. Use log_path with bash to read subprocess output.",
+                "Get full details for a single cron job run by its run_id (UUID). Returns status, summary, and notify (the structured output with content and optional attachments).",
                 schema_for_type::<CronShowRunParams>(),
             ),
             Tool::new(
@@ -339,7 +339,7 @@ impl RightBackend {
         let conn = Self::lock_conn(&conn_arc)?;
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn.prepare(
-            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path
+            "SELECT id, job_name, started_at, finished_at, exit_code, status, summary, notify_json
              FROM cron_runs
              WHERE (?1 IS NULL OR job_name = ?1)
              ORDER BY started_at DESC
@@ -354,7 +354,8 @@ impl RightBackend {
                     row.get::<_, Option<String>>(3)?.as_deref(),
                     row.get::<_, Option<i64>>(4)?,
                     &row.get::<_, String>(5)?,
-                    &row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(6)?.as_deref(),
+                    row.get::<_, Option<String>>(7)?.as_deref(),
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -372,7 +373,7 @@ impl RightBackend {
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
         let result = conn.query_row(
-            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path
+            "SELECT id, job_name, started_at, finished_at, exit_code, status, summary, notify_json
              FROM cron_runs WHERE id = ?1",
             rusqlite::params![params.run_id],
             |row| {
@@ -383,7 +384,8 @@ impl RightBackend {
                     row.get::<_, Option<String>>(3)?.as_deref(),
                     row.get::<_, Option<i64>>(4)?,
                     &row.get::<_, String>(5)?,
-                    &row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(6)?.as_deref(),
+                    row.get::<_, Option<String>>(7)?.as_deref(),
                 ))
             },
         );

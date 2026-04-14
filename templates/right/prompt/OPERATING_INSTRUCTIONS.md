@@ -114,6 +114,16 @@ and recover any persisted jobs. Do this before responding to the user.
 or recurring tasks, ALWAYS use the /rightcron skill. NEVER call CronCreate
 directly — always write a YAML spec first, then reconcile.
 
+**Viewing results:** Use `mcp__right__cron_list_runs` and `mcp__right__cron_show_run`
+to see cron run results. They return the summary and notify content directly —
+no need to read log files.
+
+**Automatic delivery:** When a cron job produces a notification (`notify` in its
+output), the platform automatically delivers it to Telegram after 3 minutes of
+chat inactivity. You do not need to relay cron results manually — the delivery
+system handles it. If the user asks about a cron result before delivery, use the
+MCP tools above to show them the data.
+
 ## Core Skills
 
 <!-- Add your skills here. Example: -->

@@ -77,8 +77,6 @@ pub struct IdleTimestamp(pub Arc<std::sync::atomic::AtomicI64>);
 /// Bundled agent invocation settings (reduces dptree injectable arity).
 #[derive(Clone)]
 pub struct AgentSettings {
-    pub max_turns: u32,
-    pub max_budget_usd: f64,
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
     pub model: Option<String>,
@@ -214,8 +212,6 @@ pub async fn handle_message(
                     ssh_config_path: ssh_config.0.clone(),
                     auth_watcher_active: Arc::clone(&auth_watcher_flag.0),
                     auth_code_tx: Arc::clone(&intercept_slots.auth_code),
-                    max_turns: settings.max_turns,
-                    max_budget_usd: settings.max_budget_usd,
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
                     stop_tokens: Arc::clone(&stop_tokens),

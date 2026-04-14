@@ -21,14 +21,6 @@ fn default_backoff_seconds() -> u32 {
     3
 }
 
-fn default_max_turns() -> u32 {
-    30
-}
-
-fn default_max_budget_usd() -> f64 {
-    1.0
-}
-
 fn default_show_thinking() -> bool {
     true
 }
@@ -170,16 +162,6 @@ pub struct AgentConfig {
     /// Attachment handling configuration.
     #[serde(default)]
     pub attachments: AttachmentsConfig,
-
-    /// Maximum number of CC turns per invocation.
-    /// CC stops gracefully with `terminal_reason: "max_turns"`.
-    #[serde(default = "default_max_turns")]
-    pub max_turns: u32,
-
-    /// Maximum dollar spend per CC invocation.
-    /// CC stops gracefully with `terminal_reason: "max_budget"`.
-    #[serde(default = "default_max_budget_usd")]
-    pub max_budget_usd: f64,
 
     /// Show live thinking indicator in Telegram during CC execution.
     #[serde(default = "default_show_thinking")]

@@ -200,7 +200,7 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "List recent cron job runs. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes log_path — use bash to read the log file directly.")]
+    #[tool(description = "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes summary and notify (the structured output produced by the cron session).")]
     async fn cron_list_runs(
         &self,
         Parameters(params): Parameters<CronListRunsParams>,
@@ -212,7 +212,7 @@ impl MemoryServer {
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn
             .prepare(
-                "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path
+                "SELECT id, job_name, started_at, finished_at, exit_code, status, summary, notify_json
                  FROM cron_runs
                  WHERE (?1 IS NULL OR job_name = ?1)
                  ORDER BY started_at DESC
@@ -228,7 +228,8 @@ impl MemoryServer {
                     row.get::<_, Option<String>>(3)?.as_deref(),
                     row.get::<_, Option<i64>>(4)?,
                     &row.get::<_, String>(5)?,
-                    &row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(6)?.as_deref(),
+                    row.get::<_, Option<String>>(7)?.as_deref(),
                 ))
             })
             .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
@@ -239,7 +240,7 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Get full metadata for a single cron job run by its run_id (UUID). Returns the same fields as cron_list_runs. Use log_path with bash to read subprocess output.")]
+    #[tool(description = "Get full details for a single cron job run by its run_id (UUID). Returns status, summary, and notify (the structured output with content and optional attachments).")]
     async fn cron_show_run(
         &self,
         Parameters(params): Parameters<CronShowRunParams>,
@@ -249,7 +250,7 @@ impl MemoryServer {
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
         let result = conn.query_row(
-            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path
+            "SELECT id, job_name, started_at, finished_at, exit_code, status, summary, notify_json
              FROM cron_runs WHERE id = ?1",
             rusqlite::params![params.run_id],
             |row| {
@@ -260,7 +261,8 @@ impl MemoryServer {
                     row.get::<_, Option<String>>(3)?.as_deref(),
                     row.get::<_, Option<i64>>(4)?,
                     &row.get::<_, String>(5)?,
-                    &row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(6)?.as_deref(),
+                    row.get::<_, Option<String>>(7)?.as_deref(),
                 ))
             },
         );
@@ -442,8 +444,8 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__cron_update: Update an existing cron job spec (full replacement)\n\
                  - mcp__right__cron_delete: Delete a cron job spec\n\
                  - mcp__right__cron_list: List all current cron job specs\n\
-                 - mcp__right__cron_list_runs: List recent cron job executions\n\
-                 - mcp__right__cron_show_run: Get details of a specific cron run\n\
+                 - mcp__right__cron_list_runs: List recent cron job runs with results (summary + notify)\n\
+                 - mcp__right__cron_show_run: Get full details of a specific cron run (summary + notify)\n\
                  - mcp__right__cron_trigger: Trigger a cron job for immediate execution\n\n\
                  ## MCP Management\n\
                  - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\
@@ -472,17 +474,27 @@ pub(crate) fn cron_run_to_json(
     finished_at: Option<&str>,
     exit_code: Option<i64>,
     status: &str,
-    log_path: &str,
+    summary: Option<&str>,
+    notify_json: Option<&str>,
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut val = serde_json::json!({
         "id": id,
         "job_name": job_name,
         "started_at": started_at,
         "finished_at": finished_at,
         "exit_code": exit_code,
         "status": status,
-        "log_path": log_path,
-    })
+    });
+    if let Some(s) = summary {
+        val["summary"] = serde_json::Value::String(s.to_owned());
+    }
+    // Parse notify_json into a structured object so the agent sees content directly.
+    if let Some(nj) = notify_json {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(nj) {
+            val["notify"] = parsed;
+        }
+    }
+    val
 }
 
 /// Run the MCP memory server over stdio.

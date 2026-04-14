@@ -31,8 +31,6 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         env: std::collections::HashMap::new(),
         secret: None,
         attachments: Default::default(),
-        max_turns: 30,
-        max_budget_usd: 1.0,
         show_thinking: true,
     });
     AgentDef {
@@ -65,8 +63,6 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         env: std::collections::HashMap::new(),
         secret: None,
         attachments: Default::default(),
-        max_turns: 30,
-        max_budget_usd: 1.0,
         show_thinking: true,
     });
     AgentDef {
@@ -116,8 +112,6 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         env: std::collections::HashMap::new(),
         secret: None,
         attachments: Default::default(),
-        max_turns: 30,
-        max_budget_usd: 1.0,
         show_thinking: true,
     });
     AgentDef {
@@ -399,8 +393,6 @@ fn make_agent_with_sandbox(name: &str, token: &str, mode: SandboxMode, policy_fi
         env: std::collections::HashMap::new(),
         secret: None,
         attachments: Default::default(),
-        max_turns: 30,
-        max_budget_usd: 1.0,
         show_thinking: true,
     });
     AgentDef {
@@ -524,8 +516,6 @@ fn agent_without_sandbox_config_defaults_to_openshell_in_process_compose() {
         env: std::collections::HashMap::new(),
         secret: None,
         attachments: Default::default(),
-        max_turns: 30,
-        max_budget_usd: 1.0,
         show_thinking: true,
     });
     let agents = vec![AgentDef {

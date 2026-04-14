@@ -3,13 +3,26 @@ use std::path::Path;
 use std::str::FromStr;
 
 /// A cron job specification loaded from the database.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CronSpec {
     pub schedule: String,
     pub prompt: String,
     pub lock_ttl: Option<String>,
     pub max_budget_usd: f64,
     pub triggered_at: Option<String>,
+}
+
+/// Compare only the spec fields that define the job configuration.
+/// `triggered_at` is transient state (set/cleared by trigger flow) and must NOT
+/// participate in equality — otherwise the reconciler aborts running jobs on every
+/// trigger because the in-memory snapshot differs from the DB snapshot.
+impl PartialEq for CronSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.schedule == other.schedule
+            && self.prompt == other.prompt
+            && self.lock_ttl == other.lock_ttl
+            && self.max_budget_usd == other.max_budget_usd
+    }
 }
 
 /// Result of a cron spec create/update operation.
@@ -732,6 +745,52 @@ mod tests {
         }
         let runs = get_recent_runs(&conn, "limit-job", 3).unwrap();
         assert_eq!(runs.len(), 3);
+    }
+
+    /// Regression: triggered_at must NOT affect CronSpec equality.
+    /// The reconciler compares old vs new specs to detect config changes.
+    /// If triggered_at participates in PartialEq, triggering a job causes the
+    /// reconciler to abort and respawn the job scheduler in an infinite loop.
+    #[test]
+    fn triggered_at_does_not_affect_equality() {
+        let base = CronSpec {
+            schedule: "*/5 * * * *".into(),
+            prompt: "do stuff".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+        };
+        let triggered = CronSpec {
+            triggered_at: Some("2026-04-15T12:00:00Z".into()),
+            ..base.clone()
+        };
+        assert_eq!(base, triggered, "triggered_at must not affect equality");
+    }
+
+    #[test]
+    fn spec_equality_detects_real_changes() {
+        let base = CronSpec {
+            schedule: "*/5 * * * *".into(),
+            prompt: "do stuff".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+        };
+        let changed_schedule = CronSpec {
+            schedule: "*/10 * * * *".into(),
+            ..base.clone()
+        };
+        let changed_prompt = CronSpec {
+            prompt: "different".into(),
+            ..base.clone()
+        };
+        let changed_budget = CronSpec {
+            max_budget_usd: 2.0,
+            ..base.clone()
+        };
+        assert_ne!(base, changed_schedule);
+        assert_ne!(base, changed_prompt);
+        assert_ne!(base, changed_budget);
     }
 
     #[test]

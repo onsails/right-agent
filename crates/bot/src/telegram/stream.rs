@@ -118,7 +118,6 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
 pub fn format_thinking_message(
     events: &VecDeque<StreamEvent>,
     usage: &StreamUsage,
-    max_turns: u32,
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
 
@@ -139,8 +138,8 @@ pub fn format_thinking_message(
         String::new()
     };
     lines.push(format!(
-        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{23f3} Turn {}/{}{}",
-        usage.num_turns, max_turns, cost_str
+        "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\n\u{23f3} Turn {}{}",
+        usage.num_turns, cost_str
     ));
 
     let msg = lines.join("\n");
@@ -300,8 +299,8 @@ mod tests {
         });
         events.push_back(StreamEvent::Text("checking files".into()));
         let usage = StreamUsage { num_turns: 2, cost_usd: 0.05 };
-        let msg = format_thinking_message(&events, &usage, 30);
-        assert!(msg.contains("Turn 2/30"));
+        let msg = format_thinking_message(&events, &usage);
+        assert!(msg.contains("Turn 2"));
         assert!(msg.contains("$0.05"));
         assert!(msg.contains("Bash <code>ls -la</code>"));
         assert!(msg.contains("\"checking files\""));
@@ -311,7 +310,7 @@ mod tests {
     fn format_thinking_message_empty() {
         let events = VecDeque::new();
         let usage = StreamUsage::default();
-        let msg = format_thinking_message(&events, &usage, 30);
+        let msg = format_thinking_message(&events, &usage);
         assert!(msg.contains("starting..."));
     }
 
@@ -329,7 +328,7 @@ mod tests {
         // StructuredOutput should be filtered out by format_event → not stored in ring buffer
         assert_eq!(buf.events().len(), 1);
         let usage = StreamUsage { num_turns: 3, cost_usd: 0.10 };
-        let msg = format_thinking_message(buf.events(), &usage, 30);
+        let msg = format_thinking_message(buf.events(), &usage);
         assert!(!msg.contains("StructuredOutput"));
         assert!(msg.contains("Bash"));
     }
@@ -340,7 +339,7 @@ mod tests {
         // Add a very long text event
         events.push_back(StreamEvent::Text("x".repeat(5000)));
         let usage = StreamUsage::default();
-        let msg = format_thinking_message(&events, &usage, 30);
+        let msg = format_thinking_message(&events, &usage);
         assert!(msg.chars().count() <= 4010); // 4000 + "...\n"
     }
 }

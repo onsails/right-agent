@@ -72,8 +72,6 @@ mod tests {
             env: std::collections::HashMap::new(),
             secret: None,
             attachments: Default::default(),
-            max_turns: 30,
-            max_budget_usd: 1.0,
             show_thinking: true,
         }
     }

@@ -23,6 +23,8 @@ Cron specs are stored in the agent database. The Rust runtime polls specs every 
 
 ## Creating a Cron Job
 
+**Always ask the user for `max_budget_usd` before creating or updating a job.** Do not silently use the default. Explain that this is the maximum dollar spend per invocation — Claude stops gracefully when the budget is reached. Suggest a value based on the task complexity (e.g. $0.30–$0.50 for simple checks, $1–$3 for multi-step research).
+
 Use the `mcp__right__cron_create` MCP tool:
 
 ```

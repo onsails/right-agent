@@ -66,8 +66,6 @@ pub async fn run_telegram(
     pending_auth: PendingAuthMap,
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
-    max_turns: u32,
-    max_budget_usd: f64,
     show_thinking: bool,
     model: Option<String>,
     shutdown: CancellationToken,
@@ -102,8 +100,6 @@ pub async fn run_telegram(
     ));
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
-        max_turns,
-        max_budget_usd,
         show_thinking,
         model,
     });

@@ -91,8 +91,6 @@ mod tests {
             secret: None,
             attachments: Default::default(),
             network_policy: Default::default(),
-            max_turns: 30,
-            max_budget_usd: 1.0,
             show_thinking: true,
         }
     }
