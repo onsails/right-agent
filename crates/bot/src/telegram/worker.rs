@@ -111,21 +111,7 @@ fn should_accept_bootstrap(agent_dir: &Path) -> bool {
 
 /// Strip HTML tags for plain-text fallback when Telegram rejects HTML.
 /// Also decodes common entities back to their characters.
-fn strip_html_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-}
+use super::markdown::strip_html_tags;
 
 /// Format a CC subprocess error as a Telegram message (D-16).
 ///
