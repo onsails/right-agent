@@ -236,7 +236,7 @@ pub async fn run_refresh_scheduler(
 
 /// Attempt token refresh with retries.
 /// Returns (updated_state, new_access_token).
-async fn do_refresh(
+pub async fn do_refresh(
     client: &reqwest::Client,
     entry: &OAuthServerState,
     max_retries: u32,
