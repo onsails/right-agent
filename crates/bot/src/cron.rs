@@ -112,6 +112,7 @@ async fn execute_job(
     agent_name: &str,
     model: Option<&str>,
     ssh_config_path: Option<&std::path::Path>,
+    internal_client: &rightclaw::mcp::internal_client::InternalClient,
 ) {
     use std::process::Stdio;
 
@@ -171,8 +172,6 @@ async fn execute_job(
         "claude".into(),
         "-p".into(),
         "--dangerously-skip-permissions".into(),
-        "--agent".into(),
-        agent_name.into(),
     ];
     if let Some(model) = model {
         claude_args.push("--model".into());
@@ -188,43 +187,74 @@ async fn execute_job(
     claude_args.push("--".into());
     claude_args.push(spec.prompt.clone());
 
+    // Derive sandbox_mode and home_dir from ssh_config_path (same as worker).
+    let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
+        (rightclaw::agent::types::SandboxMode::Openshell, "/sandbox".to_owned())
+    } else {
+        (rightclaw::agent::types::SandboxMode::None, agent_dir.to_string_lossy().into_owned())
+    };
+    let base_prompt = rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+
+    // Fetch MCP instructions from aggregator (non-fatal).
+    let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await {
+        Ok(resp) => {
+            if resp.instructions.trim().len() > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER.trim().len() {
+                Some(resp.instructions)
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            tracing::warn!(job = %job_name, "failed to fetch MCP instructions: {e:#}");
+            None
+        }
+    };
+
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
-        // Sandbox mode: route through SSH like deliver_through_session does.
-        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
-        let escaped_args: Vec<String> = claude_args
-            .iter()
-            .map(|a| shlex::try_quote(a).expect("valid UTF-8").into_owned())
-            .collect();
-        let claude_cmd = escaped_args.join(" ");
-        let mut script = String::new();
+        // Sandbox mode: assemble system prompt via shell script (same as worker).
+        let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            false,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &claude_args,
+            mcp_instructions.as_deref(),
+        );
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
-            script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
+            assembly_script = format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
-        script.push_str(&format!("cd /sandbox && {claude_cmd}"));
-
+        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
         c.arg("--");
-        c.arg(script);
+        c.arg(assembly_script);
         c
     } else {
-        // Direct exec (no sandbox).
-        let cc_bin = match which::which("claude").or_else(|_| which::which("claude-bun")) {
-            Ok(b) => b,
-            Err(_) => {
-                tracing::error!(job = %job_name, "claude binary not found in PATH");
-                update_run_record(&conn, &run_id, None, "failed");
-                std::fs::remove_file(&lock_path).ok();
-                return;
-            }
-        };
-        let mut c = tokio::process::Command::new(&cc_bin);
-        // Skip "claude" (first element) — it's the binary name for SSH mode.
-        for arg in &claude_args[1..] {
-            c.arg(arg);
+        // Direct exec (no sandbox): verify claude binary exists for clear error.
+        let agent_dir_str = agent_dir.to_string_lossy();
+        let prompt_path = agent_dir.join(".claude").join("cron-system-prompt.md");
+        let prompt_path_str = prompt_path.to_string_lossy();
+        let assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            false,
+            &agent_dir_str,
+            &prompt_path_str,
+            &agent_dir_str,
+            &claude_args,
+            mcp_instructions.as_deref(),
+        );
+        if which::which("claude").is_err() && which::which("claude-bun").is_err() {
+            tracing::error!(job = %job_name, "claude binary not found in PATH");
+            update_run_record(&conn, &run_id, None, "failed");
+            std::fs::remove_file(&lock_path).ok();
+            return;
         }
+        let mut c = tokio::process::Command::new("bash");
+        c.arg("-c");
+        c.arg(&assembly_script);
         c.env("HOME", agent_dir);
         // CC internal env var — "0" = skip bundled rg, use system rg from PATH (D-05, D-06, SBOX-02).
         // Counterintuitive: A_("0")=true means "builtin disabled" -> falls through to system rg.
@@ -529,6 +559,7 @@ pub async fn run_cron_task(
     agent_name: String,
     model: Option<String>,
     ssh_config_path: Option<std::path::PathBuf>,
+    internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
@@ -544,16 +575,16 @@ pub async fn run_cron_task(
     let execute_handles: ExecuteHandles = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut handles: HashMap<String, (CronSpec, JoinHandle<()>)> = HashMap::new();
     let mut triggered_handles: Vec<JoinHandle<()>> = Vec::new();
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &execute_handles);
+    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &execute_handles);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles);
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -627,6 +658,7 @@ fn reconcile_jobs(
     agent_name: &str,
     model: &Option<String>,
     ssh_config_path: &Option<std::path::PathBuf>,
+    internal_client: &Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
 ) {
     // Clean up finished triggered handles
@@ -665,9 +697,10 @@ fn reconcile_jobs(
         let job_model = model.clone();
         let job_ssh_config = ssh_config_path.clone();
         let job_execute_handles = Arc::clone(execute_handles);
+        let job_internal_client = Arc::clone(internal_client);
 
         let handle = tokio::spawn(async move {
-            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_execute_handles)
+            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles)
                 .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
@@ -696,10 +729,11 @@ fn reconcile_jobs(
             let an = agent_name.to_string();
             let md = model.clone();
             let sc = ssh_config_path.clone();
+            let ic = Arc::clone(internal_client);
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
-                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref()).await;
+                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic).await;
             });
             // Register for shutdown tracking
             if let Ok(mut guard) = execute_handles.lock() {
@@ -721,6 +755,7 @@ async fn run_job_loop(
     agent_name: String,
     model: Option<String>,
     ssh_config_path: Option<std::path::PathBuf>,
+    internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
 ) {
     use cron::Schedule;
@@ -756,8 +791,9 @@ async fn run_job_loop(
         let an = agent_name.clone();
         let md = model.clone();
         let sc = ssh_config_path.clone();
+        let ic = Arc::clone(&internal_client);
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref()).await;
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic).await;
         });
         // Register for shutdown tracking. Lock is brief — just a Vec push.
         if let Ok(mut guard) = execute_handles.lock() {
@@ -979,11 +1015,13 @@ mod tests {
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();
 
+        let ic = Arc::new(rightclaw::mcp::internal_client::InternalClient::new("/nonexistent.sock"));
         let cron_handle = tokio::spawn(run_cron_task(
             agent_dir,
             "test-agent".to_string(),
             None,
             None,
+            ic,
             shutdown_clone,
         ));
 
