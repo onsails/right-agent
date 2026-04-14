@@ -355,3 +355,20 @@ fn parse_telegram_tag(content: &str) -> Option<String> {
         _ => None,
     }
 }
+
+/// Strip HTML tags and unescape basic HTML entities.
+pub fn strip_html_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}

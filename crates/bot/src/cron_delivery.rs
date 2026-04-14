@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::OptionalExtension as _;
+use teloxide::payloads::SendMessageSetters as _;
 
 use crate::telegram::handler::IdleTimestamp;
 
@@ -470,9 +471,21 @@ async fn deliver_through_session(
 
     if let Some(ref content) = reply.content {
         use teloxide::prelude::Requester as _;
+        let html = crate::telegram::markdown::md_to_telegram_html(content);
+        let parts = crate::telegram::markdown::split_html_message(&html);
         for &cid in notify_chat_ids {
-            if let Err(e) = bot.send_message(teloxide::types::ChatId(cid), content).await {
-                tracing::error!(chat_id = cid, "cron delivery: Telegram send failed: {e:#}");
+            let chat_id = teloxide::types::ChatId(cid);
+            for part in &parts {
+                let send = bot
+                    .send_message(chat_id, part)
+                    .parse_mode(teloxide::types::ParseMode::Html);
+                if let Err(e) = send.await {
+                    tracing::warn!(chat_id = cid, "cron delivery: HTML send failed, retrying plain: {e:#}");
+                    let plain = crate::telegram::markdown::strip_html_tags(part);
+                    if let Err(e2) = bot.send_message(chat_id, &plain).await {
+                        tracing::error!(chat_id = cid, "cron delivery: plain text fallback also failed: {e2:#}");
+                    }
+                }
             }
         }
     }
