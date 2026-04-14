@@ -35,7 +35,6 @@ processes:
       - RC_SANDBOX_MODE=none
 {% endif %}
       - ENABLE_CLAUDEAI_MCP_SERVERS=false
-      - MCP_CONNECTION_NONBLOCKING=1
       - RC_PC_PORT={{ pc_port }}
     availability:
       restart: "{{ agent.restart_policy }}"
