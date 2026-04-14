@@ -1,12 +1,14 @@
-//! SSH exec-based Claude login flow.
+//! PTY-based Claude login flow via Python helper inside sandbox.
 //!
-//! Spawns `claude auth login` via SSH into the sandbox, parses the OAuth URL
-//! and state from stdout, discovers the callback port via `ss -tlnp`, then
-//! submits the auth code via `curl` to the local callback server.
+//! Spawns a Python script via SSH that uses `pty.fork()` to drive
+//! `claude auth login` interactively. The helper outputs structured
+//! lines (URL:, READY, OK, ERROR:) on stdout and reads the auth code
+//! from stdin. This avoids all issues with callback servers, port
+//! discovery, and redirect_uri mismatches.
 
 use std::path::Path;
 
-use tokio::io::AsyncBufReadExt as _;
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
 
 /// Messages sent from the login task to the auth watcher.
@@ -22,16 +24,121 @@ pub enum LoginEvent {
     Error(String),
 }
 
-/// Holds the running `claude auth login` SSH process and extracted OAuth state.
-struct AuthSession {
-    url: String,
-    state: String,
-    child: tokio::process::Child,
-    /// Keep stdout pipe alive so the SSH process doesn't get SIGPIPE.
-    _stdout: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-}
+/// Python helper script executed inside the sandbox via SSH.
+///
+/// Protocol (stdout lines):
+///   URL:<oauth_url>    — OAuth URL extracted
+///   READY              — waiting for code on stdin
+///   OK                 — login succeeded
+///   ERROR:<message>    — login failed
+const PTY_HELPER: &str = r##"
+import pty, os, sys, time, select, signal
 
-/// Orchestrate the Claude login flow via SSH exec and local HTTP callback.
+pid, master_fd = pty.fork()
+if pid == 0:
+    os.execvp("claude", ["claude", "auth", "login"])
+    sys.exit(1)
+
+# Read URL from PTY output
+output = b""
+start = time.time()
+url = None
+while time.time() - start < 30:
+    r, _, _ = select.select([master_fd], [], [], 0.5)
+    if r:
+        try:
+            chunk = os.read(master_fd, 4096)
+            if chunk:
+                output += chunk
+        except OSError:
+            break
+    decoded = output.decode("utf-8", errors="replace")
+    if "code_challenge" in decoded:
+        for line in decoded.splitlines():
+            if "https://" in line:
+                idx = line.find("https://")
+                url = line[idx:].strip()
+                break
+        break
+
+if not url:
+    print("ERROR:no OAuth URL found in claude auth login output", flush=True)
+    os.kill(pid, signal.SIGTERM)
+    os.waitpid(pid, 0)
+    sys.exit(1)
+
+print(f"URL:{url}", flush=True)
+print("READY", flush=True)
+
+# Read code from stdin (blocking)
+try:
+    code = sys.stdin.readline().strip()
+except EOFError:
+    print("ERROR:stdin closed before code received", flush=True)
+    os.kill(pid, signal.SIGTERM)
+    os.waitpid(pid, 0)
+    sys.exit(1)
+
+if not code:
+    print("ERROR:empty code received", flush=True)
+    os.kill(pid, signal.SIGTERM)
+    os.waitpid(pid, 0)
+    sys.exit(1)
+
+# Strip #STATE suffix if present (platform.claude.com shows CODE#STATE)
+code = code.split("#")[0]
+
+# Type code into PTY
+os.write(master_fd, code.encode() + b"\r")
+
+# Wait for result (up to 30s)
+result = b""
+start = time.time()
+while time.time() - start < 30:
+    r, _, _ = select.select([master_fd], [], [], 1)
+    if r:
+        try:
+            chunk = os.read(master_fd, 4096)
+            if chunk:
+                result += chunk
+        except OSError:
+            break
+    # Check if child exited
+    try:
+        wpid, status = os.waitpid(pid, os.WNOHANG)
+        if wpid != 0:
+            break
+    except ChildProcessError:
+        break
+
+decoded = result.decode("utf-8", errors="replace").lower()
+if "success" in decoded or "logged in" in decoded or "authenticated" in decoded:
+    print("OK", flush=True)
+else:
+    # Check exit status
+    try:
+        _, status = os.waitpid(pid, 0)
+        exit_code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
+    except ChildProcessError:
+        exit_code = -1
+    if exit_code == 0:
+        print("OK", flush=True)
+    else:
+        # Include first 200 chars of output for debugging
+        snippet = result.decode("utf-8", errors="replace").strip()[:200]
+        print(f"ERROR:exit code {exit_code}: {snippet}", flush=True)
+
+try:
+    os.kill(pid, signal.SIGTERM)
+except ProcessLookupError:
+    pass
+try:
+    os.waitpid(pid, 0)
+except ChildProcessError:
+    pass
+"##;
+
+/// Orchestrate the Claude login flow via Python PTY helper inside sandbox.
 ///
 /// Communicates via channels:
 /// - `event_tx`: sends `LoginEvent`s to the async orchestrator
@@ -43,321 +150,93 @@ pub async fn run_login(
     code_rx: oneshot::Receiver<String>,
 ) {
     let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+    tracing::info!(agent = agent_name, "login: starting PTY helper via SSH");
 
-    // Step 1: Snapshot baseline ports before starting auth
-    let baseline_ports = match get_listen_ports(ssh_config_path, &ssh_host).await {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = event_tx
-                .send(LoginEvent::Error(format!("failed to get baseline ports: {e:#}")))
-                .await;
-            return;
-        }
-    };
-    tracing::info!(agent = agent_name, ?baseline_ports, "login: baseline ports snapshot");
-
-    // Step 2: Start auth session, extract URL and state
-    let mut auth_session = match start_auth_session(ssh_config_path, &ssh_host, agent_name).await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = event_tx
-                .send(LoginEvent::Error(format!(
-                    "failed to start auth session: {e:#}"
-                )))
-                .await;
-            return;
-        }
-    };
-
-    // Step 3: Send URL to caller
-    let _ = event_tx.send(LoginEvent::Url(auth_session.url.clone())).await;
-
-    // Step 4: Discover callback port by diffing against baseline
-    let port = match discover_new_port(ssh_config_path, &ssh_host, agent_name, &baseline_ports).await {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = event_tx
-                .send(LoginEvent::Error(format!(
-                    "failed to discover callback port: {e:#}"
-                )))
-                .await;
-            return;
-        }
-    };
-
-    // Step 4: Signal waiting for code
-    let _ = event_tx.send(LoginEvent::WaitingForCode).await;
-
-    // Step 5: Wait for auth code from Telegram, monitoring child liveness
-    tracing::info!(agent = agent_name, "login: waiting for auth code from Telegram");
-    let code = tokio::select! {
-        result = code_rx => {
-            match result {
-                Ok(c) => c,
-                Err(_) => {
-                    let _ = event_tx
-                        .send(LoginEvent::Error("auth code channel closed (timeout?)".into()))
-                        .await;
-                    return;
-                }
-            }
-        }
-        status = auth_session.child.wait() => {
-            let exit = status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-            tracing::error!(agent = agent_name, exit = %exit, "login: auth process died while waiting for code");
-            let _ = event_tx
-                .send(LoginEvent::Error(format!("auth process died while waiting for code: {exit}")))
-                .await;
-            return;
-        }
-    };
-
-    // Step 6: Submit auth code and wait for process exit
-    match submit_auth_code(
-        ssh_config_path,
-        &ssh_host,
-        agent_name,
-        port,
-        &code,
-        &auth_session.state,
-        &mut auth_session.child,
-    )
-    .await
-    {
-        Ok(()) => {
-            let _ = event_tx.send(LoginEvent::Done).await;
-        }
-        Err(e) => {
-            let _ = event_tx
-                .send(LoginEvent::Error(format!("auth code submission failed: {e:#}")))
-                .await;
-        }
-    }
-}
-
-/// Start `claude auth login` via SSH, read stdout until the OAuth URL appears.
-///
-/// Returns the extracted URL, OAuth state parameter, and the running child process.
-async fn start_auth_session(
-    ssh_config_path: &Path,
-    ssh_host: &str,
-    agent_name: &str,
-) -> Result<AuthSession, miette::Report> {
-    tracing::info!(agent = agent_name, "login: spawning claude auth login via SSH");
-
-    let mut child = tokio::process::Command::new("ssh")
+    // Spawn SSH with Python PTY helper — stdin/stdout piped for communication
+    let mut child = match tokio::process::Command::new("ssh")
         .arg("-F")
         .arg(ssh_config_path)
-        .arg(ssh_host)
+        .arg(&ssh_host)
         .arg("--")
-        .arg("claude auth login")
+        .arg(format!("python3 -c {}", shell_escape(PTY_HELPER)))
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .stdin(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| miette::miette!("failed to spawn SSH for auth: {e}"))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| miette::miette!("no stdout from SSH process"))?;
-
-    let mut reader = tokio::io::BufReader::new(stdout).lines();
-
-    let url = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        while let Some(line) = reader
-            .next_line()
-            .await
-            .map_err(|e| miette::miette!("reading stdout: {e}"))?
-        {
-            let clean = strip_ansi(&line);
-            tracing::debug!(agent = agent_name, line = %clean, "login: auth session stdout");
-            if clean.contains("https://") && clean.contains("code_challenge") {
-                return Ok::<String, miette::Report>(extract_url_from_text(&clean));
-            }
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = event_tx
+                .send(LoginEvent::Error(format!("failed to spawn SSH: {e:#}")))
+                .await;
+            return;
         }
-        Err(miette::miette!(
-            "SSH process exited without producing OAuth URL"
-        ))
-    })
-    .await
-    .map_err(|_| miette::miette!("timed out waiting for OAuth URL (30s)"))??;
+    };
 
-    let state = extract_state_param(&url)
-        .ok_or_else(|| miette::miette!("no state parameter in OAuth URL: {url}"))?;
+    let stdout = child.stdout.take().expect("stdout piped");
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut code_rx = Some(code_rx);
 
-    tracing::info!(agent = agent_name, url_len = url.len(), state = %state, "login: OAuth URL extracted");
+    // Read lines from helper, drive the flow
+    let timeout = std::time::Duration::from_secs(300); // 5 min total
+    let result = tokio::time::timeout(timeout, async {
+        while let Some(line) = lines.next_line().await.map_err(|e| format!("reading stdout: {e}"))? {
+            let line = line.trim().to_string();
+            tracing::info!(agent = agent_name, line = %line, "login: helper output");
 
-    Ok(AuthSession { url, state, child, _stdout: reader })
-}
+            if let Some(url) = line.strip_prefix("URL:") {
+                let _ = event_tx.send(LoginEvent::Url(url.to_string())).await;
+            } else if line == "READY" {
+                let _ = event_tx.send(LoginEvent::WaitingForCode).await;
 
-/// Get all LISTEN ports inside the sandbox via `ss -tln`.
-async fn get_listen_ports(ssh_config_path: &Path, ssh_host: &str) -> Result<Vec<u16>, miette::Report> {
-    let output = rightclaw::openshell::ssh_exec(ssh_config_path, ssh_host, &["ss", "-tln"], 10)
-        .await
-        .map_err(|e| miette::miette!("ss -tln failed: {e}"))?;
-    Ok(parse_listen_ports(&output))
-}
-
-/// Discover the callback port by comparing current LISTEN ports against a
-/// baseline snapshot taken before `claude auth login` was started.
-///
-/// Polls up to 5 times with 1s delays. Any port present now but absent from
-/// the baseline must have been opened by `claude auth login`.
-async fn discover_new_port(
-    ssh_config_path: &Path,
-    ssh_host: &str,
-    agent_name: &str,
-    baseline: &[u16],
-) -> Result<u16, miette::Report> {
-    for attempt in 1..=5 {
-        match get_listen_ports(ssh_config_path, ssh_host).await {
-            Ok(current) => {
-                let new_ports = diff_ports(&current, baseline);
-                tracing::info!(agent = agent_name, attempt, ?current, ?new_ports, "login: port diff");
-                if let Some(&port) = new_ports.first() {
-                    tracing::info!(agent = agent_name, port, "login: discovered callback port");
-                    return Ok(port);
-                }
-            }
-            Err(e) => {
-                tracing::debug!(agent = agent_name, attempt, error = %e, "login: ss failed");
-            }
-        }
-        if attempt < 5 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    }
-    Err(miette::miette!(
-        "no new ports appeared after starting claude auth login"
-    ))
-}
-
-/// Return ports present in `current` but not in `baseline`.
-pub fn diff_ports(current: &[u16], baseline: &[u16]) -> Vec<u16> {
-    current.iter().copied().filter(|p| !baseline.contains(p)).collect()
-}
-
-/// Submit the auth code to the callback server and wait for the process to exit.
-async fn submit_auth_code(
-    ssh_config_path: &Path,
-    ssh_host: &str,
-    agent_name: &str,
-    port: u16,
-    code: &str,
-    state: &str,
-    child: &mut tokio::process::Child,
-) -> Result<(), miette::Report> {
-    // The code from platform.claude.com is formatted as CODE#STATE.
-    // Strip the #STATE suffix — we already have state from the URL.
-    let code_only = code.split('#').next().unwrap_or(code);
-    tracing::info!(agent = agent_name, raw_code_len = code.len(), code_only_len = code_only.len(), "login: stripped code");
-    let encoded_code = urlencoding::encode(code_only);
-    let encoded_state = urlencoding::encode(state);
-    let callback_url = format!(
-        "http://localhost:{port}/callback?code={encoded_code}&state={encoded_state}"
-    );
-
-    // Check if auth process is still alive before submitting
-    let child_alive = child.try_wait().map_or(true, |s| s.is_none());
-    tracing::info!(
-        agent = agent_name,
-        port,
-        child_alive,
-        callback_url = %callback_url,
-        code_len = code.len(),
-        "login: submitting auth code via curl"
-    );
-
-    // First check if the port is still listening
-    let port_check = rightclaw::openshell::ssh_exec(
-        ssh_config_path,
-        ssh_host,
-        &["ss", "-tln"],
-        5,
-    )
-    .await;
-    tracing::info!(
-        agent = agent_name,
-        ss_output = %port_check.as_deref().unwrap_or("FAILED"),
-        "login: port check before curl"
-    );
-
-    // Shell-quote the URL to prevent & being interpreted as background operator.
-    // ssh_exec concatenates args into a remote shell command, so & in the URL
-    // would split the command.
-    let quoted_url = format!("'{callback_url}'");
-    let curl_cmd = format!("curl -s -o /dev/null -w %{{http_code}} {quoted_url}");
-    let output = rightclaw::openshell::ssh_exec(
-        ssh_config_path,
-        ssh_host,
-        &[&curl_cmd],
-        30,
-    )
-    .await
-    .map_err(|e| miette::miette!("curl callback failed: {e:#}"))?;
-
-    let status_code = output.trim();
-    tracing::info!(agent = agent_name, status = %status_code, "login: callback HTTP status");
-
-    if status_code != "302" && status_code != "200" {
-        return Err(miette::miette!(
-            "callback returned unexpected HTTP status: {status_code}"
-        ));
-    }
-
-    // Wait for claude auth login process to exit (success confirmation)
-    let exit = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait())
-        .await
-        .map_err(|_| miette::miette!("timed out waiting for claude auth login to exit (30s)"))?
-        .map_err(|e| miette::miette!("waiting for process exit: {e}"))?;
-
-    if exit.success() {
-        tracing::info!(agent = agent_name, "login: claude auth login exited successfully");
-        Ok(())
-    } else {
-        Err(miette::miette!(
-            "claude auth login exited with status: {exit}"
-        ))
-    }
-}
-
-/// Extract the `state` query parameter from an OAuth URL.
-pub fn extract_state_param(url: &str) -> Option<String> {
-    let query = url.split('?').nth(1)?;
-    for pair in query.split('&') {
-        if let Some(value) = pair.strip_prefix("state=") {
-            return Some(value.to_owned());
-        }
-    }
-    None
-}
-
-/// Extract all LISTEN ports from `ss -tln` output.
-///
-/// Parses lines like:
-/// ```text
-/// LISTEN 0  512  [::1]:36275  [::]:*
-/// LISTEN 0  512  127.0.0.1:42000  0.0.0.0:*
-/// ```
-pub fn parse_listen_ports(ss_output: &str) -> Vec<u16> {
-    let mut ports = Vec::new();
-    for line in ss_output.lines() {
-        if !line.contains("LISTEN") {
-            continue;
-        }
-        // The 4th whitespace-separated field is Local Address:Port
-        if let Some(addr) = line.split_whitespace().nth(3) {
-            if let Some(port_str) = addr.rsplit(':').next() {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    if port > 0 {
-                        ports.push(port);
+                // Wait for auth code from Telegram (one-shot)
+                let rx = code_rx.take().ok_or_else(|| "code_rx already consumed".to_string())?;
+                tracing::info!(agent = agent_name, "login: waiting for auth code from Telegram");
+                let code = match rx.await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return Err("auth code channel closed (timeout?)".to_string());
                     }
-                }
+                };
+
+                // Send code to helper via stdin
+                tracing::info!(agent = agent_name, code_len = code.len(), "login: sending code to helper");
+                stdin
+                    .write_all(format!("{code}\n").as_bytes())
+                    .await
+                    .map_err(|e| format!("writing code to stdin: {e}"))?;
+                stdin.flush().await.map_err(|e| format!("flushing stdin: {e}"))?;
+            } else if line == "OK" {
+                let _ = event_tx.send(LoginEvent::Done).await;
+                return Ok(());
+            } else if let Some(msg) = line.strip_prefix("ERROR:") {
+                return Err(msg.to_string());
             }
         }
+        Err("helper exited without result".to_string())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {} // Done already sent
+        Ok(Err(msg)) => {
+            let _ = event_tx.send(LoginEvent::Error(msg)).await;
+        }
+        Err(_) => {
+            let _ = event_tx
+                .send(LoginEvent::Error("login timed out after 5 minutes".into()))
+                .await;
+        }
     }
-    ports
+
+    let _ = child.kill().await;
+}
+
+/// Shell-escape a string for use as a single argument in a remote shell command.
+/// Wraps in single quotes, escaping any embedded single quotes.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Extract the first `https://` URL from text that may contain surrounding content.
@@ -373,6 +252,46 @@ pub fn extract_url_from_text(text: &str) -> String {
     }
 }
 
+/// Extract the `state` query parameter from an OAuth URL.
+pub fn extract_state_param(url: &str) -> Option<String> {
+    let query = url.split('?').nth(1)?;
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix("state=") {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+/// Extract all LISTEN ports from `ss -tln` output.
+pub fn parse_listen_ports(ss_output: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in ss_output.lines() {
+        if !line.contains("LISTEN") {
+            continue;
+        }
+        if let Some(addr) = line.split_whitespace().nth(3) {
+            if let Some(port_str) = addr.rsplit(':').next() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if port > 0 {
+                        ports.push(port);
+                    }
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Return ports present in `current` but not in `baseline`.
+pub fn diff_ports(current: &[u16], baseline: &[u16]) -> Vec<u16> {
+    current
+        .iter()
+        .copied()
+        .filter(|p| !baseline.contains(p))
+        .collect()
+}
+
 /// Strip ANSI escape sequences from a string.
 pub fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -385,7 +304,6 @@ pub fn strip_ansi(s: &str) -> String {
         }
         if in_escape {
             if c == '[' {
-                // CSI sequence -- consume until letter
                 while let Some(&next) = chars.peek() {
                     chars.next();
                     if next.is_ascii_alphabetic() {
@@ -498,5 +416,20 @@ LISTEN 0      512            [::1]:44901         [::]:*    users:((\"node\",pid=
         let baseline = vec![8080];
         let current = vec![8080, 42561, 43000];
         assert_eq!(diff_ports(&current, &baseline), vec![42561, 43000]);
+    }
+
+    #[test]
+    fn shell_escape_simple() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn shell_escape_with_quotes() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_escape_with_special_chars() {
+        assert_eq!(shell_escape("a & b | c"), "'a & b | c'");
     }
 }
