@@ -789,7 +789,7 @@ async fn handle_mcp_add(
         // OAuth server — register without auth, tell user to run /mcp auth
         tracing::info!(agent = agent_name, server = name, url = %bare_url, "mcp add: registering OAuth server via internal API");
         match internal
-            .mcp_add(agent_name, name, &bare_url, None, None, None)
+            .mcp_add(agent_name, name, &bare_url, Some("oauth"), None, None)
             .await
         {
             Ok(resp) => {
@@ -804,7 +804,9 @@ async fn handle_mcp_add(
                 send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
             }
             Err(e) => {
-                send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}"))
+                tracing::warn!(server = name, err = %format!("{e:#}"), "mcp add: internal API registration failed");
+                let escaped_err = super::markdown::html_escape(&format!("{e:#}"));
+                send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {escaped_err}"))
                     .await?;
             }
         }
