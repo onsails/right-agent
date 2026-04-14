@@ -30,7 +30,9 @@ pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"conte
 ///
 /// `summary` is always required. `notify` is null when the cron ran silently
 /// (no user notification needed). When `notify` is present, `content` is required.
-pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"type":["object","null"],"properties":{"content":{"type":"string"},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]},"summary":{"type":"string"}},"required":["summary"]}"#;
+/// `no_notify_reason` is required when `notify` is null — a short factual explanation
+/// of why there is nothing to report (e.g. "No changes since last run").
+pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"type":["object","null"],"properties":{"content":{"type":"string"},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]},"summary":{"type":"string"},"no_notify_reason":{"type":["string","null"]}},"required":["summary"]}"#;
 
 /// Generate the base system prompt for all agent modes.
 ///

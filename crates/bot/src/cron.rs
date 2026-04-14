@@ -34,6 +34,7 @@ pub enum CronError {
 pub struct CronReplyOutput {
     pub notify: Option<CronNotify>,
     pub summary: String,
+    pub no_notify_reason: Option<String>,
 }
 
 /// User-facing notification from a cron job.
@@ -903,6 +904,27 @@ mod tests {
         let out = parse_cron_output(&lines).unwrap();
         assert!(out.notify.is_none());
         assert_eq!(out.summary, "Nothing interesting");
+    }
+
+    #[test]
+    fn parse_cron_output_silent_with_reason() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":null,"summary":"Nothing interesting","no_notify_reason":"No changes since last run"}}"#.to_string(),
+        ];
+        let out = parse_cron_output(&lines).unwrap();
+        assert!(out.notify.is_none());
+        assert_eq!(out.summary, "Nothing interesting");
+        assert_eq!(out.no_notify_reason.as_deref(), Some("No changes since last run"));
+    }
+
+    #[test]
+    fn parse_cron_output_notify_present_no_reason() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":{"content":"BTC broke 100k"},"summary":"Checked pairs","no_notify_reason":null}}"#.to_string(),
+        ];
+        let out = parse_cron_output(&lines).unwrap();
+        assert!(out.notify.is_some());
+        assert!(out.no_notify_reason.is_none());
     }
 
     #[test]
