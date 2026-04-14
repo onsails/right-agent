@@ -92,7 +92,11 @@ pub async fn run_refresh_scheduler(
     agent_dir: std::path::PathBuf,
     mut rx: tokio::sync::mpsc::Receiver<RefreshMessage>,
 ) {
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Start with empty state — callers send NewEntry messages for all OAuth servers.
     // This avoids a race where a DB-loaded timer fires before the NewEntry arrives,

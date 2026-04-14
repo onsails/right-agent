@@ -533,30 +533,35 @@ async fn main() -> miette::Result<()> {
                     refresh_rx,
                 ));
 
-                // Send NewEntry for OAuth servers that have a refresh_token.
-                for (name, state, token_arc) in &oauth_entries {
-                    if state.refresh_token.is_some() {
-                        let msg = rightclaw::mcp::refresh::RefreshMessage::NewEntry {
-                            server_name: name.clone(),
-                            state: state.clone(),
-                            token: token_arc.clone(),
-                        };
-                        if let Err(e) = refresh_tx.send(msg).await {
-                            tracing::warn!(
-                                agent = agent_name.as_str(),
-                                server = name.as_str(),
-                                "failed to send refresh entry: {e:#}",
-                            );
-                        }
-                    }
-                }
-
-                // Spawn background reconnect tasks (fire-and-forget).
+                // Build oauth_map for reconnect loop.
                 let oauth_map: std::collections::HashMap<String, _> = oauth_entries
                     .into_iter()
                     .map(|(name, state, token_arc)| (name, (state, token_arc)))
                     .collect();
 
+                // Send NewEntry only for non-expired OAuth servers. Expired tokens
+                // are handled by the reconnect task which sends NewEntry after refresh.
+                for (name, (state, token_arc)) in &oauth_map {
+                    if state.refresh_token.is_some() {
+                        let due_in = rightclaw::mcp::refresh::refresh_due_in(state);
+                        if due_in > std::time::Duration::ZERO {
+                            let msg = rightclaw::mcp::refresh::RefreshMessage::NewEntry {
+                                server_name: name.clone(),
+                                state: state.clone(),
+                                token: token_arc.clone(),
+                            };
+                            if let Err(e) = refresh_tx.send(msg).await {
+                                tracing::warn!(
+                                    agent = agent_name.as_str(),
+                                    server = name.as_str(),
+                                    "failed to send refresh entry: {e:#}",
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Spawn background reconnect tasks (fire-and-forget).
                 for (server_name, backend) in proxies_snapshot {
                     let http = http_client.clone();
                     let agent_name_owned = agent_name.clone();
@@ -571,23 +576,33 @@ async fn main() -> miette::Result<()> {
                                 let state = oauth_state.clone();
                                 let tok = token_arc.clone();
                                 let ad = agent_dir_owned.clone();
+                                let rtx = refresh_tx.clone();
+                                let sn = server_name.clone();
                                 tokio::spawn(async move {
                                     match rightclaw::mcp::refresh::do_refresh(&http, &state, 3).await {
                                         Ok((new_state, access_token)) => {
                                             *tok.write().await = Some(access_token.clone());
                                             // Persist to SQLite.
                                             if let Ok(conn) = rightclaw::memory::open_connection(&ad) {
-                                                let _ = rightclaw::mcp::credentials::db_update_oauth_token(
+                                                if let Err(e) = rightclaw::mcp::credentials::db_update_oauth_token(
                                                     &conn,
-                                                    &server_name,
+                                                    &sn,
                                                     &access_token,
                                                     &new_state.expires_at.to_rfc3339(),
-                                                );
+                                                ) {
+                                                    tracing::warn!(server = sn.as_str(), "failed to persist refreshed token: {e:#}");
+                                                }
                                             }
+                                            // Register with scheduler using updated state.
+                                            let _ = rtx.send(rightclaw::mcp::refresh::RefreshMessage::NewEntry {
+                                                server_name: sn.clone(),
+                                                state: new_state,
+                                                token: tok.clone(),
+                                            }).await;
                                             if let Err(e) = backend.connect(http.clone()).await {
                                                 tracing::warn!(
                                                     agent = agent_name_owned.as_str(),
-                                                    server = server_name.as_str(),
+                                                    server = sn.as_str(),
                                                     "reconnect after refresh failed: {e:#}",
                                                 );
                                             }
@@ -595,7 +610,7 @@ async fn main() -> miette::Result<()> {
                                         Err(e) => {
                                             tracing::warn!(
                                                 agent = agent_name_owned.as_str(),
-                                                server = server_name.as_str(),
+                                                server = sn.as_str(),
                                                 "token refresh failed: {e:#}",
                                             );
                                             backend.set_status(
