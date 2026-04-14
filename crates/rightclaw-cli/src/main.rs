@@ -2165,7 +2165,11 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     let sandbox_mode = agent.config.as_ref()
         .map(|c| c.sandbox_mode().clone())
         .unwrap_or_default();
-    let base_prompt = rightclaw::codegen::generate_system_prompt(&agent.name, &sandbox_mode);
+    let base_prompt = rightclaw::codegen::generate_system_prompt(
+        &agent.name,
+        &sandbox_mode,
+        &agent.path.to_string_lossy(),
+    );
     let mut prompt = base_prompt;
     prompt.push_str("\n## Operating Instructions\n");
     prompt.push_str(rightclaw::codegen::OPERATING_INSTRUCTIONS);

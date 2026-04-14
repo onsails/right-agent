@@ -853,13 +853,15 @@ async fn invoke_cc(
 
     // Generate base system prompt (identity-neutral — no agent name to avoid
     // contradicting IDENTITY.md which the agent may have customized).
+    let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
+        (rightclaw::agent::types::SandboxMode::Openshell, "/sandbox".to_owned())
+    } else {
+        (rightclaw::agent::types::SandboxMode::None, ctx.agent_dir.to_string_lossy().into_owned())
+    };
     let base_prompt = rightclaw::codegen::generate_system_prompt(
         &ctx.agent_name,
-        &if ctx.ssh_config_path.is_some() {
-            rightclaw::agent::types::SandboxMode::Openshell
-        } else {
-            rightclaw::agent::types::SandboxMode::None
-        },
+        &sandbox_mode,
+        &home_dir,
     );
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
