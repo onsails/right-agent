@@ -30,14 +30,18 @@ pub enum LoginEvent {
 /// Communicates via channels:
 /// - `event_tx`: sends `LoginEvent`s to the orchestrator
 /// - `token_rx`: receives the token string from the Telegram handler
+///
+/// `agent_dir` is the agent directory (memory.db lives inside it).
 pub async fn request_token(
-    db_path: &Path,
+    agent_dir: &Path,
     agent_name: &str,
     event_tx: mpsc::Sender<LoginEvent>,
     token_rx: oneshot::Receiver<String>,
 ) {
+    let db_path = agent_dir.join("memory.db");
+
     // Delete stale token if present
-    match open_db_and_delete_stale(db_path) {
+    match open_db_and_delete_stale(&db_path) {
         Ok(()) => {}
         Err(e) => {
             let _ = event_tx.send(LoginEvent::Error(format!("DB error: {e}"))).await;
@@ -63,7 +67,7 @@ pub async fn request_token(
     tracing::info!(agent = agent_name, token_len = token.len(), "login: received token, saving");
 
     // Save token
-    match save_token(db_path, &token) {
+    match save_token(&db_path, &token) {
         Ok(()) => {
             let _ = event_tx.send(LoginEvent::Done).await;
         }
@@ -92,8 +96,10 @@ fn save_token(db_path: &Path, token: &str) -> Result<(), String> {
 }
 
 /// Read the auth token from DB, if any.
-pub fn load_auth_token(db_path: &Path) -> Option<String> {
-    let conn = rusqlite::Connection::open(db_path).ok()?;
+///
+/// `agent_dir` is the agent directory (memory.db lives inside it).
+pub fn load_auth_token(agent_dir: &Path) -> Option<String> {
+    let conn = rusqlite::Connection::open(agent_dir.join("memory.db")).ok()?;
     rightclaw::memory::store::get_auth_token(&conn).ok().flatten()
 }
 
