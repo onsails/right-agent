@@ -24,7 +24,7 @@ RULES:
 
 ## Files to Create
 
-Write all three files in your current working directory using the Write tool.
+Write all three files in your home directory using the Write tool.
 Do NOT create them inside `.claude/`, `.claude/agents/`, or any subdirectory.
 
 ### IDENTITY.md

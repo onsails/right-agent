@@ -91,9 +91,11 @@ messages:
 
 Use the Read tool to view images and files at the given paths.
 
+Attachments are downloaded to the inbox/ directory in your home directory.
+
 ## Sending Attachments
 
-Write files to /sandbox/outbox/ (or the outbox/ directory in your working directory).
+Write files to the outbox/ directory in your home directory.
 Include them in your JSON response under the `attachments` array.
 
 Size limits enforced by the bot:
