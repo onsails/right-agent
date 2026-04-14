@@ -217,6 +217,26 @@ async fn handle_mcp_add(
     );
     let handle = Arc::new(backend);
 
+    // Skip connection for OAuth servers without a token — they need /mcp auth first.
+    let skip_connect = req.auth_type.as_deref() == Some("oauth") && req.auth_token.is_none();
+
+    if skip_connect {
+        tracing::info!(server = %req.name, "mcp-add: OAuth server registered (skipping connect — no token yet)");
+        {
+            let mut proxies = proxies_lock.write().await;
+            proxies.insert(req.name.clone(), Arc::clone(&handle));
+        }
+        return (
+            StatusCode::OK,
+            Json(McpAddResponse {
+                tools_count: 0,
+                excluded: Vec::new(),
+                warning: Some("OAuth server registered. Run /mcp auth to authenticate.".into()),
+            }),
+        )
+            .into_response();
+    }
+
     // Attempt connection (with timeout to prevent hanging on slow upstreams)
     tracing::info!(server = %req.name, url = %req.url, "mcp-add: connecting to upstream MCP server");
     let connect_client = reqwest::Client::builder()
