@@ -69,7 +69,7 @@ src/
 
 ```
 src/
-├── lib.rs              # Entry: resolve agent dir, open memory.db, sandbox lifecycle, start teloxide
+├── lib.rs              # Entry: resolve agent dir, open data.db, sandbox lifecycle, start teloxide
 ├── telegram/
 │   ├── attachments.rs  # Attachment extraction, download/upload, send, cleanup, YAML formatting
 │   ├── mod.rs          # Token resolution (env > file > yaml)
@@ -80,7 +80,7 @@ src/
 │   ├── session.rs      # telegram_sessions table (chat_id, thread_id, uuid)
 │   ├── filter.rs       # Allowed chat ID enforcement
 │   └── oauth_callback.rs  # Axum OAuth redirect server
-├── login.rs            # PTY-driven Claude login flow (expectrl) — menu navigation, URL extraction, code submission
+├── login.rs            # Token-based Claude login flow — setup-token request, DB persistence, env var injection
 ├── sync.rs             # Background file sync: settings, schema, skills, .claude.json verification
 ├── cron.rs             # Cron engine: load specs from cron_specs table, lock check, invoke CC, persist results
 ├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery, cleanup
@@ -120,12 +120,12 @@ rightclaw up [--agents x,y] [--detach] [--no-sandbox]
   └─ Launch process-compose (TUI or detached)
 
 rightclaw bot --agent <name>  (spawned by process-compose)
-  ├─ Resolve token, open memory.db
+  ├─ Resolve token, open data.db
   ├─ Per-agent codegen:
   │   ├─ settings.json, schemas
   │   ├─ .claude.json, credentials symlink, mcp.json
   │   ├─ TOOLS.md, skills install, policy.yaml
-  │   └─ memory.db init, git init, secret generation
+  │   └─ data.db init, git init, secret generation
   ├─ Clear Telegram webhook, verify bot identity
   ├─ Sandbox lifecycle:
   │   ├─ Check if sandbox exists via gRPC → reuse with policy hot-reload
@@ -138,7 +138,7 @@ rightclaw bot --agent <name>  (spawned by process-compose)
 
 Per message:
   ├─ Extract text + attachments from Telegram message
-  ├─ Check if login flow waiting for auth code → forward to PTY
+  ├─ Check if token request waiting for auth token → forward to intercept slot
   ├─ Route to worker task via DashMap<(chat_id, thread_id), Sender>
   ├─ Worker: debounce 500ms → download attachments → upload to sandbox inbox
   ├─ Format input: single text → raw string, multi/attachments → YAML
@@ -196,24 +196,24 @@ Platform store (/platform/ inside sandbox):
   └─ GC removes stale entries after each sync cycle
 ```
 
-### Login Flow (PTY-driven)
+### Login Flow (setup-token)
 
-When `claude -p` returns 403/401 (no credentials in sandbox):
+When `claude -p` returns 403/401 (auth error):
 
 ```
 1. is_auth_error() detects auth failure in CC JSON output
-2. spawn_auth_watcher() — tokio task:
-   ├─ Spawns blocking thread with expectrl PTY session
-   ├─ SSH -t into sandbox: claude --dangerously-skip-permissions -- /login
-   ├─ PTY width set to 500 cols (prevent URL line-wrapping)
-   ├─ Wait for "Select login method" menu → send \r (Claude subscription)
-   ├─ Wait for "Browser didn't open" → extract OAuth URL
-   ├─ Send URL to Telegram
-   ├─ Wait for "Paste" prompt → send WaitingForCode event
-   ├─ Telegram handler intercepts next message as auth code
-   ├─ Send code + \r to PTY
-   └─ Wait for success/error from CC
-3. On success: notify user in Telegram
+2. spawn_token_request() — tokio task:
+   ├─ Send "Claude needs authentication" notification to Telegram
+   ├─ Send setup-token instructions to Telegram
+   ├─ Delete stale token from auth_tokens table (if any)
+   ├─ Create oneshot channel, store sender in auth_code_tx intercept slot
+   ├─ Wait for token from Telegram (5-min timeout)
+   ├─ Telegram handler intercepts next message as token
+   ├─ Save token to auth_tokens table in data.db
+   └─ Send "Token saved" confirmation to Telegram
+3. On next claude -p: load token from auth_tokens, inject as
+   CLAUDE_CODE_OAUTH_TOKEN env var (sandbox: export in shell script,
+   no-sandbox: cmd.env())
 4. On error/timeout: notify user, reset auth_watcher_active flag
 ```
 
@@ -312,6 +312,7 @@ telegram_sessions (chat_id, effective_thread_id, session_uuid, created_at)
 cron_specs      (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at)
 cron_runs       (id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at)
 mcp_servers     (name, url, instructions, auth_type, auth_header, auth_token, refresh_token, token_endpoint, client_id, client_secret, expires_at, created_at)
+auth_tokens     (token, created_at)
 ```
 
 ## Key Types
@@ -324,7 +325,7 @@ RuntimeState    // Persisted JSON: agents, socket_path, started_at
 MemoryEntry     // SQLite row: id, content, tags, stored_by, importance
 WorkerContext   // Per-session: chat_id, thread_id, agent_dir, bot, db, ssh config, pc_port, auth state
 ProcessInfo     // From process-compose API: name, status, pid, exit_code
-LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
+LoginEvent      // Token request→async: Done, Error
 ```
 
 ## External Integrations
@@ -333,7 +334,7 @@ LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 |--------|----------|-------|
 | process-compose | REST API (TCP :18927) | Health, process start/stop/restart, logs, shutdown |
 | Claude Code CLI | Subprocess (`claude -p` via SSH) | Runs inside sandbox, structured JSON output |
-| Claude Code CLI | PTY (expectrl via SSH) | Interactive login flow — menu navigation, OAuth |
+| Claude Code CLI | Env var (CLAUDE_CODE_OAUTH_TOKEN) | Auth token from setup-token, injected into claude -p |
 | OpenShell | gRPC + mTLS (:8080) | Sandbox create/poll/reuse, policy hot-reload, exec, file verification |
 | OpenShell | CLI (`openshell sandbox upload/download`) | File transfer (no gRPC equivalent yet) |
 | Telegram | teloxide long-polling | CacheMe<Throttle<Bot>> adaptor, per-agent allowlist |
@@ -383,7 +384,7 @@ LoginEvent      // PTY→async: Url, WaitingForCode, Done, Error
 │   ├── IDENTITY.md, SOUL.md, USER.md  # created by bootstrap CC session, not init
 │   ├── TOOLS.md                       # agent-owned (created empty on init, then agent-edited)
 │   ├── policy.yaml          # OpenShell sandbox policy (openshell agents only)
-│   ├── memory.db            # SQLite: memories, sessions, cron, MCP servers + auth state
+│   ├── data.db            # SQLite: memories, sessions, cron, MCP servers + auth state
 │   ├── oauth-callback.sock
 │   ├── crons/*.yaml
 │   ├── inbox/          # Received Telegram attachments (no-sandbox mode)
