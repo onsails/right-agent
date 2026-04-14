@@ -123,10 +123,9 @@ pub fn init_agent(
             }
         }
 
-        // Model (from overrides only).
-        if let Some(ref model) = ov.model {
-            yaml.push_str(&format!("\nmodel: \"{model}\"\n"));
-        }
+        // Model — always written; defaults to "sonnet" when not overridden.
+        let model = ov.model.as_deref().unwrap_or("sonnet");
+        yaml.push_str(&format!("\nmodel: \"{model}\"\n"));
 
         // Environment variables (from overrides only).
         if !ov.env.is_empty() {

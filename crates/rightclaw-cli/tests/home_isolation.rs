@@ -17,7 +17,7 @@ fn init_agent_claude_json_has_trust() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com"])
+        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
         .assert()
         .success();
 
@@ -46,7 +46,7 @@ fn init_agent_credentials_is_symlink() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com"])
+        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
         .assert()
         .success();
 
@@ -74,7 +74,7 @@ fn init_warns_when_host_creds_missing() {
     let fake_host_home = tempdir().unwrap();
 
     let result = rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com"])
+        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
         .env("HOME", fake_host_home.path())
         .assert()
         .success();
