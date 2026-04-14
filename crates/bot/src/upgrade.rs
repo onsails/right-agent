@@ -48,6 +48,23 @@ async fn run_upgrade_loop(ssh_config_path: &Path, agent_name: &str, shutdown: Ca
 async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
     tracing::info!(agent = %agent_name, "checking for claude upgrade");
 
+    // Ensure native install metadata is registered. The sandbox image ships
+    // claude via npm (/usr/local/bin/claude), but `claude upgrade` installs a
+    // native build to .local/bin/. Without `claude install` first, upgrade
+    // warns "config install method is 'unknown'". Idempotent — no-ops if
+    // already installed.
+    if let Err(e) = rightclaw::openshell::ssh_exec(
+        ssh_config_path,
+        ssh_host,
+        &["claude", "install"],
+        UPGRADE_TIMEOUT_SECS,
+    )
+    .await
+    {
+        tracing::error!(agent = %agent_name, "claude install failed: {e:#}");
+        return;
+    }
+
     let result = rightclaw::openshell::ssh_exec(
         ssh_config_path,
         ssh_host,
