@@ -160,11 +160,11 @@ const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 pub async fn run_delivery_loop(
     agent_dir: PathBuf,
     agent_name: String,
-    model: Option<String>,
     bot: crate::telegram::BotType,
     notify_chat_ids: Vec<i64>,
     idle_ts: Arc<IdleTimestamp>,
     ssh_config_path: Option<PathBuf>,
+    internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
@@ -180,6 +180,12 @@ pub async fn run_delivery_loop(
     // Track run IDs that were successfully sent to Telegram but failed to be marked
     // as delivered in the DB. Prevents duplicate sends on subsequent delivery ticks.
     let mut delivered_in_memory: HashSet<String> = HashSet::new();
+
+    // Track delivery attempt counts per run_id. After MAX_DELIVERY_ATTEMPTS failures,
+    // mark as delivered to avoid infinite retry loops.
+    const MAX_DELIVERY_ATTEMPTS: u32 = 3;
+    let mut attempt_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
 
     loop {
         tokio::select! {
@@ -244,11 +250,11 @@ pub async fn run_delivery_loop(
             &yaml,
             &agent_dir,
             &agent_name,
-            model.as_deref(),
             &bot,
             &notify_chat_ids,
             ssh_config_path.as_deref(),
             session_id,
+            &internal_client,
         )
         .await
         {
@@ -268,11 +274,29 @@ pub async fn run_delivery_loop(
                     .store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
             }
             Err(e) => {
+                let attempts = attempt_counts
+                    .entry(to_deliver.id.clone())
+                    .and_modify(|c| *c += 1)
+                    .or_insert(1);
                 tracing::error!(
                     job = %to_deliver.job_name,
                     run_id = %to_deliver.id,
+                    attempt = *attempts,
+                    max = MAX_DELIVERY_ATTEMPTS,
                     "cron delivery failed: {e:#}"
                 );
+                if *attempts >= MAX_DELIVERY_ATTEMPTS {
+                    tracing::warn!(
+                        job = %to_deliver.job_name,
+                        run_id = %to_deliver.id,
+                        "giving up after {MAX_DELIVERY_ATTEMPTS} attempts, marking as delivered"
+                    );
+                    if let Err(db_err) = mark_delivered(&conn, &to_deliver.id) {
+                        tracing::error!(run_id = %to_deliver.id, "mark_delivered failed: {db_err:#}");
+                        delivered_in_memory.insert(to_deliver.id.clone());
+                    }
+                    attempt_counts.remove(&to_deliver.id);
+                }
             }
         }
     }
@@ -283,11 +307,11 @@ async fn deliver_through_session(
     yaml_input: &str,
     agent_dir: &Path,
     agent_name: &str,
-    model: Option<&str>,
     bot: &crate::telegram::BotType,
     notify_chat_ids: &[i64],
     ssh_config_path: Option<&Path>,
     session_id: Option<String>,
+    internal_client: &rightclaw::mcp::internal_client::InternalClient,
 ) -> Result<(), String> {
     use std::process::Stdio;
 
@@ -295,18 +319,16 @@ async fn deliver_through_session(
         return Err("no notify_chat_ids configured".into());
     }
 
-    // Build the list of claude CLI arguments (first element is "claude" for SSH mode).
+    // Delivery always uses Haiku — cheap relay task.
+    const DELIVERY_MODEL: &str = "claude-haiku-4-5-20251001";
+
     let mut claude_args: Vec<String> = vec![
         "claude".into(),
         "-p".into(),
         "--dangerously-skip-permissions".into(),
-        "--agent".into(),
-        agent_name.into(),
+        "--model".into(),
+        DELIVERY_MODEL.into(),
     ];
-    if let Some(m) = model {
-        claude_args.push("--model".into());
-        claude_args.push(m.into());
-    }
     claude_args.push("--max-budget-usd".into());
     claude_args.push("0.05".into());
     claude_args.push("--max-turns".into());
@@ -325,37 +347,70 @@ async fn deliver_through_session(
         claude_args.push(schema);
     }
 
+    // Derive sandbox_mode and home_dir from ssh_config_path.
+    let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
+        (rightclaw::agent::types::SandboxMode::Openshell, "/sandbox".to_owned())
+    } else {
+        (rightclaw::agent::types::SandboxMode::None, agent_dir.to_string_lossy().into_owned())
+    };
+    let base_prompt = rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+
+    // Fetch MCP instructions from aggregator (non-fatal).
+    let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await {
+        Ok(resp) => {
+            if resp.instructions.trim().len() > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER.trim().len() {
+                Some(resp.instructions)
+            } else {
+                None
+            }
+        }
+        Err(e) => {
+            tracing::warn!("delivery: failed to fetch MCP instructions: {e:#}");
+            None
+        }
+    };
+
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
-        // Sandbox mode: route through SSH like worker.rs does.
-        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
-        let escaped_args: Vec<String> = claude_args
-            .iter()
-            .map(|a| shlex::try_quote(a).expect("valid UTF-8").into_owned())
-            .collect();
-        let claude_cmd = escaped_args.join(" ");
-        let mut script = String::new();
+        let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            false,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &claude_args,
+            mcp_instructions.as_deref(),
+        );
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
-            script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
+            assembly_script = format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
-        script.push_str(&format!("cd /sandbox && {claude_cmd}"));
-
+        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
         c.arg("--");
-        c.arg(script);
+        c.arg(assembly_script);
         c
     } else {
-        // Direct exec (no sandbox).
+        let agent_dir_str = agent_dir.to_string_lossy();
+        let prompt_path = agent_dir.join(".claude").join("delivery-system-prompt.md");
+        let prompt_path_str = prompt_path.to_string_lossy();
+        let assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            false,
+            &agent_dir_str,
+            &prompt_path_str,
+            &agent_dir_str,
+            &claude_args,
+            mcp_instructions.as_deref(),
+        );
         let cc_bin = which::which("claude")
             .or_else(|_| which::which("claude-bun"))
             .map_err(|_| "claude binary not found in PATH".to_string())?;
-        let mut c = tokio::process::Command::new(&cc_bin);
-        // Skip "claude" (first element) — it's the binary name for SSH mode.
-        for arg in &claude_args[1..] {
-            c.arg(arg);
-        }
+        let _ = cc_bin; // Existence check only — bash -c runs the script
+        let mut c = tokio::process::Command::new("bash");
+        c.arg("-c");
+        c.arg(&assembly_script);
         c.env("HOME", agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
@@ -387,7 +442,18 @@ async fn deliver_through_session(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("CC exited with {}: {stderr}", output.status));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // CC writes errors to stdout (as JSON) when using --output-format json.
+        // Log both streams so the actual error is visible.
+        let detail = if !stderr.is_empty() {
+            stderr.into_owned()
+        } else if !stdout.is_empty() {
+            // Truncate to avoid flooding logs with full JSON blobs
+            stdout.chars().take(500).collect()
+        } else {
+            "(no output)".into()
+        };
+        return Err(format!("CC exited with {}: {detail}", output.status));
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);

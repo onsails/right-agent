@@ -367,21 +367,21 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Cron delivery loop: delivers pending cron results through main CC session when idle
     let delivery_agent_dir = agent_dir.clone();
     let delivery_agent_name = args.agent.clone();
-    let delivery_model = config.model.clone();
     let delivery_bot = telegram::bot::build_bot(token.clone());
     let delivery_chat_ids = config.allowed_chat_ids.clone();
     let delivery_idle_ts = Arc::clone(&idle_timestamp);
     let delivery_ssh_config = ssh_config_path.clone();
+    let delivery_internal_client = Arc::clone(&internal_client);
     let delivery_shutdown = shutdown.clone();
     let delivery_handle = tokio::spawn(async move {
         cron_delivery::run_delivery_loop(
             delivery_agent_dir,
             delivery_agent_name,
-            delivery_model,
             delivery_bot,
             delivery_chat_ids,
             delivery_idle_ts,
             delivery_ssh_config,
+            delivery_internal_client,
             delivery_shutdown,
         ).await;
     });
