@@ -277,39 +277,53 @@ async fn main() -> miette::Result<()> {
         "rightclaw=info"
     };
 
-    // Set up tracing with stderr + per-agent file log.
-    // The agent name comes from the bot subcommand — extract it early for the log filename.
-    let agent_name_for_log = match &cli.command {
-        Commands::Bot { agent, .. } => Some(agent.clone()),
-        _ => None,
-    };
-
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
-
+    // Set up tracing with console + per-process file log.
+    // Bot writes console to stderr (stdout reserved for JSON), aggregator to stdout (colored).
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let _log_guard;
-    if let Some(ref agent) = agent_name_for_log {
+    let setup_file_log = |name: &str| {
         let log_dir = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
             .join(".rightclaw")
             .join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
-        let file_appender = tracing_appender::rolling::daily(&log_dir, format!("{agent}.log"));
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let file_appender = tracing_appender::rolling::daily(&log_dir, format!("{name}.log"));
+        tracing_appender::non_blocking(file_appender)
+    };
 
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-            .with(tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false))
-            .init();
-        _log_guard = Some(guard);
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .init();
+    let _log_guard;
+    match &cli.command {
+        Commands::Bot { agent, .. } => {
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
+            let (non_blocking, guard) = setup_file_log(agent);
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+                .with(tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false))
+                .init();
+            _log_guard = Some(guard);
+        }
+        Commands::McpServer { .. } => {
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
+            let (non_blocking, guard) = setup_file_log("mcp-aggregator");
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(tracing_subscriber::fmt::layer())
+                .with(tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false))
+                .init();
+            _log_guard = Some(guard);
+        }
+        _ => {
+            let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .init();
+            _log_guard = None;
+        }
     };
 
     let home = rightclaw::config::resolve_home(
@@ -570,6 +584,14 @@ async fn main() -> miette::Result<()> {
                     if let Some((oauth_state, token_arc)) = oauth_map.get(&server_name) {
                         // OAuth server — check token expiry before connecting.
                         let due_in = rightclaw::mcp::refresh::refresh_due_in(oauth_state);
+                        tracing::info!(
+                            agent = agent_name.as_str(),
+                            server = server_name.as_str(),
+                            due_secs = due_in.as_secs(),
+                            expires_at = %oauth_state.expires_at,
+                            has_refresh_token = oauth_state.refresh_token.is_some(),
+                            "reconnect: checking OAuth token",
+                        );
                         if due_in == std::time::Duration::ZERO {
                             // Token expired — try refresh or mark NeedsAuth.
                             if oauth_state.refresh_token.is_some() {

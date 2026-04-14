@@ -436,4 +436,4 @@ LoginEvent      // Token request→async: Done, Error
 
 ## Logging
 
-Bot processes write to both stderr (process-compose TUI) and `~/.rightclaw/logs/<agent>.log` (daily rotation via `tracing-appender`). Login flow has step-by-step INFO-level logging for debuggability.
+Bot processes write to both stderr (process-compose TUI) and `~/.rightclaw/logs/<agent>.log` (daily rotation via `tracing-appender`). MCP Aggregator writes to both stdout (colored) and `~/.rightclaw/logs/mcp-aggregator.log` (daily rotation, no ANSI). Login flow has step-by-step INFO-level logging for debuggability.
