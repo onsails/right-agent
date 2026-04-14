@@ -1,0 +1,229 @@
+//! Shared prompt assembly for CC invocations (worker, cron, delivery).
+
+/// Shell-escape a string for safe inclusion in an SSH remote command.
+pub(crate) fn shell_escape(s: &str) -> String {
+    shlex::try_quote(s).expect("shlex::try_quote cannot fail for valid UTF-8").into_owned()
+}
+
+/// Prompt section: a file from disk that gets a markdown header.
+struct PromptSection {
+    filename: &'static str,
+    header: &'static str,
+}
+
+/// Identity and config files included in the system prompt (normal mode).
+const PROMPT_SECTIONS: &[PromptSection] = &[
+    PromptSection { filename: "IDENTITY.md", header: "## Your Identity" },
+    PromptSection { filename: "SOUL.md", header: "## Your Personality and Values" },
+    PromptSection { filename: "USER.md", header: "## Your User" },
+    PromptSection { filename: "AGENTS.md", header: "## Agent Configuration" },
+    PromptSection { filename: "TOOLS.md", header: "## Environment and Tools" },
+];
+
+/// Generate a shell script that assembles a composite system prompt and runs `claude -p`.
+///
+/// Parameterized by `root_path` — the directory containing agent .md files:
+/// - Sandbox: `/sandbox`
+/// - No-sandbox: absolute path to `agent_dir`
+///
+/// The script reads files from `root_path`, assembles them into `prompt_file`,
+/// then runs claude from `workdir`.
+pub(crate) fn build_prompt_assembly_script(
+    base_prompt: &str,
+    bootstrap_mode: bool,
+    root_path: &str,
+    prompt_file: &str,
+    workdir: &str,
+    claude_args: &[String],
+    mcp_instructions: Option<&str>,
+) -> String {
+    let escaped_base = base_prompt.replace('\'', "'\\''");
+    let escaped_args: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
+    let claude_cmd = escaped_args.join(" ");
+
+    let file_sections = if bootstrap_mode {
+        let escaped_bootstrap =
+            rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
+        format!(
+            "\nprintf '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'"
+        )
+    } else {
+        let escaped_ops =
+            rightclaw::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
+        let mut sections = format!(
+            "\nprintf '\\n## Operating Instructions\\n'\nprintf '%s\\n' '{escaped_ops}'"
+        );
+        for s in PROMPT_SECTIONS {
+            let filename = s.filename;
+            let header = s.header;
+            sections.push_str(&format!(
+                r#"
+if [ -f {root_path}/{filename} ]; then
+  printf '\n{header}\n'
+  cat {root_path}/{filename}
+  printf '\n'
+fi"#
+            ));
+        }
+        sections
+    };
+
+    let mcp_section = match mcp_instructions {
+        Some(instr) => {
+            let escaped = instr.replace('\'', "'\\''");
+            format!("\nprintf '\\n'\nprintf '%s\\n' '{escaped}'")
+        }
+        None => String::new(),
+    };
+
+    format!(
+        "{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a script with sandbox-like paths for testing.
+    fn test_script(base: &str, bootstrap: bool, args: &[String], mcp: Option<&str>) -> String {
+        build_prompt_assembly_script(base, bootstrap, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox", args, mcp)
+    }
+
+    #[test]
+    fn script_bootstrap_includes_bootstrap_md() {
+        let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
+        assert!(script.contains("Bootstrap Instructions"), "must have Bootstrap Instructions header");
+        assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
+        assert!(!script.contains("cat /sandbox/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
+        assert!(!script.contains("cat /sandbox/SOUL.md"), "bootstrap must not cat SOUL.md");
+        assert!(script.contains("claude"), "must contain claude command");
+        assert!(script.contains("--system-prompt-file"), "must pass --system-prompt-file");
+    }
+
+    #[test]
+    fn script_normal_includes_all_identity_files() {
+        let script = test_script("Base prompt", false, &["claude".into(), "-p".into()], None);
+        assert!(script.contains("IDENTITY.md"));
+        assert!(script.contains("SOUL.md"));
+        assert!(script.contains("USER.md"));
+        assert!(script.contains("AGENTS.md"));
+        assert!(script.contains("TOOLS.md"));
+        assert!(script.contains("Operating Instructions"), "must have compiled-in Operating Instructions");
+        assert!(!script.contains("cat /sandbox/.claude/agents/BOOTSTRAP.md"), "normal must not cat BOOTSTRAP.md");
+    }
+
+    #[test]
+    fn script_escapes_single_quotes_in_base() {
+        let script = test_script("It's a test", true, &["claude".into()], None);
+        // Single quote must be escaped for shell: ' → '\''
+        assert!(!script.contains("It's"), "raw single quote must be escaped");
+        assert!(script.contains("It"), "content must still be present");
+    }
+
+    #[test]
+    fn script_shell_escapes_claude_args() {
+        let script = test_script(
+            "Base",
+            false,
+            &["claude".into(), "-p".into(), "--json-schema".into(), r#"{"type":"object"}"#.into()],
+            None,
+        );
+        // JSON with braces and quotes must be shell-escaped
+        assert!(script.contains("--json-schema"));
+        assert!(script.contains("type"));
+    }
+
+    #[test]
+    fn script_writes_to_prompt_file_and_uses_system_prompt_file() {
+        let script = test_script("X", false, &["claude".into()], None);
+        assert!(script.contains("/tmp/rightclaw-system-prompt.md"));
+        assert!(script.contains("--system-prompt-file /tmp/rightclaw-system-prompt.md"));
+    }
+
+    #[test]
+    fn script_custom_paths() {
+        let script = build_prompt_assembly_script(
+            "Base\n",
+            false,
+            "/home/agent",
+            "/home/agent/.claude/composite-system-prompt.md",
+            "/home/agent",
+            &["claude".into(), "-p".into()],
+            None,
+        );
+        assert!(script.contains("/home/agent/IDENTITY.md"), "must use custom root_path");
+        assert!(script.contains("/home/agent/.claude/composite-system-prompt.md"), "must use custom prompt_file");
+        assert!(script.contains("cd /home/agent"), "must cd to custom workdir");
+    }
+
+    #[test]
+    fn script_bootstrap_mode_same_regardless_of_paths() {
+        let script = build_prompt_assembly_script(
+            "Base\n",
+            true,
+            "/home/agent",
+            "/home/agent/.claude/composite-system-prompt.md",
+            "/home/agent",
+            &["claude".into()],
+            None,
+        );
+        assert!(script.contains("## Bootstrap Instructions"));
+        assert!(script.contains("First-Time Setup"), "must use compiled-in content");
+        // Bootstrap never reads identity files regardless of path
+        assert!(!script.contains("cat /home/agent/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
+    }
+
+    #[test]
+    fn script_includes_mcp_instructions() {
+        let script = test_script(
+            "Base",
+            false,
+            &["claude".into()],
+            Some("# MCP Server Instructions\n\n## composio\n\nConnect with 250+ apps.\n"),
+        );
+        assert!(script.contains("MCP Server Instructions"));
+        assert!(script.contains("composio"));
+        // Must use printf '%s' to prevent format string injection
+        assert!(script.contains("printf '%s\\n'"));
+    }
+
+    #[test]
+    fn script_none_mcp_instructions_omitted() {
+        let script = test_script("Base", false, &["claude".into()], None);
+        assert!(!script.contains("MCP Server Instructions"));
+    }
+
+    #[test]
+    fn script_mcp_instructions_with_custom_paths() {
+        let script = build_prompt_assembly_script(
+            "Base\n",
+            false,
+            "/home/agent",
+            "/home/agent/.claude/composite-system-prompt.md",
+            "/home/agent",
+            &["claude".into()],
+            Some("# MCP Server Instructions\n\n## notion\n\nNotion tools.\n"),
+        );
+        assert!(script.contains("MCP Server Instructions"));
+        assert!(script.contains("notion"));
+        assert!(script.contains("Notion tools."));
+    }
+
+    #[test]
+    fn script_bootstrap_uses_compiled_constant() {
+        let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
+        // Bootstrap uses compiled-in constant, NOT cat of file
+        assert!(!script.contains("cat /sandbox"), "bootstrap must not cat any sandbox file");
+        assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
+        assert!(!script.contains("cat /sandbox/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
+    }
+
+    #[test]
+    fn script_normal_has_operating_instructions_before_identity() {
+        let script = test_script("Base prompt", false, &["claude".into()], None);
+        let op_instr_pos = script.find("Operating Instructions").expect("must have Operating Instructions");
+        let identity_pos = script.find("IDENTITY.md").expect("must have IDENTITY.md");
+        assert!(op_instr_pos < identity_pos, "Operating Instructions must come before IDENTITY.md");
+    }
+}
