@@ -541,14 +541,35 @@ fn shell_escape(s: &str) -> String {
     shlex::try_quote(s).expect("shlex::try_quote cannot fail for valid UTF-8").into_owned()
 }
 
-/// Generate a shell script that assembles a composite system prompt from sandbox files.
+/// Prompt section: a file from disk that gets a markdown header.
+struct PromptSection {
+    filename: &'static str,
+    header: &'static str,
+}
+
+/// Identity and config files included in the system prompt (normal mode).
+const PROMPT_SECTIONS: &[PromptSection] = &[
+    PromptSection { filename: "IDENTITY.md", header: "## Your Identity" },
+    PromptSection { filename: "SOUL.md", header: "## Your Personality and Values" },
+    PromptSection { filename: "USER.md", header: "## Your User" },
+    PromptSection { filename: "AGENTS.md", header: "## Agent Configuration" },
+    PromptSection { filename: "TOOLS.md", header: "## Environment and Tools" },
+];
+
+/// Generate a shell script that assembles a composite system prompt and runs `claude -p`.
 ///
-/// The script concatenates base identity + framed content files into a temp file,
-/// then runs `claude -p` with `--system-prompt-file` pointing to it.
-/// This runs as a single SSH command — no extra roundtrips, always fresh files.
-fn build_sandbox_prompt_assembly_script(
+/// Parameterized by `root_path` — the directory containing agent .md files:
+/// - Sandbox: `/sandbox`
+/// - No-sandbox: absolute path to `agent_dir`
+///
+/// The script reads files from `root_path`, assembles them into `prompt_file`,
+/// then runs claude from `workdir`.
+fn build_prompt_assembly_script(
     base_prompt: &str,
     bootstrap_mode: bool,
+    root_path: &str,
+    prompt_file: &str,
+    workdir: &str,
     claude_args: &[String],
     mcp_instructions: Option<&str>,
 ) -> String {
@@ -565,36 +586,22 @@ fn build_sandbox_prompt_assembly_script(
     } else {
         let escaped_ops =
             rightclaw::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
-        format!(
-            r#"
-printf '\n## Operating Instructions\n'
-printf '%s\n' '{escaped_ops}'
-if [ -f /sandbox/IDENTITY.md ]; then
-  printf '\n## Your Identity\n'
-  cat /sandbox/IDENTITY.md
-  printf '\n'
-fi
-if [ -f /sandbox/SOUL.md ]; then
-  printf '\n## Your Personality and Values\n'
-  cat /sandbox/SOUL.md
-  printf '\n'
-fi
-if [ -f /sandbox/USER.md ]; then
-  printf '\n## Your User\n'
-  cat /sandbox/USER.md
-  printf '\n'
-fi
-if [ -f /sandbox/AGENTS.md ]; then
-  printf '\n## Agent Configuration\n'
-  cat /sandbox/AGENTS.md
-  printf '\n'
-fi
-if [ -f /sandbox/TOOLS.md ]; then
-  printf '\n## Environment and Tools\n'
-  cat /sandbox/TOOLS.md
+        let mut sections = format!(
+            "\nprintf '\\n## Operating Instructions\\n'\nprintf '%s\\n' '{escaped_ops}'"
+        );
+        for s in PROMPT_SECTIONS {
+            let filename = s.filename;
+            let header = s.header;
+            sections.push_str(&format!(
+                r#"
+if [ -f {root_path}/{filename} ]; then
+  printf '\n{header}\n'
+  cat {root_path}/{filename}
   printf '\n'
 fi"#
-        )
+            ));
+        }
+        sections
     };
 
     let mcp_section = match mcp_instructions {
@@ -606,70 +613,8 @@ fi"#
     };
 
     format!(
-        "{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n}} > /tmp/rightclaw-system-prompt.md\ncd /sandbox && {claude_cmd} --system-prompt-file /tmp/rightclaw-system-prompt.md"
+        "{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
     )
-}
-
-/// Assemble a composite system prompt from host-side files.
-///
-/// Uses compiled-in constants for operating instructions and bootstrap content.
-/// Agent-owned files (IDENTITY, SOUL, USER, AGENTS, TOOLS) are read from disk.
-fn assemble_host_system_prompt(
-    base_prompt: &str,
-    bootstrap_mode: bool,
-    agent_dir: &Path,
-    mcp_instructions: Option<&str>,
-) -> String {
-    let mut prompt = base_prompt.to_string();
-
-    if bootstrap_mode {
-        prompt.push_str("\n## Bootstrap Instructions\n");
-        prompt.push_str(rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS);
-        prompt.push('\n');
-    } else {
-        // Compiled-in operating instructions (platform-owned, always fresh)
-        prompt.push_str("\n## Operating Instructions\n");
-        prompt.push_str(rightclaw::codegen::OPERATING_INSTRUCTIONS);
-        prompt.push('\n');
-
-        // Agent-owned identity files (from disk)
-        let identity_sections: &[(&str, &str)] = &[
-            ("IDENTITY.md", "## Your Identity"),
-            ("SOUL.md", "## Your Personality and Values"),
-            ("USER.md", "## Your User"),
-        ];
-        for (file, header) in identity_sections {
-            if let Ok(content) = std::fs::read_to_string(agent_dir.join(file)) {
-                prompt.push_str(&format!("\n{header}\n"));
-                prompt.push_str(&content);
-                prompt.push('\n');
-            }
-        }
-
-        // Per-agent configuration (from agent root)
-        let agents_path = agent_dir.join("AGENTS.md");
-        if let Ok(content) = std::fs::read_to_string(&agents_path) {
-            prompt.push_str("\n## Agent Configuration\n");
-            prompt.push_str(&content);
-            prompt.push('\n');
-        }
-
-        // Agent-owned tools notes (from agent root)
-        let tools_path = agent_dir.join("TOOLS.md");
-        if let Ok(content) = std::fs::read_to_string(&tools_path) {
-            prompt.push_str("\n## Environment and Tools\n");
-            prompt.push_str(&content);
-            prompt.push('\n');
-        }
-    }
-
-    if let Some(instr) = mcp_instructions {
-        prompt.push('\n');
-        prompt.push_str(instr);
-        prompt.push('\n');
-    }
-
-    prompt
 }
 
 /// Send a Telegram message, optionally in a thread.
@@ -931,8 +876,15 @@ async fn invoke_cc(
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.
         let ssh_host = rightclaw::openshell::ssh_host(&ctx.agent_name);
-        let assembly_script =
-            build_sandbox_prompt_assembly_script(&base_prompt, bootstrap_mode, &claude_args, mcp_instructions.as_deref());
+        let assembly_script = build_prompt_assembly_script(
+            &base_prompt,
+            bootstrap_mode,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &claude_args,
+            mcp_instructions.as_deref(),
+        );
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
@@ -940,29 +892,23 @@ async fn invoke_cc(
         c.arg(assembly_script);
         c
     } else {
-        // Direct exec (no sandbox): assemble prompt on host from local files.
-        let composite = assemble_host_system_prompt(
+        // No-sandbox: same shell template, paths point to host agent_dir.
+        let agent_dir_str = ctx.agent_dir.to_string_lossy();
+        let prompt_path = ctx.agent_dir.join(".claude").join("composite-system-prompt.md");
+        let prompt_path_str = prompt_path.to_string_lossy();
+        let assembly_script = build_prompt_assembly_script(
             &base_prompt,
             bootstrap_mode,
-            &ctx.agent_dir,
+            &agent_dir_str,
+            &prompt_path_str,
+            &agent_dir_str,
+            &claude_args,
             mcp_instructions.as_deref(),
         );
-        // Write composite prompt to temp file in agent dir.
-        let prompt_path = ctx.agent_dir.join(".claude").join("composite-system-prompt.md");
-        std::fs::write(&prompt_path, &composite).map_err(|e| {
-            format_error_reply(-1, &format!("failed to write composite system prompt: {e:#}"))
-        })?;
 
-        let cc_bin = which::which("claude")
-            .or_else(|_| which::which("claude-bun"))
-            .map_err(|_| "⚠️ Agent error: claude binary not found in PATH".to_string())?;
-        let mut c = tokio::process::Command::new(&cc_bin);
-        // Skip "claude" (first element in claude_args) — it's the binary name for SSH mode.
-        for arg in &claude_args[1..] {
-            c.arg(arg);
-        }
-        c.arg("--system-prompt-file");
-        c.arg(&prompt_path);
+        let mut c = tokio::process::Command::new("bash");
+        c.arg("-c");
+        c.arg(&assembly_script);
         c.env("HOME", &ctx.agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
         c.current_dir(&ctx.agent_dir);
@@ -1644,14 +1590,14 @@ mod tests {
 
     // ── Prompt assembly tests ────────────────────────────────────────────────
 
+    /// Helper: build a script with sandbox-like paths for testing.
+    fn test_script(base: &str, bootstrap: bool, args: &[String], mcp: Option<&str>) -> String {
+        build_prompt_assembly_script(base, bootstrap, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox", args, mcp)
+    }
+
     #[test]
-    fn sandbox_script_bootstrap_includes_bootstrap_md() {
-        let script = build_sandbox_prompt_assembly_script(
-            "Base prompt",
-            true,
-            &["claude".into(), "-p".into()],
-            None,
-        );
+    fn script_bootstrap_includes_bootstrap_md() {
+        let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
         assert!(script.contains("Bootstrap Instructions"), "must have Bootstrap Instructions header");
         assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
         assert!(!script.contains("cat /sandbox/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
@@ -1661,13 +1607,8 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_script_normal_includes_all_identity_files() {
-        let script = build_sandbox_prompt_assembly_script(
-            "Base prompt",
-            false,
-            &["claude".into(), "-p".into()],
-            None,
-        );
+    fn script_normal_includes_all_identity_files() {
+        let script = test_script("Base prompt", false, &["claude".into(), "-p".into()], None);
         assert!(script.contains("IDENTITY.md"));
         assert!(script.contains("SOUL.md"));
         assert!(script.contains("USER.md"));
@@ -1678,21 +1619,16 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_script_escapes_single_quotes_in_base() {
-        let script = build_sandbox_prompt_assembly_script(
-            "It's a test",
-            true,
-            &["claude".into()],
-            None,
-        );
+    fn script_escapes_single_quotes_in_base() {
+        let script = test_script("It's a test", true, &["claude".into()], None);
         // Single quote must be escaped for shell: ' → '\''
         assert!(!script.contains("It's"), "raw single quote must be escaped");
         assert!(script.contains("It"), "content must still be present");
     }
 
     #[test]
-    fn sandbox_script_shell_escapes_claude_args() {
-        let script = build_sandbox_prompt_assembly_script(
+    fn script_shell_escapes_claude_args() {
+        let script = test_script(
             "Base",
             false,
             &["claude".into(), "-p".into(), "--json-schema".into(), r#"{"type":"object"}"#.into()],
@@ -1704,74 +1640,48 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_script_writes_to_tmp_and_uses_system_prompt_file() {
-        let script = build_sandbox_prompt_assembly_script("X", false, &["claude".into()], None);
+    fn script_writes_to_prompt_file_and_uses_system_prompt_file() {
+        let script = test_script("X", false, &["claude".into()], None);
         assert!(script.contains("/tmp/rightclaw-system-prompt.md"));
         assert!(script.contains("--system-prompt-file /tmp/rightclaw-system-prompt.md"));
     }
 
     #[test]
-    fn host_prompt_bootstrap_includes_bootstrap_md() {
-        let dir = tempfile::tempdir().unwrap();
-        // File exists as flag only — content comes from constant
-        std::fs::write(dir.path().join("BOOTSTRAP.md"), "ignored").unwrap();
-
-        let result = assemble_host_system_prompt("Base\n", true, dir.path(), None);
-        assert!(result.contains("Base"));
-        assert!(result.contains("## Bootstrap Instructions"));
-        assert!(result.contains("First-Time Setup"), "must use compiled-in content");
+    fn script_custom_paths() {
+        let script = build_prompt_assembly_script(
+            "Base\n",
+            false,
+            "/home/agent",
+            "/home/agent/.claude/composite-system-prompt.md",
+            "/home/agent",
+            &["claude".into(), "-p".into()],
+            None,
+        );
+        assert!(script.contains("/home/agent/IDENTITY.md"), "must use custom root_path");
+        assert!(script.contains("/home/agent/.claude/composite-system-prompt.md"), "must use custom prompt_file");
+        assert!(script.contains("cd /home/agent"), "must cd to custom workdir");
     }
 
     #[test]
-    fn host_prompt_normal_includes_identity_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("IDENTITY.md"), "I am Spark").unwrap();
-        std::fs::write(dir.path().join("SOUL.md"), "Snarky").unwrap();
-        std::fs::write(dir.path().join("USER.md"), "Andrey").unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "## Subagents\n").unwrap();
-        std::fs::write(dir.path().join("TOOLS.md"), "outbox: /sandbox/outbox/").unwrap();
-
-        let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
-        assert!(result.contains("## Operating Instructions"), "must have compiled-in Operating Instructions");
-        assert!(result.contains("## Your Files"), "Operating Instructions must contain Your Files");
-        assert!(result.contains("## Your Identity"));
-        assert!(result.contains("I am Spark"));
-        assert!(result.contains("## Your Personality and Values"));
-        assert!(result.contains("Snarky"));
-        assert!(result.contains("## Your User"));
-        assert!(result.contains("Andrey"));
-        assert!(result.contains("## Agent Configuration"), "AGENTS.md section renamed to Agent Configuration");
-        assert!(result.contains("## Subagents"));
-        assert!(result.contains("## Environment and Tools"));
-        assert!(result.contains("outbox: /sandbox/outbox/"));
+    fn script_bootstrap_mode_same_regardless_of_paths() {
+        let script = build_prompt_assembly_script(
+            "Base\n",
+            true,
+            "/home/agent",
+            "/home/agent/.claude/composite-system-prompt.md",
+            "/home/agent",
+            &["claude".into()],
+            None,
+        );
+        assert!(script.contains("## Bootstrap Instructions"));
+        assert!(script.contains("First-Time Setup"), "must use compiled-in content");
+        // Bootstrap never reads identity files regardless of path
+        assert!(!script.contains("cat /home/agent/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
     }
 
     #[test]
-    fn host_prompt_normal_skips_missing_files() {
-        let dir = tempfile::tempdir().unwrap();
-        // No identity files — only AGENTS.md
-        std::fs::write(dir.path().join("AGENTS.md"), "Procedures").unwrap();
-
-        let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
-        assert!(result.contains("Base"));
-        assert!(result.contains("Procedures"));
-        assert!(!result.contains("## Your Identity"), "missing file must be skipped");
-        assert!(!result.contains("## Your User"), "missing file must be skipped");
-    }
-
-    #[test]
-    fn host_prompt_bootstrap_always_emits_content() {
-        let dir = tempfile::tempdir().unwrap();
-        // No BOOTSTRAP.md — but function is called with bootstrap_mode=true
-        // (caller is responsible for mode detection, not this function)
-        let result = assemble_host_system_prompt("Base\n", true, dir.path(), None);
-        assert!(result.contains("## Bootstrap Instructions"));
-        assert!(result.contains("First-Time Setup"));
-    }
-
-    #[test]
-    fn sandbox_script_includes_mcp_instructions() {
-        let script = build_sandbox_prompt_assembly_script(
+    fn script_includes_mcp_instructions() {
+        let script = test_script(
             "Base",
             false,
             &["claude".into()],
@@ -1784,79 +1694,30 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_script_none_mcp_instructions_omitted() {
-        let script = build_sandbox_prompt_assembly_script(
-            "Base",
-            false,
-            &["claude".into()],
-            None,
-        );
+    fn script_none_mcp_instructions_omitted() {
+        let script = test_script("Base", false, &["claude".into()], None);
         assert!(!script.contains("MCP Server Instructions"));
     }
 
     #[test]
-    fn host_prompt_includes_mcp_instructions() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "Procedures").unwrap();
-
-        let result = assemble_host_system_prompt(
+    fn script_mcp_instructions_with_custom_paths() {
+        let script = build_prompt_assembly_script(
             "Base\n",
             false,
-            dir.path(),
+            "/home/agent",
+            "/home/agent/.claude/composite-system-prompt.md",
+            "/home/agent",
+            &["claude".into()],
             Some("# MCP Server Instructions\n\n## notion\n\nNotion tools.\n"),
         );
-        assert!(result.contains("MCP Server Instructions"));
-        assert!(result.contains("notion"));
-        assert!(result.contains("Notion tools."));
+        assert!(script.contains("MCP Server Instructions"));
+        assert!(script.contains("notion"));
+        assert!(script.contains("Notion tools."));
     }
 
     #[test]
-    fn host_prompt_none_mcp_instructions_omitted() {
-        let dir = tempfile::tempdir().unwrap();
-        let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
-        assert!(!result.contains("MCP Server Instructions"));
-    }
-
-    #[test]
-    fn host_prompt_bootstrap_uses_compiled_constant() {
-        let dir = tempfile::tempdir().unwrap();
-        // BOOTSTRAP.md file exists (flag) but we don't read its content
-        std::fs::write(dir.path().join("BOOTSTRAP.md"), "old content").unwrap();
-
-        let result = assemble_host_system_prompt("Base\n", true, dir.path(), None);
-        assert!(result.contains("First-Time Setup"), "must use compiled-in bootstrap content");
-        assert!(!result.contains("old content"), "must NOT read file content");
-    }
-
-    #[test]
-    fn host_prompt_normal_has_operating_instructions_before_identity() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("IDENTITY.md"), "I am Test").unwrap();
-
-        let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
-        let op_instr_pos = result.find("## Operating Instructions").expect("must have Operating Instructions");
-        let identity_pos = result.find("## Your Identity").expect("must have Your Identity");
-        assert!(op_instr_pos < identity_pos, "Operating Instructions must come before identity");
-    }
-
-    #[test]
-    fn host_prompt_normal_has_agent_configuration() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "## Subagents\n\n### reviewer\n").unwrap();
-
-        let result = assemble_host_system_prompt("Base\n", false, dir.path(), None);
-        assert!(result.contains("## Agent Configuration"), "must have Agent Configuration header");
-        assert!(result.contains("### reviewer"), "must include per-agent content");
-    }
-
-    #[test]
-    fn sandbox_script_bootstrap_uses_compiled_constant() {
-        let script = build_sandbox_prompt_assembly_script(
-            "Base prompt",
-            true,
-            &["claude".into(), "-p".into()],
-            None,
-        );
+    fn script_bootstrap_uses_compiled_constant() {
+        let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
         // Bootstrap uses compiled-in constant, NOT cat of file
         assert!(!script.contains("cat /sandbox"), "bootstrap must not cat any sandbox file");
         assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
@@ -1864,26 +1725,16 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_script_normal_has_operating_instructions_before_identity() {
-        let script = build_sandbox_prompt_assembly_script(
-            "Base prompt",
-            false,
-            &["claude".into()],
-            None,
-        );
+    fn script_normal_has_operating_instructions_before_identity() {
+        let script = test_script("Base prompt", false, &["claude".into()], None);
         let op_instr_pos = script.find("Operating Instructions").expect("must have Operating Instructions");
         let identity_pos = script.find("IDENTITY.md").expect("must have IDENTITY.md");
         assert!(op_instr_pos < identity_pos, "Operating Instructions must come before IDENTITY.md");
     }
 
     #[test]
-    fn sandbox_script_normal_has_agent_configuration_section() {
-        let script = build_sandbox_prompt_assembly_script(
-            "Base prompt",
-            false,
-            &["claude".into()],
-            None,
-        );
+    fn script_normal_has_agent_configuration_section() {
+        let script = test_script("Base prompt", false, &["claude".into()], None);
         assert!(script.contains("Agent Configuration"), "must have Agent Configuration section for per-agent AGENTS.md");
         assert!(script.contains("cat /sandbox/AGENTS.md"), "must cat AGENTS.md from sandbox root");
     }
