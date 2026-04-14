@@ -212,7 +212,7 @@ impl MemoryServer {
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn
             .prepare(
-                "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json
+                "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at, delivery_status, no_notify_reason
                  FROM cron_runs
                  WHERE (?1 IS NULL OR job_name = ?1)
                  ORDER BY started_at DESC
@@ -231,6 +231,9 @@ impl MemoryServer {
                     row.get::<_, Option<String>>(6)?.as_deref(),
                     row.get::<_, Option<String>>(7)?.as_deref(),
                     row.get::<_, Option<String>>(8)?.as_deref(),
+                    row.get::<_, Option<String>>(9)?.as_deref(),
+                    row.get::<_, Option<String>>(10)?.as_deref(),
+                    row.get::<_, Option<String>>(11)?.as_deref(),
                 ))
             })
             .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
@@ -251,7 +254,7 @@ impl MemoryServer {
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
         let result = conn.query_row(
-            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json
+            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at, delivery_status, no_notify_reason
              FROM cron_runs WHERE id = ?1",
             rusqlite::params![params.run_id],
             |row| {
@@ -265,6 +268,9 @@ impl MemoryServer {
                     row.get::<_, Option<String>>(6)?.as_deref(),
                     row.get::<_, Option<String>>(7)?.as_deref(),
                     row.get::<_, Option<String>>(8)?.as_deref(),
+                    row.get::<_, Option<String>>(9)?.as_deref(),
+                    row.get::<_, Option<String>>(10)?.as_deref(),
+                    row.get::<_, Option<String>>(11)?.as_deref(),
                 ))
             },
         );
@@ -479,6 +485,9 @@ pub(crate) fn cron_run_to_json(
     log_path: Option<&str>,
     summary: Option<&str>,
     notify_json: Option<&str>,
+    delivered_at: Option<&str>,
+    delivery_status: Option<&str>,
+    no_notify_reason: Option<&str>,
 ) -> serde_json::Value {
     let mut val = serde_json::json!({
         "id": id,
@@ -488,6 +497,9 @@ pub(crate) fn cron_run_to_json(
         "exit_code": exit_code,
         "status": status,
         "log_path": log_path,
+        "delivered_at": delivered_at,
+        "delivery_status": delivery_status,
+        "no_notify_reason": no_notify_reason,
     });
     if let Some(s) = summary {
         val["summary"] = serde_json::Value::String(s.to_owned());

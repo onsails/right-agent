@@ -171,6 +171,44 @@ async fn test_cron_show_run_not_found() {
     );
 }
 
+#[tokio::test]
+async fn test_cron_list_runs_includes_diagnostics_fields() {
+    let (server, _dir) = setup_server();
+    let conn = server.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, summary, delivery_status, no_notify_reason) \
+         VALUES ('diag-1', 'tracker', '2026-04-01T10:00:00Z', 'success', '/log', 'quiet', 'silent', 'No changes since last run')",
+        [],
+    ).expect("insert");
+    conn.execute(
+        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, summary, notify_json, delivery_status, delivered_at) \
+         VALUES ('diag-2', 'tracker', '2026-04-01T11:00:00Z', 'success', '/log', 'found stuff', '{\"content\":\"new release\"}', 'delivered', '2026-04-01T11:05:00Z')",
+        [],
+    ).expect("insert");
+    drop(conn);
+
+    let result = server
+        .cron_list_runs(Parameters(CronListRunsParams {
+            job_name: Some("tracker".to_string()),
+            limit: None,
+        }))
+        .await
+        .expect("cron_list_runs ok");
+    let text = call_result_text(result);
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid json");
+    assert_eq!(parsed.len(), 2);
+
+    // diag-2 is first (DESC order)
+    assert_eq!(parsed[0]["delivery_status"], "delivered");
+    assert_eq!(parsed[0]["delivered_at"], "2026-04-01T11:05:00Z");
+    assert!(parsed[0]["no_notify_reason"].is_null());
+
+    // diag-1 is second
+    assert_eq!(parsed[1]["delivery_status"], "silent");
+    assert_eq!(parsed[1]["no_notify_reason"], "No changes since last run");
+    assert!(parsed[1]["delivered_at"].is_null());
+}
+
 // --- MCP tool tests ---
 
 #[tokio::test]
