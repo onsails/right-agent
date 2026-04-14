@@ -331,26 +331,29 @@ async fn deliver_through_session(
     // Delivery always uses Haiku — cheap relay task.
     const DELIVERY_MODEL: &str = "claude-haiku-4-5-20251001";
 
-    let mut claude_args: Vec<String> = vec![
-        "claude".into(),
-        "-p".into(),
-        "--dangerously-skip-permissions".into(),
-        "--model".into(),
-        DELIVERY_MODEL.into(),
-    ];
-    claude_args.push("--output-format".into());
-    claude_args.push("json".into());
-
-    if let Some(ref sid) = session_id {
-        claude_args.push("--resume".into());
-        claude_args.push(sid.clone());
-    }
+    let mcp_path = crate::telegram::invocation::mcp_config_path(
+        ssh_config_path,
+        agent_dir,
+    );
 
     let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
-    if let Ok(schema) = std::fs::read_to_string(&reply_schema_path) {
-        claude_args.push("--json-schema".into());
-        claude_args.push(schema);
-    }
+    let json_schema = std::fs::read_to_string(&reply_schema_path).unwrap_or_default();
+
+    let invocation = crate::telegram::invocation::ClaudeInvocation {
+        mcp_config_path: mcp_path,
+        json_schema,
+        output_format: crate::telegram::invocation::OutputFormat::Json,
+        model: Some(DELIVERY_MODEL.into()),
+        max_budget_usd: None,
+        max_turns: None,
+        resume_session_id: session_id,
+        new_session_id: None,
+        disallowed_tools: vec![], // delivery is a relay — no tools to disable
+        extra_args: vec![],
+        prompt: None, // stdin-piped
+    };
+
+    let claude_args = invocation.into_args();
 
     // Derive sandbox_mode and home_dir from ssh_config_path.
     let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
