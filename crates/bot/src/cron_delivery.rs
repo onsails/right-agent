@@ -22,7 +22,7 @@ pub fn fetch_pending(
 ) -> Result<Option<PendingCronResult>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, job_name, notify_json, summary, finished_at FROM cron_runs \
-         WHERE status = 'success' AND notify_json IS NOT NULL AND delivered_at IS NULL \
+         WHERE status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
          ORDER BY finished_at ASC LIMIT 1",
     )?;
     let result = stmt.query_row([], |row| {
@@ -63,7 +63,7 @@ pub fn deduplicate_job(
     let latest = conn
         .query_row(
             "SELECT id, job_name, notify_json, summary, finished_at FROM cron_runs \
-             WHERE job_name = ?1 AND status = 'success' AND notify_json IS NOT NULL AND delivered_at IS NULL \
+             WHERE job_name = ?1 AND status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
              ORDER BY finished_at DESC LIMIT 1",
             rusqlite::params![job_name],
             |row| {
@@ -86,7 +86,7 @@ pub fn deduplicate_job(
     let count = conn.execute(
         "UPDATE cron_runs SET delivered_at = ?1 \
          WHERE job_name = ?2 AND id != ?3 \
-         AND status = 'success' AND notify_json IS NOT NULL AND delivered_at IS NULL",
+         AND status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL",
         rusqlite::params![now, job_name, latest.id],
     )?;
 
@@ -333,7 +333,12 @@ async fn deliver_through_session(
             .map(|a| shlex::try_quote(a).expect("valid UTF-8").into_owned())
             .collect();
         let claude_cmd = escaped_args.join(" ");
-        let script = format!("cd /sandbox && {claude_cmd}");
+        let mut script = String::new();
+        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+            let escaped = token.replace('\'', "'\\''");
+            script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
+        }
+        script.push_str(&format!("cd /sandbox && {claude_cmd}"));
 
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
@@ -353,6 +358,9 @@ async fn deliver_through_session(
         }
         c.env("HOME", agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
+        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
+        }
         c.current_dir(agent_dir);
         c
     };

@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::sync::Arc;
+use tokio::io::AsyncBufReadExt as _;
+use tokio::io::AsyncReadExt as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -177,8 +180,9 @@ async fn execute_job(
     }
     claude_args.push("--max-budget-usd".into());
     claude_args.push(format!("{:.2}", spec.max_budget_usd));
+    claude_args.push("--verbose".into());
     claude_args.push("--output-format".into());
-    claude_args.push("json".into());
+    claude_args.push("stream-json".into());
     claude_args.push("--json-schema".into());
     claude_args.push(rightclaw::codegen::CRON_SCHEMA_JSON.into());
     claude_args.push("--".into());
@@ -192,7 +196,12 @@ async fn execute_job(
             .map(|a| shlex::try_quote(a).expect("valid UTF-8").into_owned())
             .collect();
         let claude_cmd = escaped_args.join(" ");
-        let script = format!("cd /sandbox && {claude_cmd}");
+        let mut script = String::new();
+        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+            let escaped = token.replace('\'', "'\\''");
+            script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
+        }
+        script.push_str(&format!("cd /sandbox && {claude_cmd}"));
 
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
@@ -223,6 +232,9 @@ async fn execute_job(
         // UNDOCUMENTED: re-verify after CC version bumps.
         // See: https://github.com/anthropics/claude-code/issues/6415
         c.env("USE_BUILTIN_RIPGREP", "0");
+        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
+        }
         c.current_dir(agent_dir);
         c
     };
@@ -233,39 +245,87 @@ async fn execute_job(
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
-    let spawn_result = cmd.spawn();
-    let output = match spawn_result {
+    let mut child = match cmd.spawn() {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
             update_run_record(&conn, &run_id, None, "failed");
             std::fs::remove_file(&lock_path).ok();
             return;
         }
-        Ok(child) => match child.wait_with_output().await {
-            Err(e) => {
-                tracing::error!(job = %job_name, "wait_with_output failed: {e:#}");
-                update_run_record(&conn, &run_id, None, "failed");
-                std::fs::remove_file(&lock_path).ok();
-                return;
-            }
-            Ok(o) => o,
-        },
+        Ok(c) => c,
     };
 
-    // Write log file (D-04)
+    // Stream stdout line-by-line into NDJSON log and collected_lines vec.
+    let stdout = child.stdout.take().expect("stdout piped");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+
+    let stream_log_dir = agent_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(agent_dir)
+        .join("logs")
+        .join("streams");
+    if let Err(e) = std::fs::create_dir_all(&stream_log_dir) {
+        tracing::warn!(job = %job_name, "failed to create stream log dir: {e:#}");
+    }
+    let stream_log_path = stream_log_dir.join(format!("{job_name}-{run_id}.ndjson"));
+    let mut stream_log = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stream_log_path)
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            tracing::warn!(job = %job_name, "failed to open stream log: {e:#}");
+            None
+        }
+    };
+
+    let mut collected_lines: Vec<String> = Vec::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(ref mut log) = stream_log {
+            let _ = writeln!(log, "{line}");
+        }
+        collected_lines.push(line);
+    }
+
+    // Wait for child exit and capture stderr.
+    let exit_status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(job = %job_name, "wait failed: {e:#}");
+            update_run_record(&conn, &run_id, None, "failed");
+            std::fs::remove_file(&lock_path).ok();
+            return;
+        }
+    };
+    // stderr is still owned by child — read it via the handle.
+    let stderr_bytes = if let Some(mut stderr) = child.stderr.take() {
+        let mut buf = Vec::new();
+        if let Err(e) = stderr.read_to_end(&mut buf).await {
+            tracing::warn!(job = %job_name, "failed to read stderr: {e:#}");
+        }
+        buf
+    } else {
+        Vec::new()
+    };
+    let stderr_str = String::from_utf8_lossy(&stderr_bytes);
+
+    // Write text log file (D-04)
     let mut log_content = String::new();
-    log_content.push_str("=== stdout ===\n");
-    log_content.push_str(&String::from_utf8_lossy(&output.stdout));
-    log_content.push_str("\n=== stderr ===\n");
-    log_content.push_str(&String::from_utf8_lossy(&output.stderr));
+    log_content.push_str(&format!("=== stream log: {} ===\n", stream_log_path.display()));
+    if !stderr_str.is_empty() {
+        log_content.push_str("=== stderr ===\n");
+        log_content.push_str(&stderr_str);
+    }
     if let Err(e) = std::fs::write(&log_path, &log_content) {
         tracing::error!(job = %job_name, "failed to write log file: {e:#}");
         // Continue — still update DB even if log write fails
     }
 
     // Determine status (D-02)
-    let exit_code = output.status.code();
-    let status = if output.status.success() {
+    let exit_code = exit_status.code();
+    let status = if exit_status.success() {
         "success"
     } else {
         tracing::error!(
@@ -285,8 +345,8 @@ async fn execute_job(
     tracing::info!(job = %job_name, run_id = %run_id, %status, "cron job completed");
 
     // Parse cron output and persist to DB
-    if output.status.success() {
-        match parse_cron_output(&output.stdout) {
+    if exit_status.success() {
+        match parse_cron_output(&collected_lines) {
             Ok(cron_output) => {
                 // Download attachments from sandbox to host outbox
                 let notify_json = if let Some(ref notify) = cron_output.notify {
@@ -369,25 +429,65 @@ async fn execute_job(
                 tracing::warn!(job = %job_name, reason, "failed to parse cron output");
             }
         }
+    } else {
+        // Build failure notification (Fix 3)
+        let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
+        let error_detail = collected_lines
+            .iter()
+            .rev()
+            .find_map(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .ok()
+                    .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("result"))
+                    .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
+            })
+            .unwrap_or_else(|| stderr_str.to_string());
+        let content = format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{error_detail}");
+        let notify = CronNotify {
+            content,
+            attachments: None,
+        };
+        match serde_json::to_string(&notify) {
+            Ok(json) => {
+                if let Err(e) = conn.execute(
+                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2 WHERE id = ?3",
+                    rusqlite::params!["failed", json, run_id],
+                ) {
+                    tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
+                }
+            }
+            Err(e) => {
+                tracing::error!(job = %job_name, "failed to serialize failure notify: {e:#}");
+            }
+        }
     }
 }
 
-/// Parse CC stdout into `CronReplyOutput`.
+/// Parse CC stream-json output (NDJSON lines) into `CronReplyOutput`.
 ///
-/// Tries `structured_output` first, falls back to `result`.
-/// Returns `Err` if neither field is present or JSON is invalid.
-pub(crate) fn parse_cron_output(stdout: &[u8]) -> Result<CronReplyOutput, String> {
-    let raw = String::from_utf8_lossy(stdout);
-
-    let envelope: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("CC output is not valid JSON: {e}"))?;
+/// Finds the last line with `"type": "result"`, then extracts the payload from
+/// `structured_output` (preferred) or `result` field.
+/// Returns `Err` if no result line found or JSON is invalid.
+pub(crate) fn parse_cron_output(lines: &[String]) -> Result<CronReplyOutput, String> {
+    let envelope = lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            if v.get("type").and_then(|t| t.as_str()) == Some("result") {
+                Some(v)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| "no result line found in stream-json output".to_string())?;
 
     let payload = if let Some(so) = envelope.get("structured_output") {
         if !so.is_null() { so } else { envelope.get("result").unwrap_or(so) }
     } else if let Some(r) = envelope.get("result") {
         r
     } else {
-        return Err("CC output has neither 'structured_output' nor 'result' field".into());
+        return Err("result line has neither 'structured_output' nor 'result' field".into());
     };
 
     serde_json::from_value(payload.clone())
@@ -736,12 +836,15 @@ mod tests {
         assert!(!is_lock_fresh(dir.path(), "my-job", "30m"));
     }
 
-    // -- CronReplyOutput parser tests --
+    // -- CronReplyOutput parser tests (stream-json NDJSON format) --
 
     #[test]
     fn parse_cron_output_full_notify() {
-        let json = r#"{"result":{"notify":{"content":"BTC broke 100k","attachments":null},"summary":"Checked 5 pairs"}}"#;
-        let out = parse_cron_output(json.as_bytes()).unwrap();
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#.to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":{"content":"BTC broke 100k","attachments":null},"summary":"Checked 5 pairs"}}"#.to_string(),
+        ];
+        let out = parse_cron_output(&lines).unwrap();
         assert_eq!(out.summary, "Checked 5 pairs");
         let notify = out.notify.unwrap();
         assert_eq!(notify.content, "BTC broke 100k");
@@ -750,16 +853,20 @@ mod tests {
 
     #[test]
     fn parse_cron_output_silent_null_notify() {
-        let json = r#"{"result":{"notify":null,"summary":"Nothing interesting"}}"#;
-        let out = parse_cron_output(json.as_bytes()).unwrap();
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":null,"summary":"Nothing interesting"}}"#.to_string(),
+        ];
+        let out = parse_cron_output(&lines).unwrap();
         assert!(out.notify.is_none());
         assert_eq!(out.summary, "Nothing interesting");
     }
 
     #[test]
     fn parse_cron_output_with_attachments() {
-        let json = r#"{"result":{"notify":{"content":"Chart","attachments":[{"type":"photo","path":"/sandbox/outbox/chart.png"}]},"summary":"Generated chart"}}"#;
-        let out = parse_cron_output(json.as_bytes()).unwrap();
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","structured_output":{"notify":{"content":"Chart","attachments":[{"type":"photo","path":"/sandbox/outbox/chart.png"}]},"summary":"Generated chart"}}"#.to_string(),
+        ];
+        let out = parse_cron_output(&lines).unwrap();
         let notify = out.notify.unwrap();
         assert_eq!(notify.attachments.as_ref().unwrap().len(), 1);
         assert_eq!(notify.attachments.unwrap()[0].path, "/sandbox/outbox/chart.png");
@@ -767,14 +874,35 @@ mod tests {
 
     #[test]
     fn parse_cron_output_structured_output_preferred() {
-        let json = r#"{"result":"ignored","structured_output":{"notify":null,"summary":"from structured"}}"#;
-        let out = parse_cron_output(json.as_bytes()).unwrap();
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"ignored","structured_output":{"notify":null,"summary":"from structured"}}"#.to_string(),
+        ];
+        let out = parse_cron_output(&lines).unwrap();
         assert_eq!(out.summary, "from structured");
     }
 
     #[test]
-    fn parse_cron_output_unparseable_returns_err() {
-        let result = parse_cron_output(b"not json");
+    fn parse_cron_output_falls_back_to_result() {
+        let lines = vec![
+            r#"{"type":"result","subtype":"success","is_error":false,"result":{"notify":null,"summary":"from result field"}}"#.to_string(),
+        ];
+        let out = parse_cron_output(&lines).unwrap();
+        assert_eq!(out.summary, "from result field");
+    }
+
+    #[test]
+    fn parse_cron_output_no_result_line_returns_err() {
+        let lines = vec![
+            r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#.to_string(),
+            "not json".to_string(),
+        ];
+        let result = parse_cron_output(&lines);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cron_output_empty_returns_err() {
+        let result = parse_cron_output(&[]);
         assert!(result.is_err());
     }
 
