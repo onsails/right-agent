@@ -25,12 +25,6 @@ backoff_seconds: 10
 #   MY_VAR: "literal value"
 #   ANOTHER_VAR: "also literal"
 
-# Maximum CC turns per invocation (CC stops gracefully at limit)
-max_turns: 30
-
-# Maximum dollar spend per CC invocation
-max_budget_usd: 1.0
-
 # Show live thinking indicator in Telegram during CC execution
 show_thinking: true
 
