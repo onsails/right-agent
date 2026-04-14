@@ -167,25 +167,33 @@ async fn execute_job(
         return;
     }
 
-    // Build claude CLI arguments (first element is "claude" for SSH mode).
-    let mut claude_args: Vec<String> = vec![
-        "claude".into(),
-        "-p".into(),
-        "--dangerously-skip-permissions".into(),
-    ];
-    if let Some(model) = model {
-        claude_args.push("--model".into());
-        claude_args.push(model.into());
-    }
-    claude_args.push("--max-budget-usd".into());
-    claude_args.push(format!("{:.2}", spec.max_budget_usd));
-    claude_args.push("--verbose".into());
-    claude_args.push("--output-format".into());
-    claude_args.push("stream-json".into());
-    claude_args.push("--json-schema".into());
-    claude_args.push(rightclaw::codegen::CRON_SCHEMA_JSON.into());
-    claude_args.push("--".into());
-    claude_args.push(spec.prompt.clone());
+    // Disallow CC built-in tools — cron jobs must not self-schedule or manage tasks.
+    let disallowed_tools: Vec<String> = [
+        "CronCreate", "CronList", "CronDelete",
+        "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop",
+        "EnterPlanMode", "ExitPlanMode", "RemoteTrigger",
+    ].iter().map(|&s| s.into()).collect();
+
+    let mcp_path = crate::telegram::invocation::mcp_config_path(
+        ssh_config_path,
+        agent_dir,
+    );
+
+    let invocation = crate::telegram::invocation::ClaudeInvocation {
+        mcp_config_path: mcp_path,
+        json_schema: rightclaw::codegen::CRON_SCHEMA_JSON.into(),
+        output_format: crate::telegram::invocation::OutputFormat::StreamJson,
+        model: model.map(|s| s.to_owned()),
+        max_budget_usd: Some(spec.max_budget_usd),
+        max_turns: None,
+        resume_session_id: None,
+        new_session_id: None,
+        disallowed_tools,
+        extra_args: vec![],
+        prompt: Some(spec.prompt.clone()),
+    };
+
+    let claude_args = invocation.into_args();
 
     // Derive sandbox_mode and home_dir from ssh_config_path (same as worker).
     let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
