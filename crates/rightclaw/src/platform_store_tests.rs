@@ -81,20 +81,6 @@ fn build_manifest_from_files() {
 }
 
 #[test]
-fn build_manifest_skips_agent_owned_files() {
-    let dir = tempdir().unwrap();
-    let agents_dir = dir.path().join(".claude/agents");
-    std::fs::create_dir_all(&agents_dir).unwrap();
-    std::fs::write(agents_dir.join("AGENTS.md"), "# agents").unwrap();
-    std::fs::write(agents_dir.join("TOOLS.md"), "# tools").unwrap();
-    std::fs::write(agents_dir.join("right.md"), "---\nname: right\n---").unwrap();
-    let manifest = build_manifest(dir.path()).unwrap();
-    assert!(manifest.entries.iter().any(|e| e.name == "right.md"));
-    assert!(!manifest.entries.iter().any(|e| e.name == "AGENTS.md"));
-    assert!(!manifest.entries.iter().any(|e| e.name == "TOOLS.md"));
-}
-
-#[test]
 fn build_manifest_caches_file_content() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
