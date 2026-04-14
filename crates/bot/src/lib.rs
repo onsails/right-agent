@@ -236,7 +236,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     tokio::spawn(rightclaw::mcp::refresh::run_refresh_scheduler(
         agent_dir.clone(),
         refresh_rx,
-        notify_refresh_tx,
     ));
 
     // Forward refresh error notifications to Telegram

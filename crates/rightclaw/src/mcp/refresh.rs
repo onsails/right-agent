@@ -91,7 +91,6 @@ pub fn refresh_due_in(entry: &OAuthServerState) -> Duration {
 pub async fn run_refresh_scheduler(
     agent_dir: std::path::PathBuf,
     mut rx: tokio::sync::mpsc::Receiver<RefreshMessage>,
-    notify_tx: tokio::sync::mpsc::Sender<String>,
 ) {
     let http_client = reqwest::Client::new();
 
@@ -224,9 +223,8 @@ pub async fn run_refresh_scheduler(
                         entries.insert(name.clone(), new_entry);
                     }
                     Err(e) => {
-                        tracing::error!(server = %name, "token refresh failed after retries: {e:#}");
+                        tracing::warn!(server = %name, "token refresh failed after retries: {e:#}");
                         timers.remove(&name);
-                        let _ = notify_tx.send(format!("OAuth refresh failed for {name}: {e:#}")).await;
                     }
                 }
             }
