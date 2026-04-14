@@ -1497,11 +1497,11 @@ mod tests {
     #[test]
     fn resolve_agent_db_errors_on_missing_memory_db() {
         let tmp = TempDir::new().unwrap();
-        // create agent dir but no memory.db
+        // create agent dir but no data.db
         let agent_dir = tmp.path().join("agents").join("testagent");
         fs::create_dir_all(&agent_dir).unwrap();
         let result = resolve_agent_db(tmp.path(), "testagent");
-        let err = result.expect_err("should fail when memory.db missing");
+        let err = result.expect_err("should fail when data.db missing");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("no memory database"),
@@ -1907,7 +1907,7 @@ fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<rusqlite::Connec
             agent_path.display()
         ));
     }
-    let db_path = agent_path.join("memory.db");
+    let db_path = agent_path.join("data.db");
     if !db_path.exists() {
         return Err(miette::miette!(
             "no memory database for agent '{}' — run `rightclaw up` first",
@@ -1915,7 +1915,7 @@ fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<rusqlite::Connec
         ));
     }
     rightclaw::memory::open_connection(&agent_path)
-        .map_err(|e| miette::miette!("failed to open memory.db for '{}': {e:#}", agent))
+        .map_err(|e| miette::miette!("failed to open data.db for '{}': {e:#}", agent))
 }
 
 fn cmd_memory_list(
@@ -1976,13 +1976,13 @@ fn cmd_memory_list(
 }
 
 fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> {
-    // resolve_agent_db validates agent dir and memory.db existence before opening.
+    // resolve_agent_db validates agent dir and data.db existence before opening.
     let conn = resolve_agent_db(home, agent)?;
 
     // db_path needed only for fs metadata (file size) — derive from home, not conn.
-    let db_path = rightclaw::config::agents_dir(home).join(agent).join("memory.db");
+    let db_path = rightclaw::config::agents_dir(home).join(agent).join("data.db");
     let db_size = std::fs::metadata(&db_path)
-        .map_err(|e| miette::miette!("failed to stat memory.db: {e:#}"))?
+        .map_err(|e| miette::miette!("failed to stat data.db: {e:#}"))?
         .len();
 
     let (total_entries, oldest, newest): (i64, Option<String>, Option<String>) = conn
@@ -2221,7 +2221,7 @@ fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()>
             .and_then(|n| n.to_str())
             .unwrap_or("?");
         let conn = rightclaw::memory::open_connection(agent_dir)
-            .map_err(|e| miette::miette!("open memory.db for {agent_name}: {e:#}"))?;
+            .map_err(|e| miette::miette!("open data.db for {agent_name}: {e:#}"))?;
         let servers = rightclaw::mcp::credentials::db_list_servers(&conn)
             .map_err(|e| miette::miette!("db_list_servers for {agent_name}: {e:#}"))?;
         for s in &servers {

@@ -636,7 +636,7 @@ pub(crate) async fn send_tg(
 ///
 /// 1. Sends instruction to user via Telegram.
 /// 2. Waits for token from Telegram message intercept.
-/// 3. Saves token to memory.db.
+/// 3. Saves token to data.db.
 fn spawn_token_request(
     ctx: &WorkerContext,
     tg_chat_id: teloxide::types::ChatId,

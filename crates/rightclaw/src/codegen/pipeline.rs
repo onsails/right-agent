@@ -37,7 +37,7 @@ fn ensure_agent_secret(agent_path: &Path, agent_name: &str, existing: Option<&st
 /// Run codegen for a single agent.
 ///
 /// Generates all per-agent artifacts: settings, agent definitions, schemas,
-/// .claude.json, mcp.json, TOOLS.md, skills, memory.db, policy.yaml.
+/// .claude.json, mcp.json, TOOLS.md, skills, data.db, policy.yaml.
 /// Called by the bot at startup. Also used by `rightclaw init` and `rightclaw agent init`.
 ///
 /// Returns the agent secret (existing or newly generated).
@@ -188,7 +188,7 @@ pub fn run_single_agent_codegen(
             agent.name
         )
     })?;
-    tracing::debug!(agent = %agent.name, "memory.db initialized");
+    tracing::debug!(agent = %agent.name, "data.db initialized");
 
     // Ensure agent has a persistent secret for token derivation.
     let existing_secret = agent.config.as_ref().and_then(|c| c.secret.as_deref());
@@ -422,7 +422,7 @@ mod tests {
         assert!(agent_dir.join(".claude/cron-schema.json").exists());
         assert!(agent_dir.join(".claude/bootstrap-schema.json").exists());
         assert!(agent_dir.join("mcp.json").exists());
-        assert!(agent_dir.join("memory.db").exists());
+        assert!(agent_dir.join("data.db").exists());
         // Policy must be generated
         assert!(agent_dir.join("policy.yaml").exists());
         let policy = std::fs::read_to_string(agent_dir.join("policy.yaml")).unwrap();

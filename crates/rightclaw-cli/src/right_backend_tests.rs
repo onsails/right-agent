@@ -15,7 +15,7 @@ fn make_backend() -> (RightBackend, PathBuf, TempDir) {
     (backend, agents_dir, tmp)
 }
 
-/// Create an agent directory with a valid memory.db inside it.
+/// Create an agent directory with a valid data.db inside it.
 fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
     let agent_dir = agents_dir.join(name);
     std::fs::create_dir_all(&agent_dir).expect("create agent dir");

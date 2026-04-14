@@ -9,13 +9,13 @@ pub use store::{
     search_memories_paged, store_memory, MemoryEntry,
 };
 
-/// Opens (or creates) the per-agent SQLite memory database at `agent_path/memory.db`.
+/// Opens (or creates) the per-agent SQLite memory database at `agent_path/data.db`.
 ///
 /// - Creates the file if absent (idempotent).
 /// - Enables WAL journal mode and sets busy_timeout=5000ms.
 /// - Applies all pending schema migrations via rusqlite_migration.
 pub fn open_db(agent_path: &std::path::Path) -> Result<(), MemoryError> {
-    let db_path = agent_path.join("memory.db");
+    let db_path = agent_path.join("data.db");
     let mut conn = rusqlite::Connection::open(&db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
@@ -33,7 +33,7 @@ pub fn open_db(agent_path: &std::path::Path) -> Result<(), MemoryError> {
 pub fn open_connection(
     agent_path: &std::path::Path,
 ) -> Result<rusqlite::Connection, MemoryError> {
-    let db_path = agent_path.join("memory.db");
+    let db_path = agent_path.join("data.db");
     let mut conn = rusqlite::Connection::open(&db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
@@ -51,8 +51,8 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         assert!(
-            dir.path().join("memory.db").exists(),
-            "memory.db should exist after open_db"
+            dir.path().join("data.db").exists(),
+            "data.db should exist after open_db"
         );
     }
 
@@ -61,7 +61,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         open_db(dir.path()).unwrap(); // second call must also succeed
-        assert!(dir.path().join("memory.db").exists());
+        assert!(dir.path().join("data.db").exists());
     }
 
     #[test]
@@ -69,7 +69,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
-            rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories'",
@@ -85,7 +85,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
-            rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_events'",
@@ -101,7 +101,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
-            rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories_fts'",
@@ -117,7 +117,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
-            rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
@@ -129,7 +129,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
-            rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -140,7 +140,7 @@ mod tests {
     fn schema_has_cron_runs_table() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cron_runs'",
@@ -155,7 +155,7 @@ mod tests {
     fn cron_runs_insert_and_update() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
 
         // Insert a running job
         conn.execute(
@@ -199,7 +199,7 @@ mod tests {
     fn schema_has_sessions_table() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
@@ -214,7 +214,7 @@ mod tests {
     fn sessions_partial_unique_active() {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
-        let conn = rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
             "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) VALUES (42, 0, 'uuid-1', 1)",
             [],
@@ -232,7 +232,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
-            rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
             "INSERT INTO memory_events (event_type, actor) VALUES ('store', 'test-agent')",
             [],
@@ -250,7 +250,7 @@ mod tests {
         let dir = tempdir().unwrap();
         open_db(dir.path()).unwrap();
         let conn =
-            rusqlite::Connection::open(dir.path().join("memory.db")).unwrap();
+            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
             "INSERT INTO memory_events (event_type, actor) VALUES ('store', 'test-agent')",
             [],
@@ -291,12 +291,12 @@ mod tests {
     fn open_connection_creates_db_file() {
         let dir = tempdir().unwrap();
         assert!(
-            !dir.path().join("memory.db").exists(),
+            !dir.path().join("data.db").exists(),
             "db file should not exist before open_connection"
         );
         let _conn = open_connection(dir.path()).unwrap();
         assert!(
-            dir.path().join("memory.db").exists(),
+            dir.path().join("data.db").exists(),
             "db file should exist after open_connection"
         );
     }

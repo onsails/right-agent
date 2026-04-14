@@ -488,7 +488,7 @@ pub(crate) fn cron_run_to_json(
 /// Run the MCP memory server over stdio.
 ///
 /// - Tracing writes to stderr only (per D-03 — stdout is reserved for JSON-RPC).
-/// - DB path: `$HOME/memory.db` (agent dir is set as HOME by shell wrapper).
+/// - DB path: `$HOME/data.db` (agent dir is set as HOME by shell wrapper).
 /// - `RC_AGENT_NAME` env var identifies the calling agent.
 pub async fn run_memory_server() -> miette::Result<()> {
     // CRITICAL: tracing to stderr only — stdout is the JSON-RPC transport channel.
@@ -497,7 +497,7 @@ pub async fn run_memory_server() -> miette::Result<()> {
         .with_env_filter("warn")
         .init();
 
-    // DB path: $HOME/memory.db (HOME = agent dir under HOME override)
+    // DB path: $HOME/data.db (HOME = agent dir under HOME override)
     let home = std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));

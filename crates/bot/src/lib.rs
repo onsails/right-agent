@@ -26,7 +26,7 @@ pub struct BotArgs {
 
 /// Entry point called from rightclaw-cli.
 ///
-/// Resolves agent directory, opens memory.db, resolves token, and starts
+/// Resolves agent directory, opens data.db, resolves token, and starts
 /// the teloxide long-polling dispatcher with graceful shutdown wiring.
 ///
 /// This is an async function. The caller (rightclaw-cli) runs inside a
@@ -118,10 +118,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         "bot starting"
     );
 
-    // Open memory.db (creates if absent, applies migrations)
+    // Open data.db (creates if absent, applies migrations)
     let _conn = open_connection(&agent_dir)
-        .map_err(|e| miette::miette!("failed to open memory.db: {:#}", e))?;
-    tracing::info!(agent = %args.agent, "memory.db opened");
+        .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
+    tracing::info!(agent = %args.agent, "data.db opened");
 
     // Resolve Telegram token
     let token = telegram::resolve_token(&agent_dir, &config)?;
@@ -153,7 +153,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Log registered MCP servers at startup.
     {
         let conn = rightclaw::memory::open_connection(&agent_dir)
-            .map_err(|e| miette::miette!("failed to open memory.db for MCP check: {e:#}"))?;
+            .map_err(|e| miette::miette!("failed to open data.db for MCP check: {e:#}"))?;
         match rightclaw::mcp::credentials::db_list_servers(&conn) {
             Ok(servers) => {
                 for s in &servers {
