@@ -410,14 +410,21 @@ pub fn db_update_oauth_token(
     conn: &Connection,
     name: &str,
     access_token: &str,
+    refresh_token: Option<&str>,
     expires_at: &str,
 ) -> Result<(), CredentialError> {
-    let changed = conn
-        .execute(
+    let changed = if let Some(rt) = refresh_token {
+        conn.execute(
+            "UPDATE mcp_servers SET auth_token = ?1, refresh_token = ?2, expires_at = ?3 WHERE name = ?4",
+            rusqlite::params![access_token, rt, expires_at, name],
+        )
+    } else {
+        conn.execute(
             "UPDATE mcp_servers SET auth_token = ?1, expires_at = ?2 WHERE name = ?3",
             rusqlite::params![access_token, expires_at, name],
         )
-        .map_err(map_db_err)?;
+    }
+    .map_err(map_db_err)?;
     if changed == 0 {
         return Err(CredentialError::ServerNotFound(name.to_string()));
     }
@@ -662,13 +669,36 @@ mod db_tests {
             "2026-04-13T12:00:00Z",
         )
         .unwrap();
-        db_update_oauth_token(&conn, "notion", "new-tok", "2026-04-13T13:00:00Z").unwrap();
+        db_update_oauth_token(&conn, "notion", "new-tok", Some("rt2"), "2026-04-13T13:00:00Z")
+            .unwrap();
         let servers = db_list_servers(&conn).unwrap();
         assert_eq!(servers[0].auth_token.as_deref(), Some("new-tok"));
+        assert_eq!(servers[0].refresh_token.as_deref(), Some("rt2"));
         assert_eq!(
             servers[0].expires_at.as_deref(),
             Some("2026-04-13T13:00:00Z")
         );
+    }
+
+    #[test]
+    fn db_update_oauth_token_keeps_old_refresh_when_none() {
+        let conn = setup_db();
+        db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+        db_set_oauth_state(
+            &conn,
+            "notion",
+            "old",
+            Some("rt-original"),
+            "https://ex.com/token",
+            "c",
+            None,
+            "2026-04-13T12:00:00Z",
+        )
+        .unwrap();
+        // Pass None — should keep "rt-original"
+        db_update_oauth_token(&conn, "notion", "new-tok", None, "2026-04-13T13:00:00Z").unwrap();
+        let servers = db_list_servers(&conn).unwrap();
+        assert_eq!(servers[0].refresh_token.as_deref(), Some("rt-original"));
     }
 
     #[test]

@@ -143,9 +143,15 @@ pub async fn run_refresh_scheduler(
                             }
                         }
 
+                        tracing::info!(
+                            server = %server_name,
+                            due_secs = due.as_secs(),
+                            expires_at = %entry_state.expires_at,
+                            has_refresh_token = entry_state.refresh_token.is_some(),
+                            "new refresh scheduled",
+                        );
                         entries.insert(server_name.clone(), entry_state);
                         token_handles.insert(server_name.clone(), token);
-                        tracing::info!(server = %server_name, due_secs = due.as_secs(), "new refresh scheduled");
                     }
                     RefreshMessage::RemoveServer { server_name } => {
                         timers.remove(&server_name);
@@ -191,6 +197,7 @@ pub async fn run_refresh_scheduler(
                                     &conn,
                                     &name,
                                     &access_token,
+                                    new_entry.refresh_token.as_deref(),
                                     &expires_at,
                                 ) {
                                     tracing::error!("failed to persist refreshed token: {e:#}");
@@ -245,8 +252,18 @@ pub async fn do_refresh(
                 let token_resp: crate::mcp::oauth::TokenResponse = r.json().await
                     .map_err(|e| miette::miette!("failed to parse token response: {e:#}"))?;
 
+                let expires_in = token_resp.expires_in.unwrap_or(3600);
+                let has_new_refresh = token_resp.refresh_token.is_some();
                 let expires_at = chrono::Utc::now()
-                    + chrono::Duration::seconds(token_resp.expires_in.unwrap_or(3600) as i64);
+                    + chrono::Duration::seconds(expires_in as i64);
+
+                tracing::info!(
+                    attempt,
+                    expires_in,
+                    has_new_refresh,
+                    %expires_at,
+                    "refresh succeeded",
+                );
 
                 let access_token = token_resp.access_token.clone();
                 return Ok((OAuthServerState {
