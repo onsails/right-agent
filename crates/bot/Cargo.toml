@@ -26,7 +26,6 @@ shlex = { workspace = true }
 tempfile = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
-expectrl = "0.8"
 pulldown-cmark = { workspace = true }
 urlencoding = { workspace = true }
 
