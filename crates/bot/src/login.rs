@@ -279,11 +279,15 @@ async fn submit_auth_code(
         "login: port check before curl"
     );
 
-    // Use -v for verbose curl output on stderr, capture both stdout and stderr
+    // Shell-quote the URL to prevent & being interpreted as background operator.
+    // ssh_exec concatenates args into a remote shell command, so & in the URL
+    // would split the command.
+    let quoted_url = format!("'{callback_url}'");
+    let curl_cmd = format!("curl -s -o /dev/null -w %{{http_code}} {quoted_url}");
     let output = rightclaw::openshell::ssh_exec(
         ssh_config_path,
         ssh_host,
-        &["curl", "-sv", "-o", "/dev/null", "-w", "%{http_code}", &callback_url],
+        &[&curl_cmd],
         30,
     )
     .await
