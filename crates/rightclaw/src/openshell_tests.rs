@@ -445,10 +445,10 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
 
     // Create a staging dir with a small test file (same as init uploads agent defs).
     let staging = tmp.path().join("staging");
-    std::fs::create_dir_all(staging.join(".claude/agents")).unwrap();
+    std::fs::create_dir_all(staging.join(".claude")).unwrap();
     std::fs::write(
-        staging.join(".claude/agents/test.md"),
-        "# test agent def\n",
+        staging.join(".claude/settings.json"),
+        "{}",
     )
     .unwrap();
 
