@@ -10,6 +10,7 @@ const RESTRICTIVE_DOMAINS: &[&str] = &[
     "claude.com",
     "*.claude.ai",
     "claude.ai",
+    "storage.googleapis.com",
 ];
 
 fn restrictive_endpoints() -> String {
@@ -184,6 +185,7 @@ mod tests {
         assert!(policy.contains(r#"host: "claude.com""#));
         assert!(policy.contains(r#"host: "*.claude.ai""#));
         assert!(policy.contains(r#"host: "claude.ai""#));
+        assert!(policy.contains(r#"host: "storage.googleapis.com""#));
         assert!(!policy.contains(r#"host: "**.*""#), "restrictive must not contain wildcard");
     }
 
