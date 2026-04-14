@@ -24,6 +24,9 @@ RULES:
 
 ## Files to Create
 
+Write all three files in your current working directory using the Write tool.
+Do NOT create them inside `.claude/`, `.claude/agents/`, or any subdirectory.
+
 ### IDENTITY.md
 
 Name, creature type, vibe, emoji. Use this structure:
