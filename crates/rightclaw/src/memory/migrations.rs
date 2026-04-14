@@ -11,6 +11,7 @@ const V8_SCHEMA: &str = include_str!("sql/v8_mcp_servers.sql");
 const V9_SCHEMA: &str = include_str!("sql/v9_mcp_instructions.sql");
 const V10_SCHEMA: &str = include_str!("sql/v10_mcp_auth.sql");
 const V11_SCHEMA: &str = include_str!("sql/v11_auth_tokens.sql");
+const V12_SCHEMA: &str = include_str!("sql/v12_cron_diagnostics.sql");
 
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
     std::sync::LazyLock::new(|| {
@@ -26,6 +27,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
             M::up(V9_SCHEMA),
             M::up(V10_SCHEMA),
             M::up(V11_SCHEMA),
+            M::up(V12_SCHEMA),
         ])
     });
 
@@ -228,6 +230,63 @@ mod tests {
         ] {
             assert!(cols.contains(&col.to_string()), "{col} column missing");
         }
+    }
+
+    #[test]
+    fn v12_cron_diagnostics_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('cron_runs')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.contains(&"delivery_status".to_string()),
+            "delivery_status column missing"
+        );
+        assert!(
+            cols.contains(&"no_notify_reason".to_string()),
+            "no_notify_reason column missing"
+        );
+    }
+
+    #[test]
+    fn v12_backfill_delivery_status() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        // Insert a delivered run (has notify_json + delivered_at)
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, notify_json, delivered_at) \
+             VALUES ('d1', 'j1', '2026-01-01T00:00:00Z', 'success', '/log', '{\"content\":\"hi\"}', '2026-01-01T00:05:00Z')",
+            [],
+        ).unwrap();
+        // Insert a pending run (has notify_json, no delivered_at)
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, notify_json) \
+             VALUES ('p1', 'j1', '2026-01-01T01:00:00Z', 'success', '/log', '{\"content\":\"pending\"}')",
+            [],
+        ).unwrap();
+        // Insert a silent run (no notify_json)
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, summary) \
+             VALUES ('s1', 'j1', '2026-01-01T02:00:00Z', 'success', '/log', 'quiet')",
+            [],
+        ).unwrap();
+
+        let status_of = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT delivery_status FROM cron_runs WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(status_of("d1").as_deref(), Some("delivered"));
+        assert_eq!(status_of("p1").as_deref(), Some("pending"));
+        assert_eq!(status_of("s1").as_deref(), Some("silent"));
     }
 
     #[test]
