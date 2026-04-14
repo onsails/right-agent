@@ -481,7 +481,7 @@ pub async fn handle_mcp(
                     return Ok(());
                 }
             };
-            handle_mcp_auth(&bot, &msg, server, &agent_dir.0, pending_auth, &home.0).await
+            handle_mcp_auth(&bot, &msg, server, &agent_dir.0, pending_auth, &home.0, &internal.0).await
         }
         Some("add") => {
             let rest = parts[1..].join(" ");
@@ -552,30 +552,42 @@ async fn handle_mcp_auth(
     agent_dir: &Path,
     pending_auth: PendingAuthMap,
     home: &Path,
+    internal: &rightclaw::mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp auth");
 
-    // 1. Read mcp.json to find server URL
-    let mcp_json_path = agent_dir.join("mcp.json");
+    let agent_name = agent_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
 
-    let servers = match rightclaw::mcp::credentials::list_http_servers(
-        &mcp_json_path,
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot read mcp.json: {e:#}")).await?;
-            return Ok(());
+    // 1. Look up server URL from aggregator (not mcp.json — external servers live in SQLite)
+    let server_url = match internal.mcp_list(agent_name).await {
+        Ok(resp) => {
+            match resp.servers.iter().find(|s| s.name == server_name) {
+                Some(s) => match &s.url {
+                    Some(url) => url.clone(),
+                    None => {
+                        bot.send_message(
+                            msg.chat.id,
+                            format!("Server '{server_name}' has no URL configured"),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                },
+                None => {
+                    bot.send_message(
+                        msg.chat.id,
+                        format!("Server '{server_name}' not found. Run /mcp list to see registered servers."),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
         }
-    };
-
-    let server_url = match servers.iter().find(|(name, _)| name == server_name) {
-        Some((_, url)) => url.clone(),
-        None => {
-            bot.send_message(
-                msg.chat.id,
-                format!("Server '{server_name}' not found in mcp.json"),
-            )
-            .await?;
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("Cannot query MCP servers: {e:#}")).await?;
             return Ok(());
         }
     };
@@ -612,6 +624,7 @@ async fn handle_mcp_auth(
 
     // 4. AS discovery
     let http_client = reqwest::Client::new();
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
     bot.send_message(
         msg.chat.id,
         format!("Discovering OAuth endpoints for {server_name}..."),
@@ -775,6 +788,7 @@ async fn handle_mcp_add(
     let eff_thread_id = effective_thread_id(msg);
 
     // Step 1: Try OAuth AS discovery
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
     tracing::info!(url = %bare_url, "mcp add: starting OAuth AS discovery");
     let http_client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -787,6 +801,7 @@ async fn handle_mcp_add(
 
     if oauth_discovered {
         // OAuth server — register without auth, tell user to run /mcp auth
+        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
         tracing::info!(agent = agent_name, server = name, url = %bare_url, "mcp add: registering OAuth server via internal API");
         match internal
             .mcp_add(agent_name, name, &bare_url, Some("oauth"), None, None)
@@ -821,6 +836,7 @@ async fn handle_mcp_add(
         ("query_string".into(), None)
     } else if is_public {
         // Public URL — dispatch haiku for classification
+        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
         bot.send_message(msg.chat.id, "Detecting authentication method...")
             .await?;
 
