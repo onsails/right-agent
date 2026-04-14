@@ -87,8 +87,6 @@ filesystem_policy:
     - /dev/urandom
   read_write:
     - /dev/null
-    - /dev/tty
-    - /dev/pts
     - /tmp
     - /sandbox
     - /platform
