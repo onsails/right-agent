@@ -248,7 +248,11 @@ async fn submit_auth_code(
     state: &str,
     child: &mut tokio::process::Child,
 ) -> Result<(), miette::Report> {
-    let encoded_code = urlencoding::encode(code);
+    // The code from platform.claude.com is formatted as CODE#STATE.
+    // Strip the #STATE suffix — we already have state from the URL.
+    let code_only = code.split('#').next().unwrap_or(code);
+    tracing::info!(agent = agent_name, raw_code_len = code.len(), code_only_len = code_only.len(), "login: stripped code");
+    let encoded_code = urlencoding::encode(code_only);
     let encoded_state = urlencoding::encode(state);
     let callback_url = format!(
         "http://localhost:{port}/callback?code={encoded_code}&state={encoded_state}"
