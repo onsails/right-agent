@@ -3,11 +3,17 @@
 //! When a fresh OAuth token arrives while a stale retry loop is in progress,
 //! the loop must be cancelled so it does not overwrite the fresh token.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::{RwLock, mpsc};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::mcp::refresh::OAuthServerState;
+use crate::mcp::proxy::{BackendStatus, ProxyBackend};
+use crate::mcp::refresh::{OAuthServerState, RefreshMessage};
 
 /// Maximum retry attempts for a cancellable refresh.
 const MAX_RETRIES: u32 = 3;
@@ -145,6 +151,152 @@ pub async fn do_refresh_cancellable(
     }
 }
 
+/// Perform a full OAuth reconnect for a single MCP server:
+/// refresh the token, persist it, notify the refresh scheduler, and reconnect.
+///
+/// Steps:
+/// 1. Call [`do_refresh_cancellable`] — cancellable retry loop.
+/// 2. Write new access token to `token_arc` (shared with [`ProxyBackend`]).
+/// 3. Persist refreshed OAuth state to SQLite via [`crate::mcp::credentials::db_update_oauth_token`].
+/// 4. Send [`RefreshMessage::NewEntry`] to the refresh scheduler.
+/// 5. Call [`ProxyBackend::connect`] to re-establish the MCP session.
+///
+/// On connect failure: returns [`ReconnectError::ConnectFailed`].
+/// On cancellation: returns [`ReconnectError::Cancelled`] immediately.
+/// On all other errors: if backend is not already `Connected`, sets status to `NeedsAuth`.
+pub async fn reconnect_task(
+    server_name: String,
+    backend: Arc<ProxyBackend>,
+    oauth_state: OAuthServerState,
+    token_arc: Arc<RwLock<Option<String>>>,
+    http_client: reqwest::Client,
+    agent_dir: PathBuf,
+    refresh_tx: mpsc::Sender<RefreshMessage>,
+    cancel: CancellationToken,
+) -> Result<(), ReconnectError> {
+    let refresh_result = do_refresh_cancellable(&http_client, &oauth_state, &cancel).await;
+
+    let (new_state, access_token) = match refresh_result {
+        Ok(ok) => ok,
+        Err(ReconnectError::Cancelled) => {
+            tracing::debug!(server = %server_name, "reconnect cancelled during refresh");
+            return Err(ReconnectError::Cancelled);
+        }
+        Err(e) => {
+            tracing::warn!(server = %server_name, "reconnect refresh failed: {e:#}");
+            // Defense-in-depth: only set NeedsAuth if we're not already Connected
+            // (a concurrent path may have authenticated successfully).
+            if backend.status().await != BackendStatus::Connected {
+                backend.set_status(BackendStatus::NeedsAuth).await;
+            }
+            return Err(e);
+        }
+    };
+
+    // Write access token to shared state so DynamicAuthClient picks it up immediately.
+    *token_arc.write().await = Some(access_token.clone());
+
+    // Persist to SQLite.
+    let conn = crate::memory::open_connection(&agent_dir)
+        .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
+    let expires_at = new_state.expires_at.to_rfc3339();
+    crate::mcp::credentials::db_update_oauth_token(
+        &conn,
+        &server_name,
+        &access_token,
+        new_state.refresh_token.as_deref(),
+        &expires_at,
+    )
+    .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
+
+    // Notify refresh scheduler so it schedules the next refresh.
+    let _ = refresh_tx
+        .send(RefreshMessage::NewEntry {
+            server_name: server_name.clone(),
+            state: new_state,
+            token: token_arc.clone(),
+        })
+        .await;
+
+    // Re-establish MCP session.
+    backend
+        .connect(http_client)
+        .await
+        .map_err(|e| ReconnectError::ConnectFailed(format!("{e:#}")))?;
+
+    Ok(())
+}
+
+/// Manages in-flight reconnect tasks, ensuring at most one reconnect per server runs
+/// at a time. Starting a new reconnect for a server automatically cancels the previous one.
+pub struct ReconnectManager {
+    in_flight: HashMap<String, CancellationToken>,
+    refresh_tx: mpsc::Sender<RefreshMessage>,
+    agent_dir: PathBuf,
+}
+
+impl ReconnectManager {
+    pub fn new(refresh_tx: mpsc::Sender<RefreshMessage>, agent_dir: PathBuf) -> Self {
+        Self {
+            in_flight: HashMap::new(),
+            refresh_tx,
+            agent_dir,
+        }
+    }
+
+    /// Start a reconnect task for `server_name`.
+    ///
+    /// If one is already in flight for this server, it is cancelled first.
+    /// Returns the [`JoinHandle`] for the newly-spawned task.
+    pub fn start_reconnect(
+        &mut self,
+        server_name: String,
+        backend: Arc<ProxyBackend>,
+        oauth_state: OAuthServerState,
+        token_arc: Arc<RwLock<Option<String>>>,
+        http_client: reqwest::Client,
+    ) -> JoinHandle<Result<(), ReconnectError>> {
+        // Cancel any existing in-flight reconnect for this server.
+        if let Some(prev) = self.in_flight.remove(&server_name) {
+            prev.cancel();
+        }
+
+        let cancel = CancellationToken::new();
+        self.in_flight.insert(server_name.clone(), cancel.clone());
+
+        let refresh_tx = self.refresh_tx.clone();
+        let agent_dir = self.agent_dir.clone();
+
+        tokio::spawn(async move {
+            reconnect_task(
+                server_name,
+                backend,
+                oauth_state,
+                token_arc,
+                http_client,
+                agent_dir,
+                refresh_tx,
+                cancel,
+            )
+            .await
+        })
+    }
+
+    /// Cancel any in-flight reconnect for `server_name`.
+    pub fn cancel(&mut self, server_name: &str) {
+        if let Some(token) = self.in_flight.remove(server_name) {
+            token.cancel();
+        }
+    }
+
+    /// Cancel all in-flight reconnects.
+    pub fn cancel_all(&mut self) {
+        for (_, token) in self.in_flight.drain() {
+            token.cancel();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,4 +360,82 @@ mod tests {
 
         // wiremock verifies exactly 1 POST was received (from the expect(1) above).
     }
+
+    /// When all refresh retries are exhausted, the backend status must NOT be set to
+    /// `NeedsAuth` if it was already `Connected` — defense-in-depth guard.
+    #[tokio::test]
+    async fn exhausted_retries_do_not_overwrite_connected_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let entry = make_entry(format!("{}/token", server.uri()));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::memory::migrations::MIGRATIONS
+            .to_latest(&mut conn)
+            .unwrap();
+
+        let token_arc: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+        let backend = Arc::new(ProxyBackend::new(
+            "composio".into(),
+            tmp.path().to_path_buf(),
+            "https://example.com/mcp".into(),
+            token_arc.clone(),
+            crate::mcp::proxy::AuthMethod::Bearer,
+        ));
+        // Pre-set status to Connected — exhausted retries must not overwrite this.
+        backend.set_status(BackendStatus::Connected).await;
+
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+
+        tokio::time::pause();
+
+        let handle = {
+            let backend = backend.clone();
+            let token_arc = token_arc.clone();
+            let agent_dir = tmp.path().to_path_buf();
+            let client = reqwest::Client::new();
+            tokio::spawn(async move {
+                reconnect_task(
+                    "composio".into(),
+                    backend,
+                    entry,
+                    token_arc,
+                    client,
+                    agent_dir,
+                    refresh_tx,
+                    cancel,
+                )
+                .await
+            })
+        };
+
+        // Advance time through all backoffs so retries complete without hanging.
+        for _ in 0..MAX_RETRIES {
+            tokio::time::advance(Duration::from_secs(200)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let result = handle.await.expect("task panicked");
+        assert!(result.is_err(), "expected error after exhausted retries, got Ok");
+
+        // Status must still be Connected — the guard prevented the overwrite.
+        assert_eq!(
+            backend.status().await,
+            BackendStatus::Connected,
+            "exhausted retries must not overwrite Connected status"
+        );
+
+        // No NewEntry should have been sent since refresh never succeeded.
+        assert!(
+            refresh_rx.try_recv().is_err(),
+            "no RefreshMessage::NewEntry should be sent on failure"
+        );
+    }
+
 }
