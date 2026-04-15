@@ -220,7 +220,7 @@ pub fn run_single_agent_codegen(
     let bearer_token = crate::mcp::derive_token(&agent_secret, "right-mcp")?;
     let right_mcp_url = match agent_sandbox_mode {
         SandboxMode::None => format!("http://127.0.0.1:{mcp_port}/mcp"),
-        SandboxMode::Openshell => format!("http://host.docker.internal:{mcp_port}/mcp"),
+        SandboxMode::Openshell => format!("http://host.openshell.internal:{mcp_port}/mcp"),
     };
     crate::codegen::generate_mcp_config_http(
         &agent.path,

@@ -33,7 +33,7 @@ fn restrictive_endpoints() -> String {
 ///
 /// `right_mcp_port`: TCP port for the host-side right MCP HTTP server.
 /// `network_policy`: Controls which outbound HTTPS domains are allowed.
-/// `host_ip`: Resolved IP of `host.docker.internal` from inside the sandbox.
+/// `host_ip`: Resolved IP of `host.openshell.internal` from inside the sandbox.
 ///   When `Some`, uses the exact IP/32 in `allowed_ips`. When `None`, falls back
 ///   to common Docker network ranges (172.16.0.0/12 + 192.168.0.0/16).
 ///
@@ -103,7 +103,7 @@ network_policies:
 
   right:
     endpoints:
-      - host: "host.docker.internal"
+      - host: "host.openshell.internal"
         port: {right_mcp_port}
         allowed_ips:
 {allowed_ips}
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn generates_policy_with_right_mcp_port() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        assert!(policy.contains("host.docker.internal"));
+        assert!(policy.contains("host.openshell.internal"));
         assert!(policy.contains("8100"));
         assert!(policy.contains("172.16.0.0/12"));
         assert!(policy.contains("right:"));

@@ -296,7 +296,7 @@ mod tests {
         generate_mcp_config_http(
             dir.path(),
             "brain",
-            "http://host.docker.internal:8100/mcp",
+            "http://host.openshell.internal:8100/mcp",
             token,
         )
         .unwrap();
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(content["mcpServers"]["right"]["type"], "http");
         assert_eq!(
             content["mcpServers"]["right"]["url"],
-            "http://host.docker.internal:8100/mcp"
+            "http://host.openshell.internal:8100/mcp"
         );
         assert_eq!(
             content["mcpServers"]["right"]["headers"]["Authorization"],
@@ -360,7 +360,7 @@ mod tests {
         generate_mcp_config_http(
             dir.path(),
             "brain",
-            "http://host.docker.internal:8100/mcp",
+            "http://host.openshell.internal:8100/mcp",
             "new-token",
         )
         .unwrap();
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(servers.len(), 1, "only 'right' should remain after overwrite");
         assert_eq!(
             content["mcpServers"]["right"]["url"],
-            "http://host.docker.internal:8100/mcp",
+            "http://host.openshell.internal:8100/mcp",
             "right URL must be updated"
         );
         assert_eq!(
