@@ -1685,7 +1685,7 @@ async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) ->
     let config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)?;
     let is_sandboxed = config
         .as_ref()
-        .map(|c| c.sandbox_mode() == &rightclaw::agent::types::SandboxMode::Openshell)
+        .map(|c| c.is_sandboxed())
         .unwrap_or(true);
 
     if is_sandboxed {
@@ -1841,7 +1841,7 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
 
     let is_sandboxed = config
         .as_ref()
-        .map(|c| c.sandbox_mode() == &rightclaw::agent::types::SandboxMode::Openshell)
+        .map(|c| c.is_sandboxed())
         .unwrap_or(true);
 
     // 2. Create backup directory: ~/.rightclaw/backups/<agent>/<YYYYMMDD-HHMM>/
@@ -1944,7 +1944,7 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
                 .into_diagnostic()
                 .map_err(|e| miette::miette!("failed to open data.db: {e:#}"))?;
             conn.execute(
-                &format!("VACUUM INTO '{}'", backup_db.display()),
+                &format!("VACUUM INTO '{}'", backup_db.display().to_string().replace('\'', "''")),
                 [],
             )
             .into_diagnostic()
@@ -2842,7 +2842,7 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
     };
 
     // Only relevant for sandboxed agents.
-    if config.sandbox_mode() != &rightclaw::agent::types::SandboxMode::Openshell {
+    if !config.is_sandboxed() {
         return Ok(());
     }
 
@@ -2912,7 +2912,7 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
         if confirmed {
-            perform_migration(home, agent_name).await?;
+            perform_migration(home, agent_name, &sb_name, &mtls_dir).await?;
         } else {
             println!("Migration skipped. Filesystem policy changes will NOT take effect until the sandbox is recreated.");
         }
@@ -2924,28 +2924,19 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
 }
 
 /// Perform sandbox migration: backup old sandbox, create new one, restore data, delete old.
-async fn perform_migration(home: &Path, agent_name: &str) -> miette::Result<()> {
+///
+/// `old_sandbox` and `mtls_dir` are pre-resolved by the caller to avoid redundant
+/// config parsing and preflight checks.
+async fn perform_migration(
+    home: &Path,
+    agent_name: &str,
+    old_sandbox: &str,
+    mtls_dir: &Path,
+) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
     let agents_dir = rightclaw::config::agents_dir(home);
     let agent_dir = agents_dir.join(agent_name);
-    let config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)?
-        .ok_or_else(|| miette::miette!("agent.yaml not found for '{agent_name}'"))?;
-
-    let old_sandbox = rightclaw::openshell::resolve_sandbox_name(agent_name, &config);
-
-    let mtls_dir = match rightclaw::openshell::preflight_check() {
-        rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
-        rightclaw::openshell::OpenShellStatus::NotInstalled => {
-            return Err(miette::miette!("openshell not installed"));
-        }
-        rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
-            return Err(miette::miette!("openshell gateway not started"));
-        }
-        rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
-            return Err(miette::miette!("openshell mTLS certs missing or corrupt"));
-        }
-    };
 
     // --- Step 1/6: Backup ---
     println!("Step 1/6: Backing up sandbox '{old_sandbox}'...");
@@ -2989,9 +2980,10 @@ async fn perform_migration(home: &Path, agent_name: &str) -> miette::Result<()> 
     let staging = agent_dir.join("staging");
     rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
-    let policy_path = config
-        .sandbox
+    let migration_config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)?;
+    let policy_path = migration_config
         .as_ref()
+        .and_then(|c| c.sandbox.as_ref())
         .and_then(|s| s.policy_file.as_ref())
         .map(|p| agent_dir.join(p))
         .unwrap_or_else(|| agent_dir.join("policy.yaml"));

@@ -193,6 +193,11 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
+    /// Whether this agent runs in an OpenShell sandbox (default: true).
+    pub fn is_sandboxed(&self) -> bool {
+        *self.sandbox_mode() == SandboxMode::Openshell
+    }
+
     /// Effective sandbox mode — defaults to Openshell when `sandbox` section is absent.
     pub fn sandbox_mode(&self) -> &SandboxMode {
         self.sandbox
