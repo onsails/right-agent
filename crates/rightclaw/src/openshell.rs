@@ -1075,6 +1075,111 @@ pub async fn verify_sandbox_files(
     }
 }
 
+/// Compare filesystem and landlock sections of two `SandboxPolicy` values.
+///
+/// Returns `true` if they differ — indicating a sandbox migration is required
+/// (filesystem policy changes cannot be hot-reloaded; only network policy can).
+pub fn filesystem_policy_changed(
+    old: &crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy,
+    new: &crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy,
+) -> bool {
+    let fs_changed = match (&old.filesystem, &new.filesystem) {
+        (Some(a), Some(b)) => {
+            a.include_workdir != b.include_workdir
+                || a.read_only != b.read_only
+                || a.read_write != b.read_write
+        }
+        (None, None) => false,
+        _ => true,
+    };
+
+    let ll_changed = match (&old.landlock, &new.landlock) {
+        (Some(a), Some(b)) => a.compatibility != b.compatibility,
+        (None, None) => false,
+        _ => true,
+    };
+
+    fs_changed || ll_changed
+}
+
+/// Fetch the currently active policy from a sandbox via gRPC.
+///
+/// Returns `None` if the revision exists but the policy payload is not populated.
+pub async fn get_active_policy(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> miette::Result<Option<crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy>> {
+    use crate::openshell_proto::openshell::v1::GetSandboxPolicyStatusRequest;
+
+    let resp = client
+        .get_sandbox_policy_status(GetSandboxPolicyStatusRequest {
+            name: name.to_owned(),
+            version: 0, // latest
+            global: false,
+        })
+        .await
+        .map_err(|e| miette::miette!("GetSandboxPolicyStatus RPC failed: {e:#}"))?;
+
+    let revision = resp
+        .into_inner()
+        .revision
+        .ok_or_else(|| miette::miette!("GetSandboxPolicyStatus returned no revision"))?;
+
+    Ok(revision.policy)
+}
+
+/// Parse a policy YAML string and extract the filesystem-relevant fields into a `SandboxPolicy`.
+///
+/// Only populates `filesystem` and `landlock` — enough for comparison via
+/// [`filesystem_policy_changed`]. Network policies are ignored.
+pub fn parse_policy_yaml_filesystem(
+    yaml: &str,
+) -> miette::Result<crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy> {
+    use crate::openshell_proto::openshell::sandbox::v1::{FilesystemPolicy, LandlockPolicy};
+
+    let doc: serde_json::Value = serde_saphyr::from_str(yaml)
+        .map_err(|e| miette::miette!("failed to parse policy YAML: {e:#}"))?;
+
+    let fs_policy = doc.get("filesystem_policy").map(|fs| FilesystemPolicy {
+        include_workdir: fs
+            .get("include_workdir")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        read_only: fs
+            .get("read_only")
+            .and_then(|v| v.as_array())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        read_write: fs
+            .get("read_write")
+            .and_then(|v| v.as_array())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    });
+
+    let landlock = doc.get("landlock").map(|ll| LandlockPolicy {
+        compatibility: ll
+            .get("compatibility")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+    });
+
+    Ok(crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy {
+        filesystem: fs_policy,
+        landlock,
+        ..Default::default()
+    })
+}
+
 #[cfg(test)]
 #[path = "openshell_tests.rs"]
 mod tests;
