@@ -5,7 +5,7 @@ description: >-
   and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, reminders, one-shot tasks, or recurring tasks.
-version: 3.0.0
+version: 3.1.0
 ---
 
 # /rightcron -- Cron Job Manager
@@ -168,11 +168,13 @@ Parameters:
 
 ### Reading logs
 
-The `log_path` field in each run record points to the log file. Read it directly:
+The `log_path` field in each run record points to the NDJSON log file inside the agent's working directory. Read the tail to see recent activity:
 
 ```
-cat <log_path>
+Read(file_path: "<log_path>")
 ```
+
+For large logs, prefer reading just the tail — use a high `offset` value to skip to the end.
 
 ### Debugging example
 
@@ -183,8 +185,8 @@ User: "Why did morning-briefing fail?"
    -> Find the failed run (status="failed")
 2. mcp__right__cron_show_run(run_id="<run_id from step 1>")
    -> Get full metadata including log_path
-3. cat <log_path>
-   -> Read the subprocess output to diagnose the failure
+3. Read(file_path: "<log_path>")
+   -> Read the tail of the log to diagnose the failure
 ```
 
 ### Diagnosing missing notifications
@@ -202,6 +204,24 @@ When the user asks "why wasn't I notified?", check `delivery_status` and `no_not
 ```
 
 Never guess at delivery issues — always check the actual `delivery_status` field.
+
+## Watching a Running Job
+
+To see what a cron job is currently doing:
+
+1. Find the running job:
+```
+mcp__right__cron_list_runs(job_name="health-check", limit=1)
+```
+Check the `status` field — `"running"` means the job is active.
+
+2. Read the tail of the log file to see current activity:
+```
+Read(file_path: "<log_path from step 1>")
+```
+The log is NDJSON (one JSON event per line) — look for `"type": "assistant"` events to see what the job is doing.
+
+3. To follow progress, read the tail again after some time has passed.
 
 ## Constraints
 
