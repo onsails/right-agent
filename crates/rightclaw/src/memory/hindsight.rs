@@ -70,20 +70,21 @@ struct RetainRequest {
     is_async: bool,
 }
 
-/// Recall request body.
+/// Request body shared by recall and reflect endpoints.
 #[derive(Debug, Serialize)]
-struct RecallRequest {
+struct QueryRequest {
     query: String,
     budget: String,
     max_tokens: u32,
 }
 
-/// Reflect request body.
-#[derive(Debug, Serialize)]
-struct ReflectRequest {
-    query: String,
-    budget: String,
-    max_tokens: u32,
+/// Join recall results into a single string separated by double newlines.
+pub fn join_recall_texts(results: &[RecallResult]) -> String {
+    results
+        .iter()
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Client for the Hindsight Cloud HTTP API.
@@ -170,7 +171,7 @@ impl HindsightClient {
             "{}/v1/default/banks/{}/memories/recall",
             self.base_url, self.bank_id
         );
-        let body = RecallRequest {
+        let body = QueryRequest {
             query: query.to_owned(),
             budget: self.budget.clone(),
             max_tokens: self.max_tokens,
@@ -205,7 +206,7 @@ impl HindsightClient {
             "{}/v1/default/banks/{}/reflect",
             self.base_url, self.bank_id
         );
-        let body = ReflectRequest {
+        let body = QueryRequest {
             query: query.to_owned(),
             budget: self.budget.clone(),
             max_tokens: self.max_tokens,

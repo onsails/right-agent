@@ -298,7 +298,6 @@ async fn execute_job(
         }
     };
 
-    // Memory mode for cron job prompt injection.
     let memory_mode: Option<crate::telegram::prompt::MemoryMode> = if hindsight.is_some() {
         let composite_path = if ssh_config_path.is_some() {
             "/sandbox/.claude/composite-memory.md".to_owned()
@@ -306,43 +305,11 @@ async fn execute_job(
             agent_dir.join(".claude").join("composite-memory.md").to_string_lossy().into_owned()
         };
 
-        // Blocking recall using cron prompt text.
         if let Some(hs) = hindsight {
-            let host_path = agent_dir.join(".claude").join("composite-memory.md");
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                hs.recall(&spec.prompt),
+            crate::telegram::prompt::recall_and_deploy_composite_memory(
+                hs, &spec.prompt, "for cron job", agent_dir, resolved_sandbox,
             )
-            .await
-            {
-                Ok(Ok(results)) if !results.is_empty() => {
-                    let content: String = results
-                        .iter()
-                        .map(|r| r.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    let fenced = format!(
-                        "<memory-context>\n[System: recalled memory context for cron job.]\n\n{content}\n</memory-context>"
-                    );
-                    if let Err(e) = std::fs::write(&host_path, &fenced) {
-                        tracing::warn!(job = %job_name, "failed to write composite-memory.md: {e:#}");
-                    }
-                    if let Some(sandbox) = resolved_sandbox {
-                        if let Err(e) = rightclaw::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/").await {
-                            tracing::warn!(job = %job_name, "failed to upload composite-memory.md: {e:#}");
-                        }
-                    }
-                }
-                Ok(Ok(_)) => {
-                    let _ = std::fs::remove_file(agent_dir.join(".claude").join("composite-memory.md"));
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(job = %job_name, "cron recall failed: {e:#}");
-                }
-                Err(_) => {
-                    tracing::warn!(job = %job_name, "cron recall timed out");
-                }
-            }
+            .await;
         }
         Some(crate::telegram::prompt::MemoryMode::Hindsight {
             composite_memory_path: composite_path,
@@ -611,7 +578,7 @@ async fn execute_job(
                     tokio::spawn(async move {
                         match hs_recall.recall(&recall_prompt).await {
                             Ok(results) if !results.is_empty() => {
-                                let content: String = results.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("\n\n");
+                                let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                                 if let Some(ref c) = cron_cache {
                                     c.put(&cron_cache_key, content).await;
                                 }

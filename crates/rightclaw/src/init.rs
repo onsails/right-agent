@@ -74,7 +74,7 @@ pub fn init_agent(
 
     // Install built-in skills into .claude/skills/ (standard Agent Skills path).
     // Claude Code discovers skills from .claude/skills/ relative to cwd.
-    crate::codegen::install_builtin_skills(&agents_dir, "file")?;
+    crate::codegen::install_builtin_skills(&agents_dir, &ov.memory_provider)?;
 
     // Resolve host HOME once, before any HOME env manipulation (Phase 8).
     let host_home = dirs::home_dir()

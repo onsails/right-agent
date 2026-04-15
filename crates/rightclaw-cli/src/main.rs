@@ -480,8 +480,11 @@ async fn main() -> miette::Result<()> {
 
             for (agent_name, _token) in &token_entries {
                 let agent_dir = agents_dir.join(agent_name);
-                let mtls_dir = match rightclaw::agent::discovery::parse_agent_config(&agent_dir) {
-                    Ok(Some(config))
+                let agent_config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)
+                    .ok()
+                    .flatten();
+                let mtls_dir = match &agent_config {
+                    Some(config)
                         if *config.sandbox_mode() == rightclaw::agent::SandboxMode::Openshell =>
                     {
                         match rightclaw::openshell::preflight_check() {
@@ -558,11 +561,14 @@ async fn main() -> miette::Result<()> {
                     proxies.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
                 // Wire up HindsightBackend if memory provider is configured.
-                let hindsight = match rightclaw::agent::discovery::parse_agent_config(&agent_dir) {
-                    Ok(Some(ref agent_config)) => {
+                let hindsight = match &agent_config {
+                    Some(agent_config) => {
                         if let Some(ref mem_config) = agent_config.memory {
                             if mem_config.provider == rightclaw::agent::types::MemoryProvider::Hindsight {
-                                if let Some(ref api_key) = mem_config.api_key {
+                                let resolved_key = std::env::var("HINDSIGHT_API_KEY")
+                                    .ok()
+                                    .or_else(|| mem_config.api_key.clone());
+                                if let Some(ref api_key) = resolved_key {
                                     let bank_id = mem_config.bank_id.as_deref().unwrap_or(agent_name.as_str());
                                     let budget = mem_config.recall_budget.to_string();
                                     let client = rightclaw::memory::hindsight::HindsightClient::new(
@@ -570,6 +576,10 @@ async fn main() -> miette::Result<()> {
                                     );
                                     Some(std::sync::Arc::new(aggregator::HindsightBackend::new(client)))
                                 } else {
+                                    tracing::warn!(
+                                        agent = agent_name.as_str(),
+                                        "Hindsight provider configured but no API key found (set HINDSIGHT_API_KEY or memory.api_key in agent.yaml) — memory tools disabled"
+                                    );
                                     None
                                 }
                             } else {
@@ -2365,7 +2375,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let agent_dir = make_agent_dir(&tmp, "agent-skills");
 
-        rightclaw::codegen::install_builtin_skills(&agent_dir, "file")
+        rightclaw::codegen::install_builtin_skills(&agent_dir, &rightclaw::agent::types::MemoryProvider::File)
             .expect("install_builtin_skills should succeed");
 
         let skills_dir = agent_dir.join(".claude").join("skills");

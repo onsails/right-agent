@@ -407,7 +407,6 @@ async fn deliver_through_session(
         }
     };
 
-    // Memory mode for delivery prompt injection.
     let memory_mode: Option<crate::telegram::prompt::MemoryMode> = if let Some(hs) = hindsight {
         let composite_path = if ssh_config_path.is_some() {
             "/sandbox/.claude/composite-memory.md".to_owned()
@@ -415,42 +414,11 @@ async fn deliver_through_session(
             agent_dir.join(".claude").join("composite-memory.md").to_string_lossy().into_owned()
         };
 
-        // Blocking recall using notification content.
-        let host_path = agent_dir.join(".claude").join("composite-memory.md");
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            hs.recall(yaml_input),
+        crate::telegram::prompt::recall_and_deploy_composite_memory(
+            hs, yaml_input, "for delivery", agent_dir, resolved_sandbox,
         )
-        .await
-        {
-            Ok(Ok(results)) if !results.is_empty() => {
-                let content: String = results
-                    .iter()
-                    .map(|r| r.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                let fenced = format!(
-                    "<memory-context>\n[System: recalled memory context for delivery.]\n\n{content}\n</memory-context>"
-                );
-                if let Err(e) = std::fs::write(&host_path, &fenced) {
-                    tracing::warn!("delivery: failed to write composite-memory.md: {e:#}");
-                }
-                if let Some(sandbox) = resolved_sandbox {
-                    if let Err(e) = rightclaw::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/").await {
-                        tracing::warn!("delivery: failed to upload composite-memory.md: {e:#}");
-                    }
-                }
-            }
-            Ok(Ok(_)) => {
-                let _ = std::fs::remove_file(&host_path);
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("delivery recall failed: {e:#}");
-            }
-            Err(_) => {
-                tracing::warn!("delivery recall timed out");
-            }
-        }
+        .await;
+
         Some(crate::telegram::prompt::MemoryMode::Hindsight {
             composite_memory_path: composite_path,
         })

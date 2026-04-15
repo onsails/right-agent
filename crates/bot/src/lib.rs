@@ -118,16 +118,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     ) = match &memory_provider {
         rightclaw::agent::types::MemoryProvider::Hindsight => {
             let mem_config = config.memory.as_ref().unwrap();
-            let api_key = mem_config.api_key.as_deref().ok_or_else(|| {
-                miette::miette!(
-                    help = "Add `memory.api_key` to agent.yaml or switch to `memory.provider: file`",
-                    "Hindsight memory provider requires an API key"
-                )
-            })?;
+            let api_key = std::env::var("HINDSIGHT_API_KEY")
+                .ok()
+                .or_else(|| mem_config.api_key.clone())
+                .ok_or_else(|| {
+                    miette::miette!(
+                        help = "Set HINDSIGHT_API_KEY env var, add `memory.api_key` to agent.yaml, or switch to `memory.provider: file`",
+                        "Hindsight memory provider requires an API key"
+                    )
+                })?;
             let bank_id = mem_config.bank_id.as_deref().unwrap_or(&args.agent);
             let budget = mem_config.recall_budget.to_string();
             let client = rightclaw::memory::hindsight::HindsightClient::new(
-                api_key,
+                &api_key,
                 bank_id,
                 &budget,
                 mem_config.recall_max_tokens,
@@ -150,11 +153,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     };
 
     // Re-install skills with correct memory variant.
-    let provider_str = match &memory_provider {
-        rightclaw::agent::types::MemoryProvider::Hindsight => "hindsight",
-        rightclaw::agent::types::MemoryProvider::File => "file",
-    };
-    rightclaw::codegen::skills::install_builtin_skills(&agent_dir, provider_str)?;
+    rightclaw::codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
 
     let is_sandboxed = matches!(config.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell);
 

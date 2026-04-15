@@ -355,7 +355,6 @@ impl ToolDispatcher {
 
         let mut tools = registry.right.tools_list();
 
-        // Add hindsight memory tools if configured
         if registry.hindsight.is_some() {
             tools.extend(HindsightBackend::tools_list());
         }

@@ -111,6 +111,72 @@ fi"#
     )
 }
 
+/// Deploy pre-recalled content as composite-memory.md to host (and sandbox if applicable).
+///
+/// Formats `content` into a `<memory-context>` fence with the given `label`,
+/// writes to `agent_dir/.claude/composite-memory.md`, and uploads to sandbox.
+pub(crate) async fn deploy_composite_memory(
+    content: &str,
+    label: &str,
+    agent_dir: &std::path::Path,
+    resolved_sandbox: Option<&str>,
+) {
+    let fenced = format!(
+        "<memory-context>\n[System: recalled memory context, {label}.]\n\n{content}\n</memory-context>"
+    );
+    let host_path = agent_dir.join(".claude").join("composite-memory.md");
+    if let Err(e) = tokio::fs::write(&host_path, &fenced).await {
+        tracing::warn!("failed to write composite-memory.md: {e:#}");
+    }
+    if let Some(sandbox) = resolved_sandbox {
+        if let Err(e) =
+            rightclaw::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/").await
+        {
+            tracing::warn!("failed to upload composite-memory.md: {e:#}");
+        }
+    }
+}
+
+/// Remove composite-memory.md from host disk (best-effort).
+pub(crate) async fn remove_composite_memory(agent_dir: &std::path::Path) {
+    let host_path = agent_dir.join(".claude").join("composite-memory.md");
+    let _ = tokio::fs::remove_file(&host_path).await;
+}
+
+/// Recall from Hindsight and deploy composite-memory.md to host (and sandbox if applicable).
+///
+/// Returns the recalled content string if successful, `None` otherwise.
+/// On empty results, error, or timeout the host file is removed.
+pub(crate) async fn recall_and_deploy_composite_memory(
+    hs: &rightclaw::memory::hindsight::HindsightClient,
+    query: &str,
+    label: &str,
+    agent_dir: &std::path::Path,
+    resolved_sandbox: Option<&str>,
+) -> Option<String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), hs.recall(query)).await {
+        Ok(Ok(results)) if !results.is_empty() => {
+            let content = rightclaw::memory::hindsight::join_recall_texts(&results);
+            deploy_composite_memory(&content, label, agent_dir, resolved_sandbox).await;
+            Some(content)
+        }
+        Ok(Ok(_)) => {
+            remove_composite_memory(agent_dir).await;
+            None
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("recall failed: {e:#}");
+            remove_composite_memory(agent_dir).await;
+            None
+        }
+        Err(_) => {
+            tracing::warn!("recall timed out");
+            remove_composite_memory(agent_dir).await;
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

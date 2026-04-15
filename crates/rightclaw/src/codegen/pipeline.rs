@@ -174,7 +174,13 @@ pub fn run_single_agent_codegen(
     // Reinstall built-in skills (remove stale dirs, overwrite built-in, preserve user dirs).
     let _ = std::fs::remove_dir_all(agent.path.join(".claude/skills/clawhub"));
     let _ = std::fs::remove_dir_all(agent.path.join(".claude/skills/skills"));
-    crate::codegen::install_builtin_skills(&agent.path, "file")?;
+    let memory_provider = agent
+        .config
+        .as_ref()
+        .and_then(|c| c.memory.as_ref())
+        .map(|m| &m.provider)
+        .unwrap_or(&crate::agent::types::MemoryProvider::File);
+    crate::codegen::install_builtin_skills(&agent.path, memory_provider)?;
 
     // Write settings.local.json only if absent (CC may write runtime state here).
     let settings_local = agent.path.join(".claude").join("settings.local.json");

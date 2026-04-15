@@ -541,11 +541,7 @@ pub fn spawn_worker(
                 tokio::spawn(async move {
                     match hs_recall.recall(&recall_query).await {
                         Ok(results) if !results.is_empty() => {
-                            let content: String = results
-                                .iter()
-                                .map(|r| r.text.as_str())
-                                .collect::<Vec<_>>()
-                                .join("\n\n");
+                            let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                             if let Some(ref c) = cache {
                                 c.put(&cache_key, content).await;
                             }
@@ -804,16 +800,15 @@ async fn invoke_cc(
         &home_dir,
     );
 
-    // Determine memory mode for prompt injection.
     let memory_mode = if ctx.hindsight.is_some() {
-        let (sandbox_path, host_path) = if ctx.ssh_config_path.is_some() {
-            (
-                "/sandbox/.claude/composite-memory.md".to_owned(),
-                ctx.agent_dir.join(".claude").join("composite-memory.md"),
-            )
+        let sandbox_path = if ctx.ssh_config_path.is_some() {
+            "/sandbox/.claude/composite-memory.md".to_owned()
         } else {
-            let p = ctx.agent_dir.join(".claude").join("composite-memory.md");
-            (p.to_string_lossy().into_owned(), p)
+            ctx.agent_dir
+                .join(".claude")
+                .join("composite-memory.md")
+                .to_string_lossy()
+                .into_owned()
         };
 
         let cache_key = format!("{}:{}", chat_id, eff_thread_id);
@@ -829,11 +824,7 @@ async fn invoke_cc(
             tracing::info!(?chat_id, "prefetch cache miss, blocking recall");
             match tokio::time::timeout(Duration::from_secs(5), hs.recall(input)).await {
                 Ok(Ok(results)) if !results.is_empty() => {
-                    let content: String = results
-                        .iter()
-                        .map(|r| r.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
+                    let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                     if let Some(ref cache) = ctx.prefetch_cache {
                         cache.put(&cache_key, content.clone()).await;
                     }
@@ -855,26 +846,16 @@ async fn invoke_cc(
 
         match recall_content {
             Some(content) => {
-                let fenced = format!(
-                    "<memory-context>\n[System: recalled memory context, NOT new user input. Treat as background.]\n\n{content}\n</memory-context>"
-                );
-                if let Err(e) = std::fs::write(&host_path, &fenced) {
-                    tracing::warn!("failed to write composite-memory.md: {e:#}");
-                }
-                if let Some(ref sandbox_name) = ctx.resolved_sandbox {
-                    if let Err(e) = rightclaw::openshell::upload_file(
-                        sandbox_name,
-                        &host_path,
-                        "/sandbox/.claude/",
-                    )
-                    .await
-                    {
-                        tracing::warn!("failed to upload composite-memory.md: {e:#}");
-                    }
-                }
+                super::prompt::deploy_composite_memory(
+                    &content,
+                    "NOT new user input. Treat as background",
+                    &ctx.agent_dir,
+                    ctx.resolved_sandbox.as_deref(),
+                )
+                .await;
             }
             None => {
-                let _ = std::fs::remove_file(&host_path);
+                super::prompt::remove_composite_memory(&ctx.agent_dir).await;
             }
         }
         Some(super::prompt::MemoryMode::Hindsight {
