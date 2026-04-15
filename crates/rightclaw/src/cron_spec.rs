@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 
+/// Default budget cap per cron invocation (USD).
+pub const DEFAULT_CRON_BUDGET_USD: f64 = 2.0;
+
 /// A cron job specification loaded from the database.
 #[derive(Debug, Clone)]
 pub struct CronSpec {
@@ -131,7 +134,7 @@ pub fn create_spec(
     let schedule_warning = validate_spec_inputs(job_name, schedule, prompt, lock_ttl, max_budget_usd)?;
 
     let now = chrono::Utc::now().to_rfc3339();
-    let budget = max_budget_usd.unwrap_or(1.0);
+    let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
     let result = conn.execute(
         "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -164,7 +167,7 @@ pub fn update_spec(
     let schedule_warning = validate_spec_inputs(job_name, schedule, prompt, lock_ttl, max_budget_usd)?;
 
     let now = chrono::Utc::now().to_rfc3339();
-    let budget = max_budget_usd.unwrap_or(1.0);
+    let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
     let rows = conn
         .execute(
             "UPDATE cron_specs SET schedule = ?2, prompt = ?3, lock_ttl = ?4, max_budget_usd = ?5, updated_at = ?6 \

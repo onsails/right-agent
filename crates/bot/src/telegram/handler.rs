@@ -256,7 +256,7 @@ pub async fn handle_new(
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
 
-    let conn = rightclaw::memory::open_connection(&agent_dir.0)
+    let conn = rightclaw::memory::open_connection(&agent_dir.0, false)
         .map_err(|e| to_request_err(format!("new: open DB: {:#}", e)))?;
 
     let prev_uuid = deactivate_current(&conn, chat_id.0, eff_thread_id)
@@ -303,7 +303,7 @@ pub async fn handle_list(
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
 
-    let conn = rightclaw::memory::open_connection(&agent_dir.0)
+    let conn = rightclaw::memory::open_connection(&agent_dir.0, false)
         .map_err(|e| to_request_err(format!("list: open DB: {:#}", e)))?;
 
     let sessions = list_sessions(&conn, chat_id.0, eff_thread_id)
@@ -385,7 +385,7 @@ pub async fn handle_switch(
         return Ok(());
     }
 
-    let conn = rightclaw::memory::open_connection(&agent_dir.0)
+    let conn = rightclaw::memory::open_connection(&agent_dir.0, false)
         .map_err(|e| to_request_err(format!("switch: open DB: {:#}", e)))?;
 
     let matches = find_sessions_by_uuid(&conn, chat_id.0, eff_thread_id, &uuid)
@@ -1084,7 +1084,7 @@ async fn handle_cron_list(
     msg: &Message,
     agent_dir: &Path,
 ) -> Result<(), RequestError> {
-    let conn = rightclaw::memory::open_connection(agent_dir)
+    let conn = rightclaw::memory::open_connection(agent_dir, false)
         .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
 
     let specs = rightclaw::cron_spec::load_specs_from_db(&conn)
@@ -1135,7 +1135,7 @@ async fn handle_cron_detail(
     job_name: &str,
     agent_dir: &Path,
 ) -> Result<(), RequestError> {
-    let conn = rightclaw::memory::open_connection(agent_dir)
+    let conn = rightclaw::memory::open_connection(agent_dir, false)
         .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
 
     let detail = rightclaw::cron_spec::get_spec_detail(&conn, job_name)

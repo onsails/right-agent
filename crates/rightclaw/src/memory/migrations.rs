@@ -1,4 +1,5 @@
-use rusqlite_migration::{Migrations, M};
+use rusqlite::Transaction;
+use rusqlite_migration::{HookError, Migrations, M};
 
 const V1_SCHEMA: &str = include_str!("sql/v1_schema.sql");
 const V2_SCHEMA: &str = include_str!("sql/v2_telegram_sessions.sql");
@@ -11,7 +12,59 @@ const V8_SCHEMA: &str = include_str!("sql/v8_mcp_servers.sql");
 const V9_SCHEMA: &str = include_str!("sql/v9_mcp_instructions.sql");
 const V10_SCHEMA: &str = include_str!("sql/v10_mcp_auth.sql");
 const V11_SCHEMA: &str = include_str!("sql/v11_auth_tokens.sql");
-const V12_SCHEMA: &str = include_str!("sql/v12_cron_diagnostics.sql");
+
+/// v12: Add delivery_status and no_notify_reason columns to cron_runs,
+/// backfill existing rows, and create auto-set trigger.
+///
+/// Implemented as a Rust hook (not pure SQL) because SQLite lacks
+/// `ADD COLUMN IF NOT EXISTS` — the ALTER TABLE would fail with
+/// "duplicate column name" if re-run on a database that already has
+/// the columns.
+fn v12_cron_diagnostics(tx: &Transaction) -> Result<(), HookError> {
+    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cron_runs') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    };
+
+    if !has_column("delivery_status")? {
+        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN delivery_status TEXT")?;
+    }
+    if !has_column("no_notify_reason")? {
+        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN no_notify_reason TEXT")?;
+    }
+
+    // Backfill existing rows (idempotent UPDATEs).
+    tx.execute_batch(
+        "UPDATE cron_runs SET delivery_status = 'delivered'
+           WHERE notify_json IS NOT NULL AND delivered_at IS NOT NULL;
+         UPDATE cron_runs SET delivery_status = 'pending'
+           WHERE notify_json IS NOT NULL AND delivered_at IS NULL;
+         UPDATE cron_runs SET delivery_status = 'silent'
+           WHERE notify_json IS NULL;",
+    )?;
+
+    // Trigger: auto-set delivery_status on INSERT (IF NOT EXISTS is idempotent).
+    tx.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS cron_runs_delivery_status_insert
+         AFTER INSERT ON cron_runs
+         WHEN NEW.delivery_status IS NULL
+         BEGIN
+           UPDATE cron_runs SET delivery_status =
+             CASE
+               WHEN NEW.notify_json IS NOT NULL AND NEW.delivered_at IS NOT NULL THEN 'delivered'
+               WHEN NEW.notify_json IS NOT NULL AND NEW.delivered_at IS NULL     THEN 'pending'
+               ELSE 'silent'
+             END
+           WHERE id = NEW.id;
+         END;",
+    )?;
+
+    Ok(())
+}
 
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
     std::sync::LazyLock::new(|| {
@@ -27,7 +80,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
             M::up(V9_SCHEMA),
             M::up(V10_SCHEMA),
             M::up(V11_SCHEMA),
-            M::up(V12_SCHEMA),
+            M::up_with_hook("", v12_cron_diagnostics),
         ])
     });
 
@@ -287,6 +340,30 @@ mod tests {
         assert_eq!(status_of("d1").as_deref(), Some("delivered"));
         assert_eq!(status_of("p1").as_deref(), Some("pending"));
         assert_eq!(status_of("s1").as_deref(), Some("silent"));
+    }
+
+    #[test]
+    fn v12_idempotent_when_columns_already_exist() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Apply up to v11 (version index is 1-based in to_version).
+        MIGRATIONS.to_version(&mut conn, 11).unwrap();
+
+        // Manually add the columns that v12 would create.
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN delivery_status TEXT").unwrap();
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN no_notify_reason TEXT").unwrap();
+
+        // v12 must not fail even though columns already exist.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('cron_runs')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(cols.contains(&"delivery_status".to_string()));
+        assert!(cols.contains(&"no_notify_reason".to_string()));
     }
 
     #[test]

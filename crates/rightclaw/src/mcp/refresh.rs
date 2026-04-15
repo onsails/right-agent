@@ -122,7 +122,7 @@ pub async fn run_refresh_scheduler(
                         let current_token = token.read().await.clone().unwrap_or_default();
 
                         // Persist to SQLite
-                        match crate::memory::open_connection(&agent_dir) {
+                        match crate::memory::open_connection(&agent_dir, false) {
                             Ok(conn) => {
                                 let expires_at = entry_state.expires_at.to_rfc3339();
                                 if let Err(e) = crate::mcp::credentials::db_set_oauth_state(
@@ -190,7 +190,7 @@ pub async fn run_refresh_scheduler(
                         timers.insert(name.clone(), tokio::time::Instant::now() + due);
 
                         // Persist refreshed token to SQLite
-                        match crate::memory::open_connection(&agent_dir) {
+                        match crate::memory::open_connection(&agent_dir, false) {
                             Ok(conn) => {
                                 let expires_at = new_entry.expires_at.to_rfc3339();
                                 if let Err(e) = crate::mcp::credentials::db_update_oauth_token(

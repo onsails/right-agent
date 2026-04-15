@@ -587,6 +587,7 @@ mod tests {
         let agents_dir = tmp.join("agents");
         let agent_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
+        rightclaw::memory::open_db(&agent_dir, true).unwrap();
 
         let right = RightBackend::new(agents_dir, None);
         let registry = BackendRegistry {

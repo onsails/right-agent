@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 fn setup_db() -> (TempDir, rusqlite::Connection) {
     let dir = tempfile::tempdir().unwrap();
-    let conn = open_connection(dir.path()).unwrap();
+    let conn = open_connection(dir.path(), true).unwrap();
     (dir, conn)
 }
 

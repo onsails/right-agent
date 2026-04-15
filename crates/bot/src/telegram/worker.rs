@@ -387,7 +387,7 @@ pub fn spawn_worker(
                     "bootstrap complete — identity files present after sync"
                 );
                 // Open a short-lived connection to deactivate the session.
-                if let Ok(conn) = rightclaw::memory::open_connection(&ctx.agent_dir) {
+                if let Ok(conn) = rightclaw::memory::open_connection(&ctx.agent_dir, false) {
                     deactivate_current(&conn, chat_id, eff_thread_id)
                         .map_err(|e| {
                             tracing::error!(
@@ -642,7 +642,7 @@ async fn invoke_cc(
     ctx: &WorkerContext,
 ) -> Result<Option<ReplyOutput>, String> {
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
-    let conn = rightclaw::memory::open_connection(&ctx.agent_dir)
+    let conn = rightclaw::memory::open_connection(&ctx.agent_dir, false)
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
 
     // Session lookup / create (SES-02, SES-03)
