@@ -198,6 +198,70 @@ impl HindsightClient {
             .map_err(|e| MemoryError::HindsightRequest(format!("parse recall response: {e:#}")))?;
         Ok(response.results)
     }
+
+    /// Reflect on memories — synthesized narrative answer to a query.
+    pub async fn reflect(&self, query: &str) -> Result<ReflectResponse, MemoryError> {
+        let url = format!(
+            "{}/v1/default/banks/{}/reflect",
+            self.base_url, self.bank_id
+        );
+        let body = ReflectRequest {
+            query: query.to_owned(),
+            budget: self.budget.clone(),
+            max_tokens: self.max_tokens,
+        };
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .timeout(REFLECT_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| MemoryError::HindsightRequest(format!("{e:#}")))?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MemoryError::Hindsight { status, body });
+        }
+
+        resp.json::<ReflectResponse>()
+            .await
+            .map_err(|e| {
+                MemoryError::HindsightRequest(format!("parse reflect response: {e:#}"))
+            })
+    }
+
+    /// Get the bank profile, creating the bank if it doesn't exist.
+    pub async fn get_or_create_bank(&self) -> Result<BankProfile, MemoryError> {
+        let url = format!(
+            "{}/v1/default/banks/{}/profile",
+            self.base_url, self.bank_id
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .timeout(RECALL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| MemoryError::HindsightRequest(format!("{e:#}")))?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MemoryError::Hindsight { status, body });
+        }
+
+        resp.json::<BankProfile>()
+            .await
+            .map_err(|e| {
+                MemoryError::HindsightRequest(format!("parse bank profile response: {e:#}"))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +312,8 @@ mod tests {
     fn test_client(base_url: &str) -> HindsightClient {
         HindsightClient::new("hs_testkey", "test-bank", "high", 8192, Some(base_url))
     }
+
+    // --- retain tests ---
 
     #[tokio::test]
     async fn retain_sends_correct_request() {
@@ -350,5 +416,72 @@ mod tests {
         let client = test_client(&url);
         let results = client.recall("nonexistent topic").await.unwrap();
         assert!(results.is_empty());
+    }
+
+    // --- reflect tests ---
+
+    #[tokio::test]
+    async fn reflect_sends_correct_request() {
+        let (handle, url) = mock_hindsight_server(
+            r#"{"text": "Based on stored memories, the user prefers dark mode."}"#,
+            200,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let resp = client.reflect("what are user preferences").await.unwrap();
+
+        assert_eq!(
+            resp.text,
+            "Based on stored memories, the user prefers dark mode."
+        );
+
+        let (method_line, _auth, body) = handle.await.unwrap();
+        assert!(method_line.starts_with("POST"));
+        assert!(method_line.contains("/v1/default/banks/test-bank/reflect"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["query"], "what are user preferences");
+        assert_eq!(parsed["budget"], "high");
+        assert_eq!(parsed["max_tokens"], 8192);
+    }
+
+    // --- get_or_create_bank tests ---
+
+    #[tokio::test]
+    async fn get_or_create_bank_success() {
+        let (handle, url) = mock_hindsight_server(
+            r#"{"bank_id": "test-bank", "name": "Test Bank"}"#,
+            200,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let profile = client.get_or_create_bank().await.unwrap();
+
+        assert_eq!(profile.bank_id, "test-bank");
+        assert_eq!(profile.name.as_deref(), Some("Test Bank"));
+
+        let (method_line, auth, _body) = handle.await.unwrap();
+        assert!(method_line.starts_with("GET"));
+        assert!(method_line.contains("/v1/default/banks/test-bank/profile"));
+        assert!(auth.to_lowercase().contains("bearer hs_testkey"));
+    }
+
+    #[tokio::test]
+    async fn get_or_create_bank_401_error() {
+        let (_handle, url) = mock_hindsight_server(
+            r#"{"error": "invalid api key"}"#,
+            401,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let err = client.get_or_create_bank().await.unwrap_err();
+
+        match err {
+            MemoryError::Hindsight { status, .. } => assert_eq!(status, 401),
+            other => panic!("expected Hindsight error, got: {other:?}"),
+        }
     }
 }
