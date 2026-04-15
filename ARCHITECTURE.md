@@ -369,10 +369,26 @@ Bot injects file contents into system prompt (truncated to 200 lines).
 No MCP memory tools.
 
 **Hindsight mode (optional):** Hindsight Cloud API (`api.hindsight.vectorize.io`),
-one bank per agent. Bot performs auto-retain after each turn and auto-recall
-(prefetch) before each claude -p. Three MCP tools exposed via aggregator:
+one bank per agent. Three MCP tools exposed via aggregator:
 `memory_retain`, `memory_recall`, `memory_reflect`. Prefetch cache is in-memory
 (lost on restart → blocking recall on first interaction).
+
+Auto-retain after each turn: content formatted as JSON array
+(`[{"role":"user","content":"...","timestamp":"..."},{"role":"assistant",...}]`),
+`document_id` = CC session UUID (same as `--resume`), `update_mode: "append"` for
+delta retain (only new content triggers LLM extraction — O(n) cost vs O(n²) for
+full-session replace). Tags: `["chat:<chat_id>"]` for per-chat scoping.
+Context: `"conversation between RightClaw Agent and the User"`.
+
+Auto-recall before each `claude -p`: query truncated to 800 chars, tags
+`["chat:<chat_id>"]` with `tags_match: "any"` (returns per-chat + global untagged
+memories). Prefetch uses same parameters.
+
+**Cron jobs skip memory:** Cron and delivery sessions do not perform recall —
+cron prompts are static system instructions, not user queries, so recall results
+would be irrelevant and corrupt user memory representations (same approach as
+hermes-agent `skip_memory=True`). Auto-retain after cron completion is still
+active so cron results can be remembered (plain text summary, no document_id/tags).
 
 Old tools (`store_record`, `query_records`, `search_records`, `delete_record`)
 are removed. Old SQLite tables (`memories`, `memories_fts`, `memory_events`)
