@@ -224,6 +224,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // One-time migration: oauth-state.json → SQLite
     migrate_oauth_state_to_db(&agent_dir);
 
+    // Resolve sandbox name once — used throughout the bot lifetime.
+    // None when running without sandbox (mode: none).
+    let resolved_sandbox: Option<String> = if is_sandboxed {
+        Some(rightclaw::openshell::resolve_sandbox_name(&args.agent, &config))
+    } else {
+        None
+    };
+
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
     let (ssh_config_path, sandbox_ctx): (Option<std::path::PathBuf>, Option<(std::path::PathBuf, String)>) = if is_sandboxed {
         // Resolve policy path from agent.yaml sandbox config.
@@ -232,7 +240,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 "sandbox mode is openshell but no policy path resolved — check sandbox.policy_file in agent.yaml"
             ))?;
 
-        let sandbox = rightclaw::openshell::sandbox_name(&args.agent);
+        // SAFETY: resolved_sandbox is always Some when is_sandboxed is true.
+        let sandbox = resolved_sandbox.clone().unwrap();
 
         // Verify OpenShell is ready before attempting gRPC connection.
         let mtls_dir = match rightclaw::openshell::preflight_check() {
@@ -303,7 +312,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     if is_sandboxed
         && let Some(ref cfg_path) = ssh_config_path
     {
-        let ssh_host = rightclaw::openshell::ssh_host(&args.agent);
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
         rightclaw::openshell::ssh_exec(
             cfg_path, &ssh_host,
             &["mkdir", "-p", "/sandbox/inbox", "/sandbox/outbox"],
@@ -316,7 +325,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Blocks until first sync completes — ensures sandbox has correct .claude.json,
     // settings.json, etc. before any claude -p invocations.
     let sync_handle = if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
-        let sandbox = rightclaw::openshell::sandbox_name(&args.agent);
+        let sandbox = resolved_sandbox.clone().unwrap();
         let sbox = rightclaw::sandbox_exec::SandboxExec::new(
             mtls_dir.clone(),
             sandbox,
@@ -334,12 +343,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     {
         let cleanup_agent_dir = agent_dir.clone();
         let cleanup_ssh_config = ssh_config_path.clone();
-        let cleanup_agent_name = args.agent.clone();
+        let cleanup_sandbox = resolved_sandbox.clone();
         let cleanup_retention = config.attachments.retention_days;
         telegram::attachments::spawn_cleanup_task(
             cleanup_agent_dir,
             cleanup_ssh_config,
-            cleanup_agent_name,
+            cleanup_sandbox,
             cleanup_retention,
         );
     }
@@ -352,8 +361,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_ssh_config = ssh_config_path.clone();
     let cron_internal_client = Arc::clone(&internal_client);
     let cron_shutdown = shutdown.clone();
+    let cron_sandbox = resolved_sandbox.clone();
     let cron_handle = tokio::spawn(async move {
-        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_internal_client, cron_shutdown).await;
+        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_internal_client, cron_shutdown, cron_sandbox).await;
     });
 
     // Shared idle timestamp: tracks last handler/worker interaction for cron delivery gating.
@@ -371,6 +381,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_ssh_config = ssh_config_path.clone();
     let delivery_internal_client = Arc::clone(&internal_client);
     let delivery_shutdown = shutdown.clone();
+    let delivery_sandbox = resolved_sandbox.clone();
     let delivery_handle = tokio::spawn(async move {
         cron_delivery::run_delivery_loop(
             delivery_agent_dir,
@@ -381,6 +392,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_ssh_config,
             delivery_internal_client,
             delivery_shutdown,
+            delivery_sandbox,
         ).await;
     });
 
@@ -407,6 +419,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             shutdown.clone(),
             Arc::clone(&idle_timestamp),
             Arc::clone(&internal_client),
+            resolved_sandbox,
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,

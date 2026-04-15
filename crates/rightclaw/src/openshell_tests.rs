@@ -12,6 +12,32 @@ fn ssh_host_prefixes_sandbox_name() {
     assert_eq!(ssh_host("worker-1"), "openshell-rightclaw-worker-1");
 }
 
+#[test]
+fn resolve_sandbox_name_with_explicit_name() {
+    use crate::agent::types::{AgentConfig, SandboxConfig, SandboxMode};
+    let config = AgentConfig {
+        sandbox: Some(SandboxConfig {
+            mode: SandboxMode::Openshell,
+            policy_file: None,
+            name: Some("rightclaw-brain-20260415-1430".to_owned()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(resolve_sandbox_name("brain", &config), "rightclaw-brain-20260415-1430");
+}
+
+#[test]
+fn resolve_sandbox_name_falls_back_to_deterministic() {
+    use crate::agent::types::AgentConfig;
+    let config = AgentConfig::default();
+    assert_eq!(resolve_sandbox_name("brain", &config), "rightclaw-brain");
+}
+
+#[test]
+fn ssh_host_for_sandbox_formats_correctly() {
+    assert_eq!(ssh_host_for_sandbox("rightclaw-brain-20260415"), "openshell-rightclaw-brain-20260415");
+}
+
 // ---------------------------------------------------------------------------
 // Mock gRPC server for is_sandbox_ready / wait_for_ready tests
 // ---------------------------------------------------------------------------
@@ -627,4 +653,84 @@ async fn upload_directory_preserves_files_and_overwrites() {
     assert_eq!(content, "# version 2\n", "overwrite must update content");
 
     sbox.destroy().await;
+}
+
+// ---------------------------------------------------------------------------
+// filesystem_policy_changed tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filesystem_policy_changed_detects_difference() {
+    use crate::openshell_proto::openshell::sandbox::v1::{FilesystemPolicy, LandlockPolicy, SandboxPolicy};
+
+    let old = SandboxPolicy {
+        filesystem: Some(FilesystemPolicy {
+            include_workdir: true,
+            read_only: vec!["/usr".into(), "/lib".into()],
+            read_write: vec!["/sandbox".into(), "/tmp".into()],
+        }),
+        landlock: Some(LandlockPolicy {
+            compatibility: "best_effort".into(),
+        }),
+        ..Default::default()
+    };
+
+    let mut new_policy = old.clone();
+    new_policy.filesystem.as_mut().unwrap().read_write.push("/data".into());
+
+    assert!(super::filesystem_policy_changed(&old, &new_policy));
+}
+
+#[test]
+fn filesystem_policy_unchanged_when_only_network_differs() {
+    use crate::openshell_proto::openshell::sandbox::v1::*;
+
+    let old = SandboxPolicy {
+        filesystem: Some(FilesystemPolicy {
+            include_workdir: true,
+            read_only: vec!["/usr".into()],
+            read_write: vec!["/sandbox".into()],
+        }),
+        landlock: Some(LandlockPolicy {
+            compatibility: "best_effort".into(),
+        }),
+        ..Default::default()
+    };
+
+    let mut new_policy = old.clone();
+    new_policy.network_policies.insert("test".into(), NetworkPolicyRule::default());
+
+    assert!(!super::filesystem_policy_changed(&old, &new_policy));
+}
+
+// ---------------------------------------------------------------------------
+// parse_policy_yaml_filesystem tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_policy_yaml_extracts_filesystem() {
+    let yaml = r#"
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+  read_write:
+    - /sandbox
+    - /tmp
+landlock:
+  compatibility: best_effort
+network_policies:
+  claude_code:
+    endpoints:
+      - host: "*.anthropic.com"
+"#;
+    let policy = super::parse_policy_yaml_filesystem(yaml).unwrap();
+    let fs = policy.filesystem.unwrap();
+    assert!(fs.include_workdir);
+    assert_eq!(fs.read_only, vec!["/usr", "/lib"]);
+    assert_eq!(fs.read_write, vec!["/sandbox", "/tmp"]);
+    let ll = policy.landlock.unwrap();
+    assert_eq!(ll.compatibility, "best_effort");
 }

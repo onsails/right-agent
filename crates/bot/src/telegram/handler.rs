@@ -80,6 +80,8 @@ pub struct AgentSettings {
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
     pub model: Option<String>,
+    /// Resolved sandbox name (None when running without sandbox).
+    pub resolved_sandbox: Option<String>,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
@@ -210,6 +212,7 @@ pub async fn handle_message(
                     db_path: agent_dir.0.clone(),
                     debug: debug_flag.0,
                     ssh_config_path: ssh_config.0.clone(),
+                    resolved_sandbox: settings.resolved_sandbox.clone(),
                     auth_watcher_active: Arc::clone(&auth_watcher_flag.0),
                     auth_code_tx: Arc::clone(&intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,
@@ -455,6 +458,7 @@ pub async fn handle_mcp(
     internal: Arc<InternalApi>,
     pending_token_slot: Arc<PendingTokenSlot>,
     ssh_config: Arc<SshConfigPath>,
+    settings: Arc<AgentSettings>,
 ) -> ResponseResult<()> {
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
     let agent_name = agent_dir.0
@@ -477,7 +481,7 @@ pub async fn handle_mcp(
         }
         Some("add") => {
             let rest = parts[1..].join(" ");
-            handle_mcp_add(&bot, &msg, &rest, &agent_dir.0, &internal.0, &pending_token_slot, ssh_config.0.as_deref()).await
+            handle_mcp_add(&bot, &msg, &rest, &agent_dir.0, &internal.0, &pending_token_slot, ssh_config.0.as_deref(), settings.resolved_sandbox.as_deref()).await
         }
         Some("remove") => {
             let server = match parts.get(1) {
@@ -745,6 +749,7 @@ async fn handle_mcp_add(
     internal: &rightclaw::mcp::internal_client::InternalClient,
     pending_token_slot: &PendingTokenSlot,
     ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), "mcp add");
     let parts: Vec<&str> = config_str.split_whitespace().collect();
@@ -832,7 +837,7 @@ async fn handle_mcp_add(
         bot.send_message(msg.chat.id, "Detecting authentication method...")
             .await?;
 
-        match detect_auth_type_via_haiku(&bare_url, agent_name, ssh_config_path).await {
+        match detect_auth_type_via_haiku(&bare_url, ssh_config_path, resolved_sandbox).await {
             Ok(result) => {
                 tracing::info!(auth_type = %result.auth_type, header = ?result.header_name, "haiku detected auth type");
                 (result.auth_type, result.header_name)
@@ -931,8 +936,8 @@ struct AuthDetectionResult {
 /// Run haiku in sandbox (or locally) to detect MCP server auth type.
 async fn detect_auth_type_via_haiku(
     bare_url: &str,
-    agent_name: &str,
     ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
 ) -> Result<AuthDetectionResult, String> {
     let prompt = format!(
         "What authentication method does the MCP server at {bare_url} use? \
@@ -954,7 +959,7 @@ async fn detect_auth_type_via_haiku(
     ];
 
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);

@@ -622,3 +622,148 @@ async fn test_policy_validates_against_openshell() {
 
     ready.expect("sandbox did not become READY — generated policy may be invalid");
 }
+
+// --- Task 9: No-sandbox backup and restore integration tests ---
+
+#[test]
+fn test_agent_backup_and_restore_no_sandbox() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+
+    // Set up a no-sandbox agent manually.
+    let agent_dir = home.path().join("agents").join("test-agent");
+    fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\nnetwork_policy: permissive\n").unwrap();
+    fs::write(agent_dir.join("IDENTITY.md"), "# Test Agent\nI am a test agent.\n").unwrap();
+    fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
+    fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
+    fs::write(agent_dir.join("test-file.txt"), "hello world\n").unwrap();
+
+    // Create a data.db with a test table.
+    let db_path = agent_dir.join("data.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)", []).unwrap();
+    conn.execute("INSERT INTO test (val) VALUES ('backup-test')", []).unwrap();
+    drop(conn);
+
+    // Run backup.
+    rightclaw()
+        .args(["--home", home_str, "agent", "backup", "test-agent"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sandbox.tar.gz"))
+        .stdout(predicate::str::contains("agent.yaml"))
+        .stdout(predicate::str::contains("data.db"));
+
+    // Find backup directory.
+    let backups_dir = home.path().join("backups").join("test-agent");
+    assert!(backups_dir.exists(), "backups dir should exist");
+    let entries: Vec<_> = fs::read_dir(&backups_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "should have exactly one backup");
+    let backup_dir = entries[0].path();
+
+    // Verify backup contents.
+    assert!(backup_dir.join("sandbox.tar.gz").exists(), "should have sandbox.tar.gz");
+    assert!(backup_dir.join("agent.yaml").exists(), "should have agent.yaml");
+    assert!(backup_dir.join("data.db").exists(), "should have data.db");
+
+    // Delete original agent.
+    fs::remove_dir_all(&agent_dir).unwrap();
+    assert!(!agent_dir.exists());
+
+    // Restore to new agent name via agent init --from-backup.
+    // Needs agents dir and config.yaml to exist (home structure).
+    fs::write(home.path().join("config.yaml"), "{}").unwrap();
+
+    rightclaw()
+        .args([
+            "--home", home_str,
+            "agent", "init", "restored-agent",
+            "--from-backup", backup_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("restored"));
+
+    // Verify restored files.
+    let restored_dir = home.path().join("agents").join("restored-agent");
+    assert!(restored_dir.exists(), "restored agent dir should exist");
+    assert!(restored_dir.join("agent.yaml").exists(), "should have agent.yaml");
+
+    // Verify the test file was restored from tar (--strip-components=1 used during extraction).
+    assert!(
+        restored_dir.join("test-file.txt").exists(),
+        "test-file.txt should be restored"
+    );
+    assert_eq!(
+        fs::read_to_string(restored_dir.join("test-file.txt")).unwrap(),
+        "hello world\n"
+    );
+
+    // Verify restored database.
+    let restored_db = rusqlite::Connection::open(restored_dir.join("data.db")).unwrap();
+    let val: String = restored_db
+        .query_row("SELECT val FROM test WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(val, "backup-test");
+}
+
+#[test]
+fn test_agent_backup_sandbox_only() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+
+    let agent_dir = home.path().join("agents").join("test-agent");
+    fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(agent_dir.join("IDENTITY.md"), "# Test\n").unwrap();
+    fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
+
+    rightclaw()
+        .args(["--home", home_str, "agent", "backup", "test-agent", "--sandbox-only"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sandbox.tar.gz"));
+
+    let backups_dir = home.path().join("backups").join("test-agent");
+    let entries: Vec<_> = fs::read_dir(&backups_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "should have exactly one backup");
+    let backup_dir = entries[0].path();
+
+    assert!(backup_dir.join("sandbox.tar.gz").exists());
+    assert!(!backup_dir.join("agent.yaml").exists(), "sandbox-only should not have agent.yaml");
+    assert!(!backup_dir.join("data.db").exists(), "sandbox-only should not have data.db");
+}
+
+#[test]
+fn test_agent_restore_fails_if_agent_exists() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+
+    // Create existing agent.
+    let agent_dir = home.path().join("agents").join("existing");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+
+    // Create a fake backup dir.
+    let backup_dir = home.path().join("fake-backup");
+    fs::create_dir_all(&backup_dir).unwrap();
+    fs::write(backup_dir.join("sandbox.tar.gz"), "fake").unwrap();
+    fs::write(backup_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+
+    rightclaw()
+        .args([
+            "--home", home_str,
+            "agent", "init", "existing",
+            "--from-backup", backup_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}

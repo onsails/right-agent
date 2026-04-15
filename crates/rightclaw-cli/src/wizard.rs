@@ -483,7 +483,7 @@ pub fn combined_setting_menu(home: &Path) -> miette::Result<()> {
                 println!("Global config saved.");
             }
             CombinedMenuItem::Agent(name) => {
-                agent_setting_menu(home, Some(&name))?;
+                let _ = agent_setting_menu(home, Some(&name))?;
             }
         }
     }
@@ -498,7 +498,8 @@ pub fn combined_setting_menu(home: &Path) -> miette::Result<()> {
 /// Interactive menu for editing per-agent settings.
 ///
 /// If `agent_name` is `None`, presents a picker to choose from discovered agents.
-pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
+/// Returns the chosen agent name so callers can act on it (e.g. sandbox migration).
+pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Result<String> {
     let agents_dir = rightclaw::config::agents_dir(home);
 
     let chosen_name = match agent_name {
@@ -660,7 +661,7 @@ pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Resu
         println!("Saved.");
     }
 
-    Ok(())
+    Ok(chosen_name)
 }
 
 // ---------------------------------------------------------------------------
@@ -762,6 +763,55 @@ fn update_agent_yaml_sandbox_mode(path: &Path, mode: &str) -> miette::Result<()>
     }
 
     std::fs::write(path, &output)
+        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
+
+    Ok(())
+}
+
+/// Write or update `sandbox.name` in agent.yaml.
+pub fn update_agent_yaml_sandbox_name(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
+    let path = agent_dir.join("agent.yaml");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
+
+    // Remove existing sandbox block (header + indented lines), preserving
+    // all sub-fields except `name:`.
+    let mut sandbox_lines: Vec<String> = Vec::new();
+    let mut other_lines: Vec<String> = Vec::new();
+    let mut in_sandbox_block = false;
+
+    for line in content.lines() {
+        if line == "sandbox:" {
+            in_sandbox_block = true;
+            continue;
+        }
+        if in_sandbox_block {
+            if line.starts_with("  ") {
+                // Skip existing name: line — we'll add the new one.
+                if !line.trim_start().starts_with("name:") {
+                    sandbox_lines.push(line.to_string());
+                }
+                continue;
+            }
+            in_sandbox_block = false;
+        }
+        other_lines.push(line.to_string());
+    }
+
+    // Rebuild: other lines first, then sandbox block with name.
+    let mut lines = other_lines;
+    lines.push("sandbox:".to_string());
+    for sl in sandbox_lines {
+        lines.push(sl);
+    }
+    lines.push(format!("  name: \"{sandbox_name}\""));
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(&path, &output)
         .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
 
     Ok(())

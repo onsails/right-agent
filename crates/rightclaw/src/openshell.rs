@@ -27,6 +27,20 @@ pub fn ssh_host(agent_name: &str) -> String {
     format!("openshell-rightclaw-{agent_name}")
 }
 
+/// Resolve sandbox name: explicit from config, or deterministic fallback.
+pub fn resolve_sandbox_name(agent_name: &str, config: &crate::agent::types::AgentConfig) -> String {
+    config
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.name.clone())
+        .unwrap_or_else(|| sandbox_name(agent_name))
+}
+
+/// SSH host alias from sandbox name (not agent name).
+pub fn ssh_host_for_sandbox(sandbox_name: &str) -> String {
+    format!("openshell-{sandbox_name}")
+}
+
 /// Resolve the default mTLS directory for the OpenShell gateway.
 ///
 /// Checks `OPENSHELL_MTLS_DIR` env var first, then falls back to the
@@ -367,6 +381,122 @@ pub async fn ssh_exec(
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     Ok(stdout)
+}
+
+/// Stream `tar czpf -` from inside the sandbox to a local file via SSH.
+///
+/// Runs `tar czpf - -C / sandbox` on the remote host, piping stdout directly
+/// to `dest_path` without buffering in memory.
+pub async fn ssh_tar_download(
+    config_path: &Path,
+    ssh_host: &str,
+    sandbox_path: &str,
+    dest_path: &Path,
+    timeout_secs: u64,
+) -> miette::Result<()> {
+    let mut command = Command::new("ssh");
+    command.arg("-F").arg(config_path);
+    command.arg(ssh_host);
+    command.arg("--");
+    command.args(["tar", "czpf", "-", "-C", "/", sandbox_path]);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| miette::miette!("failed to spawn ssh for tar download: {e:#}"))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| miette::miette!("no stdout handle from ssh tar download"))?;
+
+    let mut file = tokio::fs::File::create(dest_path)
+        .await
+        .map_err(|e| miette::miette!("failed to create backup file {}: {e:#}", dest_path.display()))?;
+
+    // Spawn a task to copy stdout → file to avoid deadlock (SSH won't exit until stdout is consumed).
+    let copy_task = tokio::spawn(async move {
+        tokio::io::copy(&mut stdout, &mut file)
+            .await
+            .map_err(|e| miette::miette!("I/O error during tar download: {e:#}"))
+    });
+
+    let timeout_dur = Duration::from_secs(timeout_secs);
+    let (copy_result, child_result) = tokio::time::timeout(timeout_dur, async {
+        let copy = copy_task.await.map_err(|e| miette::miette!("copy task panicked: {e:#}"))??;
+        let status = child.wait().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))?;
+        Ok::<_, miette::Error>((copy, status))
+    })
+    .await
+    .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
+
+    let _ = copy_result;
+    if !child_result.success() {
+        return Err(miette::miette!(
+            "ssh tar download failed (exit {child_result})"
+        ));
+    }
+    Ok(())
+}
+
+/// Stream a local tar.gz file into the sandbox via SSH `tar xzpf -`.
+///
+/// Pipes `src_path` to SSH stdin, running `tar xzpf - -C /` inside the sandbox.
+/// Archive paths like `sandbox/...` are extracted to `/sandbox/...`.
+pub async fn ssh_tar_upload(
+    config_path: &Path,
+    ssh_host: &str,
+    src_path: &Path,
+    timeout_secs: u64,
+) -> miette::Result<()> {
+    let mut command = Command::new("ssh");
+    command.arg("-F").arg(config_path);
+    command.arg(ssh_host);
+    command.arg("--");
+    command.args(["tar", "xzpf", "-", "-C", "/"]);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| miette::miette!("failed to spawn ssh for tar upload: {e:#}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| miette::miette!("no stdin handle from ssh tar upload"))?;
+
+    let src_path = src_path.to_owned();
+    let write_task = tokio::spawn(async move {
+        let mut file = tokio::fs::File::open(&src_path)
+            .await
+            .map_err(|e| miette::miette!("failed to open backup file {}: {e:#}", src_path.display()))?;
+        tokio::io::copy(&mut file, &mut stdin)
+            .await
+            .map_err(|e| miette::miette!("I/O error during tar upload: {e:#}"))?;
+        // Drop stdin to signal EOF to the remote tar process.
+        drop(stdin);
+        Ok::<_, miette::Error>(())
+    });
+
+    let timeout_dur = Duration::from_secs(timeout_secs);
+    let output = tokio::time::timeout(timeout_dur, async {
+        write_task.await.map_err(|e| miette::miette!("write task panicked: {e:#}"))??;
+        child.wait_with_output().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    })
+    .await
+    .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "ssh tar upload failed (exit {}): {stderr}",
+            output.status
+        ));
+    }
+    Ok(())
 }
 
 /// Upload a file from host into a running sandbox.
@@ -774,7 +904,7 @@ pub async fn exec_in_sandbox(
 /// gRPC READY doesn't guarantee SSH is accepting connections — there's a gap
 /// where `ExecSandbox` fails with "Connection reset by peer". This probe
 /// runs a trivial `echo` command until it succeeds.
-async fn wait_for_ssh(
+pub async fn wait_for_ssh(
     client: &mut OpenShellClient<Channel>,
     sandbox_id: &str,
     timeout_secs: u64,
@@ -943,6 +1073,111 @@ pub async fn verify_sandbox_files(
             still_missing.join(", ")
         ))
     }
+}
+
+/// Compare filesystem and landlock sections of two `SandboxPolicy` values.
+///
+/// Returns `true` if they differ — indicating a sandbox migration is required
+/// (filesystem policy changes cannot be hot-reloaded; only network policy can).
+pub fn filesystem_policy_changed(
+    old: &crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy,
+    new: &crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy,
+) -> bool {
+    let fs_changed = match (&old.filesystem, &new.filesystem) {
+        (Some(a), Some(b)) => {
+            a.include_workdir != b.include_workdir
+                || a.read_only != b.read_only
+                || a.read_write != b.read_write
+        }
+        (None, None) => false,
+        _ => true,
+    };
+
+    let ll_changed = match (&old.landlock, &new.landlock) {
+        (Some(a), Some(b)) => a.compatibility != b.compatibility,
+        (None, None) => false,
+        _ => true,
+    };
+
+    fs_changed || ll_changed
+}
+
+/// Fetch the currently active policy from a sandbox via gRPC.
+///
+/// Returns `None` if the revision exists but the policy payload is not populated.
+pub async fn get_active_policy(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> miette::Result<Option<crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy>> {
+    use crate::openshell_proto::openshell::v1::GetSandboxPolicyStatusRequest;
+
+    let resp = client
+        .get_sandbox_policy_status(GetSandboxPolicyStatusRequest {
+            name: name.to_owned(),
+            version: 0, // latest
+            global: false,
+        })
+        .await
+        .map_err(|e| miette::miette!("GetSandboxPolicyStatus RPC failed: {e:#}"))?;
+
+    let revision = resp
+        .into_inner()
+        .revision
+        .ok_or_else(|| miette::miette!("GetSandboxPolicyStatus returned no revision"))?;
+
+    Ok(revision.policy)
+}
+
+/// Parse a policy YAML string and extract the filesystem-relevant fields into a `SandboxPolicy`.
+///
+/// Only populates `filesystem` and `landlock` — enough for comparison via
+/// [`filesystem_policy_changed`]. Network policies are ignored.
+pub fn parse_policy_yaml_filesystem(
+    yaml: &str,
+) -> miette::Result<crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy> {
+    use crate::openshell_proto::openshell::sandbox::v1::{FilesystemPolicy, LandlockPolicy};
+
+    let doc: serde_json::Value = serde_saphyr::from_str(yaml)
+        .map_err(|e| miette::miette!("failed to parse policy YAML: {e:#}"))?;
+
+    let fs_policy = doc.get("filesystem_policy").map(|fs| FilesystemPolicy {
+        include_workdir: fs
+            .get("include_workdir")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        read_only: fs
+            .get("read_only")
+            .and_then(|v| v.as_array())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        read_write: fs
+            .get("read_write")
+            .and_then(|v| v.as_array())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    });
+
+    let landlock = doc.get("landlock").map(|ll| LandlockPolicy {
+        compatibility: ll
+            .get("compatibility")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+    });
+
+    Ok(crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy {
+        filesystem: fs_policy,
+        landlock,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

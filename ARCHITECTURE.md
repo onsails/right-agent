@@ -154,10 +154,36 @@ Per message:
 
 Config change (rightclaw agent config):
   ├─ Writes agent.yaml
+  ├─ Detects filesystem policy change via gRPC GetSandboxPolicyStatus
+  │   ├─ Network-only change: config_watcher → bot restart → hot-reload
+  │   └─ Filesystem change: sandbox migration (below)
   ├─ config_watcher detects change (2s debounce)
   ├─ Bot exits with code 2
   ├─ process-compose restarts bot (on_failure policy)
   └─ Bot re-runs per-agent codegen with new config → applies fresh policy
+
+Sandbox migration (filesystem policy change):
+  ├─ Backup sandbox-only (SSH tar czpf)
+  ├─ Create new sandbox rightclaw-<agent>-<YYYYMMDD-HHMM> with new policy
+  ├─ Wait for READY + SSH ready
+  ├─ Restore files via SSH tar xzpf
+  ├─ Write sandbox.name to agent.yaml
+  ├─ Delete old sandbox (best-effort)
+  └─ config_watcher restarts bot → picks up new sandbox
+
+rightclaw agent backup <name> [--sandbox-only]
+  ├─ Sandbox mode: SSH tar /sandbox/ → sandbox.tar.gz
+  ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz
+  ├─ Full mode: + agent.yaml, policy.yaml, VACUUM INTO data.db
+  └─ Stored at ~/.rightclaw/backups/<agent>/<YYYYMMDD-HHMM>/
+
+rightclaw agent init <name> --from-backup <path>
+  ├─ Validate: agent must not exist, backup has sandbox.tar.gz + agent.yaml
+  ├─ Restore config files to new agent dir
+  ├─ Create new sandbox with timestamped name
+  ├─ Restore sandbox files via SSH tar
+  ├─ Write sandbox.name to agent.yaml
+  └─ Run codegen + initial sync
 
 rightclaw down
   └─ POST /project/stop to process-compose REST API
@@ -324,7 +350,7 @@ subagent branches. Process timeout (600s) is a safety net only.
 | Scope | File | Source of Truth |
 |-------|------|-----------------|
 | Global | `~/.rightclaw/config.yaml` | Tunnel config |
-| Per-agent | `agents/<name>/agent.yaml` | Restart, model, telegram, sandbox overrides, env |
+| Per-agent | `agents/<name>/agent.yaml` | Restart, model, telegram, sandbox overrides, sandbox.name, env |
 | Generated | `agents/<name>/.claude/settings.json` | CC behavioral flags (regenerated on bot startup) |
 | Generated | `agents/<name>/.claude.json` | Trust, onboarding suppression (read-modify-write) |
 | Generated | `agents/<name>/.mcp.json` | MCP server entries (only "right" — externals managed by Aggregator) |
@@ -450,6 +476,11 @@ All migrations must be idempotent — safe to re-run if the schema already match
 │   ├── ssh/<agent>.ssh-config
 │   ├── internal.sock         # Unix socket for bot→aggregator IPC
 │   └── runtime-state.json
+├── backups/<agent>/<YYYYMMDD-HHMM>/
+│   ├── sandbox.tar.gz    # Sandbox files (tar czpf -p)
+│   ├── agent.yaml        # (full backup only)
+│   ├── data.db           # (full backup only, via VACUUM INTO)
+│   └── policy.yaml       # (full backup only)
 ├── logs/
 │   └── <agent>.log.<date>   # Per-agent daily log rotation
 └── scripts/

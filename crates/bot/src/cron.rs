@@ -106,7 +106,7 @@ async fn cleanup_old_logs(
     log_dir: &str,
     keep: usize,
     ssh_config_path: Option<&std::path::Path>,
-    agent_name: &str,
+    resolved_sandbox: Option<&str>,
 ) {
     // Defense-in-depth: job names should be alphanumeric + hyphens only (validated at creation).
     if !job_name
@@ -117,7 +117,7 @@ async fn cleanup_old_logs(
         return;
     }
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         // List matching files sorted newest-first, skip `keep`, delete the rest.
         // Using find+stat avoids ls parsing pitfalls with special characters in filenames.
         let cleanup_cmd = format!(
@@ -185,6 +185,7 @@ async fn execute_job(
     model: Option<&str>,
     ssh_config_path: Option<&std::path::Path>,
     internal_client: &rightclaw::mcp::internal_client::InternalClient,
+    resolved_sandbox: Option<&str>,
 ) {
     use std::process::Stdio;
 
@@ -313,7 +314,7 @@ async fn execute_job(
         assembly_script = format!(
             "set -o pipefail\nmkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
         );
-        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
@@ -434,9 +435,9 @@ async fn execute_job(
     let job_name_owned = job_name.to_owned();
     let log_dir_owned = sandbox_log_dir.clone();
     let ssh_config_owned = ssh_config_path.map(|p| p.to_owned());
-    let agent_name_owned = agent_name.to_owned();
+    let sandbox_owned = resolved_sandbox.map(|s| s.to_owned());
     tokio::spawn(async move {
-        cleanup_old_logs(&job_name_owned, &log_dir_owned, 10, ssh_config_owned.as_deref(), &agent_name_owned).await;
+        cleanup_old_logs(&job_name_owned, &log_dir_owned, 10, ssh_config_owned.as_deref(), sandbox_owned.as_deref()).await;
     });
 
     tracing::info!(job = %job_name, run_id = %run_id, %status, "cron job completed");
@@ -452,7 +453,7 @@ async fn execute_job(
                         if let Err(e) = std::fs::create_dir_all(&outbox_dir) {
                             tracing::error!(job = %job_name, "failed to create cron outbox dir: {e:#}");
                         } else if ssh_config_path.is_some() {
-                            let sandbox = rightclaw::openshell::sandbox_name(agent_name);
+                            let sandbox = resolved_sandbox.unwrap();
                             for att in atts {
                                 let dest = outbox_dir.join(attachment_filename(&att.path));
                                 if let Err(e) = rightclaw::openshell::download_file(
@@ -635,6 +636,7 @@ pub async fn run_cron_task(
     ssh_config_path: Option<std::path::PathBuf>,
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
+    resolved_sandbox: Option<String>,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -653,12 +655,12 @@ pub async fn run_cron_task(
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles);
+    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox);
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -751,6 +753,7 @@ fn reconcile_jobs(
     ssh_config_path: &Option<std::path::PathBuf>,
     internal_client: &Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
+    resolved_sandbox: &Option<String>,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -785,8 +788,9 @@ fn reconcile_jobs(
         let md = model.clone();
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(internal_client);
+        let rs = resolved_sandbox.clone();
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic).await;
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
             delete_one_shot_spec(&ad, &jn);
         });
         if let Ok(mut guard) = execute_handles.lock() {
@@ -827,9 +831,10 @@ fn reconcile_jobs(
         let job_ssh_config = ssh_config_path.clone();
         let job_execute_handles = Arc::clone(execute_handles);
         let job_internal_client = Arc::clone(internal_client);
+        let job_sandbox = resolved_sandbox.clone();
 
         let handle = tokio::spawn(async move {
-            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles)
+            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles, job_sandbox)
                 .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
@@ -860,10 +865,11 @@ fn reconcile_jobs(
             let md = model.clone();
             let sc = ssh_config_path.clone();
             let ic = Arc::clone(internal_client);
+            let rs = resolved_sandbox.clone();
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
-                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic).await;
+                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
             });
             // Register for shutdown tracking
             if let Ok(mut guard) = execute_handles.lock() {
@@ -887,6 +893,7 @@ async fn run_job_loop(
     ssh_config_path: Option<std::path::PathBuf>,
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
+    resolved_sandbox: Option<String>,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -929,8 +936,9 @@ async fn run_job_loop(
         let md = model.clone();
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(&internal_client);
+        let rs = resolved_sandbox.clone();
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic).await;
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
         });
         if spec.schedule_kind.is_one_shot() {
             // Wait for execution, then delete and exit loop
@@ -1189,6 +1197,7 @@ mod tests {
             None,
             ic,
             shutdown_clone,
+            None,
         ));
 
         // Give cron engine time to reconcile and spawn the job loop

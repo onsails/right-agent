@@ -175,14 +175,16 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
 ///
 /// Returns `None` when OpenShell is not ready (certs missing, not installed) —
 /// the caller skips the check silently in that case.
-fn check_sandbox_for_agent(agent_name: &str) -> Option<DoctorCheck> {
+fn check_sandbox_for_agent(agent_name: &str, config: Option<&crate::agent::types::AgentConfig>) -> Option<DoctorCheck> {
     // Only check if OpenShell is available.
     let mtls_dir = match crate::openshell::preflight_check() {
         crate::openshell::OpenShellStatus::Ready(dir) => dir,
         _ => return None, // OpenShell not ready — skip sandbox check
     };
 
-    let sandbox = crate::openshell::sandbox_name(agent_name);
+    let sandbox = config
+        .map(|c| crate::openshell::resolve_sandbox_name(agent_name, c))
+        .unwrap_or_else(|| crate::openshell::sandbox_name(agent_name));
 
     // Requires a tokio runtime — skip gracefully in sync test contexts.
     let handle = match tokio::runtime::Handle::try_current() {
@@ -339,7 +341,7 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
             .as_ref()
             .map(|c| matches!(c.sandbox_mode(), crate::agent::types::SandboxMode::Openshell))
             .unwrap_or(true); // default sandbox mode is openshell
-        if is_openshell && let Some(check) = check_sandbox_for_agent(&name) {
+        if is_openshell && let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()) {
             checks.push(check);
         }
     }

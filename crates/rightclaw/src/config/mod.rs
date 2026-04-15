@@ -61,6 +61,13 @@ pub fn agents_dir(home: &Path) -> PathBuf {
     home.join("agents")
 }
 
+/// Path to the backups directory for a specific agent.
+///
+/// Layout: `<home>/backups/<agent_name>/`
+pub fn backups_dir(home: &Path, agent_name: &str) -> PathBuf {
+    home.join("backups").join(agent_name)
+}
+
 /// Read global config from `<home>/config.yaml`.
 ///
 /// Returns `Ok(GlobalConfig::default())` if the file does not exist.

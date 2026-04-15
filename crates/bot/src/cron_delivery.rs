@@ -189,6 +189,7 @@ pub async fn run_delivery_loop(
     ssh_config_path: Option<PathBuf>,
     internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
+    resolved_sandbox: Option<String>,
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
@@ -287,6 +288,7 @@ pub async fn run_delivery_loop(
             ssh_config_path.as_deref(),
             session_id,
             &internal_client,
+            resolved_sandbox.as_deref(),
         )
         .await
         {
@@ -344,6 +346,7 @@ async fn deliver_through_session(
     ssh_config_path: Option<&Path>,
     session_id: Option<String>,
     internal_client: &rightclaw::mcp::internal_client::InternalClient,
+    resolved_sandbox: Option<&str>,
 ) -> Result<(), String> {
     use std::process::Stdio;
 
@@ -415,7 +418,7 @@ async fn deliver_through_session(
             let escaped = token.replace('\'', "'\\''");
             assembly_script = format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
-        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
@@ -523,7 +526,7 @@ async fn deliver_through_session(
                 0,
                 agent_dir,
                 ssh_config_path,
-                agent_name,
+                resolved_sandbox,
             )
             .await
             {

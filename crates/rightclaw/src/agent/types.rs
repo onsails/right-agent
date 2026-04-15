@@ -103,6 +103,10 @@ pub struct SandboxConfig {
     /// Path to OpenShell policy file, relative to agent directory.
     /// Required when mode is openshell.
     pub policy_file: Option<std::path::PathBuf>,
+    /// Explicit sandbox name. When set, overrides the deterministic
+    /// `rightclaw-{agent_name}` default. Written by migration/restore flows.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl Default for SandboxConfig {
@@ -110,6 +114,7 @@ impl Default for SandboxConfig {
         Self {
             mode: SandboxMode::Openshell,
             policy_file: Some(std::path::PathBuf::from("policy.yaml")),
+            name: None,
         }
     }
 }
@@ -168,7 +173,31 @@ pub struct AgentConfig {
     pub show_thinking: bool,
 }
 
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            restart: RestartPolicy::default(),
+            max_restarts: default_max_restarts(),
+            backoff_seconds: default_backoff_seconds(),
+            network_policy: NetworkPolicy::default(),
+            model: None,
+            sandbox: None,
+            telegram_token: None,
+            allowed_chat_ids: Vec::new(),
+            env: HashMap::new(),
+            secret: None,
+            attachments: AttachmentsConfig::default(),
+            show_thinking: default_show_thinking(),
+        }
+    }
+}
+
 impl AgentConfig {
+    /// Whether this agent runs in an OpenShell sandbox (default: true).
+    pub fn is_sandboxed(&self) -> bool {
+        *self.sandbox_mode() == SandboxMode::Openshell
+    }
+
     /// Effective sandbox mode — defaults to Openshell when `sandbox` section is absent.
     pub fn sandbox_mode(&self) -> &SandboxMode {
         self.sandbox
@@ -482,5 +511,30 @@ sandbox:
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         // sandbox is None — effective mode should be openshell (tested via helper)
         assert!(config.sandbox.is_none());
+    }
+
+    #[test]
+    fn sandbox_config_with_name() {
+        let yaml = r#"
+sandbox:
+  mode: openshell
+  policy_file: policy.yaml
+  name: "rightclaw-brain-20260415-1430"
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sb = config.sandbox.unwrap();
+        assert_eq!(sb.name.as_deref(), Some("rightclaw-brain-20260415-1430"));
+    }
+
+    #[test]
+    fn sandbox_config_without_name_is_none() {
+        let yaml = r#"
+sandbox:
+  mode: openshell
+  policy_file: policy.yaml
+"#;
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        let sb = config.sandbox.unwrap();
+        assert!(sb.name.is_none());
     }
 }
