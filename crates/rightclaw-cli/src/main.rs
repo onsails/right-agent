@@ -447,6 +447,10 @@ async fn main() -> miette::Result<()> {
             // Register agents in dispatcher, restoring proxy backends from SQLite.
             // Also create per-agent refresh schedulers and spawn reconnect tasks.
             let mut refresh_senders_map = std::collections::HashMap::new();
+            let mut reconnect_managers_map: std::collections::HashMap<
+                String,
+                tokio::sync::Mutex<rightclaw::mcp::reconnect::ReconnectManager>,
+            > = std::collections::HashMap::new();
             let http_client = reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(30))
@@ -576,10 +580,13 @@ async fn main() -> miette::Result<()> {
                 }
 
                 // Spawn background reconnect tasks (fire-and-forget).
+                let mut reconnect_mgr = rightclaw::mcp::reconnect::ReconnectManager::new(
+                    refresh_tx.clone(),
+                    agent_dir.clone(),
+                );
                 for (server_name, backend) in proxies_snapshot {
                     let http = http_client.clone();
                     let agent_name_owned = agent_name.clone();
-                    let agent_dir_owned = agent_dir.clone();
 
                     if let Some((oauth_state, token_arc)) = oauth_map.get(&server_name) {
                         // OAuth server — check token expiry before connecting.
@@ -595,53 +602,13 @@ async fn main() -> miette::Result<()> {
                         if due_in == std::time::Duration::ZERO {
                             // Token expired — try refresh or mark NeedsAuth.
                             if oauth_state.refresh_token.is_some() {
-                                let state = oauth_state.clone();
-                                let tok = token_arc.clone();
-                                let ad = agent_dir_owned.clone();
-                                let rtx = refresh_tx.clone();
-                                let sn = server_name.clone();
-                                tokio::spawn(async move {
-                                    match rightclaw::mcp::refresh::do_refresh(&http, &state, 3).await {
-                                        Ok((new_state, access_token)) => {
-                                            *tok.write().await = Some(access_token.clone());
-                                            // Persist to SQLite.
-                                            if let Ok(conn) = rightclaw::memory::open_connection(&ad) {
-                                                if let Err(e) = rightclaw::mcp::credentials::db_update_oauth_token(
-                                                    &conn,
-                                                    &sn,
-                                                    &access_token,
-                                                    new_state.refresh_token.as_deref(),
-                                                    &new_state.expires_at.to_rfc3339(),
-                                                ) {
-                                                    tracing::warn!(server = sn.as_str(), "failed to persist refreshed token: {e:#}");
-                                                }
-                                            }
-                                            // Register with scheduler using updated state.
-                                            let _ = rtx.send(rightclaw::mcp::refresh::RefreshMessage::NewEntry {
-                                                server_name: sn.clone(),
-                                                state: new_state,
-                                                token: tok.clone(),
-                                            }).await;
-                                            if let Err(e) = backend.connect(http.clone()).await {
-                                                tracing::warn!(
-                                                    agent = agent_name_owned.as_str(),
-                                                    server = sn.as_str(),
-                                                    "reconnect after refresh failed: {e:#}",
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                agent = agent_name_owned.as_str(),
-                                                server = sn.as_str(),
-                                                "token refresh failed: {e:#}",
-                                            );
-                                            backend.set_status(
-                                                rightclaw::mcp::proxy::BackendStatus::NeedsAuth,
-                                            ).await;
-                                        }
-                                    }
-                                });
+                                reconnect_mgr.start_reconnect(
+                                    server_name.clone(),
+                                    backend,
+                                    oauth_state.clone(),
+                                    token_arc.clone(),
+                                    http,
+                                );
                             } else {
                                 // No refresh_token — cannot refresh.
                                 let b = backend.clone();
@@ -690,14 +657,20 @@ async fn main() -> miette::Result<()> {
                     }
                 }
 
+                reconnect_managers_map.insert(
+                    agent_name.clone(),
+                    tokio::sync::Mutex::new(reconnect_mgr),
+                );
                 refresh_senders_map.insert(agent_name.clone(), refresh_tx);
             }
 
             let refresh_senders: aggregator::RefreshSenders =
                 std::sync::Arc::new(refresh_senders_map);
+            let reconnect_managers: aggregator::ReconnectManagers =
+                std::sync::Arc::new(reconnect_managers_map);
 
             aggregator::run_aggregator_http(
-                port, token_map, dispatcher, agents_dir, home, refresh_senders,
+                port, token_map, dispatcher, agents_dir, home, refresh_senders, reconnect_managers,
             ).await
         }
         Commands::Bot { agent, debug } => {

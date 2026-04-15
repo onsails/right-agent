@@ -38,6 +38,14 @@ pub(crate) type AgentTokenMap = Arc<tokio::sync::RwLock<HashMap<String, AgentInf
 /// Per-agent refresh scheduler sender map.
 pub(crate) type RefreshSenders = Arc<HashMap<String, tokio::sync::mpsc::Sender<RefreshMessage>>>;
 
+/// Per-agent reconnect manager map (one manager per agent, mutex-protected for mutable access).
+pub(crate) type ReconnectManagers = std::sync::Arc<
+    std::collections::HashMap<
+        String,
+        tokio::sync::Mutex<rightclaw::mcp::reconnect::ReconnectManager>,
+    >,
+>;
+
 /// Agent identity resolved from a Bearer token.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -349,6 +357,7 @@ pub(crate) async fn run_aggregator_http(
     agents_dir: PathBuf,
     home: PathBuf,
     refresh_senders: RefreshSenders,
+    reconnect_managers: ReconnectManagers,
 ) -> miette::Result<()> {
     let ct = CancellationToken::new();
 
@@ -385,7 +394,7 @@ pub(crate) async fn run_aggregator_http(
             .map_err(|e| miette::miette!("create UDS parent dir: {e:#}"))?;
     }
 
-    let internal_app = crate::internal_api::internal_router(dispatcher, refresh_senders);
+    let internal_app = crate::internal_api::internal_router(dispatcher, refresh_senders, reconnect_managers);
     let uds_listener = tokio::net::UnixListener::bind(&socket_path)
         .map_err(|e| miette::miette!("bind UDS {}: {e:#}", socket_path.display()))?;
 
