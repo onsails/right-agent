@@ -39,12 +39,7 @@ pub(crate) type AgentTokenMap = Arc<tokio::sync::RwLock<HashMap<String, AgentInf
 pub(crate) type RefreshSenders = Arc<HashMap<String, tokio::sync::mpsc::Sender<RefreshMessage>>>;
 
 /// Per-agent reconnect manager map (one manager per agent, mutex-protected for mutable access).
-pub(crate) type ReconnectManagers = std::sync::Arc<
-    std::collections::HashMap<
-        String,
-        tokio::sync::Mutex<rightclaw::mcp::reconnect::ReconnectManager>,
-    >,
->;
+pub(crate) type ReconnectManagers = Arc<HashMap<String, tokio::sync::Mutex<rightclaw::mcp::reconnect::ReconnectManager>>>;
 
 /// Agent identity resolved from a Bearer token.
 #[derive(Clone, Debug)]

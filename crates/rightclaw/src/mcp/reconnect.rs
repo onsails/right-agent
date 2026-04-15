@@ -210,13 +210,17 @@ pub async fn reconnect_task(
     .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
 
     // Notify refresh scheduler so it schedules the next refresh.
-    let _ = refresh_tx
+    refresh_tx
         .send(RefreshMessage::NewEntry {
             server_name: server_name.clone(),
             state: new_state,
             token: token_arc.clone(),
         })
-        .await;
+        .await
+        .map_err(|e| {
+            tracing::error!("refresh scheduler dropped: {e:#}");
+            ReconnectError::PersistFailed(format!("refresh scheduler unavailable: {e:#}"))
+        })?;
 
     // Re-establish MCP session.
     backend
