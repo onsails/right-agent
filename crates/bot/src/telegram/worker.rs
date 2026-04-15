@@ -31,6 +31,9 @@ const DEBOUNCE_MS: u64 = 500;
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
 
+/// Maximum input query length for Hindsight recall (matches hermes recall_max_input_chars).
+const RECALL_MAX_INPUT_CHARS: usize = 800;
+
 /// Build the inline keyboard with a single "Stop" button for thinking messages.
 fn stop_keyboard(chat_id: i64, eff_thread_id: i64) -> teloxide::types::InlineKeyboardMarkup {
     teloxide::types::InlineKeyboardMarkup::new(vec![vec![
@@ -229,6 +232,18 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
     };
 
     Ok((output, session_id))
+}
+
+/// Truncate a string to at most `max` bytes on a valid UTF-8 char boundary.
+fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 // ── Async worker ─────────────────────────────────────────────────────────────
@@ -550,11 +565,12 @@ pub fn spawn_worker(
 
                 // Prefetch for next turn.
                 let hs_recall = Arc::clone(hs);
-                let recall_query = input.clone();
+                let recall_query = truncate_to_char_boundary(&input, RECALL_MAX_INPUT_CHARS).to_owned();
+                let recall_tags = vec![format!("chat:{chat_id}")];
                 let cache_key = format!("{}:{}", chat_id, eff_thread_id);
                 let cache = ctx.prefetch_cache.clone();
                 tokio::spawn(async move {
-                    match hs_recall.recall(&recall_query, None, None).await {
+                    match hs_recall.recall(&recall_query, Some(&recall_tags), Some("any")).await {
                         Ok(results) if !results.is_empty() => {
                             let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                             if let Some(ref c) = cache {
@@ -839,7 +855,12 @@ async fn invoke_cc(
             Some(content)
         } else if let Some(ref hs) = ctx.hindsight {
             tracing::info!(?chat_id, "prefetch cache miss, blocking recall");
-            match tokio::time::timeout(Duration::from_secs(5), hs.recall(input, None, None)).await {
+            let truncated_query = truncate_to_char_boundary(input, RECALL_MAX_INPUT_CHARS);
+            let recall_tags = vec![format!("chat:{}", chat_id)];
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                hs.recall(truncated_query, Some(&recall_tags), Some("any")),
+            ).await {
                 Ok(Ok(results)) if !results.is_empty() => {
                     let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                     if let Some(ref cache) = ctx.prefetch_cache {
@@ -1641,5 +1662,45 @@ mod tests {
             }
             other => panic!("expected CallbackData, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_short_string() {
+        assert_eq!(truncate_to_char_boundary("hello", 800), "hello");
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_exact_limit() {
+        let s = "a".repeat(800);
+        assert_eq!(truncate_to_char_boundary(&s, 800).len(), 800);
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_over_limit() {
+        let s = "a".repeat(1000);
+        assert_eq!(truncate_to_char_boundary(&s, 800).len(), 800);
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_multibyte() {
+        // 'é' is 2 bytes in UTF-8. String of 500 'é' = 1000 bytes.
+        let s = "é".repeat(500);
+        let truncated = truncate_to_char_boundary(&s, 800);
+        assert!(truncated.len() <= 800);
+        assert_eq!(truncated.len(), 800); // 400 chars × 2 bytes = 800
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_emoji() {
+        // '🎯' is 4 bytes. 201 of them = 804 bytes. Truncating at 800 must not split.
+        let s = "🎯".repeat(201);
+        let truncated = truncate_to_char_boundary(&s, 800);
+        assert!(truncated.len() <= 800);
+        assert_eq!(truncated.len(), 800); // 200 × 4 = 800
+    }
+
+    #[test]
+    fn truncate_to_char_boundary_empty() {
+        assert_eq!(truncate_to_char_boundary("", 800), "");
     }
 }
