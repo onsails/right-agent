@@ -144,6 +144,9 @@ Per message:
   ├─ Worker: debounce 500ms → download attachments → upload to sandbox inbox
   ├─ Format input: single text → raw string, multi/attachments → YAML
   ├─ Pipe input to claude -p via stdin (SSH or direct)
+  │   ├─ First message: --session-id <uuid> (new session)
+  │   ├─ Subsequent: --resume <root_session_id> (persistent session)
+  │   └─ Sessions persist across messages — agent retains full CC context
   ├─ Parse reply JSON with typed attachments
   ├─ Send text reply to Telegram
   ├─ Download outbound attachments from sandbox outbox → send to Telegram

@@ -124,6 +124,25 @@ chat inactivity. You do not need to relay cron results manually — the delivery
 system handles it. If the user asks about a cron result before delivery, use the
 MCP tools above to show them the data.
 
+## MCP Error Diagnosis
+
+When an MCP tool call fails, diagnose the error accurately based on the error text.
+NEVER guess — quote the actual error in your report.
+
+| Error pattern | Meaning | Action |
+|---|---|---|
+| "unauthorized", "forbidden", "auth", 401, 403 | Authentication/permission problem | Tell the user to run `/mcp auth <server>` |
+| "Validation error: Required at", "missing fields", "Invalid request data" | Wrong parameter format — you sent the wrong field names or types | Re-read the tool's inputSchema and fix your call. Common mistake: using `input` instead of `arguments`, or passing a JSON string instead of an object |
+| "connection refused", "timeout", "unreachable" | Server is down or unreachable | Report the outage, suggest retrying later |
+| "not found", "unknown tool" | Wrong tool slug | Use SEARCH_TOOLS to find the correct slug |
+
+**Critical:** "missing fields" means YOUR request is malformed — it is NOT a permissions
+issue and NOT a server-side bug. Always fix your request before retrying or reporting failure.
+
+**Learn from mistakes:** When you fix an MCP tool call after a validation error,
+save the correct parameter format to your Claude Code conversation memory
+so you don't repeat the same mistake in future sessions.
+
 ## Core Skills
 
 <!-- Add your skills here. Example: -->
