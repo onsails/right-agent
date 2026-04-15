@@ -84,13 +84,9 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
     match event {
         StreamEvent::Text(t) => {
             // Truncate long text — thinking indicator is a preview, not the full reply.
-            let preview = if t.len() > 150 {
-                let cut = &t[..t.char_indices().take_while(|&(i, _)| i < 150).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(150)];
-                format!("{}…", super::markdown::html_escape(cut))
-            } else {
-                super::markdown::html_escape(t)
-            };
-            Some(format!("\u{1f4dd} \"{preview}\""))
+            let preview = truncate_str(t, 150);
+            let escaped = super::markdown::html_escape(&preview);
+            Some(format!("\u{1f4dd} \"{escaped}\""))
         }
         StreamEvent::Thinking => Some("\u{1f4ad} thinking...".to_string()),
         StreamEvent::ToolUse { tool, input_summary } => {
@@ -107,7 +103,8 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
                 "Grep" | "Glob" => "\u{1f50d}",
                 _ => "\u{1f527}",
             };
-            let escaped = super::markdown::html_escape(input_summary);
+            let truncated = truncate_str(input_summary, 120);
+            let escaped = super::markdown::html_escape(&truncated);
             Some(format!("{icon} {tool} <code>{escaped}</code>"))
         }
         StreamEvent::Result(_) | StreamEvent::Other => None,
@@ -181,6 +178,15 @@ impl EventRingBuffer {
     }
 }
 
+/// Truncate a string to at most `max_chars` characters, appending "…" if cut.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max_chars).collect();
+    format!("{cut}…")
+}
+
 fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
     match tool {
         "Bash" => input
@@ -208,7 +214,20 @@ fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string(),
-        _ => input.to_string(),
+        "Skill" => input
+            .get("skill")
+            .and_then(|s| s.as_str())
+            .map(|s| format!("/{s}"))
+            .unwrap_or_default(),
+        "Agent" => input
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("…")
+            .to_string(),
+        _ => {
+            let s = input.to_string();
+            truncate_str(&s, 80)
+        }
     }
 }
 
@@ -341,5 +360,50 @@ mod tests {
         let usage = StreamUsage::default();
         let msg = format_thinking_message(&events, &usage);
         assert!(msg.chars().count() <= 4010); // 4000 + "...\n"
+    }
+
+    #[test]
+    fn tool_use_input_summary_truncated() {
+        let long_cmd = "a".repeat(200);
+        let formatted = format_event(&StreamEvent::ToolUse {
+            tool: "Bash".into(),
+            input_summary: long_cmd,
+        })
+        .unwrap();
+        // 120 chars + "…" + icon + " Bash <code></code>" overhead
+        assert!(formatted.chars().count() < 160, "got: {formatted}");
+        assert!(formatted.contains('…'));
+    }
+
+    #[test]
+    fn skill_tool_shows_skill_name() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"rightcron","args":"big prompt..."}}]}}"#;
+        match parse_stream_event(line) {
+            StreamEvent::ToolUse { tool, input_summary } => {
+                assert_eq!(tool, "Skill");
+                assert_eq!(input_summary, "/rightcron");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_tool_shows_description() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","input":{"description":"Build workspace","prompt":"long prompt..."}}]}}"#;
+        match parse_stream_event(line) {
+            StreamEvent::ToolUse { tool, input_summary } => {
+                assert_eq!(tool, "Agent");
+                assert_eq!(input_summary, "Build workspace");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_tool_input_truncated() {
+        let long_json = serde_json::json!({"data": "x".repeat(200)});
+        let summary = summarize_tool_input("UnknownTool", &long_json);
+        assert!(summary.chars().count() <= 81); // 80 + "…"
+        assert!(summary.contains('…'));
     }
 }
