@@ -1009,7 +1009,32 @@ fn cmd_agent_init(
             env: config.env,
         }
     } else {
-        // Fresh init: run wizard or use CLI flags.
+        // Fresh init: optionally restore from backup or run wizard.
+        if interactive && !force {
+            let options = vec!["Create fresh", "Restore from backup"];
+            let choice = inquire::Select::new("How to initialize this agent?", options)
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+
+            if choice == "Restore from backup" {
+                let backup_path_str = inquire::Text::new("Backup directory path:")
+                    .prompt()
+                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+                let backup_path = std::path::PathBuf::from(backup_path_str.trim());
+                if !backup_path.exists() {
+                    return Err(miette::miette!(
+                        "Backup directory does not exist: {}",
+                        backup_path.display()
+                    ));
+                }
+                return tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(cmd_agent_restore(home, name, &backup_path))
+                });
+            }
+        }
+
+        // Run wizard or use CLI flags.
         let sandbox = match sandbox_mode {
             Some(mode) => mode,
             None if !interactive => rightclaw::agent::types::SandboxMode::Openshell,
