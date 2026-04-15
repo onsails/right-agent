@@ -1,0 +1,4 @@
+-- V13: Add one-shot cron job support (recurring flag + run_at absolute time).
+-- Implemented as Rust hook for idempotency (SQLite lacks ADD COLUMN IF NOT EXISTS).
+-- recurring: 1 = fires repeatedly (default), 0 = fires once then auto-deletes
+-- run_at: ISO8601 UTC datetime for absolute-time one-shot jobs (mutually exclusive with schedule)

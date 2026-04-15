@@ -12,6 +12,8 @@ const V8_SCHEMA: &str = include_str!("sql/v8_mcp_servers.sql");
 const V9_SCHEMA: &str = include_str!("sql/v9_mcp_instructions.sql");
 const V10_SCHEMA: &str = include_str!("sql/v10_mcp_auth.sql");
 const V11_SCHEMA: &str = include_str!("sql/v11_auth_tokens.sql");
+#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
+const V13_SCHEMA: &str = include_str!("sql/v13_one_shot_cron.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -66,6 +68,29 @@ fn v12_cron_diagnostics(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v13: Add recurring and run_at columns to cron_specs for one-shot job support.
+///
+/// Idempotent — checks pragma_table_info before each ALTER.
+fn v13_one_shot_cron(tx: &Transaction) -> Result<(), HookError> {
+    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    };
+
+    if !has_column("recurring")? {
+        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN recurring INTEGER NOT NULL DEFAULT 1")?;
+    }
+    if !has_column("run_at")? {
+        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN run_at TEXT")?;
+    }
+
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
     std::sync::LazyLock::new(|| {
         Migrations::new(vec![
@@ -81,6 +106,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
             M::up(V10_SCHEMA),
             M::up(V11_SCHEMA),
             M::up_with_hook("", v12_cron_diagnostics),
+            M::up_with_hook("", v13_one_shot_cron),
         ])
     });
 
@@ -384,5 +410,77 @@ mod tests {
         assert!(cols.contains(&"max_budget_usd".to_string()), "max_budget_usd column missing");
         assert!(cols.contains(&"created_at".to_string()), "created_at column missing");
         assert!(cols.contains(&"updated_at".to_string()), "updated_at column missing");
+    }
+
+    #[test]
+    fn v13_one_shot_cron_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('cron_specs')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.contains(&"recurring".to_string()),
+            "recurring column missing"
+        );
+        assert!(
+            cols.contains(&"run_at".to_string()),
+            "run_at column missing"
+        );
+    }
+
+    #[test]
+    fn v13_idempotent_when_columns_already_exist() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 12).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE cron_specs ADD COLUMN recurring INTEGER NOT NULL DEFAULT 1",
+        )
+        .unwrap();
+        conn.execute_batch("ALTER TABLE cron_specs ADD COLUMN run_at TEXT")
+            .unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('cron_specs')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(cols.contains(&"recurring".to_string()));
+        assert!(cols.contains(&"run_at".to_string()));
+    }
+
+    #[test]
+    fn v13_existing_specs_get_recurring_true() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 12).unwrap();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('old-job', '*/5 * * * *', 'do stuff', 1.0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let recurring: i64 = conn
+            .query_row(
+                "SELECT recurring FROM cron_specs WHERE job_name = 'old-job'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recurring, 1, "existing specs must default to recurring=1");
+        let run_at: Option<String> = conn
+            .query_row(
+                "SELECT run_at FROM cron_specs WHERE job_name = 'old-job'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(run_at.is_none(), "existing specs must have run_at=NULL");
     }
 }
