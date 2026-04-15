@@ -904,7 +904,7 @@ pub async fn exec_in_sandbox(
 /// gRPC READY doesn't guarantee SSH is accepting connections — there's a gap
 /// where `ExecSandbox` fails with "Connection reset by peer". This probe
 /// runs a trivial `echo` command until it succeeds.
-async fn wait_for_ssh(
+pub async fn wait_for_ssh(
     client: &mut OpenShellClient<Channel>,
     sandbox_id: &str,
     timeout_secs: u64,

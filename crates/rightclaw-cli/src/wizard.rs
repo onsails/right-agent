@@ -767,6 +767,55 @@ fn update_agent_yaml_sandbox_mode(path: &Path, mode: &str) -> miette::Result<()>
     Ok(())
 }
 
+/// Write or update `sandbox.name` in agent.yaml.
+pub fn update_agent_yaml_sandbox_name(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
+    let path = agent_dir.join("agent.yaml");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
+
+    // Remove existing sandbox block (header + indented lines), preserving
+    // all sub-fields except `name:`.
+    let mut sandbox_lines: Vec<String> = Vec::new();
+    let mut other_lines: Vec<String> = Vec::new();
+    let mut in_sandbox_block = false;
+
+    for line in content.lines() {
+        if line == "sandbox:" {
+            in_sandbox_block = true;
+            continue;
+        }
+        if in_sandbox_block {
+            if line.starts_with("  ") {
+                // Skip existing name: line — we'll add the new one.
+                if !line.trim_start().starts_with("name:") {
+                    sandbox_lines.push(line.to_string());
+                }
+                continue;
+            }
+            in_sandbox_block = false;
+        }
+        other_lines.push(line.to_string());
+    }
+
+    // Rebuild: other lines first, then sandbox block with name.
+    let mut lines = other_lines;
+    lines.push("sandbox:".to_string());
+    for sl in sandbox_lines {
+        lines.push(sl);
+    }
+    lines.push(format!("  name: \"{sandbox_name}\""));
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(&path, &output)
+        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
+
+    Ok(())
+}
+
 /// Replace the `allowed_chat_ids` block in an agent.yaml file.
 ///
 /// Removes any existing `allowed_chat_ids:` block (header + indented list items),
