@@ -163,6 +163,41 @@ impl HindsightClient {
             .await
             .map_err(|e| MemoryError::HindsightRequest(format!("parse retain response: {e:#}")))
     }
+
+    /// Recall memories relevant to a query.
+    pub async fn recall(&self, query: &str) -> Result<Vec<RecallResult>, MemoryError> {
+        let url = format!(
+            "{}/v1/default/banks/{}/memories/recall",
+            self.base_url, self.bank_id
+        );
+        let body = RecallRequest {
+            query: query.to_owned(),
+            budget: self.budget.clone(),
+            max_tokens: self.max_tokens,
+        };
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .timeout(RECALL_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| MemoryError::HindsightRequest(format!("{e:#}")))?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MemoryError::Hindsight { status, body });
+        }
+
+        let response: RecallResponse = resp
+            .json()
+            .await
+            .map_err(|e| MemoryError::HindsightRequest(format!("parse recall response: {e:#}")))?;
+        Ok(response.results)
+    }
 }
 
 #[cfg(test)]
@@ -273,5 +308,47 @@ mod tests {
             MemoryError::Hindsight { status, .. } => assert_eq!(status, 401),
             other => panic!("expected Hindsight error, got: {other:?}"),
         }
+    }
+
+    // --- recall tests ---
+
+    #[tokio::test]
+    async fn recall_sends_correct_request() {
+        let (handle, url) = mock_hindsight_server(
+            r#"{"results": [{"text": "user likes dark mode", "score": 0.95, "type": "world"}]}"#,
+            200,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let results = client.recall("what does user prefer").await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text, "user likes dark mode");
+        assert_eq!(results[0].score, Some(0.95));
+        assert_eq!(results[0].fact_type.as_deref(), Some("world"));
+
+        let (method_line, auth, body) = handle.await.unwrap();
+        assert!(method_line.starts_with("POST"));
+        assert!(method_line.contains("/v1/default/banks/test-bank/memories/recall"));
+        assert!(auth.to_lowercase().contains("bearer hs_testkey"));
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["query"], "what does user prefer");
+        assert_eq!(parsed["budget"], "high");
+        assert_eq!(parsed["max_tokens"], 8192);
+    }
+
+    #[tokio::test]
+    async fn recall_empty_results() {
+        let (_handle, url) = mock_hindsight_server(
+            r#"{"results": []}"#,
+            200,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let results = client.recall("nonexistent topic").await.unwrap();
+        assert!(results.is_empty());
     }
 }
