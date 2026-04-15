@@ -306,6 +306,7 @@ async fn execute_job(
             "/sandbox",
             &claude_args,
             mcp_instructions.as_deref(),
+            None,
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
@@ -334,6 +335,7 @@ async fn execute_job(
             &agent_dir_str,
             &claude_args,
             mcp_instructions.as_deref(),
+            None,
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");

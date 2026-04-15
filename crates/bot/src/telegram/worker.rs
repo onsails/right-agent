@@ -769,6 +769,7 @@ async fn invoke_cc(
             "/sandbox",
             &claude_args,
             mcp_instructions.as_deref(),
+            None,
         );
         // Inject auth token as env var in the remote shell
         if let Some(token) = crate::login::load_auth_token(&ctx.db_path) {
@@ -794,6 +795,7 @@ async fn invoke_cc(
             &agent_dir_str,
             &claude_args,
             mcp_instructions.as_deref(),
+            None,
         );
 
         let mut c = tokio::process::Command::new("bash");
@@ -1495,7 +1497,7 @@ mod tests {
     fn script_normal_has_agent_configuration_section() {
         let script = crate::telegram::prompt::build_prompt_assembly_script(
             "Base prompt", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
-            &["claude".into()], None,
+            &["claude".into()], None, None,
         );
         assert!(script.contains("Agent Configuration"), "must have Agent Configuration section for per-agent AGENTS.md");
         assert!(script.contains("cat /sandbox/AGENTS.md"), "must cat AGENTS.md from sandbox root");

@@ -1,5 +1,13 @@
 //! Shared prompt assembly for CC invocations (worker, cron, delivery).
 
+/// Memory injection mode for prompt assembly.
+pub(crate) enum MemoryMode {
+    /// Inject MEMORY.md from agent directory.
+    File,
+    /// Inject composite memory file written by bot (Hindsight recall results).
+    Hindsight { composite_memory_path: String },
+}
+
 /// Shell-escape a string for safe inclusion in an SSH remote command.
 pub(crate) fn shell_escape(s: &str) -> String {
     shlex::try_quote(s).expect("shlex::try_quote cannot fail for valid UTF-8").into_owned()
@@ -36,6 +44,7 @@ pub(crate) fn build_prompt_assembly_script(
     workdir: &str,
     claude_args: &[String],
     mcp_instructions: Option<&str>,
+    memory_mode: Option<&MemoryMode>,
 ) -> String {
     let escaped_base = base_prompt.replace('\'', "'\\''");
     let escaped_args: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
@@ -76,8 +85,29 @@ fi"#
         None => String::new(),
     };
 
+    let memory_section = if bootstrap_mode {
+        String::new()
+    } else {
+        match memory_mode {
+            Some(MemoryMode::File) => format!(
+                r#"
+if [ -s {root_path}/MEMORY.md ]; then
+  printf '\n## Long-Term Memory\n\n'
+  head -200 {root_path}/MEMORY.md
+fi"#
+            ),
+            Some(MemoryMode::Hindsight { composite_memory_path }) => format!(
+                r#"
+if [ -s {composite_memory_path} ]; then
+  cat {composite_memory_path}
+fi"#
+            ),
+            None => String::new(),
+        }
+    };
+
     format!(
-        "{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
+        "{{ printf '{escaped_base}'\n{file_sections}\n{mcp_section}\n{memory_section}\n}} > {prompt_file}\ncd {workdir} && {claude_cmd} --system-prompt-file {prompt_file}"
     )
 }
 
@@ -87,7 +117,7 @@ mod tests {
 
     /// Helper: build a script with sandbox-like paths for testing.
     fn test_script(base: &str, bootstrap: bool, args: &[String], mcp: Option<&str>) -> String {
-        build_prompt_assembly_script(base, bootstrap, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox", args, mcp)
+        build_prompt_assembly_script(base, bootstrap, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox", args, mcp, None)
     }
 
     #[test]
@@ -151,6 +181,7 @@ mod tests {
             "/home/agent",
             &["claude".into(), "-p".into()],
             None,
+            None,
         );
         assert!(script.contains("/home/agent/IDENTITY.md"), "must use custom root_path");
         assert!(script.contains("/home/agent/.claude/composite-system-prompt.md"), "must use custom prompt_file");
@@ -166,6 +197,7 @@ mod tests {
             "/home/agent/.claude/composite-system-prompt.md",
             "/home/agent",
             &["claude".into()],
+            None,
             None,
         );
         assert!(script.contains("## Bootstrap Instructions"));
@@ -204,6 +236,7 @@ mod tests {
             "/home/agent",
             &["claude".into()],
             Some("# MCP Server Instructions\n\n## notion\n\nNotion tools.\n"),
+            None,
         );
         assert!(script.contains("MCP Server Instructions"));
         assert!(script.contains("notion"));
@@ -225,5 +258,59 @@ mod tests {
         let op_instr_pos = script.find("Operating Instructions").expect("must have Operating Instructions");
         let identity_pos = script.find("IDENTITY.md").expect("must have IDENTITY.md");
         assert!(op_instr_pos < identity_pos, "Operating Instructions must come before IDENTITY.md");
+    }
+
+    #[test]
+    fn script_includes_memory_section_for_file_mode() {
+        let script = build_prompt_assembly_script(
+            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
+            &["claude".into()], None, Some(&MemoryMode::File),
+        );
+        assert!(script.contains("MEMORY.md"), "must reference MEMORY.md for file mode");
+        assert!(script.contains("head -200"), "must truncate to 200 lines");
+        assert!(script.contains("if [ -s"), "must check file exists and is non-empty");
+    }
+
+    #[test]
+    fn script_includes_composite_memory_for_hindsight_mode() {
+        let hs_mode = MemoryMode::Hindsight {
+            composite_memory_path: "/sandbox/.claude/composite-memory.md".to_owned(),
+        };
+        let script = build_prompt_assembly_script(
+            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
+            &["claude".into()], None, Some(&hs_mode),
+        );
+        assert!(script.contains("composite-memory.md"), "must reference composite-memory");
+        assert!(script.contains("if [ -s"), "must check file exists");
+    }
+
+    #[test]
+    fn script_no_memory_section_when_none() {
+        let script = build_prompt_assembly_script(
+            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
+            &["claude".into()], None, None,
+        );
+        assert!(!script.contains("MEMORY.md"));
+        assert!(!script.contains("composite-memory"));
+    }
+
+    #[test]
+    fn script_memory_section_is_last() {
+        let script = build_prompt_assembly_script(
+            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
+            &["claude".into()], Some("# MCP Instructions\n\n## composio\n"), Some(&MemoryMode::File),
+        );
+        let mcp_pos = script.rfind("MCP").unwrap();
+        let memory_pos = script.rfind("MEMORY.md").unwrap();
+        assert!(memory_pos > mcp_pos, "memory section must come after MCP instructions");
+    }
+
+    #[test]
+    fn script_bootstrap_no_memory() {
+        let script = build_prompt_assembly_script(
+            "Base", true, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
+            &["claude".into()], None, Some(&MemoryMode::File),
+        );
+        assert!(!script.contains("MEMORY.md"), "bootstrap mode must not include memory");
     }
 }
