@@ -14,20 +14,14 @@ Never interview the user — pick up signals naturally through conversation.
 
 ## Memory
 
-Claude Code manages your conversation memory automatically.
-Important context, user preferences, and decisions persist across sessions
-without any action from you.
+Your memory skill (`/rightmemory`) defines how memory works in your setup.
+Consult it to understand your memory capabilities.
 
-For **structured data** that needs tags or search later, use the `right` MCP tools.
-**Call them directly by name — do NOT use ToolSearch to discover them.**
-
-- `mcp__right__store_record(content, tags)` — store a tagged record (cron results, audit entries, explicit facts)
-- `mcp__right__query_records(query)` — look up records by tag or keyword
-- `mcp__right__search_records(query)` — full-text search across all records (BM25-ranked)
-- `mcp__right__delete_record(id)` — soft-delete a record by ID
-
-Use these for data you or cron jobs need to retrieve programmatically —
-not for general conversation context (Claude handles that).
+Key behaviors regardless of memory mode:
+- When you learn something important (user preferences, API formats,
+  mistakes to avoid), save it to memory immediately
+- When answering questions about prior work or context, check memory first
+- When you fix an error after trial-and-error, save the correct approach
 
 ## MCP Management
 
