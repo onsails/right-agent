@@ -1653,15 +1653,49 @@ pub(crate) fn tools_list(&self, agent_name: &str) -> Vec<Tool> {
     // ... rest unchanged (proxy tools)
 ```
 
-- [ ] **Step 5: Verify it compiles**
+- [ ] **Step 5: Fix all BackendRegistry construction sites**
+
+Adding the `hindsight` field to `BackendRegistry` breaks all existing struct literals. Add `hindsight: None` to each:
+
+In `crates/rightclaw-cli/src/main.rs` (~line 560):
+```rust
+let registry = aggregator::BackendRegistry {
+    right,
+    proxies: std::sync::Arc::new(tokio::sync::RwLock::new(proxies)),
+    agent_dir: agent_dir.clone(),
+    hindsight: None, // wired up in Task 18
+};
+```
+
+In `crates/rightclaw-cli/src/internal_api.rs` (~line 593):
+```rust
+let registry = BackendRegistry {
+    right,
+    proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+    agent_dir,
+    hindsight: None,
+};
+```
+
+In `crates/rightclaw-cli/src/aggregator.rs` test helper `make_test_registry()` (~line 431):
+```rust
+BackendRegistry {
+    right,
+    proxies: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+    agent_dir,
+    hindsight: None,
+}
+```
+
+- [ ] **Step 6: Verify it compiles**
 
 Run: `cargo build --workspace 2>&1 | tail -10`
-Expected: compiles. The `hindsight` field is `None` at all existing call sites until Task 14 wires it up.
+Expected: compiles with no errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/rightclaw-cli/src/aggregator.rs
+git add crates/rightclaw-cli/src/aggregator.rs crates/rightclaw-cli/src/main.rs crates/rightclaw-cli/src/internal_api.rs
 git commit -m "feat(memory): add HindsightBackend to MCP aggregator with 3 memory tools"
 ```
 
@@ -1876,6 +1910,17 @@ let memory_mode = if ctx.hindsight.is_some() {
         None
     };
 
+    // Determine paths based on sandbox mode.
+    let (sandbox_composite_path, host_composite_path) = if ctx.ssh_config_path.is_some() {
+        (
+            "/sandbox/.claude/composite-memory.md".to_owned(),
+            ctx.agent_dir.join(".claude").join("composite-memory.md"),
+        )
+    } else {
+        let p = ctx.agent_dir.join(".claude").join("composite-memory.md");
+        (p.to_string_lossy().into_owned(), p)
+    };
+
     match recall_content {
         Some(content) => {
             let fenced = format!(
@@ -1884,39 +1929,31 @@ let memory_mode = if ctx.hindsight.is_some() {
                  {content}\n\
                  </memory-context>"
             );
-            // Write composite memory file
-            let composite_path = if ctx.ssh_config_path.is_some() {
-                // Sandbox: write to temp, upload
-                let tmp = ctx.agent_dir.join(".claude").join("composite-memory.md");
-                std::fs::write(&tmp, &fenced).ok();
-                // Upload to sandbox
-                if let Some(ref ssh_cfg) = ctx.ssh_config_path {
-                    let ssh_host = rightclaw::openshell::ssh_host(&ctx.agent_name);
-                    let _ = rightclaw::openshell::ssh_exec(
-                        ssh_cfg, &ssh_host,
-                        &["tee", "/sandbox/.claude/composite-memory.md"],
-                        5,
-                    ).await;
-                    // Alternative: use stdin pipe. For now, write locally and use scp-like.
+            // Write composite memory file on host.
+            if let Err(e) = std::fs::write(&host_composite_path, &fenced) {
+                tracing::warn!("failed to write composite-memory.md: {e:#}");
+            }
+            // Upload to sandbox if sandboxed.
+            if let Some(ref sandbox_name) = ctx.resolved_sandbox {
+                if let Err(e) = rightclaw::openshell::upload_file(
+                    sandbox_name,
+                    &host_composite_path,
+                    "/sandbox/.claude/",
+                ).await {
+                    tracing::warn!("failed to upload composite-memory.md to sandbox: {e:#}");
                 }
-                "/sandbox/.claude/composite-memory.md".to_owned()
-            } else {
-                let path = ctx.agent_dir.join(".claude").join("composite-memory.md");
-                std::fs::write(&path, &fenced).ok();
-                path.to_string_lossy().into_owned()
-            };
+            }
             Some(super::prompt::MemoryMode::Hindsight {
-                composite_memory_path: composite_path,
+                composite_memory_path: sandbox_composite_path,
             })
         }
-        None => Some(super::prompt::MemoryMode::Hindsight {
-            composite_memory_path: if ctx.ssh_config_path.is_some() {
-                "/sandbox/.claude/composite-memory.md".to_owned()
-            } else {
-                ctx.agent_dir.join(".claude").join("composite-memory.md")
-                    .to_string_lossy().into_owned()
-            },
-        }),
+        None => {
+            // No recall content — delete stale composite file so prompt assembly skips it.
+            let _ = std::fs::remove_file(&host_composite_path);
+            Some(super::prompt::MemoryMode::Hindsight {
+                composite_memory_path: sandbox_composite_path,
+            })
+        }
     }
 } else {
     // File mode: inject MEMORY.md if it exists.
