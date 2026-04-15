@@ -2,6 +2,7 @@ mod config_watcher;
 pub mod cron;
 pub mod cron_delivery;
 pub mod error;
+mod keepalive;
 pub mod login;
 pub mod sync;
 pub mod telegram;
@@ -460,6 +461,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             shutdown.clone(),
         );
     }
+
+    // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token expiration.
+    keepalive::spawn_keepalive(
+        agent_dir.clone(),
+        ssh_config_path.clone(),
+        resolved_sandbox.clone(),
+        shutdown.clone(),
+    );
 
     let result = tokio::select! {
         result = telegram::run_telegram(
