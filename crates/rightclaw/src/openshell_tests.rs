@@ -654,3 +654,83 @@ async fn upload_directory_preserves_files_and_overwrites() {
 
     sbox.destroy().await;
 }
+
+// ---------------------------------------------------------------------------
+// filesystem_policy_changed tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn filesystem_policy_changed_detects_difference() {
+    use crate::openshell_proto::openshell::sandbox::v1::{FilesystemPolicy, LandlockPolicy, SandboxPolicy};
+
+    let old = SandboxPolicy {
+        filesystem: Some(FilesystemPolicy {
+            include_workdir: true,
+            read_only: vec!["/usr".into(), "/lib".into()],
+            read_write: vec!["/sandbox".into(), "/tmp".into()],
+        }),
+        landlock: Some(LandlockPolicy {
+            compatibility: "best_effort".into(),
+        }),
+        ..Default::default()
+    };
+
+    let mut new_policy = old.clone();
+    new_policy.filesystem.as_mut().unwrap().read_write.push("/data".into());
+
+    assert!(super::filesystem_policy_changed(&old, &new_policy));
+}
+
+#[test]
+fn filesystem_policy_unchanged_when_only_network_differs() {
+    use crate::openshell_proto::openshell::sandbox::v1::*;
+
+    let old = SandboxPolicy {
+        filesystem: Some(FilesystemPolicy {
+            include_workdir: true,
+            read_only: vec!["/usr".into()],
+            read_write: vec!["/sandbox".into()],
+        }),
+        landlock: Some(LandlockPolicy {
+            compatibility: "best_effort".into(),
+        }),
+        ..Default::default()
+    };
+
+    let mut new_policy = old.clone();
+    new_policy.network_policies.insert("test".into(), NetworkPolicyRule::default());
+
+    assert!(!super::filesystem_policy_changed(&old, &new_policy));
+}
+
+// ---------------------------------------------------------------------------
+// parse_policy_yaml_filesystem tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_policy_yaml_extracts_filesystem() {
+    let yaml = r#"
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+  read_write:
+    - /sandbox
+    - /tmp
+landlock:
+  compatibility: best_effort
+network_policies:
+  claude_code:
+    endpoints:
+      - host: "*.anthropic.com"
+"#;
+    let policy = super::parse_policy_yaml_filesystem(yaml).unwrap();
+    let fs = policy.filesystem.unwrap();
+    assert!(fs.include_workdir);
+    assert_eq!(fs.read_only, vec!["/usr", "/lib"]);
+    assert_eq!(fs.read_write, vec!["/sandbox", "/tmp"]);
+    let ll = policy.landlock.unwrap();
+    assert_eq!(ll.compatibility, "best_effort");
+}
