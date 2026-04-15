@@ -70,6 +70,8 @@ pub struct WorkerContext {
     /// Slot for auth code sender — when login flow is waiting for a code from Telegram,
     /// the oneshot::Sender is stored here. Message handler checks this before routing to worker.
     pub auth_code_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    /// Resolved sandbox name (None when running without sandbox).
+    pub resolved_sandbox: Option<String>,
     /// Show live thinking indicator in Telegram.
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
@@ -292,7 +294,7 @@ pub fn spawn_worker(
                         &ctx.bot,
                         &ctx.agent_dir,
                         ctx.ssh_config_path.as_deref(),
-                        &ctx.agent_name,
+                        ctx.resolved_sandbox.as_deref(),
                         tg_chat_id,
                         eff_thread_id,
                     ).await {
@@ -351,7 +353,7 @@ pub fn spawn_worker(
             // Normal mode: fire-and-forget, don't delay reply.
             let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
             if ctx.ssh_config_path.is_some() {
-                let sandbox = rightclaw::openshell::sandbox_name(&ctx.agent_name);
+                let sandbox = ctx.resolved_sandbox.clone().unwrap();
                 if bootstrap_mode {
                     if let Err(e) =
                         crate::sync::reverse_sync_md(&ctx.agent_dir, &sandbox).await
@@ -484,7 +486,7 @@ pub fn spawn_worker(
                             eff_thread_id,
                             &ctx.agent_dir,
                             ctx.ssh_config_path.as_deref(),
-                            &ctx.agent_name,
+                            ctx.resolved_sandbox.as_deref(),
                         ).await {
                             tracing::error!(?key, "failed to send attachments: {:#}", e);
                             let _ = send_tg(&ctx.bot, tg_chat_id, eff_thread_id, &format!("Failed to send attachments: {e}")).await;
@@ -758,7 +760,7 @@ async fn invoke_cc(
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.
-        let ssh_host = rightclaw::openshell::ssh_host(&ctx.agent_name);
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
         let mut assembly_script = super::prompt::build_prompt_assembly_script(
             &base_prompt,
             bootstrap_mode,

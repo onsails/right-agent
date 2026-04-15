@@ -173,6 +173,25 @@ pub struct AgentConfig {
     pub show_thinking: bool,
 }
 
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            restart: RestartPolicy::default(),
+            max_restarts: default_max_restarts(),
+            backoff_seconds: default_backoff_seconds(),
+            network_policy: NetworkPolicy::default(),
+            model: None,
+            sandbox: None,
+            telegram_token: None,
+            allowed_chat_ids: Vec::new(),
+            env: HashMap::new(),
+            secret: None,
+            attachments: AttachmentsConfig::default(),
+            show_thinking: default_show_thinking(),
+        }
+    }
+}
+
 impl AgentConfig {
     /// Effective sandbox mode — defaults to Openshell when `sandbox` section is absent.
     pub fn sandbox_mode(&self) -> &SandboxMode {

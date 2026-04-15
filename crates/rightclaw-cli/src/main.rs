@@ -930,9 +930,12 @@ fn cmd_agent_init(
             println!("Agent \"{name}\" already exists at {}", agent_dir.display());
             println!("This will permanently delete:");
             println!("  - All agent files (identity, memory, skills, config)");
+            let display_sb = saved.as_ref()
+                .map(|c| rightclaw::openshell::resolve_sandbox_name(name, c))
+                .unwrap_or_else(|| rightclaw::openshell::sandbox_name(name));
             println!(
                 "  - OpenShell sandbox \"{}\" (if exists)",
-                rightclaw::openshell::sandbox_name(name)
+                display_sb
             );
             print!("Continue? [y/N] ");
             io::stdout().flush().map_err(|e| miette::miette!("stdout flush: {e}"))?;
@@ -946,7 +949,9 @@ fn cmd_agent_init(
         }
 
         // Delete sandbox (best-effort, async).
-        let sb_name = rightclaw::openshell::sandbox_name(name);
+        let sb_name = saved.as_ref()
+            .map(|c| rightclaw::openshell::resolve_sandbox_name(name, c))
+            .unwrap_or_else(|| rightclaw::openshell::sandbox_name(name));
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 rightclaw::openshell::delete_sandbox(&sb_name).await;
@@ -1635,7 +1640,9 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     }
 
     // 4. Locate SSH config
-    let sb_name = rightclaw::openshell::sandbox_name(agent_name);
+    let sb_name = agent.config.as_ref()
+        .map(|c| rightclaw::openshell::resolve_sandbox_name(agent_name, c))
+        .unwrap_or_else(|| rightclaw::openshell::sandbox_name(agent_name));
     let ssh_config = home.join(format!("run/ssh/{}.ssh-config", sb_name));
     if !ssh_config.exists() {
         return Err(miette::miette!(
@@ -1646,7 +1653,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     }
 
     // 5. exec into SSH
-    let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+    let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(&sb_name);
     let mut cmd = std::process::Command::new("ssh");
     cmd.arg("-F").arg(&ssh_config);
     cmd.arg(&ssh_host);

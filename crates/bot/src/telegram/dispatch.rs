@@ -71,6 +71,7 @@ pub async fn run_telegram(
     shutdown: CancellationToken,
     idle_ts: Arc<IdleTimestamp>,
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
+    resolved_sandbox: Option<String>,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
@@ -102,6 +103,7 @@ pub async fn run_telegram(
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         show_thinking,
         model,
+        resolved_sandbox,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
 

@@ -12,6 +12,32 @@ fn ssh_host_prefixes_sandbox_name() {
     assert_eq!(ssh_host("worker-1"), "openshell-rightclaw-worker-1");
 }
 
+#[test]
+fn resolve_sandbox_name_with_explicit_name() {
+    use crate::agent::types::{AgentConfig, SandboxConfig, SandboxMode};
+    let config = AgentConfig {
+        sandbox: Some(SandboxConfig {
+            mode: SandboxMode::Openshell,
+            policy_file: None,
+            name: Some("rightclaw-brain-20260415-1430".to_owned()),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(resolve_sandbox_name("brain", &config), "rightclaw-brain-20260415-1430");
+}
+
+#[test]
+fn resolve_sandbox_name_falls_back_to_deterministic() {
+    use crate::agent::types::AgentConfig;
+    let config = AgentConfig::default();
+    assert_eq!(resolve_sandbox_name("brain", &config), "rightclaw-brain");
+}
+
+#[test]
+fn ssh_host_for_sandbox_formats_correctly() {
+    assert_eq!(ssh_host_for_sandbox("rightclaw-brain-20260415"), "openshell-rightclaw-brain-20260415");
+}
+
 // ---------------------------------------------------------------------------
 // Mock gRPC server for is_sandbox_ready / wait_for_ready tests
 // ---------------------------------------------------------------------------
