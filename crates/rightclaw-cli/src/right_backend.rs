@@ -16,7 +16,7 @@ use rmcp::model::{CallToolResult, Content, Tool};
 
 use crate::memory_server::{
     CronCreateParams, CronDeleteParams, CronListParams, CronListRunsParams, CronShowRunParams,
-    CronTriggerParams, DeleteRecordParams, McpListParams,
+    CronTriggerParams, CronUpdateParams, DeleteRecordParams, McpListParams,
     QueryRecordsParams, SearchRecordsParams, StoreRecordParams, cron_run_to_json,
     entry_to_json,
 };
@@ -68,13 +68,13 @@ impl RightBackend {
             // Cron tools
             Tool::new(
                 "cron_create",
-                "Create a new cron job spec. The job will be picked up by the cron engine on its next reload cycle.",
+                "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false). The job will be picked up by the cron engine on its next reload cycle.",
                 schema_for_type::<CronCreateParams>(),
             ),
             Tool::new(
                 "cron_update",
-                "Update an existing cron job spec (full replacement). All fields are overwritten.",
-                schema_for_type::<CronCreateParams>(),
+                "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values. Setting schedule clears run_at; setting run_at clears schedule.",
+                schema_for_type::<CronUpdateParams>(),
             ),
             Tool::new(
                 "cron_delete",
@@ -268,13 +268,15 @@ impl RightBackend {
             serde_json::from_value(args.clone()).context("invalid cron_create params")?;
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
-        let result = rightclaw::cron_spec::create_spec(
+        let result = rightclaw::cron_spec::create_spec_v2(
             &conn,
             &params.job_name,
-            &params.schedule,
+            params.schedule.as_deref(),
             &params.prompt,
             params.lock_ttl.as_deref(),
             params.max_budget_usd,
+            params.recurring,
+            params.run_at.as_deref(),
         )
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -287,15 +289,17 @@ impl RightBackend {
         agent_name: &str,
         args: &serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
-        let params: CronCreateParams =
+        let params: CronUpdateParams =
             serde_json::from_value(args.clone()).context("invalid cron_update params")?;
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
-        let result = rightclaw::cron_spec::update_spec(
+        let result = rightclaw::cron_spec::update_spec_partial(
             &conn,
             &params.job_name,
-            &params.schedule,
-            &params.prompt,
+            params.schedule.as_deref(),
+            params.run_at.as_deref(),
+            params.prompt.as_deref(),
+            params.recurring,
             params.lock_ttl.as_deref(),
             params.max_budget_usd,
         )

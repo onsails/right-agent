@@ -8,7 +8,7 @@ use rmcp::{
     ErrorData as McpError, ServiceExt,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 // --- Parameter types ---
 
@@ -56,13 +56,37 @@ pub struct CronShowRunParams {
 pub struct CronCreateParams {
     #[schemars(description = "Job name (lowercase alphanumeric and hyphens, e.g. 'health-check')")]
     pub job_name: String,
-    #[schemars(description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5')")]
-    pub schedule: String,
+    #[schemars(description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5'). Required if run_at is not set. Mutually exclusive with run_at.")]
+    pub schedule: Option<String>,
     #[schemars(description = "Task prompt that Claude executes when the cron fires")]
     pub prompt: String,
+    #[schemars(description = "Whether the job fires repeatedly (true, default) or once then auto-deletes (false). Ignored if run_at is set.")]
+    pub recurring: Option<bool>,
+    #[schemars(description = "ISO8601 UTC datetime to fire once (e.g. '2026-04-15T15:30:00Z'). Mutually exclusive with schedule. Job auto-deletes after firing.")]
+    pub run_at: Option<String>,
     #[schemars(description = "Lock TTL duration (e.g. '30m', '1h'). Default: 30m")]
     pub lock_ttl: Option<String>,
-    #[schemars(description = "Maximum dollar spend per invocation. Default: 1.0")]
+    #[schemars(description = "Maximum dollar spend per invocation. Default: 2.0")]
+    #[serde(default, deserialize_with = "deserialize_lenient_f64")]
+    pub max_budget_usd: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CronUpdateParams {
+    #[schemars(description = "Job name to update")]
+    pub job_name: String,
+    #[schemars(description = "New 5-field cron expression. Clears run_at if set.")]
+    pub schedule: Option<String>,
+    #[schemars(description = "New ISO8601 UTC datetime. Clears schedule and forces recurring=false.")]
+    pub run_at: Option<String>,
+    #[schemars(description = "New task prompt")]
+    pub prompt: Option<String>,
+    #[schemars(description = "Set recurring (true) or one-shot (false)")]
+    pub recurring: Option<bool>,
+    #[schemars(description = "New lock TTL duration (e.g. '30m', '1h')")]
+    pub lock_ttl: Option<String>,
+    #[schemars(description = "New maximum dollar spend per invocation")]
+    #[serde(default, deserialize_with = "deserialize_lenient_f64")]
     pub max_budget_usd: Option<f64>,
 }
 
@@ -83,6 +107,33 @@ pub struct CronTriggerParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct McpListParams {}
+
+/// Deserialize an `Option<f64>` that also accepts string representations.
+/// LLMs sometimes send numbers as strings (e.g. `"2.0"` instead of `2.0`).
+fn deserialize_lenient_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(f64),
+        Str(String),
+        Null,
+    }
+
+    match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => Ok(Some(n)),
+        NumOrStr::Str(s) if s.is_empty() => Ok(None),
+        NumOrStr::Str(s) => s
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| de::Error::custom(format!("invalid number: {s}"))),
+        NumOrStr::Null => Ok(None),
+    }
+}
 
 // --- Server struct ---
 
@@ -290,7 +341,7 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "Create a new cron job spec. The job will be picked up by the cron engine on its next reload cycle.")]
+    #[tool(description = "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false).")]
     async fn cron_create(
         &self,
         Parameters(params): Parameters<CronCreateParams>,
@@ -299,13 +350,15 @@ impl MemoryServer {
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let result = rightclaw::cron_spec::create_spec(
+        let result = rightclaw::cron_spec::create_spec_v2(
             &conn,
             &params.job_name,
-            &params.schedule,
+            params.schedule.as_deref(),
             &params.prompt,
             params.lock_ttl.as_deref(),
             params.max_budget_usd,
+            params.recurring,
+            params.run_at.as_deref(),
         )
         .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -313,20 +366,22 @@ impl MemoryServer {
         )]))
     }
 
-    #[tool(description = "Update an existing cron job spec (full replacement). All fields are overwritten.")]
+    #[tool(description = "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values.")]
     async fn cron_update(
         &self,
-        Parameters(params): Parameters<CronCreateParams>,
+        Parameters(params): Parameters<CronUpdateParams>,
     ) -> Result<CallToolResult, McpError> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let result = rightclaw::cron_spec::update_spec(
+        let result = rightclaw::cron_spec::update_spec_partial(
             &conn,
             &params.job_name,
-            &params.schedule,
-            &params.prompt,
+            params.schedule.as_deref(),
+            params.run_at.as_deref(),
+            params.prompt.as_deref(),
+            params.recurring,
             params.lock_ttl.as_deref(),
             params.max_budget_usd,
         )
@@ -449,7 +504,7 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__delete_record: Soft-delete a record (preserves audit trail)\n\n\
                  ## Cron\n\
                  - mcp__right__cron_create: Create a new cron job spec\n\
-                 - mcp__right__cron_update: Update an existing cron job spec (full replacement)\n\
+                 - mcp__right__cron_update: Update an existing cron job spec (partial — only changed fields)\n\
                  - mcp__right__cron_delete: Delete a cron job spec\n\
                  - mcp__right__cron_list: List all current cron job specs\n\
                  - mcp__right__cron_list_runs: List recent cron job runs with results (summary + notify)\n\
