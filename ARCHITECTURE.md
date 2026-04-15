@@ -310,8 +310,9 @@ When `show_thinking: true` (default), a live thinking message in Telegram shows
 the last 5 events (tool calls, text) with turn counter and cost. Updated every 2s
 via `editMessageText`. Stays in chat after completion.
 
-CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 1.0)
-from agent.yaml. Process timeout (600s) is a safety net only.
+CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
+per-message from agent.yaml). Cron jobs disable `Agent` tool to prevent budget waste on
+subagent branches. Process timeout (600s) is a safety net only.
 
 ### Configuration Hierarchy
 
@@ -364,6 +365,22 @@ LoginEvent      // Token request→async: Done, Error
 | Telegram | teloxide long-polling | CacheMe<Throttle<Bot>> adaptor, per-agent allowlist |
 | Cloudflare Tunnel | CLI (`cloudflared`) | Named tunnel, DNS CNAME, credentials file |
 | MCP Aggregator | HTTP (:8100/mcp) + Unix socket (internal API) | Aggregates built-in + external MCP backends, per-agent Bearer auth |
+
+## SQLite Rules
+
+### Migration Ownership
+
+Only the MCP aggregator (`right-mcp-server`) runs schema migrations via `open_connection(path, migrate: true)`. All other processes (bots, CLI commands, runtime code) open the database with `migrate: false`. Bot processes declare `depends_on: right-mcp-server: condition: process_started` in process-compose to ensure the aggregator migrates before bots start.
+
+### Transaction Rule
+
+Any operation that performs 2+ writes (INSERT, UPDATE, DELETE) MUST wrap them in a single `conn.unchecked_transaction()`. Single-statement writes don't need a transaction. Migrations are the sole exception (handled by `rusqlite_migration` internally).
+
+Use `unchecked_transaction()` (takes `&self`) rather than `transaction()` (takes `&mut self`) since most callsites hold `&Connection`.
+
+### Idempotent Migrations
+
+All migrations must be idempotent — safe to re-run if the schema already matches. SQLite lacks `ADD COLUMN IF NOT EXISTS`, so column additions must check `pragma_table_info` first. Use `M::up_with_hook()` for migrations that need conditional DDL. `CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS` is naturally idempotent.
 
 ## Security Model
 

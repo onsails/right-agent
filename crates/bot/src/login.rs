@@ -113,7 +113,7 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     fn init_db(dir: &std::path::Path) {
-        rightclaw::memory::open_db(dir).unwrap();
+        rightclaw::memory::open_db(dir, true).unwrap();
     }
 
     #[test]

@@ -188,7 +188,7 @@ pub fn run_single_agent_codegen(
     }
 
     // Initialize per-agent memory database.
-    crate::memory::open_db(&agent.path).map_err(|e| {
+    crate::memory::open_db(&agent.path, false).map_err(|e| {
         miette::miette!(
             "failed to open memory database for '{}': {e:#}",
             agent.name

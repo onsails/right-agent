@@ -314,7 +314,7 @@ impl ProxyBackend {
             .peer()
             .peer_info()
             .and_then(|info| info.instructions.clone());
-        let conn = crate::memory::open_connection(&self.agent_dir)
+        let conn = crate::memory::open_connection(&self.agent_dir, false)
             .map_err(|e| ProxyError::InstructionsCacheFailed {
                 server: self.server_name.clone(),
                 source: e.into(),

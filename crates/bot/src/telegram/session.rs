@@ -174,7 +174,7 @@ mod tests {
 
     fn test_conn() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path()).unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
         (dir, conn)
     }
 

@@ -726,7 +726,7 @@ fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
             continue;
         }
 
-        let conn = match crate::memory::open_connection(&path) {
+        let conn = match crate::memory::open_connection(&path, false) {
             Ok(c) => c,
             Err(_) => continue, // skip agents with unreadable DB
         };

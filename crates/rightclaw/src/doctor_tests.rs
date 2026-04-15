@@ -492,7 +492,7 @@ fn check_mcp_tokens_counts_registered_servers() {
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     // Create data.db with a registered server
-    let conn = crate::memory::open_connection(&agent_dir).unwrap();
+    let conn = crate::memory::open_connection(&agent_dir, true).unwrap();
     crate::mcp::credentials::db_add_server(
         &conn,
         "notion",
@@ -518,7 +518,7 @@ fn check_mcp_tokens_pass_no_servers() {
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     // Create data.db but register no servers
-    let _conn = crate::memory::open_connection(&agent_dir).unwrap();
+    let _conn = crate::memory::open_connection(&agent_dir, true).unwrap();
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);

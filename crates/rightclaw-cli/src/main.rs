@@ -482,7 +482,7 @@ async fn main() -> miette::Result<()> {
                 )> = Vec::new();
                 let mut oauth_server_names = std::collections::HashSet::<String>::new();
 
-                match rightclaw::memory::open_connection(&agent_dir) {
+                match rightclaw::memory::open_connection(&agent_dir, true) {
                     Ok(conn) => match rightclaw::mcp::credentials::db_list_servers(&conn) {
                         Ok(servers) => for s in servers {
                             let auth_method = rightclaw::mcp::proxy::AuthMethod::from_db(
@@ -2046,6 +2046,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let agent_dir = tmp.path().join("agents").join("myagent");
         fs::create_dir_all(&agent_dir).unwrap();
+        // CLI commands expect a pre-migrated DB (aggregator migrates at startup).
+        rightclaw::memory::open_db(&agent_dir, true).unwrap();
 
         let result = cmd_mcp_status(tmp.path(), Some("myagent"));
         assert!(result.is_ok(), "should succeed when mcp.json absent");
@@ -2120,7 +2122,7 @@ fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<rusqlite::Connec
             agent
         ));
     }
-    rightclaw::memory::open_connection(&agent_path)
+    rightclaw::memory::open_connection(&agent_path, false)
         .map_err(|e| miette::miette!("failed to open data.db for '{}': {e:#}", agent))
 }
 
@@ -2430,7 +2432,7 @@ fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()>
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("?");
-        let conn = rightclaw::memory::open_connection(agent_dir)
+        let conn = rightclaw::memory::open_connection(agent_dir, false)
             .map_err(|e| miette::miette!("open data.db for {agent_name}: {e:#}"))?;
         let servers = rightclaw::mcp::credentials::db_list_servers(&conn)
             .map_err(|e| miette::miette!("db_list_servers for {agent_name}: {e:#}"))?;
