@@ -20,7 +20,7 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
     let agent_dir = agents_dir.join(name);
     std::fs::create_dir_all(&agent_dir).expect("create agent dir");
     // open_connection will create the DB and run migrations
-    let _conn = rightclaw::memory::open_connection(&agent_dir).expect("open memory db");
+    let _conn = rightclaw::memory::open_connection(&agent_dir, true).expect("open memory db");
     agent_dir
 }
 
@@ -307,7 +307,7 @@ async fn bootstrap_done_sandbox_files_present() {
     let agent_dir = agents_dir.join(agent_name);
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "bootstrap").unwrap();
-    let _conn = rightclaw::memory::open_connection(&agent_dir).unwrap();
+    let _conn = rightclaw::memory::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend
@@ -351,7 +351,7 @@ async fn bootstrap_done_sandbox_files_missing() {
     let agents_dir = tmp.path().join("agents");
     let agent_dir = agents_dir.join(agent_name);
     std::fs::create_dir_all(&agent_dir).unwrap();
-    let _conn = rightclaw::memory::open_connection(&agent_dir).unwrap();
+    let _conn = rightclaw::memory::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend

@@ -529,7 +529,7 @@ pub async fn run_memory_server() -> miette::Result<()> {
     let home = std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let conn = rightclaw::memory::open_connection(&home)
+    let conn = rightclaw::memory::open_connection(&home, true)
         .map_err(|e| miette::miette!("failed to open memory database: {e:#}"))?;
 
     let agent_name = match std::env::var("RC_AGENT_NAME") {

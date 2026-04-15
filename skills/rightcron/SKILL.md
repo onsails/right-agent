@@ -93,7 +93,7 @@ Returns: job_name, schedule, prompt, lock_ttl, max_budget_usd for each job.
 | `schedule` | string | Yes | - | Standard 5-field cron expression (minute hour day-of-month month day-of-week). Evaluated in **UTC**. |
 | `prompt` | string | Yes | - | The task prompt that Claude executes when the cron fires. |
 | `lock_ttl` | string | No | `30m` | Duration after which a lock is considered stale (e.g. `10m`, `1h`). |
-| `max_budget_usd` | number | No | `1.0` | Maximum dollar spend per invocation. Claude stops gracefully when budget is reached. |
+| `max_budget_usd` | number | No | `2.0` | Maximum dollar spend per invocation. Claude stops gracefully when budget is reached. |
 
 ### Schedule Guidelines
 

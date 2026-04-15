@@ -13,14 +13,12 @@ pub use store::{
 ///
 /// - Creates the file if absent (idempotent).
 /// - Enables WAL journal mode and sets busy_timeout=5000ms.
-/// - Applies all pending schema migrations via rusqlite_migration.
-pub fn open_db(agent_path: &std::path::Path) -> Result<(), MemoryError> {
-    let db_path = agent_path.join("data.db");
-    let mut conn = rusqlite::Connection::open(&db_path)?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
-    migrations::MIGRATIONS.to_latest(&mut conn)?;
-    Ok(())
+/// - When `migrate` is true, applies all pending schema migrations.
+///
+/// Only the MCP aggregator should pass `migrate: true`. Bot processes must
+/// pass `migrate: false` — they depend on the aggregator starting first.
+pub fn open_db(agent_path: &std::path::Path, migrate: bool) -> Result<(), MemoryError> {
+    open_connection(agent_path, migrate).map(drop)
 }
 
 /// Opens (or creates) the per-agent SQLite memory database and returns the live connection.
@@ -28,16 +26,23 @@ pub fn open_db(agent_path: &std::path::Path) -> Result<(), MemoryError> {
 /// Unlike `open_db`, this function returns the `Connection` for use by store operations.
 /// Callers are responsible for keeping it alive for the duration of their operations.
 ///
-/// - Same WAL + busy_timeout + migration logic as `open_db`.
+/// - Same WAL + busy_timeout logic as `open_db`.
 /// - Idempotent: safe to call multiple times on the same path.
+/// - When `migrate` is true, applies all pending schema migrations.
+///
+/// Only the MCP aggregator should pass `migrate: true`. Bot processes must
+/// pass `migrate: false` — they depend on the aggregator starting first.
 pub fn open_connection(
     agent_path: &std::path::Path,
+    migrate: bool,
 ) -> Result<rusqlite::Connection, MemoryError> {
     let db_path = agent_path.join("data.db");
     let mut conn = rusqlite::Connection::open(&db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
-    migrations::MIGRATIONS.to_latest(&mut conn)?;
+    if migrate {
+        migrations::MIGRATIONS.to_latest(&mut conn)?;
+    }
     Ok(conn)
 }
 
@@ -49,7 +54,7 @@ mod tests {
     #[test]
     fn open_db_creates_file() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         assert!(
             dir.path().join("data.db").exists(),
             "data.db should exist after open_db"
@@ -59,15 +64,15 @@ mod tests {
     #[test]
     fn open_db_is_idempotent() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
-        open_db(dir.path()).unwrap(); // second call must also succeed
+        open_db(dir.path(), true).unwrap();
+        open_db(dir.path(), true).unwrap(); // second call must also succeed
         assert!(dir.path().join("data.db").exists());
     }
 
     #[test]
     fn schema_has_memories_table() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn =
             rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
@@ -83,7 +88,7 @@ mod tests {
     #[test]
     fn schema_has_memory_events_table() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn =
             rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
@@ -99,7 +104,7 @@ mod tests {
     #[test]
     fn schema_has_memories_fts() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn =
             rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
@@ -115,7 +120,7 @@ mod tests {
     #[test]
     fn wal_mode_enabled() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn =
             rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let mode: String = conn
@@ -127,7 +132,7 @@ mod tests {
     #[test]
     fn user_version_is_12() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn =
             rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let version: u32 = conn
@@ -139,7 +144,7 @@ mod tests {
     #[test]
     fn schema_has_cron_runs_table() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
@@ -154,7 +159,7 @@ mod tests {
     #[test]
     fn cron_runs_insert_and_update() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
 
         // Insert a running job
@@ -198,7 +203,7 @@ mod tests {
     #[test]
     fn schema_has_sessions_table() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
@@ -213,7 +218,7 @@ mod tests {
     #[test]
     fn sessions_partial_unique_active() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
             "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) VALUES (42, 0, 'uuid-1', 1)",
@@ -230,7 +235,7 @@ mod tests {
     #[test]
     fn memory_events_blocks_update() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn =
             rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
@@ -248,7 +253,7 @@ mod tests {
     #[test]
     fn memory_events_blocks_delete() {
         let dir = tempdir().unwrap();
-        open_db(dir.path()).unwrap();
+        open_db(dir.path(), true).unwrap();
         let conn =
             rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
@@ -265,7 +270,7 @@ mod tests {
     #[test]
     fn open_connection_returns_live_connection() {
         let dir = tempdir().unwrap();
-        let conn = open_connection(dir.path()).unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
         // Verify memories table is accessible
         let count: i64 = conn
             .query_row(
@@ -280,10 +285,10 @@ mod tests {
     #[test]
     fn open_connection_is_idempotent() {
         let dir = tempdir().unwrap();
-        let conn1 = open_connection(dir.path());
+        let conn1 = open_connection(dir.path(), true);
         assert!(conn1.is_ok(), "first open_connection call should succeed");
         drop(conn1);
-        let conn2 = open_connection(dir.path());
+        let conn2 = open_connection(dir.path(), true);
         assert!(conn2.is_ok(), "second open_connection call should also succeed");
     }
 
@@ -294,10 +299,43 @@ mod tests {
             !dir.path().join("data.db").exists(),
             "db file should not exist before open_connection"
         );
-        let _conn = open_connection(dir.path()).unwrap();
+        let _conn = open_connection(dir.path(), true).unwrap();
         assert!(
             dir.path().join("data.db").exists(),
             "db file should exist after open_connection"
         );
+    }
+
+    #[test]
+    fn open_connection_no_migrate_skips_schema() {
+        let dir = tempdir().unwrap();
+        // Open without migration — DB file is created but has no tables.
+        let conn = open_connection(dir.path(), false).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "memories table should NOT exist with migrate=false");
+    }
+
+    #[test]
+    fn open_connection_no_migrate_after_migrate_works() {
+        let dir = tempdir().unwrap();
+        // First: migrate.
+        let conn1 = open_connection(dir.path(), true).unwrap();
+        drop(conn1);
+        // Second: open without migration — tables are already there.
+        let conn2 = open_connection(dir.path(), false).unwrap();
+        let count: i64 = conn2
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "memories table should exist from prior migration");
     }
 }

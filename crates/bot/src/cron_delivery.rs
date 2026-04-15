@@ -42,15 +42,18 @@ pub fn fetch_pending(
     }
 }
 
-/// Mark a cron run as delivered.
-pub fn mark_delivered(
+/// Mark a cron run delivery as complete with a given status.
+///
+/// Single UPDATE sets both `delivery_status` and `delivered_at` atomically.
+fn mark_delivery_outcome(
     conn: &rusqlite::Connection,
     run_id: &str,
+    status: &str,
 ) -> Result<(), rusqlite::Error> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE cron_runs SET delivered_at = ?1 WHERE id = ?2",
-        rusqlite::params![now, run_id],
+        "UPDATE cron_runs SET delivery_status = ?1, delivered_at = ?2 WHERE id = ?3",
+        rusqlite::params![status, now, run_id],
     )?;
     Ok(())
 }
@@ -170,7 +173,7 @@ pub async fn run_delivery_loop(
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
-    let conn = match rightclaw::memory::open_connection(&agent_dir) {
+    let conn = match rightclaw::memory::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("cron delivery: DB open failed: {e:#}");
@@ -269,14 +272,8 @@ pub async fn run_delivery_loop(
         .await
         {
             Ok(()) => {
-                if let Err(e) = conn.execute(
-                    "UPDATE cron_runs SET delivery_status = 'delivered' WHERE id = ?1",
-                    rusqlite::params![to_deliver.id],
-                ) {
-                    tracing::error!(run_id = %to_deliver.id, "failed to set delivery_status=delivered: {e:#}");
-                }
-                if let Err(e) = mark_delivered(&conn, &to_deliver.id) {
-                    tracing::error!(run_id = %to_deliver.id, "mark_delivered failed: {e:#}");
+                if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "delivered") {
+                    tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
                     delivered_in_memory.insert(to_deliver.id.clone());
                 }
                 let outbox_dir = agent_dir.join("outbox").join("cron").join(&to_deliver.id);
@@ -307,14 +304,8 @@ pub async fn run_delivery_loop(
                         run_id = %to_deliver.id,
                         "giving up after {MAX_DELIVERY_ATTEMPTS} attempts, marking as delivered"
                     );
-                    if let Err(e) = conn.execute(
-                        "UPDATE cron_runs SET delivery_status = 'failed' WHERE id = ?1",
-                        rusqlite::params![to_deliver.id],
-                    ) {
-                        tracing::error!(run_id = %to_deliver.id, "failed to set delivery_status=failed: {e:#}");
-                    }
-                    if let Err(db_err) = mark_delivered(&conn, &to_deliver.id) {
-                        tracing::error!(run_id = %to_deliver.id, "mark_delivered failed: {db_err:#}");
+                    if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "failed") {
+                        tracing::error!(run_id = %to_deliver.id, "delivery-failure DB update failed: {e:#}");
                         delivered_in_memory.insert(to_deliver.id.clone());
                     }
                     attempt_counts.remove(&to_deliver.id);
@@ -531,7 +522,7 @@ mod tests {
 
     fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
-        let conn = rightclaw::memory::open_connection(dir.path()).unwrap();
+        let conn = rightclaw::memory::open_connection(dir.path(), true).unwrap();
         (dir, conn)
     }
 

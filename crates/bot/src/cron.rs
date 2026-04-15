@@ -151,7 +151,7 @@ async fn execute_job(
 
     // DB insert: status='running' (D-04)
     // Open connection per-job — rusqlite::Connection is !Send
-    let conn = match rightclaw::memory::open_connection(agent_dir) {
+    let conn = match rightclaw::memory::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(job = %job_name, "DB open failed: {e:#}");
@@ -168,8 +168,10 @@ async fn execute_job(
         return;
     }
 
-    // Disallow CC built-in tools — cron jobs must not self-schedule or manage tasks.
+    // Disallow CC built-in tools — cron jobs must not self-schedule, manage tasks, or spawn subagents.
+    // Agent is disabled to prevent budget waste on parallel subagent branches.
     let disallowed_tools: Vec<String> = [
+        "Agent",
         "CronCreate", "CronList", "CronDelete",
         "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop",
         "EnterPlanMode", "ExitPlanMode", "RemoteTrigger",
@@ -580,7 +582,7 @@ pub async fn run_cron_task(
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
-    let conn = match rightclaw::memory::open_connection(&agent_dir) {
+    let conn = match rightclaw::memory::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(agent = %agent_name, "cron task: DB open failed: {e:#}");
@@ -982,7 +984,7 @@ mod tests {
     #[test]
     fn test_triggered_at_loaded_from_db() {
         let dir = tempdir().unwrap();
-        let conn = rightclaw::memory::open_connection(dir.path()).unwrap();
+        let conn = rightclaw::memory::open_connection(dir.path(), true).unwrap();
 
         rightclaw::cron_spec::create_spec(
             &conn,
@@ -1005,7 +1007,7 @@ mod tests {
     #[test]
     fn test_clear_triggered_at_works() {
         let dir = tempdir().unwrap();
-        let conn = rightclaw::memory::open_connection(dir.path()).unwrap();
+        let conn = rightclaw::memory::open_connection(dir.path(), true).unwrap();
 
         rightclaw::cron_spec::create_spec(
             &conn,
@@ -1037,7 +1039,7 @@ mod tests {
         let agent_dir = dir.path().to_path_buf();
 
         // Create DB and register a job with a far-future schedule (once per year)
-        let conn = rightclaw::memory::open_connection(&agent_dir).unwrap();
+        let conn = rightclaw::memory::open_connection(&agent_dir, true).unwrap();
         rightclaw::cron_spec::create_spec(
             &conn,
             "slow-job",

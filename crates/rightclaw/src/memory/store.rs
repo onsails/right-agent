@@ -29,15 +29,17 @@ pub fn store_memory(
     if guard::has_injection(content) {
         return Err(MemoryError::InjectionDetected);
     }
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "INSERT INTO memories (content, tags, stored_by, source_tool) VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![content, tags, stored_by, source_tool],
     )?;
-    let id = conn.last_insert_rowid();
-    conn.execute(
+    let id = tx.last_insert_rowid();
+    tx.execute(
         "INSERT INTO memory_events (memory_id, event_type, actor) VALUES (?1, 'store', ?2)",
         rusqlite::params![id, stored_by],
     )?;
+    tx.commit()?;
     Ok(id)
 }
 
@@ -207,8 +209,9 @@ pub fn forget_memory(
     id: i64,
     actor: Option<&str>,
 ) -> Result<(), MemoryError> {
-    // Verify the row exists and is not already deleted
-    let exists: bool = conn
+    let tx = conn.unchecked_transaction()?;
+    // Verify inside the transaction to avoid TOCTOU with concurrent connections.
+    let exists: bool = tx
         .query_row(
             "SELECT 1 FROM memories WHERE id = ?1 AND deleted_at IS NULL",
             [id],
@@ -219,24 +222,27 @@ pub fn forget_memory(
     if !exists {
         return Err(MemoryError::NotFound(id));
     }
-    conn.execute(
+    tx.execute(
         "UPDATE memories SET deleted_at = datetime('now') WHERE id = ?1",
         [id],
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO memory_events (memory_id, event_type, actor) VALUES (?1, 'forget', ?2)",
         rusqlite::params![id, actor],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
 /// Save an auth token, replacing any existing one.
 pub fn save_auth_token(conn: &rusqlite::Connection, token: &str) -> Result<(), rusqlite::Error> {
-    conn.execute("DELETE FROM auth_tokens", [])?;
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM auth_tokens", [])?;
+    tx.execute(
         "INSERT INTO auth_tokens (token) VALUES (?1)",
         rusqlite::params![token],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
