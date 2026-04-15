@@ -84,7 +84,7 @@ src/
 ├── login.rs            # Token-based Claude login flow — setup-token request, DB persistence, env var injection
 ├── sync.rs             # Background file sync: settings, schema, skills, .claude.json verification
 ├── cron.rs             # Cron engine: load specs, lock check, invoke CC with system prompt, persist results
-├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery (haiku), cleanup
+├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery (haiku), cleanup. Resumes main session so cron results land in agent conversation context.
 └── error.rs            # BotError types
 ```
 
@@ -416,7 +416,7 @@ All migrations must be idempotent — safe to re-run if the schema already match
 - Wildcard domains (`*.anthropic.com`) work — the earlier 403 was caused by the binaries restriction, not wildcard matching.
 - CC actively manages `.claude.json` — strips unknown project trust entries on startup. Use `--dangerously-skip-permissions` instead of relying on trust entries.
 - `HTTPS_PROXY=http://10.200.0.1:3128` is set automatically inside sandbox. All HTTP/HTTPS goes through the proxy.
-- **Host service access from sandbox** (`host.docker.internal`): requires `allowed_ips: ["172.16.0.0/12"]` in the policy endpoint to bypass SSRF protection. Server must bind `0.0.0.0` (not `127.0.0.1` — loopback is always blocked). Plain HTTP works without `tls: terminate`.
+- **Host service access from sandbox** (`host.openshell.internal`): requires `allowed_ips` in the policy endpoint to bypass SSRF protection. Server must bind `0.0.0.0` (not `127.0.0.1` — loopback is always blocked). Plain HTTP works without `tls: terminate`. Prefer `host.openshell.internal` over `host.docker.internal` — both resolve to the same IP, but the OpenShell hostname is guaranteed available in all sandboxes regardless of Docker setup.
 - **NixOS users**: must add `networking.firewall.trustedInterfaces = [ "docker0" "br-+" ];` to NixOS config. OpenShell runs k3s inside a Docker container on a custom bridge network (`br-XXXXX`), not the default `docker0`. Without this, the NixOS firewall drops traffic from k3s pods to host services. The `+` suffix is iptables wildcard matching all `br-*` interfaces.
 - **Filesystem policy changes require sandbox recreation**: `openshell policy set --wait` hot-reloads network policies but does NOT apply filesystem policy changes to running sandboxes. Landlock rules are set at sandbox creation time. To apply filesystem_policy changes, the sandbox must be destroyed and recreated.
 
