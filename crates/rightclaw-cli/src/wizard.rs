@@ -483,7 +483,7 @@ pub fn combined_setting_menu(home: &Path) -> miette::Result<()> {
                 println!("Global config saved.");
             }
             CombinedMenuItem::Agent(name) => {
-                agent_setting_menu(home, Some(&name))?;
+                let _ = agent_setting_menu(home, Some(&name))?;
             }
         }
     }
@@ -498,7 +498,8 @@ pub fn combined_setting_menu(home: &Path) -> miette::Result<()> {
 /// Interactive menu for editing per-agent settings.
 ///
 /// If `agent_name` is `None`, presents a picker to choose from discovered agents.
-pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
+/// Returns the chosen agent name so callers can act on it (e.g. sandbox migration).
+pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Result<String> {
     let agents_dir = rightclaw::config::agents_dir(home);
 
     let chosen_name = match agent_name {
@@ -660,7 +661,7 @@ pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Resu
         println!("Saved.");
     }
 
-    Ok(())
+    Ok(chosen_name)
 }
 
 // ---------------------------------------------------------------------------

@@ -401,7 +401,10 @@ async fn main() -> miette::Result<()> {
             AgentCommands::List => cmd_list(&home),
             AgentCommands::Config { name, key, value } => {
                 match (key, value) {
-                    (None, None) => crate::wizard::agent_setting_menu(&home, name.as_deref())?,
+                    (None, None) => {
+                        let agent_name = crate::wizard::agent_setting_menu(&home, name.as_deref())?;
+                        maybe_migrate_sandbox(&home, &agent_name).await?;
+                    }
                     (Some(_key), _) => {
                         return Err(miette::miette!(
                             "Direct get/set not yet implemented. Use `rightclaw agent config` for interactive mode."
@@ -2794,5 +2797,259 @@ fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()>
     if !any {
         println!("No MCP servers configured.");
     }
+    Ok(())
+}
+
+/// Check if sandbox migration is needed after config changes and perform it.
+///
+/// Compares the active sandbox policy (via gRPC) with the on-disk policy.yaml.
+/// If filesystem/landlock sections differ, triggers a full sandbox migration
+/// (backup -> create new -> restore -> delete old). Network-only changes are
+/// applied automatically on next bot restart via hot-reload.
+async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<()> {
+    let agents_dir = rightclaw::config::agents_dir(home);
+    let agent_dir = agents_dir.join(agent_name);
+
+    // Load config from disk.
+    let config = match rightclaw::agent::discovery::parse_agent_config(&agent_dir)? {
+        Some(c) => c,
+        None => return Ok(()), // No agent.yaml — nothing to check.
+    };
+
+    // Only relevant for sandboxed agents.
+    if config.sandbox_mode() != &rightclaw::agent::types::SandboxMode::Openshell {
+        return Ok(());
+    }
+
+    // Check OpenShell availability.
+    let mtls_dir = match rightclaw::openshell::preflight_check() {
+        rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
+        _ => {
+            println!("OpenShell not available — skipping sandbox migration check.");
+            return Ok(());
+        }
+    };
+
+    let sb_name = rightclaw::openshell::resolve_sandbox_name(agent_name, &config);
+
+    let mut grpc = match rightclaw::openshell::connect_grpc(&mtls_dir).await {
+        Ok(g) => g,
+        Err(_) => {
+            println!("Cannot connect to OpenShell gRPC — skipping sandbox migration check.");
+            return Ok(());
+        }
+    };
+
+    // Check if sandbox exists and is READY.
+    let ready = rightclaw::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
+    if !ready {
+        // Sandbox doesn't exist or isn't ready — no migration needed.
+        return Ok(());
+    }
+
+    // Get active policy from sandbox.
+    let active_policy = match rightclaw::openshell::get_active_policy(&mut grpc, &sb_name).await? {
+        Some(p) => p,
+        None => {
+            println!(
+                "Warning: cannot retrieve active policy for sandbox '{}'. \
+                 If you changed filesystem policy, manually back up and recreate the sandbox.",
+                sb_name
+            );
+            return Ok(());
+        }
+    };
+
+    // Read new policy from disk.
+    let policy_path = config
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.policy_file.as_ref())
+        .map(|p| agent_dir.join(p))
+        .unwrap_or_else(|| agent_dir.join("policy.yaml"));
+
+    if !policy_path.exists() {
+        // No policy file on disk — can't compare.
+        return Ok(());
+    }
+
+    let policy_yaml = std::fs::read_to_string(&policy_path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", policy_path.display()))?;
+    let new_policy = rightclaw::openshell::parse_policy_yaml_filesystem(&policy_yaml)?;
+
+    if rightclaw::openshell::filesystem_policy_changed(&active_policy, &new_policy) {
+        println!("\nFilesystem policy changed — sandbox migration required.");
+        let confirmed = inquire::Confirm::new(
+            "Migrate sandbox now? (backup old, create new, restore data)",
+        )
+        .with_default(true)
+        .prompt()
+        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+
+        if confirmed {
+            perform_migration(home, agent_name).await?;
+        } else {
+            println!("Migration skipped. Filesystem policy changes will NOT take effect until the sandbox is recreated.");
+        }
+    } else {
+        println!("Network-only changes will apply on next bot restart.");
+    }
+
+    Ok(())
+}
+
+/// Perform sandbox migration: backup old sandbox, create new one, restore data, delete old.
+async fn perform_migration(home: &Path, agent_name: &str) -> miette::Result<()> {
+    use miette::IntoDiagnostic;
+
+    let agents_dir = rightclaw::config::agents_dir(home);
+    let agent_dir = agents_dir.join(agent_name);
+    let config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)?
+        .ok_or_else(|| miette::miette!("agent.yaml not found for '{agent_name}'"))?;
+
+    let old_sandbox = rightclaw::openshell::resolve_sandbox_name(agent_name, &config);
+
+    let mtls_dir = match rightclaw::openshell::preflight_check() {
+        rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
+        rightclaw::openshell::OpenShellStatus::NotInstalled => {
+            return Err(miette::miette!("openshell not installed"));
+        }
+        rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
+            return Err(miette::miette!("openshell gateway not started"));
+        }
+        rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
+            return Err(miette::miette!("openshell mTLS certs missing or corrupt"));
+        }
+    };
+
+    // --- Step 1/6: Backup ---
+    println!("Step 1/6: Backing up sandbox '{old_sandbox}'...");
+
+    let old_ssh_config = home.join("run").join("ssh").join(format!("{old_sandbox}.ssh-config"));
+    if !old_ssh_config.exists() {
+        return Err(miette::miette!(
+            help = "Try restarting the agent first so SSH config is generated",
+            "SSH config not found at {} — cannot back up sandbox",
+            old_ssh_config.display(),
+        ));
+    }
+
+    let old_ssh_host = rightclaw::openshell::ssh_host_for_sandbox(&old_sandbox);
+    let backup_base = rightclaw::config::backups_dir(home, agent_name);
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
+    let backup_dir = backup_base.join(&timestamp);
+    std::fs::create_dir_all(&backup_dir)
+        .into_diagnostic()
+        .map_err(|e| miette::miette!("failed to create backup dir: {e:#}"))?;
+
+    let backup_tar = backup_dir.join("sandbox.tar.gz");
+    rightclaw::openshell::ssh_tar_download(
+        &old_ssh_config, &old_ssh_host, "sandbox", &backup_tar, 300,
+    ).await?;
+
+    let tar_size = std::fs::metadata(&backup_tar).map(|m| m.len()).unwrap_or(0);
+    println!("  Backup complete ({tar_size} bytes) at {}", backup_dir.display());
+
+    // --- Step 2/6: Create new sandbox ---
+    let new_sandbox = format!("rightclaw-{agent_name}-{timestamp}");
+    println!("Step 2/6: Creating new sandbox '{new_sandbox}'...");
+
+    // Run codegen for staging dir.
+    let agent_def = rightclaw::agent::discover_single_agent(&agent_dir)?;
+    let self_exe = std::env::current_exe()
+        .into_diagnostic()
+        .map_err(|e| miette::miette!("failed to resolve self exe: {e:#}"))?;
+    rightclaw::codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+
+    let staging = agent_dir.join("staging");
+    rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+
+    let policy_path = config
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.policy_file.as_ref())
+        .map(|p| agent_dir.join(p))
+        .unwrap_or_else(|| agent_dir.join("policy.yaml"));
+
+    let mut child = rightclaw::openshell::spawn_sandbox(
+        &new_sandbox, &policy_path, Some(&staging),
+    )?;
+
+    let mut grpc = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
+
+    // Wait for READY (race with child exit).
+    tokio::select! {
+        result = rightclaw::openshell::wait_for_ready(&mut grpc, &new_sandbox, 120, 2) => {
+            result?;
+            drop(child);
+        }
+        status = child.wait() => {
+            let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
+            if !status.success() {
+                return Err(miette::miette!(
+                    "openshell sandbox create for '{}' exited with {status} before reaching READY",
+                    new_sandbox
+                ));
+            }
+        }
+    }
+
+    println!("  Sandbox '{new_sandbox}' is READY.");
+
+    // --- Step 3/6: Wait for SSH ---
+    println!("Step 3/6: Waiting for SSH transport...");
+    let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox).await?;
+    rightclaw::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
+    println!("  SSH transport ready.");
+
+    // --- Step 4/6: Generate SSH config ---
+    println!("Step 4/6: Generating SSH config...");
+    let ssh_config_dir = home.join("run").join("ssh");
+    std::fs::create_dir_all(&ssh_config_dir)
+        .into_diagnostic()
+        .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
+    let new_ssh_config = rightclaw::openshell::generate_ssh_config(
+        &new_sandbox, &ssh_config_dir,
+    ).await?;
+    println!("  SSH config written to {}", new_ssh_config.display());
+
+    // --- Step 5/6: Restore data ---
+    println!("Step 5/6: Restoring sandbox data...");
+    let new_ssh_host = rightclaw::openshell::ssh_host_for_sandbox(&new_sandbox);
+    if let Err(e) = rightclaw::openshell::ssh_tar_upload(
+        &new_ssh_config, &new_ssh_host, &backup_tar, 600,
+    ).await {
+        // Rollback: delete new sandbox, keep old, report error.
+        eprintln!("Restore failed — rolling back: deleting new sandbox '{new_sandbox}'...");
+        rightclaw::openshell::delete_sandbox(&new_sandbox).await;
+        let _ = rightclaw::openshell::wait_for_deleted(&mut grpc, &new_sandbox, 60, 2).await;
+        // Remove new SSH config (best-effort).
+        let _ = std::fs::remove_file(&new_ssh_config);
+        return Err(miette::miette!(
+            "Sandbox restore failed (old sandbox '{}' preserved): {:#}",
+            old_sandbox, e
+        ));
+    }
+    println!("  Sandbox data restored.");
+
+    // --- Step 6/6: Update agent.yaml and cleanup ---
+    println!("Step 6/6: Updating agent.yaml and cleaning up...");
+    crate::wizard::update_agent_yaml_sandbox_name(&agent_dir, &new_sandbox)?;
+    println!("  sandbox.name set to '{new_sandbox}' in agent.yaml");
+
+    // Delete old sandbox (best-effort).
+    println!("  Deleting old sandbox '{old_sandbox}'...");
+    rightclaw::openshell::delete_sandbox(&old_sandbox).await;
+    let _ = rightclaw::openshell::wait_for_deleted(&mut grpc, &old_sandbox, 60, 2).await;
+
+    // Remove old SSH config (best-effort).
+    let _ = std::fs::remove_file(&old_ssh_config);
+
+    // Clean up staging dir.
+    let _ = std::fs::remove_dir_all(&staging);
+
+    println!("\nMigration complete. New sandbox: {new_sandbox}");
+    println!("Restart the agent with `rightclaw up` to use the new sandbox.");
+
     Ok(())
 }
