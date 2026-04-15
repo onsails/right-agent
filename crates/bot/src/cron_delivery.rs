@@ -104,56 +104,75 @@ fn yaml_escape(s: &str) -> String {
         .replace('\n', "\\n")
 }
 
+/// Instruction prefix for the delivery CC session.
+///
+/// This is approach A: instruction in stdin. If Haiku ignores these instructions
+/// (summarizes instead of relaying verbatim), migrate to approach B: add a
+/// delivery-specific block to the system prompt via `build_prompt_assembly_script()`.
+/// See docs/superpowers/specs/2026-04-15-cron-delivery-verbatim-relay.md.
+const DELIVERY_INSTRUCTION: &str = "\
+You are delivering a cron job result to the user.
+The `content` field below is the FINAL user-facing message — send it VERBATIM in your response.
+Do NOT summarize, rephrase, or omit any part of the content.
+You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
+Ignore the attachments field — attachments are sent separately.
+
+Here is the YAML report of the cron job:
+";
+
 /// Format a pending cron result as YAML for the main CC session.
+///
+/// The output begins with a [`DELIVERY_INSTRUCTION`] prefix that tells the
+/// delivery model to relay the content verbatim, followed by the YAML payload.
 pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
     let total = skipped + 1;
-    let mut yaml = String::new();
-    yaml.push_str("cron_result:\n");
-    yaml.push_str(&format!("  job: \"{}\"\n", yaml_escape(&pending.job_name)));
-    yaml.push_str(&format!("  runs_total: {total}\n"));
+    let mut output = String::from(DELIVERY_INSTRUCTION);
+    output.push_str("\ncron_result:\n");
+    output.push_str(&format!("  job: \"{}\"\n", yaml_escape(&pending.job_name)));
+    output.push_str(&format!("  runs_total: {total}\n"));
     if skipped > 0 {
-        yaml.push_str(&format!("  skipped_runs: {skipped}\n"));
+        output.push_str(&format!("  skipped_runs: {skipped}\n"));
     }
 
     if let Ok(notify) = serde_json::from_str::<crate::cron::CronNotify>(&pending.notify_json) {
-        yaml.push_str("  result:\n");
-        yaml.push_str("    notify:\n");
-        yaml.push_str(&format!(
+        output.push_str("  result:\n");
+        output.push_str("    notify:\n");
+        output.push_str(&format!(
             "      content: \"{}\"\n",
             yaml_escape(&notify.content)
         ));
         if let Some(ref atts) = notify.attachments
             && !atts.is_empty()
         {
-            yaml.push_str("      attachments:\n");
+            output.push_str("      attachments:\n");
             for att in atts {
                 let kind_str = serde_json::to_value(att.kind)
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_else(|| "document".to_string());
-                yaml.push_str(&format!(
+                output.push_str(&format!(
                     "        - type: \"{}\"\n",
                     yaml_escape(&kind_str)
                 ));
-                yaml.push_str(&format!(
+                output.push_str(&format!(
                     "          path: \"{}\"\n",
                     yaml_escape(&att.path)
                 ));
                 if let Some(ref caption) = att.caption {
-                    yaml.push_str(&format!(
+                    output.push_str(&format!(
                         "          caption: \"{}\"\n",
                         yaml_escape(caption)
                     ));
                 }
             }
         }
-        yaml.push_str(&format!(
+        output.push_str(&format!(
             "    summary: \"{}\"\n",
             yaml_escape(&pending.summary)
         ));
     }
 
-    yaml
+    output
 }
 
 const IDLE_THRESHOLD_SECS: i64 = 180; // 3 minutes — within CC's 5-min prompt cache TTL
@@ -660,12 +679,18 @@ mod tests {
             summary: "Checked 5 pairs".into(),
             finished_at: "2026-01-01T00:01:00Z".into(),
         };
-        let yaml = format_cron_yaml(&pending, 2);
-        assert!(yaml.contains("job: \"health-check\""));
-        assert!(yaml.contains("runs_total: 3"));
-        assert!(yaml.contains("skipped_runs: 2"));
-        assert!(yaml.contains("BTC up 2%"));
-        assert!(yaml.contains("Checked 5 pairs"));
+        let output = format_cron_yaml(&pending, 2);
+        // Instruction prefix assertions
+        assert!(output.starts_with("You are delivering a cron job result"));
+        assert!(output.contains("VERBATIM"));
+        assert!(output.contains("attachments are sent separately"));
+        assert!(output.contains("Here is the YAML report of the cron job:"));
+        // YAML content assertions
+        assert!(output.contains("job: \"health-check\""));
+        assert!(output.contains("runs_total: 3"));
+        assert!(output.contains("skipped_runs: 2"));
+        assert!(output.contains("BTC up 2%"));
+        assert!(output.contains("Checked 5 pairs"));
     }
 
     #[test]
@@ -677,8 +702,9 @@ mod tests {
             summary: "done".into(),
             finished_at: "2026-01-01T00:01:00Z".into(),
         };
-        let yaml = format_cron_yaml(&pending, 0);
-        assert!(yaml.contains("runs_total: 1"));
-        assert!(!yaml.contains("skipped_runs"));
+        let output = format_cron_yaml(&pending, 0);
+        assert!(output.starts_with("You are delivering a cron job result"));
+        assert!(output.contains("runs_total: 1"));
+        assert!(!output.contains("skipped_runs"));
     }
 }
