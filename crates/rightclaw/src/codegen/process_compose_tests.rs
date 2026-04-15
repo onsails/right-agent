@@ -24,7 +24,7 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         backoff_seconds: 5,
         network_policy: Default::default(),
         model: None,
-        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None }),
+        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None, name: None }),
         telegram_token: Some(token.to_string()),
 
         allowed_chat_ids: vec![],
@@ -56,7 +56,7 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         backoff_seconds: 5,
         network_policy: Default::default(),
         model: None,
-        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None }),
+        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None, name: None }),
         telegram_token: None,
 
         allowed_chat_ids: vec![],
@@ -105,7 +105,7 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         backoff_seconds: 10,
         network_policy: Default::default(),
         model: None,
-        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None }),
+        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None, name: None }),
         telegram_token: Some(token.to_string()),
 
         allowed_chat_ids: vec![],
@@ -387,6 +387,7 @@ fn make_agent_with_sandbox(name: &str, token: &str, mode: SandboxMode, policy_fi
         sandbox: Some(SandboxConfig {
             mode,
             policy_file: policy_file.map(std::path::PathBuf::from),
+            name: None,
         }),
         telegram_token: Some(token.to_string()),
         allowed_chat_ids: vec![],
