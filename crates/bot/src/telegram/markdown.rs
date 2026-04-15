@@ -262,6 +262,18 @@ pub(crate) fn html_escape_into(s: &str, out: &mut String) {
 
 const TELEGRAM_LIMIT: usize = 4096;
 
+/// Round a byte index down to the nearest char boundary in `s`.
+fn snap_to_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Split an HTML message at the Telegram 4096-char limit.
 ///
 /// Tracks open tags and closes/reopens them across split boundaries.
@@ -274,11 +286,13 @@ pub fn split_html_message(html: &str) -> Vec<String> {
     let mut buf = html.to_string();
 
     while buf.len() > TELEGRAM_LIMIT {
-        let window_start = TELEGRAM_LIMIT.saturating_sub(400);
-        let split_pos = buf[window_start..TELEGRAM_LIMIT]
+        // Snap byte offsets to char boundaries (multi-byte UTF-8 safety).
+        let limit = snap_to_char_boundary(&buf, TELEGRAM_LIMIT);
+        let window_start = snap_to_char_boundary(&buf, limit.saturating_sub(400));
+        let split_pos = buf[window_start..limit]
             .rfind('\n')
             .map(|p| window_start + p + 1)
-            .unwrap_or(TELEGRAM_LIMIT);
+            .unwrap_or(limit);
 
         let chunk = &buf[..split_pos];
         let open_tags = find_unclosed_tags(chunk);

@@ -251,3 +251,40 @@ fn split_does_not_exceed_limit_with_closing_tags() {
         assert!(part.len() <= 4200, "part too long: {} chars", part.len());
     }
 }
+
+#[test]
+fn split_html_message_multibyte_no_panic() {
+    // Reproduce the production crash: byte index 3696 (= TELEGRAM_LIMIT - 400)
+    // landed inside an em-dash '—' (3-byte UTF-8: E2 80 94).
+    // We construct a string where byte 3696 falls inside a multi-byte char.
+    // window_start = 4096 - 400 = 3696 is used as a slice index.
+    let target = 3696; // window_start byte offset
+    // Fill with ASCII up to target-1, then place a 3-byte char spanning target.
+    let prefix = "x".repeat(target - 1); // 3695 bytes of ASCII
+    assert_eq!(prefix.len(), target - 1);
+    // '—' is 3 bytes: bytes 3695, 3696, 3697. Byte 3696 is inside it.
+    let mid = "—"; // 3 bytes
+    // Fill remainder to exceed TELEGRAM_LIMIT (4096).
+    let suffix = "y".repeat(4096 - (target - 1) - mid.len() + 500);
+    let msg = format!("{prefix}{mid}{suffix}");
+    assert!(msg.len() > 4096);
+    assert!(
+        !msg.is_char_boundary(target),
+        "byte {target} should be inside the em-dash"
+    );
+    // This panicked before the fix.
+    let parts = split_html_message(&msg);
+    assert!(parts.len() >= 2);
+    let joined: String = parts.join("");
+    assert_eq!(joined, msg);
+}
+
+#[test]
+fn snap_to_char_boundary_basic() {
+    let s = "abc—def"; // '—' occupies bytes 3..6
+    assert_eq!(super::snap_to_char_boundary(s, 3), 3); // exact boundary
+    assert_eq!(super::snap_to_char_boundary(s, 4), 3); // inside '—'
+    assert_eq!(super::snap_to_char_boundary(s, 5), 3); // inside '—'
+    assert_eq!(super::snap_to_char_boundary(s, 6), 6); // after '—'
+    assert_eq!(super::snap_to_char_boundary(s, 100), s.len()); // beyond end
+}
