@@ -383,6 +383,122 @@ pub async fn ssh_exec(
     Ok(stdout)
 }
 
+/// Stream `tar czpf -` from inside the sandbox to a local file via SSH.
+///
+/// Runs `tar czpf - -C / sandbox` on the remote host, piping stdout directly
+/// to `dest_path` without buffering in memory.
+pub async fn ssh_tar_download(
+    config_path: &Path,
+    ssh_host: &str,
+    sandbox_path: &str,
+    dest_path: &Path,
+    timeout_secs: u64,
+) -> miette::Result<()> {
+    let mut command = Command::new("ssh");
+    command.arg("-F").arg(config_path);
+    command.arg(ssh_host);
+    command.arg("--");
+    command.args(["tar", "czpf", "-", "-C", "/", sandbox_path]);
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| miette::miette!("failed to spawn ssh for tar download: {e:#}"))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| miette::miette!("no stdout handle from ssh tar download"))?;
+
+    let mut file = tokio::fs::File::create(dest_path)
+        .await
+        .map_err(|e| miette::miette!("failed to create backup file {}: {e:#}", dest_path.display()))?;
+
+    // Spawn a task to copy stdout → file to avoid deadlock (SSH won't exit until stdout is consumed).
+    let copy_task = tokio::spawn(async move {
+        tokio::io::copy(&mut stdout, &mut file)
+            .await
+            .map_err(|e| miette::miette!("I/O error during tar download: {e:#}"))
+    });
+
+    let timeout_dur = Duration::from_secs(timeout_secs);
+    let (copy_result, child_result) = tokio::time::timeout(timeout_dur, async {
+        let copy = copy_task.await.map_err(|e| miette::miette!("copy task panicked: {e:#}"))??;
+        let status = child.wait().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))?;
+        Ok::<_, miette::Error>((copy, status))
+    })
+    .await
+    .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
+
+    let _ = copy_result;
+    if !child_result.success() {
+        return Err(miette::miette!(
+            "ssh tar download failed (exit {child_result})"
+        ));
+    }
+    Ok(())
+}
+
+/// Stream a local tar.gz file into the sandbox via SSH `tar xzpf -`.
+///
+/// Pipes `src_path` to SSH stdin, running `tar xzpf - -C /` inside the sandbox.
+/// Archive paths like `sandbox/...` are extracted to `/sandbox/...`.
+pub async fn ssh_tar_upload(
+    config_path: &Path,
+    ssh_host: &str,
+    src_path: &Path,
+    timeout_secs: u64,
+) -> miette::Result<()> {
+    let mut command = Command::new("ssh");
+    command.arg("-F").arg(config_path);
+    command.arg(ssh_host);
+    command.arg("--");
+    command.args(["tar", "xzpf", "-", "-C", "/"]);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|e| miette::miette!("failed to spawn ssh for tar upload: {e:#}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| miette::miette!("no stdin handle from ssh tar upload"))?;
+
+    let src_path = src_path.to_owned();
+    let write_task = tokio::spawn(async move {
+        let mut file = tokio::fs::File::open(&src_path)
+            .await
+            .map_err(|e| miette::miette!("failed to open backup file {}: {e:#}", src_path.display()))?;
+        tokio::io::copy(&mut file, &mut stdin)
+            .await
+            .map_err(|e| miette::miette!("I/O error during tar upload: {e:#}"))?;
+        // Drop stdin to signal EOF to the remote tar process.
+        drop(stdin);
+        Ok::<_, miette::Error>(())
+    });
+
+    let timeout_dur = Duration::from_secs(timeout_secs);
+    let output = tokio::time::timeout(timeout_dur, async {
+        write_task.await.map_err(|e| miette::miette!("write task panicked: {e:#}"))??;
+        child.wait_with_output().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    })
+    .await
+    .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))??;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(miette::miette!(
+            "ssh tar upload failed (exit {}): {stderr}",
+            output.status
+        ));
+    }
+    Ok(())
+}
+
 /// Upload a file from host into a running sandbox.
 ///
 /// `sandbox_dir` must be a directory path ending with `/`.
