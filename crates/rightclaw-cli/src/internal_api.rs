@@ -10,7 +10,7 @@ use rightclaw::mcp::credentials::{self, CredentialError};
 use rightclaw::mcp::proxy::{AuthMethod, ProxyBackend};
 use serde::{Deserialize, Serialize};
 
-use crate::aggregator::{RefreshSenders, ToolDispatcher};
+use crate::aggregator::{ReconnectManagers, RefreshSenders, ToolDispatcher};
 use rightclaw::mcp::refresh::{OAuthServerState, RefreshMessage};
 
 // ---------------------------------------------------------------------------
@@ -116,10 +116,15 @@ struct ErrorResponse {
 pub(crate) struct InternalState {
     dispatcher: Arc<ToolDispatcher>,
     refresh_senders: RefreshSenders,
+    reconnect_managers: ReconnectManagers,
 }
 
-pub(crate) fn internal_router(dispatcher: Arc<ToolDispatcher>, refresh_senders: RefreshSenders) -> Router {
-    let state = InternalState { dispatcher, refresh_senders };
+pub(crate) fn internal_router(
+    dispatcher: Arc<ToolDispatcher>,
+    refresh_senders: RefreshSenders,
+    reconnect_managers: ReconnectManagers,
+) -> Router {
+    let state = InternalState { dispatcher, refresh_senders, reconnect_managers };
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
         .route("/mcp-remove", post(handle_mcp_remove))
@@ -424,6 +429,11 @@ async fn handle_set_token(
         }
     }
 
+    // Cancel stale reconnect if one is running for this server.
+    if let Some(mgr) = state.reconnect_managers.get(&req.agent) {
+        mgr.lock().await.cancel(&req.server);
+    }
+
     // Reconnect in background with the new token.
     let server_name = req.server.clone();
     let handle_clone = Arc::clone(&handle);
@@ -593,7 +603,8 @@ mod tests {
     fn make_test_router(tmp: &std::path::Path) -> Router {
         let dispatcher = make_test_dispatcher(tmp);
         let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
-        internal_router(dispatcher, refresh_senders)
+        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+        internal_router(dispatcher, refresh_senders, reconnect_managers)
     }
 
     async fn send_json(

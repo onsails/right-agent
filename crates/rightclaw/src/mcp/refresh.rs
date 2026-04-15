@@ -221,77 +221,18 @@ pub async fn run_refresh_scheduler(
 
 /// Attempt token refresh with retries.
 /// Returns (updated_state, new_access_token).
+///
+/// Delegates to [`crate::mcp::reconnect::do_refresh_cancellable`] with a
+/// never-cancelled token. See that function for the retry/backoff logic.
 pub async fn do_refresh(
     client: &reqwest::Client,
     entry: &OAuthServerState,
-    max_retries: u32,
+    _max_retries: u32,
 ) -> miette::Result<(OAuthServerState, String)> {
-    let refresh_token = entry.refresh_token.as_deref()
-        .ok_or_else(|| miette::miette!("no refresh_token"))?;
-
-    let backoffs = [30, 60, 120]; // seconds
-
-    for attempt in 0..max_retries {
-        let mut form = vec![
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", &entry.client_id),
-        ];
-        if let Some(ref secret) = entry.client_secret {
-            form.push(("client_secret", secret));
-        }
-
-        let resp = client
-            .post(&entry.token_endpoint)
-            .form(&form)
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let token_resp: crate::mcp::oauth::TokenResponse = r.json().await
-                    .map_err(|e| miette::miette!("failed to parse token response: {e:#}"))?;
-
-                let expires_in = token_resp.expires_in.unwrap_or(3600);
-                let has_new_refresh = token_resp.refresh_token.is_some();
-                let expires_at = chrono::Utc::now()
-                    + chrono::Duration::seconds(expires_in as i64);
-
-                tracing::info!(
-                    attempt,
-                    expires_in,
-                    has_new_refresh,
-                    %expires_at,
-                    "refresh succeeded",
-                );
-
-                let access_token = token_resp.access_token.clone();
-                return Ok((OAuthServerState {
-                    refresh_token: token_resp.refresh_token.or(entry.refresh_token.clone()),
-                    token_endpoint: entry.token_endpoint.clone(),
-                    client_id: entry.client_id.clone(),
-                    client_secret: entry.client_secret.clone(),
-                    expires_at,
-                    server_url: entry.server_url.clone(),
-                }, access_token));
-            }
-            Ok(r) => {
-                let status = r.status();
-                let body = r.text().await.unwrap_or_default();
-                tracing::warn!(attempt, %status, %body, "refresh attempt failed");
-            }
-            Err(e) => {
-                tracing::warn!(attempt, "refresh request error: {e:#}");
-            }
-        }
-
-        if attempt < max_retries - 1 {
-            let delay = backoffs.get(attempt as usize).copied().unwrap_or(120);
-            tokio::time::sleep(Duration::from_secs(delay)).await;
-        }
-    }
-
-    Err(miette::miette!("token refresh failed after {max_retries} attempts"))
+    let cancel = tokio_util::sync::CancellationToken::new();
+    crate::mcp::reconnect::do_refresh_cancellable(client, entry, &cancel)
+        .await
+        .map_err(|e| miette::miette!("{e}"))
 }
 
 #[cfg(test)]
