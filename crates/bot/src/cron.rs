@@ -602,6 +602,24 @@ async fn execute_job(
                             c.clear().await;
                         }
                     });
+
+                    // Prefetch recall for next cron run (background).
+                    let hs_recall = Arc::clone(hs);
+                    let recall_prompt = spec.prompt.clone();
+                    let cron_cache_key = format!("cron:{job_name}");
+                    let cron_cache = prefetch_cache.cloned();
+                    tokio::spawn(async move {
+                        match hs_recall.recall(&recall_prompt).await {
+                            Ok(results) if !results.is_empty() => {
+                                let content: String = results.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join("\n\n");
+                                if let Some(ref c) = cron_cache {
+                                    c.put(&cron_cache_key, content).await;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("cron prefetch recall failed: {e:#}"),
+                        }
+                    });
                 }
             }
             Err(reason) => {
