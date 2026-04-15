@@ -108,10 +108,20 @@ async fn cleanup_old_logs(
     ssh_config_path: Option<&std::path::Path>,
     agent_name: &str,
 ) {
+    // Defense-in-depth: job names should be alphanumeric + hyphens only (validated at creation).
+    if !job_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        tracing::error!(job = %job_name, "job name contains unsafe characters, skipping log cleanup");
+        return;
+    }
     if let Some(ssh_config) = ssh_config_path {
         let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        // List matching files sorted newest-first, skip `keep`, delete the rest.
+        // Using find+stat avoids ls parsing pitfalls with special characters in filenames.
         let cleanup_cmd = format!(
-            "ls -1t {log_dir}/{job_name}-*.ndjson 2>/dev/null | tail -n +{} | xargs rm -f",
+            "find {log_dir} -maxdepth 1 -name '{job_name}-*.ndjson' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | tail -n +{} | cut -d' ' -f2- | xargs -r rm -f",
             keep + 1
         );
         let output = tokio::process::Command::new("ssh")
@@ -140,21 +150,21 @@ async fn cleanup_old_logs(
             Ok(d) => d,
             Err(_) => return,
         };
-        let mut files: Vec<std::path::PathBuf> = dir
+        let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = dir
             .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
                     .is_some_and(|n| n.starts_with(&pattern) && n.ends_with(".ndjson"))
             })
+            .filter_map(|e| {
+                let path = e.path();
+                let mtime = e.metadata().ok()?.modified().ok()?;
+                Some((path, mtime))
+            })
             .collect();
-        files.sort_by(|a, b| {
-            let ma = a.metadata().and_then(|m| m.modified()).ok();
-            let mb = b.metadata().and_then(|m| m.modified()).ok();
-            mb.cmp(&ma)
-        });
-        for old in files.into_iter().skip(keep) {
+        files.sort_by(|a, b| b.1.cmp(&a.1));
+        for (old, _) in files.into_iter().skip(keep) {
             if let Err(e) = std::fs::remove_file(&old) {
                 tracing::warn!(job = %job_name, path = %old.display(), "failed to delete old log: {e:#}");
             }
@@ -301,7 +311,7 @@ async fn execute_job(
             assembly_script = format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
         assembly_script = format!(
-            "mkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
+            "set -o pipefail\nmkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
         );
         let ssh_host = rightclaw::openshell::ssh_host(agent_name);
         let mut c = tokio::process::Command::new("ssh");
@@ -336,7 +346,7 @@ async fn execute_job(
             std::fs::remove_file(&lock_path).ok();
             return;
         }
-        let assembly_script = format!("{assembly_script} | tee {sandbox_log_dir}/{log_filename}");
+        let assembly_script = format!("set -o pipefail\n{assembly_script} | tee {sandbox_log_dir}/{log_filename}");
         let mut c = tokio::process::Command::new("bash");
         c.arg("-c");
         c.arg(&assembly_script);
@@ -420,8 +430,14 @@ async fn execute_job(
     // Delete lock on completion (CRON-04)
     std::fs::remove_file(&lock_path).ok();
 
-    // Retention: keep last 10 log files per job
-    cleanup_old_logs(job_name, &sandbox_log_dir, 10, ssh_config_path, agent_name).await;
+    // Retention: keep last 10 log files per job (fire-and-forget to avoid SSH overhead on hot path)
+    let job_name_owned = job_name.to_owned();
+    let log_dir_owned = sandbox_log_dir.clone();
+    let ssh_config_owned = ssh_config_path.map(|p| p.to_owned());
+    let agent_name_owned = agent_name.to_owned();
+    tokio::spawn(async move {
+        cleanup_old_logs(&job_name_owned, &log_dir_owned, 10, ssh_config_owned.as_deref(), &agent_name_owned).await;
+    });
 
     tracing::info!(job = %job_name, run_id = %run_id, %status, "cron job completed");
 
