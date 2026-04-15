@@ -299,7 +299,7 @@ pub async fn download_attachments(
     bot: &super::BotType,
     agent_dir: &std::path::Path,
     ssh_config_path: Option<&std::path::Path>,
-    agent_name: &str,
+    resolved_sandbox: Option<&str>,
     chat_id: teloxide::types::ChatId,
     eff_thread_id: i64,
 ) -> Result<Vec<ResolvedAttachment>, Box<dyn std::error::Error + Send + Sync>> {
@@ -351,8 +351,8 @@ pub async fn download_attachments(
 
         let final_path = if sandboxed {
             // Upload to sandbox, then clean up host temp file
-            let sandbox = rightclaw::openshell::sandbox_name(agent_name);
-            rightclaw::openshell::upload_file(&sandbox, &host_path, SANDBOX_INBOX).await?;
+            let sandbox = resolved_sandbox.unwrap();
+            rightclaw::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
             if let Err(e) = tokio::fs::remove_file(&host_path).await {
                 tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
             }
@@ -383,7 +383,7 @@ pub async fn send_attachments(
     eff_thread_id: i64,
     agent_dir: &std::path::Path,
     ssh_config_path: Option<&std::path::Path>,
-    agent_name: &str,
+    resolved_sandbox: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use teloxide::payloads::{
         SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
@@ -425,8 +425,8 @@ pub async fn send_attachments(
                 .to_string_lossy()
                 .into_owned();
             let dest = tmp_dir.join(&file_name);
-            let sandbox = rightclaw::openshell::sandbox_name(agent_name);
-            rightclaw::openshell::download_file(&sandbox, &att.path, &dest).await?;
+            let sandbox = resolved_sandbox.unwrap();
+            rightclaw::openshell::download_file(sandbox, &att.path, &dest).await?;
             dest
         } else {
             // Canonicalize to resolve any `..` components and verify the path
@@ -591,7 +591,7 @@ pub async fn send_attachments(
 pub fn spawn_cleanup_task(
     agent_dir: std::path::PathBuf,
     ssh_config_path: Option<std::path::PathBuf>,
-    agent_name: String,
+    resolved_sandbox: Option<String>,
     retention_days: u32,
 ) {
     tokio::spawn(async move {
@@ -599,7 +599,7 @@ pub fn spawn_cleanup_task(
         loop {
             tokio::time::sleep(interval).await;
             if let Err(e) =
-                run_cleanup(&agent_dir, ssh_config_path.as_deref(), &agent_name, retention_days)
+                run_cleanup(&agent_dir, ssh_config_path.as_deref(), resolved_sandbox.as_deref(), retention_days)
                     .await
             {
                 tracing::warn!("attachment cleanup failed: {e:#}");
@@ -611,11 +611,11 @@ pub fn spawn_cleanup_task(
 async fn run_cleanup(
     agent_dir: &std::path::Path,
     ssh_config_path: Option<&std::path::Path>,
-    agent_name: &str,
+    resolved_sandbox: Option<&str>,
     retention_days: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mtime_arg = format!("+{retention_days}");
         // Use find to delete files older than retention_days in sandbox inbox/outbox
         rightclaw::openshell::ssh_exec(

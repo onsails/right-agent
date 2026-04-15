@@ -27,6 +27,20 @@ pub fn ssh_host(agent_name: &str) -> String {
     format!("openshell-rightclaw-{agent_name}")
 }
 
+/// Resolve sandbox name: explicit from config, or deterministic fallback.
+pub fn resolve_sandbox_name(agent_name: &str, config: &crate::agent::types::AgentConfig) -> String {
+    config
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.name.clone())
+        .unwrap_or_else(|| sandbox_name(agent_name))
+}
+
+/// SSH host alias from sandbox name (not agent name).
+pub fn ssh_host_for_sandbox(sandbox_name: &str) -> String {
+    format!("openshell-{sandbox_name}")
+}
+
 /// Resolve the default mTLS directory for the OpenShell gateway.
 ///
 /// Checks `OPENSHELL_MTLS_DIR` env var first, then falls back to the

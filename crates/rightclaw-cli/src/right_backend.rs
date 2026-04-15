@@ -458,7 +458,10 @@ impl RightBackend {
         let required = ["IDENTITY.md", "SOUL.md", "USER.md"];
 
         let missing: Vec<&str> = if let Some(mtls_dir) = &self.mtls_dir {
-            let sandbox_name = rightclaw::openshell::sandbox_name(agent_name);
+            let sandbox_name = match rightclaw::agent::parse_agent_config(&agent_dir) {
+                Ok(Some(config)) => rightclaw::openshell::resolve_sandbox_name(agent_name, &config),
+                _ => rightclaw::openshell::sandbox_name(agent_name),
+            };
             let mut client = rightclaw::openshell::connect_grpc(mtls_dir)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
