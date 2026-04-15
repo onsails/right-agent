@@ -67,11 +67,17 @@ All three CC invocation paths use `build_prompt_assembly_script()`:
 
 ## MCP Server Instructions  (if any external MCP servers have instructions)
 {fetched from aggregator via POST /mcp-instructions at prompt assembly time}
+
+## Memory
+{composite-memory — file mode: MEMORY.md contents truncated to 200 lines;
+ Hindsight mode: prefetched recall results injected as context}
 ```
 
 Missing agent-owned files are silently skipped. Operating instructions and bootstrap
 content are compiled into the binary — no file sync needed. MCP instructions are
-fetched from the aggregator's internal API (non-fatal if unavailable).
+fetched from the aggregator's internal API (non-fatal if unavailable). Memory section
+is appended last: file mode inlines MEMORY.md contents, Hindsight mode inlines
+prefetched recall results.
 
 ### Bootstrap mode
 
@@ -165,8 +171,9 @@ SOUL.md, USER.md all exist on the host after reverse_sync.
 ## MCP Server Instructions
 
 The `right` MCP server provides `with_instructions()` describing all tools:
-memory (store/query/search/delete), cron (list/show runs), MCP management
-(add/remove/list/auth), and bootstrap (mcp__right__bootstrap_done).
+memory (memory_retain/memory_recall/memory_reflect — Hindsight mode only),
+cron (list/show runs), MCP management (add/remove/list/auth), and bootstrap
+(mcp__right__bootstrap_done).
 
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
 whenever tools change.
