@@ -84,6 +84,14 @@ pub enum AgentCommands {
         #[arg(last = true)]
         command: Vec<String>,
     },
+    /// Back up an agent's sandbox and configuration
+    Backup {
+        /// Agent name
+        name: String,
+        /// Only back up sandbox files (skip agent.yaml, data.db, policy.yaml)
+        #[arg(long)]
+        sandbox_only: bool,
+    },
 }
 
 /// Subcommands for `rightclaw memory`.
@@ -400,6 +408,9 @@ async fn main() -> miette::Result<()> {
             }
             AgentCommands::Ssh { name, command } => {
                 cmd_agent_ssh(&home, &name, &command).await
+            }
+            AgentCommands::Backup { name, sandbox_only } => {
+                cmd_agent_backup(&home, &name, sandbox_only).await
             }
         },
         Commands::Memory { command } => match command {
@@ -1584,6 +1595,141 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
         .exec();
 
     Err(miette::miette!("Failed to attach: {err}"))
+}
+
+async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> miette::Result<()> {
+    use miette::IntoDiagnostic;
+
+    // 1. Discover agent and parse config
+    let agents_dir = rightclaw::config::agents_dir(home);
+    let agents = rightclaw::agent::discover_agents(&agents_dir)?;
+    let _agent = agents
+        .iter()
+        .find(|a| a.name == agent_name)
+        .ok_or_else(|| {
+            let available: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+            miette::miette!("Agent '{}' not found. Available: {}", agent_name, available.join(", "))
+        })?;
+
+    let agent_dir = agents_dir.join(agent_name);
+    let config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)?;
+
+    let is_sandboxed = config
+        .as_ref()
+        .map(|c| c.sandbox_mode() == &rightclaw::agent::types::SandboxMode::Openshell)
+        .unwrap_or(true);
+
+    // 2. Create backup directory: ~/.rightclaw/backups/<agent>/<YYYYMMDD-HHMM>/
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
+    let backup_base = rightclaw::config::backups_dir(home, agent_name);
+    let backup_dir = backup_base.join(&timestamp);
+    std::fs::create_dir_all(&backup_dir)
+        .into_diagnostic()
+        .map_err(|e| miette::miette!("failed to create backup dir {}: {e:#}", backup_dir.display()))?;
+
+    tracing::info!(agent = agent_name, backup_dir = %backup_dir.display(), "starting backup");
+
+    // 3. Sandbox tar download (if sandboxed)
+    if is_sandboxed {
+        let sb_name = config
+            .as_ref()
+            .map(|c| rightclaw::openshell::resolve_sandbox_name(agent_name, c))
+            .unwrap_or_else(|| rightclaw::openshell::sandbox_name(agent_name));
+
+        // Verify OpenShell is reachable
+        let mtls_dir = match rightclaw::openshell::preflight_check() {
+            rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
+            rightclaw::openshell::OpenShellStatus::NotInstalled => {
+                return Err(miette::miette!("openshell not installed — required for sandboxed agent backup"));
+            }
+            rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
+                return Err(miette::miette!("openshell gateway not started — start it before backing up"));
+            }
+            rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
+                return Err(miette::miette!("openshell mTLS certs missing or corrupt — try reinstalling openshell"));
+            }
+        };
+
+        let mut grpc = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
+
+        let ready = rightclaw::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
+        if !ready {
+            return Err(miette::miette!(
+                help = "Start the agent with: rightclaw up",
+                "Sandbox '{}' is not ready — agent must be running to back up sandbox files",
+                sb_name,
+            ));
+        }
+
+        let ssh_config = home.join("run").join("ssh").join(format!("{}.ssh-config", sb_name));
+        if !ssh_config.exists() {
+            return Err(miette::miette!(
+                help = "Try restarting the agent",
+                "SSH config not found at {}",
+                ssh_config.display(),
+            ));
+        }
+
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(&sb_name);
+        let dest_tar = backup_dir.join("sandbox.tar.gz");
+
+        tracing::info!(sandbox = %sb_name, dest = %dest_tar.display(), "downloading sandbox via SSH tar");
+        rightclaw::openshell::ssh_tar_download(&ssh_config, &ssh_host, "sandbox", &dest_tar, 300).await?;
+        println!("sandbox.tar.gz written ({} bytes)", std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0));
+    } else {
+        // No-sandbox: tar the agent dir (excluding data.db — backed up separately via VACUUM)
+        let dest_tar = backup_dir.join("sandbox.tar.gz");
+        tracing::info!(agent_dir = %agent_dir.display(), dest = %dest_tar.display(), "archiving agent directory");
+        let status = std::process::Command::new("tar")
+            .args([
+                "czpf",
+                dest_tar.to_str().ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?,
+                "--exclude=data.db",
+                "-C",
+                agent_dir.parent().ok_or_else(|| miette::miette!("agent_dir has no parent"))?.to_str()
+                    .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?,
+                agent_name,
+            ])
+            .status()
+            .into_diagnostic()
+            .map_err(|e| miette::miette!("failed to spawn tar: {e:#}"))?;
+        if !status.success() {
+            return Err(miette::miette!("tar exited with status {status}"));
+        }
+        println!("sandbox.tar.gz written ({} bytes)", std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0));
+    }
+
+    // 4. Config files (unless --sandbox-only)
+    if !sandbox_only {
+        for filename in &["agent.yaml", "policy.yaml"] {
+            let src = agent_dir.join(filename);
+            if src.exists() {
+                let dest = backup_dir.join(filename);
+                std::fs::copy(&src, &dest)
+                    .into_diagnostic()
+                    .map_err(|e| miette::miette!("failed to copy {filename}: {e:#}"))?;
+                println!("{filename} copied");
+            }
+        }
+
+        let db_path = agent_dir.join("data.db");
+        if db_path.exists() {
+            let backup_db = backup_dir.join("data.db");
+            let conn = rusqlite::Connection::open(&db_path)
+                .into_diagnostic()
+                .map_err(|e| miette::miette!("failed to open data.db: {e:#}"))?;
+            conn.execute(
+                &format!("VACUUM INTO '{}'", backup_db.display()),
+                [],
+            )
+            .into_diagnostic()
+            .map_err(|e| miette::miette!("VACUUM INTO failed: {e:#}"))?;
+            println!("data.db vacuumed ({} bytes)", std::fs::metadata(&backup_db).map(|m| m.len()).unwrap_or(0));
+        }
+    }
+
+    println!("Backup complete: {}", backup_dir.display());
+    Ok(())
 }
 
 async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> miette::Result<()> {
