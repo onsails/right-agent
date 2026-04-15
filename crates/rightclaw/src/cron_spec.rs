@@ -226,6 +226,7 @@ pub fn create_spec(
 ///
 /// Exactly one of `schedule`/`run_at` must be provided.
 /// `run_at` implies `recurring=false`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_spec_v2(
     conn: &rusqlite::Connection,
     job_name: &str,
@@ -243,10 +244,10 @@ pub fn create_spec_v2(
     if let Some(ttl) = lock_ttl {
         validate_lock_ttl(ttl)?;
     }
-    if let Some(budget) = max_budget_usd {
-        if budget <= 0.0 {
-            return Err("max_budget_usd must be greater than 0".into());
-        }
+    if let Some(budget) = max_budget_usd
+        && budget <= 0.0
+    {
+        return Err("max_budget_usd must be greater than 0".into());
     }
 
     let (db_schedule, db_recurring, db_run_at, schedule_warning) =
@@ -311,6 +312,7 @@ pub fn update_spec(
 /// - `run_at` set → clears `schedule`, forces `recurring=false`
 /// - Both set → error
 /// - No fields → error
+#[allow(clippy::too_many_arguments)]
 pub fn update_spec_partial(
     conn: &rusqlite::Connection,
     job_name: &str,
@@ -345,18 +347,18 @@ pub fn update_spec_partial(
         rat.parse::<DateTime<Utc>>()
             .map_err(|e| format!("invalid run_at datetime '{rat}': {e}"))?;
     }
-    if let Some(p) = prompt {
-        if p.trim().is_empty() {
-            return Err("prompt must not be empty".into());
-        }
+    if let Some(p) = prompt
+        && p.trim().is_empty()
+    {
+        return Err("prompt must not be empty".into());
     }
     if let Some(ttl) = lock_ttl {
         validate_lock_ttl(ttl)?;
     }
-    if let Some(budget) = max_budget_usd {
-        if budget <= 0.0 {
-            return Err("max_budget_usd must be greater than 0".into());
-        }
+    if let Some(budget) = max_budget_usd
+        && budget <= 0.0
+    {
+        return Err("max_budget_usd must be greater than 0".into());
     }
 
     // Build dynamic UPDATE
