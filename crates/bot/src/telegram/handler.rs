@@ -1102,9 +1102,14 @@ async fn handle_cron_list(
 
     for name in names {
         let spec = &specs[name];
-        let desc = super::markdown::html_escape(
-            &rightclaw::cron_spec::describe_schedule(spec.schedule_kind.cron_schedule().unwrap_or("")),
-        );
+        let desc = match &spec.schedule_kind {
+            rightclaw::cron_spec::ScheduleKind::RunAt(dt) => {
+                super::markdown::html_escape(&format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")))
+            }
+            _ => super::markdown::html_escape(
+                &rightclaw::cron_spec::describe_schedule(spec.schedule_kind.cron_schedule().unwrap_or("")),
+            ),
+        };
 
         let last_run = rightclaw::cron_spec::get_recent_runs(&conn, name, 1)
             .map_err(|e| to_request_err(format!("get runs failed: {e:#}")))?;

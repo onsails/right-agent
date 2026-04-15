@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 pub const DEFAULT_CRON_BUDGET_USD: f64 = 2.0;
 
 /// How a cron job is scheduled.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ScheduleKind {
     /// 5-field cron expression, fires repeatedly.
     Recurring(String),
@@ -49,21 +49,10 @@ pub struct CronSpec {
 /// trigger because the in-memory snapshot differs from the DB snapshot.
 impl PartialEq for CronSpec {
     fn eq(&self, other: &Self) -> bool {
-        self.schedule_kind_eq(&other.schedule_kind)
+        self.schedule_kind == other.schedule_kind
             && self.prompt == other.prompt
             && self.lock_ttl == other.lock_ttl
             && self.max_budget_usd == other.max_budget_usd
-    }
-}
-
-impl CronSpec {
-    fn schedule_kind_eq(&self, other: &ScheduleKind) -> bool {
-        match (&self.schedule_kind, other) {
-            (ScheduleKind::Recurring(a), ScheduleKind::Recurring(b)) => a == b,
-            (ScheduleKind::OneShotCron(a), ScheduleKind::OneShotCron(b)) => a == b,
-            (ScheduleKind::RunAt(a), ScheduleKind::RunAt(b)) => a == b,
-            _ => false,
-        }
     }
 }
 
@@ -182,9 +171,14 @@ fn resolve_schedule_fields(
             Ok((sched.to_string(), rec, None, warning))
         }
         (None, Some(rat)) => {
-            rat.parse::<DateTime<Utc>>()
+            let dt = rat.parse::<DateTime<Utc>>()
                 .map_err(|e| format!("invalid run_at datetime '{rat}': {e}"))?;
-            Ok(("".to_string(), 0, Some(rat.to_string()), None))
+            let warning = if dt <= Utc::now() {
+                Some("run_at is in the past — job will fire on next reconcile tick".into())
+            } else {
+                None
+            };
+            Ok(("".to_string(), 0, Some(rat.to_string()), warning))
         }
     }
 }

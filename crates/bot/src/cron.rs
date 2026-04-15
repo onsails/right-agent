@@ -668,6 +668,23 @@ pub async fn run_cron_task(
     tracing::info!(agent = %agent_name, "cron shutdown complete");
 }
 
+/// Delete a one-shot spec after it has fired. Opens a fresh DB connection
+/// (callers are inside `tokio::spawn` and cannot share the reconciler's connection).
+fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
+    let conn = match rightclaw::memory::open_connection(agent_dir, false) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(job = %job_name, "failed to open DB for post-fire delete: {e:#}");
+            return;
+        }
+    };
+    if let Err(e) = rightclaw::cron_spec::delete_spec(&conn, job_name, agent_dir) {
+        tracing::error!(job = %job_name, "failed to delete one-shot spec after fire: {e}");
+    } else {
+        tracing::info!(job = %job_name, "one-shot spec auto-deleted after fire");
+    }
+}
+
 fn reconcile_jobs(
     handles: &mut HashMap<String, (CronSpec, JoinHandle<()>)>,
     triggered_handles: &mut Vec<JoinHandle<()>>,
@@ -689,6 +706,40 @@ fn reconcile_jobs(
         }
     };
 
+    // Fire overdue run_at specs (one-shot absolute time jobs)
+    let now = chrono::Utc::now();
+    let overdue_run_at: Vec<(String, CronSpec)> = new_specs
+        .iter()
+        .filter(|(_, spec)| matches!(&spec.schedule_kind, rightclaw::cron_spec::ScheduleKind::RunAt(dt) if *dt <= now))
+        .map(|(name, spec)| (name.clone(), spec.clone()))
+        .collect();
+
+    for (name, spec) in overdue_run_at {
+        let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+        if is_lock_fresh(agent_dir, &name, lock_ttl) {
+            tracing::info!(job = %name, "run_at overdue but locked — skipping until next tick");
+            continue;
+        }
+
+        tracing::info!(job = %name, "firing overdue run_at job");
+        let jn = name.clone();
+        let sp = spec.clone();
+        let ad = agent_dir.to_path_buf();
+        let an = agent_name.to_string();
+        let md = model.clone();
+        let sc = ssh_config_path.clone();
+        let ic = Arc::clone(internal_client);
+        let handle = tokio::spawn(async move {
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic).await;
+            delete_one_shot_spec(&ad, &jn);
+        });
+        if let Ok(mut guard) = execute_handles.lock() {
+            guard.push((name, handle));
+        } else {
+            triggered_handles.push(handle);
+        }
+    }
+
     // Abort handles for removed or changed jobs (CRON-06)
     let to_remove: Vec<String> = handles
         .iter()
@@ -705,6 +756,10 @@ fn reconcile_jobs(
 
     // Spawn new handles for new or changed jobs
     for (name, spec) in &new_specs {
+        // Skip RunAt specs — they are handled above via reconcile tick, not run_job_loop
+        if matches!(spec.schedule_kind, rightclaw::cron_spec::ScheduleKind::RunAt(_)) {
+            continue;
+        }
         if handles.contains_key(name) {
             continue; // unchanged, already running
         }
@@ -821,7 +876,15 @@ async fn run_job_loop(
         let handle = tokio::spawn(async move {
             execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic).await;
         });
-        // Register for shutdown tracking. Lock is brief — just a Vec push.
+        if spec.schedule_kind.is_one_shot() {
+            // Wait for execution, then delete and exit loop
+            if let Err(e) = handle.await {
+                tracing::error!(job = %job_name, "one-shot job panicked: {e}");
+            }
+            delete_one_shot_spec(&agent_dir, &job_name);
+            break;
+        }
+        // Register for shutdown tracking (only for recurring jobs that continue the loop)
         if let Ok(mut guard) = execute_handles.lock() {
             // Clean up finished handles to prevent unbounded growth
             guard.retain(|(_, h)| !h.is_finished());
