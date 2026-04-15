@@ -449,8 +449,16 @@ pub fn delete_spec(
 pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at, recurring, run_at \
-             FROM cron_specs ORDER BY job_name",
+            "SELECT s.job_name, s.schedule, s.prompt, s.lock_ttl, s.max_budget_usd, \
+                    s.created_at, s.updated_at, s.recurring, s.run_at, \
+                    r.started_at, r.status \
+             FROM cron_specs s \
+             LEFT JOIN ( \
+                 SELECT job_name, started_at, status, \
+                        ROW_NUMBER() OVER (PARTITION BY job_name ORDER BY started_at DESC) AS rn \
+                 FROM cron_runs \
+             ) r ON r.job_name = s.job_name AND r.rn = 1 \
+             ORDER BY s.job_name",
         )
         .map_err(|e| format!("prepare failed: {e:#}"))?;
     let rows: Vec<serde_json::Value> = stmt
@@ -465,6 +473,8 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
                 "updated_at": row.get::<_, String>(6)?,
                 "recurring": row.get::<_, i64>(7)? != 0,
                 "run_at": row.get::<_, Option<String>>(8)?,
+                "last_run_at": row.get::<_, Option<String>>(9)?,
+                "last_status": row.get::<_, Option<String>>(10)?,
             }))
         })
         .map_err(|e| format!("query failed: {e:#}"))?
@@ -837,6 +847,35 @@ mod tests {
         assert_eq!(parsed[0]["job_name"], "a-job");
         assert_eq!(parsed[1]["job_name"], "b-job");
         assert_eq!(parsed[1]["max_budget_usd"], 2.5);
+        // No runs yet — last_run_at and last_status should be null
+        assert!(parsed[0]["last_run_at"].is_null());
+        assert!(parsed[0]["last_status"].is_null());
+        assert!(parsed[1]["last_run_at"].is_null());
+        assert!(parsed[1]["last_status"].is_null());
+    }
+
+    #[test]
+    fn list_specs_includes_last_run() {
+        let conn = setup_db();
+        create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None).unwrap();
+        // Insert two runs — only the latest should appear
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path) \
+             VALUES ('run-old', 'a-job', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 0, 'success', '/tmp/old.log')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path) \
+             VALUES ('run-new', 'a-job', '2026-01-02T00:00:00Z', '2026-01-02T00:01:00Z', 1, 'failed', '/tmp/new.log')",
+            [],
+        )
+        .unwrap();
+        let output = list_specs(&conn).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0]["last_run_at"], "2026-01-02T00:00:00Z");
+        assert_eq!(parsed[0]["last_status"], "failed");
     }
 
     #[test]
