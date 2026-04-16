@@ -186,8 +186,6 @@ async fn execute_job(
     ssh_config_path: Option<&std::path::Path>,
     internal_client: &rightclaw::mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
-    hindsight: Option<&Arc<rightclaw::memory::hindsight::HindsightClient>>,
-    prefetch_cache: Option<&rightclaw::memory::prefetch::PrefetchCache>,
 ) {
     use std::process::Stdio;
 
@@ -298,25 +296,10 @@ async fn execute_job(
         }
     };
 
-    let memory_mode: Option<crate::telegram::prompt::MemoryMode> = if hindsight.is_some() {
-        let composite_path = if ssh_config_path.is_some() {
-            "/sandbox/.claude/composite-memory.md".to_owned()
-        } else {
-            agent_dir.join(".claude").join("composite-memory.md").to_string_lossy().into_owned()
-        };
-
-        if let Some(hs) = hindsight {
-            crate::telegram::prompt::recall_and_deploy_composite_memory(
-                hs, &spec.prompt, "for cron job", agent_dir, resolved_sandbox,
-            )
-            .await;
-        }
-        Some(crate::telegram::prompt::MemoryMode::Hindsight {
-            composite_memory_path: composite_path,
-        })
-    } else {
-        Some(crate::telegram::prompt::MemoryMode::File)
-    };
+    // Cron jobs skip memory injection — cron prompts are static instructions,
+    // not user queries. Agents can still call memory_recall/memory_retain MCP
+    // tools explicitly from within cron prompts.
+    let memory_mode: Option<crate::telegram::prompt::MemoryMode> = None;
 
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         // Sandbox mode: assemble system prompt via shell script (same as worker).
@@ -554,40 +537,6 @@ async fn execute_job(
                     "cron output persisted to DB"
                 );
 
-                // Hindsight: auto-retain cron summary and invalidate worker prefetch cache.
-                if let Some(hs) = hindsight {
-                    let hs_retain = Arc::clone(hs);
-                    let summary = cron_output.summary.clone();
-                    let context = format!("cron:{job_name}");
-                    let cache_to_clear = prefetch_cache.cloned();
-                    tokio::spawn(async move {
-                        if let Err(e) = hs_retain.retain(&summary, Some(&context), None, None, None).await {
-                            tracing::warn!("cron auto-retain failed: {e:#}");
-                        }
-                        // Invalidate worker prefetch cache — cron output may change recall results.
-                        if let Some(ref c) = cache_to_clear {
-                            c.clear().await;
-                        }
-                    });
-
-                    // Prefetch recall for next cron run (background).
-                    let hs_recall = Arc::clone(hs);
-                    let recall_prompt = spec.prompt.clone();
-                    let cron_cache_key = format!("cron:{job_name}");
-                    let cron_cache = prefetch_cache.cloned();
-                    tokio::spawn(async move {
-                        match hs_recall.recall(&recall_prompt, None, None).await {
-                            Ok(results) if !results.is_empty() => {
-                                let content = rightclaw::memory::hindsight::join_recall_texts(&results);
-                                if let Some(ref c) = cron_cache {
-                                    c.put(&cron_cache_key, content).await;
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => tracing::warn!("cron prefetch recall failed: {e:#}"),
-                        }
-                    });
-                }
             }
             Err(reason) => {
                 tracing::warn!(job = %job_name, reason, "failed to parse cron output");
@@ -696,8 +645,6 @@ pub async fn run_cron_task(
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
     resolved_sandbox: Option<String>,
-    hindsight: Option<Arc<rightclaw::memory::hindsight::HindsightClient>>,
-    prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -716,12 +663,12 @@ pub async fn run_cron_task(
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &hindsight, &prefetch_cache);
+    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &hindsight, &prefetch_cache);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox);
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -815,8 +762,6 @@ fn reconcile_jobs(
     internal_client: &Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
-    hindsight: &Option<Arc<rightclaw::memory::hindsight::HindsightClient>>,
-    prefetch_cache: &Option<rightclaw::memory::prefetch::PrefetchCache>,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -852,10 +797,8 @@ fn reconcile_jobs(
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(internal_client);
         let rs = resolved_sandbox.clone();
-        let hs = hindsight.clone();
-        let pc = prefetch_cache.clone();
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), hs.as_ref(), pc.as_ref()).await;
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
             delete_one_shot_spec(&ad, &jn);
         });
         if let Ok(mut guard) = execute_handles.lock() {
@@ -897,11 +840,9 @@ fn reconcile_jobs(
         let job_execute_handles = Arc::clone(execute_handles);
         let job_internal_client = Arc::clone(internal_client);
         let job_sandbox = resolved_sandbox.clone();
-        let job_hindsight = hindsight.clone();
-        let job_prefetch = prefetch_cache.clone();
 
         let handle = tokio::spawn(async move {
-            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles, job_sandbox, job_hindsight, job_prefetch)
+            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles, job_sandbox)
                 .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
@@ -933,12 +874,10 @@ fn reconcile_jobs(
             let sc = ssh_config_path.clone();
             let ic = Arc::clone(internal_client);
             let rs = resolved_sandbox.clone();
-            let hs = hindsight.clone();
-            let pc = prefetch_cache.clone();
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
-                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), hs.as_ref(), pc.as_ref()).await;
+                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
             });
             // Register for shutdown tracking
             if let Ok(mut guard) = execute_handles.lock() {
@@ -963,8 +902,6 @@ async fn run_job_loop(
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
     resolved_sandbox: Option<String>,
-    hindsight: Option<Arc<rightclaw::memory::hindsight::HindsightClient>>,
-    prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -1008,10 +945,8 @@ async fn run_job_loop(
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(&internal_client);
         let rs = resolved_sandbox.clone();
-        let hs = hindsight.clone();
-        let pc = prefetch_cache.clone();
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), hs.as_ref(), pc.as_ref()).await;
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
         });
         if spec.schedule_kind.is_one_shot() {
             // Wait for execution, then delete and exit loop
@@ -1270,8 +1205,6 @@ mod tests {
             None,
             ic,
             shutdown_clone,
-            None,
-            None,
             None,
         ));
 

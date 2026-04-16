@@ -415,10 +415,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_internal_client = Arc::clone(&internal_client);
     let cron_shutdown = shutdown.clone();
     let cron_sandbox = resolved_sandbox.clone();
-    let cron_hindsight = hindsight_client.clone();
-    let cron_prefetch = prefetch_cache.clone();
     let cron_handle = tokio::spawn(async move {
-        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_internal_client, cron_shutdown, cron_sandbox, cron_hindsight, cron_prefetch).await;
+        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_internal_client, cron_shutdown, cron_sandbox).await;
     });
 
     // Shared idle timestamp: tracks last handler/worker interaction for cron delivery gating.
