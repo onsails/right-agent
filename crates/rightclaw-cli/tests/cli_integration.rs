@@ -767,3 +767,75 @@ fn test_agent_restore_fails_if_agent_exists() {
         .failure()
         .stderr(predicate::str::contains("already exists"));
 }
+
+// --- Task 5: Agent destroy integration tests ---
+
+#[test]
+fn test_destroy_nonexistent_agent() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create home structure but no agent
+    std::fs::create_dir_all(dir.path().join("agents")).unwrap();
+
+    rightclaw()
+        .args(["--home", home, "agent", "destroy", "nonexistent", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn test_destroy_agent_force() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    // Create an agent via init first
+    rightclaw()
+        .args(["--home", home, "init", "-y", "--sandbox-mode", "none", "--tunnel-hostname", "test.example.com"])
+        .assert()
+        .success();
+
+    // Verify agent exists
+    assert!(dir.path().join("agents/right").exists());
+
+    // Destroy with --force (no TTY prompts)
+    rightclaw()
+        .args(["--home", home, "agent", "destroy", "right", "--force"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Destroyed agent"));
+
+    // Verify agent directory is gone
+    assert!(!dir.path().join("agents/right").exists());
+}
+
+#[test]
+fn test_destroy_agent_force_with_backup() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+
+    rightclaw()
+        .args(["--home", home, "init", "-y", "--sandbox-mode", "none", "--tunnel-hostname", "test.example.com"])
+        .assert()
+        .success();
+
+    rightclaw()
+        .args(["--home", home, "agent", "destroy", "right", "--force", "--backup"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Backup saved to"))
+        .stdout(predicate::str::contains("Destroyed agent"));
+
+    assert!(!dir.path().join("agents/right").exists(), "agent dir should be removed");
+    assert!(dir.path().join("backups/right").exists(), "backup dir should exist");
+}
+
+#[test]
+fn test_help_lists_destroy() {
+    rightclaw()
+        .args(["agent", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destroy"));
+}
