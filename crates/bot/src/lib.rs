@@ -170,7 +170,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     );
 
     // Open data.db (creates if absent, applies migrations)
-    let _conn = open_connection(&agent_dir, false)
+    let _conn = open_connection(&agent_dir, true)
         .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
     tracing::info!(agent = %args.agent, "data.db opened");
 
