@@ -147,8 +147,7 @@ pub struct InputMessage {
 
 /// Format input for CC stdin.
 ///
-/// - Single message with no attachments: raw text string.
-/// - Otherwise: YAML with `messages:` root key.
+/// Always formats as YAML with `messages:` root key containing author metadata.
 ///
 /// Returns None if there is nothing to send.
 pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
@@ -156,36 +155,68 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         return None;
     }
 
-    // Single message, no attachments, has text: plain text
-    if msgs.len() == 1 && msgs[0].attachments.is_empty() {
-        return msgs[0].text.clone();
+    // Check if all messages have no text and no attachments
+    if msgs.iter().all(|m| m.text.is_none() && m.attachments.is_empty()) {
+        return None;
     }
 
-    // YAML format — use write! to avoid per-field allocations
     use std::fmt::Write;
-    let mut out = String::with_capacity(256);
+    let mut out = String::with_capacity(512);
     out.push_str("messages:\n");
     for m in msgs {
-        writeln!(out, "  - id: {}", m.message_id).expect("write to String is infallible");
+        writeln!(out, "  - id: {}", m.message_id).expect("infallible");
         writeln!(out, "    ts: \"{}\"", m.timestamp.format("%Y-%m-%dT%H:%M:%SZ"))
-            .expect("write to String is infallible");
+            .expect("infallible");
+
+        // Author block (always present)
+        out.push_str("    author:\n");
+        writeln!(out, "      name: \"{}\"", yaml_escape_string(&m.author.name))
+            .expect("infallible");
+        if let Some(ref username) = m.author.username {
+            writeln!(out, "      username: \"{}\"", yaml_escape_string(username))
+                .expect("infallible");
+        }
+        if let Some(user_id) = m.author.user_id {
+            writeln!(out, "      user_id: {user_id}").expect("infallible");
+        }
+
+        // Forward info (only if forwarded)
+        if let Some(ref fwd) = m.forward_info {
+            out.push_str("    forward_from:\n");
+            writeln!(out, "      name: \"{}\"", yaml_escape_string(&fwd.from.name))
+                .expect("infallible");
+            if let Some(ref username) = fwd.from.username {
+                writeln!(out, "      username: \"{}\"", yaml_escape_string(username))
+                    .expect("infallible");
+            }
+            if let Some(user_id) = fwd.from.user_id {
+                writeln!(out, "      user_id: {user_id}").expect("infallible");
+            }
+            writeln!(out, "    forward_date: \"{}\"", fwd.date.format("%Y-%m-%dT%H:%M:%SZ"))
+                .expect("infallible");
+        }
+
+        // Reply-to (only if reply)
+        if let Some(reply_id) = m.reply_to_id {
+            writeln!(out, "    reply_to_id: {reply_id}").expect("infallible");
+        }
+
+        // Text
         if let Some(ref text) = m.text {
             let escaped = yaml_escape_string(text);
-            writeln!(out, "    text: \"{escaped}\"").expect("write to String is infallible");
+            writeln!(out, "    text: \"{escaped}\"").expect("infallible");
         }
+
+        // Attachments
         if !m.attachments.is_empty() {
             out.push_str("    attachments:\n");
             for att in &m.attachments {
-                writeln!(out, "      - type: {}", att.kind.as_str())
-                    .expect("write to String is infallible");
-                writeln!(out, "        path: {}", att.path.display())
-                    .expect("write to String is infallible");
-                writeln!(out, "        mime_type: {}", att.mime_type)
-                    .expect("write to String is infallible");
+                writeln!(out, "      - type: {}", att.kind.as_str()).expect("infallible");
+                writeln!(out, "        path: {}", att.path.display()).expect("infallible");
+                writeln!(out, "        mime_type: {}", att.mime_type).expect("infallible");
                 if let Some(ref fname) = att.filename {
                     let escaped = yaml_escape_string(fname);
-                    writeln!(out, "        filename: \"{escaped}\"")
-                        .expect("write to String is infallible");
+                    writeln!(out, "        filename: \"{escaped}\"").expect("infallible");
                 }
             }
         }
@@ -698,6 +729,14 @@ async fn cleanup_local_dir(
 mod tests {
     use super::*;
 
+    fn test_author() -> MessageAuthor {
+        MessageAuthor {
+            name: "Test User".into(),
+            username: None,
+            user_id: Some(1),
+        }
+    }
+
     #[test]
     fn attachment_kind_as_str_roundtrip() {
         assert_eq!(AttachmentKind::Photo.as_str(), "photo");
@@ -752,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn format_cc_input_single_text_returns_plain_string() {
+    fn format_cc_input_single_text_returns_yaml() {
         let msgs = vec![InputMessage {
             message_id: 1,
             text: Some("hello world".into()),
@@ -760,9 +799,14 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             attachments: vec![],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
-        assert_eq!(result, "hello world");
+        assert!(result.starts_with("messages:\n"));
+        assert!(result.contains("    text: \"hello world\"\n"));
+        assert!(result.contains("    author:\n"));
     }
 
     #[test]
@@ -777,6 +821,9 @@ mod tests {
             text: None,
             timestamp: Utc::now(),
             attachments: vec![],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: None,
         }];
         assert!(format_cc_input(&msgs).is_none());
     }
@@ -792,12 +839,18 @@ mod tests {
                 text: Some("first".into()),
                 timestamp: ts,
                 attachments: vec![],
+                author: test_author(),
+                forward_info: None,
+                reply_to_id: None,
             },
             InputMessage {
                 message_id: 2,
                 text: Some("second".into()),
                 timestamp: ts,
                 attachments: vec![],
+                author: test_author(),
+                forward_info: None,
+                reply_to_id: None,
             },
         ];
         let result = format_cc_input(&msgs).unwrap();
@@ -823,6 +876,9 @@ mod tests {
                 mime_type: "image/jpeg".into(),
                 filename: None,
             }],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.starts_with("messages:\n"));
@@ -846,6 +902,9 @@ mod tests {
                 mime_type: "application/pdf".into(),
                 filename: Some("report.pdf".into()),
             }],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.contains("      - type: document\n"));
@@ -860,12 +919,18 @@ mod tests {
                 text: Some("hello".into()),
                 timestamp: Utc::now(),
                 attachments: vec![],
+                author: test_author(),
+                forward_info: None,
+                reply_to_id: None,
             },
             InputMessage {
                 message_id: 2,
                 text: Some("line1\nline2\ttab \"quoted\"".into()),
                 timestamp: Utc::now(),
                 attachments: vec![],
+                author: test_author(),
+                forward_info: None,
+                reply_to_id: None,
             },
         ];
         let result = format_cc_input(&msgs).unwrap();
@@ -879,5 +944,122 @@ mod tests {
         assert_eq!(yaml_escape_string("a\\b"), r"a\\b");
         assert_eq!(yaml_escape_string("a\rb"), r"a\rb");
         assert_eq!(yaml_escape_string("a\tb"), r"a\tb");
+    }
+
+    #[test]
+    fn format_cc_input_includes_author() {
+        let ts = DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let msgs = vec![InputMessage {
+            message_id: 1,
+            text: Some("hello".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "\u{0410}\u{043d}\u{0434}\u{0440}\u{0435}\u{0439} \u{041a}\u{0443}\u{0437}\u{043d}\u{0435}\u{0446}\u{043e}\u{0432}".into(),
+                username: Some("@right".into()),
+                user_id: Some(12345678),
+            },
+            forward_info: None,
+            reply_to_id: None,
+        }];
+        let result = format_cc_input(&msgs).unwrap();
+        assert!(result.starts_with("messages:\n"), "should be YAML, not raw text");
+        assert!(result.contains("    author:\n"));
+        assert!(result.contains("      name: \"\u{0410}\u{043d}\u{0434}\u{0440}\u{0435}\u{0439} \u{041a}\u{0443}\u{0437}\u{043d}\u{0435}\u{0446}\u{043e}\u{0432}\"\n"));
+        assert!(result.contains("      username: \"@right\"\n"));
+        assert!(result.contains("      user_id: 12345678\n"));
+    }
+
+    #[test]
+    fn format_cc_input_includes_forward_info() {
+        let ts = DateTime::parse_from_rfc3339("2026-04-08T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let fwd_date = DateTime::parse_from_rfc3339("2026-04-07T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let msgs = vec![InputMessage {
+            message_id: 1,
+            text: Some("forwarded text".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "\u{0410}\u{043d}\u{0434}\u{0440}\u{0435}\u{0439} \u{041a}\u{0443}\u{0437}\u{043d}\u{0435}\u{0446}\u{043e}\u{0432}".into(),
+                username: Some("@right".into()),
+                user_id: Some(12345678),
+            },
+            forward_info: Some(ForwardInfo {
+                from: MessageAuthor {
+                    name: "\u{041c}\u{0438}\u{0448}\u{0430} \u{041f}\u{0435}\u{0442}\u{0440}\u{043e}\u{0432}".into(),
+                    username: Some("@mishapetrov".into()),
+                    user_id: Some(12345678),
+                },
+                date: fwd_date,
+            }),
+            reply_to_id: None,
+        }];
+        let result = format_cc_input(&msgs).unwrap();
+        assert!(result.contains("    forward_from:\n"));
+        assert!(result.contains("      name: \"\u{041c}\u{0438}\u{0448}\u{0430} \u{041f}\u{0435}\u{0442}\u{0440}\u{043e}\u{0432}\"\n"));
+        assert!(result.contains("      username: \"@mishapetrov\"\n"));
+        assert!(result.contains("      user_id: 12345678\n"));
+        assert!(result.contains("    forward_date: \"2026-04-07T20:00:00Z\"\n"));
+    }
+
+    #[test]
+    fn format_cc_input_includes_reply_to_id() {
+        let ts = Utc::now();
+        let msgs = vec![InputMessage {
+            message_id: 5,
+            text: Some("replying".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "\u{0410}\u{043d}\u{0434}\u{0440}\u{0435}\u{0439}".into(),
+                username: None,
+                user_id: Some(12345678),
+            },
+            forward_info: None,
+            reply_to_id: Some(3),
+        }];
+        let result = format_cc_input(&msgs).unwrap();
+        assert!(result.contains("    reply_to_id: 3\n"));
+    }
+
+    #[test]
+    fn format_cc_input_hidden_user_forward_omits_missing_fields() {
+        let ts = Utc::now();
+        let fwd_date = Utc::now();
+        let msgs = vec![InputMessage {
+            message_id: 1,
+            text: Some("secret".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "\u{0410}\u{043d}\u{0434}\u{0440}\u{0435}\u{0439}".into(),
+                username: None,
+                user_id: Some(12345678),
+            },
+            forward_info: Some(ForwardInfo {
+                from: MessageAuthor {
+                    name: "Hidden Person".into(),
+                    username: None,
+                    user_id: None,
+                },
+                date: fwd_date,
+            }),
+            reply_to_id: None,
+        }];
+        let result = format_cc_input(&msgs).unwrap();
+        assert!(result.contains("      name: \"Hidden Person\"\n"));
+        // username and user_id lines should NOT be present under forward_from
+        let fwd_idx = result.find("    forward_from:\n").unwrap();
+        let after_fwd = &result[fwd_idx..];
+        let fwd_block_end = after_fwd.find("    forward_date:").unwrap();
+        let fwd_block = &after_fwd[..fwd_block_end];
+        assert!(!fwd_block.contains("username:"));
+        assert!(!fwd_block.contains("user_id:"));
     }
 }
