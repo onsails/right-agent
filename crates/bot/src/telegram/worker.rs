@@ -56,6 +56,8 @@ pub struct DebounceMsg {
     pub reply_to_id: Option<i32>,
     pub address: super::mention::AddressKind,
     pub group_open: bool,
+    pub chat: super::attachments::ChatContext,
+    pub reply_to_body: Option<super::attachments::ReplyToBody>,
 }
 
 /// Context passed to each worker task when it is spawned.
@@ -345,6 +347,8 @@ pub fn spawn_worker(
                     author: msg.author.clone(),
                     forward_info: msg.forward_info.clone(),
                     reply_to_id: msg.reply_to_id,
+                    chat: msg.chat.clone(),
+                    reply_to_body: msg.reply_to_body.clone(),
                 });
             }
             if skip_batch {
