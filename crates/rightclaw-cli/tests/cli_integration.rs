@@ -584,6 +584,7 @@ fn test_agent_list() {
 /// Creates an ephemeral sandbox via `ensure_sandbox`, applies the policy, then destroys it.
 #[tokio::test]
 async fn test_policy_validates_against_openshell() {
+    let _slot = rightclaw::openshell::acquire_sandbox_slot();
     let mtls_dir = match rightclaw::openshell::preflight_check() {
         rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),

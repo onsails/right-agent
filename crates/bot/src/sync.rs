@@ -321,6 +321,7 @@ mod tests {
     /// Requires: running OpenShell gateway.
     #[tokio::test]
     async fn initial_sync_does_not_upload_agent_md_files() {
+        let _slot = rightclaw::openshell::acquire_sandbox_slot();
         let sandbox_name = "rightclaw-test-sync-upload";
 
         let mtls_dir = match rightclaw::openshell::preflight_check() {
