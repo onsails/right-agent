@@ -437,7 +437,7 @@ LoginEvent      // Token request→async: Done, Error
 
 ### Migration Ownership
 
-Only the MCP aggregator (`right-mcp-server`) runs schema migrations via `open_connection(path, migrate: true)`. All other processes (bots, CLI commands, runtime code) open the database with `migrate: false`. Bot processes declare `depends_on: right-mcp-server: condition: process_started` in process-compose to ensure the aggregator migrates before bots start.
+Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `open_connection(path, migrate: true)`. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false`. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations.
 
 ### Transaction Rule
 

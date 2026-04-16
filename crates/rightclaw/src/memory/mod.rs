@@ -13,8 +13,8 @@ pub use error::MemoryError;
 /// - Enables WAL journal mode and sets busy_timeout=5000ms.
 /// - When `migrate` is true, applies all pending schema migrations.
 ///
-/// Only the MCP aggregator should pass `migrate: true`. Bot processes must
-/// pass `migrate: false` — they depend on the aggregator starting first.
+/// Both the MCP aggregator and bot processes pass `migrate: true` for their
+/// per-agent databases. Migrations are idempotent so concurrent callers are safe.
 pub fn open_db(agent_path: &std::path::Path, migrate: bool) -> Result<(), MemoryError> {
     open_connection(agent_path, migrate).map(drop)
 }
@@ -28,8 +28,8 @@ pub fn open_db(agent_path: &std::path::Path, migrate: bool) -> Result<(), Memory
 /// - Idempotent: safe to call multiple times on the same path.
 /// - When `migrate` is true, applies all pending schema migrations.
 ///
-/// Only the MCP aggregator should pass `migrate: true`. Bot processes must
-/// pass `migrate: false` — they depend on the aggregator starting first.
+/// Both the MCP aggregator and bot processes pass `migrate: true` for their
+/// per-agent databases. Migrations are idempotent so concurrent callers are safe.
 pub fn open_connection(
     agent_path: &std::path::Path,
     migrate: bool,
