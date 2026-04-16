@@ -435,7 +435,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_internal_client = Arc::clone(&internal_client);
     let delivery_shutdown = shutdown.clone();
     let delivery_sandbox = resolved_sandbox.clone();
-    let delivery_hindsight = hindsight_client.clone();
     let delivery_handle = tokio::spawn(async move {
         cron_delivery::run_delivery_loop(
             delivery_agent_dir,
@@ -447,7 +446,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_internal_client,
             delivery_shutdown,
             delivery_sandbox,
-            delivery_hindsight,
         ).await;
     });
 

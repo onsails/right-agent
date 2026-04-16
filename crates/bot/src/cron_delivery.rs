@@ -190,7 +190,6 @@ pub async fn run_delivery_loop(
     internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
     resolved_sandbox: Option<String>,
-    hindsight: Option<std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
@@ -290,7 +289,6 @@ pub async fn run_delivery_loop(
             session_id,
             &internal_client,
             resolved_sandbox.as_deref(),
-            hindsight.as_ref(),
         )
         .await
         {
@@ -349,7 +347,6 @@ async fn deliver_through_session(
     session_id: Option<String>,
     internal_client: &rightclaw::mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
-    hindsight: Option<&std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
 ) -> Result<(), String> {
     use std::process::Stdio;
 
@@ -407,24 +404,8 @@ async fn deliver_through_session(
         }
     };
 
-    let memory_mode: Option<crate::telegram::prompt::MemoryMode> = if let Some(hs) = hindsight {
-        let composite_path = if ssh_config_path.is_some() {
-            "/sandbox/.claude/composite-memory.md".to_owned()
-        } else {
-            agent_dir.join(".claude").join("composite-memory.md").to_string_lossy().into_owned()
-        };
-
-        crate::telegram::prompt::recall_and_deploy_composite_memory(
-            hs, yaml_input, "for delivery", agent_dir, resolved_sandbox,
-        )
-        .await;
-
-        Some(crate::telegram::prompt::MemoryMode::Hindsight {
-            composite_memory_path: composite_path,
-        })
-    } else {
-        Some(crate::telegram::prompt::MemoryMode::File)
-    };
+    // Delivery sessions skip memory injection — same rationale as cron jobs.
+    let memory_mode: Option<crate::telegram::prompt::MemoryMode> = None;
 
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
