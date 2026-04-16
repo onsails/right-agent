@@ -33,6 +33,7 @@ http = "1.0"
 subtle = { workspace = true }
 inquire = { workspace = true }
 chrono = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"
