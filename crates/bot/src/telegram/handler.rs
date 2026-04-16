@@ -58,11 +58,13 @@ pub struct PendingTokenRequest {
 }
 
 /// Bundle of message-intercept slots to reduce dptree DI parameter count.
-/// Contains both auth code and MCP token intercept slots.
+/// Contains both auth code and MCP token intercept slots, plus the
+/// auth-watcher-active flag (true while a token request task is running).
 #[derive(Clone)]
 pub struct InterceptSlots {
     pub auth_code: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     pub pending_token: Arc<tokio::sync::Mutex<Option<PendingTokenRequest>>>,
+    pub auth_watcher: Arc<AtomicBool>,
 }
 
 /// Newtype wrapper for the InternalClient used to communicate with the MCP aggregator.
@@ -125,11 +127,11 @@ async fn send_html_reply(
 pub async fn handle_message(
     bot: BotType,
     msg: Message,
+    decision: super::filter::RoutingDecision,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
     debug_flag: Arc<DebugFlag>,
     ssh_config: Arc<SshConfigPath>,
-    auth_watcher_flag: Arc<AuthWatcherFlag>,
     intercept_slots: Arc<InterceptSlots>,
     settings: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
@@ -244,6 +246,8 @@ pub async fn handle_message(
         author,
         forward_info,
         reply_to_id,
+        address: decision.address.clone(),
+        group_open: decision.group_open,
     };
 
     // Check for existing worker or spawn a new one.
@@ -279,7 +283,7 @@ pub async fn handle_message(
                     debug: debug_flag.0,
                     ssh_config_path: ssh_config.0.clone(),
                     resolved_sandbox: settings.resolved_sandbox.clone(),
-                    auth_watcher_active: Arc::clone(&auth_watcher_flag.0),
+                    auth_watcher_active: Arc::clone(&intercept_slots.auth_watcher),
                     auth_code_tx: Arc::clone(&intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
