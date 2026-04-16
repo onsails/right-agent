@@ -243,8 +243,27 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
     Ok((output, session_id))
 }
 
-/// Build the chat-scoped tag list for Hindsight retain/recall.
-fn chat_tags(chat_id: i64) -> Vec<String> {
+/// Build the tag list for a Hindsight retain call.
+///
+/// - DM: `["chat:<chat_id>"]`.
+/// - Group: `["chat:<chat_id>", "user:<sender_id>"]` plus `"topic:<thread_id>"`
+///   when this is a supergroup topic (thread_id > 0).
+fn retain_tags(chat_id: i64, sender_id: Option<i64>, thread_id: i64, is_group: bool) -> Vec<String> {
+    let mut tags = vec![format!("chat:{chat_id}")];
+    if is_group {
+        if let Some(uid) = sender_id {
+            tags.push(format!("user:{uid}"));
+        }
+        if thread_id > 0 {
+            tags.push(format!("topic:{thread_id}"));
+        }
+    }
+    tags
+}
+
+/// Recall tags — always just `chat:<chat_id>`, group/DM agnostic so recall
+/// fetches all memories scoped to that chat.
+fn recall_tags(chat_id: i64) -> Vec<String> {
     vec![format!("chat:{chat_id}")]
 }
 
@@ -311,6 +330,16 @@ pub fn spawn_worker(
                     }
                     _ = sleep(window) => break,
                 }
+            }
+
+            // Group vs DM detection: used for tag derivation, live-thinking
+            // suppression, and reply-to behavior across the batch.
+            let is_group = matches!(
+                batch.first().map(|m| &m.chat),
+                Some(super::attachments::ChatContext::Group { .. })
+            );
+            if is_group && ctx.show_thinking {
+                tracing::debug!(?key, "show_thinking suppressed in group");
             }
 
             // Download attachments for all messages in batch
@@ -386,7 +415,7 @@ pub fn spawn_worker(
             // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
-            let (reply_result, session_uuid) = match invoke_cc(&input, first_text, chat_id, eff_thread_id, &ctx).await {
+            let (reply_result, session_uuid) = match invoke_cc(&input, first_text, chat_id, eff_thread_id, is_group, &ctx).await {
                 Ok((output, uuid)) => (Ok(output), uuid),
                 Err(e) => (Err(e), String::new()),
             };
@@ -460,7 +489,11 @@ pub fn spawn_worker(
             let mut reply_text_for_retain: Option<String> = None;
             match reply_result {
                 Ok(Some(output)) => {
-                    let reply_to = if batch.len() == 1 {
+                    let reply_to = if is_group {
+                        // Always reply-to the triggering message in groups,
+                        // regardless of batch size.
+                        batch.first().map(|m| m.message_id)
+                    } else if batch.len() == 1 {
                         Some(batch[0].message_id)
                     } else {
                         output.reply_to_message_id
@@ -562,7 +595,8 @@ pub fn spawn_worker(
                     let retain_input = input.clone();
                     let retain_response = reply_text.clone();
                     let retain_doc_id = session_uuid.clone();
-                    let retain_tags = chat_tags(chat_id);
+                    let sender_id = batch.first().and_then(|m| m.author.user_id);
+                    let retain_tags_v = retain_tags(chat_id, sender_id, eff_thread_id, is_group);
                     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                     tokio::spawn(async move {
                         let content = serde_json::json!([
@@ -575,7 +609,7 @@ pub fn spawn_worker(
                                 Some("conversation between RightClaw Agent and the User"),
                                 Some(&retain_doc_id),
                                 Some("append"),
-                                Some(&retain_tags),
+                                Some(&retain_tags_v),
                             )
                             .await
                         {
@@ -587,11 +621,11 @@ pub fn spawn_worker(
                 // Prefetch for next turn.
                 let hs_recall = Arc::clone(hs);
                 let recall_query = truncate_to_chars(&input, RECALL_MAX_CHARS).to_owned();
-                let recall_tags = chat_tags(chat_id);
+                let recall_tags_v = recall_tags(chat_id);
                 let cache_key = format!("{}:{}", chat_id, eff_thread_id);
                 let cache = ctx.prefetch_cache.clone();
                 tokio::spawn(async move {
-                    match hs_recall.recall(&recall_query, Some(&recall_tags), Some("any")).await {
+                    match hs_recall.recall(&recall_query, Some(&recall_tags_v), Some("any")).await {
                         Ok(results) if !results.is_empty() => {
                             let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                             if let Some(ref c) = cache {
@@ -736,6 +770,7 @@ async fn invoke_cc(
     first_text: Option<&str>,
     chat_id: i64,
     eff_thread_id: i64,
+    is_group: bool,
     ctx: &WorkerContext,
 ) -> Result<(Option<ReplyOutput>, String), String> {
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
@@ -877,10 +912,10 @@ async fn invoke_cc(
         } else if let Some(ref hs) = ctx.hindsight {
             tracing::info!(?chat_id, "prefetch cache miss, blocking recall");
             let truncated_query = truncate_to_chars(input, RECALL_MAX_CHARS);
-            let recall_tags = chat_tags(chat_id);
+            let recall_tags_v = recall_tags(chat_id);
             match tokio::time::timeout(
                 Duration::from_secs(5),
-                hs.recall(truncated_query, Some(&recall_tags), Some("any")),
+                hs.recall(truncated_query, Some(&recall_tags_v), Some("any")),
             ).await {
                 Ok(Ok(results)) if !results.is_empty() => {
                     let content = rightclaw::memory::hindsight::join_recall_texts(&results);
@@ -1091,7 +1126,9 @@ async fn invoke_cc(
 
                             if thinking_msg_id.is_none() {
                                 // First displayable event — send thinking message.
-                                let text = if ctx.show_thinking {
+                                // In groups, always fall back to the static "Working..."
+                                // placeholder to avoid noisy live updates.
+                                let text = if ctx.show_thinking && !is_group {
                                     super::stream::format_thinking_message(
                                         ring_buffer.events(),
                                         &usage,
@@ -1112,6 +1149,7 @@ async fn invoke_cc(
                                 }
                                 last_edit = tokio::time::Instant::now();
                             } else if ctx.show_thinking
+                                && !is_group
                                 && last_edit.elapsed() >= Duration::from_secs(2)
                             {
                                 // Throttled update (show_thinking=true only).
@@ -1186,7 +1224,9 @@ async fn invoke_cc(
     if let Some(msg_id) = thinking_msg_id {
         if stopped {
             // Stopped by user — show final state, remove keyboard.
-            let text = if ctx.show_thinking {
+            // In groups we never rendered the thinking view, so reuse the
+            // "Working..." placeholder for consistency with the initial send.
+            let text = if ctx.show_thinking && !is_group {
                 let mut msg = super::stream::format_thinking_message(
                     ring_buffer.events(),
                     &usage,
@@ -1201,7 +1241,7 @@ async fn invoke_cc(
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
-        } else if ctx.show_thinking {
+        } else if ctx.show_thinking && !is_group {
             // Normal finish with thinking — final cost/turns, remove keyboard.
             let text = super::stream::format_thinking_message(
                 ring_buffer.events(),
@@ -1213,7 +1253,7 @@ async fn invoke_cc(
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
         } else {
-            // Normal finish without thinking — delete the anchor message.
+            // Normal finish without thinking (or group chat) — delete the anchor message.
             let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
         }
     }
@@ -1729,5 +1769,34 @@ mod tests {
         let truncated = truncate_to_chars(&s, 800);
         assert_eq!(truncated.chars().count(), 500);
         assert_eq!(truncated, s);
+    }
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    #[test]
+    fn dm_tags_have_chat_only() {
+        let t = retain_tags(42, Some(42), 0, false);
+        assert_eq!(t, vec!["chat:42"]);
+    }
+
+    #[test]
+    fn group_tags_have_user_and_topic() {
+        let t = retain_tags(-1001, Some(100), 7, true);
+        assert_eq!(t, vec!["chat:-1001", "user:100", "topic:7"]);
+    }
+
+    #[test]
+    fn group_tags_no_topic_when_thread_zero() {
+        let t = retain_tags(-1001, Some(100), 0, true);
+        assert_eq!(t, vec!["chat:-1001", "user:100"]);
+    }
+
+    #[test]
+    fn recall_tags_unchanged_by_group() {
+        let t = recall_tags(-1001);
+        assert_eq!(t, vec!["chat:-1001"]);
     }
 }
