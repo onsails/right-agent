@@ -92,6 +92,11 @@ fn to_request_err(e: impl std::fmt::Display) -> RequestError {
     RequestError::Io(std::io::Error::other(e.to_string()).into())
 }
 
+/// True when the chat is a private (1:1) chat. Used by DM-only command gates.
+pub(crate) fn is_private_chat(kind: &teloxide::types::ChatKind) -> bool {
+    matches!(kind, teloxide::types::ChatKind::Private(_))
+}
+
 /// Send an HTML-formatted message, respecting thread_id for topic replies.
 async fn send_html_reply(
     bot: &BotType,
@@ -311,6 +316,10 @@ pub async fn handle_start(
     bot: BotType,
     msg: Message,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "start", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     bot.send_message(msg.chat.id, "Agent is running. Send a message to start.").await?;
     Ok(())
 }
@@ -323,6 +332,10 @@ pub async fn handle_new(
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "new", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
@@ -371,6 +384,10 @@ pub async fn handle_list(
     msg: Message,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "list", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
 
@@ -442,6 +459,10 @@ pub async fn handle_switch(
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "switch", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
@@ -528,6 +549,10 @@ pub async fn handle_mcp(
     ssh_config: Arc<SshConfigPath>,
     settings: Arc<AgentSettings>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "mcp", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
     let agent_name = agent_dir.0
         .file_name()
@@ -1142,6 +1167,10 @@ pub async fn handle_cron(
     args: String,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "cron", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let result = if args.trim().is_empty() {
         handle_cron_list(&bot, &msg, &agent_dir.0).await
     } else {
@@ -1294,6 +1323,10 @@ pub async fn handle_doctor(
     msg: Message,
     home: Arc<RightclawHome>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "doctor", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     tracing::info!("handle_doctor: running diagnostics");
     let checks = rightclaw::doctor::run_doctor(&home.0);
     let mut body = String::new();
@@ -1366,6 +1399,26 @@ pub async fn handle_stop_callback(
 mod tests {
     use super::*;
     use std::any::TypeId;
+
+    fn make_private_chat_kind() -> teloxide::types::ChatKind {
+        serde_json::from_value(serde_json::json!({
+            "type": "private",
+            "first_name": "Test"
+        })).unwrap()
+    }
+
+    fn make_group_chat_kind() -> teloxide::types::ChatKind {
+        serde_json::from_value(serde_json::json!({
+            "type": "group",
+            "title": "Group"
+        })).unwrap()
+    }
+
+    #[test]
+    fn is_private_chat_detects_dm() {
+        assert!(is_private_chat(&make_private_chat_kind()));
+        assert!(!is_private_chat(&make_group_chat_kind()));
+    }
 
     /// Regression test: AgentDir and RightclawHome must have distinct TypeIds.
     /// If they shared the same type (e.g., both Arc<PathBuf>), dptree would overwrite
