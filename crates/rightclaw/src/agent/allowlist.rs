@@ -628,3 +628,92 @@ mod io_tests {
         assert!(dir.path().join("allowlist.yaml.lock").exists());
     }
 }
+
+/// Summary of a migration run, for logging.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MigrationReport {
+    pub migrated_users: usize,
+    pub migrated_groups: usize,
+    /// True iff `allowlist.yaml` existed prior to this call (nothing to do).
+    pub already_present: bool,
+}
+
+/// One-time migration from `agent.yaml::allowed_chat_ids` to `allowlist.yaml`.
+///
+/// Behaviour:
+/// 1. If `allowlist.yaml` exists → no-op, return `already_present: true`.
+/// 2. Else, write a new `allowlist.yaml` containing split-by-sign entries
+///    (positive → users, negative → groups), all with `added_by`/`opened_by = None`
+///    and `added_at`/`opened_at = now`.
+/// 3. If `legacy_chat_ids` is empty, create an empty `allowlist.yaml`.
+pub fn migrate_from_legacy(
+    agent_dir: &Path,
+    legacy_chat_ids: &[i64],
+    now: DateTime<Utc>,
+) -> Result<MigrationReport, String> {
+    if allowlist_path(agent_dir).exists() {
+        return Ok(MigrationReport { already_present: true, ..Default::default() });
+    }
+    let mut file = AllowlistFile::default();
+    let mut mu = 0usize;
+    let mut mg = 0usize;
+    for &id in legacy_chat_ids {
+        if id > 0 {
+            file.users.push(AllowedUser { id, label: None, added_by: None, added_at: now });
+            mu += 1;
+        } else if id < 0 {
+            file.groups.push(AllowedGroup { id, label: None, opened_by: None, opened_at: now });
+            mg += 1;
+        }
+        // id == 0 skipped (Telegram never uses 0).
+    }
+    write_file(agent_dir, &file)?;
+    Ok(MigrationReport { migrated_users: mu, migrated_groups: mg, already_present: false })
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn t() -> DateTime<Utc> { "2026-04-16T12:00:00Z".parse().unwrap() }
+
+    #[test]
+    fn migration_splits_by_sign() {
+        let dir = TempDir::new().unwrap();
+        let report = migrate_from_legacy(dir.path(), &[42, -1001, 100, -500, 0], t()).unwrap();
+        assert_eq!(report.migrated_users, 2);
+        assert_eq!(report.migrated_groups, 2);
+        assert!(!report.already_present);
+        let file = read_file(dir.path()).unwrap().unwrap();
+        let user_ids: Vec<i64> = file.users.iter().map(|u| u.id).collect();
+        let group_ids: Vec<i64> = file.groups.iter().map(|g| g.id).collect();
+        assert_eq!(user_ids, vec![42, 100]);
+        assert_eq!(group_ids, vec![-1001, -500]);
+        assert!(file.users.iter().all(|u| u.added_by.is_none()));
+        assert!(file.groups.iter().all(|g| g.opened_by.is_none()));
+    }
+
+    #[test]
+    fn migration_skips_when_allowlist_exists() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), &AllowlistFile::default()).unwrap();
+        let report = migrate_from_legacy(dir.path(), &[42], t()).unwrap();
+        assert!(report.already_present);
+        assert_eq!(report.migrated_users, 0);
+        let file = read_file(dir.path()).unwrap().unwrap();
+        assert!(file.users.is_empty(), "should not overwrite existing file");
+    }
+
+    #[test]
+    fn migration_empty_list_creates_empty_allowlist() {
+        let dir = TempDir::new().unwrap();
+        let report = migrate_from_legacy(dir.path(), &[], t()).unwrap();
+        assert_eq!(report.migrated_users, 0);
+        assert_eq!(report.migrated_groups, 0);
+        assert!(!report.already_present);
+        let file = read_file(dir.path()).unwrap().unwrap();
+        assert!(file.users.is_empty());
+        assert!(file.groups.is_empty());
+    }
+}
