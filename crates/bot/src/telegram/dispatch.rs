@@ -43,6 +43,19 @@ enum BotCommand {
     Doctor,
     #[command(description = "Cron job status (list or detail)")]
     Cron(String),
+    #[command(description = "Add trusted user (reply to user, or /allow <user_id>)")]
+    Allow(String),
+    #[command(description = "Remove trusted user")]
+    Deny(String),
+    #[command(description = "List trusted users and opened groups")]
+    Allowed,
+    #[command(
+        description = "Open this group for all members (group only)",
+        rename = "allow_all"
+    )]
+    AllowAll,
+    #[command(description = "Close this group (group only)", rename = "deny_all")]
+    DenyAll,
 }
 
 /// Run the teloxide long-polling dispatcher.
@@ -128,7 +141,26 @@ pub async fn run_telegram(
         .branch(dptree::case![BotCommand::Switch(uuid)].endpoint(handle_switch))
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
-        .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron));
+        .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
+        .branch(
+            dptree::case![BotCommand::Allow(args)]
+                .endpoint(super::allowlist_commands::handle_allow),
+        )
+        .branch(
+            dptree::case![BotCommand::Deny(args)]
+                .endpoint(super::allowlist_commands::handle_deny),
+        )
+        .branch(
+            dptree::case![BotCommand::Allowed].endpoint(super::allowlist_commands::handle_allowed),
+        )
+        .branch(
+            dptree::case![BotCommand::AllowAll]
+                .endpoint(super::allowlist_commands::handle_allow_all),
+        )
+        .branch(
+            dptree::case![BotCommand::DenyAll]
+                .endpoint(super::allowlist_commands::handle_deny_all),
+        );
 
     let message_handler = Update::filter_message()
         .inspect(|msg: Message| {

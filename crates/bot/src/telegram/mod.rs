@@ -1,3 +1,4 @@
+pub mod allowlist_commands;
 pub mod attachments;
 pub mod bot;
 pub mod dispatch;
