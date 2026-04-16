@@ -167,6 +167,11 @@ impl InternalClient {
     ) -> Result<SetTokenResponse, InternalClientError> {
         self.post("/set-token", request).await
     }
+
+    /// Tell the aggregator to re-read agent-tokens.json and register new agents.
+    pub async fn reload(&self) -> Result<ReloadResponse, InternalClientError> {
+        self.post("/reload", &serde_json::json!({})).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +228,12 @@ pub struct SetTokenResponse {
 #[derive(Debug, Deserialize)]
 pub struct McpInstructionsResponse {
     pub instructions: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ReloadResponse {
+    pub added: Vec<String>,
+    pub total: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -283,5 +294,21 @@ mod tests {
         let json = "{\"instructions\":\"# MCP Server Instructions\\n\\n## composio\\n\\nConnect apps.\\n\"}";
         let resp: McpInstructionsResponse = serde_json::from_str(json).unwrap();
         assert!(resp.instructions.contains("composio"));
+    }
+
+    #[test]
+    fn reload_response_deserializes() {
+        let json = r#"{"added":["him","test"],"total":3}"#;
+        let resp: ReloadResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.added, vec!["him", "test"]);
+        assert_eq!(resp.total, 3);
+    }
+
+    #[test]
+    fn reload_response_empty_added() {
+        let json = r#"{"added":[],"total":2}"#;
+        let resp: ReloadResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.added.is_empty());
+        assert_eq!(resp.total, 2);
     }
 }
