@@ -16,8 +16,11 @@
 //!     opened_at: 2026-04-16T12:00:00Z
 //! ```
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -341,5 +344,155 @@ groups: []
         let parsed = parse_yaml(&yaml).unwrap();
         assert_eq!(parsed.users[0].label, None);
         assert_eq!(parsed.groups[0].label, None);
+    }
+}
+
+/// Outcome of `add_user` / `add_group`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AddOutcome {
+    Inserted,
+    AlreadyPresent,
+}
+
+/// Outcome of `remove_user` / `remove_group`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RemoveOutcome {
+    Removed,
+    NotFound,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct AllowlistState {
+    inner: AllowlistFile,
+}
+
+impl AllowlistState {
+    pub fn from_file(file: AllowlistFile) -> Self {
+        Self { inner: file }
+    }
+
+    pub fn to_file(&self) -> AllowlistFile {
+        self.inner.clone()
+    }
+
+    /// Is this user globally trusted?
+    pub fn is_user_trusted(&self, user_id: i64) -> bool {
+        self.inner.users.iter().any(|u| u.id == user_id)
+    }
+
+    /// Is this group opened (members may talk to bot with mention/reply)?
+    pub fn is_group_open(&self, chat_id: i64) -> bool {
+        self.inner.groups.iter().any(|g| g.id == chat_id)
+    }
+
+    pub fn users(&self) -> &[AllowedUser] {
+        &self.inner.users
+    }
+
+    pub fn groups(&self) -> &[AllowedGroup] {
+        &self.inner.groups
+    }
+
+    pub fn add_user(&mut self, user: AllowedUser) -> AddOutcome {
+        if self.is_user_trusted(user.id) {
+            return AddOutcome::AlreadyPresent;
+        }
+        self.inner.users.push(user);
+        AddOutcome::Inserted
+    }
+
+    pub fn remove_user(&mut self, user_id: i64) -> RemoveOutcome {
+        let before = self.inner.users.len();
+        self.inner.users.retain(|u| u.id != user_id);
+        if self.inner.users.len() == before {
+            RemoveOutcome::NotFound
+        } else {
+            RemoveOutcome::Removed
+        }
+    }
+
+    pub fn add_group(&mut self, group: AllowedGroup) -> AddOutcome {
+        if self.is_group_open(group.id) {
+            return AddOutcome::AlreadyPresent;
+        }
+        self.inner.groups.push(group);
+        AddOutcome::Inserted
+    }
+
+    pub fn remove_group(&mut self, chat_id: i64) -> RemoveOutcome {
+        let before = self.inner.groups.len();
+        self.inner.groups.retain(|g| g.id != chat_id);
+        if self.inner.groups.len() == before {
+            RemoveOutcome::NotFound
+        } else {
+            RemoveOutcome::Removed
+        }
+    }
+}
+
+/// Shareable handle used by bot and CLI. Writers take `.write()`, readers take `.read()`.
+#[derive(Debug, Clone, Default)]
+pub struct AllowlistHandle(pub Arc<RwLock<AllowlistState>>);
+
+impl AllowlistHandle {
+    pub fn new(state: AllowlistState) -> Self {
+        Self(Arc::new(RwLock::new(state)))
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    fn t() -> DateTime<Utc> {
+        "2026-04-16T12:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn add_user_inserted_then_already_present() {
+        let mut s = AllowlistState::default();
+        let u = AllowedUser { id: 1, label: None, added_by: None, added_at: t() };
+        assert_eq!(s.add_user(u.clone()), AddOutcome::Inserted);
+        assert_eq!(s.add_user(u), AddOutcome::AlreadyPresent);
+        assert_eq!(s.users().len(), 1);
+    }
+
+    #[test]
+    fn remove_user_removed_then_not_found() {
+        let mut s = AllowlistState::default();
+        let u = AllowedUser { id: 1, label: None, added_by: None, added_at: t() };
+        s.add_user(u);
+        assert_eq!(s.remove_user(1), RemoveOutcome::Removed);
+        assert_eq!(s.remove_user(1), RemoveOutcome::NotFound);
+    }
+
+    #[test]
+    fn is_user_trusted_reflects_state() {
+        let mut s = AllowlistState::default();
+        assert!(!s.is_user_trusted(99));
+        s.add_user(AllowedUser { id: 99, label: None, added_by: None, added_at: t() });
+        assert!(s.is_user_trusted(99));
+    }
+
+    #[test]
+    fn add_group_and_is_open() {
+        let mut s = AllowlistState::default();
+        assert!(!s.is_group_open(-1));
+        s.add_group(AllowedGroup { id: -1, label: None, opened_by: Some(1), opened_at: t() });
+        assert!(s.is_group_open(-1));
+    }
+
+    #[tokio::test]
+    async fn handle_is_shareable_across_tasks() {
+        let h = AllowlistHandle::new(AllowlistState::default());
+        let h2 = h.clone();
+        tokio::spawn(async move {
+            let mut w = h2.0.write().await;
+            w.add_user(AllowedUser { id: 7, label: None, added_by: None, added_at: t() });
+        })
+        .await
+        .unwrap();
+        let r = h.0.read().await;
+        assert!(r.is_user_trusted(7));
     }
 }
