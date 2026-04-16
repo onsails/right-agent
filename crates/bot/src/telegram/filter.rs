@@ -40,7 +40,7 @@ pub fn make_routing_filter(
 ) -> impl Fn(Message) -> Option<(Message, RoutingDecision)> + Send + Sync + Clone + 'static {
     move |msg: Message| {
         // No `from` means channel post or anonymous — ignore.
-        let Some(sender) = msg.from.as_ref() else { return None; };
+        let sender = msg.from.as_ref()?;
         let sender_id = sender.id.0 as i64;
         let chat_id = msg.chat.id.0;
 
