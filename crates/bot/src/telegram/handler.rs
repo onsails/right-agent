@@ -40,11 +40,6 @@ pub struct RightclawHome(pub PathBuf);
 #[derive(Clone)]
 pub struct DebugFlag(pub bool);
 
-/// Shared flag: true when an auth watcher task is active for this agent.
-/// One per bot process (one agent per process), shared across all workers.
-#[derive(Clone)]
-pub struct AuthWatcherFlag(pub Arc<AtomicBool>);
-
 /// Shared slot for pending MCP token requests. When /mcp add needs a token,
 /// a oneshot::Sender is placed here. Message handler checks before routing to worker.
 #[derive(Clone)]
