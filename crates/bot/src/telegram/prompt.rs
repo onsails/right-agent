@@ -143,39 +143,6 @@ pub(crate) async fn remove_composite_memory(agent_dir: &std::path::Path) {
     let _ = tokio::fs::remove_file(&host_path).await;
 }
 
-/// Recall from Hindsight and deploy composite-memory.md to host (and sandbox if applicable).
-///
-/// Returns the recalled content string if successful, `None` otherwise.
-/// On empty results, error, or timeout the host file is removed.
-pub(crate) async fn recall_and_deploy_composite_memory(
-    hs: &rightclaw::memory::hindsight::HindsightClient,
-    query: &str,
-    label: &str,
-    agent_dir: &std::path::Path,
-    resolved_sandbox: Option<&str>,
-) -> Option<String> {
-    match tokio::time::timeout(std::time::Duration::from_secs(5), hs.recall(query, None, None)).await {
-        Ok(Ok(results)) if !results.is_empty() => {
-            let content = rightclaw::memory::hindsight::join_recall_texts(&results);
-            deploy_composite_memory(&content, label, agent_dir, resolved_sandbox).await;
-            Some(content)
-        }
-        Ok(Ok(_)) => {
-            remove_composite_memory(agent_dir).await;
-            None
-        }
-        Ok(Err(e)) => {
-            tracing::warn!("recall failed: {e:#}");
-            remove_composite_memory(agent_dir).await;
-            None
-        }
-        Err(_) => {
-            tracing::warn!("recall timed out");
-            remove_composite_memory(agent_dir).await;
-            None
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
