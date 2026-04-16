@@ -19,10 +19,10 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AllowedUser {
     pub id: i64,
@@ -33,7 +33,7 @@ pub struct AllowedUser {
     pub added_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AllowedGroup {
     pub id: i64,
@@ -44,7 +44,7 @@ pub struct AllowedGroup {
     pub opened_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AllowlistFile {
     #[serde(default = "default_version")]
