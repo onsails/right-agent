@@ -186,7 +186,7 @@ impl HindsightBackend {
                 let context = args["context"].as_str();
                 let result = self
                     .client
-                    .retain(content, context)
+                    .retain(content, context, None, None, None)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e:#}"))?;
                 let json = serde_json::json!({
@@ -203,7 +203,7 @@ impl HindsightBackend {
                     .ok_or_else(|| anyhow::anyhow!("missing required param: query"))?;
                 let results = self
                     .client
-                    .recall(query)
+                    .recall(query, None, None)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e:#}"))?;
                 let json = serde_json::json!({ "results": results });

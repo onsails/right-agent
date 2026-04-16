@@ -154,7 +154,7 @@ pub(crate) async fn recall_and_deploy_composite_memory(
     agent_dir: &std::path::Path,
     resolved_sandbox: Option<&str>,
 ) -> Option<String> {
-    match tokio::time::timeout(std::time::Duration::from_secs(5), hs.recall(query)).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), hs.recall(query, None, None)).await {
         Ok(Ok(results)) if !results.is_empty() => {
             let content = rightclaw::memory::hindsight::join_recall_texts(&results);
             deploy_composite_memory(&content, label, agent_dir, resolved_sandbox).await;

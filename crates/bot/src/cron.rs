@@ -561,7 +561,7 @@ async fn execute_job(
                     let context = format!("cron:{job_name}");
                     let cache_to_clear = prefetch_cache.cloned();
                     tokio::spawn(async move {
-                        if let Err(e) = hs_retain.retain(&summary, Some(&context)).await {
+                        if let Err(e) = hs_retain.retain(&summary, Some(&context), None, None, None).await {
                             tracing::warn!("cron auto-retain failed: {e:#}");
                         }
                         // Invalidate worker prefetch cache — cron output may change recall results.
@@ -576,7 +576,7 @@ async fn execute_job(
                     let cron_cache_key = format!("cron:{job_name}");
                     let cron_cache = prefetch_cache.cloned();
                     tokio::spawn(async move {
-                        match hs_recall.recall(&recall_prompt).await {
+                        match hs_recall.recall(&recall_prompt, None, None).await {
                             Ok(results) if !results.is_empty() => {
                                 let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                                 if let Some(ref c) = cron_cache {
