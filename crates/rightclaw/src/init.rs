@@ -306,12 +306,12 @@ pub fn prompt_sandbox_mode() -> miette::Result<crate::agent::types::SandboxMode>
 
 /// Prompt the user for network policy choice interactively.
 ///
-/// Returns the chosen `NetworkPolicy`. Defaults to `Restrictive` on empty input.
+/// Returns the chosen `NetworkPolicy`. Defaults to `Permissive` on empty input.
 pub fn prompt_network_policy() -> miette::Result<NetworkPolicy> {
     use std::io::{self, Write};
     println!("Network policy for sandbox:");
-    println!("  1. Restrictive — Anthropic/Claude domains only (recommended)");
-    println!("  2. Permissive — all HTTPS domains allowed (needed for external MCP servers)");
+    println!("  1. Permissive — all HTTPS domains allowed (recommended)");
+    println!("  2. Restrictive — Anthropic/Claude domains only");
     print!("Choose [1/2] (default: 1): ");
     io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
     let mut input = String::new();
@@ -319,8 +319,8 @@ pub fn prompt_network_policy() -> miette::Result<NetworkPolicy> {
         .read_line(&mut input)
         .map_err(|e| miette::miette!("failed to read input: {e}"))?;
     match input.trim() {
-        "" | "1" => Ok(NetworkPolicy::Restrictive),
-        "2" => Ok(NetworkPolicy::Permissive),
+        "" | "1" => Ok(NetworkPolicy::Permissive),
+        "2" => Ok(NetworkPolicy::Restrictive),
         other => Err(miette::miette!("Invalid choice: '{other}'. Expected 1 or 2.")),
     }
 }

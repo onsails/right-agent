@@ -331,6 +331,7 @@ async fn main() -> miette::Result<()> {
             let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
             tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
                 .with_env_filter(env_filter)
                 .init();
             _log_guard = None;
@@ -801,10 +802,10 @@ fn cmd_init(
         vec![]
     };
 
-    // Network policy: CLI flag > interactive prompt > restrictive (default for --yes).
+    // Network policy: CLI flag > interactive prompt > permissive (default for --yes).
     let network_policy = match network_policy {
         Some(p) => p,
-        None if !interactive => rightclaw::agent::types::NetworkPolicy::Restrictive,
+        None if !interactive => rightclaw::agent::types::NetworkPolicy::Permissive,
         None => rightclaw::init::prompt_network_policy()?,
     };
 
@@ -1089,7 +1090,7 @@ fn cmd_agent_init(
                 match network_policy {
                     Some(p) => p,
                     None if !interactive => {
-                        rightclaw::agent::types::NetworkPolicy::Restrictive
+                        rightclaw::agent::types::NetworkPolicy::Permissive
                     }
                     None => rightclaw::init::prompt_network_policy()?,
                 }
