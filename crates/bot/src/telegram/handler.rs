@@ -36,10 +36,6 @@ pub struct SshConfigPath(pub Option<PathBuf>);
 #[derive(Clone)]
 pub struct RightclawHome(pub PathBuf);
 
-/// Newtype wrapper for the debug flag passed via dptree dependencies.
-#[derive(Clone)]
-pub struct DebugFlag(pub bool);
-
 /// Shared slot for pending MCP token requests. When /mcp add needs a token,
 /// a oneshot::Sender is placed here. Message handler checks before routing to worker.
 #[derive(Clone)]
@@ -85,6 +81,8 @@ pub struct AgentSettings {
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     /// RwLock gate — upgrade takes write (exclusive), CC invocations take read (shared).
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
+    /// When true, CC subprocesses run with --verbose and stderr is logged at debug level.
+    pub debug: bool,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
@@ -130,13 +128,13 @@ pub async fn handle_message(
     decision: super::filter::RoutingDecision,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
-    debug_flag: Arc<DebugFlag>,
     ssh_config: Arc<SshConfigPath>,
     intercept_slots: Arc<InterceptSlots>,
     settings: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
     idle_ts: Arc<IdleTimestamp>,
     internal_api: Arc<InternalApi>,
+    identity: Arc<super::mention::BotIdentity>,
 ) -> ResponseResult<()> {
     idle_ts.0.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
 
@@ -238,6 +236,42 @@ pub async fn handle_message(
     let worker_exists = worker_map.contains_key(&key);
     tracing::info!(?key, worker_exists, has_text = text.is_some(), attachment_count = attachments.len(), "handle_message: routing");
 
+    // Build ChatContext: DM emits nothing; Group emits id/title/topic_id.
+    // General topic has thread_id = 1 in supergroups — normalise to "no topic".
+    let chat_ctx = match &msg.chat.kind {
+        teloxide::types::ChatKind::Private(_) => super::attachments::ChatContext::Private,
+        _ => super::attachments::ChatContext::Group {
+            id: msg.chat.id.0,
+            title: msg.chat.title().map(|s| s.to_string()),
+            topic_id: msg
+                .thread_id
+                .map(|t| i64::from(t.0.0))
+                .filter(|&n| n > 1),
+        },
+    };
+
+    // Populate reply_to_body only when the user replied to a non-bot message.
+    // When they reply to our own bot message, the context is already in the CC
+    // session history — emitting it again would be noisy and duplicative.
+    let reply_to_body = msg.reply_to_message().and_then(|r| {
+        let from = r.from.as_ref()?;
+        if from.is_bot && from.id.0 == identity.user_id {
+            return None;
+        }
+        Some(super::attachments::ReplyToBody {
+            author: super::attachments::MessageAuthor {
+                name: from.full_name(),
+                username: from.username.as_ref().map(|u| format!("@{u}")),
+                user_id: Some(from.id.0 as i64),
+            },
+            text: r.text().or(r.caption()).map(|t| t.to_string()),
+        })
+    });
+
+    // Strip `@botname` mentions from text AFTER interceptors (auth code / MCP
+    // token) have seen the raw string. No-op when the pattern isn't present.
+    let text = text.map(|t| super::mention::strip_bot_mentions(&t, &identity.username));
+
     let debounce_msg = DebounceMsg {
         message_id: msg.id.0,
         text,
@@ -248,6 +282,8 @@ pub async fn handle_message(
         reply_to_id,
         address: decision.address.clone(),
         group_open: decision.group_open,
+        chat: chat_ctx,
+        reply_to_body,
     };
 
     // Check for existing worker or spawn a new one.
@@ -280,7 +316,7 @@ pub async fn handle_message(
                     agent_name,
                     bot: bot.clone(),
                     db_path: agent_dir.0.clone(),
-                    debug: debug_flag.0,
+                    debug: settings.debug,
                     ssh_config_path: ssh_config.0.clone(),
                     resolved_sandbox: settings.resolved_sandbox.clone(),
                     auth_watcher_active: Arc::clone(&intercept_slots.auth_watcher),

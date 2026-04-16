@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use super::bot::build_bot;
 use super::filter::make_routing_filter;
 use super::mention::BotIdentity;
-use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, DebugFlag, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RightclawHome, SshConfigPath};
+use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -105,7 +105,6 @@ pub async fn run_telegram(
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
         Arc::new(DashMap::new());
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
-    let debug_arc: Arc<DebugFlag> = Arc::new(DebugFlag(debug));
     let ssh_config_arc: Arc<SshConfigPath> = Arc::new(SshConfigPath(ssh_config_path));
     let pending_auth_arc: PendingAuthMap = pending_auth;
     let home_arc: Arc<RightclawHome> = Arc::new(RightclawHome(home));
@@ -129,6 +128,7 @@ pub async fn run_telegram(
         hindsight: hindsight_client,
         prefetch_cache,
         upgrade_lock,
+        debug,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
 
@@ -205,7 +205,6 @@ pub async fn run_telegram(
         .dependencies(dptree::deps![
             Arc::clone(&worker_map),
             Arc::clone(&agent_dir_arc),
-            Arc::clone(&debug_arc),
             pending_auth_arc,
             Arc::clone(&home_arc),
             Arc::clone(&ssh_config_arc),

@@ -133,6 +133,26 @@ pub struct ForwardInfo {
     pub date: DateTime<Utc>,
 }
 
+/// Chat kind + identity for the incoming message. DM emits no attribution block;
+/// Group emits a `chat:` block in the prompt.
+#[derive(Debug, Clone)]
+pub enum ChatContext {
+    Private,
+    Group {
+        id: i64,
+        title: Option<String>,
+        topic_id: Option<i64>,
+    },
+}
+
+/// Body of the replied-to message — populated only when the user's message is
+/// a Telegram reply AND the reply target is not the bot's own message.
+#[derive(Debug, Clone)]
+pub struct ReplyToBody {
+    pub author: MessageAuthor,
+    pub text: Option<String>,
+}
+
 /// Message in a debounce batch -- text and/or attachments.
 #[derive(Debug, Clone)]
 pub struct InputMessage {
@@ -143,6 +163,8 @@ pub struct InputMessage {
     pub author: MessageAuthor,
     pub forward_info: Option<ForwardInfo>,
     pub reply_to_id: Option<i32>,
+    pub chat: ChatContext,
+    pub reply_to_body: Option<ReplyToBody>,
 }
 
 /// Format input for CC stdin.
@@ -180,6 +202,20 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             writeln!(out, "      user_id: {user_id}").expect("infallible");
         }
 
+        // Chat block (group only; DM stays unchanged).
+        if let ChatContext::Group { id, title, topic_id } = &m.chat {
+            out.push_str("    chat:\n");
+            writeln!(out, "      kind: group").expect("infallible");
+            writeln!(out, "      id: {id}").expect("infallible");
+            if let Some(t) = title {
+                writeln!(out, "      title: \"{}\"", yaml_escape_string(t))
+                    .expect("infallible");
+            }
+            if let Some(tid) = topic_id {
+                writeln!(out, "      topic_id: {tid}").expect("infallible");
+            }
+        }
+
         // Forward info (only if forwarded)
         if let Some(ref fwd) = m.forward_info {
             out.push_str("    forward_from:\n");
@@ -199,6 +235,25 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         // Reply-to (only if reply)
         if let Some(reply_id) = m.reply_to_id {
             writeln!(out, "    reply_to_id: {reply_id}").expect("infallible");
+        }
+
+        // Reply-to body: present only when the user replied to a non-bot message.
+        if let Some(ref r) = m.reply_to_body {
+            out.push_str("    reply_to:\n");
+            out.push_str("      author:\n");
+            writeln!(out, "        name: \"{}\"", yaml_escape_string(&r.author.name))
+                .expect("infallible");
+            if let Some(ref un) = r.author.username {
+                writeln!(out, "        username: \"{}\"", yaml_escape_string(un))
+                    .expect("infallible");
+            }
+            if let Some(uid) = r.author.user_id {
+                writeln!(out, "        user_id: {uid}").expect("infallible");
+            }
+            if let Some(ref t) = r.text {
+                writeln!(out, "      text: \"{}\"", yaml_escape_string(t))
+                    .expect("infallible");
+            }
         }
 
         // Text
@@ -802,6 +857,8 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.starts_with("messages:\n"));
@@ -824,6 +881,8 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         assert!(format_cc_input(&msgs).is_none());
     }
@@ -842,6 +901,8 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                chat: ChatContext::Private,
+                reply_to_body: None,
             },
             InputMessage {
                 message_id: 2,
@@ -851,6 +912,8 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                chat: ChatContext::Private,
+                reply_to_body: None,
             },
         ];
         let result = format_cc_input(&msgs).unwrap();
@@ -879,6 +942,8 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.starts_with("messages:\n"));
@@ -905,6 +970,8 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.contains("      - type: document\n"));
@@ -922,6 +989,8 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                chat: ChatContext::Private,
+                reply_to_body: None,
             },
             InputMessage {
                 message_id: 2,
@@ -931,6 +1000,8 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
+                chat: ChatContext::Private,
+                reply_to_body: None,
             },
         ];
         let result = format_cc_input(&msgs).unwrap();
@@ -963,6 +1034,8 @@ mod tests {
             },
             forward_info: None,
             reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.starts_with("messages:\n"), "should be YAML, not raw text");
@@ -999,6 +1072,8 @@ mod tests {
                 date: fwd_date,
             }),
             reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.contains("    forward_from:\n"));
@@ -1023,6 +1098,8 @@ mod tests {
             },
             forward_info: None,
             reply_to_id: Some(3),
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.contains("    reply_to_id: 3\n"));
@@ -1051,6 +1128,8 @@ mod tests {
                 date: fwd_date,
             }),
             reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
         assert!(result.contains("      name: \"Hidden Person\"\n"));
@@ -1061,5 +1140,99 @@ mod tests {
         let fwd_block = &after_fwd[..fwd_block_end];
         assert!(!fwd_block.contains("username:"));
         assert!(!fwd_block.contains("user_id:"));
+    }
+}
+
+#[cfg(test)]
+mod group_format_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn now() -> DateTime<Utc> {
+        chrono::Utc.with_ymd_and_hms(2026, 4, 16, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn dm_single_message_emits_yaml_with_no_chat_block() {
+        let m = InputMessage {
+            message_id: 1,
+            text: Some("hi".into()),
+            timestamp: now(),
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "Alice".into(),
+                username: Some("@alice".into()),
+                user_id: Some(42),
+            },
+            forward_info: None,
+            reply_to_id: None,
+            chat: ChatContext::Private,
+            reply_to_body: None,
+        };
+        let yaml = format_cc_input(&[m]).unwrap();
+        assert!(yaml.contains("messages:"));
+        assert!(!yaml.contains("chat:"), "DM must not emit chat block, got: {yaml}");
+    }
+
+    #[test]
+    fn group_message_emits_chat_block_and_topic() {
+        let m = InputMessage {
+            message_id: 9,
+            text: Some("what does foo do".into()),
+            timestamp: now(),
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "Alice".into(),
+                username: Some("@alice".into()),
+                user_id: Some(42),
+            },
+            forward_info: None,
+            reply_to_id: None,
+            chat: ChatContext::Group {
+                id: -1001,
+                title: Some("Dev".into()),
+                topic_id: Some(7),
+            },
+            reply_to_body: None,
+        };
+        let yaml = format_cc_input(&[m]).unwrap();
+        assert!(yaml.contains("chat:"), "got: {yaml}");
+        assert!(yaml.contains("kind: group"));
+        assert!(yaml.contains("id: -1001"));
+        assert!(yaml.contains("title:"));
+        assert!(yaml.contains("topic_id: 7"));
+    }
+
+    #[test]
+    fn group_message_with_reply_to_body_emits_reply_to_block() {
+        let m = InputMessage {
+            message_id: 10,
+            text: Some("explain this".into()),
+            timestamp: now(),
+            attachments: vec![],
+            author: MessageAuthor {
+                name: "Bob".into(),
+                username: None,
+                user_id: Some(43),
+            },
+            forward_info: None,
+            reply_to_id: Some(5),
+            chat: ChatContext::Group {
+                id: -1001,
+                title: None,
+                topic_id: None,
+            },
+            reply_to_body: Some(ReplyToBody {
+                author: MessageAuthor {
+                    name: "Alice".into(),
+                    username: Some("@alice".into()),
+                    user_id: Some(42),
+                },
+                text: Some("here is the function: foo()".into()),
+            }),
+        };
+        let yaml = format_cc_input(&[m]).unwrap();
+        assert!(yaml.contains("reply_to:"), "got: {yaml}");
+        assert!(yaml.contains("here is the function: foo()"));
     }
 }
