@@ -233,6 +233,7 @@ pub struct McpInstructionsResponse {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ReloadResponse {
     pub added: Vec<String>,
+    pub removed: Vec<String>,
     pub total: usize,
 }
 

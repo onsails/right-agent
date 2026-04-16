@@ -651,10 +651,31 @@ async fn handle_reload(
         tracing::info!(agent = agent_name.as_str(), "reload: registered new agent");
     }
 
+    // 3. Remove agents that are in dispatcher but not on disk
+    let mut removed = Vec::new();
+    let current_agents: Vec<String> = state
+        .dispatcher
+        .agents
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    for agent_name in current_agents {
+        if !disk_entries.contains_key(&agent_name) {
+            state.dispatcher.agents.remove(&agent_name);
+            // Remove from token_map (token→AgentInfo where AgentInfo.name matches)
+            {
+                let mut map = state.token_map.write().await;
+                map.retain(|_token, info| info.name != agent_name);
+            }
+            removed.push(agent_name.clone());
+            tracing::info!(agent = agent_name.as_str(), "reload: removed destroyed agent");
+        }
+    }
+
     let total = state.dispatcher.agents.len();
     (
         StatusCode::OK,
-        Json(rightclaw::mcp::internal_client::ReloadResponse { added, total }),
+        Json(rightclaw::mcp::internal_client::ReloadResponse { added, removed, total }),
     )
         .into_response()
 }

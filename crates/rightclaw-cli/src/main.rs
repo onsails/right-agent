@@ -1778,6 +1778,13 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
                     resp.added.join(", "),
                 );
             }
+            if !resp.removed.is_empty() {
+                println!(
+                    "Removed {} agent(s) from aggregator: {}",
+                    resp.removed.len(),
+                    resp.removed.join(", "),
+                );
+            }
         }
         Err(e) => {
             eprintln!("warning: failed to reload aggregator: {e:#}");

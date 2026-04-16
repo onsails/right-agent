@@ -70,7 +70,6 @@ async fn run_backup(
         }
     }
 
-    // Copy config files
     for filename in &["agent.yaml", "policy.yaml"] {
         let src = agent_dir.join(filename);
         if src.exists() {
@@ -80,16 +79,15 @@ async fn run_backup(
         }
     }
 
-    // VACUUM data.db if it exists
     let db_path = agent_dir.join("data.db");
     if db_path.exists() {
         let backup_db = backup_dir.join("data.db");
         let db_display = db_path.display().to_string();
-        let backup_display = backup_db.display().to_string().replace('\'', "''");
+        let backup_path_sql = backup_db.display().to_string().replace('\'', "''");
         let conn = rusqlite::Connection::open(&db_path).map_err(|e| {
             miette::miette!("failed to open {}: {e:#}", db_display)
         })?;
-        conn.execute(&format!("VACUUM INTO '{backup_display}'"), []).map_err(|e| {
+        conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), []).map_err(|e| {
             miette::miette!("VACUUM INTO failed: {e:#}")
         })?;
     }
@@ -98,7 +96,6 @@ async fn run_backup(
     Ok(backup_dir)
 }
 
-/// Attempt to SSH-tar the sandbox contents. Returns true if successful.
 async fn try_sandbox_backup(
     home: &Path,
     agent_name: &str,
@@ -172,7 +169,6 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         pc_reloaded: false,
     };
 
-    // Step 1: Stop agent via process-compose (non-fatal)
     let pc_client = crate::runtime::PcClient::new(options.pc_port)?;
     let pc_running = pc_client.health_check().await.is_ok();
 
@@ -189,13 +185,11 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         }
     }
 
-    // Step 2: Backup (fatal if requested)
     if options.backup {
         let backup_path = run_backup(home, &options.agent_name, &agent_dir, &config, is_sandboxed).await?;
         result.backup_path = Some(backup_path);
     }
 
-    // Step 3: Delete sandbox (non-fatal, sandboxed agents only)
     if is_sandboxed {
         let sb_name = config
             .as_ref()
@@ -205,7 +199,6 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         result.sandbox_deleted = true;
     }
 
-    // Step 4: Remove agent directory (fatal)
     std::fs::remove_dir_all(&agent_dir).map_err(|e| {
         miette::miette!(
             "failed to remove agent directory {}: {e:#}",
@@ -215,7 +208,6 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     result.dir_removed = true;
     tracing::info!(agent = %options.agent_name, dir = %agent_dir.display(), "removed agent directory");
 
-    // Step 5: Reload process-compose (non-fatal)
     if pc_running {
         let all_agents = crate::agent::discover_agents(&agents_dir)?;
         let self_exe = std::env::current_exe().map_err(|e| {
