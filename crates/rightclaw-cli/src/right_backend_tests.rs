@@ -208,6 +208,7 @@ network_policies:
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_present() {
+    let _slot = rightclaw::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-present";
 
     let mtls_dir = match rightclaw::openshell::preflight_check() {
@@ -256,6 +257,7 @@ async fn bootstrap_done_sandbox_files_present() {
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_missing() {
+    let _slot = rightclaw::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-missing";
 
     let mtls_dir = match rightclaw::openshell::preflight_check() {

@@ -386,6 +386,7 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 
 #[tokio::test]
 async fn exec_in_sandbox_runs_command() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("exec-run").await;
     let (stdout, exit_code) = sbox.exec(&["echo", "hello-from-test"]).await;
 
@@ -400,6 +401,7 @@ async fn exec_in_sandbox_runs_command() {
 
 #[tokio::test]
 async fn exec_in_sandbox_returns_exit_code() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("exec-exit").await;
     let (_, exit_code) = sbox.exec(&["sh", "-c", "exit 42"]).await;
 
@@ -410,6 +412,7 @@ async fn exec_in_sandbox_returns_exit_code() {
 
 #[tokio::test]
 async fn verify_sandbox_files_detects_missing_and_reuploads() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("verify-missing").await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -438,6 +441,7 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
 /// may not be up yet, causing "Connection reset by peer".
 #[tokio::test]
 async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
+    let _slot = super::acquire_sandbox_slot();
     // ensure_sandbox takes agent name and prepends "rightclaw-" via sandbox_name().
     const AGENT: &str = "test-lifecycle";
     let sandbox = super::sandbox_name(AGENT);
@@ -509,6 +513,7 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
 
 #[tokio::test]
 async fn verify_sandbox_files_passes_when_all_present() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("verify-present").await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -532,6 +537,7 @@ async fn verify_sandbox_files_passes_when_all_present() {
 
 #[tokio::test]
 async fn upload_file_to_directory() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("upload-dir").await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -550,6 +556,7 @@ async fn upload_file_to_directory() {
 
 #[tokio::test]
 async fn upload_file_overwrites_existing() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("upload-overwrite").await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -575,6 +582,7 @@ async fn upload_file_overwrites_existing() {
 
 #[tokio::test]
 async fn upload_file_to_nested_dir() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("upload-nested").await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -621,6 +629,7 @@ async fn upload_file_rejects_non_directory_dest() {
 /// Also tests overwrite: sync runs every 5 min, so repeated uploads must work.
 #[tokio::test]
 async fn upload_directory_preserves_files_and_overwrites() {
+    let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("upload-dir-tree").await;
 
     // Create a directory tree mimicking a skill: rightmcp/SKILL.md

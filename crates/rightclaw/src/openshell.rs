@@ -284,6 +284,54 @@ pub fn spawn_sandbox(
     Ok(child)
 }
 
+/// Test-only concurrency limiter for live OpenShell sandbox tests.
+///
+/// Holds one of [`MAX_CONCURRENT_SANDBOX_TESTS`] exclusive file locks so the
+/// total number of concurrently running sandbox-creating tests across the
+/// entire workspace — including tests in separate test binaries — is capped.
+///
+/// Drop releases the lock. Acquire via [`acquire_sandbox_slot`].
+pub struct SandboxTestSlot {
+    _file: std::fs::File,
+    #[allow(dead_code)]
+    slot: u8,
+}
+
+/// Maximum number of live OpenShell sandbox tests allowed to run in parallel.
+/// See [`acquire_sandbox_slot`].
+pub const MAX_CONCURRENT_SANDBOX_TESTS: u8 = 3;
+
+/// Acquire one of [`MAX_CONCURRENT_SANDBOX_TESTS`] parallel-sandbox-test slots.
+///
+/// Blocks (polling every 200ms) until a slot is free. Cross-process via
+/// `fs4` advisory file locks on `$TMPDIR/rightclaw-sandbox-slot-{N}.lock`.
+/// Drop the returned [`SandboxTestSlot`] to release the slot.
+///
+/// This function is intended for use in test code that calls [`spawn_sandbox`]
+/// — it prevents `cargo test --workspace` from fork-bombing the host when
+/// multiple test binaries run in parallel, each starting Docker/k3s containers.
+pub fn acquire_sandbox_slot() -> SandboxTestSlot {
+    use fs4::fs_std::FileExt;
+
+    loop {
+        for slot in 1..=MAX_CONCURRENT_SANDBOX_TESTS {
+            let path = std::env::temp_dir().join(format!("rightclaw-sandbox-slot-{slot}.lock"));
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .expect("open sandbox-slot lock file");
+            match file.try_lock_exclusive() {
+                Ok(true) => return SandboxTestSlot { _file: file, slot },
+                Ok(false) => continue, // another holder
+                Err(e) => panic!("sandbox-slot lock {}: {e:#}", path.display()),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Run `openshell sandbox ssh-config NAME` and write the output to
 /// `config_dir/{name}.ssh-config`. Returns the path of the written file.
 pub async fn generate_ssh_config(
