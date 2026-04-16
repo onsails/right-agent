@@ -143,23 +143,92 @@ callsite missed by this matrix. Any new ssh/openshell callsite must use
 
 ## Test changes
 
-### `TestSandbox` Drop
+### `TestSandbox` Drop + panic hook
 
-`crates/rightclaw/src/openshell_tests.rs::TestSandbox`:
+**Critical constraint:** `Cargo.toml` sets `panic = "abort"` on both `dev` and
+`release` profiles. Under abort, a panic skips stack unwinding — `Drop` does
+**not** run. This means `TestSandbox::Drop` and `ProcessGroupChild::Drop` only
+clean up on the happy path, not on test panics.
 
-- Add `impl Drop` calling `std::process::Command::new("openshell")` synchronously
-  with `["sandbox", "delete", "--name", &self.name, "--no-tty"]`,
-  `Stdio::null()` for stdout/stderr, `.status()`. Best-effort, ignore errors.
-- Remove `TestSandbox::destroy()` entirely and remove all `.destroy().await` call
-  sites. Drop-on-scope-exit handles success and panic uniformly.
-- Do **not** add `wait_for_deleted` in Drop — slow, and the next test's
-  pre-create check already handles "still deleting" state.
+Solution: a global registry + `std::panic::set_hook` fallback that runs
+before `abort()` and cleans up anything still registered.
+
+`crates/rightclaw/src/openshell_tests.rs` (or a new
+`crates/rightclaw/src/test_cleanup.rs` for reuse across test modules):
+
+```rust
+use std::sync::{Mutex, OnceLock};
+
+static LIVE_TEST_SANDBOXES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static HOOK_INSTALLED: OnceLock<()> = OnceLock::new();
+
+/// Register a test sandbox so that on panic (even with panic=abort) the
+/// hook deletes it before abort() fires.
+fn register_test_sandbox(name: &str) {
+    LIVE_TEST_SANDBOXES.lock().unwrap().push(name.to_owned());
+    HOOK_INSTALLED.get_or_init(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            cleanup_registered();
+            default(info);
+        }));
+    });
+}
+
+fn cleanup_registered() {
+    let names: Vec<String> = LIVE_TEST_SANDBOXES.lock().unwrap().drain(..).collect();
+    for name in names {
+        // Kill any remaining orphan processes first; see pkill_test_orphans.
+        pkill_test_orphans(&name);
+        let _ = std::process::Command::new("openshell")
+            .args(["sandbox", "delete", "--name", &name, "--no-tty"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+fn unregister_test_sandbox(name: &str) {
+    LIVE_TEST_SANDBOXES.lock().unwrap().retain(|n| n != name);
+}
+```
+
+`TestSandbox::create` calls `register_test_sandbox(&name)`. `TestSandbox::Drop`
+calls `unregister_test_sandbox(&self.name)` plus the synchronous delete for
+happy-path cleanup:
+
+```rust
+impl Drop for TestSandbox {
+    fn drop(&mut self) {
+        unregister_test_sandbox(&self.name);
+        let _ = std::process::Command::new("openshell")
+            .args(["sandbox", "delete", "--name", &self.name, "--no-tty"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+```
+
+Remove `TestSandbox::destroy()` and all `.destroy().await` call sites. Drop
+handles the happy path; the panic hook handles the abort path.
 
 Rationale for sync `std::process::Command`:
 - Works regardless of tokio runtime flavor (current_thread vs multi_thread).
-- Works during stack unwinding from panic.
+- Works from a panic hook (no async runtime guarantees during abort).
 - `openshell sandbox delete` returns quickly enough that bounded blocking is
   acceptable in test teardown.
+
+**Coverage matrix:**
+
+| Scenario | Happy-path Drop | Panic hook | Pre-test pkill |
+|---|:-:|:-:|:-:|
+| Test passes | ✓ | — | belt-and-suspenders |
+| Test panics (panic=abort → no Drop) | — | ✓ | belt-and-suspenders |
+| Harness SIGKILLed externally | — | — | ✓ |
+| Previous run leaked orphan procs | — | — | ✓ |
+
+All three mechanisms are needed.
 
 ### Pre-test narrow cleanup (C-lite from diagnosis doc)
 
@@ -240,15 +309,20 @@ After implementing the changes, confirm by:
 
 ## Implementation order (suggested for the implementation plan)
 
-1. Add `nix` dep, create `process_group.rs` with `ProcessGroupChild` + tests
-   for the wrapper itself (spawn `bash -c 'sleep 60 & wait'`, drop, assert
-   grandchild dead within 200ms — same as the empirical verification).
-2. Convert `spawn_sandbox` to return `ProcessGroupChild`. Update all callers.
-3. Convert `upload_single_file` to use `ProcessGroupChild`.
-4. Convert ssh callsites in bot crate (worker, handler, cron, cron_delivery,
-   keepalive) and openshell.rs (`wait_for_ssh` family).
-5. `impl Drop for TestSandbox`, remove `destroy()` calls (or no-op the method).
-6. Add `pkill_test_orphans` to `TestSandbox::create`.
-7. Fix `sync.rs:376` and `right_backend_tests.rs:180` (explicit kill or rely
-   on Drop).
-8. Run verification criteria above.
+1. Add `nix` dep (0.31), create `process_group.rs` with `ProcessGroupChild` +
+   unit tests for the wrapper itself (spawn `bash -c 'sleep 60 & wait'`, drop,
+   assert grandchild dead within 200ms).
+2. Convert `spawn_sandbox` to return `ProcessGroupChild`. Update all callers
+   (`tokio::select!` in `create_sandbox` and CLI main, plus tests).
+3. Convert `upload_single_file` and `keepalive.rs::ping_claude` (both use
+   `.output()/.status().await` directly).
+4. Convert ssh callsites in bot crate (worker, handler, cron, cron_delivery)
+   and openshell.rs (`ssh_exec`, `ssh_tar_download`, `ssh_tar_upload`, and the
+   `wait_for_ssh` family).
+5. Add `pkill_test_orphans` helper (narrow kill by sandbox name).
+6. Add panic hook + `LIVE_TEST_SANDBOXES` registry.
+7. `impl Drop for TestSandbox`, `register_test_sandbox` in create. Remove
+   `destroy()` and all `.destroy().await` call sites.
+8. Fix `sync.rs:376` and `right_backend_tests.rs:180`: bind `let mut child`
+   and call `let _ = child.kill().await;` after `wait_for_ready`.
+9. Run verification criteria above.
