@@ -495,6 +495,7 @@ impl rmcp::ServerHandler for Aggregator {
 pub(crate) async fn run_aggregator_http(
     port: u16,
     token_map: AgentTokenMap,
+    token_map_path: PathBuf,
     dispatcher: Arc<ToolDispatcher>,
     agents_dir: PathBuf,
     home: PathBuf,
@@ -514,6 +515,7 @@ pub(crate) async fn run_aggregator_http(
 
     let mcp_service = StreamableHttpService::new(factory, session_manager, config);
 
+    let token_map_for_reload = token_map.clone();
     let app = axum::Router::new()
         .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn_with_state(
@@ -536,7 +538,14 @@ pub(crate) async fn run_aggregator_http(
             .map_err(|e| miette::miette!("create UDS parent dir: {e:#}"))?;
     }
 
-    let internal_app = crate::internal_api::internal_router(dispatcher, refresh_senders, reconnect_managers);
+    let internal_app = crate::internal_api::internal_router(
+        dispatcher,
+        refresh_senders,
+        reconnect_managers,
+        token_map_for_reload,
+        token_map_path,
+        agents_dir.clone(),
+    );
     let uds_listener = tokio::net::UnixListener::bind(&socket_path)
         .map_err(|e| miette::miette!("bind UDS {}: {e:#}", socket_path.display()))?;
 

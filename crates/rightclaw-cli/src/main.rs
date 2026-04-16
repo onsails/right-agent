@@ -441,6 +441,7 @@ async fn main() -> miette::Result<()> {
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
         Commands::McpServer { port, ref token_map } => {
             let agents_dir = rightclaw::config::agents_dir(&home);
+            let token_map_path = token_map.clone();
             let token_map_content = std::fs::read_to_string(token_map)
                 .map_err(|e| miette::miette!("failed to read token map: {e:#}"))?;
             let token_entries: std::collections::HashMap<String, String> =
@@ -728,7 +729,7 @@ async fn main() -> miette::Result<()> {
                 std::sync::Arc::new(reconnect_managers_map);
 
             aggregator::run_aggregator_http(
-                port, token_map, dispatcher, agents_dir, home, refresh_senders, reconnect_managers,
+                port, token_map, token_map_path, dispatcher, agents_dir, home, refresh_senders, reconnect_managers,
             ).await
         }
         Commands::Bot { agent, debug } => {
