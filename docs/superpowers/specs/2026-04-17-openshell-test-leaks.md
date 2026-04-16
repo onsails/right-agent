@@ -1,6 +1,6 @@
 # OpenShell test-process leaks — fork exhaustion on dev box
 
-**Status:** problem identified, fix pending discussion
+**Status:** design resolved, implementation pending
 **Date:** 2026-04-17
 **Branch observed on:** `groups` (but problem is pre-existing, independent of branch work)
 
@@ -74,8 +74,9 @@ When a test panics (or is killed mid-flight), the `Child` drops but the openshel
 CLI process keeps going. Its grandchildren (ssh, ssh-proxy, k3s bits) are not in
 our process group → they survive indefinitely.
 
-Justified in prod bot code (sandbox create is a fire-and-forget lifecycle
-operation), but it is the default behavior tests inherit.
+This was originally *claimed* to be justified in prod ("so the sandbox
+survives if the parent exits"), but that claim was wrong — see the
+**Additional finding during design review** section below.
 
 ### 2. No `Drop` cleanup on `TestSandbox`
 
@@ -132,65 +133,223 @@ leaked trees faster.
 | E | Add a session-level cleanup shell script at `scripts/cleanup-test-leaks.sh`, document "run this between test sessions" | docs + script | Requires human discipline, not self-healing |
 | F | Switch to `cargo-nextest` which kills test processes per group cleanly | tooling | New dep, but proper fix — nextest has `--final-status-level` and proper process isolation |
 
-### Recommended combo
+### Superseded by Design (resolved) below
 
-**A + B + C-lite**:
+The initial recommendation was `A + B + C-lite` (test-only `kill_on_drop(true)`,
+`Drop for TestSandbox`, narrow pre-test pkill). During design review we
+discovered (a) prod code also leaks on the happy path, and (b) there is a
+second leak vector via `ssh` process groups that affects bot operation, not
+only tests. The revised solution — **see "Design (resolved)" below** —
+replaces "test-only `kill_on_drop`" with a prod-wide `ProcessGroupChild`
+wrapper that handles both vectors.
 
-1. **A** — `spawn_sandbox` takes an optional `kill_on_drop: bool` flag or a separate
-   test-only wrapper `spawn_sandbox_for_test` with `kill_on_drop(true)`. Test
-   harness uses the new wrapper.
-2. **B** — `impl Drop for TestSandbox` that does a non-blocking `delete_sandbox`
-   and a bounded (10s) wait. Panics don't leak.
-3. **C-lite** — narrow pre-test cleanup: only kill `openshell sandbox create` and
-   `openshell sandbox upload` processes whose argv references `rightclaw-test-*`.
-   Leave unrelated `openshell` and `ssh-proxy` processes alone (they may belong
-   to a running bot).
+Option D (killing cargo harness binaries) and F (cargo-nextest) remain
+rejected for the same reasons (dangerous / out of scope).
 
-This gives us self-healing tests without breaking prod bot code or killing
-unrelated user processes.
+## Additional finding during design review
 
-### Not recommended
+Inspecting callers of `spawn_sandbox` reveals that **prod code also leaks on the
+happy path**, not only on panic:
 
-- **D** (killing cargo harness binaries) — too dangerous, races with other dev
-  workflows.
-- **F** (nextest) — bigger change, not scoped to this issue.
-- `kill_on_drop(true)` **in prod** (`openshell.rs:277` unconditional) — the bot
-  currently relies on `spawn_sandbox` being able to run to completion even if
-  the parent Rust Future is dropped; making it kill_on_drop would change
-  startup semantics.
+- `crates/rightclaw/src/openshell.rs:825-831` — `create_sandbox` does
+  `spawn_sandbox → wait_for_ready → drop(child)`. Combined with
+  `kill_on_drop(false)`, that `drop(child)` is a no-op: the openshell CLI
+  process does not self-exit after READY (that's why `TestSandbox::create`
+  explicitly does `child.kill().await`). Every successful bot sandbox-create
+  leaks one `openshell sandbox create` process plus its k3s/ssh descendants.
+- `crates/bot/src/sync.rs:376` and `crates/rightclaw-cli/src/right_backend_tests.rs:180`
+  use `let _child = spawn_sandbox(...)` with no subsequent kill — leaks on
+  every success, not just panic.
 
-## Open questions for discussion
+The original `kill_on_drop(false)` rationale ("so the sandbox survives if the
+parent process exits", commit `30c0a89`) rested on a wrong mental model: the
+sandbox is owned by the OpenShell daemon / k3s, not by the CLI process. The CLI
+is a gRPC client that polls state; killing it post-READY does not destroy the
+sandbox. `kill_on_drop(true)` is safe.
 
-1. **Is it safe to `kill_on_drop(true)` for prod `spawn_sandbox`?** I initially
-   assumed no (see "Not recommended"), but the bot actually calls
-   `wait_for_ready` before moving on — if the parent Rust Future drops during
-   that wait, do we *want* to leak the openshell CLI?
-2. **Who owns cleanup semantics for the bot?** If bot crashes during sandbox
-   creation, should the sandbox auto-clean, or remain for debugging? Currently
-   the sandbox remains.
-3. **Should we add a periodic "reap orphans" task at bot startup?** Before
-   creating a new agent sandbox, scan for orphan `openshell sandbox create`
-   processes matching this agent and kill them.
-4. **Is Drop-on-panic reliable enough for `TestSandbox`?** macOS signal handling
-   + tokio runtime + async Drop makes this tricky. May need a
-   `std::sync::Mutex<Vec<String>>` of sandboxes-to-destroy registered at create
-   time, drained by a `ctor::dtor` at binary exit.
-5. **Should `openshell sandbox upload` be replaced with a direct tar-over-ssh
-   pipeline using the gRPC-provided SSH config?** The CLI's "fire ssh as a
-   subprocess that fires ssh-proxy as another subprocess" is inherently
-   leak-prone. A direct tokio SSH client would let us reap children ourselves.
+## Additional leak vector: SSH process groups
 
-## Scope of this doc
+`tokio::process::Child::kill()` / `kill_on_drop(true)` send **SIGKILL**, which
+gives `ssh` zero time to propagate the signal to its `ProxyCommand` child
+(`openshell ssh-proxy`). The proxy child is reparented to `init` and keeps
+running. This applies to:
 
-**Diagnosis only.** No code changes proposed yet — waiting on answers to the
-open questions above before writing an implementation plan.
+- All `Command::new("ssh")` invocations in `worker.rs`, `cron.rs`,
+  `cron_delivery.rs`, `handler.rs`, `keepalive.rs` — they already have
+  `kill_on_drop(true)` but still orphan the `ssh-proxy` grandchild on worker
+  cancellation / bot shutdown.
+- `openshell sandbox upload` (Go binary) — internally spawns the same
+  `ssh` + `ssh-proxy` pair; if our parent `Command::output().await` future is
+  dropped (panic), the whole tree orphans.
+
+Bot-side SSH orphans accumulate during normal operation, not only test runs.
+The ~2000 `ssh-proxy` processes in the evidence table are partially from bot
+activity, not only from tests.
+
+Empirical confirmation: a controlled experiment on macOS
+(`tokio::process::Command::process_group(0)` + `libc::killpg(pgid, SIGKILL)`)
+reliably reaps the entire tree in 5/5 runs; the control (no process group)
+orphans the grandchild in 5/5 runs. See brainstorm transcript for details.
+
+## Design (resolved)
+
+### Component 1: `ProcessGroupChild` wrapper (prod + tests)
+
+New module `crates/rightclaw/src/process_group.rs` with:
+
+```rust
+/// Wraps a tokio Child that was spawned with process_group(0). Drop SIGKILLs
+/// the entire process group so grandchildren (e.g. `ssh -o ProxyCommand=...`)
+/// are reaped along with the direct child.
+pub struct ProcessGroupChild {
+    inner: tokio::process::Child,
+}
+
+impl ProcessGroupChild {
+    pub fn spawn(mut cmd: tokio::process::Command) -> std::io::Result<Self> {
+        cmd.process_group(0);
+        Ok(Self { inner: cmd.spawn()? })
+    }
+    pub fn inner_mut(&mut self) -> &mut tokio::process::Child { &mut self.inner }
+    // Forwarders: id(), wait(), kill(), stdout/stderr/stdin getters.
+}
+
+impl Drop for ProcessGroupChild {
+    fn drop(&mut self) {
+        if let Some(pid) = self.inner.id() {
+            killpg_sigkill(pid);
+        }
+        // tokio's internal reaper handles the zombie asynchronously.
+    }
+}
+
+fn killpg_sigkill(pid: u32) {
+    // SAFETY: killpg(SIGKILL) has no memory-safety implications. ESRCH
+    // (process already gone) and EPERM are harmless; we ignore the return.
+    unsafe { libc::killpg(pid as i32, libc::SIGKILL); }
+}
+```
+
+No new external crate — uses `libc` (already transitive).
+
+**Callsite migration** (all replaced with `ProcessGroupChild::spawn(cmd)`):
+- `crates/rightclaw/src/openshell.rs::spawn_sandbox` — remove
+  `kill_on_drop(false)` (it was never correct).
+- `crates/rightclaw/src/openshell.rs::upload_single_file` — add
+  process-group-aware spawn; the `.output().await` pattern becomes
+  "wait via the wrapper".
+- `crates/bot/src/telegram/worker.rs`, `handler.rs`, `cron.rs`,
+  `cron_delivery.rs`, `keepalive.rs` — replace `cmd.kill_on_drop(true);
+  cmd.spawn()?` with `ProcessGroupChild::spawn(cmd)`.
+
+**`spawn_sandbox` API change:** returns `ProcessGroupChild` instead of
+`tokio::process::Child`. All callers already hold `mut child` and call
+either `.kill()` or `.wait()` — the wrapper forwards both. The two buggy
+test callsites (`sync.rs:376`, `right_backend_tests.rs:180`) that bound
+`_child` without killing will now get automatic cleanup on drop.
+
+### Component 2: `Drop for TestSandbox`
+
+`crates/rightclaw/src/openshell_tests.rs`:
+
+```rust
+impl Drop for TestSandbox {
+    fn drop(&mut self) {
+        // Fire-and-forget sync delete. std::process avoids any tokio runtime
+        // dependency during panic unwind. setpgid isolates ssh grandchildren
+        // from our process — they die when the spawned openshell CLI exits.
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let mut cmd = Command::new("openshell");
+        cmd.args(["sandbox", "delete", "--name", &self.name, "--no-tty"])
+           .stdout(Stdio::null())
+           .stderr(Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let _ = cmd.spawn();  // fire-and-forget
+    }
+}
+```
+
+`destroy(self)` consumes `self`, so the happy path does not double-delete.
+On panic, the Drop fires a delete request; the next test-run's pre-cleanup
+(`sandbox_exists → delete_sandbox → wait_for_deleted`) handles completion.
+
+### Component 3: Narrow pre-test pkill
+
+`TestSandbox::create` runs a bounded `pkill` before `spawn_sandbox`:
+
+```rust
+// Kill any lingering openshell processes whose argv references this test's
+// sandbox name. Narrow patterns — do NOT touch unrelated openshell/ssh-proxy.
+for pattern in [
+    &format!("openshell sandbox create.*{name}"),
+    &format!("openshell sandbox upload.*{name}"),
+    &format!("openshell sandbox delete.*{name}"),
+    &format!("openshell ssh-proxy.*--sandbox-id .*{name}"),
+] {
+    let _ = std::process::Command::new("pkill")
+        .args(["-9", "-f", pattern]).status();
+}
+```
+
+Only matches patterns scoped to `rightclaw-test-<this test>`. Bot sandboxes
+(`right` and user-named agents) and unrelated dev workflows are untouched.
+
+### Component 4: Not doing (explicit non-goals)
+
+| Option from diagnosis | Resolution |
+|---|---|
+| D — Kill cargo test harness binaries | Rejected. Races with parallel user dev workflows. |
+| E — Manual cleanup shell script | Superseded by Components 1–3 (self-healing). |
+| F — Switch to cargo-nextest | Out of scope. Separate tooling decision. |
+| Q2 — Auto-clean sandbox on bot crash | No change. `kill_on_drop(true)` on `spawn_sandbox` kills the CLI but the sandbox survives in k3s state — identical to current behavior. |
+| Q3 — Periodic orphan reaper on bot startup | Rejected. After Components 1–3 land, new orphans do not appear. Adding a reaper means permanent code to service a transient migration state. One manual `pkill` run after merging is enough. |
+| Q5 — Replace `openshell sandbox upload` with direct tar-over-ssh | Deferred. `ProcessGroupChild` around the CLI contains all its grandchildren — the leak motivation goes away. Revisit only if the CLI's other known issues (silent file drops) escalate. |
+
+## Implementation order
+
+1. Add `process_group.rs` with `ProcessGroupChild` + `killpg_sigkill`.
+2. Migrate `spawn_sandbox` (prod and the two leaky test callsites).
+3. Migrate `upload_single_file`.
+4. Migrate the five bot-side `ssh -F ...` callsites.
+5. Add `Drop for TestSandbox` + narrow pre-test `pkill`.
+6. One-time host cleanup: run `pkill -9 -f "rightclaw-test-"` and
+   `pkill -9 -f "openshell ssh-proxy"` once on each dev box where leaks
+   already accumulated. No documentation file needed — this is a one-shot
+   migration, not an ongoing procedure.
+7. Verify: run `cargo test --workspace` 5× in a row on a cold host; confirm
+   no `openshell.*` or `ssh-proxy.*` survives between runs.
+
+## Verification criteria
+
+- Between any two consecutive `cargo test --workspace` runs, zero
+  `openshell` / `ssh` / `ssh-proxy` processes survive (apart from a running
+  bot if the user has one).
+- `ps -ef | grep rightclaw-test-` is empty 5s after `cargo test` exits on
+  either success or panic.
+- Existing tests pass. No new `cargo test` time regression > 5% in CI.
+- `cargo clippy --workspace -- -D warnings` clean (single isolated
+  `unsafe` block passes).
 
 ## References
 
 - `crates/rightclaw/src/openshell.rs:260-285` — `spawn_sandbox` (sets `kill_on_drop(false)`)
+- `crates/rightclaw/src/openshell.rs:825-830` — `create_sandbox` drops child without killing
+- `crates/rightclaw/src/openshell.rs:569-583` — `upload_single_file`
 - `crates/rightclaw/src/openshell_tests.rs:200-265` — `TestSandbox` impl (no `Drop`)
-- `crates/rightclaw-cli/src/right_backend_tests.rs::create_test_sandbox`
-- `crates/rightclaw-cli/tests/cli_integration.rs::test_policy_validates_against_openshell`
-- `crates/bot/src/sync.rs::tests::initial_sync_does_not_upload_agent_md_files`
-
-- Commit `7095f14` (this branch): 3-slot file-lock limiter — partial mitigation.
+- `crates/bot/src/telegram/worker.rs:1017`, `cron.rs:381`,
+  `cron_delivery.rs:470`, `handler.rs:1114`, `keepalive.rs:72` — bot-side
+  `ssh` callsites with `kill_on_drop(true)` but no process group.
+- `crates/rightclaw-cli/src/right_backend_tests.rs:180`,
+  `crates/bot/src/sync.rs:376` — tests that drop `spawn_sandbox` child
+  without killing.
+- `crates/rightclaw-cli/tests/cli_integration.rs:616` — correct pattern
+  (explicit `child.kill().await` after READY).
+- Commit `30c0a89` — original `kill_on_drop(false)` introduction.
+- Commit `7095f14` (this branch): 3-slot file-lock limiter — partial mitigation,
+  kept as defense-in-depth.
