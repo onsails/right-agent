@@ -95,6 +95,17 @@ pub enum AgentCommands {
         #[arg(long)]
         sandbox_only: bool,
     },
+    /// Destroy an agent (stop, optionally backup, delete sandbox and files)
+    Destroy {
+        /// Agent name
+        name: String,
+        /// Create backup before destroying
+        #[arg(long)]
+        backup: bool,
+        /// Skip interactive prompts
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Subcommands for `rightclaw memory`.
@@ -422,6 +433,9 @@ async fn main() -> miette::Result<()> {
             }
             AgentCommands::Backup { name, sandbox_only } => {
                 cmd_agent_backup(&home, &name, sandbox_only).await
+            }
+            AgentCommands::Destroy { name, backup, force } => {
+                cmd_agent_destroy(&home, &name, backup, force).await
             }
         },
         Commands::Memory { command } => match command {
@@ -2158,6 +2172,134 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
 
     println!("Backup complete: {}", backup_dir.display());
     Ok(())
+}
+
+async fn cmd_agent_destroy(home: &Path, agent_name: &str, backup_flag: bool, force: bool) -> miette::Result<()> {
+    use inquire::ui::{Color, RenderConfig, Styled};
+
+    // Validate agent exists
+    let agents_dir = rightclaw::config::agents_dir(home);
+    let agent_dir = agents_dir.join(agent_name);
+    if !agent_dir.exists() {
+        return Err(miette::miette!("Agent '{}' not found", agent_name));
+    }
+
+    let config = rightclaw::agent::parse_agent_config(&agent_dir)?;
+    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
+
+    let do_backup = if force {
+        backup_flag
+    } else {
+        // Show summary of what will be destroyed
+        println!("Agent: {agent_name}");
+        println!("  Directory: {}", agent_dir.display());
+        if let Ok(size) = dir_size(&agent_dir) {
+            println!("  Size: {}", format_bytes(size));
+        }
+        if is_sandboxed {
+            let sb_name = config
+                .as_ref()
+                .map(|c| rightclaw::openshell::resolve_sandbox_name(agent_name, c))
+                .unwrap_or_else(|| rightclaw::openshell::sandbox_name(agent_name));
+            println!("  Sandbox: {sb_name}");
+        } else {
+            println!("  Sandbox: none");
+        }
+        let db_path = agent_dir.join("data.db");
+        if db_path.exists() {
+            if let Ok(meta) = std::fs::metadata(&db_path) {
+                println!("  data.db: {}", format_bytes(meta.len()));
+            }
+        }
+
+        // Check if PC is running and agent is active
+        let pc_client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+        if pc_client.health_check().await.is_ok() {
+            println!("  Process: running (will be stopped)");
+        } else {
+            println!("  Process: not running");
+        }
+
+        println!();
+
+        // Backup prompt
+        let do_backup = if backup_flag {
+            true
+        } else {
+            inquire::Confirm::new("Create backup before destroying?")
+                .with_default(false)
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?
+        };
+
+        // Final confirmation — red styled
+        let red_config = RenderConfig::default()
+            .with_prompt_prefix(Styled::new("⚠").with_fg(Color::LightRed));
+
+        let confirmed = inquire::Confirm::new(&format!(
+            "Permanently destroy agent '{agent_name}'? This cannot be undone."
+        ))
+        .with_default(false)
+        .with_render_config(red_config)
+        .prompt()
+        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+
+        if !confirmed {
+            println!("Aborted.");
+            return Ok(());
+        }
+
+        do_backup
+    };
+
+    let options = rightclaw::agent::DestroyOptions {
+        agent_name: agent_name.to_string(),
+        backup: do_backup,
+        pc_port: rightclaw::runtime::PC_PORT,
+    };
+
+    let result = rightclaw::agent::destroy_agent(home, &options).await?;
+
+    // Print summary
+    println!();
+    println!("Destroyed agent '{agent_name}':");
+    if result.agent_stopped {
+        println!("  ✓ Stopped process");
+    }
+    if let Some(ref path) = result.backup_path {
+        println!("  ✓ Backup saved to {}", path.display());
+    }
+    if result.sandbox_deleted {
+        println!("  ✓ Deleted sandbox");
+    }
+    if result.dir_removed {
+        println!("  ✓ Removed agent directory");
+    }
+    if result.pc_reloaded {
+        println!("  ✓ Reloaded process-compose");
+    }
+
+    Ok(())
+}
+
+fn dir_size(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0;
+    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    Ok(total)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> miette::Result<()> {
