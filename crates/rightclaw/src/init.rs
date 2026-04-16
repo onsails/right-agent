@@ -266,124 +266,117 @@ pub fn validate_telegram_token(token: &str) -> miette::Result<()> {
     Ok(())
 }
 
-/// Prompt the user for a Telegram bot token interactively.
-///
-/// Returns `Some(token)` if a valid token was entered, `None` if the user
-/// pressed Enter to skip.
-pub fn prompt_telegram_token() -> miette::Result<Option<String>> {
-    use std::io::{self, Write};
-    print!("Set up Telegram channel? (paste bot token or press Enter to skip): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
-    let token = input.trim();
-    if token.is_empty() {
-        return Ok(None);
-    }
-    validate_telegram_token(token)?;
-    Ok(Some(token.to_string()))
-}
-
-/// Prompt the user for sandbox mode choice interactively.
-///
-/// Returns the chosen `SandboxMode`. Defaults to `Openshell` on empty input.
-pub fn prompt_sandbox_mode() -> miette::Result<crate::agent::types::SandboxMode> {
-    use std::io::{self, Write};
-    println!("Sandbox mode:");
-    println!("  1. OpenShell — run in isolated container (recommended)");
-    println!("  2. None — run directly on host (for computer-use, Chrome, etc.)");
-    print!("Choose [1/2] (default: 1): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
-    match input.trim() {
-        "" | "1" => Ok(crate::agent::types::SandboxMode::Openshell),
-        "2" => Ok(crate::agent::types::SandboxMode::None),
-        other => Err(miette::miette!("Invalid choice: '{other}'. Expected 1 or 2.")),
+/// Helper: convert inquire error. Returns `Ok(None)` on Esc (back), propagates real errors.
+fn inquire_back<T>(result: Result<T, inquire::InquireError>) -> miette::Result<Option<T>> {
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => Ok(None),
+        Err(e) => Err(miette::miette!("prompt failed: {e:#}")),
     }
 }
 
-/// Prompt the user for network policy choice interactively.
-///
-/// Returns the chosen `NetworkPolicy`. Defaults to `Permissive` on empty input.
-pub fn prompt_network_policy() -> miette::Result<NetworkPolicy> {
-    use std::io::{self, Write};
-    println!("Network policy for sandbox:");
-    println!("  1. Permissive — all HTTPS domains allowed (recommended)");
-    println!("  2. Restrictive — Anthropic/Claude domains only");
-    print!("Choose [1/2] (default: 1): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
-    match input.trim() {
-        "" | "1" => Ok(NetworkPolicy::Permissive),
-        "2" => Ok(NetworkPolicy::Restrictive),
-        other => Err(miette::miette!("Invalid choice: '{other}'. Expected 1 or 2.")),
+/// Prompt for sandbox mode. Returns `None` on Esc.
+pub fn prompt_sandbox_mode() -> miette::Result<Option<SandboxMode>> {
+    let options = vec![
+        "OpenShell — run in isolated container (recommended)",
+        "None — run directly on host (for computer-use, Chrome, etc.)",
+    ];
+    let result = inquire::Select::new("Sandbox mode:", options)
+        .with_starting_cursor(0)
+        .prompt();
+    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    Ok(Some(if choice.starts_with("OpenShell") {
+        SandboxMode::Openshell
+    } else {
+        SandboxMode::None
+    }))
+}
+
+/// Prompt for network policy. Returns `None` on Esc.
+pub fn prompt_network_policy() -> miette::Result<Option<NetworkPolicy>> {
+    let options = vec![
+        "Permissive — all HTTPS domains allowed (recommended)",
+        "Restrictive — Anthropic/Claude domains only",
+    ];
+    let result = inquire::Select::new("Network policy for sandbox:", options)
+        .with_starting_cursor(0)
+        .prompt();
+    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    Ok(Some(if choice.starts_with("Permissive") {
+        NetworkPolicy::Permissive
+    } else {
+        NetworkPolicy::Restrictive
+    }))
+}
+
+/// Prompt for memory provider. Returns `None` on Esc.
+pub fn prompt_memory_provider() -> miette::Result<Option<MemoryProvider>> {
+    let options = vec![
+        "Hindsight — Hindsight Cloud API (recommended)",
+        "File — agent manages MEMORY.md",
+    ];
+    let result = inquire::Select::new("Memory provider:", options)
+        .with_starting_cursor(0)
+        .prompt();
+    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    Ok(Some(if choice.starts_with("Hindsight") {
+        MemoryProvider::Hindsight
+    } else {
+        MemoryProvider::File
+    }))
+}
+
+/// Prompt for Hindsight API key. Returns `Ok(None)` on Esc (back).
+/// Empty input means "use HINDSIGHT_API_KEY env var at runtime".
+pub fn prompt_hindsight_api_key() -> miette::Result<Option<Option<String>>> {
+    let result = inquire::Text::new("Hindsight API key (Enter to use HINDSIGHT_API_KEY env var):")
+        .prompt();
+    let Some(input) = inquire_back(result)? else { return Ok(None) };
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(Some(None))
+    } else {
+        Ok(Some(Some(trimmed.to_string())))
     }
 }
 
-/// Prompt the user for memory provider choice interactively.
-///
-/// Returns the chosen `MemoryProvider`. Defaults to `File` on empty input.
-pub fn prompt_memory_provider() -> miette::Result<crate::agent::types::MemoryProvider> {
-    use std::io::{self, Write};
-    println!("Memory provider:");
-    println!("  1. File — agent manages MEMORY.md (default)");
-    println!("  2. Hindsight — Hindsight Cloud API");
-    print!("Choose [1/2] (default: 1): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
-    match input.trim() {
-        "" | "1" => Ok(crate::agent::types::MemoryProvider::File),
-        "2" => Ok(crate::agent::types::MemoryProvider::Hindsight),
-        other => Err(miette::miette!("Invalid choice: '{other}'. Expected 1 or 2.")),
+/// Prompt for Hindsight bank ID. Returns `Ok(None)` on Esc (back).
+/// Empty input means "use agent name as default".
+pub fn prompt_hindsight_bank_id(agent_name: &str) -> miette::Result<Option<Option<String>>> {
+    let result = inquire::Text::new(&format!("Hindsight bank ID (default: {agent_name}):"))
+        .prompt();
+    let Some(input) = inquire_back(result)? else { return Ok(None) };
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        Ok(Some(None))
+    } else {
+        Ok(Some(Some(trimmed.to_string())))
     }
 }
 
-/// Prompt the user for Hindsight API key.
+/// Run the memory configuration wizard with Esc-to-go-back support.
 ///
-/// Returns `Some(key)` if a key was entered, `None` if skipped.
-/// The key can also be set via `HINDSIGHT_API_KEY` env var at runtime.
-pub fn prompt_hindsight_api_key() -> miette::Result<Option<String>> {
-    use std::io::{self, Write};
-    print!("Hindsight API key (press Enter to use HINDSIGHT_API_KEY env var): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
-    let key = input.trim();
-    if key.is_empty() {
-        return Ok(None);
+/// Returns `None` on Esc from the provider selection (caller should go back).
+pub fn prompt_memory_config(
+    agent_name: &str,
+) -> miette::Result<Option<(MemoryProvider, Option<String>, Option<String>)>> {
+    loop {
+        let Some(provider) = prompt_memory_provider()? else {
+            return Ok(None);
+        };
+        if !matches!(provider, MemoryProvider::Hindsight) {
+            return Ok(Some((provider, None, None)));
+        }
+        // Hindsight: prompt for API key, Esc goes back to provider selection.
+        let Some(api_key) = prompt_hindsight_api_key()? else {
+            continue;
+        };
+        // Prompt for bank ID, Esc goes back to API key? No — back to provider.
+        let Some(bank_id) = prompt_hindsight_bank_id(agent_name)? else {
+            continue;
+        };
+        return Ok(Some((provider, api_key, bank_id)));
     }
-    Ok(Some(key.to_string()))
-}
-
-/// Prompt the user for Hindsight bank ID.
-///
-/// Returns `Some(bank_id)` if entered, `None` to use agent name as default.
-pub fn prompt_hindsight_bank_id(agent_name: &str) -> miette::Result<Option<String>> {
-    use std::io::{self, Write};
-    print!("Hindsight bank ID (default: {agent_name}): ");
-    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
-    let bank = input.trim();
-    if bank.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(bank.to_string()))
 }
 
 #[cfg(test)]

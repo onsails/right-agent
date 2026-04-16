@@ -26,7 +26,7 @@ fn default_show_thinking() -> bool {
 }
 
 /// Network access policy for sandbox.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPolicy {
     /// Only allow Anthropic/Claude domains.
@@ -60,7 +60,7 @@ impl std::str::FromStr for NetworkPolicy {
 }
 
 /// Sandbox execution mode for an agent.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxMode {
     /// Run inside OpenShell container (default — secure).
