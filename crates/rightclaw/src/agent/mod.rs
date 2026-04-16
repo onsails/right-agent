@@ -1,3 +1,4 @@
+pub mod allowlist;
 pub mod destroy;
 pub mod discovery;
 pub mod types;
