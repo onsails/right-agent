@@ -27,9 +27,6 @@ pub fn is_bot_addressed(msg: &Message, identity: &BotIdentity) -> Option<Address
     match &msg.chat.kind {
         ChatKind::Private(_) => Some(AddressKind::DirectMessage),
         _ => {
-            let text_opt = msg.text().or(msg.caption()).unwrap_or("");
-            let entities_opt = msg.entities().or(msg.caption_entities());
-
             // 1) reply to bot's message
             if let Some(reply) = msg.reply_to_message()
                 && let Some(from) = reply.from.as_ref()
@@ -38,17 +35,21 @@ pub fn is_bot_addressed(msg: &Message, identity: &BotIdentity) -> Option<Address
                 return Some(AddressKind::GroupReplyToBot);
             }
 
-            if let Some(entities) = entities_opt {
+            // 2) parse entities with correct UTF-8 offsets (teloxide converts
+            //    from UTF-16 code units). Use text entities first, fall back
+            //    to caption entities.
+            let entities = msg.parse_entities().or_else(|| msg.parse_caption_entities());
+            if let Some(entities) = entities {
                 for e in entities {
-                    match &e.kind {
-                        MessageEntityKind::TextMention { user } if user.id.0 == identity.user_id => {
+                    match e.kind() {
+                        MessageEntityKind::TextMention { user }
+                            if user.id.0 == identity.user_id =>
+                        {
                             return Some(AddressKind::GroupMentionEntity);
                         }
                         MessageEntityKind::Mention => {
-                            let start = e.offset;
-                            let slice: String = text_opt.chars().skip(start).take(e.length).collect();
                             // Slice is e.g. "@botname"; compare case-insensitively.
-                            if slice
+                            if e.text()
                                 .strip_prefix('@')
                                 .map(|u| u.eq_ignore_ascii_case(&identity.username))
                                 .unwrap_or(false)
@@ -57,7 +58,7 @@ pub fn is_bot_addressed(msg: &Message, identity: &BotIdentity) -> Option<Address
                             }
                         }
                         MessageEntityKind::BotCommand => {
-                            let slice: String = text_opt.chars().skip(e.offset).take(e.length).collect();
+                            let slice = e.text();
                             // Accept /cmd (no suffix — only one bot in chat or we're the default)
                             // or /cmd@botname (explicit).
                             if let Some((_, maybe_user)) = slice.split_once('@') {
@@ -78,8 +79,11 @@ pub fn is_bot_addressed(msg: &Message, identity: &BotIdentity) -> Option<Address
 }
 
 /// Strip `@botname` mentions from `text` for prompt cleanup.
+///
+/// Preserves newlines and internal whitespace. Only collapses horizontal
+/// whitespace immediately adjacent to the stripped mention (to avoid
+/// double-spaces), and trims leading/trailing whitespace from the result.
 pub fn strip_bot_mentions(text: &str, username: &str) -> String {
-    let lower_user = username.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
     let mut it = text.char_indices().peekable();
     while let Some((i, c)) = it.next() {
@@ -91,8 +95,24 @@ pub fn strip_bot_mentions(text: &str, username: &str) -> String {
                 .map(|(idx, _)| idx)
                 .unwrap_or(rest.len());
             let candidate = &rest[..end];
-            if candidate.eq_ignore_ascii_case(&lower_user) && !candidate.is_empty() {
+            if !candidate.is_empty() && candidate.eq_ignore_ascii_case(username) {
+                // Advance iterator past the username chars.
                 for _ in 0..candidate.chars().count() {
+                    it.next();
+                }
+                // If the char before the mention (last in `out`) is a horizontal
+                // whitespace (space or tab) AND the next char is also horizontal
+                // whitespace, drop one trailing horizontal whitespace to avoid
+                // a double gap. Never touch newlines.
+                let prev_is_hspace = out
+                    .chars()
+                    .next_back()
+                    .map(|c| c == ' ' || c == '\t')
+                    .unwrap_or(true); // treat start-of-string as "space-like"
+                if prev_is_hspace
+                    && let Some(&(_, next_c)) = it.peek()
+                    && (next_c == ' ' || next_c == '\t')
+                {
                     it.next();
                 }
                 continue;
@@ -100,16 +120,18 @@ pub fn strip_bot_mentions(text: &str, username: &str) -> String {
         }
         out.push(c);
     }
-    let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
-    collapsed.trim().to_string()
+    out.trim().to_string()
 }
 
 /// Parse a command string `/cmd[@botname] [args...]`.
 /// Returns `(cmd, args_rest, addressed)` — `addressed` is `false` only when the
 /// `@who` suffix names a *different* bot.
 pub fn parse_bot_command<'a>(text: &'a str, username: &str) -> Option<(&'a str, &'a str, bool)> {
-    let stripped = text.strip_prefix('/')?;
+    let stripped = text.trim_start().strip_prefix('/')?;
     let (head, rest) = stripped.split_once(char::is_whitespace).unwrap_or((stripped, ""));
+    if head.is_empty() {
+        return None;
+    }
     let (cmd, addressed) = match head.split_once('@') {
         Some((cmd, who)) => (cmd, who.eq_ignore_ascii_case(username)),
         None => (head, true),
@@ -150,6 +172,15 @@ mod tests {
     }
 
     #[test]
+    fn strip_preserves_newlines() {
+        let input = "@rightclaw_bot hello\nline two\nline three";
+        assert_eq!(
+            strip_bot_mentions(input, "rightclaw_bot"),
+            "hello\nline two\nline three"
+        );
+    }
+
+    #[test]
     fn parse_command_no_suffix() {
         let (cmd, args, addressed) = parse_bot_command("/allow 42", "rightclaw_bot").unwrap();
         assert_eq!(cmd, "allow");
@@ -177,5 +208,41 @@ mod tests {
         let (cmd, args, _) = parse_bot_command("/allowed", "rightclaw_bot").unwrap();
         assert_eq!(cmd, "allowed");
         assert_eq!(args, "");
+    }
+
+    #[test]
+    fn parse_command_rejects_bare_slash_and_leading_ws() {
+        assert!(parse_bot_command("/", "rightclaw_bot").is_none());
+        let (cmd, args, _) = parse_bot_command("  /allow 42", "rightclaw_bot").unwrap();
+        assert_eq!(cmd, "allow");
+        assert_eq!(args, "42");
+    }
+
+    #[test]
+    fn dm_returns_direct_message() {
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private", "first_name": "U"},
+            "from": {"id": 1, "is_bot": false, "first_name": "U"},
+            "text": "hi"
+        }))
+        .unwrap();
+        let identity = BotIdentity { username: "rightclaw_bot".into(), user_id: 999 };
+        assert_eq!(is_bot_addressed(&msg, &identity), Some(AddressKind::DirectMessage));
+    }
+
+    #[test]
+    fn group_non_mention_returns_none() {
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": -1001, "type": "group", "title": "g"},
+            "from": {"id": 1, "is_bot": false, "first_name": "U"},
+            "text": "just chatting"
+        }))
+        .unwrap();
+        let identity = BotIdentity { username: "rightclaw_bot".into(), user_id: 999 };
+        assert_eq!(is_bot_addressed(&msg, &identity), None);
     }
 }
