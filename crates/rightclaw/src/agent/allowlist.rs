@@ -496,3 +496,135 @@ mod state_tests {
         assert!(r.is_user_trusted(7));
     }
 }
+
+use std::path::{Path, PathBuf};
+
+/// Filename inside `agent_dir`.
+pub const ALLOWLIST_FILENAME: &str = "allowlist.yaml";
+/// Lockfile sibling. Held during read-modify-write.
+pub const ALLOWLIST_LOCK_FILENAME: &str = "allowlist.yaml.lock";
+
+pub fn allowlist_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join(ALLOWLIST_FILENAME)
+}
+
+pub fn lock_path(agent_dir: &Path) -> PathBuf {
+    agent_dir.join(ALLOWLIST_LOCK_FILENAME)
+}
+
+/// Read `allowlist.yaml` if present. Returns `Ok(None)` when the file doesn't exist
+/// (caller decides whether to migrate or create empty). Returns parse errors verbatim.
+pub fn read_file(agent_dir: &Path) -> Result<Option<AllowlistFile>, String> {
+    let path = allowlist_path(agent_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_yaml(&text).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("read {}: {e:#}", path.display())),
+    }
+}
+
+/// Acquire an exclusive file lock on `agent_dir/allowlist.yaml.lock`, then run `f`,
+/// which may read, mutate, and call `write_file_inner` (below). Lock is released on drop.
+///
+/// The lockfile is created if missing. Using `fs4::fs_std::FileExt::lock_exclusive`
+/// (advisory flock on Unix, LockFileEx on Windows).
+pub fn with_lock<R>(
+    agent_dir: &Path,
+    f: impl FnOnce(&Path) -> Result<R, String>,
+) -> Result<R, String> {
+    use fs4::fs_std::FileExt;
+    let lock_p = lock_path(agent_dir);
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_p)
+        .map_err(|e| format!("open lockfile {}: {e:#}", lock_p.display()))?;
+    lock_file
+        .lock_exclusive()
+        .map_err(|e| format!("lock {}: {e:#}", lock_p.display()))?;
+    let result = f(agent_dir);
+    let _ = FileExt::unlock(&lock_file);
+    result
+}
+
+/// Atomic write: serialize `file`, write to `allowlist.yaml.tmp`, fsync, rename.
+/// Caller must already hold the lock (via `with_lock`).
+pub fn write_file_inner(agent_dir: &Path, file: &AllowlistFile) -> Result<(), String> {
+    use std::io::Write;
+    let text = serialize_yaml(file);
+    let target = allowlist_path(agent_dir);
+    let tmp = target.with_extension("yaml.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)
+            .map_err(|e| format!("create {}: {e:#}", tmp.display()))?;
+        f.write_all(text.as_bytes())
+            .map_err(|e| format!("write {}: {e:#}", tmp.display()))?;
+        f.sync_all()
+            .map_err(|e| format!("fsync {}: {e:#}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, &target)
+        .map_err(|e| format!("rename {} -> {}: {e:#}", tmp.display(), target.display()))?;
+    Ok(())
+}
+
+/// Convenience: lock + write in one call.
+pub fn write_file(agent_dir: &Path, file: &AllowlistFile) -> Result<(), String> {
+    with_lock(agent_dir, |dir| write_file_inner(dir, file))
+}
+
+#[cfg(test)]
+mod io_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn t() -> DateTime<Utc> {
+        "2026-04-16T12:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn read_nonexistent_returns_none() {
+        let dir = TempDir::new().unwrap();
+        assert!(read_file(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn write_then_read_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let file = AllowlistFile {
+            version: 1,
+            users: vec![AllowedUser {
+                id: 1,
+                label: Some("u".into()),
+                added_by: None,
+                added_at: t(),
+            }],
+            groups: vec![AllowedGroup {
+                id: -1,
+                label: None,
+                opened_by: Some(1),
+                opened_at: t(),
+            }],
+        };
+        write_file(dir.path(), &file).unwrap();
+        let read = read_file(dir.path()).unwrap().unwrap();
+        assert_eq!(read, file);
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_tmp_file() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), &AllowlistFile::default()).unwrap();
+        let tmp = dir.path().join("allowlist.yaml.tmp");
+        assert!(!tmp.exists(), "tmp file must be renamed away");
+        assert!(dir.path().join("allowlist.yaml").exists());
+    }
+
+    #[test]
+    fn with_lock_creates_lockfile_and_returns_result() {
+        let dir = TempDir::new().unwrap();
+        let r = with_lock(dir.path(), |_| Ok::<_, String>(42)).unwrap();
+        assert_eq!(r, 42);
+        assert!(dir.path().join("allowlist.yaml.lock").exists());
+    }
+}

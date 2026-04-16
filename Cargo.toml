@@ -60,6 +60,7 @@ owo-colors = { version = "4.2", features = ["supports-colors"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 url = "2.5"
 anyhow = "1.0"
+fs4 = "0.13"
 
 [profile.dev]
 panic = "abort"
