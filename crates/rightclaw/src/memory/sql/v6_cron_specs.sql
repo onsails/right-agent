@@ -1,5 +1,5 @@
 -- V6: Cron spec storage in DB (replaces crons/*.yaml files).
-CREATE TABLE cron_specs (
+CREATE TABLE IF NOT EXISTS cron_specs (
     job_name       TEXT PRIMARY KEY,
     schedule       TEXT NOT NULL,
     prompt         TEXT NOT NULL,

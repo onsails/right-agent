@@ -4,7 +4,7 @@
 
 DROP TABLE IF EXISTS telegram_sessions;
 
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id         INTEGER NOT NULL,
     thread_id       INTEGER NOT NULL DEFAULT 0,
@@ -15,5 +15,5 @@ CREATE TABLE sessions (
     last_used_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
 );
 
-CREATE UNIQUE INDEX idx_sessions_active
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_active
     ON sessions(chat_id, thread_id) WHERE is_active = 1;
