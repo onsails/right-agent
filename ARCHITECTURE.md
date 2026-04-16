@@ -384,11 +384,11 @@ Auto-recall before each `claude -p`: query truncated to 800 chars, tags
 `["chat:<chat_id>"]` with `tags_match: "any"` (returns per-chat + global untagged
 memories). Prefetch uses same parameters.
 
-**Cron jobs skip memory:** Cron and delivery sessions do not perform recall —
-cron prompts are static system instructions, not user queries, so recall results
-would be irrelevant and corrupt user memory representations (same approach as
-hermes-agent `skip_memory=True`). Auto-retain after cron completion is still
-active so cron results can be remembered (plain text summary, no document_id/tags).
+**Cron jobs skip memory:** Cron and delivery sessions perform no auto-recall
+or auto-retain. Cron prompts are static instructions — recall results would be
+irrelevant and corrupt user memory representations (same approach as hermes-agent
+`skip_memory=True`). Crons can call `memory_recall` and `memory_retain` MCP tools
+explicitly when needed.
 
 Old tools (`store_record`, `query_records`, `search_records`, `delete_record`)
 are removed. Old SQLite tables (`memories`, `memories_fts`, `memory_events`)
