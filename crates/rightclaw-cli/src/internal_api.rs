@@ -3,6 +3,7 @@
 //! Exposes endpoints for MCP server management (add/remove/set-token) that are
 //! accessible only to the Telegram bot process, not to agents.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
@@ -10,7 +11,7 @@ use rightclaw::mcp::credentials::{self, CredentialError};
 use rightclaw::mcp::proxy::{AuthMethod, ProxyBackend};
 use serde::{Deserialize, Serialize};
 
-use crate::aggregator::{ReconnectManagers, RefreshSenders, ToolDispatcher};
+use crate::aggregator::{AgentInfo, AgentTokenMap, ReconnectManagers, RefreshSenders, ToolDispatcher};
 use rightclaw::mcp::refresh::{OAuthServerState, RefreshMessage};
 
 // ---------------------------------------------------------------------------
@@ -117,20 +118,34 @@ pub(crate) struct InternalState {
     dispatcher: Arc<ToolDispatcher>,
     refresh_senders: RefreshSenders,
     reconnect_managers: ReconnectManagers,
+    token_map: AgentTokenMap,
+    token_map_path: PathBuf,
+    agents_dir: PathBuf,
 }
 
 pub(crate) fn internal_router(
     dispatcher: Arc<ToolDispatcher>,
     refresh_senders: RefreshSenders,
     reconnect_managers: ReconnectManagers,
+    token_map: AgentTokenMap,
+    token_map_path: PathBuf,
+    agents_dir: PathBuf,
 ) -> Router {
-    let state = InternalState { dispatcher, refresh_senders, reconnect_managers };
+    let state = InternalState {
+        dispatcher,
+        refresh_senders,
+        reconnect_managers,
+        token_map,
+        token_map_path,
+        agents_dir,
+    };
     Router::new()
         .route("/mcp-add", post(handle_mcp_add))
         .route("/mcp-remove", post(handle_mcp_remove))
         .route("/set-token", post(handle_set_token))
         .route("/mcp-list", post(handle_mcp_list))
         .route("/mcp-instructions", post(handle_mcp_instructions))
+        .route("/reload", post(handle_reload))
         .with_state(state)
 }
 
@@ -571,6 +586,79 @@ async fn handle_mcp_instructions(
     .into_response()
 }
 
+async fn handle_reload(
+    State(state): State<InternalState>,
+) -> axum::response::Response {
+    // 1. Read token map from disk
+    let content = match std::fs::read_to_string(&state.token_map_path) {
+        Ok(c) => c,
+        Err(e) => return internal_error(format!("read token map: {e:#}")).into_response(),
+    };
+    let disk_entries: std::collections::HashMap<String, String> = match serde_json::from_str(&content) {
+        Ok(m) => m,
+        Err(e) => return internal_error(format!("parse token map: {e:#}")).into_response(),
+    };
+
+    // 2. Find new agents (in disk but not in dispatcher)
+    let mut added = Vec::new();
+    for (agent_name, token) in &disk_entries {
+        if state.dispatcher.agents.contains_key(agent_name) {
+            continue;
+        }
+
+        let agent_dir = state.agents_dir.join(agent_name);
+        if !agent_dir.exists() {
+            tracing::warn!(agent = agent_name.as_str(), "reload: agent dir missing, skipping");
+            continue;
+        }
+
+        // Determine mTLS dir for sandbox agents
+        let agent_config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)
+            .ok()
+            .flatten();
+        let mtls_dir = match &agent_config {
+            Some(config)
+                if *config.sandbox_mode() == rightclaw::agent::SandboxMode::Openshell =>
+            {
+                match rightclaw::openshell::preflight_check() {
+                    rightclaw::openshell::OpenShellStatus::Ready(dir) => Some(dir),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        // Create backend registry
+        let right = crate::right_backend::RightBackend::new(state.agents_dir.clone(), mtls_dir);
+        let registry = crate::aggregator::BackendRegistry {
+            right,
+            proxies: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            agent_dir: agent_dir.clone(),
+            hindsight: None,
+        };
+        state.dispatcher.agents.insert(agent_name.clone(), registry);
+
+        // Add to in-memory token map
+        {
+            let mut map = state.token_map.write().await;
+            map.insert(token.clone(), AgentInfo {
+                name: agent_name.clone(),
+                dir: agent_dir,
+            });
+        }
+
+        added.push(agent_name.clone());
+        tracing::info!(agent = agent_name.as_str(), "reload: registered new agent");
+    }
+
+    let total = state.dispatcher.agents.len();
+    (
+        StatusCode::OK,
+        Json(rightclaw::mcp::internal_client::ReloadResponse { added, total }),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,7 +694,32 @@ mod tests {
         let dispatcher = make_test_dispatcher(tmp);
         let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
         let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
-        internal_router(dispatcher, refresh_senders, reconnect_managers)
+
+        let token_map_path = tmp.join("agent-tokens.json");
+        if !token_map_path.exists() {
+            std::fs::write(
+                &token_map_path,
+                serde_json::json!({"test-agent": "tok-test"}).to_string(),
+            )
+            .unwrap();
+        }
+        let token_map: crate::aggregator::AgentTokenMap = {
+            let mut map = std::collections::HashMap::new();
+            map.insert("tok-test".into(), crate::aggregator::AgentInfo {
+                name: "test-agent".into(),
+                dir: tmp.join("agents/test-agent"),
+            });
+            std::sync::Arc::new(tokio::sync::RwLock::new(map))
+        };
+
+        internal_router(
+            dispatcher,
+            refresh_senders,
+            reconnect_managers,
+            token_map,
+            token_map_path,
+            tmp.join("agents"),
+        )
     }
 
     async fn send_json(
@@ -926,5 +1039,100 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reload_no_new_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let token_map_path = tmp.path().join("agent-tokens.json");
+        std::fs::write(
+            &token_map_path,
+            serde_json::json!({"test-agent": "tok-test"}).to_string(),
+        )
+        .unwrap();
+
+        let dispatcher = make_test_dispatcher(tmp.path());
+        let token_map: crate::aggregator::AgentTokenMap = {
+            let mut map = std::collections::HashMap::new();
+            map.insert("tok-test".into(), crate::aggregator::AgentInfo {
+                name: "test-agent".into(),
+                dir: tmp.path().join("agents/test-agent"),
+            });
+            std::sync::Arc::new(tokio::sync::RwLock::new(map))
+        };
+        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
+        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+
+        let app = internal_router(
+            dispatcher,
+            refresh_senders,
+            reconnect_managers,
+            token_map,
+            token_map_path,
+            tmp.path().join("agents"),
+        );
+
+        let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["added"].as_array().unwrap().is_empty());
+        assert_eq!(body["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn reload_registers_new_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+
+        let agent1_dir = agents_dir.join("test-agent");
+        std::fs::create_dir_all(&agent1_dir).unwrap();
+        rightclaw::memory::open_db(&agent1_dir, true).unwrap();
+
+        let agent2_dir = agents_dir.join("new-agent");
+        std::fs::create_dir_all(&agent2_dir).unwrap();
+        rightclaw::memory::open_db(&agent2_dir, true).unwrap();
+
+        let token_map_path = tmp.path().join("agent-tokens.json");
+        std::fs::write(
+            &token_map_path,
+            serde_json::json!({"test-agent": "tok-test", "new-agent": "tok-new"}).to_string(),
+        )
+        .unwrap();
+
+        let dispatcher = make_test_dispatcher(tmp.path());
+
+        let token_map: crate::aggregator::AgentTokenMap = {
+            let mut map = std::collections::HashMap::new();
+            map.insert("tok-test".into(), crate::aggregator::AgentInfo {
+                name: "test-agent".into(),
+                dir: agent1_dir,
+            });
+            std::sync::Arc::new(tokio::sync::RwLock::new(map))
+        };
+
+        let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
+        let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
+
+        let app = internal_router(
+            dispatcher.clone(),
+            refresh_senders,
+            reconnect_managers,
+            token_map.clone(),
+            token_map_path,
+            agents_dir,
+        );
+
+        let (status, body) = send_json(app, "/reload", serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let added = body["added"].as_array().unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0], "new-agent");
+        assert_eq!(body["total"], 2);
+
+        assert!(dispatcher.agents.contains_key("new-agent"));
+
+        let map = token_map.read().await;
+        assert!(map.contains_key("tok-new"));
     }
 }
