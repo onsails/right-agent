@@ -784,58 +784,120 @@ fn cmd_init(
 ) -> miette::Result<()> {
     let interactive = !yes;
 
-    // Telegram token: CLI flag > interactive prompt > skip.
-    let token = match telegram_token {
-        Some(t) => {
-            rightclaw::init::validate_telegram_token(t)?;
-            Some(t.to_string())
-        }
-        None if !interactive => None,
-        None => crate::wizard::telegram_setup(None, true)?,
-    };
+    // Non-interactive: use CLI flags or defaults.
+    // Interactive: wizard with Esc-to-go-back between steps.
+    let (sandbox, network_policy_val, token, chat_ids, memory_provider, memory_api_key, memory_bank_id);
 
-    // Chat IDs: CLI flag > interactive prompt (only when token is set) > empty.
-    let chat_ids: Vec<i64> = if !telegram_allowed_chat_ids.is_empty() {
-        telegram_allowed_chat_ids.to_vec()
-    } else if interactive && token.is_some() {
-        crate::wizard::chat_ids_setup()?
+    if !interactive {
+        sandbox = sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
+        network_policy_val = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+        token = telegram_token.map(|t| {
+            rightclaw::init::validate_telegram_token(t).unwrap();
+            t.to_string()
+        });
+        chat_ids = telegram_allowed_chat_ids.to_vec();
+        memory_provider = rightclaw::agent::types::MemoryProvider::Hindsight;
+        memory_api_key = None;
+        memory_bank_id = None;
     } else {
-        vec![]
-    };
+        // Wizard state machine: Esc goes back to previous step.
+        #[derive(Clone, Copy)]
+        enum Step { Sandbox, Network, Telegram, ChatIds, Memory, Done }
 
-    // Network policy: CLI flag > interactive prompt > permissive (default for --yes).
-    let network_policy = match network_policy {
-        Some(p) => p,
-        None if !interactive => rightclaw::agent::types::NetworkPolicy::Permissive,
-        None => rightclaw::init::prompt_network_policy()?,
-    };
+        let mut step = if sandbox_mode.is_some() { Step::Network } else { Step::Sandbox };
+        let mut w_sandbox = sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
+        let mut w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+        let mut w_token: Option<String> = telegram_token.map(|t| t.to_string());
+        let mut w_chat_ids: Vec<i64> = telegram_allowed_chat_ids.to_vec();
+        let mut w_mem = (rightclaw::agent::types::MemoryProvider::Hindsight, None::<String>, None::<String>);
 
-    // Sandbox mode: CLI flag > interactive prompt > openshell (default for --yes).
-    let sandbox = match sandbox_mode {
-        Some(m) => m,
-        None if !interactive => rightclaw::agent::types::SandboxMode::Openshell,
-        None => rightclaw::init::prompt_sandbox_mode()?,
-    };
-
-    // Memory provider: interactive prompt > File (default for --yes).
-    let (memory_provider, memory_api_key, memory_bank_id) = if interactive {
-        let provider = rightclaw::init::prompt_memory_provider()?;
-        if matches!(provider, rightclaw::agent::types::MemoryProvider::Hindsight) {
-            let api_key = rightclaw::init::prompt_hindsight_api_key()?;
-            let bank_id = rightclaw::init::prompt_hindsight_bank_id("right")?;
-            (provider, api_key, bank_id)
-        } else {
-            (provider, None, None)
+        loop {
+            match step {
+                Step::Sandbox => {
+                    if let Some(m) = sandbox_mode {
+                        w_sandbox = m;
+                        step = Step::Network;
+                    } else if let Some(s) = rightclaw::init::prompt_sandbox_mode()? {
+                        w_sandbox = s;
+                        step = Step::Network;
+                    } else {
+                        // Esc on first step — abort.
+                        return Err(miette::miette!("Setup cancelled."));
+                    }
+                }
+                Step::Network => {
+                    if matches!(w_sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
+                        if let Some(p) = network_policy {
+                            w_network = p;
+                            step = Step::Telegram;
+                        } else if let Some(p) = rightclaw::init::prompt_network_policy()? {
+                            w_network = p;
+                            step = Step::Telegram;
+                        } else {
+                            step = Step::Sandbox; // back
+                        }
+                    } else {
+                        w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+                        step = Step::Telegram;
+                    }
+                }
+                Step::Telegram => {
+                    if telegram_token.is_some() {
+                        w_token = telegram_token.map(|t| t.to_string());
+                        step = if w_token.is_some() { Step::ChatIds } else { Step::Memory };
+                    } else {
+                        match crate::wizard::telegram_setup(None, true) {
+                            Ok(t) => {
+                                w_token = t;
+                                step = if w_token.is_some() { Step::ChatIds } else { Step::Memory };
+                            }
+                            Err(_) => { step = Step::Network; } // back
+                        }
+                    }
+                }
+                Step::ChatIds => {
+                    if !telegram_allowed_chat_ids.is_empty() {
+                        w_chat_ids = telegram_allowed_chat_ids.to_vec();
+                        step = Step::Memory;
+                    } else {
+                        match crate::wizard::chat_ids_setup() {
+                            Ok(ids) => {
+                                w_chat_ids = ids;
+                                step = Step::Memory;
+                            }
+                            Err(_) => { step = Step::Telegram; } // back
+                        }
+                    }
+                }
+                Step::Memory => {
+                    match rightclaw::init::prompt_memory_config("right")? {
+                        Some((p, k, b)) => {
+                            w_mem = (p, k, b);
+                            step = Step::Done;
+                        }
+                        None => {
+                            step = if w_token.is_some() { Step::ChatIds } else { Step::Telegram };
+                        }
+                    }
+                }
+                Step::Done => break,
+            }
         }
-    } else {
-        (rightclaw::agent::types::MemoryProvider::File, None, None)
-    };
+
+        sandbox = w_sandbox;
+        network_policy_val = w_network;
+        token = w_token;
+        chat_ids = w_chat_ids;
+        memory_provider = w_mem.0;
+        memory_api_key = w_mem.1;
+        memory_bank_id = w_mem.2;
+    }
 
     rightclaw::init::init_rightclaw_home(
         home,
         token.as_deref(),
         &chat_ids,
-        &network_policy,
+        &network_policy_val,
         &sandbox,
         memory_provider,
         memory_api_key,
@@ -929,7 +991,7 @@ fn cmd_init(
     if !chat_ids.is_empty() {
         println!("Telegram chat ID allowlist configured.");
     }
-    println!("Network policy: {network_policy}");
+    println!("Network policy: {network_policy_val}");
 
     // Tunnel setup via wizard.
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
@@ -1102,62 +1164,100 @@ fn cmd_agent_init(
             }
         }
 
-        // Run wizard or use CLI flags.
-        let sandbox = match sandbox_mode {
-            Some(mode) => mode,
-            None if !interactive => rightclaw::agent::types::SandboxMode::Openshell,
-            None => rightclaw::init::prompt_sandbox_mode()?,
-        };
-
-        let network_policy =
-            if matches!(sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
-                match network_policy {
-                    Some(p) => p,
-                    None if !interactive => {
-                        rightclaw::agent::types::NetworkPolicy::Permissive
-                    }
-                    None => rightclaw::init::prompt_network_policy()?,
-                }
-            } else {
-                network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive)
-            };
-
-        let token = if interactive {
-            crate::wizard::telegram_setup(None, true)?
-        } else {
-            None
-        };
-
-        let chat_ids: Vec<i64> = if interactive && token.is_some() {
-            crate::wizard::chat_ids_setup()?
-        } else {
-            vec![]
-        };
-
-        // Memory provider: interactive prompt > File (default for --yes).
-        let (memory_provider, memory_api_key, memory_bank_id) = if interactive {
-            let provider = rightclaw::init::prompt_memory_provider()?;
-            if matches!(provider, rightclaw::agent::types::MemoryProvider::Hindsight) {
-                let api_key = rightclaw::init::prompt_hindsight_api_key()?;
-                let bank_id = rightclaw::init::prompt_hindsight_bank_id(name)?;
-                (provider, api_key, bank_id)
-            } else {
-                (provider, None, None)
+        // Run wizard or use CLI flags. Esc goes back to previous step.
+        if !interactive {
+            rightclaw::init::InitOverrides {
+                sandbox_mode: sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell),
+                network_policy: network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive),
+                telegram_token: None,
+                allowed_chat_ids: vec![],
+                model: None,
+                env: std::collections::HashMap::new(),
+                memory_provider: rightclaw::agent::types::MemoryProvider::Hindsight,
+                memory_api_key: None,
+                memory_bank_id: None,
             }
         } else {
-            (rightclaw::agent::types::MemoryProvider::File, None, None)
-        };
+            #[derive(Clone, Copy)]
+            enum Step { Sandbox, Network, Telegram, ChatIds, Memory, Done }
 
-        rightclaw::init::InitOverrides {
-            sandbox_mode: sandbox,
-            network_policy,
-            telegram_token: token,
-            allowed_chat_ids: chat_ids,
-            model: None,
-            env: std::collections::HashMap::new(),
-            memory_provider,
-            memory_api_key,
-            memory_bank_id,
+            let mut step = if sandbox_mode.is_some() { Step::Network } else { Step::Sandbox };
+            let mut w_sandbox = sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
+            let mut w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+            let mut w_token: Option<String> = None;
+            let mut w_chat_ids: Vec<i64> = vec![];
+            let mut w_mem = (rightclaw::agent::types::MemoryProvider::Hindsight, None::<String>, None::<String>);
+
+            loop {
+                match step {
+                    Step::Sandbox => {
+                        if let Some(s) = rightclaw::init::prompt_sandbox_mode()? {
+                            w_sandbox = s;
+                            step = Step::Network;
+                        } else {
+                            return Err(miette::miette!("Setup cancelled."));
+                        }
+                    }
+                    Step::Network => {
+                        if matches!(w_sandbox, rightclaw::agent::types::SandboxMode::Openshell) {
+                            if let Some(p) = network_policy {
+                                w_network = p;
+                                step = Step::Telegram;
+                            } else if let Some(p) = rightclaw::init::prompt_network_policy()? {
+                                w_network = p;
+                                step = Step::Telegram;
+                            } else {
+                                step = Step::Sandbox;
+                            }
+                        } else {
+                            w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+                            step = Step::Telegram;
+                        }
+                    }
+                    Step::Telegram => {
+                        match crate::wizard::telegram_setup(None, true) {
+                            Ok(t) => {
+                                w_token = t;
+                                step = if w_token.is_some() { Step::ChatIds } else { Step::Memory };
+                            }
+                            Err(_) => { step = Step::Network; }
+                        }
+                    }
+                    Step::ChatIds => {
+                        match crate::wizard::chat_ids_setup() {
+                            Ok(ids) => {
+                                w_chat_ids = ids;
+                                step = Step::Memory;
+                            }
+                            Err(_) => { step = Step::Telegram; }
+                        }
+                    }
+                    Step::Memory => {
+                        match rightclaw::init::prompt_memory_config(name)? {
+                            Some((p, k, b)) => {
+                                w_mem = (p, k, b);
+                                step = Step::Done;
+                            }
+                            None => {
+                                step = if w_token.is_some() { Step::ChatIds } else { Step::Telegram };
+                            }
+                        }
+                    }
+                    Step::Done => break,
+                }
+            }
+
+            rightclaw::init::InitOverrides {
+                sandbox_mode: w_sandbox,
+                network_policy: w_network,
+                telegram_token: w_token,
+                allowed_chat_ids: w_chat_ids,
+                model: None,
+                env: std::collections::HashMap::new(),
+                memory_provider: w_mem.0,
+                memory_api_key: w_mem.1,
+                memory_bank_id: w_mem.2,
+            }
         }
     };
 
