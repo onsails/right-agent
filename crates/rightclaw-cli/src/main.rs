@@ -817,7 +817,30 @@ fn cmd_init(
         None => rightclaw::init::prompt_sandbox_mode()?,
     };
 
-    rightclaw::init::init_rightclaw_home(home, token.as_deref(), &chat_ids, &network_policy, &sandbox)?;
+    // Memory provider: interactive prompt > File (default for --yes).
+    let (memory_provider, memory_api_key, memory_bank_id) = if interactive {
+        let provider = rightclaw::init::prompt_memory_provider()?;
+        if matches!(provider, rightclaw::agent::types::MemoryProvider::Hindsight) {
+            let api_key = rightclaw::init::prompt_hindsight_api_key()?;
+            let bank_id = rightclaw::init::prompt_hindsight_bank_id("right")?;
+            (provider, api_key, bank_id)
+        } else {
+            (provider, None, None)
+        }
+    } else {
+        (rightclaw::agent::types::MemoryProvider::File, None, None)
+    };
+
+    rightclaw::init::init_rightclaw_home(
+        home,
+        token.as_deref(),
+        &chat_ids,
+        &network_policy,
+        &sandbox,
+        memory_provider,
+        memory_api_key,
+        memory_bank_id,
+    )?;
 
     // Run codegen for the default "right" agent.
     // Per-agent codegen was moved to bot startup (59243d0) but init needs it
@@ -1111,6 +1134,20 @@ fn cmd_agent_init(
             vec![]
         };
 
+        // Memory provider: interactive prompt > File (default for --yes).
+        let (memory_provider, memory_api_key, memory_bank_id) = if interactive {
+            let provider = rightclaw::init::prompt_memory_provider()?;
+            if matches!(provider, rightclaw::agent::types::MemoryProvider::Hindsight) {
+                let api_key = rightclaw::init::prompt_hindsight_api_key()?;
+                let bank_id = rightclaw::init::prompt_hindsight_bank_id(name)?;
+                (provider, api_key, bank_id)
+            } else {
+                (provider, None, None)
+            }
+        } else {
+            (rightclaw::agent::types::MemoryProvider::File, None, None)
+        };
+
         rightclaw::init::InitOverrides {
             sandbox_mode: sandbox,
             network_policy,
@@ -1118,9 +1155,9 @@ fn cmd_agent_init(
             allowed_chat_ids: chat_ids,
             model: None,
             env: std::collections::HashMap::new(),
-            memory_provider: rightclaw::agent::types::MemoryProvider::File,
-            memory_api_key: None,
-            memory_bank_id: None,
+            memory_provider,
+            memory_api_key,
+            memory_bank_id,
         }
     };
 
@@ -1614,6 +1651,24 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
     rightclaw::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
     client.reload_configuration().await?;
+
+    // Notify aggregator to pick up new agents from updated token map
+    let socket_path = home.join("run/internal.sock");
+    let internal = rightclaw::mcp::internal_client::InternalClient::new(&socket_path);
+    match internal.reload().await {
+        Ok(resp) => {
+            if !resp.added.is_empty() {
+                println!(
+                    "Registered {} new agent(s) in aggregator: {}",
+                    resp.added.len(),
+                    resp.added.join(", "),
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("warning: failed to reload aggregator: {e:#}");
+        }
+    }
 
     let has_bot = all_agents.iter().any(|a| {
         a.config.as_ref().map(|c| c.telegram_token.is_some()).unwrap_or(false)
