@@ -190,6 +190,7 @@ pub async fn run_delivery_loop(
     internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
     resolved_sandbox: Option<String>,
+    upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
@@ -289,6 +290,7 @@ pub async fn run_delivery_loop(
             session_id,
             &internal_client,
             resolved_sandbox.as_deref(),
+            &upgrade_lock,
         )
         .await
         {
@@ -347,12 +349,16 @@ async fn deliver_through_session(
     session_id: Option<String>,
     internal_client: &rightclaw::mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
+    upgrade_lock: &tokio::sync::RwLock<()>,
 ) -> Result<(), String> {
     use std::process::Stdio;
 
     if notify_chat_ids.is_empty() {
         return Err("no notify_chat_ids configured".into());
     }
+
+    // Block while upgrade is running.
+    let _upgrade_guard = upgrade_lock.read().await;
 
     // Delivery always uses Haiku — cheap relay task.
     const DELIVERY_MODEL: &str = "claude-haiku-4-5-20251001";

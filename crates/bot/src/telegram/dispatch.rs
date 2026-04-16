@@ -74,6 +74,7 @@ pub async fn run_telegram(
     resolved_sandbox: Option<String>,
     hindsight_client: Option<std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
     prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
+    upgrade_lock: Arc<tokio::sync::RwLock<()>>,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
@@ -108,6 +109,7 @@ pub async fn run_telegram(
         resolved_sandbox,
         hindsight: hindsight_client,
         prefetch_cache,
+        upgrade_lock,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
 

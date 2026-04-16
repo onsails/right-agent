@@ -92,6 +92,8 @@ pub struct WorkerContext {
     pub hindsight: Option<std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
     /// Prefetch cache for auto-recall results (None when memory.provider=file).
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
+    /// RwLock gate — worker acquires read lock before invoke_cc to block during upgrades.
+    pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// Parsed output from CC structured JSON response (`result` field per D-03).
@@ -371,6 +373,9 @@ pub fn spawn_worker(
                     }
                 }
             });
+
+            // Block while upgrade is running (upgrade holds write lock).
+            let _upgrade_guard = ctx.upgrade_lock.read().await;
 
             // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).

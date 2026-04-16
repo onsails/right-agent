@@ -186,6 +186,7 @@ async fn execute_job(
     ssh_config_path: Option<&std::path::Path>,
     internal_client: &rightclaw::mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
+    upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     use std::process::Stdio;
 
@@ -195,6 +196,9 @@ async fn execute_job(
         tracing::info!(job = %job_name, "skipping — previous run still active (lock fresh)");
         return;
     }
+
+    // Block while upgrade is running (upgrade holds write lock).
+    let _upgrade_guard = upgrade_lock.read().await;
 
     // Write lock file
     let lock_dir = agent_dir.join("crons").join(".locks");
@@ -645,6 +649,7 @@ pub async fn run_cron_task(
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
     resolved_sandbox: Option<String>,
+    upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -663,12 +668,12 @@ pub async fn run_cron_task(
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox);
+    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock);
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -762,6 +767,7 @@ fn reconcile_jobs(
     internal_client: &Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
+    upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -797,8 +803,9 @@ fn reconcile_jobs(
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(internal_client);
         let rs = resolved_sandbox.clone();
+        let ul = Arc::clone(upgrade_lock);
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), ul).await;
             delete_one_shot_spec(&ad, &jn);
         });
         if let Ok(mut guard) = execute_handles.lock() {
@@ -840,9 +847,10 @@ fn reconcile_jobs(
         let job_execute_handles = Arc::clone(execute_handles);
         let job_internal_client = Arc::clone(internal_client);
         let job_sandbox = resolved_sandbox.clone();
+        let job_upgrade_lock = Arc::clone(upgrade_lock);
 
         let handle = tokio::spawn(async move {
-            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles, job_sandbox)
+            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles, job_sandbox, job_upgrade_lock)
                 .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
@@ -874,10 +882,11 @@ fn reconcile_jobs(
             let sc = ssh_config_path.clone();
             let ic = Arc::clone(internal_client);
             let rs = resolved_sandbox.clone();
+            let ul = Arc::clone(upgrade_lock);
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
-                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
+                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), ul).await;
             });
             // Register for shutdown tracking
             if let Ok(mut guard) = execute_handles.lock() {
@@ -902,6 +911,7 @@ async fn run_job_loop(
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
     resolved_sandbox: Option<String>,
+    upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -945,8 +955,9 @@ async fn run_job_loop(
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(&internal_client);
         let rs = resolved_sandbox.clone();
+        let ul = Arc::clone(&upgrade_lock);
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref()).await;
+            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), ul).await;
         });
         if spec.schedule_kind.is_one_shot() {
             // Wait for execution, then delete and exit loop
@@ -1206,6 +1217,7 @@ mod tests {
             ic,
             shutdown_clone,
             None,
+            Arc::new(tokio::sync::RwLock::new(())),
         ));
 
         // Give cron engine time to reconcile and spawn the job loop

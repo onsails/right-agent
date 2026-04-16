@@ -406,6 +406,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         );
     }
 
+    // Upgrade lock: upgrade (write) vs CC sessions (read).
+    let upgrade_lock = Arc::new(tokio::sync::RwLock::new(()));
+
+    // Startup upgrade: runs before cron/telegram — no lock contention.
+    if let Some(ref cfg_path) = ssh_config_path {
+        upgrade::run_startup_upgrade(cfg_path, &args.agent).await;
+    }
+
     // CRON-01: spawn cron task alongside Telegram dispatcher.
     // Cron results are persisted to DB; Telegram delivery is handled separately.
     let cron_agent_dir = agent_dir.clone();
@@ -415,8 +423,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_internal_client = Arc::clone(&internal_client);
     let cron_shutdown = shutdown.clone();
     let cron_sandbox = resolved_sandbox.clone();
+    let cron_upgrade_lock = Arc::clone(&upgrade_lock);
     let cron_handle = tokio::spawn(async move {
-        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_internal_client, cron_shutdown, cron_sandbox).await;
+        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_internal_client, cron_shutdown, cron_sandbox, cron_upgrade_lock).await;
     });
 
     // Shared idle timestamp: tracks last handler/worker interaction for cron delivery gating.
@@ -435,6 +444,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_internal_client = Arc::clone(&internal_client);
     let delivery_shutdown = shutdown.clone();
     let delivery_sandbox = resolved_sandbox.clone();
+    let delivery_upgrade_lock = Arc::clone(&upgrade_lock);
     let delivery_handle = tokio::spawn(async move {
         cron_delivery::run_delivery_loop(
             delivery_agent_dir,
@@ -446,6 +456,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_internal_client,
             delivery_shutdown,
             delivery_sandbox,
+            delivery_upgrade_lock,
         ).await;
     });
 
@@ -455,6 +466,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             cfg_path.clone(),
             args.agent.clone(),
             shutdown.clone(),
+            Arc::clone(&upgrade_lock),
         );
     }
 
@@ -483,6 +495,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             resolved_sandbox,
             hindsight_client,
             prefetch_cache,
+            upgrade_lock,
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,

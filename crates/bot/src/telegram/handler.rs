@@ -86,6 +86,8 @@ pub struct AgentSettings {
     pub hindsight: Option<std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
     /// Prefetch cache for Hindsight recall results.
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
+    /// RwLock gate — upgrade takes write (exclusive), CC invocations take read (shared).
+    pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
@@ -286,6 +288,7 @@ pub async fn handle_message(
                     internal_client: Arc::clone(&internal_api.0),
                     hindsight: settings.hindsight.clone(),
                     prefetch_cache: settings.prefetch_cache.clone(),
+                    upgrade_lock: Arc::clone(&settings.upgrade_lock),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());
