@@ -2698,6 +2698,8 @@ dependencies = [
  "inquire",
  "miette",
  "minijinja",
+ "notify",
+ "notify-debouncer-mini",
  "owo-colors",
  "prost",
  "prost-types",

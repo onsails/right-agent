@@ -717,3 +717,116 @@ mod migration_tests {
         assert!(file.groups.is_empty());
     }
 }
+
+use std::time::Duration;
+
+/// Spawn a background watcher on `allowlist_path(agent_dir)`. Whenever the file
+/// changes, reparse and swap the `handle` contents. Parse errors are logged
+/// (tracing::warn) and leave the previous state untouched.
+///
+/// Returns the debouncer object. Dropping it stops the watcher. The caller
+/// typically keeps it alive for the lifetime of the bot process.
+pub fn spawn_watcher(
+    agent_dir: &Path,
+    handle: AllowlistHandle,
+) -> Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>, String> {
+    use notify::RecursiveMode;
+    use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
+
+    let watch_path = agent_dir.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut debouncer = new_debouncer(Duration::from_millis(200), move |res| {
+        let _ = tx.send(res);
+    })
+    .map_err(|e| format!("create debouncer: {e:#}"))?;
+
+    debouncer
+        .watcher()
+        .watch(&watch_path, RecursiveMode::NonRecursive)
+        .map_err(|e| format!("watch {}: {e:#}", watch_path.display()))?;
+
+    let handle_clone = handle.clone();
+    let dir_clone = agent_dir.to_path_buf();
+    std::thread::spawn(move || {
+        // macOS FSEvents reports canonical paths (e.g. /private/var/... for /var/...),
+        // so we compare by filename rather than full path. Safe because the watcher
+        // is scoped to `agent_dir` with `NonRecursive`.
+        let target_filename = std::ffi::OsStr::new(ALLOWLIST_FILENAME);
+        for events in rx {
+            let Ok(evts) = events else { continue; };
+            let touches_allowlist = evts.iter().any(|e| {
+                matches!(e.kind, DebouncedEventKind::Any)
+                    && e.path.file_name() == Some(target_filename)
+            });
+            if !touches_allowlist { continue; }
+
+            match read_file(&dir_clone) {
+                Ok(Some(file)) => {
+                    let state = AllowlistState::from_file(file);
+                    let rt = tokio::runtime::Handle::try_current();
+                    match rt {
+                        Ok(h) => {
+                            let handle = handle_clone.clone();
+                            h.spawn(async move {
+                                let mut w = handle.0.write().await;
+                                *w = state;
+                            });
+                        }
+                        Err(_) => {
+                            let fut = async {
+                                let mut w = handle_clone.0.write().await;
+                                *w = state;
+                            };
+                            tokio::runtime::Runtime::new()
+                                .expect("fallback runtime")
+                                .block_on(fut);
+                        }
+                    }
+                    tracing::info!("allowlist.yaml reloaded");
+                }
+                Ok(None) => {
+                    tracing::warn!("allowlist.yaml disappeared; keeping previous state");
+                }
+                Err(e) => {
+                    tracing::warn!("allowlist.yaml reload failed: {e}; keeping previous state");
+                }
+            }
+        }
+    });
+
+    Ok(debouncer)
+}
+
+#[cfg(test)]
+mod watcher_tests {
+    use super::*;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    fn t() -> DateTime<Utc> { "2026-04-16T12:00:00Z".parse().unwrap() }
+
+    #[tokio::test]
+    async fn watcher_reloads_after_external_write() {
+        let dir = TempDir::new().unwrap();
+        write_file(dir.path(), &AllowlistFile::default()).unwrap();
+        let handle = AllowlistHandle::new(AllowlistState::from_file(
+            read_file(dir.path()).unwrap().unwrap(),
+        ));
+        let _watcher = spawn_watcher(dir.path(), handle.clone()).unwrap();
+
+        // Externally mutate the file.
+        let mut file = AllowlistFile::default();
+        file.users.push(AllowedUser { id: 777, label: None, added_by: None, added_at: t() });
+        write_file(dir.path(), &file).unwrap();
+
+        // Poll up to 2s for the handle to reflect the change.
+        for _ in 0..40 {
+            {
+                let r = handle.0.read().await;
+                if r.is_user_trusted(777) { return; }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("watcher did not propagate external write within 2s");
+    }
+}
