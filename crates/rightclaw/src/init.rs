@@ -200,6 +200,9 @@ pub fn init_rightclaw_home(
     telegram_allowed_chat_ids: &[i64],
     network_policy: &NetworkPolicy,
     sandbox_mode: &SandboxMode,
+    memory_provider: MemoryProvider,
+    memory_api_key: Option<String>,
+    memory_bank_id: Option<String>,
 ) -> miette::Result<()> {
     let agents_parent = crate::config::agents_dir(home);
     if agents_parent.join("right").exists() {
@@ -216,9 +219,9 @@ pub fn init_rightclaw_home(
         allowed_chat_ids: telegram_allowed_chat_ids.to_vec(),
         model: None,
         env: HashMap::new(),
-        memory_provider: MemoryProvider::File,
-        memory_api_key: None,
-        memory_bank_id: None,
+        memory_provider,
+        memory_api_key,
+        memory_bank_id,
     };
     let _agents_dir = init_agent(&agents_parent, "right", Some(&overrides))?;
 
@@ -325,6 +328,64 @@ pub fn prompt_network_policy() -> miette::Result<NetworkPolicy> {
     }
 }
 
+/// Prompt the user for memory provider choice interactively.
+///
+/// Returns the chosen `MemoryProvider`. Defaults to `File` on empty input.
+pub fn prompt_memory_provider() -> miette::Result<crate::agent::types::MemoryProvider> {
+    use std::io::{self, Write};
+    println!("Memory provider:");
+    println!("  1. File — agent manages MEMORY.md (default)");
+    println!("  2. Hindsight — Hindsight Cloud API");
+    print!("Choose [1/2] (default: 1): ");
+    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+    match input.trim() {
+        "" | "1" => Ok(crate::agent::types::MemoryProvider::File),
+        "2" => Ok(crate::agent::types::MemoryProvider::Hindsight),
+        other => Err(miette::miette!("Invalid choice: '{other}'. Expected 1 or 2.")),
+    }
+}
+
+/// Prompt the user for Hindsight API key.
+///
+/// Returns `Some(key)` if a key was entered, `None` if skipped.
+/// The key can also be set via `HINDSIGHT_API_KEY` env var at runtime.
+pub fn prompt_hindsight_api_key() -> miette::Result<Option<String>> {
+    use std::io::{self, Write};
+    print!("Hindsight API key (press Enter to use HINDSIGHT_API_KEY env var): ");
+    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+    let key = input.trim();
+    if key.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(key.to_string()))
+}
+
+/// Prompt the user for Hindsight bank ID.
+///
+/// Returns `Some(bank_id)` if entered, `None` to use agent name as default.
+pub fn prompt_hindsight_bank_id(agent_name: &str) -> miette::Result<Option<String>> {
+    use std::io::{self, Write};
+    print!("Hindsight bank ID (default: {agent_name}): ");
+    io::stdout().flush().map_err(|e| miette::miette!("stdout flush failed: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| miette::miette!("failed to read input: {e}"))?;
+    let bank = input.trim();
+    if bank.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(bank.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -337,7 +398,7 @@ mod tests {
     #[test]
     fn init_creates_default_agent_files() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let agents_dir = dir.path().join("agents").join("right");
         assert!(!agents_dir.join("IDENTITY.md").exists(), "IDENTITY.md must not be created by init");
@@ -370,9 +431,9 @@ mod tests {
     #[test]
     fn init_errors_if_already_initialized() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
-        let result = init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell);
+        let result = init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None);
         assert!(result.is_err());
         let err = format!("{:?}", result.unwrap_err());
         assert!(
@@ -389,7 +450,7 @@ mod tests {
     #[test]
     fn init_with_telegram_writes_token_inline_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -401,7 +462,7 @@ mod tests {
     #[test]
     fn init_creates_bootstrap_md() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let bootstrap = std::fs::read_to_string(
             dir.path().join("agents/right/BOOTSTRAP.md"),
@@ -448,7 +509,7 @@ mod tests {
     #[test]
     fn init_with_telegram_creates_settings_json() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let settings_path = dir
             .path()
@@ -482,7 +543,7 @@ mod tests {
     #[test]
     fn init_creates_settings_without_sandbox_section() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let settings_path = dir.path().join("agents/right/.claude/settings.json");
         let content = std::fs::read_to_string(&settings_path).unwrap();
@@ -499,7 +560,7 @@ mod tests {
     #[test]
     fn init_without_telegram_creates_settings_without_plugin() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let settings_path = dir
             .path()
@@ -537,6 +598,9 @@ mod tests {
             &[12345678_i64, 100200300_i64],
             &NetworkPolicy::Permissive,
             &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
         )
         .unwrap();
 
@@ -572,6 +636,9 @@ mod tests {
             &[12345678_i64],
             &NetworkPolicy::Permissive,
             &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
         )
         .unwrap();
 
@@ -593,7 +660,7 @@ mod tests {
     #[test]
     fn init_with_telegram_no_chat_ids_does_not_write_allowed_chat_ids() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -609,7 +676,7 @@ mod tests {
     #[test]
     fn init_writes_network_policy_restrictive_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Restrictive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Restrictive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -621,7 +688,7 @@ mod tests {
     #[test]
     fn init_writes_network_policy_permissive_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
