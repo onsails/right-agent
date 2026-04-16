@@ -4,6 +4,7 @@ pub mod dispatch;
 pub mod filter;
 pub mod handler;
 pub mod markdown;
+pub mod mention;
 pub mod oauth_callback;
 pub(crate) mod invocation;
 pub(crate) mod prompt;
