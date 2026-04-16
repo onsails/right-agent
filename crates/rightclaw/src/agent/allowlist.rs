@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AllowedUser {
     pub id: i64,
     #[serde(default)]
@@ -30,6 +31,7 @@ pub struct AllowedUser {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AllowedGroup {
     pub id: i64,
     #[serde(default)]
@@ -40,6 +42,7 @@ pub struct AllowedGroup {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct AllowlistFile {
     #[serde(default = "default_version")]
     pub version: u32,
@@ -109,11 +112,37 @@ fn write_label(out: &mut String, key: &str, val: Option<&str>, indent: usize) {
     let spaces: String = " ".repeat(indent);
     match val {
         Some(s) => {
-            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped = escape_double_quoted(s);
             writeln!(out, "{spaces}{key}: \"{escaped}\"").unwrap();
         }
         None => writeln!(out, "{spaces}{key}: null").unwrap(),
     }
+}
+
+/// Escape a string for embedding inside a YAML 1.2 double-quoted scalar.
+///
+/// Escapes: `\`, `"`, common control whitespace (`\n`, `\r`, `\t`), NUL, and any
+/// other byte in the C0 control range (< 0x20) or DEL (0x7F). Other Unicode
+/// code points pass through untouched — double-quoted YAML scalars are UTF-8
+/// and emoji/CJK/RTL marks are valid as-is.
+fn escape_double_quoted(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7F => {
+                write!(out, "\\x{:02X}", c as u32).unwrap();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn write_opt_i64(out: &mut String, key: &str, val: Option<i64>, indent: usize) {
@@ -221,5 +250,96 @@ groups:
         let yaml = serialize_yaml(&file);
         let parsed = parse_yaml(&yaml).unwrap();
         assert_eq!(parsed.users[0].label.as_deref(), Some(r#"has "quotes""#));
+    }
+
+    #[test]
+    fn allowed_user_rejects_unknown_fields() {
+        let yaml = r#"
+id: 42
+opned_by: 7
+added_at: 2026-04-16T12:00:00Z
+"#;
+        let result: Result<AllowedUser, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "expected 'unknown field' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn allowed_group_rejects_unknown_fields() {
+        let yaml = r#"
+id: -1001
+opend_by: 7
+opened_at: 2026-04-16T12:00:00Z
+"#;
+        let result: Result<AllowedGroup, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "expected 'unknown field' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn allowlist_file_rejects_unknown_fields() {
+        let yaml = r#"
+version: 1
+usrs: []
+groups: []
+"#;
+        let result: Result<AllowlistFile, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field"),
+            "expected 'unknown field' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn serialize_escapes_control_chars_in_label() {
+        // Literal backslash, double quote, newline, carriage return, tab,
+        // NUL, \x05 (arbitrary control char), plus non-ASCII (emoji + Cyrillic).
+        let tricky = "a\\b\"c\nd\re\tf\0g\x05h \u{1F600} \u{0410}\u{0411}";
+        let file = AllowlistFile {
+            version: 1,
+            users: vec![AllowedUser {
+                id: 1,
+                label: Some(tricky.to_string()),
+                added_by: None,
+                added_at: "2026-04-16T12:00:00Z".parse().unwrap(),
+            }],
+            groups: vec![],
+        };
+        let yaml = serialize_yaml(&file);
+        let parsed = parse_yaml(&yaml).unwrap();
+        assert_eq!(parsed.users[0].label.as_deref(), Some(tricky));
+    }
+
+    #[test]
+    fn serialize_null_label_roundtrips_as_none() {
+        let file = AllowlistFile {
+            version: 1,
+            users: vec![AllowedUser {
+                id: 1,
+                label: None,
+                added_by: None,
+                added_at: "2026-04-16T12:00:00Z".parse().unwrap(),
+            }],
+            groups: vec![AllowedGroup {
+                id: -1001,
+                label: None,
+                opened_by: None,
+                opened_at: "2026-04-16T12:30:00Z".parse().unwrap(),
+            }],
+        };
+        let yaml = serialize_yaml(&file);
+        let parsed = parse_yaml(&yaml).unwrap();
+        assert_eq!(parsed.users[0].label, None);
+        assert_eq!(parsed.groups[0].label, None);
     }
 }
