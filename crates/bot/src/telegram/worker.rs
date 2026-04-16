@@ -54,6 +54,8 @@ pub struct DebounceMsg {
     pub author: super::attachments::MessageAuthor,
     pub forward_info: Option<super::attachments::ForwardInfo>,
     pub reply_to_id: Option<i32>,
+    pub address: super::mention::AddressKind,
+    pub group_open: bool,
 }
 
 /// Context passed to each worker task when it is spawned.

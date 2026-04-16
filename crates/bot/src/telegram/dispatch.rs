@@ -9,7 +9,6 @@
 //! When the worker is respawned (Pitfall 7), the in-progress batch is discarded.
 //! This is an accepted trade-off -- retrying arbitrary messages is not safe.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,8 +20,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::bot::build_bot;
-use super::filter::make_chat_id_filter;
-use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, AuthWatcherFlag, DebugFlag, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RightclawHome, SshConfigPath};
+use super::filter::make_routing_filter;
+use super::mention::BotIdentity;
+use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, DebugFlag, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -60,7 +60,7 @@ enum BotCommand {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_telegram(
     token: String,
-    allowed_chat_ids: Vec<i64>,
+    allowlist: rightclaw::agent::allowlist::AllowlistHandle,
     agent_dir: PathBuf,
     debug: bool,
     pending_auth: PendingAuthMap,
@@ -78,9 +78,15 @@ pub async fn run_telegram(
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
-    let allowed: HashSet<i64> = allowed_chat_ids.into_iter().collect();
-    tracing::info!(allowed_chat_ids = ?allowed, "chat ID allow-list loaded");
-    let filter = make_chat_id_filter(allowed.clone());
+    // Resolve bot identity (username + user_id) via getMe — required for group mention detection.
+    let me = bot.get_me().await
+        .map_err(|e| miette::miette!("bot.get_me() failed: {e:#}"))?;
+    let username = me.user.username.clone()
+        .ok_or_else(|| miette::miette!("bot has no username; cannot set up group-mention detection"))?;
+    let identity = BotIdentity { username: username.clone(), user_id: me.user.id.0 };
+    tracing::info!(%username, user_id = identity.user_id, "bot identity resolved");
+    let filter = make_routing_filter(allowlist.clone(), identity.clone());
+    let identity_arc = Arc::new(identity);
 
     // Shared state
     let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
@@ -90,14 +96,14 @@ pub async fn run_telegram(
     let ssh_config_arc: Arc<SshConfigPath> = Arc::new(SshConfigPath(ssh_config_path));
     let pending_auth_arc: PendingAuthMap = pending_auth;
     let home_arc: Arc<RightclawHome> = Arc::new(RightclawHome(home));
-    let auth_watcher_flag_arc: Arc<AuthWatcherFlag> = Arc::new(AuthWatcherFlag(
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    ));
+    let auth_watcher_arc: Arc<std::sync::atomic::AtomicBool> =
+        Arc::new(std::sync::atomic::AtomicBool::new(false));
     let auth_code_arc = Arc::new(tokio::sync::Mutex::new(None));
     let pending_token_arc = Arc::new(tokio::sync::Mutex::new(None));
     let intercept_slots_arc: Arc<InterceptSlots> = Arc::new(InterceptSlots {
         auth_code: Arc::clone(&auth_code_arc),
         pending_token: Arc::clone(&pending_token_arc),
+        auth_watcher: Arc::clone(&auth_watcher_arc),
     });
     let pending_token_slot_arc: Arc<PendingTokenSlot> = Arc::new(PendingTokenSlot(
         pending_token_arc,
@@ -171,13 +177,14 @@ pub async fn run_telegram(
             pending_auth_arc,
             Arc::clone(&home_arc),
             Arc::clone(&ssh_config_arc),
-            Arc::clone(&auth_watcher_flag_arc),
             Arc::clone(&intercept_slots_arc),
             Arc::clone(&pending_token_slot_arc),
             Arc::clone(&internal_api_arc),
             Arc::clone(&settings_arc),
             Arc::clone(&stop_tokens),
-            Arc::clone(&idle_ts)
+            Arc::clone(&idle_ts),
+            Arc::clone(&identity_arc),
+            allowlist.clone()
         ])
         .build();
 
@@ -217,25 +224,15 @@ pub async fn run_telegram(
         }
     });
 
-    // Register commands per-chat using BotCommandScope::Chat.
-    // Per-chat scope has higher priority than default scope in Telegram's resolution,
-    // so CC Telegram plugin's default-scope commands won't overwrite ours.
+    // Register commands at default (global) scope. Per-chat scope is no longer
+    // required now that routing is gated by allowlist.yaml instead of a static
+    // allow-list of chat IDs.
     let commands = BotCommand::bot_commands();
-    for &cid in &allowed {
-        let scope = teloxide::types::BotCommandScope::Chat {
-            chat_id: teloxide::types::Recipient::Id(teloxide::types::ChatId(cid)),
-        };
-        match bot.delete_my_commands().scope(scope.clone()).await {
-            Ok(_) => {}
-            Err(e) => tracing::warn!(chat_id = cid, "delete_my_commands(chat) failed: {e:#}"),
-        }
-        match bot.set_my_commands(commands.clone()).scope(scope).await {
-            Ok(_) => tracing::info!(chat_id = cid, "set_my_commands(chat) succeeded"),
-            Err(e) => tracing::warn!(chat_id = cid, "set_my_commands(chat) failed: {e:#}"),
-        }
+    if let Err(e) = bot.delete_my_commands().await {
+        tracing::warn!("delete_my_commands (default scope): {e:#}");
     }
-    if allowed.is_empty() {
-        tracing::info!("no allowed_chat_ids — skipping set_my_commands");
+    if let Err(e) = bot.set_my_commands(commands).await {
+        tracing::warn!("set_my_commands (default scope): {e:#}");
     }
 
     tracing::info!("teloxide dispatcher starting (long-polling)");
