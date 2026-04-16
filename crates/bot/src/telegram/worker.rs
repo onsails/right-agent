@@ -31,8 +31,8 @@ const DEBOUNCE_MS: u64 = 500;
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
 
-/// Maximum input query length for Hindsight recall (matches hermes recall_max_input_chars).
-const RECALL_MAX_INPUT_CHARS: usize = 800;
+/// Maximum character count for Hindsight recall queries (~530 tokens, safely under the 500-token API limit).
+const RECALL_MAX_CHARS: usize = 800;
 
 /// Build the inline keyboard with a single "Stop" button for thinking messages.
 fn stop_keyboard(chat_id: i64, eff_thread_id: i64) -> teloxide::types::InlineKeyboardMarkup {
@@ -239,16 +239,15 @@ fn chat_tags(chat_id: i64) -> Vec<String> {
     vec![format!("chat:{chat_id}")]
 }
 
-/// Truncate a string to at most `max` bytes on a valid UTF-8 char boundary.
-fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
+/// Truncate a string to at most `max_chars` characters (not bytes).
+///
+/// Hindsight recall API rejects queries over 500 tokens. At ~1 token per
+/// 1.5 chars, 800 chars stays safely under that limit.
+fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
     }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 // ── Async worker ─────────────────────────────────────────────────────────────
@@ -570,7 +569,7 @@ pub fn spawn_worker(
 
                 // Prefetch for next turn.
                 let hs_recall = Arc::clone(hs);
-                let recall_query = truncate_to_char_boundary(&input, RECALL_MAX_INPUT_CHARS).to_owned();
+                let recall_query = truncate_to_chars(&input, RECALL_MAX_CHARS).to_owned();
                 let recall_tags = chat_tags(chat_id);
                 let cache_key = format!("{}:{}", chat_id, eff_thread_id);
                 let cache = ctx.prefetch_cache.clone();
@@ -860,7 +859,7 @@ async fn invoke_cc(
             Some(content)
         } else if let Some(ref hs) = ctx.hindsight {
             tracing::info!(?chat_id, "prefetch cache miss, blocking recall");
-            let truncated_query = truncate_to_char_boundary(input, RECALL_MAX_INPUT_CHARS);
+            let truncated_query = truncate_to_chars(input, RECALL_MAX_CHARS);
             let recall_tags = chat_tags(chat_id);
             match tokio::time::timeout(
                 Duration::from_secs(5),
@@ -1670,42 +1669,48 @@ mod tests {
     }
 
     #[test]
-    fn truncate_to_char_boundary_short_string() {
-        assert_eq!(truncate_to_char_boundary("hello", 800), "hello");
+    fn truncate_to_chars_short_string() {
+        assert_eq!(truncate_to_chars("hello", 800), "hello");
     }
 
     #[test]
-    fn truncate_to_char_boundary_exact_limit() {
+    fn truncate_to_chars_exact_limit() {
         let s = "a".repeat(800);
-        assert_eq!(truncate_to_char_boundary(&s, 800).len(), 800);
+        assert_eq!(truncate_to_chars(&s, 800).chars().count(), 800);
     }
 
     #[test]
-    fn truncate_to_char_boundary_over_limit() {
+    fn truncate_to_chars_over_limit() {
         let s = "a".repeat(1000);
-        assert_eq!(truncate_to_char_boundary(&s, 800).len(), 800);
+        assert_eq!(truncate_to_chars(&s, 800).chars().count(), 800);
     }
 
     #[test]
-    fn truncate_to_char_boundary_multibyte() {
-        // 'é' is 2 bytes in UTF-8. String of 500 'é' = 1000 bytes.
-        let s = "é".repeat(500);
-        let truncated = truncate_to_char_boundary(&s, 800);
-        assert!(truncated.len() <= 800);
-        assert_eq!(truncated.len(), 800); // 400 chars × 2 bytes = 800
+    fn truncate_to_chars_multibyte() {
+        let s = "é".repeat(1000);
+        let truncated = truncate_to_chars(&s, 800);
+        assert_eq!(truncated.chars().count(), 800);
+        assert_eq!(truncated.len(), 1600);
     }
 
     #[test]
-    fn truncate_to_char_boundary_emoji() {
-        // '🎯' is 4 bytes. 201 of them = 804 bytes. Truncating at 800 must not split.
-        let s = "🎯".repeat(201);
-        let truncated = truncate_to_char_boundary(&s, 800);
-        assert!(truncated.len() <= 800);
-        assert_eq!(truncated.len(), 800); // 200 × 4 = 800
+    fn truncate_to_chars_emoji() {
+        let s = "🎯".repeat(1000);
+        let truncated = truncate_to_chars(&s, 800);
+        assert_eq!(truncated.chars().count(), 800);
+        assert_eq!(truncated.len(), 3200);
     }
 
     #[test]
-    fn truncate_to_char_boundary_empty() {
-        assert_eq!(truncate_to_char_boundary("", 800), "");
+    fn truncate_to_chars_empty() {
+        assert_eq!(truncate_to_chars("", 800), "");
+    }
+
+    #[test]
+    fn truncate_to_chars_cyrillic() {
+        let s = "я".repeat(500);
+        let truncated = truncate_to_chars(&s, 800);
+        assert_eq!(truncated.chars().count(), 500);
+        assert_eq!(truncated, s);
     }
 }
