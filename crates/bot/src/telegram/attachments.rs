@@ -118,6 +118,21 @@ pub const CLEANUP_INTERVAL_SECS: u64 = 3600; // 1 hour
 pub const SANDBOX_INBOX: &str = "/sandbox/inbox/";
 pub const SANDBOX_OUTBOX: &str = "/sandbox/outbox/";
 
+/// Telegram user/chat identity for message authorship.
+#[derive(Debug, Clone)]
+pub struct MessageAuthor {
+    pub name: String,
+    pub username: Option<String>,
+    pub user_id: Option<i64>,
+}
+
+/// Forward origin metadata.
+#[derive(Debug, Clone)]
+pub struct ForwardInfo {
+    pub from: MessageAuthor,
+    pub date: DateTime<Utc>,
+}
+
 /// Message in a debounce batch -- text and/or attachments.
 #[derive(Debug, Clone)]
 pub struct InputMessage {
@@ -125,6 +140,9 @@ pub struct InputMessage {
     pub text: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub attachments: Vec<ResolvedAttachment>,
+    pub author: MessageAuthor,
+    pub forward_info: Option<ForwardInfo>,
+    pub reply_to_id: Option<i32>,
 }
 
 /// Format input for CC stdin.

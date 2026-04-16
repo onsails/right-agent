@@ -147,6 +147,63 @@ pub async fn handle_message(
         return Ok(());
     }
 
+    // Extract author from sender
+    let author = match msg.from.as_ref() {
+        Some(user) => super::attachments::MessageAuthor {
+            name: user.full_name(),
+            username: user.username.as_ref().map(|u| format!("@{u}")),
+            user_id: Some(user.id.0 as i64),
+        },
+        None => super::attachments::MessageAuthor {
+            name: msg.chat.title().unwrap_or("unknown").to_owned(),
+            username: msg.chat.username().map(|u| format!("@{u}")),
+            user_id: None,
+        },
+    };
+
+    // Extract forward origin
+    let forward_info = msg.forward_origin().map(|origin| {
+        use teloxide::types::MessageOrigin;
+        let (from, date) = match origin {
+            MessageOrigin::User { sender_user, date } => (
+                super::attachments::MessageAuthor {
+                    name: sender_user.full_name(),
+                    username: sender_user.username.as_ref().map(|u| format!("@{u}")),
+                    user_id: Some(sender_user.id.0 as i64),
+                },
+                *date,
+            ),
+            MessageOrigin::HiddenUser { sender_user_name, date } => (
+                super::attachments::MessageAuthor {
+                    name: sender_user_name.clone(),
+                    username: None,
+                    user_id: None,
+                },
+                *date,
+            ),
+            MessageOrigin::Chat { sender_chat, date, .. } => (
+                super::attachments::MessageAuthor {
+                    name: sender_chat.title().unwrap_or("unknown").to_owned(),
+                    username: sender_chat.username().map(|u| format!("@{u}")),
+                    user_id: None,
+                },
+                *date,
+            ),
+            MessageOrigin::Channel { chat, date, .. } => (
+                super::attachments::MessageAuthor {
+                    name: chat.title().unwrap_or("unknown").to_owned(),
+                    username: chat.username().map(|u| format!("@{u}")),
+                    user_id: None,
+                },
+                *date,
+            ),
+        };
+        super::attachments::ForwardInfo { from, date }
+    });
+
+    // Extract reply-to message ID
+    let reply_to_id = msg.reply_to_message().map(|m| m.id.0);
+
     // Intercept auth code: if login flow is waiting for a code, forward this message.
     if let Some(ref text_val) = text {
         let mut slot = intercept_slots.auth_code.lock().await;
@@ -182,6 +239,9 @@ pub async fn handle_message(
         text,
         timestamp: chrono::Utc::now(),
         attachments,
+        author,
+        forward_info,
+        reply_to_id,
     };
 
     // Check for existing worker or spawn a new one.

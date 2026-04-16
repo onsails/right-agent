@@ -51,6 +51,9 @@ pub struct DebounceMsg {
     pub text: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub attachments: Vec<super::attachments::InboundAttachment>,
+    pub author: super::attachments::MessageAuthor,
+    pub forward_info: Option<super::attachments::ForwardInfo>,
+    pub reply_to_id: Option<i32>,
 }
 
 /// Context passed to each worker task when it is spawned.
@@ -335,6 +338,9 @@ pub fn spawn_worker(
                     text: msg.text.clone(),
                     timestamp: msg.timestamp,
                     attachments: resolved,
+                    author: msg.author.clone(),
+                    forward_info: msg.forward_info.clone(),
+                    reply_to_id: msg.reply_to_id,
                 });
             }
             if skip_batch {
