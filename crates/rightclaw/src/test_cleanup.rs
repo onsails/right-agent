@@ -8,8 +8,9 @@
 //! 2. On first registration, install a `std::panic::set_hook` that drains
 //!    the registry and issues `openshell sandbox delete` for each entry
 //!    before calling the default panic hook (which then aborts).
-//! 3. Happy-path `Drop for TestSandbox` calls `unregister_and_delete`, which
-//!    removes the entry and issues the same delete synchronously.
+//! 3. Happy-path `Drop for TestSandbox` calls `unregister_test_sandbox` +
+//!    `delete_sandbox_sync`, which removes the entry and issues the same
+//!    delete synchronously.
 //!
 //! Narrow `pkill_test_orphans(name)` is a separate safety net that kills
 //! orphan openshell/ssh-proxy processes associated with a specific test
