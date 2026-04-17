@@ -420,8 +420,7 @@ pub async fn ssh_exec(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let child = command
-        .spawn()
+    let child = crate::process_group::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh: {e:#}"))?;
 
     let timeout_dur = Duration::from_secs(timeout_secs);
@@ -462,13 +461,11 @@ pub async fn ssh_tar_download(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
+    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh for tar download: {e:#}"))?;
 
     let mut stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| miette::miette!("no stdout handle from ssh tar download"))?;
 
     let mut file = tokio::fs::File::create(dest_path)
@@ -519,13 +516,11 @@ pub async fn ssh_tar_upload(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
+    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh for tar upload: {e:#}"))?;
 
     let mut stdin = child
-        .stdin
-        .take()
+        .stdin()
         .ok_or_else(|| miette::miette!("no stdin handle from ssh tar upload"))?;
 
     let src_path = src_path.to_owned();
