@@ -29,3 +29,4 @@ notify-debouncer-mini = { workspace = true }
 pulldown-cmark = { workspace = true }
 
 [dev-dependencies]
+rightclaw = { path = "../rightclaw", features = ["test-support"] }
