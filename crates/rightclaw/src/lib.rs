@@ -12,6 +12,7 @@ pub mod platform_store;
 pub mod process_group;
 pub mod runtime;
 pub mod sandbox_exec;
+pub mod test_cleanup;
 pub mod tunnel;
 
 /// Generated protobuf types for the OpenShell gRPC API.
