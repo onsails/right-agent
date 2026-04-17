@@ -48,6 +48,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
+use crate::test_support::TestSandbox;
+
 /// Minimal mock — only `get_sandbox` is meaningful; all other RPCs return Unimplemented.
 ///
 /// `get_sandbox_phase` controls the sandbox phase returned.
@@ -171,105 +173,6 @@ async fn mock_client(addr: SocketAddr) -> OpenShellClient<Channel> {
         .await
         .unwrap();
     OpenShellClient::new(channel)
-}
-
-// ---------------------------------------------------------------------------
-// Ephemeral test sandbox — created per test, destroyed explicitly.
-// Leftovers from panicked tests are cleaned up by the next create() call.
-// ---------------------------------------------------------------------------
-
-pub(crate) struct TestSandbox {
-    name: String,
-    mtls_dir: PathBuf,
-    _tmp: tempfile::TempDir, // keeps policy file alive
-}
-
-impl TestSandbox {
-    /// Create an ephemeral sandbox for testing. Cleans up any leftover from previous runs.
-    pub(crate) async fn create(test_name: &str) -> Self {
-        let name = format!("rightclaw-test-{test_name}");
-
-        // Belt-and-suspenders cleanup of any orphan processes from a
-        // previous SIGKILLed test run that Drop/hook could not handle.
-        crate::test_cleanup::pkill_test_orphans(&name);
-
-        // Register in the panic-hook registry so abort-on-panic still
-        // triggers sandbox cleanup.
-        crate::test_cleanup::register_test_sandbox(&name);
-
-        let mtls_dir = match super::preflight_check() {
-            super::OpenShellStatus::Ready(dir) => dir,
-            other => panic!("OpenShell not ready: {other:?}"),
-        };
-
-        // Clean up leftover from a previous failed run.
-        let mut client = super::connect_grpc(&mtls_dir).await.unwrap();
-        if super::sandbox_exists(&mut client, &name).await.unwrap() {
-            super::delete_sandbox(&name).await;
-            super::wait_for_deleted(&mut client, &name, 60, 2)
-                .await
-                .expect("cleanup of leftover sandbox failed");
-        }
-
-        // Minimal policy — fast startup, no restrictive network rules.
-        let tmp = tempfile::tempdir().unwrap();
-        let policy_path = tmp.path().join("policy.yaml");
-        let policy = "\
-version: 1
-filesystem_policy:
-  include_workdir: true
-  read_write:
-    - /tmp
-    - /sandbox
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-network_policies:
-  outbound:
-    endpoints:
-      - host: \"**.*\"
-        port: 443
-        protocol: rest
-        access: full
-        tls: terminate
-    binaries:
-      - path: \"**\"
-";
-        std::fs::write(&policy_path, policy).unwrap();
-
-        let mut child = super::spawn_sandbox(&name, &policy_path, None)
-            .expect("failed to spawn sandbox");
-        super::wait_for_ready(&mut client, &name, 120, 2)
-            .await
-            .expect("sandbox did not become READY");
-
-        // Kill the create process — it doesn't exit on its own after READY.
-        let _ = child.kill().await;
-
-        Self { name, mtls_dir, _tmp: tmp }
-    }
-
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Execute a command inside the sandbox, return (stdout, exit_code).
-    pub(crate) async fn exec(&self, cmd: &[&str]) -> (String, i32) {
-        let mut client = super::connect_grpc(&self.mtls_dir).await.unwrap();
-        let id = super::resolve_sandbox_id(&mut client, &self.name)
-            .await
-            .unwrap();
-        super::exec_in_sandbox(&mut client, &id, cmd)
-            .await
-            .unwrap()
-    }
-}
-
-impl Drop for TestSandbox {
-    fn drop(&mut self) {
-        crate::test_cleanup::unregister_test_sandbox(&self.name);
-        crate::test_cleanup::delete_sandbox_sync(&self.name);
-    }
 }
 
 // ---------------------------------------------------------------------------
