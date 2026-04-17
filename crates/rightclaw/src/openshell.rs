@@ -345,7 +345,7 @@ pub async fn generate_ssh_config(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell sandbox ssh-config: {e:#}"))?;
 
     let output = child
@@ -381,7 +381,7 @@ pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell policy set: {e:#}"))?;
 
     let output = child
@@ -420,7 +420,7 @@ pub async fn ssh_exec(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let child = crate::process_group::ProcessGroupChild::spawn(command)
+    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh: {e:#}"))?;
 
     let timeout_dur = Duration::from_secs(timeout_secs);
@@ -581,7 +581,7 @@ async fn upload_single_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell upload: {e:#}"))?;
 
     let output = child
@@ -652,7 +652,7 @@ pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell download: {e:#}"))?;
 
     let output = child
@@ -675,7 +675,7 @@ pub async fn delete_sandbox(name: &str) {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let child = match crate::process_group::ProcessGroupChild::spawn(cmd) {
+    let mut child = match crate::process_group::ProcessGroupChild::spawn(cmd) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(sandbox = name, "failed to spawn openshell delete: {e:#}");

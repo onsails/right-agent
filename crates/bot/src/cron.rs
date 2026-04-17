@@ -132,7 +132,7 @@ async fn cleanup_old_logs(
         c.stdout(std::process::Stdio::piped());
         c.stderr(std::process::Stdio::piped());
         let output = match rightclaw::process_group::ProcessGroupChild::spawn(c) {
-            Ok(child) => child.wait_with_output().await,
+            Ok(mut child) => child.wait_with_output().await,
             Err(e) => Err(e),
         };
         match output {
