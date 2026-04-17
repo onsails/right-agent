@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
@@ -253,15 +253,19 @@ pub async fn wait_for_ready(
     }
 }
 
-/// Spawn an OpenShell sandbox. Returns the child process handle.
+/// Spawn an OpenShell sandbox. Returns a [`ProcessGroupChild`] handle.
 ///
-/// The child has `kill_on_drop(false)` so the sandbox survives if the
-/// parent process exits.
+/// On Drop, the openshell CLI process and all its descendants (ssh,
+/// ssh-proxy, internal k3s spawns) are killed via `killpg(SIGKILL)`.
+/// Callers that need the sandbox to outlive the Rust process must
+/// `std::mem::forget` the returned handle (we currently have no such
+/// callers — the CLI process does nothing useful after READY, and the
+/// sandbox itself lives in k3s state, not in the CLI process).
 pub fn spawn_sandbox(
     name: &str,
     policy_path: &Path,
     upload_dir: Option<&Path>,
-) -> miette::Result<Child> {
+) -> miette::Result<crate::process_group::ProcessGroupChild> {
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "create", "--name", name, "--policy"]);
     cmd.arg(policy_path);
@@ -274,10 +278,8 @@ pub fn spawn_sandbox(
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(false);
 
-    let child = cmd
-        .spawn()
+    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell sandbox create: {e:#}"))?;
 
     tracing::info!(sandbox = name, "spawned sandbox create process");
