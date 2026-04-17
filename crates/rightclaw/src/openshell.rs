@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
@@ -253,15 +253,19 @@ pub async fn wait_for_ready(
     }
 }
 
-/// Spawn an OpenShell sandbox. Returns the child process handle.
+/// Spawn an OpenShell sandbox. Returns a [`ProcessGroupChild`] handle.
 ///
-/// The child has `kill_on_drop(false)` so the sandbox survives if the
-/// parent process exits.
+/// On Drop, the openshell CLI process and all its descendants (ssh,
+/// ssh-proxy, internal k3s spawns) are killed via `killpg(SIGKILL)`.
+/// Callers that need the sandbox to outlive the Rust process must
+/// `std::mem::forget` the returned handle (we currently have no such
+/// callers — the CLI process does nothing useful after READY, and the
+/// sandbox itself lives in k3s state, not in the CLI process).
 pub fn spawn_sandbox(
     name: &str,
     policy_path: &Path,
     upload_dir: Option<&Path>,
-) -> miette::Result<Child> {
+) -> miette::Result<crate::process_group::ProcessGroupChild> {
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "create", "--name", name, "--policy"]);
     cmd.arg(policy_path);
@@ -274,14 +278,58 @@ pub fn spawn_sandbox(
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(false);
 
-    let child = cmd
-        .spawn()
+    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell sandbox create: {e:#}"))?;
 
     tracing::info!(sandbox = name, "spawned sandbox create process");
     Ok(child)
+}
+
+/// Test-only concurrency limiter for live OpenShell sandbox tests.
+///
+/// Holds one of [`MAX_CONCURRENT_SANDBOX_TESTS`] exclusive file locks so the
+/// total number of concurrently running sandbox-creating tests across the
+/// entire workspace — including tests in separate test binaries — is capped.
+///
+/// Drop releases the lock. Acquire via [`acquire_sandbox_slot`].
+pub struct SandboxTestSlot {
+    _file: std::fs::File,
+}
+
+/// Maximum number of live OpenShell sandbox tests allowed to run in parallel.
+/// See [`acquire_sandbox_slot`].
+pub const MAX_CONCURRENT_SANDBOX_TESTS: u8 = 3;
+
+/// Acquire one of [`MAX_CONCURRENT_SANDBOX_TESTS`] parallel-sandbox-test slots.
+///
+/// Blocks (polling every 200ms) until a slot is free. Cross-process via
+/// `fs4` advisory file locks on `$TMPDIR/rightclaw-sandbox-slot-{N}.lock`.
+/// Drop the returned [`SandboxTestSlot`] to release the slot.
+///
+/// This function is intended for use in test code that calls [`spawn_sandbox`]
+/// — it prevents `cargo test --workspace` from fork-bombing the host when
+/// multiple test binaries run in parallel, each starting Docker/k3s containers.
+pub fn acquire_sandbox_slot() -> SandboxTestSlot {
+    use fs4::fs_std::FileExt;
+
+    loop {
+        for slot in 1..=MAX_CONCURRENT_SANDBOX_TESTS {
+            let path = std::env::temp_dir().join(format!("rightclaw-sandbox-slot-{slot}.lock"));
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .expect("open sandbox-slot lock file");
+            match file.try_lock_exclusive() {
+                Ok(true) => return SandboxTestSlot { _file: file },
+                Ok(false) => continue, // another holder
+                Err(e) => panic!("sandbox-slot lock {}: {e:#}", path.display()),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// Run `openshell sandbox ssh-config NAME` and write the output to
@@ -290,13 +338,18 @@ pub async fn generate_ssh_config(
     name: &str,
     config_dir: &Path,
 ) -> miette::Result<PathBuf> {
-    let output = Command::new("openshell")
-        .args(["sandbox", "ssh-config", name])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "ssh-config", name]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell sandbox ssh-config: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("failed to run openshell sandbox ssh-config: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell sandbox ssh-config wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -319,15 +372,20 @@ pub async fn generate_ssh_config(
 ///
 /// Uses `--wait` to block until the sandbox confirms it loaded the new policy.
 pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> {
-    let output = Command::new("openshell")
-        .args(["policy", "set", name, "--policy"])
+    let mut cmd = Command::new("openshell");
+    cmd.args(["policy", "set", name, "--policy"])
         .arg(policy_path)
-        .args(["--wait", "--timeout", "30"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        .args(["--wait", "--timeout", "30"]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell policy set: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("failed to run openshell policy set: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell policy set wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -360,8 +418,7 @@ pub async fn ssh_exec(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let child = command
-        .spawn()
+    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh: {e:#}"))?;
 
     let timeout_dur = Duration::from_secs(timeout_secs);
@@ -402,36 +459,40 @@ pub async fn ssh_tar_download(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
+    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh for tar download: {e:#}"))?;
 
     let mut stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| miette::miette!("no stdout handle from ssh tar download"))?;
 
     let mut file = tokio::fs::File::create(dest_path)
         .await
         .map_err(|e| miette::miette!("failed to create backup file {}: {e:#}", dest_path.display()))?;
 
-    // Spawn a task to copy stdout → file to avoid deadlock (SSH won't exit until stdout is consumed).
-    let copy_task = tokio::spawn(async move {
+    // Run stdout→file copy concurrently with child wait via try_join! — no orphan
+    // spawn to leak on timeout. Dropping the outer future cancels both branches.
+    let copy_fut = async {
         tokio::io::copy(&mut stdout, &mut file)
             .await
-            .map_err(|e| miette::miette!("I/O error during tar download: {e:#}"))
-    });
+            .map_err(|e| miette::miette!("I/O error during tar download: {e:#}"))?;
+        Ok::<_, miette::Error>(())
+    };
+
+    let wait_fut = async {
+        child
+            .wait()
+            .await
+            .map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    };
 
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let (copy_result, child_result) = tokio::time::timeout(timeout_dur, async {
-        let copy = copy_task.await.map_err(|e| miette::miette!("copy task panicked: {e:#}"))??;
-        let status = child.wait().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))?;
-        Ok::<_, miette::Error>((copy, status))
+    let ((), child_result) = tokio::time::timeout(timeout_dur, async {
+        tokio::try_join!(copy_fut, wait_fut)
     })
     .await
     .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
 
-    let _ = copy_result;
     if !child_result.success() {
         return Err(miette::miette!(
             "ssh tar download failed (exit {child_result})"
@@ -459,17 +520,17 @@ pub async fn ssh_tar_upload(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let mut child = command
-        .spawn()
+    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh for tar upload: {e:#}"))?;
 
     let mut stdin = child
-        .stdin
-        .take()
+        .stdin()
         .ok_or_else(|| miette::miette!("no stdin handle from ssh tar upload"))?;
 
     let src_path = src_path.to_owned();
-    let write_task = tokio::spawn(async move {
+    // Run the write task concurrently with child wait via try_join! — no orphan
+    // spawn to leak on timeout. Dropping the outer future cancels both branches.
+    let write_fut = async {
         let mut file = tokio::fs::File::open(&src_path)
             .await
             .map_err(|e| miette::miette!("failed to open backup file {}: {e:#}", src_path.display()))?;
@@ -479,12 +540,18 @@ pub async fn ssh_tar_upload(
         // Drop stdin to signal EOF to the remote tar process.
         drop(stdin);
         Ok::<_, miette::Error>(())
-    });
+    };
+
+    let wait_fut = async {
+        child
+            .wait_with_output()
+            .await
+            .map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    };
 
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let output = tokio::time::timeout(timeout_dur, async {
-        write_task.await.map_err(|e| miette::miette!("write task panicked: {e:#}"))??;
-        child.wait_with_output().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    let ((), output) = tokio::time::timeout(timeout_dur, async {
+        tokio::try_join!(write_fut, wait_fut)
     })
     .await
     .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))??;
@@ -519,13 +586,20 @@ pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> 
 
 /// Upload a single file to a sandbox directory.
 async fn upload_single_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> miette::Result<()> {
-    let output = Command::new("openshell")
-        .args(["sandbox", "upload", sandbox])
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "upload", sandbox])
         .arg(host_path)
-        .arg(sandbox_dir)
-        .output()
+        .arg(sandbox_dir);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell upload: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("openshell upload failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell upload wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -584,12 +658,19 @@ async fn upload_directory(sandbox: &str, host_dir: &Path, sandbox_dir: &str) -> 
 
 /// Download a file or directory from a sandbox to the host.
 pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) -> miette::Result<()> {
-    let output = Command::new("openshell")
-        .args(["sandbox", "download", sandbox, sandbox_path])
-        .arg(host_dest)
-        .output()
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "download", sandbox, sandbox_path])
+        .arg(host_dest);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell download: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("openshell download failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell download wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -601,12 +682,20 @@ pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) 
 /// Delete a sandbox. Best-effort — logs a warning on failure but does not
 /// propagate the error (stale sandboxes that don't exist shouldn't block callers).
 pub async fn delete_sandbox(name: &str) {
-    let result = Command::new("openshell")
-        .args(["sandbox", "delete", name])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "delete", name]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = match crate::process_group::ProcessGroupChild::spawn(cmd) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(sandbox = name, "failed to spawn openshell delete: {e:#}");
+            return;
+        }
+    };
+
+    let result = child.wait_with_output().await;
 
     match result {
         Ok(output) if output.status.success() => {
@@ -624,8 +713,7 @@ pub async fn delete_sandbox(name: &str) {
         Err(e) => {
             tracing::warn!(
                 sandbox = name,
-                error = %e,
-                "failed to run openshell sandbox delete (best-effort)"
+                "failed to wait for openshell delete: {e:#}"
             );
         }
     }

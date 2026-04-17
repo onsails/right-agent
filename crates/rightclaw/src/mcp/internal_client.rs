@@ -299,17 +299,19 @@ mod tests {
 
     #[test]
     fn reload_response_deserializes() {
-        let json = r#"{"added":["him","test"],"total":3}"#;
+        let json = r#"{"added":["him","test"],"removed":["gone"],"total":3}"#;
         let resp: ReloadResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.added, vec!["him", "test"]);
+        assert_eq!(resp.removed, vec!["gone"]);
         assert_eq!(resp.total, 3);
     }
 
     #[test]
     fn reload_response_empty_added() {
-        let json = r#"{"added":[],"total":2}"#;
+        let json = r#"{"added":[],"removed":[],"total":2}"#;
         let resp: ReloadResponse = serde_json::from_str(json).unwrap();
         assert!(resp.added.is_empty());
+        assert!(resp.removed.is_empty());
         assert_eq!(resp.total, 2);
     }
 }

@@ -467,11 +467,11 @@ async fn deliver_through_session(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
 
-    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e:#}"))?;
+    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| format!("spawn failed: {e:#}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.stdin() {
         use tokio::io::AsyncWriteExt;
         stdin
             .write_all(yaml_input.as_bytes())

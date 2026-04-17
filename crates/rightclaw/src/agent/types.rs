@@ -212,9 +212,12 @@ pub struct AgentConfig {
     #[serde(default)]
     pub telegram_token: Option<String>,
 
-    /// Telegram chat IDs permitted to interact with this agent's bot.
-    /// Empty vec = block all incoming messages (secure default). Bot emits
-    /// `tracing::warn!` at startup when empty — see D-05.
+    /// **DEPRECATED** — source of truth moved to `allowlist.yaml`. Retained
+    /// for backward-compatible parsing and one-time migration. On first bot
+    /// startup after upgrade, `load_or_migrate_allowlist` seeds `allowlist.yaml`
+    /// from this field via `migrate_from_legacy`. Subsequent startups ignore
+    /// the field and emit a WARN when it's still populated alongside a present
+    /// `allowlist.yaml`. See §Migration in the group-chat spec.
     #[serde(default)]
     pub allowed_chat_ids: Vec<i64>,
 
@@ -478,6 +481,13 @@ unknown_field: "should fail"
         let yaml = "allowed_chat_ids:\n  - -100";
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.allowed_chat_ids, vec![-100_i64]);
+    }
+
+    #[test]
+    fn allowed_chat_ids_still_parses_for_migration() {
+        let yaml = "allowed_chat_ids:\n  - 42\n  - -100\n";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.allowed_chat_ids, vec![42, -100]);
     }
 
     #[test]

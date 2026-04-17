@@ -124,13 +124,17 @@ async fn cleanup_old_logs(
             "find {log_dir} -maxdepth 1 -name '{job_name}-*.ndjson' -printf '%T@ %p\\n' 2>/dev/null | sort -rn | tail -n +{} | cut -d' ' -f2- | xargs -r rm -f",
             keep + 1
         );
-        let output = tokio::process::Command::new("ssh")
-            .arg("-F").arg(ssh_config)
+        let mut c = tokio::process::Command::new("ssh");
+        c.arg("-F").arg(ssh_config)
             .arg(&ssh_host)
             .arg("--")
-            .arg(&cleanup_cmd)
-            .output()
-            .await;
+            .arg(&cleanup_cmd);
+        c.stdout(std::process::Stdio::piped());
+        c.stderr(std::process::Stdio::piped());
+        let output = match rightclaw::process_group::ProcessGroupChild::spawn(c) {
+            Ok(mut child) => child.wait_with_output().await,
+            Err(e) => Err(e),
+        };
         match output {
             Ok(o) if !o.status.success() => {
                 tracing::warn!(
@@ -378,11 +382,10 @@ async fn execute_job(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
-    let mut child = match cmd.spawn() {
+    let mut child = match rightclaw::process_group::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
             update_run_record(&conn, &run_id, None, "failed");
@@ -393,7 +396,7 @@ async fn execute_job(
     };
 
     // Stream stdout line-by-line; tee inside the subprocess writes the NDJSON log.
-    let stdout = child.stdout.take().expect("stdout piped");
+    let stdout = child.stdout().expect("stdout piped");
     let mut lines = tokio::io::BufReader::new(stdout).lines();
 
     let mut collected_lines: Vec<String> = Vec::new();
@@ -412,7 +415,7 @@ async fn execute_job(
         }
     };
     // stderr is still owned by child — read it via the handle.
-    let stderr_bytes = if let Some(mut stderr) = child.stderr.take() {
+    let stderr_bytes = if let Some(mut stderr) = child.stderr() {
         let mut buf = Vec::new();
         if let Err(e) = stderr.read_to_end(&mut buf).await {
             tracing::warn!(job = %job_name, "failed to read stderr: {e:#}");

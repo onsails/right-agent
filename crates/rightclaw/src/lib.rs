@@ -9,8 +9,12 @@ pub mod mcp;
 pub mod memory;
 pub mod openshell;
 pub mod platform_store;
-pub mod sandbox_exec;
+#[cfg(unix)]
+pub mod process_group;
 pub mod runtime;
+pub mod sandbox_exec;
+#[cfg(unix)]
+pub mod test_cleanup;
 pub mod tunnel;
 
 /// Generated protobuf types for the OpenShell gRPC API.

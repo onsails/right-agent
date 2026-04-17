@@ -43,6 +43,10 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 url = { workspace = true }
 tokio-util = { workspace = true }
+fs4 = { workspace = true }
+nix = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
 
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }

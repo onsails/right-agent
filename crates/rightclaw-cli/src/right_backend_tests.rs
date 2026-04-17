@@ -133,6 +133,9 @@ async fn create_test_sandbox(
     mtls_dir: &std::path::Path,
     sandbox_name: &str,
 ) -> rightclaw::sandbox_exec::SandboxExec {
+    rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
+    rightclaw::test_cleanup::register_test_sandbox(sandbox_name);
+
     let mut grpc_client = rightclaw::openshell::connect_grpc(mtls_dir)
         .await
         .expect("gRPC connect");
@@ -177,11 +180,12 @@ network_policies:
     )
     .unwrap();
 
-    let _child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+    let mut child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
         .expect("failed to spawn sandbox");
     rightclaw::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
         .await
         .expect("sandbox did not become READY");
+    let _ = child.kill().await;
 
     let sandbox_id =
         rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
@@ -208,6 +212,7 @@ network_policies:
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_present() {
+    let _slot = rightclaw::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-present";
 
     let mtls_dir = match rightclaw::openshell::preflight_check() {
@@ -252,10 +257,12 @@ async fn bootstrap_done_sandbox_files_present() {
     );
 
     rightclaw::openshell::delete_sandbox(sandbox_name).await;
+    rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_missing() {
+    let _slot = rightclaw::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-missing";
 
     let mtls_dir = match rightclaw::openshell::preflight_check() {
@@ -300,4 +307,5 @@ async fn bootstrap_done_sandbox_files_missing() {
     );
 
     rightclaw::openshell::delete_sandbox(sandbox_name).await;
+    rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
