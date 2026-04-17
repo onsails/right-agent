@@ -340,13 +340,18 @@ pub async fn generate_ssh_config(
     name: &str,
     config_dir: &Path,
 ) -> miette::Result<PathBuf> {
-    let output = Command::new("openshell")
-        .args(["sandbox", "ssh-config", name])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "ssh-config", name]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell sandbox ssh-config: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("failed to run openshell sandbox ssh-config: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell sandbox ssh-config wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -369,15 +374,20 @@ pub async fn generate_ssh_config(
 ///
 /// Uses `--wait` to block until the sandbox confirms it loaded the new policy.
 pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> {
-    let output = Command::new("openshell")
-        .args(["policy", "set", name, "--policy"])
+    let mut cmd = Command::new("openshell");
+    cmd.args(["policy", "set", name, "--policy"])
         .arg(policy_path)
-        .args(["--wait", "--timeout", "30"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
+        .args(["--wait", "--timeout", "30"]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell policy set: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("failed to run openshell policy set: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell policy set wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -582,7 +592,7 @@ async fn upload_single_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) 
     let output = child
         .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("openshell upload failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell upload wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -641,12 +651,19 @@ async fn upload_directory(sandbox: &str, host_dir: &Path, sandbox_dir: &str) -> 
 
 /// Download a file or directory from a sandbox to the host.
 pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) -> miette::Result<()> {
-    let output = Command::new("openshell")
-        .args(["sandbox", "download", sandbox, sandbox_path])
-        .arg(host_dest)
-        .output()
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "download", sandbox, sandbox_path])
+        .arg(host_dest);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell download: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| miette::miette!("openshell download failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("openshell download wait failed: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

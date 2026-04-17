@@ -98,11 +98,11 @@ async fn ping_claude(
     cmd.stderr(std::process::Stdio::null());
 
     let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
-        .map_err(|e| format!("spawn failed: {e}"))?;
+        .map_err(|e| format!("spawn failed: {e:#}"))?;
     let status = child
         .wait()
         .await
-        .map_err(|e| format!("wait failed: {e}"))?;
+        .map_err(|e| format!("wait failed: {e:#}"))?;
 
     if status.success() {
         Ok(())
