@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Test-only sandbox cleanup registry + panic hook.
 //!
 //! The workspace builds with `panic = "abort"` (see top-level Cargo.toml),

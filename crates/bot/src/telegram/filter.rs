@@ -22,14 +22,10 @@ pub fn make_routing_filter(
         let sender_id = sender.id.0 as i64;
         let chat_id = msg.chat.id.0;
 
-        // Synchronous read of the RwLock via blocking_read. Safe in teloxide
-        // filter_map closures because they're sync and we only read.
-        let state = allowlist.0.blocking_read();
+        let state = allowlist.0.read().expect("allowlist lock poisoned");
         let sender_trusted = state.is_user_trusted(sender_id);
         let group_open = state.is_group_open(chat_id);
         drop(state);
-
-        let is_group = !matches!(msg.chat.kind, ChatKind::Private(_));
 
         match is_bot_addressed(&msg, &identity) {
             None => None, // group non-mention dropped
@@ -42,8 +38,7 @@ pub fn make_routing_filter(
                 }))
             }
             Some(addr) => {
-                debug_assert!(is_group);
-                let _ = is_group;
+                debug_assert!(!matches!(msg.chat.kind, ChatKind::Private(_)));
                 if !sender_trusted && !group_open { return None; }
                 Some((msg, RoutingDecision { address: addr, sender_trusted, group_open }))
             }

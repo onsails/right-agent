@@ -484,6 +484,11 @@ async fn main() -> miette::Result<()> {
                 cmd_agent_destroy(&home, &name, backup, force).await
             }
             AgentCommands::Allow { name, user_id, label } => {
+                if user_id < 0 {
+                    miette::bail!(
+                        "user_id cannot be negative (groups/channels use `rightclaw agent allow_all`)"
+                    );
+                }
                 let dir = rightclaw::config::agents_dir(&home).join(&name);
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
@@ -579,7 +584,7 @@ async fn main() -> miette::Result<()> {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
                 use rightclaw::agent::allowlist;
-                let file = allowlist::with_lock(&dir, |d| allowlist::read_file(d))
+                let file = allowlist::read_file(&dir)
                     .map_err(|e| miette::miette!("{e}"))?
                     .unwrap_or_default();
                 if json {

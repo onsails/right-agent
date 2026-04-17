@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use rightclaw::agent::allowlist::{
-    self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, RemoveOutcome,
+    self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, AllowlistState, RemoveOutcome,
 };
 use teloxide::RequestError;
 use teloxide::prelude::*;
@@ -60,25 +60,36 @@ pub fn resolve_user_target(msg: &Message, args: &str) -> UserTarget {
     UserTarget::None
 }
 
-/// Persist the current `AllowlistState` atomically to disk (under the lock).
-async fn persist(handle: &AllowlistHandle, agent_dir: &std::path::Path) -> Result<(), String> {
-    let file = {
-        let state = handle.0.read().await;
-        state.to_file()
-    };
+/// Persist the proposed `AllowlistState` atomically to disk, then swap it
+/// into the in-memory handle on success.
+///
+/// Order matters: if we mutated the in-memory state first and the disk write
+/// failed, the filter would honor an entry that is not on disk until the
+/// watcher reload fires — a security-relevant consistency hole.
+async fn persist_new(
+    handle: &AllowlistHandle,
+    agent_dir: &std::path::Path,
+    new_state: AllowlistState,
+) -> Result<(), String> {
+    let file = new_state.to_file();
     let dir = agent_dir.to_path_buf();
     tokio::task::spawn_blocking(move || allowlist::write_file(&dir, &file))
         .await
-        .map_err(|e| format!("join: {e:#}"))?
+        .map_err(|e| format!("join: {e:#}"))??;
+    *handle.0.write().expect("allowlist lock poisoned") = new_state;
+    Ok(())
 }
 
 /// Trusted-only gate. Returns true when the sender is in the trusted-users allowlist.
-async fn sender_is_trusted(msg: &Message, allowlist: &AllowlistHandle) -> bool {
+fn sender_is_trusted(msg: &Message, allowlist: &AllowlistHandle) -> bool {
     let Some(sender) = msg.from.as_ref() else {
         return false;
     };
-    let state = allowlist.0.read().await;
-    state.is_user_trusted(sender.id.0 as i64)
+    allowlist
+        .0
+        .read()
+        .expect("allowlist lock poisoned")
+        .is_user_trusted(sender.id.0 as i64)
 }
 
 async fn reply(bot: &BotType, msg: &Message, text: &str) -> Result<(), RequestError> {
@@ -98,7 +109,7 @@ pub async fn handle_allow(
     allowlist: AllowlistHandle,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist).await {
+    if !sender_is_trusted(&msg, &allowlist) {
         tracing::debug!("/allow ignored: non-trusted sender");
         return Ok(());
     }
@@ -140,19 +151,22 @@ pub async fn handle_allow(
         return Ok(());
     }
 
-    let outcome = {
-        let mut w = allowlist.0.write().await;
-        w.add_user(AllowedUser {
+    let (outcome, new_state) = {
+        let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
+        let mut next = current;
+        let outcome = next.add_user(AllowedUser {
             id,
             label: label.clone(),
             added_by: msg.from.as_ref().map(|u| u.id.0 as i64),
             added_at: Utc::now(),
-        })
+        });
+        (outcome, next)
     };
 
     match outcome {
         AddOutcome::Inserted => {
-            if let Err(e) = persist(&allowlist, &agent_dir.0).await {
+            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+                tracing::error!(error = %e, "allowlist persist failed for /allow");
                 reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
@@ -173,7 +187,7 @@ pub async fn handle_deny(
     allowlist: AllowlistHandle,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist).await {
+    if !sender_is_trusted(&msg, &allowlist) {
         tracing::debug!("/deny ignored: non-trusted sender");
         return Ok(());
     }
@@ -217,13 +231,16 @@ pub async fn handle_deny(
         return Ok(());
     }
 
-    let outcome = {
-        let mut w = allowlist.0.write().await;
-        w.remove_user(id)
+    let (outcome, new_state) = {
+        let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
+        let mut next = current;
+        let outcome = next.remove_user(id);
+        (outcome, next)
     };
     match outcome {
         RemoveOutcome::Removed => {
-            if let Err(e) = persist(&allowlist, &agent_dir.0).await {
+            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+                tracing::error!(error = %e, "allowlist persist failed for /deny");
                 reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
@@ -241,13 +258,13 @@ pub async fn handle_allowed(
     msg: Message,
     allowlist: AllowlistHandle,
 ) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist).await {
+    if !sender_is_trusted(&msg, &allowlist) {
         tracing::debug!("/allowed ignored: non-trusted sender");
         return Ok(());
     }
 
     let file = {
-        let state = allowlist.0.read().await;
+        let state = allowlist.0.read().expect("allowlist lock poisoned");
         state.to_file()
     };
     let mut text = String::from("<b>Trusted users:</b>\n");
@@ -280,7 +297,7 @@ pub async fn handle_allow_all(
     allowlist: AllowlistHandle,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist).await {
+    if !sender_is_trusted(&msg, &allowlist) {
         tracing::debug!("/allow_all ignored: non-trusted sender");
         return Ok(());
     }
@@ -291,18 +308,21 @@ pub async fn handle_allow_all(
     }
     let chat_id = msg.chat.id.0;
     let label = msg.chat.title().map(|s| s.to_string());
-    let outcome = {
-        let mut w = allowlist.0.write().await;
-        w.add_group(AllowedGroup {
+    let (outcome, new_state) = {
+        let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
+        let mut next = current;
+        let outcome = next.add_group(AllowedGroup {
             id: chat_id,
             label: label.clone(),
             opened_by: msg.from.as_ref().map(|u| u.id.0 as i64),
             opened_at: Utc::now(),
-        })
+        });
+        (outcome, next)
     };
     match outcome {
         AddOutcome::Inserted => {
-            if let Err(e) = persist(&allowlist, &agent_dir.0).await {
+            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+                tracing::error!(error = %e, "allowlist persist failed for /allow_all");
                 reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
@@ -321,7 +341,7 @@ pub async fn handle_deny_all(
     allowlist: AllowlistHandle,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
-    if !sender_is_trusted(&msg, &allowlist).await {
+    if !sender_is_trusted(&msg, &allowlist) {
         tracing::debug!("/deny_all ignored: non-trusted sender");
         return Ok(());
     }
@@ -331,13 +351,16 @@ pub async fn handle_deny_all(
         return Ok(());
     }
     let chat_id = msg.chat.id.0;
-    let outcome = {
-        let mut w = allowlist.0.write().await;
-        w.remove_group(chat_id)
+    let (outcome, new_state) = {
+        let current = allowlist.0.read().expect("allowlist lock poisoned").clone();
+        let mut next = current;
+        let outcome = next.remove_group(chat_id);
+        (outcome, next)
     };
     match outcome {
         RemoveOutcome::Removed => {
-            if let Err(e) = persist(&allowlist, &agent_dir.0).await {
+            if let Err(e) = persist_new(&allowlist, &agent_dir.0, new_state).await {
+                tracing::error!(error = %e, "allowlist persist failed for /deny_all");
                 reply(&bot, &msg, &format!("\u{2717} persist failed: {e}")).await?;
                 return Ok(());
             }
