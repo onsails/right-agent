@@ -15,6 +15,8 @@ pub mod runtime;
 pub mod sandbox_exec;
 #[cfg(unix)]
 pub mod test_cleanup;
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub mod test_support;
 pub mod tunnel;
 
 /// Generated protobuf types for the OpenShell gRPC API.
