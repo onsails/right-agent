@@ -12,10 +12,15 @@ pub struct RoutingDecision {
     pub group_open: bool,
 }
 
+// Return shape note: dptree 0.5.1 `filter_map` inserts the closure's `Option<T>`
+// into the DI bag as a single value — it does **not** unpack tuples. Since
+// `Update::filter_message()` already places `Message` in the bag, we return
+// only `Option<RoutingDecision>`. Returning `Option<(Message, RoutingDecision)>`
+// would leave `RoutingDecision` unreachable from downstream handlers.
 pub fn make_routing_filter(
     allowlist: AllowlistHandle,
     identity: BotIdentity,
-) -> impl Fn(Message) -> Option<(Message, RoutingDecision)> + Send + Sync + Clone + 'static {
+) -> impl Fn(Message) -> Option<RoutingDecision> + Send + Sync + Clone + 'static {
     move |msg: Message| {
         // No `from` means channel post or anonymous — ignore.
         let sender = msg.from.as_ref()?;
@@ -31,16 +36,16 @@ pub fn make_routing_filter(
             None => None, // group non-mention dropped
             Some(AddressKind::DirectMessage) => {
                 if !sender_trusted { return None; } // DM from non-trusted → drop
-                Some((msg, RoutingDecision {
+                Some(RoutingDecision {
                     address: AddressKind::DirectMessage,
                     sender_trusted: true,
                     group_open: false,
-                }))
+                })
             }
             Some(addr) => {
                 debug_assert!(!matches!(msg.chat.kind, ChatKind::Private(_)));
                 if !sender_trusted && !group_open { return None; }
-                Some((msg, RoutingDecision { address: addr, sender_trusted, group_open }))
+                Some(RoutingDecision { address: addr, sender_trusted, group_open })
             }
         }
     }
