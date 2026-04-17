@@ -10,3 +10,4 @@ devenv.local.yaml
 .pre-commit-config.yaml
 target/
 .claude/worktrees
+.claude
