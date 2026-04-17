@@ -1,6 +1,6 @@
 # OpenShell test-process leaks — fix design
 
-**Status:** design approved, plan pending
+**Status:** implemented and verified, 2026-04-17
 **Date:** 2026-04-17
 **Companion to:** `2026-04-17-openshell-test-leaks.md` (diagnosis)
 
