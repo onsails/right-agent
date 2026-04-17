@@ -189,6 +189,14 @@ impl TestSandbox {
     pub(crate) async fn create(test_name: &str) -> Self {
         let name = format!("rightclaw-test-{test_name}");
 
+        // Belt-and-suspenders cleanup of any orphan processes from a
+        // previous SIGKILLed test run that Drop/hook could not handle.
+        crate::test_cleanup::pkill_test_orphans(&name);
+
+        // Register in the panic-hook registry so abort-on-panic still
+        // triggers sandbox cleanup.
+        crate::test_cleanup::register_test_sandbox(&name);
+
         let mtls_dir = match super::preflight_check() {
             super::OpenShellStatus::Ready(dir) => dir,
             other => panic!("OpenShell not ready: {other:?}"),
@@ -255,12 +263,12 @@ network_policies:
             .await
             .unwrap()
     }
+}
 
-    /// Delete the sandbox and wait for deletion to complete.
-    pub(crate) async fn destroy(self) {
-        super::delete_sandbox(&self.name).await;
-        let mut client = super::connect_grpc(&self.mtls_dir).await.unwrap();
-        let _ = super::wait_for_deleted(&mut client, &self.name, 60, 2).await;
+impl Drop for TestSandbox {
+    fn drop(&mut self) {
+        crate::test_cleanup::unregister_test_sandbox(&self.name);
+        crate::test_cleanup::delete_sandbox_sync(&self.name);
     }
 }
 
@@ -395,8 +403,6 @@ async fn exec_in_sandbox_runs_command() {
         stdout.contains("hello-from-test"),
         "expected 'hello-from-test' in stdout, got: {stdout:?}"
     );
-
-    sbox.destroy().await;
 }
 
 #[tokio::test]
@@ -406,8 +412,6 @@ async fn exec_in_sandbox_returns_exit_code() {
     let (_, exit_code) = sbox.exec(&["sh", "-c", "exit 42"]).await;
 
     assert_eq!(exit_code, 42, "should propagate remote exit code");
-
-    sbox.destroy().await;
 }
 
 #[tokio::test]
@@ -430,8 +434,6 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
     // Confirm file actually exists in sandbox now.
     let (output, _) = sbox.exec(&["cat", "/sandbox/VERIFY_TEST.md"]).await;
     assert_eq!(output, "# verify test\n", "file content should match");
-
-    sbox.destroy().await;
 }
 
 /// Reproduces the exact flow of `rightclaw init`:
@@ -527,8 +529,6 @@ async fn verify_sandbox_files_passes_when_all_present() {
     super::verify_sandbox_files(sbox.name(), host_dir, "/sandbox/", &["PRESENT_TEST.md"])
         .await
         .expect("verify should pass when file exists");
-
-    sbox.destroy().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -550,8 +550,6 @@ async fn upload_file_to_directory() {
     let (content, code) = sbox.exec(&["cat", "/sandbox/hello.txt"]).await;
     assert_eq!(code, 0);
     assert_eq!(content, "hello sandbox\n");
-
-    sbox.destroy().await;
 }
 
 #[tokio::test]
@@ -576,8 +574,6 @@ async fn upload_file_overwrites_existing() {
 
     let (content, _) = sbox.exec(&["cat", "/sandbox/data.txt"]).await;
     assert_eq!(content, "version 2\n", "second upload should overwrite");
-
-    sbox.destroy().await;
 }
 
 #[tokio::test]
@@ -596,8 +592,6 @@ async fn upload_file_to_nested_dir() {
     let (content, code) = sbox.exec(&["cat", "/sandbox/a/b/c/nested.txt"]).await;
     assert_eq!(code, 0);
     assert_eq!(content, "deep\n");
-
-    sbox.destroy().await;
 }
 
 /// Regression test: upload_file must reject non-directory destination.
@@ -660,8 +654,6 @@ async fn upload_directory_preserves_files_and_overwrites() {
         .await;
     assert_eq!(code, 0, "SKILL.md must exist after overwrite");
     assert_eq!(content, "# version 2\n", "overwrite must update content");
-
-    sbox.destroy().await;
 }
 
 // ---------------------------------------------------------------------------

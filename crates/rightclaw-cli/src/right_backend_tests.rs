@@ -133,6 +133,9 @@ async fn create_test_sandbox(
     mtls_dir: &std::path::Path,
     sandbox_name: &str,
 ) -> rightclaw::sandbox_exec::SandboxExec {
+    rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
+    rightclaw::test_cleanup::register_test_sandbox(sandbox_name);
+
     let mut grpc_client = rightclaw::openshell::connect_grpc(mtls_dir)
         .await
         .expect("gRPC connect");
@@ -254,6 +257,7 @@ async fn bootstrap_done_sandbox_files_present() {
     );
 
     rightclaw::openshell::delete_sandbox(sandbox_name).await;
+    rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
 #[tokio::test]
@@ -303,4 +307,5 @@ async fn bootstrap_done_sandbox_files_missing() {
     );
 
     rightclaw::openshell::delete_sandbox(sandbox_name).await;
+    rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
