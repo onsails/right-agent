@@ -13,9 +13,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use teloxide::dispatching::UpdateFilterExt;
+use teloxide::dispatching::{DefaultKey, UpdateFilterExt};
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
+use teloxide::RequestError;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +26,7 @@ use super::mention::BotIdentity;
 use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
+use super::BotType;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
@@ -98,7 +100,6 @@ pub async fn run_telegram(
         .ok_or_else(|| miette::miette!("bot has no username; cannot set up group-mention detection"))?;
     let identity = BotIdentity { username: username.clone(), user_id: me.user.id.0 };
     tracing::info!(%username, user_id = identity.user_id, "bot identity resolved");
-    let filter = make_routing_filter(allowlist.clone(), identity.clone());
     let identity_arc = Arc::new(identity);
 
     // Shared state
@@ -131,6 +132,98 @@ pub async fn run_telegram(
         debug,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
+
+    let mut dispatcher = build_dispatcher(
+        bot.clone(),
+        allowlist.clone(),
+        Arc::clone(&identity_arc),
+        Arc::clone(&worker_map),
+        Arc::clone(&agent_dir_arc),
+        pending_auth_arc,
+        Arc::clone(&home_arc),
+        Arc::clone(&ssh_config_arc),
+        Arc::clone(&intercept_slots_arc),
+        Arc::clone(&pending_token_slot_arc),
+        Arc::clone(&internal_api_arc),
+        Arc::clone(&settings_arc),
+        Arc::clone(&stop_tokens),
+        Arc::clone(&idle_ts),
+    );
+
+    let shutdown_token = dispatcher.shutdown_token();
+
+    // Signal handler task
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .expect("failed to register SIGTERM handler");
+
+        tokio::select! {
+            _ = sigterm.recv() => {
+                tracing::info!("SIGTERM received -- initiating graceful shutdown");
+            }
+            result = tokio::signal::ctrl_c() => {
+                if result.is_ok() {
+                    tracing::info!("SIGINT received -- initiating graceful shutdown");
+                }
+            }
+            _ = shutdown.cancelled() => {
+                tracing::info!("config change detected -- initiating graceful shutdown");
+            }
+        }
+
+        // Shutdown dispatcher -- worker tasks drain their mpsc channels and exit.
+        // In-flight CC subprocesses are killed by kill_on_drop(true) when workers are dropped.
+        match shutdown_token.shutdown() {
+            Ok(fut) => {
+                fut.await;
+                tracing::info!("dispatcher stopped");
+            }
+            Err(_idle) => {
+                tracing::debug!("dispatcher was idle at shutdown -- already stopped");
+            }
+        }
+    });
+
+    // Register commands at default (global) scope; routing gates them via allowlist.yaml.
+    let commands = BotCommand::bot_commands();
+    if let Err(e) = bot.delete_my_commands().await {
+        tracing::warn!("delete_my_commands (default scope): {e:#}");
+    }
+    if let Err(e) = bot.set_my_commands(commands).await {
+        tracing::warn!("set_my_commands (default scope): {e:#}");
+    }
+
+    tracing::info!("teloxide dispatcher starting (long-polling)");
+    dispatcher.dispatch().await;
+    tracing::info!("dispatcher exited cleanly");
+    Ok(())
+}
+
+/// Build the teloxide `Dispatcher` with the full handler schema and dependency map.
+///
+/// Extracted from `run_telegram` so that dptree dependency-injection type checking
+/// (which runs inside `DispatcherBuilder::build()`) can be smoke-tested without
+/// going through the full bot startup path. See `dispatcher_builds_without_panic`.
+#[allow(clippy::too_many_arguments)]
+fn build_dispatcher(
+    bot: BotType,
+    allowlist: rightclaw::agent::allowlist::AllowlistHandle,
+    identity_arc: Arc<BotIdentity>,
+    worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
+    agent_dir_arc: Arc<AgentDir>,
+    pending_auth_arc: PendingAuthMap,
+    home_arc: Arc<RightclawHome>,
+    ssh_config_arc: Arc<SshConfigPath>,
+    intercept_slots_arc: Arc<InterceptSlots>,
+    pending_token_slot_arc: Arc<PendingTokenSlot>,
+    internal_api_arc: Arc<InternalApi>,
+    settings_arc: Arc<AgentSettings>,
+    stop_tokens: super::StopTokens,
+    idle_ts: Arc<IdleTimestamp>,
+) -> teloxide::dispatching::Dispatcher<BotType, RequestError, DefaultKey> {
+    let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
 
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
@@ -201,71 +294,103 @@ pub async fn run_telegram(
         .branch(message_handler)
         .branch(callback_handler);
 
-    let mut dispatcher = Dispatcher::builder(bot.clone(), schema)
+    Dispatcher::builder(bot, schema)
         .dependencies(dptree::deps![
-            Arc::clone(&worker_map),
-            Arc::clone(&agent_dir_arc),
+            worker_map,
+            agent_dir_arc,
             pending_auth_arc,
-            Arc::clone(&home_arc),
-            Arc::clone(&ssh_config_arc),
-            Arc::clone(&intercept_slots_arc),
-            Arc::clone(&pending_token_slot_arc),
-            Arc::clone(&internal_api_arc),
-            Arc::clone(&settings_arc),
-            Arc::clone(&stop_tokens),
-            Arc::clone(&idle_ts),
-            Arc::clone(&identity_arc),
-            allowlist.clone()
+            home_arc,
+            ssh_config_arc,
+            intercept_slots_arc,
+            pending_token_slot_arc,
+            internal_api_arc,
+            settings_arc,
+            stop_tokens,
+            idle_ts,
+            identity_arc,
+            allowlist
         ])
-        .build();
+        .build()
+}
 
-    let shutdown_token = dispatcher.shutdown_token();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicI64};
 
-    // Signal handler task
-    tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )
-        .expect("failed to register SIGTERM handler");
+    use rightclaw::agent::allowlist::{AllowlistHandle, AllowlistState};
+    use rightclaw::mcp::internal_client::InternalClient;
+    use rightclaw::memory::prefetch::PrefetchCache;
+    use tokio::sync::{Mutex, RwLock};
 
-        tokio::select! {
-            _ = sigterm.recv() => {
-                tracing::info!("SIGTERM received -- initiating graceful shutdown");
-            }
-            result = tokio::signal::ctrl_c() => {
-                if result.is_ok() {
-                    tracing::info!("SIGINT received -- initiating graceful shutdown");
-                }
-            }
-            _ = shutdown.cancelled() => {
-                tracing::info!("config change detected -- initiating graceful shutdown");
-            }
-        }
+    /// Smoke test: construct the real dispatcher with dummy deps. If a handler
+    /// in the tree declares a DI parameter type that is not supplied by either
+    /// `.dependencies(...)` or an upstream combinator (filter_map etc.), dptree's
+    /// runtime `type_check` panics inside `DispatcherBuilder::build()`. We exercise
+    /// exactly that path so the regression is caught at `cargo test` time.
+    ///
+    /// History: commit 34b7a84 wired `make_routing_filter` returning
+    /// `Option<(Message, RoutingDecision)>` into `filter_map`. dptree 0.5.1 does
+    /// not unpack tuples — the bag received `(Message, RoutingDecision)` as a
+    /// single type, leaving `handle_message`'s `decision: RoutingDecision`
+    /// parameter unsatisfied and aborting every bot on startup.
+    #[tokio::test]
+    async fn dispatcher_builds_without_panic() {
+        let bot = build_bot("0:fake_token_for_smoke_test".to_string());
 
-        // Shutdown dispatcher -- worker tasks drain their mpsc channels and exit.
-        // In-flight CC subprocesses are killed by kill_on_drop(true) when workers are dropped.
-        match shutdown_token.shutdown() {
-            Ok(fut) => {
-                fut.await;
-                tracing::info!("dispatcher stopped");
-            }
-            Err(_idle) => {
-                tracing::debug!("dispatcher was idle at shutdown -- already stopped");
-            }
-        }
-    });
+        let allowlist = AllowlistHandle(Arc::new(std::sync::RwLock::new(
+            AllowlistState::default(),
+        )));
+        let identity = Arc::new(BotIdentity {
+            username: "smoke_bot".to_string(),
+            user_id: 1,
+        });
+        let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
+            Arc::new(DashMap::new());
+        let agent_dir = Arc::new(AgentDir(PathBuf::from("/tmp/smoke")));
+        let pending_auth: PendingAuthMap =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let home = Arc::new(RightclawHome(PathBuf::from("/tmp/smoke")));
+        let ssh_config = Arc::new(SshConfigPath(None));
+        let intercept_slots = Arc::new(InterceptSlots {
+            auth_code: Arc::new(Mutex::new(None)),
+            pending_token: Arc::new(Mutex::new(None)),
+            auth_watcher: Arc::new(AtomicBool::new(false)),
+        });
+        let pending_token_slot = Arc::new(PendingTokenSlot(Arc::new(Mutex::new(None))));
+        let internal_api = Arc::new(InternalApi(Arc::new(InternalClient::new(
+            "/tmp/smoke.sock",
+        ))));
+        let settings = Arc::new(AgentSettings {
+            show_thinking: false,
+            model: None,
+            resolved_sandbox: None,
+            hindsight: None,
+            prefetch_cache: Some(PrefetchCache::new()),
+            upgrade_lock: Arc::new(RwLock::new(())),
+            debug: false,
+        });
+        let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
+        let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
 
-    // Register commands at default (global) scope; routing gates them via allowlist.yaml.
-    let commands = BotCommand::bot_commands();
-    if let Err(e) = bot.delete_my_commands().await {
-        tracing::warn!("delete_my_commands (default scope): {e:#}");
+        // The call under test. If dptree type_check fails, this aborts the
+        // test process.
+        let _dispatcher = build_dispatcher(
+            bot,
+            allowlist,
+            identity,
+            worker_map,
+            agent_dir,
+            pending_auth,
+            home,
+            ssh_config,
+            intercept_slots,
+            pending_token_slot,
+            internal_api,
+            settings,
+            stop_tokens,
+            idle_ts,
+        );
     }
-    if let Err(e) = bot.set_my_commands(commands).await {
-        tracing::warn!("set_my_commands (default scope): {e:#}");
-    }
-
-    tracing::info!("teloxide dispatcher starting (long-polling)");
-    dispatcher.dispatch().await;
-    tracing::info!("dispatcher exited cleanly");
-    Ok(())
 }
