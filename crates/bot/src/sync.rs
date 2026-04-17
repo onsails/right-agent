@@ -373,11 +373,12 @@ network_policies:
         )
         .unwrap();
 
-        let _child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+        let mut child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
             .expect("failed to spawn sandbox");
         rightclaw::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
             .await
             .expect("sandbox did not become READY");
+        let _ = child.kill().await;
 
         let sandbox_id =
             rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
