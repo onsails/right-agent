@@ -1,0 +1,1150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RightClaw — Brand Guide v1</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f0f0f;
+    --panel: #161616;
+    --line: #222;
+    --line-soft: #1a1a1a;
+    --orange: #E8632A;
+    --cream: #f2ede4;
+    --ok: #6bbf59;
+    --warn: #d9a82a;
+    --err: #e03c3c;
+    --dim: #666;
+    --muted: #888;
+    --text: #ddd;
+    --heading: #eee;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', -apple-system, system-ui, sans-serif;
+    padding: 0;
+    line-height: 1.55;
+  }
+  code, .mono { font-family: 'JetBrains Mono', 'Fira Mono', ui-monospace, monospace; }
+  code {
+    background: #0a0a0a; border: 1px solid var(--line);
+    padding: 1px 6px; border-radius: 3px;
+    color: var(--heading); font-size: 0.9em;
+  }
+
+  /* layout */
+  .shell { max-width: 1200px; margin: 0 auto; padding: 48px 56px 120px; }
+  header.top {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding-bottom: 24px; border-bottom: 1px solid var(--line-soft);
+    margin-bottom: 40px;
+  }
+  header.top h1 { font-size: 28px; font-weight: 800; color: var(--orange); letter-spacing: -0.02em; }
+  header.top .meta { font-size: 12px; color: var(--muted); letter-spacing: 0.05em; }
+  header.top .meta b { color: var(--text); }
+
+  /* TOC */
+  .toc {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 22px 28px; margin-bottom: 56px;
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 32px;
+    font-size: 13px;
+  }
+  .toc a { color: var(--text); text-decoration: none; padding: 4px 0; display: block; }
+  .toc a:hover { color: var(--orange); }
+  .toc a .num { color: var(--muted); margin-right: 10px; font-variant-numeric: tabular-nums; }
+
+  /* sections */
+  section { margin-bottom: 72px; scroll-margin-top: 24px; }
+  section > h2 {
+    font-size: 11px; color: var(--muted); letter-spacing: 0.25em;
+    text-transform: uppercase; border-bottom: 1px solid var(--line-soft);
+    padding-bottom: 10px; margin-bottom: 28px;
+    font-weight: 600;
+  }
+  section > h2 b { color: var(--heading); font-weight: 700; margin-right: 10px; }
+  section > h2 span.sub { color: var(--muted); letter-spacing: 0.02em; text-transform: none; margin-left: 14px; font-size: 12px; font-weight: 400; }
+
+  h3 {
+    font-size: 10px; color: var(--muted); letter-spacing: 0.2em;
+    text-transform: uppercase; margin: 0 0 10px 0; font-weight: 600;
+  }
+  h3 b { color: var(--heading); font-weight: 700; margin-right: 8px; }
+
+  p.lead { font-size: 14px; color: var(--text); max-width: 820px; margin-bottom: 20px; line-height: 1.7; }
+  p.note { font-size: 12px; color: var(--muted); max-width: 720px; margin-top: 6px; line-height: 1.6; }
+
+  /* cards & rows */
+  .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 24px 22px 18px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .card.centered { align-items: center; }
+  .card.light { background: var(--cream); border-color: #ddd6c9; }
+  .card .label {
+    font-size: 10px; color: var(--muted); letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .card.light .label { color: #776e5e; }
+  .card .caption {
+    font-size: 12px; color: var(--muted); line-height: 1.6;
+  }
+  .card.light .caption { color: #776e5e; }
+  .card .caption b { color: var(--text); display: block; font-size: 12px; margin-bottom: 3px; }
+  .card.light .caption b { color: #1a1108; }
+
+  /* wordmark display — canonical: right=orange + claw=dim */
+  .wm {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-weight: 800; letter-spacing: -0.025em;
+    color: #666;  /* default claw color = dim */
+  }
+  .wm .right { color: var(--orange); }
+  .wm-48 { font-size: 48px; }
+  .wm-36 { font-size: 36px; }
+  .wm-28 { font-size: 28px; }
+  .wm-22 { font-size: 22px; }
+  .wm-18 { font-size: 18px; }
+  .wm-14 { font-size: 14px; }
+
+  .wm.light { color: #776e5e; }  /* dim-on-cream */
+  .wm.light .right { color: var(--orange); }
+
+  /* swatch tiles */
+  .swatch {
+    border-radius: 6px; padding: 18px 16px;
+    display: flex; flex-direction: column; gap: 6px;
+    min-height: 120px; justify-content: flex-end;
+  }
+  .swatch .hex { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600; }
+  .swatch .name { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 600; opacity: 0.8; }
+  .swatch .use { font-size: 11px; opacity: 0.7; }
+
+  /* terminal */
+  .term {
+    background: #0a0a0a; border: 1px solid var(--line); border-radius: 6px;
+    padding: 18px 20px; font-size: 13px; line-height: 1.65;
+    color: #c8c8c8; white-space: pre;
+    font-family: 'JetBrains Mono', 'Fira Mono', ui-monospace, monospace;
+  }
+  .term .ok { color: var(--ok); }
+  .term .warn { color: var(--warn); }
+  .term .err { color: var(--err); }
+  .term .orange { color: var(--orange); }
+  .term .dim { color: var(--dim); }
+  .term .white { color: var(--heading); font-weight: 700; }
+  .term .muted { color: var(--muted); }
+  .term .prompt { color: var(--dim); }
+
+  /* do/don't */
+  .do-dont { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .dd-panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 20px 22px;
+  }
+  .dd-panel.do   { border-left: 3px solid var(--ok); }
+  .dd-panel.dont { border-left: 3px solid var(--err); }
+  .dd-panel h4 { font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 14px; font-weight: 700; }
+  .dd-panel.do h4   { color: var(--ok); }
+  .dd-panel.dont h4 { color: var(--err); }
+  .dd-panel .item { margin-bottom: 16px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+  .dd-panel .item:last-child { margin-bottom: 0; }
+  .dd-panel .item .demo { margin-bottom: 4px; }
+
+  /* clear space diagram */
+  .clearspace-box {
+    position: relative; background: var(--panel); border: 1px solid var(--line);
+    padding: 60px; display: flex; justify-content: center; align-items: center;
+    border-radius: 6px;
+  }
+  .clearspace-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(to right, rgba(232,99,42,0.08) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(232,99,42,0.08) 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+  .clearspace-frame {
+    border: 1px dashed rgba(232,99,42,0.5); padding: 20px;
+    position: relative;
+  }
+  .clearspace-label {
+    position: absolute; top: -12px; left: 12px;
+    background: var(--panel); padding: 0 6px;
+    font-size: 9px; color: var(--orange); letter-spacing: 0.15em; text-transform: uppercase;
+  }
+
+  /* applications */
+  .app-mock {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 0; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .app-mock .chrome {
+    background: #0a0a0a; padding: 10px 14px; border-bottom: 1px solid var(--line);
+    font-size: 10px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .app-mock .dots { display: flex; gap: 5px; }
+  .app-mock .dot { width: 9px; height: 9px; border-radius: 50%; background: #2a2a2a; }
+  .app-mock .body { padding: 28px 24px; }
+  .app-mock .footer { padding: 12px 20px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+
+  /* hex tile */
+  .hex-tile {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .hex-tile .hex-title {
+    font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;
+    font-weight: 600;
+  }
+  .hex-tile .hex-val {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 12px; color: var(--heading);
+  }
+
+  /* rule */
+  .rule {
+    background: linear-gradient(180deg, #1a1108 0%, var(--panel) 100%);
+    border: 1px solid #3a2010;
+    border-left: 3px solid var(--orange);
+    padding: 18px 22px; border-radius: 4px;
+    font-size: 13px; line-height: 1.7; max-width: 860px;
+  }
+  .rule b { color: var(--orange); }
+  .rule p + p { margin-top: 8px; }
+
+  /* anchor jump links */
+  .anchor {
+    display: inline-block; width: 14px; color: var(--dim); font-size: 11px;
+    text-decoration: none; margin-left: 6px; opacity: 0; transition: opacity 0.15s;
+  }
+  section h2:hover .anchor { opacity: 1; }
+
+  /* tables */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; max-width: 900px; }
+  table th {
+    text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line);
+    font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;
+    font-weight: 600;
+  }
+  table td {
+    padding: 12px; border-bottom: 1px solid var(--line-soft);
+    color: var(--text); vertical-align: top;
+  }
+  table td.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; color: var(--heading); }
+  table td.dim { color: var(--muted); font-size: 11px; }
+
+  /* wordmark picker */
+  .wm-option {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 28px 28px 16px; display: flex; flex-direction: column; gap: 10px;
+    position: relative;
+  }
+  .wm-option.recommended { border: 1px solid var(--orange); }
+  .wm-option.recommended::before {
+    content: 'recommended'; position: absolute; top: -9px; left: 18px;
+    background: var(--orange); color: #1a1108; font-size: 9px; font-weight: 700;
+    padding: 2px 8px; border-radius: 3px; letter-spacing: 0.1em; text-transform: uppercase;
+  }
+
+  /* svg claw container */
+  .mark-svg { display: block; }
+
+  footer.bottom {
+    border-top: 1px solid var(--line-soft); padding-top: 24px; margin-top: 40px;
+    font-size: 11px; color: var(--muted); letter-spacing: 0.05em;
+    display: flex; justify-content: space-between;
+  }
+
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header class="top">
+  <h1>RightClaw · Brand Guide</h1>
+  <div class="meta">v1.0 · <b>lock</b> · 2026-04-17</div>
+</header>
+
+<!-- ========================= TOC ========================= -->
+<nav class="toc">
+  <a href="#essence"><span class="num">00</span>Essence</a>
+  <a href="#logo"><span class="num">01</span>Logo system</a>
+  <a href="#wordmark"><span class="num">02</span>Wordmark &amp; accent</a>
+  <a href="#clearspace"><span class="num">03</span>Clear space &amp; minimums</a>
+  <a href="#color"><span class="num">04</span>Color</a>
+  <a href="#typography"><span class="num">05</span>Typography</a>
+  <a href="#voice"><span class="num">06</span>Voice &amp; tone</a>
+  <a href="#character"><span class="num">07</span>Character usage</a>
+  <a href="#applications"><span class="num">08</span>Applications</a>
+  <a href="#terminal"><span class="num">09</span>Terminal</a>
+  <a href="#dodont"><span class="num">10</span>Do / Don't</a>
+  <a href="#assets"><span class="num">11</span>Assets manifest</a>
+</nav>
+
+<!-- ========================= 00 ESSENCE ========================= -->
+<section id="essence">
+  <h2><b>00</b> Essence <span class="sub">what we are</span></h2>
+
+  <p class="lead">
+    <b style="color:var(--heading);">RightClaw</b> — a multi-agent runtime for Claude Code, built on NVIDIA OpenShell.
+    Each agent is a separate Claude Code session inside its own OpenShell sandbox with a declarative YAML policy.
+    The Rust CLI orchestrates lifecycles via process-compose.
+  </p>
+
+  <div class="grid-2" style="max-width: 860px; margin-top: 16px;">
+    <div class="card">
+      <div class="label">double meaning</div>
+      <p style="font-size: 13px; color: var(--text); line-height: 1.7;">
+        <b style="color:var(--orange);">right</b> = right-hand (claw, position)<br>
+        <b style="color:var(--orange);">right</b> = correct (security-first, sandbox by default)
+      </p>
+    </div>
+    <div class="card">
+      <div class="label">opposition</div>
+      <p style="font-size: 13px; color: var(--text); line-height: 1.7;">
+        OpenClaw → &ldquo;everything open, hope it works&rdquo;<br>
+        <b style="color:var(--orange);">RightClaw</b> → &ldquo;everything locked, by default&rdquo;
+      </p>
+    </div>
+  </div>
+
+  <div class="rule" style="margin-top: 24px;">
+    <p><b>Core promise.</b> Run multiple autonomous Claude Code agents <i>safely</i> — each in a sandbox, with its own identity and memory, from a single command.</p>
+    <p><b>Emotional payoff.</b> Confidence. &ldquo;I can leave them running.&rdquo;</p>
+  </div>
+</section>
+
+<!-- ========================= 01 LOGO SYSTEM ========================= -->
+<section id="logo">
+  <h2><b>01</b> Logo system <span class="sub">three marks, one family</span></h2>
+
+  <p class="lead">
+    The brand has three marks: <b>primary</b> (strict, functional), <b>character</b> (friendly, for the stage), <b>wordmark</b> (anywhere text is needed).
+    They don't compete — they cover different sizes and registers.
+  </p>
+
+  <!-- 1.1 PRIMARY -->
+  <h3 style="margin-top: 32px;"><b>1.1</b> Primary mark</h3>
+  <div class="grid-3">
+    <div class="card centered">
+      <svg width="140" height="140" viewBox="0 0 100 100" class="mark-svg">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="caption"><b>Primary on dark</b>Orange claw on #0f0f0f. Default context — dev tools, terminals, dark UIs.</div>
+    </div>
+    <div class="card light centered">
+      <svg width="140" height="140" viewBox="0 0 100 100" class="mark-svg">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#1a1108" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="caption"><b>Primary on cream</b>Orange claw on #f2ede4. For docs, print, light web pages.</div>
+    </div>
+    <div class="card centered" style="background:#E8632A; border-color:#E8632A;">
+      <svg width="140" height="140" viewBox="0 0 100 100" class="mark-svg">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#fff"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="caption" style="color:#1a1108;"><b style="color:#1a1108;">Primary reversed</b>White claw + white check on brand orange. Stickers, merch, accents.</div>
+    </div>
+  </div>
+  <p class="note">The claw always faces <b>right</b>. The check is always <b>inside the upper-right pincer</b>, never outside. Proportions are fixed — don't stretch, don't skew.</p>
+
+  <!-- 1.2 CHARACTER -->
+  <h3 style="margin-top: 36px;"><b>1.2</b> Character · C1 (smile-check)</h3>
+  <div class="grid-3">
+    <div class="card centered">
+      <svg width="180" height="180" viewBox="0 0 100 100" class="mark-svg">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <circle cx="42" cy="45" r="5" fill="#fff"/>
+        <circle cx="42.8" cy="45" r="2.5" fill="#161616"/>
+        <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
+        <circle cx="55" cy="45" r="3.8" fill="#fff"/>
+        <circle cx="55.5" cy="45" r="1.9" fill="#161616"/>
+        <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
+        <path d="M40 58 L46 64 L62 52" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="caption"><b>C1 · thin smile</b>Two eyes, mouth = check. Default character.</div>
+    </div>
+    <div class="card centered">
+      <svg width="180" height="180" viewBox="0 0 100 100" class="mark-svg">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <circle cx="42" cy="45" r="5" fill="#fff"/>
+        <circle cx="42.8" cy="45" r="2.5" fill="#161616"/>
+        <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
+        <circle cx="55" cy="45" r="3.8" fill="#fff"/>
+        <circle cx="55.5" cy="45" r="1.9" fill="#161616"/>
+        <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
+        <path d="M40 58 L46 64 L62 52" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="caption"><b>C1 · bold smile</b>Same construction, thicker mouth (width 5). For merch, banners — when density is needed.</div>
+    </div>
+    <div class="card light centered">
+      <svg width="180" height="180" viewBox="0 0 100 100" class="mark-svg">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <circle cx="42" cy="45" r="5" fill="#fff"/>
+        <circle cx="42.8" cy="45" r="2.5" fill="#1a1108"/>
+        <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
+        <circle cx="55" cy="45" r="3.8" fill="#fff"/>
+        <circle cx="55.5" cy="45" r="1.9" fill="#1a1108"/>
+        <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
+        <path d="M40 58 L46 64 L62 52" stroke="#1a1108" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="caption"><b>C1 · on cream</b>For light backgrounds: eye whites — cream, pupils and smile — dark.</div>
+    </div>
+  </div>
+  <p class="note">Character is used only at sizes ≥ 48px. Smaller — primary only (no eyes).</p>
+
+  <!-- 1.3 WORDMARK FAMILY (6 variants from v11) -->
+  <h3 style="margin-top: 36px;"><b>1.3</b> Wordmark family</h3>
+  <p class="lead" style="max-width: 760px;">
+    Six canonical variants. All applied by context — this isn't &ldquo;pick one,&rdquo; it's a family.
+    The accent always follows the morpheme seam: <code>right</code> whole, <code>claw</code> whole. Never inside &ldquo;right.&rdquo;
+  </p>
+
+  <!-- row 1: W1, W2, W3 -->
+  <div class="grid-3" style="margin-top: 16px;">
+
+    <div class="wm-option recommended">
+      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W1 · default inline</div>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <svg width="44" height="44" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div class="wm wm-28"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+      </div>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;"><code>right</code> orange + <code>claw</code> dim. Default for nav, headers, docs. <b style="color:var(--heading); display:block; margin-top:4px;">Canon.</b></p>
+    </div>
+
+    <div class="wm-option">
+      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W2 · white-right</div>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <svg width="44" height="44" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div class="wm wm-28"><span style="color:#eee;">right</span><span style="color:#666;">claw</span></div>
+      </div>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">When there's too much orange around (next to the mark). For docs, README.</p>
+    </div>
+
+    <div class="wm-option">
+      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W3 · with tagline</div>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <svg width="50" height="50" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div>
+          <div class="wm wm-28"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+          <div style="font-size: 9px; color: #666; letter-spacing: 0.15em; text-transform: uppercase; margin-top: 3px;">the proper claude code runtime</div>
+        </div>
+      </div>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">For hero, landing, first screen. Wordmark + tagline in one block.</p>
+    </div>
+
+  </div>
+
+  <!-- row 2: W4 underline, W5 dot, W6 stacked -->
+  <div class="grid-3" style="margin-top: 18px;">
+
+    <div class="wm-option">
+      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W4 · underline-check</div>
+      <div style="display:flex; align-items:flex-start; gap:14px;">
+        <svg width="56" height="56" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div style="display: flex; flex-direction: column; gap: 2px;">
+          <div class="wm wm-36" style="line-height: 1;"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+          <svg width="140" height="12" viewBox="0 0 140 12" style="margin-top: 2px;">
+            <path d="M2 7 L22 3 L36 9 L58 4 L78 8 L102 2 L128 6" stroke="#E8632A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+        </div>
+      </div>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">An uneven &ldquo;check&rdquo; underline — rhymes with the check in the mark. For posters, covers, presentations.</p>
+    </div>
+
+    <div class="wm-option">
+      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W5 · dot-compact</div>
+      <div style="display:flex; align-items:center; gap:12px;">
+        <svg width="38" height="38" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div class="wm wm-18" style="letter-spacing: 0.01em;"><span style="color:#E8632A;">right</span><span style="color:#666;">·claw</span></div>
+      </div>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">With a middle dot, smaller. For sidebar, footer, captions in dense layouts.</p>
+    </div>
+
+    <div class="wm-option">
+      <div class="label" style="font-size: 10px; color: var(--muted); letter-spacing: 0.15em; text-transform: uppercase;">W6 · stacked · square</div>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <svg width="48" height="48" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div style="display: flex; flex-direction: column; gap: 0; line-height: 1;">
+          <div class="wm wm-28" style="color:#E8632A; letter-spacing: -0.03em;">right</div>
+          <div style="font-size: 11px; color: #666; letter-spacing: 0.25em; margin-top: 3px; font-weight: 700;">CLAW</div>
+        </div>
+      </div>
+      <p class="caption" style="font-size: 12px; color: var(--muted); margin-top: 8px;">Two lines — big orange <code>right</code> + small spaced <code>CLAW</code>. For square formats: social avatar, favicon 512, sticker.</p>
+    </div>
+
+  </div>
+
+  <div class="rule" style="margin-top: 28px;">
+    <p><b>Wordmark rules.</b></p>
+    <p>1. Always lowercase (except <code>CLAW</code> in W6 — there it's a deliberate stencil device).</p>
+    <p>2. The accent is the whole word <code>right</code>. Never <code>r·igh·t</code>, <code>ri·ght</code> — that breaks the word.</p>
+    <p>3. <code>claw</code> in dim (<code>#666</code>) is canon. On light — <code>#776e5e</code>.</p>
+    <p>4. In prose / body text: <code>RightClaw</code> (Title Case) — that's a mention, not the wordmark.</p>
+  </div>
+
+  <!-- 1.4 LOCKUPS -->
+  <h3 style="margin-top: 36px;"><b>1.4</b> Lockups</h3>
+  <div class="grid-3">
+    <div class="card centered">
+      <div style="display: flex; align-items: center; gap: 14px;">
+        <svg width="48" height="48" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div class="wm wm-28"><span class="right">right</span>claw</div>
+      </div>
+      <div class="caption"><b>L1 · horizontal</b>Mark + wordmark, gap = height of &ldquo;c&rdquo;. Default for nav, headers.</div>
+    </div>
+    <div class="card centered">
+      <svg width="64" height="64" viewBox="0 0 100 100">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="wm wm-22" style="margin-top: 8px;"><span class="right">right</span>claw</div>
+      <div class="caption"><b>L2 · stacked</b>Mark over wordmark, gap = 0.5× mark height. For square areas: social avatar, favicon 512+.</div>
+    </div>
+    <div class="card centered">
+      <div style="display: flex; align-items: baseline; gap: 10px;">
+        <div class="wm wm-28"><span class="right">right</span>claw</div>
+        <div style="font-size: 11px; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase;">v0.1.0</div>
+      </div>
+      <div class="caption"><b>L3 · with version</b>Wordmark + version. Version in <code>--muted</code>, monospace, 2 steps smaller.</div>
+    </div>
+  </div>
+
+</section>
+
+<!-- ========================= 02 WORDMARK ACCENT DETAIL ========================= -->
+<section id="wordmark">
+  <h2><b>02</b> Wordmark accent <span class="sub">the morpheme seam</span></h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>anatomy</h3>
+      <div class="wm wm-48" style="margin: 12px 0;"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+      <div style="display: flex; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); letter-spacing: 0.05em; padding: 0 4px;">
+        <span style="color: var(--orange); flex: 0 0 auto;">└──right──┘</span>
+        <span style="margin-left: 4px; flex: 0 0 auto;">└─claw─┘</span>
+      </div>
+      <p class="caption" style="margin-top: 16px;">The accent covers <b>5 letters</b>: <code>r·i·g·h·t</code>. No more, no less.</p>
+    </div>
+
+    <div class="card">
+      <h3>color values</h3>
+      <table style="font-size: 11px;">
+        <tr><td style="padding: 6px 8px; color: var(--muted);">right</td><td class="mono" style="padding: 6px 8px;">#E8632A</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">orange-500</td></tr>
+        <tr><td style="padding: 6px 8px; color: var(--muted);">claw (on dark)</td><td class="mono" style="padding: 6px 8px;">#666666</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">dim — canon</td></tr>
+        <tr><td style="padding: 6px 8px; color: var(--muted);">claw (on light)</td><td class="mono" style="padding: 6px 8px;">#776E5E</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">dim-on-cream</td></tr>
+        <tr><td style="padding: 6px 8px; color: var(--muted);">claw · W2 white</td><td class="mono" style="padding: 6px 8px;">#EEEEEE</td><td style="padding: 6px 8px; color: var(--muted); font-size: 10px;">W2 only</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 36px;">scale behaviour</h3>
+  <div class="card" style="padding: 32px 28px;">
+    <div class="wm wm-48"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+    <div class="wm wm-36" style="margin-top: 14px;"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+    <div class="wm wm-28" style="margin-top: 12px;"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+    <div class="wm wm-22" style="margin-top: 10px;"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+    <div class="wm wm-18" style="margin-top: 8px;"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+    <div class="wm wm-14" style="margin-top: 6px;"><span style="color:#E8632A;">right</span><span style="color:#666;">claw</span></div>
+  </div>
+  <p class="note">Letter-spacing: <code>-0.025em</code> up to 28px, <code>-0.02em</code> at 22–18px, <code>-0.01em</code> at 14px and below. Below 14px — wordmark without the accent (contrast is lost).</p>
+</section>
+
+<!-- ========================= 03 CLEAR SPACE ========================= -->
+<section id="clearspace">
+  <h2><b>03</b> Clear space &amp; minimum sizes</h2>
+
+  <div class="grid-2">
+    <div>
+      <h3>clear space</h3>
+      <div class="clearspace-box">
+        <div class="clearspace-grid"></div>
+        <div class="clearspace-frame">
+          <span class="clearspace-label">X</span>
+          <svg width="80" height="80" viewBox="0 0 100 100">
+            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+            <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+        </div>
+      </div>
+      <p class="note">X = 25% of the mark height. No other elements inside clear space.</p>
+    </div>
+
+    <div>
+      <h3>minimum sizes</h3>
+      <table>
+        <tr><th>Context</th><th>Min size</th><th>What</th></tr>
+        <tr><td>Web / digital</td><td class="mono">24×24 px</td><td>primary mark</td></tr>
+        <tr><td>Favicon</td><td class="mono">16×16 px</td><td>simplified (see 08.1)</td></tr>
+        <tr><td>Character C1/C2</td><td class="mono">48×48 px</td><td>eyes lost below</td></tr>
+        <tr><td>Wordmark w/ accent</td><td class="mono">14 px</td><td>below — no accent</td></tr>
+        <tr><td>Print</td><td class="mono">8 mm</td><td>primary mark</td></tr>
+        <tr><td>Embroidery</td><td class="mono">25 mm</td><td>primary, claw only</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ========================= 04 COLOR ========================= -->
+<section id="color">
+  <h2><b>04</b> Color</h2>
+
+  <h3>core palette</h3>
+  <div class="grid-4">
+    <div class="swatch" style="background: #E8632A; color: #1a1108;">
+      <div class="name">orange / brand</div>
+      <div class="hex">#E8632A</div>
+      <div class="use">primary · accent · &ldquo;right&rdquo;</div>
+    </div>
+    <div class="swatch" style="background: #0f0f0f; color: #ddd; border: 1px solid var(--line);">
+      <div class="name">coal</div>
+      <div class="hex">#0F0F0F</div>
+      <div class="use">primary background (dark)</div>
+    </div>
+    <div class="swatch" style="background: #161616; color: #ddd; border: 1px solid var(--line);">
+      <div class="name">panel</div>
+      <div class="hex">#161616</div>
+      <div class="use">cards, surfaces</div>
+    </div>
+    <div class="swatch" style="background: #f2ede4; color: #1a1108; border: 1px solid #ddd6c9;">
+      <div class="name">cream</div>
+      <div class="hex">#F2EDE4</div>
+      <div class="use">primary background (light)</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 28px;">semantic (cli + ui)</h3>
+  <div class="grid-4">
+    <div class="swatch" style="background: #6bbf59; color: #0a2008;">
+      <div class="name">ok</div>
+      <div class="hex">#6BBF59</div>
+      <div class="use">✓ success · ready</div>
+    </div>
+    <div class="swatch" style="background: #d9a82a; color: #2a1f05;">
+      <div class="name">warn</div>
+      <div class="hex">#D9A82A</div>
+      <div class="use">! caution · degraded</div>
+    </div>
+    <div class="swatch" style="background: #e03c3c; color: #2a0505;">
+      <div class="name">err</div>
+      <div class="hex">#E03C3C</div>
+      <div class="use">✗ fail · fatal</div>
+    </div>
+    <div class="swatch" style="background: #4a90e2; color: #05152a;">
+      <div class="name">info</div>
+      <div class="hex">#4A90E2</div>
+      <div class="use">… running · pending</div>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 28px;">neutral ladder</h3>
+  <div class="grid-4">
+    <div class="hex-tile"><div class="hex-title">heading</div><div style="background:#EEEEEE; height: 32px; border-radius: 3px;"></div><div class="hex-val">#EEEEEE</div></div>
+    <div class="hex-tile"><div class="hex-title">text</div><div style="background:#DDDDDD; height: 32px; border-radius: 3px;"></div><div class="hex-val">#DDDDDD</div></div>
+    <div class="hex-tile"><div class="hex-title">muted</div><div style="background:#888888; height: 32px; border-radius: 3px;"></div><div class="hex-val">#888888</div></div>
+    <div class="hex-tile"><div class="hex-title">dim</div><div style="background:#666666; height: 32px; border-radius: 3px;"></div><div class="hex-val">#666666</div></div>
+    <div class="hex-tile"><div class="hex-title">line</div><div style="background:#222222; height: 32px; border-radius: 3px;"></div><div class="hex-val">#222222</div></div>
+    <div class="hex-tile"><div class="hex-title">line-soft</div><div style="background:#1A1A1A; height: 32px; border-radius: 3px;"></div><div class="hex-val">#1A1A1A</div></div>
+    <div class="hex-tile"><div class="hex-title">dark-text</div><div style="background:#1A1108; height: 32px; border-radius: 3px;"></div><div class="hex-val">#1A1108</div></div>
+    <div class="hex-tile"><div class="hex-title">cream-line</div><div style="background:#DDD6C9; height: 32px; border-radius: 3px;"></div><div class="hex-val">#DDD6C9</div></div>
+  </div>
+
+  <div class="rule" style="margin-top: 28px;">
+    <p><b>Color rules.</b></p>
+    <p>1. <code>#E8632A</code> is the only brand accent. Don't shift the hue. Don't swap it for &ldquo;some orange.&rdquo;</p>
+    <p>2. Orange is not used for semantic states. <code>warn</code> — yellow, <code>err</code> — red.</p>
+    <p>3. Orange on orange is forbidden. If the background is brand-orange, the claw is white.</p>
+    <p>4. Minimum text contrast — WCAG AA (4.5:1). White check on brand-orange passes.</p>
+  </div>
+</section>
+
+<!-- ========================= 05 TYPOGRAPHY ========================= -->
+<section id="typography">
+  <h2><b>05</b> Typography</h2>
+
+  <div class="grid-3">
+    <div class="card">
+      <div class="label">display / wordmark</div>
+      <div style="font-family: Inter, system-ui, sans-serif; font-weight: 800; font-size: 36px; letter-spacing: -0.025em; color: #666; margin: 8px 0;"><span style="color: var(--orange);">right</span>claw</div>
+      <p class="caption"><b>Inter</b> 800 · SIL Open Font License. Free, stable, broad language coverage.</p>
+      <p style="font-size: 11px; color: var(--muted); margin-top: 4px;">fallback: <code>-apple-system, system-ui, sans-serif</code></p>
+    </div>
+    <div class="card">
+      <div class="label">ui / body</div>
+      <p style="font-family: Inter, system-ui, sans-serif; font-size: 14px; line-height: 1.6; color: var(--text); margin: 8px 0;">Multi-agent runtime for Claude Code. Each agent in a sandbox.</p>
+      <p class="caption"><b>Inter</b> 400 / 500 / 600 / 700 · size 13–16px, line-height 1.5–1.65.</p>
+    </div>
+    <div class="card">
+      <div class="label">mono / terminal / code</div>
+      <div style="font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; color: var(--text); margin: 8px 0;"><span style="color:var(--orange);">▐✓</span> rightclaw <span style="color:var(--dim);">v0.1.0</span></div>
+      <p class="caption"><b>JetBrains Mono</b> · Apache 2.0. Good rendering for <code>▐</code>, <code>✓</code>, and wide glyph coverage.</p>
+      <p style="font-size: 11px; color: var(--muted); margin-top: 4px;">fallback: <code>Fira Mono, Menlo, ui-monospace, monospace</code></p>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 32px;">scale</h3>
+  <table>
+    <tr><th>Role</th><th>Size</th><th>Weight</th><th>Tracking</th><th>Example</th></tr>
+    <tr><td>Hero wordmark</td><td class="mono">48–64 px</td><td class="mono">800</td><td class="mono">-0.025em</td><td style="font-family: Inter; font-size: 18px; font-weight: 800; letter-spacing: -0.025em;"><span style="color:var(--orange);">right</span><span style="color:#666;">claw</span></td></tr>
+    <tr><td>Page title</td><td class="mono">28–36 px</td><td class="mono">800</td><td class="mono">-0.02em</td><td class="dim">RightClaw</td></tr>
+    <tr><td>Section H2</td><td class="mono">10–11 px</td><td class="mono">600</td><td class="mono">0.2em</td><td class="mono">ESSENCE</td></tr>
+    <tr><td>Body</td><td class="mono">14 px</td><td class="mono">400</td><td class="mono">0</td><td class="dim">body text</td></tr>
+    <tr><td>Caption</td><td class="mono">11–12 px</td><td class="mono">400</td><td class="mono">0</td><td class="dim">caption</td></tr>
+    <tr><td>Mono / code</td><td class="mono">12–13 px</td><td class="mono">400</td><td class="mono">0</td><td class="mono">rightclaw up</td></tr>
+  </table>
+</section>
+
+<!-- ========================= 06 VOICE ========================= -->
+<section id="voice">
+  <h2><b>06</b> Voice &amp; tone</h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>voice attributes</h3>
+      <ul style="list-style: none; padding: 0; font-size: 13px; line-height: 1.9;">
+        <li><b style="color:var(--orange);">precise</b> <span class="dim">— technical accuracy, no handwaving</span></li>
+        <li><b style="color:var(--orange);">lowercase-first</b> <span class="dim">— like rust/go tools</span></li>
+        <li><b style="color:var(--orange);">serious-friendly</b> <span class="dim">— not corporate, not &ldquo;hipster&rdquo;</span></li>
+        <li><b style="color:var(--orange);">opinionated</b> <span class="dim">— has a stance on security</span></li>
+        <li><b style="color:var(--orange);">terse</b> <span class="dim">— the command does the work, doesn't talk about it</span></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>taglines</h3>
+      <p style="font-size: 14px; color: var(--heading); margin: 6px 0; font-weight: 600;">sandboxed multi-agent runtime<br><span style="font-weight: 400; color: var(--muted); font-size: 12px;">— primary, factual</span></p>
+      <p style="font-size: 14px; color: var(--heading); margin: 12px 0 6px; font-weight: 600;">the proper claude code runtime<br><span style="font-weight: 400; color: var(--muted); font-size: 12px;">— secondary, voicey</span></p>
+      <p style="font-size: 14px; color: var(--heading); margin: 12px 0 6px; font-weight: 600;">right by default<br><span style="font-weight: 400; color: var(--muted); font-size: 12px;">— micro / sticker / CTA</span></p>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 28px;">copy · do / don't</h3>
+  <div class="do-dont">
+    <div class="dd-panel do">
+      <h4>✓ do</h4>
+      <div class="item">
+        <div class="demo mono" style="color: var(--text);">policy validation failed</div>
+        <span>Fact. A short note on what exactly. No apologies.</span>
+      </div>
+      <div class="item">
+        <div class="demo mono" style="color: var(--text);">3 agents spawned</div>
+        <span>Past-tense verb, number up front. Factual.</span>
+      </div>
+      <div class="item">
+        <div class="demo" style="color: var(--text);">Run multiple Claude Code agents safely.</div>
+        <span>Verb first, benefit clear in a second.</span>
+      </div>
+    </div>
+    <div class="dd-panel dont">
+      <h4>✗ don't</h4>
+      <div class="item">
+        <div class="demo mono" style="color: #777;">oops! something went wrong :(</div>
+        <span>Apologies, emotion, emoticons. Not our voice.</span>
+      </div>
+      <div class="item">
+        <div class="demo mono" style="color: #777;">Successfully Initialized!</div>
+        <span>Title Case, exclamation. Sounds like Windows.</span>
+      </div>
+      <div class="item">
+        <div class="demo" style="color: #777;">Revolutionize Your AI Workflow 🚀</div>
+        <span>Marketing-speak. Rockets. No.</span>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="margin-top: 28px;">level glyphs</h3>
+  <table style="max-width: 700px;">
+    <tr><th>Level</th><th>Glyph</th><th>Color</th><th>Pattern</th></tr>
+    <tr><td>ok</td><td class="mono" style="color: var(--ok);">✓</td><td class="mono">#6BBF59</td><td class="mono">✓ {noun} {past-verb}</td></tr>
+    <tr><td>warn</td><td class="mono" style="color: var(--warn);">!</td><td class="mono">#D9A82A</td><td class="mono">! {subject} {concern}</td></tr>
+    <tr><td>err</td><td class="mono" style="color: var(--err);">✗</td><td class="mono">#E03C3C</td><td class="mono">✗ {subject} {failure}</td></tr>
+    <tr><td>info</td><td class="mono" style="color: #4a90e2;">…</td><td class="mono">#4A90E2</td><td class="mono">… {subject} {ing-verb}</td></tr>
+  </table>
+</section>
+
+<!-- ========================= 07 CHARACTER USAGE ========================= -->
+<section id="character">
+  <h2><b>07</b> Character usage</h2>
+
+  <p class="lead">The character version (C1) is <b>not a replacement for primary</b>. For places that need a &ldquo;stage&rdquo; and emotion: hero, cover, sticker, README illustration. Don't put character in UI chrome, don't use as favicon.</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>do</h3>
+      <ul style="list-style: none; padding: 0; font-size: 12px; line-height: 1.9; color: var(--text);">
+        <li>· hero image on landing</li>
+        <li>· README header illustration</li>
+        <li>· Twitter/X card</li>
+        <li>· stickers, merch</li>
+        <li>· t-shirt print</li>
+        <li>· 404 page</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>don't</h3>
+      <ul style="list-style: none; padding: 0; font-size: 12px; line-height: 1.9; color: var(--muted);">
+        <li>· in nav / header</li>
+        <li>· as favicon</li>
+        <li>· below 48px</li>
+        <li>· in the terminal</li>
+        <li>· in error states</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ========================= 08 APPLICATIONS ========================= -->
+<section id="applications">
+  <h2><b>08</b> Applications</h2>
+
+  <!-- 8.1 FAVICON -->
+  <h3 style="margin-top: 8px;"><b>8.1</b> Favicon</h3>
+  <div class="grid-4">
+    <div class="card centered">
+      <div style="background: #0f0f0f; width: 64px; height: 64px; display: flex; align-items: center; justify-content: center; border-radius: 8px; border: 1px solid var(--line);">
+        <svg width="48" height="48" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="10" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="10" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="12" height="24" rx="6" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <div class="caption" style="text-align:center;"><b>64×64</b>full primary</div>
+    </div>
+    <div class="card centered">
+      <div style="background: #0f0f0f; width: 48px; height: 48px; display: flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid var(--line);">
+        <svg width="36" height="36" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="11" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="11" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="13" height="24" rx="6.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <div class="caption" style="text-align:center;"><b>32×32</b>thicker strokes</div>
+    </div>
+    <div class="card centered">
+      <div style="background: #0f0f0f; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 4px; border: 1px solid var(--line);">
+        <svg width="24" height="24" viewBox="0 0 100 100">
+          <path d="M12 42 L48 20 Q56 15 64 20 L86 36" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <path d="M12 58 L48 80 Q56 85 64 80 L86 64" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <rect x="4" y="36" width="14" height="28" rx="7" fill="#E8632A"/>
+        </svg>
+      </div>
+      <div class="caption" style="text-align:center;"><b>16×16</b>claw only, no check</div>
+    </div>
+    <div class="card centered" style="background: #E8632A; border-color: #E8632A;">
+      <div style="background: #fff; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 6px;">
+        <svg width="24" height="24" viewBox="0 0 100 100">
+          <path d="M12 42 L48 20 Q56 15 64 20 L86 36" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <path d="M12 58 L48 80 Q56 85 64 80 L86 64" stroke="#E8632A" stroke-width="13" stroke-linecap="round" fill="none"/>
+          <rect x="4" y="36" width="14" height="28" rx="7" fill="#E8632A"/>
+        </svg>
+      </div>
+      <div class="caption" style="text-align:center; color: #1a1108;"><b style="color:#1a1108;">apple touch</b>orange bg, inset white</div>
+    </div>
+  </div>
+  <p class="note">At 16×16 — claw only, no check (the check is lost). At 32+ — full version. Apple touch icon: white plate on brand-orange.</p>
+
+  <!-- 8.2 README -->
+  <h3 style="margin-top: 36px;"><b>8.2</b> README header</h3>
+  <div class="app-mock">
+    <div class="chrome">
+      <div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
+      <span>github.com/onsails/rightclaw</span>
+    </div>
+    <div class="body" style="padding: 32px 40px;">
+      <div style="display: flex; align-items: center; gap: 18px; margin-bottom: 14px;">
+        <svg width="60" height="60" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+        <div>
+          <div class="wm wm-36"><span class="right">right</span>claw</div>
+          <div style="font-size: 13px; color: var(--muted); margin-top: 4px;">sandboxed multi-agent runtime for claude code</div>
+        </div>
+      </div>
+      <div style="display: flex; gap: 6px; margin: 16px 0 18px;">
+        <span style="background: #1a1a1a; border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted); font-family: monospace;">crates.io v0.1.0</span>
+        <span style="background: #1a1a1a; border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted); font-family: monospace;">ci passing</span>
+        <span style="background: #1a1a1a; border: 1px solid var(--line); padding: 2px 8px; border-radius: 3px; font-size: 10px; color: var(--muted); font-family: monospace;">license MIT</span>
+      </div>
+      <p style="color: var(--text); font-size: 14px; line-height: 1.6;">
+        Run multiple Claude Code agents safely — each sandboxed by <a style="color: var(--orange); text-decoration: none;">OpenShell</a> policies, orchestrated by one CLI.
+      </p>
+    </div>
+  </div>
+
+  <!-- 8.3 GITHUB SOCIAL -->
+  <h3 style="margin-top: 36px;"><b>8.3</b> GitHub social preview · 1280×640</h3>
+  <div style="background: #0f0f0f; border: 1px solid var(--line); padding: 60px 80px; border-radius: 8px; position: relative; aspect-ratio: 1280/640; max-width: 860px;">
+    <div style="position: absolute; top: 40px; left: 80px; display: flex; align-items: center; gap: 18px;">
+      <svg width="56" height="56" viewBox="0 0 100 100">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+        <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      </svg>
+      <div class="wm" style="font-size: 42px;"><span class="right">right</span>claw</div>
+    </div>
+    <div style="position: absolute; bottom: 60px; left: 80px; right: 80px;">
+      <div style="font-size: 48px; font-weight: 800; color: var(--heading); letter-spacing: -0.02em; line-height: 1.1; margin-bottom: 10px;">sandboxed multi-agent<br>runtime for claude code.</div>
+      <div style="font-size: 16px; color: var(--muted); font-family: monospace;">cargo install rightclaw</div>
+    </div>
+    <div style="position: absolute; top: 50%; right: 60px; transform: translateY(-30%); opacity: 0.12;">
+      <svg width="320" height="320" viewBox="0 0 100 100">
+        <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+        <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- 8.4 WEBSITE HERO -->
+  <h3 style="margin-top: 36px;"><b>8.4</b> Website hero</h3>
+  <div class="app-mock">
+    <div class="chrome">
+      <div class="dots"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>
+      <span>rightclaw.dev</span>
+    </div>
+    <div style="background: #0f0f0f; padding: 0;">
+      <!-- nav -->
+      <div style="padding: 20px 48px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--line);">
+        <div style="display: flex; align-items: center; gap: 12px;">
+          <svg width="28" height="28" viewBox="0 0 100 100">
+            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+            <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+          <div class="wm wm-18"><span class="right">right</span>claw</div>
+        </div>
+        <div style="display: flex; gap: 24px; font-size: 13px; color: var(--muted);">
+          <span>docs</span><span>github</span><span>install</span>
+        </div>
+      </div>
+      <!-- hero -->
+      <div style="padding: 80px 48px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; align-items: center;">
+        <div>
+          <div style="font-size: 56px; font-weight: 800; letter-spacing: -0.025em; line-height: 1.05; color: var(--heading); margin-bottom: 20px;">
+            run agents.<br><span style="color: var(--orange);">safely.</span>
+          </div>
+          <div style="font-size: 17px; color: var(--muted); line-height: 1.6; margin-bottom: 32px; max-width: 440px;">
+            multi-agent runtime for claude code. each agent in its own openshell sandbox. declarative policies. one cli.
+          </div>
+          <div style="display: flex; gap: 12px; align-items: center;">
+            <div style="background: var(--orange); color: #1a1108; padding: 12px 22px; border-radius: 4px; font-weight: 600; font-size: 14px;">get started →</div>
+            <div style="font-family: monospace; color: var(--muted); font-size: 13px; padding: 12px 18px; border: 1px solid var(--line); border-radius: 4px;">$ cargo install rightclaw</div>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: center;">
+          <svg width="240" height="240" viewBox="0 0 100 100">
+            <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+            <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+            <circle cx="42" cy="45" r="5" fill="#fff"/>
+            <circle cx="42.8" cy="45" r="2.5" fill="#161616"/>
+            <circle cx="44" cy="43.8" r="0.9" fill="#fff"/>
+            <circle cx="55" cy="45" r="3.8" fill="#fff"/>
+            <circle cx="55.5" cy="45" r="1.9" fill="#161616"/>
+            <circle cx="56.3" cy="44" r="0.7" fill="#fff"/>
+            <path d="M40 58 L46 64 L62 52" stroke="#fff" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 8.5 SOCIAL -->
+  <h3 style="margin-top: 36px;"><b>8.5</b> Social · avatar + banner</h3>
+  <div class="grid-2">
+    <div class="card centered">
+      <div style="background: #0f0f0f; width: 160px; height: 160px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1px solid var(--line);">
+        <svg width="110" height="110" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <div class="caption" style="text-align:center;"><b>avatar · 400×400</b>primary mark on coal, centered. Circle-crop ready.</div>
+    </div>
+    <div class="card centered">
+      <div style="background: #E8632A; width: 160px; height: 160px; border-radius: 50%; display: flex; align-items: center; justify-content: center;">
+        <svg width="110" height="110" viewBox="0 0 100 100">
+          <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#fff" stroke-width="8.5" stroke-linecap="round" fill="none"/>
+          <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#fff"/>
+          <path d="M38 50 L46 58 L64 40" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+        </svg>
+      </div>
+      <div class="caption" style="text-align:center;"><b>avatar · alt</b>reversed — on orange. For contexts with many dark avatars in a row.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================= 09 TERMINAL ========================= -->
+<section id="terminal">
+  <h2><b>09</b> Terminal <span class="sub">brief — full spec in v13</span></h2>
+
+  <div class="grid-2">
+    <div class="card">
+      <h3>three atoms</h3>
+      <table>
+        <tr><td class="mono" style="color: var(--orange); font-size: 18px;">▐✓</td><td>ASCII mark · the only one · 2 cells</td></tr>
+        <tr><td class="mono" style="color: var(--orange); font-size: 18px;">▐</td><td>bar element · &ldquo;sandbox rail,&rdquo; log prefix</td></tr>
+        <tr><td style="font-family: 'JetBrains Mono', monospace; font-size: 14px;"><span style="color: var(--orange);">right</span><span style="color:#666;">claw</span></td><td>wordmark · anywhere larger than ▐✓</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h3>example · splash</h3>
+      <div class="term"><span class="orange">▐✓</span> <span class="white"><span style="color:var(--orange);">right</span>claw</span> <span class="dim">v0.1.0</span>
+<span class="orange">▐</span>  <span class="muted">sandboxed multi-agent runtime</span>
+<span class="orange">▐</span>
+<span class="orange">▐</span>  <span class="ok">✓</span> process-compose  <span class="dim">ready</span>
+<span class="orange">▐</span>  <span class="ok">✓</span> openshell        <span class="dim">ready</span>
+<span class="orange">▐</span>  <span class="ok">✓</span> 3 agents         <span class="dim">spawned</span></div>
+    </div>
+  </div>
+  <p class="note">Don't draw the claw in ASCII at large sizes. <code>NO_COLOR</code> / <code>TERM=dumb</code> — fallback to <code>[ok]</code>/<code>[warn]</code>/<code>[err]</code> without ANSI.</p>
+</section>
+
+<!-- ========================= 10 DO / DON'T ========================= -->
+<section id="dodont">
+  <h2><b>10</b> Do / Don't <span class="sub">full summary</span></h2>
+
+  <div class="do-dont">
+    <div class="dd-panel do">
+      <h4>✓ do</h4>
+      <div class="item">Use <code>#E8632A</code> as the only orange. Period.</div>
+      <div class="item">Accent the whole word <code>right</code> — the full word, not a part.</div>
+      <div class="item">Keep clear space ≥ 25% of the mark height.</div>
+      <div class="item">Use character (C1/C2) only at 48px+ and only &ldquo;on stage.&rdquo;</div>
+      <div class="item">Add a fallback for <code>NO_COLOR</code> / <code>TERM=dumb</code>.</div>
+      <div class="item">In prose, write <code>RightClaw</code> (Title Case). Wordmark is lowercase.</div>
+    </div>
+    <div class="dd-panel dont">
+      <h4>✗ don't</h4>
+      <div class="item">Shift the orange hue &ldquo;brighter&rdquo; / &ldquo;warmer.&rdquo;</div>
+      <div class="item">Write <code>r·igh·t·claw</code> or <code>r·ight·claw</code> — it breaks the word.</div>
+      <div class="item">Stretch, skew, outline, or apply a gradient to the mark.</div>
+      <div class="item">Put character in nav / favicon / small sizes.</div>
+      <div class="item">Draw the claw as ASCII art from block characters.</div>
+      <div class="item">Use <code>RIGHTCLAW</code> in uppercase or <code>rightClaw</code> in camelCase.</div>
+      <div class="item">Add 🚀 emoji to the tagline or marketing copy.</div>
+      <div class="item">Put the mark on an orange background in orange itself.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========================= 11 ASSETS ========================= -->
+<section id="assets">
+  <h2><b>11</b> Assets manifest <span class="sub">what lives in the repo</span></h2>
+
+  <p class="lead">Canonical <code>assets/</code> structure at the root of <code>rightclaw/</code>:</p>
+
+  <div class="code-block" style="background: #0a0a0a; border: 1px solid var(--line); border-radius: 6px; padding: 18px 22px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text); line-height: 1.7; max-width: 820px;"><span style="color: var(--orange);">assets/</span>
+├── <span style="color: var(--heading);">primary.svg</span>              <span style="color: var(--muted);"># claw + check, transparent</span>
+├── <span style="color: var(--heading);">primary-on-dark.svg</span>      <span style="color: var(--muted);"># with #0f0f0f background</span>
+├── <span style="color: var(--heading);">primary-on-light.svg</span>     <span style="color: var(--muted);"># with #f2ede4 background</span>
+├── <span style="color: var(--heading);">primary-reversed.svg</span>     <span style="color: var(--muted);"># white claw on orange</span>
+├── <span style="color: var(--heading);">character.svg</span>             <span style="color: var(--muted);"># C1 smile-check (thin)</span>
+├── <span style="color: var(--heading);">character-bold.svg</span>        <span style="color: var(--muted);"># C1 bold smile for merch</span>
+├── <span style="color: var(--heading);">character-on-cream.svg</span>    <span style="color: var(--muted);"># C1 for light backgrounds</span>
+├── <span style="color: var(--heading);">wordmark.svg</span>              <span style="color: var(--muted);"># right·claw text with accent</span>
+├── <span style="color: var(--heading);">wordmark-underline.svg</span>    <span style="color: var(--muted);"># W4 with uneven underline</span>
+├── <span style="color: var(--heading);">wordmark-stacked.svg</span>      <span style="color: var(--muted);"># W6 right · CLAW</span>
+├── <span style="color: var(--heading);">lockup-horizontal.svg</span>    <span style="color: var(--muted);"># L1</span>
+├── <span style="color: var(--heading);">lockup-stacked.svg</span>        <span style="color: var(--muted);"># L2</span>
+├── <span style="color: var(--heading);">favicon.ico</span>               <span style="color: var(--muted);"># 16/32/48 multi-size</span>
+├── <span style="color: var(--heading);">favicon-16.png</span>
+├── <span style="color: var(--heading);">favicon-32.png</span>
+├── <span style="color: var(--heading);">apple-touch-icon.png</span>      <span style="color: var(--muted);"># 180×180</span>
+├── <span style="color: var(--heading);">og-image.png</span>              <span style="color: var(--muted);"># 1280×640 social preview</span>
+├── <span style="color: var(--heading);">avatar.png</span>                <span style="color: var(--muted);"># 400×400</span>
+└── <span style="color: var(--orange);">README.md</span>                 <span style="color: var(--muted);"># which file is for what</span></div>
+
+  <h3 style="margin-top: 32px;">naming convention</h3>
+  <ul style="list-style: none; padding: 0; font-size: 13px; line-height: 1.9; color: var(--text); max-width: 820px;">
+    <li>· <code>primary-*</code> — functional mark for tools/UI</li>
+    <li>· <code>character-*</code> — stage versions</li>
+    <li>· <code>lockup-*</code> — fixed mark + wordmark combinations</li>
+    <li>· all SVG; PNG only for specific sizes (favicon, og, avatar)</li>
+    <li>· no JPGs in <code>assets/</code></li>
+  </ul>
+</section>
+
+<footer class="bottom">
+  <span>RightClaw Brand Guide · v1.0 · 2026-04-17</span>
+  <span>one orange · two curves · one check</span>
+</footer>
+
+</div>
+</body>
+</html>
