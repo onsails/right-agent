@@ -324,6 +324,9 @@ mod tests {
         let _slot = rightclaw::openshell::acquire_sandbox_slot();
         let sandbox_name = "rightclaw-test-sync-upload";
 
+        rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
+        rightclaw::test_cleanup::register_test_sandbox(sandbox_name);
+
         let mtls_dir = match rightclaw::openshell::preflight_check() {
             rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
             other => panic!("OpenShell not ready: {other:?}"),
@@ -443,5 +446,6 @@ network_policies:
 
         // Clean up.
         rightclaw::openshell::delete_sandbox(sandbox_name).await;
+        rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
     }
 }
