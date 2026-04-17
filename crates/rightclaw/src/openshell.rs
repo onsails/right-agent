@@ -569,11 +569,18 @@ pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> 
 
 /// Upload a single file to a sandbox directory.
 async fn upload_single_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> miette::Result<()> {
-    let output = Command::new("openshell")
-        .args(["sandbox", "upload", sandbox])
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "upload", sandbox])
         .arg(host_path)
-        .arg(sandbox_dir)
-        .output()
+        .arg(sandbox_dir);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| miette::miette!("failed to spawn openshell upload: {e:#}"))?;
+
+    let output = child
+        .wait_with_output()
         .await
         .map_err(|e| miette::miette!("openshell upload failed: {e:#}"))?;
 
@@ -651,12 +658,20 @@ pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) 
 /// Delete a sandbox. Best-effort — logs a warning on failure but does not
 /// propagate the error (stale sandboxes that don't exist shouldn't block callers).
 pub async fn delete_sandbox(name: &str) {
-    let result = Command::new("openshell")
-        .args(["sandbox", "delete", name])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
+    let mut cmd = Command::new("openshell");
+    cmd.args(["sandbox", "delete", name]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = match crate::process_group::ProcessGroupChild::spawn(cmd) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(sandbox = name, "failed to spawn openshell delete: {e:#}");
+            return;
+        }
+    };
+
+    let result = child.wait_with_output().await;
 
     match result {
         Ok(output) if output.status.success() => {
@@ -674,8 +689,7 @@ pub async fn delete_sandbox(name: &str) {
         Err(e) => {
             tracing::warn!(
                 sandbox = name,
-                error = %e,
-                "failed to run openshell sandbox delete (best-effort)"
+                "failed to wait for openshell delete: {e:#}"
             );
         }
     }
