@@ -123,22 +123,6 @@ pub fn strip_bot_mentions(text: &str, username: &str) -> String {
     out.trim().to_string()
 }
 
-/// Parse a command string `/cmd[@botname] [args...]`.
-/// Returns `(cmd, args_rest, addressed)` — `addressed` is `false` only when the
-/// `@who` suffix names a *different* bot.
-pub fn parse_bot_command<'a>(text: &'a str, username: &str) -> Option<(&'a str, &'a str, bool)> {
-    let stripped = text.trim_start().strip_prefix('/')?;
-    let (head, rest) = stripped.split_once(char::is_whitespace).unwrap_or((stripped, ""));
-    if head.is_empty() {
-        return None;
-    }
-    let (cmd, addressed) = match head.split_once('@') {
-        Some((cmd, who)) => (cmd, who.eq_ignore_ascii_case(username)),
-        None => (head, true),
-    };
-    Some((cmd, rest.trim_start(), addressed))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,44 +162,6 @@ mod tests {
             strip_bot_mentions(input, "rightclaw_bot"),
             "hello\nline two\nline three"
         );
-    }
-
-    #[test]
-    fn parse_command_no_suffix() {
-        let (cmd, args, addressed) = parse_bot_command("/allow 42", "rightclaw_bot").unwrap();
-        assert_eq!(cmd, "allow");
-        assert_eq!(args, "42");
-        assert!(addressed);
-    }
-
-    #[test]
-    fn parse_command_addressed_suffix() {
-        let (cmd, args, addressed) = parse_bot_command("/allow@rightclaw_bot 42", "rightclaw_bot").unwrap();
-        assert_eq!(cmd, "allow");
-        assert_eq!(args, "42");
-        assert!(addressed);
-    }
-
-    #[test]
-    fn parse_command_different_bot() {
-        let (cmd, _args, addressed) = parse_bot_command("/allow@otherbot 42", "rightclaw_bot").unwrap();
-        assert_eq!(cmd, "allow");
-        assert!(!addressed);
-    }
-
-    #[test]
-    fn parse_command_bare() {
-        let (cmd, args, _) = parse_bot_command("/allowed", "rightclaw_bot").unwrap();
-        assert_eq!(cmd, "allowed");
-        assert_eq!(args, "");
-    }
-
-    #[test]
-    fn parse_command_rejects_bare_slash_and_leading_ws() {
-        assert!(parse_bot_command("/", "rightclaw_bot").is_none());
-        let (cmd, args, _) = parse_bot_command("  /allow 42", "rightclaw_bot").unwrap();
-        assert_eq!(cmd, "allow");
-        assert_eq!(args, "42");
     }
 
     #[test]

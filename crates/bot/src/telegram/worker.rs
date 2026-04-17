@@ -1014,8 +1014,6 @@ async fn invoke_cc(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    // Group kill on Drop (via ProcessGroupChild) subsumes kill_on_drop(true)
-    // and also reaps ssh-proxy / bash-spawned claude grandchildren.
 
     let sandboxed = ctx.ssh_config_path.is_some();
     tracing::info!(

@@ -295,8 +295,6 @@ pub fn spawn_sandbox(
 /// Drop releases the lock. Acquire via [`acquire_sandbox_slot`].
 pub struct SandboxTestSlot {
     _file: std::fs::File,
-    #[allow(dead_code)]
-    slot: u8,
 }
 
 /// Maximum number of live OpenShell sandbox tests allowed to run in parallel.
@@ -325,7 +323,7 @@ pub fn acquire_sandbox_slot() -> SandboxTestSlot {
                 .open(&path)
                 .expect("open sandbox-slot lock file");
             match file.try_lock_exclusive() {
-                Ok(true) => return SandboxTestSlot { _file: file, slot },
+                Ok(true) => return SandboxTestSlot { _file: file },
                 Ok(false) => continue, // another holder
                 Err(e) => panic!("sandbox-slot lock {}: {e:#}", path.display()),
             }
@@ -472,23 +470,29 @@ pub async fn ssh_tar_download(
         .await
         .map_err(|e| miette::miette!("failed to create backup file {}: {e:#}", dest_path.display()))?;
 
-    // Spawn a task to copy stdout → file to avoid deadlock (SSH won't exit until stdout is consumed).
-    let copy_task = tokio::spawn(async move {
+    // Run stdout→file copy concurrently with child wait via try_join! — no orphan
+    // spawn to leak on timeout. Dropping the outer future cancels both branches.
+    let copy_fut = async {
         tokio::io::copy(&mut stdout, &mut file)
             .await
-            .map_err(|e| miette::miette!("I/O error during tar download: {e:#}"))
-    });
+            .map_err(|e| miette::miette!("I/O error during tar download: {e:#}"))?;
+        Ok::<_, miette::Error>(())
+    };
+
+    let wait_fut = async {
+        child
+            .wait()
+            .await
+            .map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    };
 
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let (copy_result, child_result) = tokio::time::timeout(timeout_dur, async {
-        let copy = copy_task.await.map_err(|e| miette::miette!("copy task panicked: {e:#}"))??;
-        let status = child.wait().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))?;
-        Ok::<_, miette::Error>((copy, status))
+    let ((), child_result) = tokio::time::timeout(timeout_dur, async {
+        tokio::try_join!(copy_fut, wait_fut)
     })
     .await
     .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
 
-    let _ = copy_result;
     if !child_result.success() {
         return Err(miette::miette!(
             "ssh tar download failed (exit {child_result})"
@@ -524,7 +528,9 @@ pub async fn ssh_tar_upload(
         .ok_or_else(|| miette::miette!("no stdin handle from ssh tar upload"))?;
 
     let src_path = src_path.to_owned();
-    let write_task = tokio::spawn(async move {
+    // Run the write task concurrently with child wait via try_join! — no orphan
+    // spawn to leak on timeout. Dropping the outer future cancels both branches.
+    let write_fut = async {
         let mut file = tokio::fs::File::open(&src_path)
             .await
             .map_err(|e| miette::miette!("failed to open backup file {}: {e:#}", src_path.display()))?;
@@ -534,12 +540,18 @@ pub async fn ssh_tar_upload(
         // Drop stdin to signal EOF to the remote tar process.
         drop(stdin);
         Ok::<_, miette::Error>(())
-    });
+    };
+
+    let wait_fut = async {
+        child
+            .wait_with_output()
+            .await
+            .map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    };
 
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let output = tokio::time::timeout(timeout_dur, async {
-        write_task.await.map_err(|e| miette::miette!("write task panicked: {e:#}"))??;
-        child.wait_with_output().await.map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
+    let ((), output) = tokio::time::timeout(timeout_dur, async {
+        tokio::try_join!(write_fut, wait_fut)
     })
     .await
     .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))??;

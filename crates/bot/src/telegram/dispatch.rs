@@ -255,9 +255,7 @@ pub async fn run_telegram(
         }
     });
 
-    // Register commands at default (global) scope. Per-chat scope is no longer
-    // required now that routing is gated by allowlist.yaml instead of a static
-    // allow-list of chat IDs.
+    // Register commands at default (global) scope; routing gates them via allowlist.yaml.
     let commands = BotCommand::bot_commands();
     if let Err(e) = bot.delete_my_commands().await {
         tracing::warn!("delete_my_commands (default scope): {e:#}");

@@ -265,7 +265,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Warn when the trusted-users set is empty — DMs will be silently dropped.
     {
-        let r = allowlist.0.read().await;
+        let r = allowlist.0.read().expect("allowlist lock poisoned");
         if r.users().is_empty() {
             tracing::warn!(
                 agent = %args.agent,
