@@ -186,13 +186,31 @@ pub async fn run_telegram(
         }
     });
 
-    // Register commands at default (global) scope; routing gates them via allowlist.yaml.
+    // Register commands in three overlapping scopes so autocomplete works in both DMs and
+    // groups. Setting only Default is not enough when another tool sharing this token has
+    // previously written a narrower scope (e.g. AllPrivateChats) — that narrower scope wins
+    // per Telegram's resolution order and shadows Default.
     let commands = BotCommand::bot_commands();
-    if let Err(e) = bot.delete_my_commands().await {
-        tracing::warn!("delete_my_commands (default scope): {e:#}");
+    for scope in [
+        teloxide::types::BotCommandScope::Default,
+        teloxide::types::BotCommandScope::AllPrivateChats,
+        teloxide::types::BotCommandScope::AllGroupChats,
+    ] {
+        if let Err(e) = bot
+            .set_my_commands(commands.clone())
+            .scope(scope.clone())
+            .await
+        {
+            tracing::warn!(?scope, "set_my_commands failed: {e:#}");
+        }
     }
-    if let Err(e) = bot.set_my_commands(commands).await {
-        tracing::warn!("set_my_commands (default scope): {e:#}");
+    // Clean any stale commands in the admins-only scope we do not populate.
+    if let Err(e) = bot
+        .delete_my_commands()
+        .scope(teloxide::types::BotCommandScope::AllChatAdministrators)
+        .await
+    {
+        tracing::warn!("delete_my_commands (all_chat_administrators): {e:#}");
     }
 
     tracing::info!("teloxide dispatcher starting (long-polling)");
