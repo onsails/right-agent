@@ -1111,13 +1111,11 @@ async fn detect_auth_type_via_haiku(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
-    cmd.kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
+    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.stdin() {
         use tokio::io::AsyncWriteExt;
         stdin
             .write_all(prompt.as_bytes())
