@@ -52,7 +52,6 @@ notify-debouncer-mini = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 wiremock = "0.6"
 tokio = { version = "1.50", features = ["test-util"] }
-libc = "0.2"
 
 [build-dependencies]
 tonic-prost-build = "0.14"
