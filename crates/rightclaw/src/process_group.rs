@@ -8,6 +8,12 @@
 //! grandchildren are reparented to launchd/init and survive indefinitely.
 //! Putting the child into its own process group lets us atomically reap
 //! the whole tree with one `killpg` syscall.
+//!
+//! Note: `wait_with_output(self)` is NOT cancel-safe. If the awaiting
+//! task is cancelled (task abort or losing a `tokio::select!` branch),
+//! the process group is orphaned — `mem::forget(self)` has already
+//! disarmed the Drop-based cleanup. Callers that need cancel-safe
+//! cleanup should call `wait()`/`kill()` on `&mut self` instead.
 
 use std::mem::ManuallyDrop;
 
@@ -18,6 +24,8 @@ use tokio::process::{Child, Command};
 /// A child process handle that kills its entire process group on Drop.
 pub struct ProcessGroupChild {
     inner: ManuallyDrop<Child>,
+    /// Process group id. `None` only if the child was reaped before
+    /// `spawn()` returned (should not happen in practice).
     pgid: Option<i32>,
 }
 
@@ -43,11 +51,11 @@ impl ProcessGroupChild {
     }
 
     pub async fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
-        // SAFETY: We take `inner` out of ManuallyDrop and then `mem::forget`
-        // self so its Drop never runs (which would double-drop or kill the
-        // group while wait_with_output is still using the Child).
-        // wait_with_output drives the child to completion, so any process-
-        // group cleanup at this point would be redundant.
+        // SAFETY: Without `mem::forget(self)`, Drop would call
+        // `ManuallyDrop::drop` on an already-moved value (UB) and also send
+        // SIGKILL to the group that the awaited child still occupies.
+        // `wait_with_output` drives the child to completion, so group cleanup
+        // at this point is redundant.
         let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
         std::mem::forget(self);
         inner.wait_with_output().await
@@ -74,7 +82,15 @@ impl Drop for ProcessGroupChild {
     fn drop(&mut self) {
         if let Some(pgid) = self.pgid {
             // Best-effort. ESRCH (group already gone) is fine to ignore.
-            let _ = killpg(Pid::from_raw(pgid), Signal::SIGKILL);
+            if let Err(e) = killpg(Pid::from_raw(pgid), Signal::SIGKILL) {
+                if e != nix::errno::Errno::ESRCH {
+                    tracing::warn!(
+                        pgid,
+                        error = %e,
+                        "killpg failed during ProcessGroupChild drop"
+                    );
+                }
+            }
         }
         // SAFETY: `inner` is only taken out via `wait_with_output`, which
         // forgets `self` before this Drop can run. So here the ManuallyDrop
@@ -91,17 +107,18 @@ impl Drop for ProcessGroupChild {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tempfile::NamedTempFile;
 
     /// Given a bash parent that spawns a `sleep 600` grandchild, dropping
     /// the `ProcessGroupChild` must kill both within ~200ms.
     #[tokio::test(flavor = "multi_thread")]
     async fn drop_kills_grandchild() {
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let pid_path = tmp.path().to_str().expect("utf-8");
+
         let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(
-            "sleep 600 & \
-             echo $! > /tmp/rightclaw_pgtest_grandchild.pid; \
-             wait",
-        );
+        cmd.arg("-c")
+            .arg(format!("sleep 600 & echo $! > {pid_path}; wait"));
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
@@ -110,12 +127,11 @@ mod tests {
 
         // Give bash time to spawn the sleep and write the pid file.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let grandchild_pid: i32 = std::fs::read_to_string("/tmp/rightclaw_pgtest_grandchild.pid")
+        let grandchild_pid: i32 = std::fs::read_to_string(tmp.path())
             .expect("grandchild pid file")
             .trim()
             .parse()
             .expect("parse pid");
-        std::fs::remove_file("/tmp/rightclaw_pgtest_grandchild.pid").ok();
 
         // Both alive before drop.
         assert!(is_alive(parent_pid as i32), "parent should be alive before drop");
@@ -135,13 +151,13 @@ mod tests {
     /// alive. This is the bug ProcessGroupChild exists to fix.
     #[tokio::test(flavor = "multi_thread")]
     async fn control_without_group_leaks_grandchild() {
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let pid_path = tmp.path().to_str().expect("utf-8");
+
         let mut cmd = Command::new("bash");
         cmd.kill_on_drop(true);
-        cmd.arg("-c").arg(
-            "sleep 600 & \
-             echo $! > /tmp/rightclaw_pgtest_control_grandchild.pid; \
-             wait",
-        );
+        cmd.arg("-c")
+            .arg(format!("sleep 600 & echo $! > {pid_path}; wait"));
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
@@ -149,13 +165,11 @@ mod tests {
         let parent_pid = child.id().expect("pid") as i32;
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let grandchild_pid: i32 =
-            std::fs::read_to_string("/tmp/rightclaw_pgtest_control_grandchild.pid")
-                .expect("grandchild pid file")
-                .trim()
-                .parse()
-                .expect("parse pid");
-        std::fs::remove_file("/tmp/rightclaw_pgtest_control_grandchild.pid").ok();
+        let grandchild_pid: i32 = std::fs::read_to_string(tmp.path())
+            .expect("grandchild pid file")
+            .trim()
+            .parse()
+            .expect("parse pid");
 
         assert!(is_alive(parent_pid), "parent alive before drop");
         assert!(is_alive(grandchild_pid), "grandchild alive before drop");
@@ -170,14 +184,15 @@ mod tests {
         );
 
         // Cleanup the leaked grandchild so the test doesn't itself leak.
-        unsafe {
-            libc::kill(grandchild_pid, libc::SIGKILL);
-        }
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(grandchild_pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
     }
 
     fn is_alive(pid: i32) -> bool {
-        // `kill(pid, 0)` returns 0 if the process exists, -1 with ESRCH if not.
-        let r = unsafe { libc::kill(pid, 0) };
-        r == 0
+        // Signal 0 is a liveness probe: returns Ok if the process exists,
+        // Err(ESRCH) if not.
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
     }
 }

@@ -2708,7 +2708,6 @@ dependencies = [
  "hyper-util",
  "include_dir",
  "inquire",
- "libc",
  "miette",
  "minijinja",
  "nix",
