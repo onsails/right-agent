@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rightclaw = { path = "../rightclaw" }
+rightclaw = { path = "../rightclaw", version = "*" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -29,4 +29,4 @@ notify-debouncer-mini = { workspace = true }
 pulldown-cmark = { workspace = true }
 
 [dev-dependencies]
-rightclaw = { path = "../rightclaw", features = ["test-support"] }
+rightclaw = { path = "../rightclaw", version = "*", features = ["test-support"] }

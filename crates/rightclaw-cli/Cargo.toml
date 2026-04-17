@@ -8,8 +8,8 @@ name = "rightclaw"
 path = "src/main.rs"
 
 [dependencies]
-rightclaw = { path = "../rightclaw" }
-rightclaw-bot = { path = "../bot" }
+rightclaw = { path = "../rightclaw", version = "*" }
+rightclaw-bot = { path = "../bot", version = "*" }
 clap = { workspace = true }
 dirs = { workspace = true }
 miette = { workspace = true }
