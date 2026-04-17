@@ -449,6 +449,31 @@ Use `unchecked_transaction()` (takes `&self`) rather than `transaction()` (takes
 
 All migrations must be idempotent — safe to re-run if the schema already matches. SQLite lacks `ADD COLUMN IF NOT EXISTS`, so column additions must check `pragma_table_info` first. Use `M::up_with_hook()` for migrations that need conditional DDL. `CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS` is naturally idempotent.
 
+## Integration Tests Using Live Sandboxes
+
+Any test that needs a live OpenShell sandbox MUST create it via
+`rightclaw::test_support::TestSandbox::create("<test-name>")`. The helper:
+
+- Generates a unique `rightclaw-test-<name>` sandbox with a minimal permissive policy (wildcard `"**.*"` host on port 443, `binaries: "**"`).
+- Registers the sandbox in `test_cleanup` so sandboxes are deleted even under `panic = "abort"` (the panic hook drains the registry and calls `openshell sandbox delete`).
+- Cleans up leftovers from prior SIGKILLed runs via `pkill_test_orphans`.
+- Exposes `.exec(&[...])` which goes through gRPC — the project bans the `openshell sandbox exec` CLI from tests.
+- Exposes `.name()` for helpers like `upload_file` that take a sandbox name.
+
+Consumers outside `rightclaw`'s own unit tests depend on the `test-support` feature:
+
+```toml
+[dev-dependencies]
+rightclaw = { path = "...", features = ["test-support"] }
+```
+
+Rules:
+
+- Never hardcode sandbox names (no `rightclaw-foo-test-lifecycle` fixtures).
+- Never invoke the `openshell` CLI from tests. Use `TestSandbox::exec` or the gRPC helpers in `crate::openshell`.
+- Never add `#[ignore]` to sandbox tests. Dev machines have OpenShell.
+- Parallel caps (`SandboxTestSlot` / `acquire_sandbox_slot`) are unchanged — tests that create multiple sandboxes should still acquire a slot.
+
 ## Security Model
 
 - **Sandbox isolation**: OpenShell (k3s containers) — filesystem + network + TLS policies per agent
