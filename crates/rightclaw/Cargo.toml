@@ -48,6 +48,9 @@ nix = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 
+[features]
+test-support = []
+
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
 wiremock = "0.6"
