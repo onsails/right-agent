@@ -52,7 +52,7 @@ pub fn unregister_test_sandbox(name: &str) {
 /// call from `Drop` and from a panic hook (no tokio/async required).
 pub fn delete_sandbox_sync(name: &str) {
     let _ = std::process::Command::new("openshell")
-        .args(["sandbox", "delete", "--name", name, "--no-tty"])
+        .args(["sandbox", "delete", name])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
