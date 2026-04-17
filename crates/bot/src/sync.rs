@@ -321,7 +321,11 @@ mod tests {
     /// Requires: running OpenShell gateway.
     #[tokio::test]
     async fn initial_sync_does_not_upload_agent_md_files() {
+        let _slot = rightclaw::openshell::acquire_sandbox_slot();
         let sandbox_name = "rightclaw-test-sync-upload";
+
+        rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
+        rightclaw::test_cleanup::register_test_sandbox(sandbox_name);
 
         let mtls_dir = match rightclaw::openshell::preflight_check() {
             rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
@@ -372,11 +376,12 @@ network_policies:
         )
         .unwrap();
 
-        let _child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+        let mut child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
             .expect("failed to spawn sandbox");
         rightclaw::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
             .await
             .expect("sandbox did not become READY");
+        let _ = child.kill().await;
 
         let sandbox_id =
             rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
@@ -441,5 +446,6 @@ network_policies:
 
         // Clean up.
         rightclaw::openshell::delete_sandbox(sandbox_name).await;
+        rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
     }
 }

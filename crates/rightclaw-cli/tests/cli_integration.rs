@@ -584,12 +584,16 @@ fn test_agent_list() {
 /// Creates an ephemeral sandbox via `ensure_sandbox`, applies the policy, then destroys it.
 #[tokio::test]
 async fn test_policy_validates_against_openshell() {
+    let _slot = rightclaw::openshell::acquire_sandbox_slot();
     let mtls_dir = match rightclaw::openshell::preflight_check() {
         rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
     let sandbox_name = "rightclaw-test-policy-validate";
+
+    rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
+    rightclaw::test_cleanup::register_test_sandbox(sandbox_name);
 
     // Clean up leftover from a previous failed run.
     let mut client = rightclaw::openshell::connect_grpc(&mtls_dir).await.unwrap();
@@ -619,6 +623,7 @@ async fn test_policy_validates_against_openshell() {
 
     // Cleanup regardless of outcome.
     rightclaw::openshell::delete_sandbox(sandbox_name).await;
+    rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
 
     ready.expect("sandbox did not become READY — generated policy may be invalid");
 }

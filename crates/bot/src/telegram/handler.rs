@@ -36,15 +36,6 @@ pub struct SshConfigPath(pub Option<PathBuf>);
 #[derive(Clone)]
 pub struct RightclawHome(pub PathBuf);
 
-/// Newtype wrapper for the debug flag passed via dptree dependencies.
-#[derive(Clone)]
-pub struct DebugFlag(pub bool);
-
-/// Shared flag: true when an auth watcher task is active for this agent.
-/// One per bot process (one agent per process), shared across all workers.
-#[derive(Clone)]
-pub struct AuthWatcherFlag(pub Arc<AtomicBool>);
-
 /// Shared slot for pending MCP token requests. When /mcp add needs a token,
 /// a oneshot::Sender is placed here. Message handler checks before routing to worker.
 #[derive(Clone)]
@@ -58,11 +49,13 @@ pub struct PendingTokenRequest {
 }
 
 /// Bundle of message-intercept slots to reduce dptree DI parameter count.
-/// Contains both auth code and MCP token intercept slots.
+/// Contains both auth code and MCP token intercept slots, plus the
+/// auth-watcher-active flag (true while a token request task is running).
 #[derive(Clone)]
 pub struct InterceptSlots {
     pub auth_code: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     pub pending_token: Arc<tokio::sync::Mutex<Option<PendingTokenRequest>>>,
+    pub auth_watcher: Arc<AtomicBool>,
 }
 
 /// Newtype wrapper for the InternalClient used to communicate with the MCP aggregator.
@@ -88,11 +81,18 @@ pub struct AgentSettings {
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     /// RwLock gate — upgrade takes write (exclusive), CC invocations take read (shared).
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
+    /// When true, CC subprocesses run with --verbose and stderr is logged at debug level.
+    pub debug: bool,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
 fn to_request_err(e: impl std::fmt::Display) -> RequestError {
     RequestError::Io(std::io::Error::other(e.to_string()).into())
+}
+
+/// True when the chat is a private (1:1) chat. Used by DM-only command gates.
+pub(crate) fn is_private_chat(kind: &teloxide::types::ChatKind) -> bool {
+    matches!(kind, teloxide::types::ChatKind::Private(_))
 }
 
 /// Send an HTML-formatted message, respecting thread_id for topic replies.
@@ -125,16 +125,16 @@ async fn send_html_reply(
 pub async fn handle_message(
     bot: BotType,
     msg: Message,
+    decision: super::filter::RoutingDecision,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
-    debug_flag: Arc<DebugFlag>,
     ssh_config: Arc<SshConfigPath>,
-    auth_watcher_flag: Arc<AuthWatcherFlag>,
     intercept_slots: Arc<InterceptSlots>,
     settings: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
     idle_ts: Arc<IdleTimestamp>,
     internal_api: Arc<InternalApi>,
+    identity: Arc<super::mention::BotIdentity>,
 ) -> ResponseResult<()> {
     idle_ts.0.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
 
@@ -236,6 +236,42 @@ pub async fn handle_message(
     let worker_exists = worker_map.contains_key(&key);
     tracing::info!(?key, worker_exists, has_text = text.is_some(), attachment_count = attachments.len(), "handle_message: routing");
 
+    // Build ChatContext: DM emits nothing; Group emits id/title/topic_id.
+    // General topic has thread_id = 1 in supergroups — normalise to "no topic".
+    let chat_ctx = match &msg.chat.kind {
+        teloxide::types::ChatKind::Private(_) => super::attachments::ChatContext::Private,
+        _ => super::attachments::ChatContext::Group {
+            id: msg.chat.id.0,
+            title: msg.chat.title().map(|s| s.to_string()),
+            topic_id: msg
+                .thread_id
+                .map(|t| i64::from(t.0.0))
+                .filter(|&n| n > 1),
+        },
+    };
+
+    // Populate reply_to_body only when the user replied to a non-bot message.
+    // When they reply to our own bot message, the context is already in the CC
+    // session history — emitting it again would be noisy and duplicative.
+    let reply_to_body = msg.reply_to_message().and_then(|r| {
+        let from = r.from.as_ref()?;
+        if from.is_bot && from.id.0 == identity.user_id {
+            return None;
+        }
+        Some(super::attachments::ReplyToBody {
+            author: super::attachments::MessageAuthor {
+                name: from.full_name(),
+                username: from.username.as_ref().map(|u| format!("@{u}")),
+                user_id: Some(from.id.0 as i64),
+            },
+            text: r.text().or(r.caption()).map(|t| t.to_string()),
+        })
+    });
+
+    // Strip `@botname` mentions from text AFTER interceptors (auth code / MCP
+    // token) have seen the raw string. No-op when the pattern isn't present.
+    let text = text.map(|t| super::mention::strip_bot_mentions(&t, &identity.username));
+
     let debounce_msg = DebounceMsg {
         message_id: msg.id.0,
         text,
@@ -244,6 +280,10 @@ pub async fn handle_message(
         author,
         forward_info,
         reply_to_id,
+        address: decision.address.clone(),
+        group_open: decision.group_open,
+        chat: chat_ctx,
+        reply_to_body,
     };
 
     // Check for existing worker or spawn a new one.
@@ -276,10 +316,10 @@ pub async fn handle_message(
                     agent_name,
                     bot: bot.clone(),
                     db_path: agent_dir.0.clone(),
-                    debug: debug_flag.0,
+                    debug: settings.debug,
                     ssh_config_path: ssh_config.0.clone(),
                     resolved_sandbox: settings.resolved_sandbox.clone(),
-                    auth_watcher_active: Arc::clone(&auth_watcher_flag.0),
+                    auth_watcher_active: Arc::clone(&intercept_slots.auth_watcher),
                     auth_code_tx: Arc::clone(&intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
@@ -312,6 +352,10 @@ pub async fn handle_start(
     bot: BotType,
     msg: Message,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "start", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     bot.send_message(msg.chat.id, "Agent is running. Send a message to start.").await?;
     Ok(())
 }
@@ -324,6 +368,10 @@ pub async fn handle_new(
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "new", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
@@ -372,6 +420,10 @@ pub async fn handle_list(
     msg: Message,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "list", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
 
@@ -443,6 +495,10 @@ pub async fn handle_switch(
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "switch", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
@@ -529,6 +585,10 @@ pub async fn handle_mcp(
     ssh_config: Arc<SshConfigPath>,
     settings: Arc<AgentSettings>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "mcp", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
     let agent_name = agent_dir.0
         .file_name()
@@ -1051,13 +1111,11 @@ async fn detect_auth_type_via_haiku(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
-    cmd.kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
+    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.stdin() {
         use tokio::io::AsyncWriteExt;
         stdin
             .write_all(prompt.as_bytes())
@@ -1143,6 +1201,10 @@ pub async fn handle_cron(
     args: String,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "cron", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     let result = if args.trim().is_empty() {
         handle_cron_list(&bot, &msg, &agent_dir.0).await
     } else {
@@ -1295,6 +1357,10 @@ pub async fn handle_doctor(
     msg: Message,
     home: Arc<RightclawHome>,
 ) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "doctor", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
     tracing::info!("handle_doctor: running diagnostics");
     let checks = rightclaw::doctor::run_doctor(&home.0);
     let mut body = String::new();
@@ -1367,6 +1433,26 @@ pub async fn handle_stop_callback(
 mod tests {
     use super::*;
     use std::any::TypeId;
+
+    fn make_private_chat_kind() -> teloxide::types::ChatKind {
+        serde_json::from_value(serde_json::json!({
+            "type": "private",
+            "first_name": "Test"
+        })).unwrap()
+    }
+
+    fn make_group_chat_kind() -> teloxide::types::ChatKind {
+        serde_json::from_value(serde_json::json!({
+            "type": "group",
+            "title": "Group"
+        })).unwrap()
+    }
+
+    #[test]
+    fn is_private_chat_detects_dm() {
+        assert!(is_private_chat(&make_private_chat_kind()));
+        assert!(!is_private_chat(&make_group_chat_kind()));
+    }
 
     /// Regression test: AgentDir and RightclawHome must have distinct TypeIds.
     /// If they shared the same type (e.g., both Arc<PathBuf>), dptree would overwrite

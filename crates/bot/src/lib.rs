@@ -10,6 +10,42 @@ mod upgrade;
 
 pub use error::BotError;
 
+use rightclaw::agent::allowlist::{self, AllowlistHandle, AllowlistState};
+
+/// Load `allowlist.yaml` for this agent, migrating from the legacy
+/// `agent.yaml::allowed_chat_ids` field on first boot. Returns a shareable
+/// `AllowlistHandle` ready for the routing filter and command handlers.
+fn load_or_migrate_allowlist(
+    agent_dir: &std::path::Path,
+    legacy: &[i64],
+) -> miette::Result<AllowlistHandle> {
+    let now = chrono::Utc::now();
+    let existed_before = allowlist::allowlist_path(agent_dir).exists();
+    let report = allowlist::migrate_from_legacy(agent_dir, legacy, now)
+        .map_err(|e| miette::miette!("allowlist migration: {e:#}"))?;
+    if !existed_before
+        && !report.already_present
+        && (report.migrated_users + report.migrated_groups) > 0
+    {
+        tracing::info!(
+            users = report.migrated_users,
+            groups = report.migrated_groups,
+            "migrated {} users, {} groups from agent.yaml::allowed_chat_ids; consider removing the legacy field",
+            report.migrated_users,
+            report.migrated_groups,
+        );
+    }
+    if report.already_present && !legacy.is_empty() {
+        tracing::warn!(
+            "legacy allowed_chat_ids field in agent.yaml is ignored; source of truth is allowlist.yaml"
+        );
+    }
+    let file = allowlist::read_file(agent_dir)
+        .map_err(|e| miette::miette!("read allowlist: {e:#}"))?
+        .unwrap_or_default();
+    Ok(AllowlistHandle::new(AllowlistState::from_file(file)))
+}
+
 /// Exit code returned when bot shuts down due to config change.
 /// process-compose's `on_failure` policy will restart the bot.
 pub const CONFIG_RESTART_EXIT_CODE: i32 = 2;
@@ -104,6 +140,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             memory: None,
         }
     });
+
+    // Load (or migrate from legacy) the bot-managed allowlist, and spawn a
+    // notify-based watcher so external edits hot-reload into the in-memory
+    // handle without requiring a bot restart.
+    let allowlist = load_or_migrate_allowlist(&agent_dir, &config.allowed_chat_ids)?;
+    let _allowlist_watcher = allowlist::spawn_watcher(&agent_dir, allowlist.clone())
+        .map_err(|e| miette::miette!("allowlist watcher: {e:#}"))?;
 
     // Memory: initialize HindsightClient and prefetch cache if configured.
     let memory_provider = config
@@ -220,14 +263,15 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         }
     }
 
-    // Warn if allowed_chat_ids is empty (D-05)
-    if config.allowed_chat_ids.is_empty() {
-        tracing::warn!(
-            agent = %args.agent,
-            "allowed_chat_ids is empty -- all incoming messages will be dropped. \
-             Run `rightclaw agent config {}` to add your Telegram chat ID",
-            args.agent,
-        );
+    // Warn when the trusted-users set is empty — DMs will be silently dropped.
+    {
+        let r = allowlist.0.read().expect("allowlist lock poisoned");
+        if r.users().is_empty() {
+            tracing::warn!(
+                agent = %args.agent,
+                "allowlist.yaml has no trusted users — DMs will be silently dropped until you add one via `rightclaw agent allow` or a first-run wizard",
+            );
+        }
     }
 
     // Graceful restart: config watcher cancels this token when agent.yaml changes.
@@ -481,7 +525,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let result = tokio::select! {
         result = telegram::run_telegram(
             token,
-            config.allowed_chat_ids,
+            allowlist,
             agent_dir,
             args.debug,
             Arc::clone(&pending_auth),

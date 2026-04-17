@@ -168,6 +168,30 @@ pub fn init_agent(
             .map_err(|e| miette::miette!("Failed to write policy.yaml: {e}"))?;
     }
 
+    // Seed allowlist.yaml from the user-provided first trusted user.
+    // Idempotent — skipped when allowlist.yaml already exists (wizard re-run, --force, etc.).
+    if let Some(ov) = overrides {
+        if !ov.allowed_chat_ids.is_empty() {
+            let report = crate::agent::allowlist::migrate_from_legacy(
+                &agents_dir,
+                &ov.allowed_chat_ids,
+                chrono::Utc::now(),
+            )
+            .map_err(|e| miette::miette!("seed allowlist.yaml: {e:#}"))?;
+            if !report.already_present
+                && (report.migrated_users + report.migrated_groups) > 0
+            {
+                tracing::info!(
+                    users = report.migrated_users,
+                    groups = report.migrated_groups,
+                    "seeded allowlist.yaml with {} users, {} groups from wizard input",
+                    report.migrated_users,
+                    report.migrated_groups,
+                );
+            }
+        }
+    }
+
     // Pre-trust the agent directory in the agent-local .claude.json (D-06).
     let trust_agent = crate::agent::AgentDef {
         name: name.to_owned(),
@@ -774,6 +798,32 @@ mod tests {
         assert!(
             yaml.contains("mode: none"),
             "agent.yaml must contain sandbox mode: none"
+        );
+    }
+
+    #[test]
+    fn init_agent_seeds_allowlist_yaml_from_overrides() {
+        let dir = tempdir().unwrap();
+        let overrides = InitOverrides {
+            sandbox_mode: SandboxMode::None,
+            network_policy: NetworkPolicy::Restrictive,
+            telegram_token: Some("123:ABC".to_string()),
+            allowed_chat_ids: vec![42, -1001234],
+            model: None,
+            env: HashMap::new(),
+            memory_provider: MemoryProvider::File,
+            memory_api_key: None,
+            memory_bank_id: None,
+        };
+        init_agent(&dir.path().join("agents"), "testbot", Some(&overrides)).unwrap();
+
+        let allowlist_path = dir.path().join("agents/testbot/allowlist.yaml");
+        assert!(allowlist_path.exists(), "allowlist.yaml must be written");
+        let content = std::fs::read_to_string(&allowlist_path).unwrap();
+        assert!(content.contains("id: 42"), "user 42 must be seeded, got:\n{content}");
+        assert!(
+            content.contains("id: -1001234"),
+            "group -1001234 must be seeded, got:\n{content}"
         );
     }
 

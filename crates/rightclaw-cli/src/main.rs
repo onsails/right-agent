@@ -106,6 +106,52 @@ pub enum AgentCommands {
         #[arg(long)]
         force: bool,
     },
+    /// Add a trusted user to this agent's allowlist
+    Allow {
+        /// Agent name
+        name: String,
+        /// Telegram user ID (positive integer)
+        user_id: i64,
+        /// Optional label (first_name or username)
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Remove a trusted user from this agent's allowlist
+    Deny {
+        /// Agent name
+        name: String,
+        /// Telegram user ID
+        user_id: i64,
+    },
+    /// Open a group for all members (non-trusted senders may address the bot)
+    #[command(name = "allow_all")]
+    AllowAll {
+        /// Agent name
+        name: String,
+        /// Telegram group chat ID (negative integer for regular groups)
+        #[arg(allow_hyphen_values = true)]
+        chat_id: i64,
+        /// Optional label (group title)
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Close an opened group
+    #[command(name = "deny_all")]
+    DenyAll {
+        /// Agent name
+        name: String,
+        /// Telegram group chat ID
+        #[arg(allow_hyphen_values = true)]
+        chat_id: i64,
+    },
+    /// Dump the current allowlist
+    Allowed {
+        /// Agent name
+        name: String,
+        /// Emit as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for `rightclaw memory`.
@@ -436,6 +482,148 @@ async fn main() -> miette::Result<()> {
             }
             AgentCommands::Destroy { name, backup, force } => {
                 cmd_agent_destroy(&home, &name, backup, force).await
+            }
+            AgentCommands::Allow { name, user_id, label } => {
+                if user_id < 0 {
+                    miette::bail!(
+                        "user_id cannot be negative (groups/channels use `rightclaw agent allow_all`)"
+                    );
+                }
+                let dir = rightclaw::config::agents_dir(&home).join(&name);
+                if !dir.exists() {
+                    return Err(miette::miette!("agent not found: {}", dir.display()));
+                }
+                use rightclaw::agent::allowlist::{self, AddOutcome, AllowedUser, AllowlistState};
+                let outcome = allowlist::with_lock(&dir, |d| -> Result<AddOutcome, String> {
+                    let file = allowlist::read_file(d)?.unwrap_or_default();
+                    let mut state = AllowlistState::from_file(file);
+                    let outcome = state.add_user(AllowedUser {
+                        id: user_id,
+                        label: label.clone(),
+                        added_by: None,
+                        added_at: chrono::Utc::now(),
+                    });
+                    allowlist::write_file_inner(d, &state.to_file())?;
+                    Ok(outcome)
+                })
+                .map_err(|e| miette::miette!("{e}"))?;
+                match outcome {
+                    AddOutcome::Inserted => println!("added user {user_id}"),
+                    AddOutcome::AlreadyPresent => println!("user {user_id} already allowed"),
+                }
+                Ok(())
+            }
+            AgentCommands::Deny { name, user_id } => {
+                let dir = rightclaw::config::agents_dir(&home).join(&name);
+                if !dir.exists() {
+                    return Err(miette::miette!("agent not found: {}", dir.display()));
+                }
+                use rightclaw::agent::allowlist::{self, AllowlistState, RemoveOutcome};
+                let outcome = allowlist::with_lock(&dir, |d| -> Result<RemoveOutcome, String> {
+                    let file = allowlist::read_file(d)?.unwrap_or_default();
+                    let mut state = AllowlistState::from_file(file);
+                    let outcome = state.remove_user(user_id);
+                    allowlist::write_file_inner(d, &state.to_file())?;
+                    Ok(outcome)
+                })
+                .map_err(|e| miette::miette!("{e}"))?;
+                match outcome {
+                    RemoveOutcome::Removed => println!("removed user {user_id}"),
+                    RemoveOutcome::NotFound => println!("user {user_id} not in allowlist"),
+                }
+                Ok(())
+            }
+            AgentCommands::AllowAll { name, chat_id, label } => {
+                let dir = rightclaw::config::agents_dir(&home).join(&name);
+                if !dir.exists() {
+                    return Err(miette::miette!("agent not found: {}", dir.display()));
+                }
+                use rightclaw::agent::allowlist::{self, AddOutcome, AllowedGroup, AllowlistState};
+                let outcome = allowlist::with_lock(&dir, |d| -> Result<AddOutcome, String> {
+                    let file = allowlist::read_file(d)?.unwrap_or_default();
+                    let mut state = AllowlistState::from_file(file);
+                    let outcome = state.add_group(AllowedGroup {
+                        id: chat_id,
+                        label: label.clone(),
+                        opened_by: None,
+                        opened_at: chrono::Utc::now(),
+                    });
+                    allowlist::write_file_inner(d, &state.to_file())?;
+                    Ok(outcome)
+                })
+                .map_err(|e| miette::miette!("{e}"))?;
+                match outcome {
+                    AddOutcome::Inserted => println!("opened group {chat_id}"),
+                    AddOutcome::AlreadyPresent => println!("group {chat_id} already opened"),
+                }
+                Ok(())
+            }
+            AgentCommands::DenyAll { name, chat_id } => {
+                let dir = rightclaw::config::agents_dir(&home).join(&name);
+                if !dir.exists() {
+                    return Err(miette::miette!("agent not found: {}", dir.display()));
+                }
+                use rightclaw::agent::allowlist::{self, AllowlistState, RemoveOutcome};
+                let outcome = allowlist::with_lock(&dir, |d| -> Result<RemoveOutcome, String> {
+                    let file = allowlist::read_file(d)?.unwrap_or_default();
+                    let mut state = AllowlistState::from_file(file);
+                    let outcome = state.remove_group(chat_id);
+                    allowlist::write_file_inner(d, &state.to_file())?;
+                    Ok(outcome)
+                })
+                .map_err(|e| miette::miette!("{e}"))?;
+                match outcome {
+                    RemoveOutcome::Removed => println!("closed group {chat_id}"),
+                    RemoveOutcome::NotFound => println!("group {chat_id} was not opened"),
+                }
+                Ok(())
+            }
+            AgentCommands::Allowed { name, json } => {
+                let dir = rightclaw::config::agents_dir(&home).join(&name);
+                if !dir.exists() {
+                    return Err(miette::miette!("agent not found: {}", dir.display()));
+                }
+                use rightclaw::agent::allowlist;
+                let file = allowlist::read_file(&dir)
+                    .map_err(|e| miette::miette!("{e}"))?
+                    .unwrap_or_default();
+                if json {
+                    let out = serde_json::json!({
+                        "users": file.users,
+                        "groups": file.groups,
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out)
+                            .map_err(|e| miette::miette!("{e:#}"))?
+                    );
+                } else {
+                    println!("Trusted users:");
+                    if file.users.is_empty() {
+                        println!("  (none)");
+                    }
+                    for u in &file.users {
+                        println!(
+                            "  - {} {} (added {})",
+                            u.id,
+                            u.label.as_deref().unwrap_or(""),
+                            u.added_at.format("%Y-%m-%d")
+                        );
+                    }
+                    println!("Opened groups:");
+                    if file.groups.is_empty() {
+                        println!("  (none)");
+                    }
+                    for g in &file.groups {
+                        println!(
+                            "  - {} {} (opened {})",
+                            g.id,
+                            g.label.as_deref().unwrap_or(""),
+                            g.opened_at.format("%Y-%m-%d")
+                        );
+                    }
+                }
+                Ok(())
             }
         },
         Commands::Memory { command } => match command {
