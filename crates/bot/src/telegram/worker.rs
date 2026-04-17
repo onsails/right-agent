@@ -1014,7 +1014,8 @@ async fn invoke_cc(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true); // BOT-04: killed on SIGTERM
+    // Group kill on Drop (via ProcessGroupChild) subsumes kill_on_drop(true)
+    // and also reaps ssh-proxy / bash-spawned claude grandchildren.
 
     let sandboxed = ctx.ssh_config_path.is_some();
     tracing::info!(
@@ -1025,12 +1026,11 @@ async fn invoke_cc(
         "invoking claude -p"
     );
 
-    let mut child = cmd
-        .spawn()
+    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
 
     // Write input to stdin, then drop to signal EOF.
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = child.stdin() {
         use tokio::io::AsyncWriteExt;
         stdin
             .write_all(input.as_bytes())
@@ -1044,8 +1044,7 @@ async fn invoke_cc(
 
     // Stream stdout line-by-line: log to file, parse events, update thinking message.
     let stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| format_error_reply(-1, "no stdout handle"))?;
 
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1197,7 +1196,7 @@ async fn invoke_cc(
     ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
 
     // Read any remaining stderr.
-    let stderr_str = if let Some(mut stderr) = child.stderr.take() {
+    let stderr_str = if let Some(mut stderr) = child.stderr() {
         let mut buf = String::new();
         use tokio::io::AsyncReadExt;
         let _ = stderr.read_to_string(&mut buf).await;
