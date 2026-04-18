@@ -803,6 +803,7 @@ pub async fn send_attachments(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_single(
     att: &OutboundAttachment,
     bot: &super::BotType,
@@ -1007,6 +1008,7 @@ async fn send_single(
     send_result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_group(
     items: &[OutboundAttachment],
     bot: &super::BotType,
