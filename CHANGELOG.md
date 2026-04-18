@@ -1,4 +1,44 @@
 # Changelog
+## [0.2.1] - 2026-04-18
+
+
+### Bug Fixes
+
+- **openshell**: Download_file delivers to exact host_dest path
+
+### Documentation
+
+- **prompt**: Describe media_group_id to the agent
+
+### Features
+
+- **attachments**: GroupKind enum categorising album compatibility
+- **attachments**: Classify_media_group pure helper
+- **attachments**: Merge_group_captions helper
+- **attachments**: Partition_sends turns reply into ordered sends
+- **attachments**: Execute partitioned sends via sendMediaGroup
+- **schema**: Add media_group_id to outbound attachment schemas
+
+### Refactor
+
+- **attachments**: Rename Send to OutboundSend, add split-caption test
+- **attachments**: Allow(too_many_arguments) on send_single/send_group
+- **attachments**: Extract SendCtx + resolve_host_path
+
+### Testing
+
+- **agent_def**: Replace unwrap with expect in type-array test helper
+
+### Review
+
+- **attachments**: Tighten visibility + cover boundary cases
+- **iter1**: Address major findings
+- **iter2**: Propagate silent skips through send_attachments errors
+
+### Style
+
+- **attachments**: Resolve new clippy warnings
+
 ## [0.2.0] - 2026-04-17
 
 
