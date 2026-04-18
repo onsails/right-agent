@@ -1,5 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_dir = "../../proto/openshell";
+    let proto_dir = "proto/openshell";
 
     tonic_prost_build::configure()
         .build_server(true)

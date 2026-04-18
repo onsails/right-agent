@@ -16,9 +16,9 @@ pub struct InitOverrides {
     pub memory_bank_id: Option<String>,
 }
 
-const DEFAULT_AGENTS: &str = include_str!("../../../templates/right/agent/AGENTS.md");
-const DEFAULT_BOOTSTRAP: &str = include_str!("../../../templates/right/agent/BOOTSTRAP.md");
-const DEFAULT_AGENT_YAML: &str = include_str!("../../../templates/right/agent/agent.yaml");
+const DEFAULT_AGENTS: &str = include_str!("../templates/right/agent/AGENTS.md");
+const DEFAULT_BOOTSTRAP: &str = include_str!("../templates/right/agent/BOOTSTRAP.md");
+const DEFAULT_AGENT_YAML: &str = include_str!("../templates/right/agent/agent.yaml");
 
 /// Initialize a single agent under `agents_parent_dir/<name>/`.
 ///

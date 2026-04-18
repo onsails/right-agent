@@ -4,12 +4,12 @@ use include_dir::{Dir, include_dir};
 
 use crate::agent::types::MemoryProvider;
 
-const SKILL_RIGHTSKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../skills/rightskills");
-const SKILL_RIGHTCRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../skills/rightcron");
-const SKILL_RIGHTMCP: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../skills/rightmcp");
-const SKILL_RIGHTMEMORY_FILE: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../skills/rightmemory-file");
+const SKILL_RIGHTSKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightskills");
+const SKILL_RIGHTCRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightcron");
+const SKILL_RIGHTMCP: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightmcp");
+const SKILL_RIGHTMEMORY_FILE: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightmemory-file");
 const SKILL_RIGHTMEMORY_HINDSIGHT: Dir =
-    include_dir!("$CARGO_MANIFEST_DIR/../../skills/rightmemory-hindsight");
+    include_dir!("$CARGO_MANIFEST_DIR/skills/rightmemory-hindsight");
 
 /// Install RightClaw built-in skills into an agent's `.claude/skills/` directory.
 ///
