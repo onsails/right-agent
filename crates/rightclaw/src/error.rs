@@ -1,6 +1,25 @@
 use miette::Diagnostic;
 use thiserror::Error;
 
+/// Render an error together with its full `source()` chain as a single
+/// colon-separated string.
+///
+/// `thiserror`-derived errors and raw `reqwest::Error` types do not walk the
+/// source chain in their `Display` output, so `{:#}` alone often hides the
+/// underlying cause (e.g. the real IO error behind
+/// "error sending request for url"). Use this helper whenever logging errors
+/// that cross library boundaries and could carry meaningful chained context.
+pub fn display_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        use std::fmt::Write as _;
+        let _ = write!(out, ": {cause}");
+        source = cause.source();
+    }
+    out
+}
+
 #[derive(Debug, Error, Diagnostic)]
 pub enum AgentError {
     #[error("Agent '{name}' is missing required file: {file}")]
@@ -52,5 +71,46 @@ mod tests {
             msg.contains("bad agent!"),
             "expected invalid name in: {msg}"
         );
+    }
+
+    #[test]
+    fn display_error_chain_includes_sources() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Inner;
+        impl fmt::Display for Inner {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("root cause")
+            }
+        }
+        impl Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+        impl fmt::Display for Outer {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("top-level failure")
+            }
+        }
+        impl Error for Outer {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let err = Outer(Inner);
+        assert_eq!(
+            display_error_chain(&err),
+            "top-level failure: root cause"
+        );
+    }
+
+    #[test]
+    fn display_error_chain_handles_no_source() {
+        let err = AgentError::InvalidName { name: "x".into() };
+        let rendered = display_error_chain(&err);
+        assert_eq!(rendered, err.to_string(), "no source: unchanged");
     }
 }

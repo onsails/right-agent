@@ -560,6 +560,109 @@ async fn upload_directory_preserves_files_and_overwrites() {
 }
 
 // ---------------------------------------------------------------------------
+// download_file integration tests
+// ---------------------------------------------------------------------------
+
+/// Regression test for the photo-send bug: `openshell sandbox download` always
+/// writes to DEST as a directory. `download_file` must hide that and deliver
+/// the file at exactly the caller's `host_dest` path.
+#[tokio::test]
+async fn download_file_writes_to_exact_dest_path() {
+    let _slot = super::acquire_sandbox_slot();
+    let sbox = TestSandbox::create("download-file-path").await;
+
+    // Put a known file in the sandbox.
+    let (_, code) = sbox
+        .exec(&["sh", "-c", "printf 'payload\\n' > /sandbox/download_test.txt"])
+        .await;
+    assert_eq!(code, 0, "sandbox write failed");
+
+    let tmp = tempfile::tempdir().unwrap();
+    // NOTE: host_dest basename differs from sandbox basename to prove the
+    // function honors the dest path, not the source name.
+    let host_dest = tmp.path().join("renamed_on_host.txt");
+
+    super::download_file(sbox.name(), "/sandbox/download_test.txt", &host_dest)
+        .await
+        .expect("download should succeed");
+
+    assert!(host_dest.is_file(), "host_dest must be a regular file, not a directory");
+    let content = std::fs::read_to_string(&host_dest).unwrap();
+    assert_eq!(content, "payload\n", "downloaded content must match sandbox file");
+}
+
+#[tokio::test]
+async fn download_file_overwrites_existing_file() {
+    let _slot = super::acquire_sandbox_slot();
+    let sbox = TestSandbox::create("download-overwrite").await;
+
+    let (_, code) = sbox
+        .exec(&["sh", "-c", "printf 'new\\n' > /sandbox/overwrite_test.txt"])
+        .await;
+    assert_eq!(code, 0);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dest = tmp.path().join("existing.txt");
+    std::fs::write(&host_dest, "stale").unwrap();
+
+    super::download_file(sbox.name(), "/sandbox/overwrite_test.txt", &host_dest)
+        .await
+        .expect("download should overwrite existing file");
+
+    let content = std::fs::read_to_string(&host_dest).unwrap();
+    assert_eq!(content, "new\n", "existing file must be replaced with new content");
+}
+
+/// Upgrade path: agents deployed before the fix accumulated directories at
+/// `tmp/outbox/<basename>/` (with the file buried inside). New downloads with
+/// the same dest path must not be blocked by that stale state.
+#[tokio::test]
+async fn download_file_replaces_stale_directory_at_dest() {
+    let _slot = super::acquire_sandbox_slot();
+    let sbox = TestSandbox::create("download-stale-dir").await;
+
+    let (_, code) = sbox
+        .exec(&["sh", "-c", "printf 'fresh\\n' > /sandbox/stale_test.txt"])
+        .await;
+    assert_eq!(code, 0);
+
+    // Simulate the stale state produced by the pre-fix code: a directory at
+    // host_dest containing a file of the same basename.
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dest = tmp.path().join("collision.txt");
+    std::fs::create_dir(&host_dest).unwrap();
+    std::fs::write(host_dest.join("collision.txt"), "old junk").unwrap();
+
+    super::download_file(sbox.name(), "/sandbox/stale_test.txt", &host_dest)
+        .await
+        .expect("download should recover from stale directory");
+
+    assert!(host_dest.is_file(), "host_dest must be a regular file after recovery");
+    assert_eq!(std::fs::read_to_string(&host_dest).unwrap(), "fresh\n");
+}
+
+#[tokio::test]
+async fn download_file_creates_parent_directory() {
+    let _slot = super::acquire_sandbox_slot();
+    let sbox = TestSandbox::create("download-mkparent").await;
+
+    let (_, code) = sbox
+        .exec(&["sh", "-c", "printf 'deep\\n' > /sandbox/parent_test.txt"])
+        .await;
+    assert_eq!(code, 0);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dest = tmp.path().join("a/b/c/file.txt");
+
+    super::download_file(sbox.name(), "/sandbox/parent_test.txt", &host_dest)
+        .await
+        .expect("download should create missing parent dirs");
+
+    assert!(host_dest.is_file());
+    assert_eq!(std::fs::read_to_string(&host_dest).unwrap(), "deep\n");
+}
+
+// ---------------------------------------------------------------------------
 // filesystem_policy_changed tests
 // ---------------------------------------------------------------------------
 

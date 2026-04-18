@@ -657,10 +657,35 @@ async fn upload_directory(sandbox: &str, host_dir: &Path, sandbox_dir: &str) -> 
 }
 
 /// Download a file or directory from a sandbox to the host.
+/// Download a single file from the sandbox, placing it at exactly `host_dest`.
+///
+/// The `openshell sandbox download` CLI always treats its DEST argument as a
+/// directory and writes the file inside it using the source basename. This
+/// wrapper hides that quirk: it downloads into a private temp directory in
+/// `host_dest`'s parent, then renames the file into place. Missing parent
+/// directories are created. Any pre-existing file at `host_dest` is replaced.
 pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) -> miette::Result<()> {
+    let basename = Path::new(sandbox_path).file_name().ok_or_else(|| {
+        miette::miette!("sandbox_path has no file name: {sandbox_path}")
+    })?;
+
+    let parent = host_dest.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| {
+        miette::miette!(
+            "failed to create parent directory {}: {e:#}",
+            parent.display()
+        )
+    })?;
+
+    // Stage the download in a temp dir alongside host_dest so the final
+    // rename stays on the same filesystem (atomic rename, no cross-device copy).
+    let staging = tempfile::tempdir_in(parent).map_err(|e| {
+        miette::miette!("failed to create staging dir in {}: {e:#}", parent.display())
+    })?;
+
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "download", sandbox, sandbox_path])
-        .arg(host_dest);
+        .arg(staging.path());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -676,6 +701,36 @@ pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) 
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(miette::miette!("openshell download failed: {stderr}"));
     }
+
+    let staged = staging.path().join(basename);
+    if !staged.exists() {
+        return Err(miette::miette!(
+            "openshell download reported success but expected file not found at {}",
+            staged.display()
+        ));
+    }
+
+    // Clear any stale directory at host_dest left behind by the earlier
+    // buggy version of this function (which treated host_dest as a dir).
+    // `fs::rename` would otherwise fail with EISDIR on such paths.
+    if let Ok(meta) = std::fs::symlink_metadata(host_dest)
+        && meta.is_dir()
+    {
+        std::fs::remove_dir_all(host_dest).map_err(|e| {
+            miette::miette!(
+                "failed to remove stale directory at {}: {e:#}",
+                host_dest.display()
+            )
+        })?;
+    }
+
+    std::fs::rename(&staged, host_dest).map_err(|e| {
+        miette::miette!(
+            "failed to move downloaded file to {}: {e:#}",
+            host_dest.display()
+        )
+    })?;
+
     Ok(())
 }
 
