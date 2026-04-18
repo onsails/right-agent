@@ -104,6 +104,79 @@ impl GroupKind {
     }
 }
 
+/// Outcome of classifying a candidate media group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupPlan {
+    /// 2–10 compatible items: one `sendMediaGroup` call.
+    SendAsGroup(GroupKind),
+    /// More than 10 compatible same-kind items: split into consecutive
+    /// chunks. Each chunk is a list of indices into the input slice. The last
+    /// chunk may be size 1 — the caller must fall back to an individual send
+    /// for a size-1 chunk because `sendMediaGroup` rejects it.
+    Split {
+        chunks: Vec<Vec<usize>>,
+        kind: GroupKind,
+        reason: String,
+    },
+    /// Incompatible mix, size 0 or 1, or oversize-with-incompatible-mix: the
+    /// caller falls back to individual sends for every item in the group.
+    Degrade { reason: String },
+}
+
+/// Maximum items per Telegram media group.
+const MEDIA_GROUP_MAX: usize = 10;
+
+pub fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
+    if items.len() < 2 {
+        return GroupPlan::Degrade {
+            reason: if items.is_empty() {
+                "group of 0".into()
+            } else {
+                "group of 1".into()
+            },
+        };
+    }
+
+    // All items must share a single GroupKind; any ungroupable item → degrade.
+    let Some(first) = GroupKind::of(&items[0].kind) else {
+        return GroupPlan::Degrade {
+            reason: format!(
+                "incompatible types: {:?} cannot appear in a media group",
+                items[0].kind
+            ),
+        };
+    };
+    for it in &items[1..] {
+        match GroupKind::of(&it.kind) {
+            Some(k) if k == first => (),
+            _ => {
+                let summary: Vec<_> = items.iter().map(|i| i.kind).collect();
+                return GroupPlan::Degrade {
+                    reason: format!("incompatible types {summary:?} in one media group"),
+                };
+            }
+        }
+    }
+
+    if items.len() <= MEDIA_GROUP_MAX {
+        return GroupPlan::SendAsGroup(first);
+    }
+
+    let chunks: Vec<Vec<usize>> = (0..items.len())
+        .collect::<Vec<_>>()
+        .chunks(MEDIA_GROUP_MAX)
+        .map(<[usize]>::to_vec)
+        .collect();
+    GroupPlan::Split {
+        chunks,
+        kind: first,
+        reason: format!(
+            "group of {} exceeds Telegram limit of {MEDIA_GROUP_MAX}",
+            items.len()
+        ),
+    }
+}
+
 /// Derive file extension from MIME type. Fallback to `.bin`.
 pub fn mime_to_extension(mime: &str) -> &'static str {
     match mime {
@@ -1076,6 +1149,148 @@ mod tests {
         assert_eq!(GroupKind::of(&VideoNote), None);
         assert_eq!(GroupKind::of(&Sticker), None);
         assert_eq!(GroupKind::of(&Animation), None);
+    }
+
+    fn att(kind: OutboundKind) -> OutboundAttachment {
+        OutboundAttachment {
+            kind,
+            path: format!("/sandbox/outbox/{}.bin", kind_to_ext(kind)),
+            filename: None,
+            caption: None,
+            media_group_id: Some("g".into()),
+        }
+    }
+
+    fn kind_to_ext(k: OutboundKind) -> &'static str {
+        match k {
+            OutboundKind::Photo => "jpg",
+            OutboundKind::Video => "mp4",
+            OutboundKind::Document => "pdf",
+            OutboundKind::Audio => "mp3",
+            OutboundKind::Voice => "ogg",
+            OutboundKind::VideoNote => "mp4",
+            OutboundKind::Sticker => "webp",
+            OutboundKind::Animation => "gif",
+        }
+    }
+
+    fn atts(kinds: &[OutboundKind]) -> Vec<OutboundAttachment> {
+        kinds.iter().copied().map(att).collect()
+    }
+
+    fn refs(v: &[OutboundAttachment]) -> Vec<&OutboundAttachment> {
+        v.iter().collect()
+    }
+
+    #[test]
+    fn classify_two_photos_sends_as_group() {
+        let items = atts(&[OutboundKind::Photo, OutboundKind::Photo]);
+        assert_eq!(
+            classify_media_group(&refs(&items)),
+            GroupPlan::SendAsGroup(GroupKind::PhotoVideo),
+        );
+    }
+
+    #[test]
+    fn classify_photo_and_video_mix_sends_as_group() {
+        let items = atts(&[OutboundKind::Photo, OutboundKind::Video]);
+        assert_eq!(
+            classify_media_group(&refs(&items)),
+            GroupPlan::SendAsGroup(GroupKind::PhotoVideo),
+        );
+    }
+
+    #[test]
+    fn classify_two_documents_sends_as_group() {
+        let items = atts(&[OutboundKind::Document, OutboundKind::Document]);
+        assert_eq!(
+            classify_media_group(&refs(&items)),
+            GroupPlan::SendAsGroup(GroupKind::Document),
+        );
+    }
+
+    #[test]
+    fn classify_two_audios_sends_as_group() {
+        let items = atts(&[OutboundKind::Audio, OutboundKind::Audio]);
+        assert_eq!(
+            classify_media_group(&refs(&items)),
+            GroupPlan::SendAsGroup(GroupKind::Audio),
+        );
+    }
+
+    #[test]
+    fn classify_photo_and_voice_degrades() {
+        let items = atts(&[OutboundKind::Photo, OutboundKind::Voice]);
+        match classify_media_group(&refs(&items)) {
+            GroupPlan::Degrade { reason } => assert!(reason.contains("incompatible")),
+            other => panic!("expected Degrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_photo_and_document_degrades() {
+        let items = atts(&[OutboundKind::Photo, OutboundKind::Document]);
+        match classify_media_group(&refs(&items)) {
+            GroupPlan::Degrade { reason } => assert!(reason.contains("incompatible")),
+            other => panic!("expected Degrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_single_item_degrades() {
+        let items = atts(&[OutboundKind::Photo]);
+        match classify_media_group(&refs(&items)) {
+            GroupPlan::Degrade { reason } => assert!(reason.contains("group of 1")),
+            other => panic!("expected Degrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_empty_group_degrades() {
+        let items: Vec<OutboundAttachment> = vec![];
+        match classify_media_group(&refs(&items)) {
+            GroupPlan::Degrade { .. } => (),
+            other => panic!("expected Degrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_eleven_photos_splits_into_chunks() {
+        let items = atts(&vec![OutboundKind::Photo; 11]);
+        match classify_media_group(&refs(&items)) {
+            GroupPlan::Split { chunks, kind, .. } => {
+                assert_eq!(kind, GroupKind::PhotoVideo);
+                assert_eq!(chunks.len(), 2, "expected 2 chunks (10 + 1)");
+                assert_eq!(chunks[0], (0..10).collect::<Vec<_>>());
+                assert_eq!(chunks[1], vec![10]);
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_twenty_five_photos_splits_into_three_chunks() {
+        let items = atts(&vec![OutboundKind::Photo; 25]);
+        match classify_media_group(&refs(&items)) {
+            GroupPlan::Split { chunks, .. } => {
+                assert_eq!(chunks.len(), 3);
+                assert_eq!(chunks[0].len(), 10);
+                assert_eq!(chunks[1].len(), 10);
+                assert_eq!(chunks[2].len(), 5);
+            }
+            other => panic!("expected Split, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_eleven_mixed_with_voice_degrades() {
+        let mut kinds = vec![OutboundKind::Photo; 10];
+        kinds.push(OutboundKind::Voice);
+        let items = atts(&kinds);
+        match classify_media_group(&refs(&items)) {
+            GroupPlan::Degrade { reason } => assert!(reason.contains("incompatible")),
+            other => panic!("expected Degrade, got {other:?}"),
+        }
     }
 
     #[test]
