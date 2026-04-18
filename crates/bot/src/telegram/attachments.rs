@@ -177,6 +177,27 @@ pub fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
     }
 }
 
+/// Fold every non-empty caption into the first slot, separated by blank lines,
+/// and blank the rest. Telegram only shows the first item's caption in a media
+/// group; without folding, later captions would be silently dropped.
+pub fn merge_group_captions(captions: &mut [Option<String>]) {
+    if captions.is_empty() {
+        return;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for cap in captions.iter_mut() {
+        if let Some(c) = cap.take() {
+            if !c.is_empty() {
+                parts.push(c);
+            }
+        }
+    }
+    if parts.is_empty() {
+        return;
+    }
+    captions[0] = Some(parts.join("\n\n"));
+}
+
 /// Derive file extension from MIME type. Fallback to `.bin`.
 pub fn mime_to_extension(mime: &str) -> &'static str {
     match mime {
@@ -1291,6 +1312,45 @@ mod tests {
             GroupPlan::Degrade { reason } => assert!(reason.contains("incompatible")),
             other => panic!("expected Degrade, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn merge_captions_first_only_is_preserved() {
+        let mut caps = vec![Some("first".to_owned()), None, None];
+        merge_group_captions(&mut caps);
+        assert_eq!(caps, vec![Some("first".to_owned()), None, None]);
+    }
+
+    #[test]
+    fn merge_captions_all_none_stays_none() {
+        let mut caps: Vec<Option<String>> = vec![None, None, None];
+        merge_group_captions(&mut caps);
+        assert_eq!(caps, vec![None, None, None]);
+    }
+
+    #[test]
+    fn merge_captions_later_items_fold_into_first() {
+        let mut caps = vec![Some("a".to_owned()), None, Some("b".to_owned())];
+        merge_group_captions(&mut caps);
+        assert_eq!(caps, vec![Some("a\n\nb".to_owned()), None, None]);
+    }
+
+    #[test]
+    fn merge_captions_only_later_item_moves_to_first() {
+        let mut caps = vec![None, Some("only".to_owned())];
+        merge_group_captions(&mut caps);
+        assert_eq!(caps, vec![Some("only".to_owned()), None]);
+    }
+
+    #[test]
+    fn merge_captions_all_three_set_joined() {
+        let mut caps = vec![
+            Some("a".to_owned()),
+            Some("b".to_owned()),
+            Some("c".to_owned()),
+        ];
+        merge_group_captions(&mut caps);
+        assert_eq!(caps, vec![Some("a\n\nb\n\nc".to_owned()), None, None]);
     }
 
     #[test]
