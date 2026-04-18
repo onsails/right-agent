@@ -19,7 +19,7 @@ Prerequisites:
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - Telegram bot token from [@BotFather](https://t.me/BotFather)
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) with a named tunnel (for Telegram webhook ingress)
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) authenticated with a [Cloudflare account](https://dash.cloudflare.com/sign-up) (for Telegram webhook ingress)
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
@@ -28,6 +28,14 @@ rightclaw up
 ```
 
 Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
+
+<p align="center">
+  <a href="#what-you-get-out-of-the-box">what you get</a> ·
+  <a href="#self-evolving-by-design">self-evolving</a> ·
+  <a href="#architecture">architecture</a> ·
+  <a href="#how-it-compares">how it compares</a> ·
+  <a href="#roadmap">roadmap</a>
+</p>
 
 ## What you get out of the box
 
