@@ -81,7 +81,7 @@ pub enum OutboundKind {
 /// the attachment kind (voice / video_note / sticker / animation) cannot live in
 /// any media group and must be sent individually.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupKind {
+pub(crate) enum GroupKind {
     /// Photos and videos can mix in the same album.
     PhotoVideo,
     /// Documents form a documents-only album.
@@ -91,7 +91,7 @@ pub enum GroupKind {
 }
 
 impl GroupKind {
-    pub fn of(kind: &OutboundKind) -> Option<Self> {
+    pub(crate) fn of(kind: &OutboundKind) -> Option<Self> {
         match kind {
             OutboundKind::Photo | OutboundKind::Video => Some(Self::PhotoVideo),
             OutboundKind::Document => Some(Self::Document),
@@ -106,7 +106,7 @@ impl GroupKind {
 
 /// Outcome of classifying a candidate media group.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GroupPlan {
+pub(crate) enum GroupPlan {
     /// 2–10 compatible items: one `sendMediaGroup` call.
     SendAsGroup(GroupKind),
     /// More than 10 compatible same-kind items: split into consecutive
@@ -126,7 +126,7 @@ pub enum GroupPlan {
 /// Maximum items per Telegram media group.
 const MEDIA_GROUP_MAX: usize = 10;
 
-pub fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
+pub(crate) fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
     if items.len() < 2 {
         return GroupPlan::Degrade {
             reason: if items.is_empty() {
@@ -180,7 +180,7 @@ pub fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
 /// Fold every non-empty caption into the first slot, separated by blank lines,
 /// and blank the rest. Telegram only shows the first item's caption in a media
 /// group; without folding, later captions would be silently dropped.
-pub fn merge_group_captions(captions: &mut [Option<String>]) {
+pub(crate) fn merge_group_captions(captions: &mut [Option<String>]) {
     if captions.is_empty() {
         return;
     }
@@ -202,7 +202,7 @@ pub fn merge_group_captions(captions: &mut [Option<String>]) {
 /// `Single` reuses the per-type `send_*` path; `Group` becomes one
 /// `sendMediaGroup`.
 #[derive(Debug)]
-pub enum OutboundSend {
+pub(crate) enum OutboundSend {
     Single(OutboundAttachment),
     Group {
         kind: GroupKind,
@@ -213,7 +213,7 @@ pub enum OutboundSend {
 /// Partition a reply's attachments into the ordered sends the bot must perform.
 /// Returns the list of sends and a list of WARN strings describing any group
 /// that had to be degraded or split — the caller logs them.
-pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<OutboundSend>, Vec<String>) {
+pub(crate) fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<OutboundSend>, Vec<String>) {
     use std::collections::BTreeMap;
 
     // Collect indices per group, preserving first-occurrence order via a
@@ -1030,6 +1030,14 @@ async fn send_group(
     // Resolve every item's host path up front so we can clean them all up
     // after the send attempt, regardless of success. A validation failure on
     // ANY member aborts the entire group (logs WARN + returns Ok(())).
+    //
+    // All-or-nothing: Telegram's sendMediaGroup requires the full set in one
+    // call. If any member fails path validation, download, metadata read, or
+    // the size check, the whole group is aborted — already-downloaded temp
+    // files are deleted, and the user sees no message for this group. A WARN
+    // record goes to the bot log identifying the offending path. We prefer
+    // this over partial sends because a partial album would be surprising
+    // (user asked for 5 photos, got a silent-cropped album of 3).
     let mut host_paths: Vec<std::path::PathBuf> = Vec::with_capacity(items.len());
     for att in items {
         if !att.path.starts_with(outbox_prefix) {
@@ -1677,6 +1685,23 @@ mod tests {
             }
             other => panic!("expected Split, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn classify_exactly_ten_photos_sends_as_group() {
+        // Boundary: `len <= MEDIA_GROUP_MAX` — off-by-one guard.
+        let items = atts(&[OutboundKind::Photo; 10]);
+        assert_eq!(
+            classify_media_group(&refs(&items)),
+            GroupPlan::SendAsGroup(GroupKind::PhotoVideo),
+        );
+    }
+
+    #[test]
+    fn partition_empty_input_is_safe() {
+        let (sends, warnings) = partition_sends(&[]);
+        assert!(sends.is_empty());
+        assert!(warnings.is_empty());
     }
 
     #[test]
