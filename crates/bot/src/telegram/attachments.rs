@@ -129,11 +129,7 @@ const MEDIA_GROUP_MAX: usize = 10;
 pub(crate) fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
     if items.len() < 2 {
         return GroupPlan::Degrade {
-            reason: if items.is_empty() {
-                "group of 0".into()
-            } else {
-                "group of 1".into()
-            },
+            reason: format!("group of {}", items.len()),
         };
     }
 
@@ -181,21 +177,17 @@ pub(crate) fn classify_media_group(items: &[&OutboundAttachment]) -> GroupPlan {
 /// and blank the rest. Telegram only shows the first item's caption in a media
 /// group; without folding, later captions would be silently dropped.
 pub(crate) fn merge_group_captions(captions: &mut [Option<String>]) {
-    if captions.is_empty() {
-        return;
+    let parts: Vec<String> = captions
+        .iter_mut()
+        .filter_map(|c| c.take().filter(|s| !s.is_empty()))
+        .collect();
+    if let Some(slot) = captions.first_mut() {
+        *slot = if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        };
     }
-    let mut parts: Vec<String> = Vec::new();
-    for cap in captions.iter_mut() {
-        if let Some(c) = cap.take()
-            && !c.is_empty()
-        {
-            parts.push(c);
-        }
-    }
-    if parts.is_empty() {
-        return;
-    }
-    captions[0] = Some(parts.join("\n\n"));
 }
 
 /// One Telegram API call the bot must make to honour a reply's attachments.
@@ -736,12 +728,39 @@ pub async fn send_attachments(
     } else {
         agent_dir.join("outbox").to_string_lossy().into_owned()
     };
-    let outbox_path = agent_dir.join("outbox");
 
     // Pre-create tmp/outbox for sandboxed downloads (avoids repeated create_dir_all in loop)
     if sandboxed {
         tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await?;
     }
+
+    // Canonicalize the outbox dir once per call (non-sandboxed only). Eliminates
+    // N repeated blocking syscalls in groups of ≤10.
+    let outbox_canonical = if sandboxed {
+        None
+    } else {
+        match std::fs::canonicalize(agent_dir.join("outbox")) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to canonicalize outbox dir {}: {e} — all outbound attachments will be skipped",
+                    agent_dir.join("outbox").display(),
+                );
+                None
+            }
+        }
+    };
+
+    let ctx = SendCtx {
+        bot,
+        chat_id,
+        eff_thread_id,
+        agent_dir,
+        resolved_sandbox,
+        sandboxed,
+        outbox_prefix: &outbox_prefix,
+        outbox_canonical,
+    };
 
     let (sends, warnings) = partition_sends(attachments);
     for w in &warnings {
@@ -751,34 +770,8 @@ pub async fn send_attachments(
     let mut errors: Vec<String> = Vec::new();
     for send in &sends {
         let result: Result<(), teloxide::RequestError> = match send {
-            OutboundSend::Single(att) => {
-                send_single(
-                    att,
-                    bot,
-                    chat_id,
-                    eff_thread_id,
-                    agent_dir,
-                    resolved_sandbox,
-                    sandboxed,
-                    &outbox_prefix,
-                    &outbox_path,
-                )
-                .await
-            }
-            OutboundSend::Group { kind: _, items } => {
-                send_group(
-                    items,
-                    bot,
-                    chat_id,
-                    eff_thread_id,
-                    agent_dir,
-                    resolved_sandbox,
-                    sandboxed,
-                    &outbox_prefix,
-                    &outbox_path,
-                )
-                .await
-            }
+            OutboundSend::Single(att) => send_single(att, &ctx).await,
+            OutboundSend::Group { kind: _, items } => send_group(items, &ctx).await,
         };
         if let Err(e) = result {
             let label = match send {
@@ -803,17 +796,121 @@ pub async fn send_attachments(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn send_single(
-    att: &OutboundAttachment,
-    bot: &super::BotType,
+/// Shared context passed to per-send helpers. Built once per `send_attachments`
+/// call. `outbox_canonical` is pre-computed in non-sandboxed mode so we don't
+/// re-canonicalize the outbox dir per attachment.
+struct SendCtx<'a> {
+    bot: &'a super::BotType,
     chat_id: teloxide::types::ChatId,
     eff_thread_id: i64,
-    agent_dir: &std::path::Path,
-    resolved_sandbox: Option<&str>,
+    agent_dir: &'a std::path::Path,
+    resolved_sandbox: Option<&'a str>,
     sandboxed: bool,
-    outbox_prefix: &str,
-    outbox_path: &std::path::Path,
+    outbox_prefix: &'a str,
+    outbox_canonical: Option<PathBuf>,
+}
+
+/// Validate an outbound attachment, fetch its host path, and enforce the size
+/// limit. Returns `Some(path)` on success; logs WARN and returns `None` on any
+/// failure. On sandboxed paths a size/metadata failure deletes the just-downloaded
+/// temp file so callers never see orphans.
+///
+/// `log_suffix` is appended to each WARN message so the caller's path shape
+/// ("skipping" vs "skipping media group") is visible without duplicating the
+/// whole message.
+async fn resolve_host_path(
+    att: &OutboundAttachment,
+    ctx: &SendCtx<'_>,
+    log_suffix: &str,
+) -> Option<PathBuf> {
+    if !att.path.starts_with(ctx.outbox_prefix) {
+        tracing::warn!(
+            "Outbound attachment path {} is outside outbox prefix {} — {log_suffix}",
+            att.path,
+            ctx.outbox_prefix,
+        );
+        return None;
+    }
+
+    let host: PathBuf = if ctx.sandboxed {
+        let tmp_dir = ctx.agent_dir.join("tmp/outbox");
+        let file_name = std::path::Path::new(&att.path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let dest = tmp_dir.join(&file_name);
+        let sandbox = ctx.resolved_sandbox.unwrap();
+        if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
+            tracing::warn!(
+                "download_file failed for {}: {:#} — {log_suffix}",
+                att.path,
+                e,
+            );
+            return None;
+        }
+        dest
+    } else {
+        let Some(outbox_c) = ctx.outbox_canonical.as_deref() else {
+            tracing::warn!(
+                "outbox dir not canonicalizable — {log_suffix} (path {})",
+                att.path,
+            );
+            return None;
+        };
+        let canonical = match std::fs::canonicalize(PathBuf::from(&att.path)) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    "Outbound attachment path {} could not be canonicalized: {e} — {log_suffix}",
+                    att.path,
+                );
+                return None;
+            }
+        };
+        if !canonical.starts_with(outbox_c) {
+            tracing::warn!(
+                "Outbound attachment path {} resolves to {} which is outside outbox — {log_suffix}",
+                att.path,
+                canonical.display(),
+            );
+            return None;
+        }
+        canonical
+    };
+
+    let meta = match tokio::fs::metadata(&host).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("metadata failed for {}: {e} — {log_suffix}", host.display());
+            if ctx.sandboxed {
+                let _ = tokio::fs::remove_file(&host).await;
+            }
+            return None;
+        }
+    };
+    let limit = match att.kind {
+        OutboundKind::Photo => TELEGRAM_PHOTO_UPLOAD_LIMIT,
+        _ => TELEGRAM_FILE_UPLOAD_LIMIT,
+    };
+    if meta.len() > limit {
+        tracing::warn!(
+            "Outbound {} ({:.1} MB) exceeds upload limit — {log_suffix}",
+            att.path,
+            meta.len() as f64 / (1024.0 * 1024.0),
+        );
+        if ctx.sandboxed {
+            let _ = tokio::fs::remove_file(&host).await;
+        }
+        return None;
+    }
+
+    Some(host)
+}
+
+async fn send_single(
+    att: &OutboundAttachment,
+    ctx: &SendCtx<'_>,
 ) -> Result<(), teloxide::RequestError> {
     use teloxide::payloads::{
         SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
@@ -822,110 +919,22 @@ async fn send_single(
     use teloxide::requests::Requester;
     use teloxide::types::{InputFile, MessageId, ThreadId};
 
-    // Validate path is within outbox
-    if !att.path.starts_with(outbox_prefix) {
-        tracing::warn!(
-            "Outbound attachment path {} is outside outbox prefix {outbox_prefix} — skipping",
-            att.path,
-        );
+    let Some(host_path) = resolve_host_path(att, ctx, "skipping").await else {
         return Ok(());
-    }
-
-    // Resolve to host path
-    let host_path = if sandboxed {
-        let tmp_dir = agent_dir.join("tmp/outbox");
-        let file_name = std::path::Path::new(&att.path)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let dest = tmp_dir.join(&file_name);
-        let sandbox = resolved_sandbox.unwrap();
-        if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
-            tracing::warn!(
-                "download_file failed for {}: {:#} — skipping",
-                att.path,
-                e,
-            );
-            return Ok(());
-        }
-        dest
-    } else {
-        // Canonicalize to resolve any `..` components and verify the path
-        // truly resides under the outbox directory (string prefix check above
-        // is insufficient against paths like `outbox/../../etc/passwd`).
-        let canonical = match std::fs::canonicalize(PathBuf::from(&att.path)) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(
-                    "Outbound attachment path {} could not be canonicalized: {e} — skipping",
-                    att.path,
-                );
-                return Ok(());
-            }
-        };
-        let canonical_outbox = match std::fs::canonicalize(outbox_path) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("Failed to canonicalize outbox dir: {e} — skipping attachment");
-                return Ok(());
-            }
-        };
-        if !canonical.starts_with(&canonical_outbox) {
-            tracing::warn!(
-                "Outbound attachment path {} resolves to {} which is outside outbox — skipping",
-                att.path,
-                canonical.display(),
-            );
-            return Ok(());
-        }
-        canonical
     };
-
-    // Check file size against limits
-    let metadata = match tokio::fs::metadata(&host_path).await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                "metadata failed for {}: {e} — skipping",
-                host_path.display(),
-            );
-            if sandboxed {
-                let _ = tokio::fs::remove_file(&host_path).await;
-            }
-            return Ok(());
-        }
-    };
-    let size = metadata.len();
-    let limit = match att.kind {
-        OutboundKind::Photo => TELEGRAM_PHOTO_UPLOAD_LIMIT,
-        _ => TELEGRAM_FILE_UPLOAD_LIMIT,
-    };
-    if size > limit {
-        tracing::warn!(
-            "Outbound {} ({:.1} MB) exceeds upload limit — skipping",
-            att.path,
-            size as f64 / (1024.0 * 1024.0),
-        );
-        if sandboxed {
-            let _ = tokio::fs::remove_file(&host_path).await;
-        }
-        return Ok(());
-    }
 
     let input_file = InputFile::file(&host_path);
-    let thread_id = if eff_thread_id != 0 {
-        Some(ThreadId(MessageId(eff_thread_id as i32)))
+    let thread_id = if ctx.eff_thread_id != 0 {
+        Some(ThreadId(MessageId(ctx.eff_thread_id as i32)))
     } else {
         None
     };
 
-    // Kinds that support captions
     let caption = att.caption.as_deref();
 
     let send_result: Result<_, teloxide::RequestError> = match att.kind {
         OutboundKind::Photo => {
-            let mut req = bot.send_photo(chat_id, input_file);
+            let mut req = ctx.bot.send_photo(ctx.chat_id, input_file);
             if let Some(cap) = caption {
                 req = req.caption(cap);
             }
@@ -935,7 +944,7 @@ async fn send_single(
             req.await.map(|_| ())
         }
         OutboundKind::Document => {
-            let mut req = bot.send_document(chat_id, input_file);
+            let mut req = ctx.bot.send_document(ctx.chat_id, input_file);
             if let Some(cap) = caption {
                 req = req.caption(cap);
             }
@@ -945,7 +954,7 @@ async fn send_single(
             req.await.map(|_| ())
         }
         OutboundKind::Video => {
-            let mut req = bot.send_video(chat_id, input_file);
+            let mut req = ctx.bot.send_video(ctx.chat_id, input_file);
             if let Some(cap) = caption {
                 req = req.caption(cap);
             }
@@ -955,7 +964,7 @@ async fn send_single(
             req.await.map(|_| ())
         }
         OutboundKind::Audio => {
-            let mut req = bot.send_audio(chat_id, input_file);
+            let mut req = ctx.bot.send_audio(ctx.chat_id, input_file);
             if let Some(cap) = caption {
                 req = req.caption(cap);
             }
@@ -965,7 +974,7 @@ async fn send_single(
             req.await.map(|_| ())
         }
         OutboundKind::Voice => {
-            let mut req = bot.send_voice(chat_id, input_file);
+            let mut req = ctx.bot.send_voice(ctx.chat_id, input_file);
             if let Some(cap) = caption {
                 req = req.caption(cap);
             }
@@ -975,7 +984,7 @@ async fn send_single(
             req.await.map(|_| ())
         }
         OutboundKind::Animation => {
-            let mut req = bot.send_animation(chat_id, input_file);
+            let mut req = ctx.bot.send_animation(ctx.chat_id, input_file);
             if let Some(cap) = caption {
                 req = req.caption(cap);
             }
@@ -984,16 +993,15 @@ async fn send_single(
             }
             req.await.map(|_| ())
         }
-        // video_note and sticker don't support captions
         OutboundKind::VideoNote => {
-            let mut req = bot.send_video_note(chat_id, input_file);
+            let mut req = ctx.bot.send_video_note(ctx.chat_id, input_file);
             if let Some(tid) = thread_id {
                 req = req.message_thread_id(tid);
             }
             req.await.map(|_| ())
         }
         OutboundKind::Sticker => {
-            let mut req = bot.send_sticker(chat_id, input_file);
+            let mut req = ctx.bot.send_sticker(ctx.chat_id, input_file);
             if let Some(tid) = thread_id {
                 req = req.message_thread_id(tid);
             }
@@ -1001,8 +1009,7 @@ async fn send_single(
         }
     };
 
-    // Clean up temp file if sandboxed
-    if sandboxed {
+    if ctx.sandboxed {
         let _ = tokio::fs::remove_file(&host_path).await;
     }
     send_result
@@ -1011,14 +1018,7 @@ async fn send_single(
 #[allow(clippy::too_many_arguments)]
 async fn send_group(
     items: &[OutboundAttachment],
-    bot: &super::BotType,
-    chat_id: teloxide::types::ChatId,
-    eff_thread_id: i64,
-    agent_dir: &std::path::Path,
-    resolved_sandbox: Option<&str>,
-    sandboxed: bool,
-    outbox_prefix: &str,
-    outbox_path: &std::path::Path,
+    ctx: &SendCtx<'_>,
 ) -> Result<(), teloxide::RequestError> {
     use teloxide::payloads::SendMediaGroupSetters;
     use teloxide::requests::Requester;
@@ -1027,10 +1027,6 @@ async fn send_group(
         InputMediaVideo, MessageId, ThreadId,
     };
 
-    // Resolve every item's host path up front so we can clean them all up
-    // after the send attempt, regardless of success. A validation failure on
-    // ANY member aborts the entire group (logs WARN + returns Ok(())).
-    //
     // All-or-nothing: Telegram's sendMediaGroup requires the full set in one
     // call. If any member fails path validation, download, metadata read, or
     // the size check, the whole group is aborted — already-downloaded temp
@@ -1038,95 +1034,17 @@ async fn send_group(
     // record goes to the bot log identifying the offending path. We prefer
     // this over partial sends because a partial album would be surprising
     // (user asked for 5 photos, got a silent-cropped album of 3).
-    let mut host_paths: Vec<std::path::PathBuf> = Vec::with_capacity(items.len());
+    let mut host_paths: Vec<PathBuf> = Vec::with_capacity(items.len());
     for att in items {
-        if !att.path.starts_with(outbox_prefix) {
-            tracing::warn!(
-                "Outbound attachment path {} is outside outbox prefix {outbox_prefix} — skipping media group",
-                att.path,
-            );
-            cleanup_host_paths(&host_paths, sandboxed).await;
-            return Ok(());
-        }
-        let host: std::path::PathBuf = if sandboxed {
-            let tmp_dir = agent_dir.join("tmp/outbox");
-            let file_name = std::path::Path::new(&att.path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            let dest = tmp_dir.join(&file_name);
-            let sandbox = resolved_sandbox.unwrap();
-            if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
-                tracing::warn!(
-                    "download_file failed for {}: {:#} — skipping media group",
-                    att.path,
-                    e,
-                );
-                cleanup_host_paths(&host_paths, sandboxed).await;
+        match resolve_host_path(att, ctx, "skipping media group").await {
+            Some(p) => host_paths.push(p),
+            None => {
+                cleanup_host_paths(&host_paths, ctx.sandboxed).await;
                 return Ok(());
             }
-            dest
-        } else {
-            match std::fs::canonicalize(std::path::PathBuf::from(&att.path)) {
-                Ok(p) => match std::fs::canonicalize(outbox_path) {
-                    Ok(outbox_c) if p.starts_with(&outbox_c) => p,
-                    Ok(_) => {
-                        tracing::warn!(
-                            "Outbound attachment {} resolves outside outbox — skipping media group",
-                            att.path,
-                        );
-                        cleanup_host_paths(&host_paths, sandboxed).await;
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        tracing::warn!("canonicalize outbox failed: {e} — skipping media group");
-                        cleanup_host_paths(&host_paths, sandboxed).await;
-                        return Ok(());
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "canonicalize {} failed: {e} — skipping media group",
-                        att.path,
-                    );
-                    cleanup_host_paths(&host_paths, sandboxed).await;
-                    return Ok(());
-                }
-            }
-        };
-
-        let meta = match tokio::fs::metadata(&host).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    "metadata failed for {}: {e} — skipping media group",
-                    host.display(),
-                );
-                cleanup_host_paths(&[host], sandboxed).await;
-                cleanup_host_paths(&host_paths, sandboxed).await;
-                return Ok(());
-            }
-        };
-        let limit = match att.kind {
-            OutboundKind::Photo => TELEGRAM_PHOTO_UPLOAD_LIMIT,
-            _ => TELEGRAM_FILE_UPLOAD_LIMIT,
-        };
-        if meta.len() > limit {
-            tracing::warn!(
-                "Outbound {} ({:.1} MB) exceeds upload limit — skipping media group",
-                att.path,
-                meta.len() as f64 / (1024.0 * 1024.0),
-            );
-            cleanup_host_paths(&[host], sandboxed).await;
-            cleanup_host_paths(&host_paths, sandboxed).await;
-            return Ok(());
         }
-
-        host_paths.push(host);
     }
 
-    // Build InputMedia list. The per-item OutboundKind drives the variant.
     let media: Vec<InputMedia> = items
         .iter()
         .zip(host_paths.iter())
@@ -1178,19 +1096,19 @@ async fn send_group(
         })
         .collect();
 
-    let thread_id = if eff_thread_id != 0 {
-        Some(ThreadId(MessageId(eff_thread_id as i32)))
+    let thread_id = if ctx.eff_thread_id != 0 {
+        Some(ThreadId(MessageId(ctx.eff_thread_id as i32)))
     } else {
         None
     };
 
-    let mut req = bot.send_media_group(chat_id, media);
+    let mut req = ctx.bot.send_media_group(ctx.chat_id, media);
     if let Some(tid) = thread_id {
         req = req.message_thread_id(tid);
     }
     let result = req.await.map(|_| ());
 
-    cleanup_host_paths(&host_paths, sandboxed).await;
+    cleanup_host_paths(&host_paths, ctx.sandboxed).await;
     result
 }
 
