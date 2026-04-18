@@ -20,7 +20,7 @@ Prerequisites:
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
 - Telegram bot token from [@BotFather](https://t.me/BotFather)
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) with a named tunnel
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) with a named tunnel (for Telegram webhook ingress)
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
