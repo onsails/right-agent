@@ -3,13 +3,17 @@ set -euo pipefail
 
 # ── RightClaw Installer ────────────────────────────────────────────
 #
-# Installs RightClaw and its dependencies:
+# Installs:
 #   1. rightclaw        - Multi-agent runtime CLI
 #   2. process-compose  - Process orchestrator with TUI
-#   3. bubblewrap + socat (Linux only) - Sandbox dependencies
+#   3. NVIDIA OpenShell - Sandbox runtime for AI agents
+#
+# Prerequisites (install separately before running this script):
+#   - Claude Code CLI     https://docs.anthropic.com/en/docs/claude-code
+#   - cloudflared         https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 #
 # Usage:
-#   curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/main/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
 #
 # Environment variables:
 #   RIGHTCLAW_VERSION  - Version to install (default: latest)
@@ -86,6 +90,7 @@ install_rightclaw() {
   local version="${RIGHTCLAW_VERSION:-latest}"
   local target
   local download_url
+  local http_code=""
 
   case "${PLATFORM}-${ARCH}" in
     linux-x86_64)   target="rightclaw-x86_64-unknown-linux-gnu" ;;
@@ -101,10 +106,22 @@ install_rightclaw() {
     download_url="https://github.com/onsails/rightclaw/releases/download/${version}/${target}"
   fi
 
-  echo "  downloading: $download_url"
+  # Platforms with prebuilt binaries on GitHub releases (as of v0.2.0).
+  # Others fall through to source build via cargo.
+  case "${PLATFORM}-${ARCH}" in
+    linux-x86_64|darwin-aarch64)
+      echo "  downloading: $download_url"
+      ;;
+    *)
+      warn "No prebuilt binary yet for ${PLATFORM}-${ARCH}."
+      echo "       Falling back to source build (requires Rust toolchain)."
+      http_code="000"
+      ;;
+  esac
 
-  local http_code
-  http_code=$(curl -LsSf -w '%{http_code}' -o "$INSTALL_DIR/rightclaw" "$download_url" 2>/dev/null) || http_code="000"
+  if [ -z "${http_code:-}" ]; then
+    http_code=$(curl -LsSf -w '%{http_code}' -o "$INSTALL_DIR/rightclaw" "$download_url" 2>/dev/null) || http_code="000"
+  fi
 
   if [ "$http_code" = "200" ]; then
     chmod +x "$INSTALL_DIR/rightclaw"
@@ -177,44 +194,7 @@ install_openshell() {
   fi
 }
 
-# ── Step 4: Install sandbox dependencies (Linux only) ─────────────
-
-install_sandbox_deps() {
-  if [ "$PLATFORM" = "darwin" ]; then
-    ok "macOS uses built-in Seatbelt sandbox (no additional deps needed)"
-    return 0
-  fi
-
-  info "Installing sandbox dependencies..."
-
-  local need_bwrap=false need_socat=false
-  command -v bwrap  >/dev/null 2>&1 || need_bwrap=true
-  command -v socat  >/dev/null 2>&1 || need_socat=true
-
-  if [ "$need_bwrap" = false ] && [ "$need_socat" = false ]; then
-    ok "bubblewrap and socat already installed"
-    return 0
-  fi
-
-  local pkgs=""
-  [ "$need_bwrap" = true ] && pkgs="bubblewrap"
-  [ "$need_socat" = true ] && pkgs="$pkgs socat"
-
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get install -y $pkgs
-  elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y $pkgs
-  elif command -v pacman >/dev/null 2>&1; then
-    sudo pacman -S --noconfirm $pkgs
-  else
-    die "No supported package manager found (need apt, dnf, or pacman).
-    Install manually: bubblewrap socat"
-  fi
-
-  ok "sandbox dependencies installed"
-}
-
-# ── Step 5: Run rightclaw init ─────────────────────────────────────
+# ── Step 4: Run rightclaw init ─────────────────────────────────────
 
 run_init() {
   info "Running rightclaw init..."
@@ -223,25 +203,13 @@ run_init() {
   "$INSTALL_DIR/rightclaw" init
 }
 
-# ── Step 6: Run rightclaw doctor ───────────────────────────────────
+# ── Step 5: Run rightclaw doctor ───────────────────────────────────
 
 run_doctor() {
   info "Running rightclaw doctor..."
 
   # Use full path to avoid PATH resolution issues (Pitfall 6)
   "$INSTALL_DIR/rightclaw" doctor
-}
-
-# ── Bun Check ──────────────────────────────────────────────────────
-
-check_bun() {
-  if ! command -v bun >/dev/null 2>&1; then
-    echo ""
-    warn "bun is not installed"
-    echo "       Bun is required for the Telegram channel plugin."
-    echo "       Install it: ${CYAN}curl -fsSL https://bun.sh/install | bash${RESET}"
-    echo ""
-  fi
 }
 
 # ── Main ───────────────────────────────────────────────────────────
@@ -259,10 +227,6 @@ main() {
   install_rightclaw
   install_process_compose
   install_openshell
-  install_sandbox_deps
-
-  echo ""
-  check_bun
 
   echo ""
   run_init
