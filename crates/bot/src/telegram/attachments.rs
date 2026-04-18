@@ -185,7 +185,26 @@ pub(crate) fn merge_group_captions(captions: &mut [Option<String>]) {
         *slot = if parts.is_empty() {
             None
         } else {
-            Some(parts.join("\n\n"))
+            let joined = parts.join("\n\n");
+            let char_count = joined.chars().count();
+            if char_count > TELEGRAM_CAPTION_LIMIT {
+                // Truncate to (limit - 1) chars, then append the ellipsis character.
+                let truncated: String = joined
+                    .char_indices()
+                    .take(TELEGRAM_CAPTION_LIMIT - 1)
+                    .map(|(_, c)| c)
+                    .collect();
+                let result = format!("{truncated}…");
+                tracing::warn!(
+                    original_chars = char_count,
+                    limit = TELEGRAM_CAPTION_LIMIT,
+                    "media-group caption exceeded Telegram limit; truncated to {} chars",
+                    result.chars().count()
+                );
+                Some(result)
+            } else {
+                Some(joined)
+            }
         };
     }
 }
@@ -340,6 +359,8 @@ pub fn mime_to_extension(mime: &str) -> &'static str {
 pub const TELEGRAM_DOWNLOAD_LIMIT: u64 = 20 * 1024 * 1024; // 20 MB
 pub const TELEGRAM_PHOTO_UPLOAD_LIMIT: u64 = 10 * 1024 * 1024; // 10 MB
 pub const TELEGRAM_FILE_UPLOAD_LIMIT: u64 = 50 * 1024 * 1024; // 50 MB
+/// Maximum characters in a Telegram message/media-group caption.
+pub const TELEGRAM_CAPTION_LIMIT: usize = 1024;
 
 /// Default attachment retention in days.
 pub const DEFAULT_RETENTION_DAYS: u32 = 7;
@@ -858,7 +879,7 @@ async fn resolve_host_path(
             );
             return None;
         };
-        let canonical = match std::fs::canonicalize(PathBuf::from(&att.path)) {
+        let canonical = match tokio::fs::canonicalize(&att.path).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -884,7 +905,11 @@ async fn resolve_host_path(
         Err(e) => {
             tracing::warn!("metadata failed for {}: {e} — {log_suffix}", host.display());
             if ctx.sandboxed {
-                let _ = tokio::fs::remove_file(&host).await;
+                if let Err(e) = tokio::fs::remove_file(&host).await
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!("failed to remove temp file {}: {e}", host.display());
+                }
             }
             return None;
         }
@@ -900,7 +925,11 @@ async fn resolve_host_path(
             meta.len() as f64 / (1024.0 * 1024.0),
         );
         if ctx.sandboxed {
-            let _ = tokio::fs::remove_file(&host).await;
+            if let Err(e) = tokio::fs::remove_file(&host).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("failed to remove temp file {}: {e}", host.display());
+            }
         }
         return None;
     }
@@ -1010,7 +1039,11 @@ async fn send_single(
     };
 
     if ctx.sandboxed {
-        let _ = tokio::fs::remove_file(&host_path).await;
+        if let Err(e) = tokio::fs::remove_file(&host_path).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("failed to remove temp file {}: {e}", host_path.display());
+        }
     }
     send_result
 }
@@ -1117,7 +1150,11 @@ async fn cleanup_host_paths(paths: &[std::path::PathBuf], sandboxed: bool) {
         return;
     }
     for p in paths {
-        let _ = tokio::fs::remove_file(p).await;
+        if let Err(e) = tokio::fs::remove_file(p).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("failed to remove temp file {}: {e}", p.display());
+        }
     }
 }
 
@@ -1670,6 +1707,46 @@ mod tests {
         ];
         merge_group_captions(&mut caps);
         assert_eq!(caps, vec![Some("a\n\nb\n\nc".to_owned()), None, None]);
+    }
+
+    #[test]
+    fn merge_captions_truncates_when_over_telegram_limit() {
+        // 10 captions × 150 chars each → 1500 chars of content + 9 "\n\n" = 1518
+        // Well over the 1024 limit; should be truncated with ellipsis.
+        let mut caps: Vec<Option<String>> = (0..10)
+            .map(|i| Some("x".repeat(150) + &format!("#{i}")))
+            .collect();
+        merge_group_captions(&mut caps);
+        let first = caps[0].as_deref().expect("first slot must be set");
+        assert!(
+            first.chars().count() <= TELEGRAM_CAPTION_LIMIT,
+            "caption too long: {} chars",
+            first.chars().count()
+        );
+        assert!(first.ends_with('…'), "truncated caption must end with …");
+        for tail in &caps[1..] {
+            assert!(tail.is_none());
+        }
+    }
+
+    #[test]
+    fn merge_captions_under_limit_is_not_truncated() {
+        let mut caps = vec![Some("short".to_owned()), Some("also short".to_owned())];
+        merge_group_captions(&mut caps);
+        assert_eq!(caps[0].as_deref(), Some("short\n\nalso short"));
+        assert!(!caps[0].as_deref().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn merge_captions_truncation_is_char_safe() {
+        // Russian / emoji caption, each copy is 500+ chars via chars().count() —
+        // byte length is 2-4x that. Byte-slice truncation would panic mid-codepoint.
+        let cyrillic: String = "а".repeat(600);
+        let mut caps = vec![Some(cyrillic.clone()), Some(cyrillic.clone()), Some(cyrillic)];
+        merge_group_captions(&mut caps);
+        let first = caps[0].as_deref().unwrap();
+        assert!(first.chars().count() <= TELEGRAM_CAPTION_LIMIT);
+        // No panic = char-boundary-safe truncation.
     }
 
     #[test]
