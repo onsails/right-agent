@@ -77,6 +77,33 @@ pub enum OutboundKind {
     Animation,
 }
 
+/// Category of Telegram media-group album. A `None` from [`GroupKind::of`] means
+/// the attachment kind (voice / video_note / sticker / animation) cannot live in
+/// any media group and must be sent individually.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupKind {
+    /// Photos and videos can mix in the same album.
+    PhotoVideo,
+    /// Documents form a documents-only album.
+    Document,
+    /// Audios form an audios-only album.
+    Audio,
+}
+
+impl GroupKind {
+    pub fn of(kind: &OutboundKind) -> Option<Self> {
+        match kind {
+            OutboundKind::Photo | OutboundKind::Video => Some(Self::PhotoVideo),
+            OutboundKind::Document => Some(Self::Document),
+            OutboundKind::Audio => Some(Self::Audio),
+            OutboundKind::Voice
+            | OutboundKind::VideoNote
+            | OutboundKind::Sticker
+            | OutboundKind::Animation => None,
+        }
+    }
+}
+
 /// Derive file extension from MIME type. Fallback to `.bin`.
 pub fn mime_to_extension(mime: &str) -> &'static str {
     match mime {
@@ -1036,6 +1063,19 @@ mod tests {
         assert_eq!(yaml_escape_string("a\\b"), r"a\\b");
         assert_eq!(yaml_escape_string("a\rb"), r"a\rb");
         assert_eq!(yaml_escape_string("a\tb"), r"a\tb");
+    }
+
+    #[test]
+    fn group_kind_from_outbound_kind_covers_all_variants() {
+        use OutboundKind::*;
+        assert_eq!(GroupKind::of(&Photo), Some(GroupKind::PhotoVideo));
+        assert_eq!(GroupKind::of(&Video), Some(GroupKind::PhotoVideo));
+        assert_eq!(GroupKind::of(&Document), Some(GroupKind::Document));
+        assert_eq!(GroupKind::of(&Audio), Some(GroupKind::Audio));
+        assert_eq!(GroupKind::of(&Voice), None);
+        assert_eq!(GroupKind::of(&VideoNote), None);
+        assert_eq!(GroupKind::of(&Sticker), None);
+        assert_eq!(GroupKind::of(&Animation), None);
     }
 
     #[test]
