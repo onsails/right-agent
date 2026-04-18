@@ -125,7 +125,7 @@ In RightClaw, those scenarios break one sandbox — not your machine, not your f
 
 Every outbound request passes through OpenShell's policy engine, which terminates TLS and enforces a domain allowlist. Full request logging — nothing leaves the sandbox without a record.
 
-Permissive by default. One line in `agent.yaml` flips to restrictive: the agent can reach Anthropic and Claude endpoints, and nothing else.
+The network policy is permissive by default. One line in `agent.yaml` flips to restrictive: the agent can reach Anthropic and Claude endpoints, and nothing else.
 
 ### Your secrets stay yours
 
