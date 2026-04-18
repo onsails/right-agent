@@ -1,23 +1,28 @@
 [workspace]
 changelog_config = "cliff.toml"
-changelog_update = true
+changelog_update = false
 dependencies_update = false
 git_release_enable = false
+git_tag_enable = false
+git_only = true
 publish = false
 semver_check = false
 
 [[package]]
 name = "rightclaw"
-release = false
+version_group = "workspace"
 
 [[package]]
 name = "rightclaw-bot"
-release = false
+version_group = "workspace"
 
 [[package]]
 name = "rightclaw-cli"
-git_only = true
+version_group = "workspace"
+changelog_update = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["rightclaw", "rightclaw-bot"]
 git_release_enable = true
 git_release_name = "v{{ version }}"
+git_tag_enable = true
 git_tag_name = "v{{ version }}"
-changelog_path = "CHANGELOG.md"
