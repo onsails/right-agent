@@ -186,10 +186,10 @@ pub fn merge_group_captions(captions: &mut [Option<String>]) {
     }
     let mut parts: Vec<String> = Vec::new();
     for cap in captions.iter_mut() {
-        if let Some(c) = cap.take() {
-            if !c.is_empty() {
-                parts.push(c);
-            }
+        if let Some(c) = cap.take()
+            && !c.is_empty()
+        {
+            parts.push(c);
         }
     }
     if parts.is_empty() {
@@ -1653,7 +1653,7 @@ mod tests {
 
     #[test]
     fn classify_eleven_photos_splits_into_chunks() {
-        let items = atts(&vec![OutboundKind::Photo; 11]);
+        let items = atts(&[OutboundKind::Photo; 11]);
         match classify_media_group(&refs(&items)) {
             GroupPlan::Split { chunks, kind, .. } => {
                 assert_eq!(kind, GroupKind::PhotoVideo);
@@ -1667,7 +1667,7 @@ mod tests {
 
     #[test]
     fn classify_twenty_five_photos_splits_into_three_chunks() {
-        let items = atts(&vec![OutboundKind::Photo; 25]);
+        let items = atts(&[OutboundKind::Photo; 25]);
         match classify_media_group(&refs(&items)) {
             GroupPlan::Split { chunks, .. } => {
                 assert_eq!(chunks.len(), 3);
