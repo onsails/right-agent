@@ -790,7 +790,7 @@ pub async fn send_attachments(
 
     let mut errors: Vec<String> = Vec::new();
     for send in &sends {
-        let result: Result<(), teloxide::RequestError> = match send {
+        let result: Result<(), SendError> = match send {
             OutboundSend::Single(att) => send_single(att, &ctx).await,
             OutboundSend::Group { kind: _, items } => send_group(items, &ctx).await,
         };
@@ -801,12 +801,11 @@ pub async fn send_attachments(
                     format!("{kind:?} media group of {} items", items.len())
                 }
             };
-            let msg = format!(
-                "failed to send {label}: {}",
-                rightclaw::error::display_error_chain(&e),
-            );
-            tracing::error!("{msg}");
-            errors.push(msg);
+            // Api failures are ERROR-level; Skip reasons were already WARN'd in resolve_host_path.
+            if matches!(e, SendError::Api(_)) {
+                tracing::error!("failed to send {label}: see SendError::Api");
+            }
+            errors.push(e.into_user_msg(&label));
         }
     }
 
@@ -831,10 +830,42 @@ struct SendCtx<'a> {
     outbox_canonical: Option<PathBuf>,
 }
 
+/// Internal error type for per-send operations in this module.
+///
+/// `Skip` carries the human-readable reason from `resolve_host_path` — the same
+/// string that was already logged at WARN level. `Api` wraps a Telegram API
+/// failure, logged at ERROR level by `send_attachments`.
+#[derive(Debug)]
+enum SendError {
+    /// Path validation / download / metadata / size failure — always WARN.
+    Skip(String),
+    /// Telegram API call failed — always ERROR.
+    Api(teloxide::RequestError),
+}
+
+impl SendError {
+    /// Format a user-visible error string labelled with the attachment description.
+    fn into_user_msg(self, label: &str) -> String {
+        match self {
+            Self::Skip(msg) => format!("skipped {label}: {msg}"),
+            Self::Api(e) => format!(
+                "failed to send {label}: {}",
+                rightclaw::error::display_error_chain(&e),
+            ),
+        }
+    }
+}
+
+impl From<teloxide::RequestError> for SendError {
+    fn from(e: teloxide::RequestError) -> Self {
+        Self::Api(e)
+    }
+}
+
 /// Validate an outbound attachment, fetch its host path, and enforce the size
-/// limit. Returns `Some(path)` on success; logs WARN and returns `None` on any
-/// failure. On sandboxed paths a size/metadata failure deletes the just-downloaded
-/// temp file so callers never see orphans.
+/// limit. Returns `Ok(path)` on success; logs WARN and returns `Err(reason)` on
+/// any failure. On sandboxed paths a size/metadata failure deletes the
+/// just-downloaded temp file so callers never see orphans.
 ///
 /// `log_suffix` is appended to each WARN message so the caller's path shape
 /// ("skipping" vs "skipping media group") is visible without duplicating the
@@ -843,14 +874,14 @@ async fn resolve_host_path(
     att: &OutboundAttachment,
     ctx: &SendCtx<'_>,
     log_suffix: &str,
-) -> Option<PathBuf> {
+) -> Result<PathBuf, String> {
     if !att.path.starts_with(ctx.outbox_prefix) {
-        tracing::warn!(
+        let msg = format!(
             "Outbound attachment path {} is outside outbox prefix {} — {log_suffix}",
-            att.path,
-            ctx.outbox_prefix,
+            att.path, ctx.outbox_prefix,
         );
-        return None;
+        tracing::warn!("{msg}");
+        return Err(msg);
     }
 
     let host: PathBuf = if ctx.sandboxed {
@@ -863,39 +894,39 @@ async fn resolve_host_path(
         let dest = tmp_dir.join(&file_name);
         let sandbox = ctx.resolved_sandbox.unwrap();
         if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
-            tracing::warn!(
-                "download_file failed for {}: {:#} — {log_suffix}",
-                att.path,
-                e,
-            );
-            return None;
+            let msg = format!("download_file failed for {}: {:#} — {log_suffix}", att.path, e);
+            tracing::warn!("{msg}");
+            return Err(msg);
         }
         dest
     } else {
         let Some(outbox_c) = ctx.outbox_canonical.as_deref() else {
-            tracing::warn!(
+            let msg = format!(
                 "outbox dir not canonicalizable — {log_suffix} (path {})",
                 att.path,
             );
-            return None;
+            tracing::warn!("{msg}");
+            return Err(msg);
         };
         let canonical = match tokio::fs::canonicalize(&att.path).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(
+                let msg = format!(
                     "Outbound attachment path {} could not be canonicalized: {e} — {log_suffix}",
                     att.path,
                 );
-                return None;
+                tracing::warn!("{msg}");
+                return Err(msg);
             }
         };
         if !canonical.starts_with(outbox_c) {
-            tracing::warn!(
+            let msg = format!(
                 "Outbound attachment path {} resolves to {} which is outside outbox — {log_suffix}",
                 att.path,
                 canonical.display(),
             );
-            return None;
+            tracing::warn!("{msg}");
+            return Err(msg);
         }
         canonical
     };
@@ -903,7 +934,8 @@ async fn resolve_host_path(
     let meta = match tokio::fs::metadata(&host).await {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!("metadata failed for {}: {e} — {log_suffix}", host.display());
+            let msg = format!("metadata failed for {}: {e} — {log_suffix}", host.display());
+            tracing::warn!("{msg}");
             if ctx.sandboxed {
                 if let Err(e) = tokio::fs::remove_file(&host).await
                     && e.kind() != std::io::ErrorKind::NotFound
@@ -911,7 +943,7 @@ async fn resolve_host_path(
                     tracing::warn!("failed to remove temp file {}: {e}", host.display());
                 }
             }
-            return None;
+            return Err(msg);
         }
     };
     let limit = match att.kind {
@@ -919,11 +951,12 @@ async fn resolve_host_path(
         _ => TELEGRAM_FILE_UPLOAD_LIMIT,
     };
     if meta.len() > limit {
-        tracing::warn!(
+        let msg = format!(
             "Outbound {} ({:.1} MB) exceeds upload limit — {log_suffix}",
             att.path,
             meta.len() as f64 / (1024.0 * 1024.0),
         );
+        tracing::warn!("{msg}");
         if ctx.sandboxed {
             if let Err(e) = tokio::fs::remove_file(&host).await
                 && e.kind() != std::io::ErrorKind::NotFound
@@ -931,16 +964,13 @@ async fn resolve_host_path(
                 tracing::warn!("failed to remove temp file {}: {e}", host.display());
             }
         }
-        return None;
+        return Err(msg);
     }
 
-    Some(host)
+    Ok(host)
 }
 
-async fn send_single(
-    att: &OutboundAttachment,
-    ctx: &SendCtx<'_>,
-) -> Result<(), teloxide::RequestError> {
+async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), SendError> {
     use teloxide::payloads::{
         SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
         SendStickerSetters, SendVideoNoteSetters, SendVideoSetters, SendVoiceSetters,
@@ -948,9 +978,9 @@ async fn send_single(
     use teloxide::requests::Requester;
     use teloxide::types::{InputFile, MessageId, ThreadId};
 
-    let Some(host_path) = resolve_host_path(att, ctx, "skipping").await else {
-        return Ok(());
-    };
+    let host_path = resolve_host_path(att, ctx, "skipping")
+        .await
+        .map_err(SendError::Skip)?;
 
     let input_file = InputFile::file(&host_path);
     let thread_id = if ctx.eff_thread_id != 0 {
@@ -1045,14 +1075,10 @@ async fn send_single(
             tracing::warn!("failed to remove temp file {}: {e}", host_path.display());
         }
     }
-    send_result
+    send_result.map_err(SendError::Api)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn send_group(
-    items: &[OutboundAttachment],
-    ctx: &SendCtx<'_>,
-) -> Result<(), teloxide::RequestError> {
+async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(), SendError> {
     use teloxide::payloads::SendMediaGroupSetters;
     use teloxide::requests::Requester;
     use teloxide::types::{
@@ -1070,10 +1096,10 @@ async fn send_group(
     let mut host_paths: Vec<PathBuf> = Vec::with_capacity(items.len());
     for att in items {
         match resolve_host_path(att, ctx, "skipping media group").await {
-            Some(p) => host_paths.push(p),
-            None => {
+            Ok(p) => host_paths.push(p),
+            Err(msg) => {
                 cleanup_host_paths(&host_paths, ctx.sandboxed).await;
-                return Ok(());
+                return Err(SendError::Skip(msg));
             }
         }
     }
@@ -1139,7 +1165,7 @@ async fn send_group(
     if let Some(tid) = thread_id {
         req = req.message_thread_id(tid);
     }
-    let result = req.await.map(|_| ());
+    let result = req.await.map(|_| ()).map_err(SendError::Api);
 
     cleanup_host_paths(&host_paths, ctx.sandboxed).await;
     result
@@ -2112,5 +2138,15 @@ mod group_format_tests {
         let yaml = format_cc_input(&[m]).unwrap();
         assert!(yaml.contains("reply_to:"), "got: {yaml}");
         assert!(yaml.contains("here is the function: foo()"));
+    }
+
+    #[test]
+    fn send_error_skip_into_user_msg_prefixes_label_and_reason() {
+        let e = SendError::Skip("path outside outbox — skipping".into());
+        let msg = e.into_user_msg("Photo attachment /bad/path.jpg");
+        assert_eq!(
+            msg,
+            "skipped Photo attachment /bad/path.jpg: path outside outbox — skipping",
+        );
     }
 }
