@@ -3,7 +3,7 @@
 /// Injected directly into the system prompt at assembly time.
 /// Source: `templates/right/prompt/OPERATING_INSTRUCTIONS.md`
 pub const OPERATING_INSTRUCTIONS: &str =
-    include_str!("../../../../templates/right/prompt/OPERATING_INSTRUCTIONS.md");
+    include_str!("../../templates/right/prompt/OPERATING_INSTRUCTIONS.md");
 
 /// Bootstrap instructions, compiled into the binary.
 ///
@@ -12,7 +12,7 @@ pub const OPERATING_INSTRUCTIONS: &str =
 /// an existence flag — content always comes from this constant.
 /// Source: `templates/right/agent/BOOTSTRAP.md`
 pub const BOOTSTRAP_INSTRUCTIONS: &str =
-    include_str!("../../../../templates/right/agent/BOOTSTRAP.md");
+    include_str!("../../templates/right/agent/BOOTSTRAP.md");
 
 /// JSON schema for the structured reply format used by teloxide agents (D-02).
 ///

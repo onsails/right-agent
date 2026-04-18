@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::agent::{AgentDef, RestartPolicy};
 use crate::runtime::MCP_HTTP_PORT;
 
-const PC_TEMPLATE: &str = include_str!("../../../../templates/process-compose.yaml.j2");
+const PC_TEMPLATE: &str = include_str!("../../templates/process-compose.yaml.j2");
 
 /// Template context for a single bot process entry.
 #[derive(Debug, Serialize)]
