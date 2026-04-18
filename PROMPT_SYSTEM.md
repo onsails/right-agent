@@ -163,6 +163,12 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 Required: `content` (string|null).
 Optional: `reply_to_message_id`, `attachments`.
 
+**Attachments.** Each item in `attachments` accepts an optional `media_group_id`
+(nullable string). Items sharing the same value are delivered as a single
+Telegram media group (album). Validation and degradation rules match Telegram's
+`sendMediaGroup` constraints — see `### Media Groups (Albums)` in
+`OPERATING_INSTRUCTIONS.md` for the full rules shown to the agent.
+
 ### bootstrap-schema.json (bootstrap mode)
 Same as reply-schema plus required `bootstrap_complete` (boolean).
 Server-side validation: `bootstrap_complete: true` is ignored unless IDENTITY.md,

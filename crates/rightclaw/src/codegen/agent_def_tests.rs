@@ -162,3 +162,14 @@ fn cron_schema_attachments_item_has_media_group_id() {
     );
     assert_has_nullable_media_group_id(&items);
 }
+
+#[test]
+fn operating_instructions_documents_media_groups() {
+    let ops = crate::codegen::OPERATING_INSTRUCTIONS;
+    assert!(ops.contains("Media Groups"), "missing media-group docs");
+    assert!(ops.contains("media_group_id"), "missing media_group_id mention");
+    assert!(
+        ops.contains("2–10") || ops.contains("2-10"),
+        "must mention the 2–10 item limit"
+    );
+}

@@ -99,6 +99,45 @@ Size limits enforced by the bot:
 Do not produce files exceeding these limits. If you need to send large data,
 split into multiple smaller files or use a different format.
 
+### Media Groups (Albums)
+
+Multiple attachments can arrive as a single Telegram message ("media group") by
+sharing the same `media_group_id` string across items in your `attachments`
+array. This mirrors the `media_group_id` field Telegram puts on inbound
+messages — same field name, same semantics.
+
+Use media groups when attachments belong together (photos from one event, pages
+of one report). Without a `media_group_id`, each attachment arrives as its own
+Telegram message.
+
+Telegram rules — the bot warns and falls back to individual sends if violated:
+
+- A group must contain 2–10 items.
+- Photos and videos can mix in one group.
+- Documents form a documents-only group (no photos, videos, or audio).
+- Audios form an audios-only group.
+- Voice, video_note, sticker, and animation cannot be grouped — send them one by one.
+
+Captions: Telegram shows one caption per media group, taken from the first
+item. If multiple items carry a caption, the bot joins them with blank lines
+into the first item's caption.
+
+Example — two grouped photos plus one standalone document:
+
+```json
+{
+  "content": "Here are the shots and the report.",
+  "attachments": [
+    {"type": "photo",    "path": "/sandbox/outbox/a.jpg", "media_group_id": "shots", "caption": "Front view"},
+    {"type": "photo",    "path": "/sandbox/outbox/b.jpg", "media_group_id": "shots", "caption": "Side view"},
+    {"type": "document", "path": "/sandbox/outbox/report.pdf"}
+  ]
+}
+```
+
+The value of `media_group_id` is arbitrary — only equality within one reply
+matters.
+
 ## Cron Management (RightCron)
 
 **On startup:** Run `/rightcron` immediately. It will bootstrap the reconciler
