@@ -1,4 +1,4 @@
-use crate::codegen::{generate_system_prompt, BOOTSTRAP_SCHEMA_JSON, REPLY_SCHEMA_JSON};
+use crate::codegen::{generate_system_prompt, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, REPLY_SCHEMA_JSON};
 
 #[test]
 fn reply_schema_json_is_valid() {
@@ -113,4 +113,49 @@ fn system_prompt_contains_home_dir() {
         result.contains("/my/custom/home"),
         "system prompt must contain the passed home_dir"
     );
+}
+
+fn attachments_item_schema(schema_json: &str, path: &[&str]) -> serde_json::Value {
+    let mut node: serde_json::Value = serde_json::from_str(schema_json).unwrap();
+    for key in path {
+        node = node.get(*key).unwrap_or_else(|| panic!("missing key {key}")).clone();
+    }
+    node
+}
+
+fn assert_has_nullable_media_group_id(items: &serde_json::Value) {
+    let props = items.get("properties").expect("items.properties");
+    let field = props.get("media_group_id").expect("media_group_id property missing");
+    let ty = field.get("type").expect("media_group_id.type missing");
+    let arr = ty.as_array().expect("media_group_id.type must be an array for nullable");
+    let kinds: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(kinds.contains(&"string"), "must allow string, got {kinds:?}");
+    assert!(kinds.contains(&"null"), "must allow null, got {kinds:?}");
+}
+
+#[test]
+fn reply_schema_attachments_item_has_media_group_id() {
+    let items = attachments_item_schema(
+        REPLY_SCHEMA_JSON,
+        &["properties", "attachments", "items"],
+    );
+    assert_has_nullable_media_group_id(&items);
+}
+
+#[test]
+fn bootstrap_schema_attachments_item_has_media_group_id() {
+    let items = attachments_item_schema(
+        BOOTSTRAP_SCHEMA_JSON,
+        &["properties", "attachments", "items"],
+    );
+    assert_has_nullable_media_group_id(&items);
+}
+
+#[test]
+fn cron_schema_attachments_item_has_media_group_id() {
+    let items = attachments_item_schema(
+        CRON_SCHEMA_JSON,
+        &["properties", "notify", "properties", "attachments", "items"],
+    );
+    assert_has_nullable_media_group_id(&items);
 }
