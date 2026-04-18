@@ -59,6 +59,8 @@ pub struct OutboundAttachment {
     pub path: String,
     pub filename: Option<String>,
     pub caption: Option<String>,
+    #[serde(default)]
+    pub media_group_id: Option<String>,
 }
 
 /// Attachment kinds CC can produce in output.
@@ -848,6 +850,20 @@ mod tests {
         let json = r#"{"type":"video_note","path":"/sandbox/outbox/note.mp4"}"#;
         let att: OutboundAttachment = serde_json::from_str(json).unwrap();
         assert_eq!(att.kind, OutboundKind::VideoNote);
+    }
+
+    #[test]
+    fn outbound_attachment_deserialize_without_media_group_id_defaults_none() {
+        let json = r#"{"type":"photo","path":"/sandbox/outbox/a.jpg"}"#;
+        let att: OutboundAttachment = serde_json::from_str(json).unwrap();
+        assert!(att.media_group_id.is_none());
+    }
+
+    #[test]
+    fn outbound_attachment_deserialize_with_media_group_id() {
+        let json = r#"{"type":"photo","path":"/sandbox/outbox/a.jpg","media_group_id":"shots"}"#;
+        let att: OutboundAttachment = serde_json::from_str(json).unwrap();
+        assert_eq!(att.media_group_id.as_deref(), Some("shots"));
     }
 
     #[test]
