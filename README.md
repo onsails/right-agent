@@ -8,7 +8,6 @@
 </p>
 
 <p align="center">
-  <a href="https://crates.io/crates/rightclaw-cli"><img src="https://img.shields.io/crates/v/rightclaw-cli.svg" alt="crates.io"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
   <a href="https://github.com/onsails/rightclaw/actions"><img src="https://github.com/onsails/rightclaw/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <a href="https://t.me/rightclaww">Telegram</a>
@@ -24,7 +23,7 @@ Prerequisites:
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
-rightclaw init --telegram-token <YOUR_BOT_TOKEN>
+rightclaw init
 rightclaw up
 ```
 
@@ -89,9 +88,12 @@ The sandbox layer is [**NVIDIA OpenShell**](https://github.com/NVIDIA/OpenShell)
 
 ```mermaid
 flowchart LR
-  U[You] -->|Telegram| TG[(Telegram)]
-  TG <--> B[Bot · host]
-  B --> A1
+  U[You] --> TG[(Telegram)]
+
+  TG <--> B1[Bot · agent one · host]
+  TG <--> B2[Bot · agent two · host]
+  B1 --> A1
+  B2 --> A2
 
   subgraph SANDBOX_1["Sandbox · agent one"]
     A1[Claude Code]
@@ -105,7 +107,6 @@ flowchart LR
     A2 <--> M2
   end
 
-  B --> A2
   A1 -.MCP calls.-> AGG
   A2 -.MCP calls.-> AGG
   AGG[MCP Aggregator · host] -->|holds tokens| EXT[(Linear · Notion · Gmail · …)]
