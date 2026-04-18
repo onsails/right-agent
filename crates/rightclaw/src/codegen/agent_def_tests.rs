@@ -128,7 +128,10 @@ fn assert_has_nullable_media_group_id(items: &serde_json::Value) {
     let field = props.get("media_group_id").expect("media_group_id property missing");
     let ty = field.get("type").expect("media_group_id.type missing");
     let arr = ty.as_array().expect("media_group_id.type must be an array for nullable");
-    let kinds: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
+    let kinds: Vec<&str> = arr
+        .iter()
+        .map(|v| v.as_str().expect("type array element must be a string JSON value"))
+        .collect();
     assert!(kinds.contains(&"string"), "must allow string, got {kinds:?}");
     assert!(kinds.contains(&"null"), "must allow null, got {kinds:?}");
 }
