@@ -673,7 +673,12 @@ pub async fn send_attachments(
         };
 
         if let Err(e) = send_result {
-            let msg = format!("failed to send {:?} attachment {}: {e:#}", att.kind, att.path);
+            let msg = format!(
+                "failed to send {:?} attachment {}: {}",
+                att.kind,
+                att.path,
+                rightclaw::error::display_error_chain(&e),
+            );
             tracing::error!("{msg}");
             errors.push(msg);
         }

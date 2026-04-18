@@ -86,20 +86,17 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
     let tmp_dir = tempfile::tempdir()
         .map_err(|e| miette::miette!("reverse sync: failed to create temp dir: {e:#}"))?;
 
-    // Download all files concurrently, each into its own subdirectory to avoid
-    // file collisions if openshell uses non-atomic writes internally.
+    // Download all files concurrently. Each job gets a unique dest path so
+    // openshell can never clash on temp files.
     let mut join_set = tokio::task::JoinSet::new();
     for &filename in REVERSE_SYNC_FILES {
         let sandbox = sandbox_name.to_owned();
-        let sub_dir = tmp_dir.path().join(format!("dl-{filename}"));
-        std::fs::create_dir(&sub_dir).map_err(|e| {
-            miette::miette!("reverse sync: failed to create sub dir for {filename}: {e:#}")
-        })?;
+        let dl_path = tmp_dir.path().join(format!("dl-{filename}"));
         let sandbox_path = format!("/sandbox/{filename}");
         join_set.spawn(async move {
             let result =
-                rightclaw::openshell::download_file(&sandbox, &sandbox_path, &sub_dir).await;
-            (filename, sub_dir, result)
+                rightclaw::openshell::download_file(&sandbox, &sandbox_path, &dl_path).await;
+            (filename, dl_path, result)
         });
     }
 
@@ -109,14 +106,13 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
 
     // Process results sequentially.
     while let Some(join_result) = join_set.join_next().await {
-        let (filename, sub_dir, dl_result) = join_result
+        let (filename, downloaded, dl_result) = join_result
             .map_err(|e| miette::miette!("reverse sync: join error: {e:#}"))?;
         let host_path = agent_dir.join(filename);
 
         match dl_result {
             Ok(()) => {
                 any_download_ok = true;
-                let downloaded = sub_dir.join(filename);
                 if !downloaded.exists() {
                     continue;
                 }
@@ -203,11 +199,11 @@ fn atomic_write_bytes(path: &Path, content: &[u8]) -> miette::Result<()> {
 async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
     let tmp_dir = tempfile::tempdir()
         .map_err(|e| miette::miette!("failed to create temp dir: {e:#}"))?;
-    let download_dest = tmp_dir.path();
+    let downloaded = tmp_dir.path().join(".claude.json");
 
     // Download .claude.json from sandbox
     if let Err(e) =
-        rightclaw::openshell::download_file(sandbox, "/sandbox/.claude.json", download_dest).await
+        rightclaw::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded).await
     {
         tracing::warn!(
             "sync: failed to download .claude.json (may not exist yet): {e:#}"
@@ -222,7 +218,6 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
         return Ok(());
     }
 
-    let downloaded = download_dest.join(".claude.json");
     if !downloaded.exists() {
         return Ok(());
     }
