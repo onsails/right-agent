@@ -730,13 +730,6 @@ pub async fn send_attachments(
     ssh_config_path: Option<&std::path::Path>,
     resolved_sandbox: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use teloxide::payloads::{
-        SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
-        SendStickerSetters, SendVideoNoteSetters, SendVideoSetters, SendVoiceSetters,
-    };
-    use teloxide::requests::Requester;
-    use teloxide::types::{InputFile, MessageId, ThreadId};
-
     let sandboxed = ssh_config_path.is_some();
     let outbox_prefix = if sandboxed {
         SANDBOX_OUTBOX.to_owned()
@@ -750,19 +743,302 @@ pub async fn send_attachments(
         tokio::fs::create_dir_all(agent_dir.join("tmp/outbox")).await?;
     }
 
+    let (sends, warnings) = partition_sends(attachments);
+    for w in &warnings {
+        tracing::warn!("{w}");
+    }
+
     let mut errors: Vec<String> = Vec::new();
-    for att in attachments {
-        // Validate path is within outbox
-        if !att.path.starts_with(&outbox_prefix) {
+    for send in &sends {
+        let result: Result<(), teloxide::RequestError> = match send {
+            OutboundSend::Single(att) => {
+                send_single(
+                    att,
+                    bot,
+                    chat_id,
+                    eff_thread_id,
+                    agent_dir,
+                    resolved_sandbox,
+                    sandboxed,
+                    &outbox_prefix,
+                    &outbox_path,
+                )
+                .await
+            }
+            OutboundSend::Group { kind: _, items } => {
+                send_group(
+                    items,
+                    bot,
+                    chat_id,
+                    eff_thread_id,
+                    agent_dir,
+                    resolved_sandbox,
+                    sandboxed,
+                    &outbox_prefix,
+                    &outbox_path,
+                )
+                .await
+            }
+        };
+        if let Err(e) = result {
+            let label = match send {
+                OutboundSend::Single(att) => format!("{:?} attachment {}", att.kind, att.path),
+                OutboundSend::Group { kind, items } => {
+                    format!("{kind:?} media group of {} items", items.len())
+                }
+            };
+            let msg = format!(
+                "failed to send {label}: {}",
+                rightclaw::error::display_error_chain(&e),
+            );
+            tracing::error!("{msg}");
+            errors.push(msg);
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; ").into())
+    }
+}
+
+async fn send_single(
+    att: &OutboundAttachment,
+    bot: &super::BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    agent_dir: &std::path::Path,
+    resolved_sandbox: Option<&str>,
+    sandboxed: bool,
+    outbox_prefix: &str,
+    outbox_path: &std::path::Path,
+) -> Result<(), teloxide::RequestError> {
+    use teloxide::payloads::{
+        SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
+        SendStickerSetters, SendVideoNoteSetters, SendVideoSetters, SendVoiceSetters,
+    };
+    use teloxide::requests::Requester;
+    use teloxide::types::{InputFile, MessageId, ThreadId};
+
+    // Validate path is within outbox
+    if !att.path.starts_with(outbox_prefix) {
+        tracing::warn!(
+            "Outbound attachment path {} is outside outbox prefix {outbox_prefix} — skipping",
+            att.path,
+        );
+        return Ok(());
+    }
+
+    // Resolve to host path
+    let host_path = if sandboxed {
+        let tmp_dir = agent_dir.join("tmp/outbox");
+        let file_name = std::path::Path::new(&att.path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let dest = tmp_dir.join(&file_name);
+        let sandbox = resolved_sandbox.unwrap();
+        if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
             tracing::warn!(
-                "Outbound attachment path {} is outside outbox prefix {outbox_prefix} — skipping",
+                "download_file failed for {}: {:#} — skipping",
+                att.path,
+                e,
+            );
+            return Ok(());
+        }
+        dest
+    } else {
+        // Canonicalize to resolve any `..` components and verify the path
+        // truly resides under the outbox directory (string prefix check above
+        // is insufficient against paths like `outbox/../../etc/passwd`).
+        let canonical = match std::fs::canonicalize(PathBuf::from(&att.path)) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    "Outbound attachment path {} could not be canonicalized: {e} — skipping",
+                    att.path,
+                );
+                return Ok(());
+            }
+        };
+        let canonical_outbox = match std::fs::canonicalize(outbox_path) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to canonicalize outbox dir: {e} — skipping attachment");
+                return Ok(());
+            }
+        };
+        if !canonical.starts_with(&canonical_outbox) {
+            tracing::warn!(
+                "Outbound attachment path {} resolves to {} which is outside outbox — skipping",
+                att.path,
+                canonical.display(),
+            );
+            return Ok(());
+        }
+        canonical
+    };
+
+    // Check file size against limits
+    let metadata = match tokio::fs::metadata(&host_path).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                "metadata failed for {}: {e} — skipping",
+                host_path.display(),
+            );
+            if sandboxed {
+                let _ = tokio::fs::remove_file(&host_path).await;
+            }
+            return Ok(());
+        }
+    };
+    let size = metadata.len();
+    let limit = match att.kind {
+        OutboundKind::Photo => TELEGRAM_PHOTO_UPLOAD_LIMIT,
+        _ => TELEGRAM_FILE_UPLOAD_LIMIT,
+    };
+    if size > limit {
+        tracing::warn!(
+            "Outbound {} ({:.1} MB) exceeds upload limit — skipping",
+            att.path,
+            size as f64 / (1024.0 * 1024.0),
+        );
+        if sandboxed {
+            let _ = tokio::fs::remove_file(&host_path).await;
+        }
+        return Ok(());
+    }
+
+    let input_file = InputFile::file(&host_path);
+    let thread_id = if eff_thread_id != 0 {
+        Some(ThreadId(MessageId(eff_thread_id as i32)))
+    } else {
+        None
+    };
+
+    // Kinds that support captions
+    let caption = att.caption.as_deref();
+
+    let send_result: Result<_, teloxide::RequestError> = match att.kind {
+        OutboundKind::Photo => {
+            let mut req = bot.send_photo(chat_id, input_file);
+            if let Some(cap) = caption {
+                req = req.caption(cap);
+            }
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+        OutboundKind::Document => {
+            let mut req = bot.send_document(chat_id, input_file);
+            if let Some(cap) = caption {
+                req = req.caption(cap);
+            }
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+        OutboundKind::Video => {
+            let mut req = bot.send_video(chat_id, input_file);
+            if let Some(cap) = caption {
+                req = req.caption(cap);
+            }
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+        OutboundKind::Audio => {
+            let mut req = bot.send_audio(chat_id, input_file);
+            if let Some(cap) = caption {
+                req = req.caption(cap);
+            }
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+        OutboundKind::Voice => {
+            let mut req = bot.send_voice(chat_id, input_file);
+            if let Some(cap) = caption {
+                req = req.caption(cap);
+            }
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+        OutboundKind::Animation => {
+            let mut req = bot.send_animation(chat_id, input_file);
+            if let Some(cap) = caption {
+                req = req.caption(cap);
+            }
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+        // video_note and sticker don't support captions
+        OutboundKind::VideoNote => {
+            let mut req = bot.send_video_note(chat_id, input_file);
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+        OutboundKind::Sticker => {
+            let mut req = bot.send_sticker(chat_id, input_file);
+            if let Some(tid) = thread_id {
+                req = req.message_thread_id(tid);
+            }
+            req.await.map(|_| ())
+        }
+    };
+
+    // Clean up temp file if sandboxed
+    if sandboxed {
+        let _ = tokio::fs::remove_file(&host_path).await;
+    }
+    send_result
+}
+
+async fn send_group(
+    items: &[OutboundAttachment],
+    bot: &super::BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    agent_dir: &std::path::Path,
+    resolved_sandbox: Option<&str>,
+    sandboxed: bool,
+    outbox_prefix: &str,
+    outbox_path: &std::path::Path,
+) -> Result<(), teloxide::RequestError> {
+    use teloxide::payloads::SendMediaGroupSetters;
+    use teloxide::requests::Requester;
+    use teloxide::types::{
+        InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
+        InputMediaVideo, MessageId, ThreadId,
+    };
+
+    // Resolve every item's host path up front so we can clean them all up
+    // after the send attempt, regardless of success. A validation failure on
+    // ANY member aborts the entire group (logs WARN + returns Ok(())).
+    let mut host_paths: Vec<std::path::PathBuf> = Vec::with_capacity(items.len());
+    for att in items {
+        if !att.path.starts_with(outbox_prefix) {
+            tracing::warn!(
+                "Outbound attachment path {} is outside outbox prefix {outbox_prefix} — skipping media group",
                 att.path,
             );
-            continue;
+            cleanup_host_paths(&host_paths, sandboxed).await;
+            return Ok(());
         }
-
-        // Resolve to host path
-        let host_path = if sandboxed {
+        let host: std::path::PathBuf = if sandboxed {
             let tmp_dir = agent_dir.join("tmp/outbox");
             let file_name = std::path::Path::new(&att.path)
                 .file_name()
@@ -771,169 +1047,149 @@ pub async fn send_attachments(
                 .into_owned();
             let dest = tmp_dir.join(&file_name);
             let sandbox = resolved_sandbox.unwrap();
-            rightclaw::openshell::download_file(sandbox, &att.path, &dest).await?;
+            if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
+                tracing::warn!(
+                    "download_file failed for {}: {:#} — skipping media group",
+                    att.path,
+                    e,
+                );
+                cleanup_host_paths(&host_paths, sandboxed).await;
+                return Ok(());
+            }
             dest
         } else {
-            // Canonicalize to resolve any `..` components and verify the path
-            // truly resides under the outbox directory (string prefix check above
-            // is insufficient against paths like `outbox/../../etc/passwd`).
-            let canonical = std::fs::canonicalize(PathBuf::from(&att.path)).map_err(|e| {
-                tracing::warn!(
-                    "Outbound attachment path {} could not be canonicalized: {e} — skipping",
-                    att.path,
-                );
-                e
-            });
-            let canonical = match canonical {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let canonical_outbox = match std::fs::canonicalize(&outbox_path) {
-                Ok(p) => p,
+            match std::fs::canonicalize(std::path::PathBuf::from(&att.path)) {
+                Ok(p) => match std::fs::canonicalize(outbox_path) {
+                    Ok(outbox_c) if p.starts_with(&outbox_c) => p,
+                    Ok(_) => {
+                        tracing::warn!(
+                            "Outbound attachment {} resolves outside outbox — skipping media group",
+                            att.path,
+                        );
+                        cleanup_host_paths(&host_paths, sandboxed).await;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        tracing::warn!("canonicalize outbox failed: {e} — skipping media group");
+                        cleanup_host_paths(&host_paths, sandboxed).await;
+                        return Ok(());
+                    }
+                },
                 Err(e) => {
-                    tracing::warn!("Failed to canonicalize outbox dir: {e} — skipping attachment");
-                    continue;
+                    tracing::warn!(
+                        "canonicalize {} failed: {e} — skipping media group",
+                        att.path,
+                    );
+                    cleanup_host_paths(&host_paths, sandboxed).await;
+                    return Ok(());
                 }
-            };
-            if !canonical.starts_with(&canonical_outbox) {
-                tracing::warn!(
-                    "Outbound attachment path {} resolves to {} which is outside outbox — skipping",
-                    att.path,
-                    canonical.display(),
-                );
-                continue;
             }
-            canonical
         };
 
-        // Check file size against limits
-        let metadata = tokio::fs::metadata(&host_path).await?;
-        let size = metadata.len();
+        let meta = match tokio::fs::metadata(&host).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    "metadata failed for {}: {e} — skipping media group",
+                    host.display(),
+                );
+                cleanup_host_paths(&[host], sandboxed).await;
+                cleanup_host_paths(&host_paths, sandboxed).await;
+                return Ok(());
+            }
+        };
         let limit = match att.kind {
             OutboundKind::Photo => TELEGRAM_PHOTO_UPLOAD_LIMIT,
             _ => TELEGRAM_FILE_UPLOAD_LIMIT,
         };
-        if size > limit {
+        if meta.len() > limit {
             tracing::warn!(
-                "Outbound {} ({:.1} MB) exceeds upload limit — skipping",
+                "Outbound {} ({:.1} MB) exceeds upload limit — skipping media group",
                 att.path,
-                size as f64 / (1024.0 * 1024.0),
+                meta.len() as f64 / (1024.0 * 1024.0),
             );
-            if sandboxed {
-                let _ = tokio::fs::remove_file(&host_path).await;
-            }
-            continue;
+            cleanup_host_paths(&[host], sandboxed).await;
+            cleanup_host_paths(&host_paths, sandboxed).await;
+            return Ok(());
         }
 
-        let input_file = InputFile::file(&host_path);
-        let thread_id = if eff_thread_id != 0 {
-            Some(ThreadId(MessageId(eff_thread_id as i32)))
-        } else {
-            None
-        };
-
-        // Kinds that support captions
-        let caption = att.caption.as_deref();
-
-        let send_result: Result<_, teloxide::RequestError> = match att.kind {
-            OutboundKind::Photo => {
-                let mut req = bot.send_photo(chat_id, input_file);
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-            OutboundKind::Document => {
-                let mut req = bot.send_document(chat_id, input_file);
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-            OutboundKind::Video => {
-                let mut req = bot.send_video(chat_id, input_file);
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-            OutboundKind::Audio => {
-                let mut req = bot.send_audio(chat_id, input_file);
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-            OutboundKind::Voice => {
-                let mut req = bot.send_voice(chat_id, input_file);
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-            OutboundKind::Animation => {
-                let mut req = bot.send_animation(chat_id, input_file);
-                if let Some(cap) = caption {
-                    req = req.caption(cap);
-                }
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-            // video_note and sticker don't support captions
-            OutboundKind::VideoNote => {
-                let mut req = bot.send_video_note(chat_id, input_file);
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-            OutboundKind::Sticker => {
-                let mut req = bot.send_sticker(chat_id, input_file);
-                if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
-                }
-                req.await.map(|_| ())
-            }
-        };
-
-        if let Err(e) = send_result {
-            let msg = format!(
-                "failed to send {:?} attachment {}: {}",
-                att.kind,
-                att.path,
-                rightclaw::error::display_error_chain(&e),
-            );
-            tracing::error!("{msg}");
-            errors.push(msg);
-        }
-
-        // Clean up temp file if sandboxed
-        if sandboxed {
-            let _ = tokio::fs::remove_file(&host_path).await;
-        }
+        host_paths.push(host);
     }
 
-    if errors.is_empty() {
-        Ok(())
+    // Build InputMedia list. The per-item OutboundKind drives the variant.
+    let media: Vec<InputMedia> = items
+        .iter()
+        .zip(host_paths.iter())
+        .map(|(att, host)| {
+            let file = InputFile::file(host);
+            let cap = att.caption.clone();
+            match att.kind {
+                OutboundKind::Photo => {
+                    let mut m = InputMediaPhoto::new(file);
+                    if let Some(c) = cap {
+                        m = m.caption(c);
+                    }
+                    InputMedia::Photo(m)
+                }
+                OutboundKind::Video => {
+                    let mut m = InputMediaVideo::new(file);
+                    if let Some(c) = cap {
+                        m = m.caption(c);
+                    }
+                    InputMedia::Video(m)
+                }
+                OutboundKind::Document => {
+                    let mut m = InputMediaDocument::new(file);
+                    if let Some(c) = cap {
+                        m = m.caption(c);
+                    }
+                    InputMedia::Document(m)
+                }
+                OutboundKind::Audio => {
+                    let mut m = InputMediaAudio::new(file);
+                    if let Some(c) = cap {
+                        m = m.caption(c);
+                    }
+                    InputMedia::Audio(m)
+                }
+                // Classifier rejects these kinds from groups, so this branch is
+                // unreachable in practice. Log a loud error and fall back to a
+                // Document to keep the bot alive if the classifier is ever
+                // changed. This MUST NOT silently swallow data.
+                _ => {
+                    tracing::error!(
+                        "send_group received ungroupable kind {:?} for {} — classifier bug",
+                        att.kind,
+                        att.path,
+                    );
+                    InputMedia::Document(InputMediaDocument::new(file))
+                }
+            }
+        })
+        .collect();
+
+    let thread_id = if eff_thread_id != 0 {
+        Some(ThreadId(MessageId(eff_thread_id as i32)))
     } else {
-        Err(errors.join("; ").into())
+        None
+    };
+
+    let mut req = bot.send_media_group(chat_id, media);
+    if let Some(tid) = thread_id {
+        req = req.message_thread_id(tid);
+    }
+    let result = req.await.map(|_| ());
+
+    cleanup_host_paths(&host_paths, sandboxed).await;
+    result
+}
+
+async fn cleanup_host_paths(paths: &[std::path::PathBuf], sandboxed: bool) {
+    if !sandboxed {
+        return;
+    }
+    for p in paths {
+        let _ = tokio::fs::remove_file(p).await;
     }
 }
 
