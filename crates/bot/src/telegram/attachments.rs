@@ -202,7 +202,7 @@ pub fn merge_group_captions(captions: &mut [Option<String>]) {
 /// `Single` reuses the per-type `send_*` path; `Group` becomes one
 /// `sendMediaGroup`.
 #[derive(Debug)]
-pub enum Send {
+pub enum OutboundSend {
     Single(OutboundAttachment),
     Group {
         kind: GroupKind,
@@ -213,7 +213,7 @@ pub enum Send {
 /// Partition a reply's attachments into the ordered sends the bot must perform.
 /// Returns the list of sends and a list of WARN strings describing any group
 /// that had to be degraded or split — the caller logs them.
-pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Send>, Vec<String>) {
+pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<OutboundSend>, Vec<String>) {
     use std::collections::BTreeMap;
 
     // Collect indices per group, preserving first-occurrence order via a
@@ -253,11 +253,11 @@ pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Send>, Vec<St
     }
 
     let mut warnings: Vec<String> = Vec::new();
-    let mut sends: Vec<Send> = Vec::new();
+    let mut sends: Vec<OutboundSend> = Vec::new();
 
     for (i, slot) in slots.iter().enumerate() {
         match slot {
-            Slot::Single => sends.push(Send::Single(attachments[i].clone())),
+            Slot::Single => sends.push(OutboundSend::Single(attachments[i].clone())),
             Slot::GroupAnchor(id) => {
                 let indices = &group_indices[id];
                 let group_items: Vec<&OutboundAttachment> =
@@ -273,7 +273,7 @@ pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Send>, Vec<St
                         for (it, c) in items.iter_mut().zip(caps.into_iter()) {
                             it.caption = c;
                         }
-                        sends.push(Send::Group { kind, items });
+                        sends.push(OutboundSend::Group { kind, items });
                     }
                     GroupPlan::Split { chunks, kind, reason } => {
                         warnings.push(format!(
@@ -283,7 +283,7 @@ pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Send>, Vec<St
                             if chunk.len() < 2 {
                                 // size-1 trailing chunk: emit as Single
                                 let src_idx = indices[chunk[0]];
-                                sends.push(Send::Single(attachments[src_idx].clone()));
+                                sends.push(OutboundSend::Single(attachments[src_idx].clone()));
                             } else {
                                 let mut items: Vec<OutboundAttachment> = chunk
                                     .iter()
@@ -295,7 +295,7 @@ pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Send>, Vec<St
                                 for (it, c) in items.iter_mut().zip(caps.into_iter()) {
                                     it.caption = c;
                                 }
-                                sends.push(Send::Group { kind, items });
+                                sends.push(OutboundSend::Group { kind, items });
                             }
                         }
                     }
@@ -304,7 +304,7 @@ pub fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Send>, Vec<St
                             "media_group_id={id:?}: {reason} — falling back to individual sends"
                         ));
                         for &idx in indices {
-                            sends.push(Send::Single(attachments[idx].clone()));
+                            sends.push(OutboundSend::Single(attachments[idx].clone()));
                         }
                     }
                 }
@@ -647,7 +647,7 @@ pub async fn download_attachments(
     resolved_sandbox: Option<&str>,
     chat_id: teloxide::types::ChatId,
     eff_thread_id: i64,
-) -> Result<Vec<ResolvedAttachment>, Box<dyn std::error::Error + std::marker::Send + Sync>> {
+) -> Result<Vec<ResolvedAttachment>, Box<dyn std::error::Error + Send + Sync>> {
     use teloxide::net::Download;
     use teloxide::requests::Requester;
     use tokio::io::AsyncWriteExt;
@@ -729,7 +729,7 @@ pub async fn send_attachments(
     agent_dir: &std::path::Path,
     ssh_config_path: Option<&std::path::Path>,
     resolved_sandbox: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use teloxide::payloads::{
         SendAnimationSetters, SendAudioSetters, SendDocumentSetters, SendPhotoSetters,
         SendStickerSetters, SendVideoNoteSetters, SendVideoSetters, SendVoiceSetters,
@@ -963,7 +963,7 @@ async fn run_cleanup(
     ssh_config_path: Option<&std::path::Path>,
     resolved_sandbox: Option<&str>,
     retention_days: u32,
-) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(ssh_config) = ssh_config_path {
         let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mtime_arg = format!("+{retention_days}");
@@ -1005,7 +1005,7 @@ async fn run_cleanup(
 async fn cleanup_local_dir(
     dir: &std::path::Path,
     retention_days: u32,
-) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cutoff = std::time::SystemTime::now()
         - std::time::Duration::from_secs(u64::from(retention_days) * 86400);
 
@@ -1578,8 +1578,8 @@ mod tests {
         let (sends, warnings) = partition_sends(&atts);
         assert_eq!(sends.len(), 2);
         assert!(warnings.is_empty());
-        assert!(matches!(sends[0], Send::Single(_)));
-        assert!(matches!(sends[1], Send::Single(_)));
+        assert!(matches!(sends[0], OutboundSend::Single(_)));
+        assert!(matches!(sends[1], OutboundSend::Single(_)));
     }
 
     #[test]
@@ -1592,13 +1592,13 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(sends.len(), 1);
         match &sends[0] {
-            Send::Group { kind, items } => {
+            OutboundSend::Group { kind, items } => {
                 assert_eq!(*kind, GroupKind::PhotoVideo);
                 assert_eq!(items.len(), 2);
                 assert_eq!(items[0].caption.as_deref(), Some("a\n\nb"));
                 assert!(items[1].caption.is_none());
             }
-            other => panic!("expected Send::Group, got {other:?}"),
+            other => panic!("expected OutboundSend::Group, got {other:?}"),
         }
     }
 
@@ -1617,9 +1617,9 @@ mod tests {
         // Expected send order: group "a" (where it first appeared), then single,
         // then group "b".
         assert_eq!(sends.len(), 3);
-        assert!(matches!(sends[0], Send::Group { kind: GroupKind::PhotoVideo, .. }));
-        assert!(matches!(sends[1], Send::Single(_)));
-        assert!(matches!(sends[2], Send::Group { kind: GroupKind::Document, .. }));
+        assert!(matches!(sends[0], OutboundSend::Group { kind: GroupKind::PhotoVideo, .. }));
+        assert!(matches!(sends[1], OutboundSend::Single(_)));
+        assert!(matches!(sends[2], OutboundSend::Group { kind: GroupKind::Document, .. }));
     }
 
     #[test]
@@ -1632,7 +1632,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("bad"), "warning must mention group id, got: {}", warnings[0]);
         assert_eq!(sends.len(), 2, "both items fall back to Single");
-        assert!(sends.iter().all(|s| matches!(s, Send::Single(_))));
+        assert!(sends.iter().all(|s| matches!(s, OutboundSend::Single(_))));
     }
 
     #[test]
@@ -1645,7 +1645,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("only"));
         assert_eq!(sends.len(), 2);
-        assert!(sends.iter().all(|s| matches!(s, Send::Single(_))));
+        assert!(sends.iter().all(|s| matches!(s, OutboundSend::Single(_))));
     }
 
     #[test]
@@ -1659,10 +1659,50 @@ mod tests {
         // 11 → one group of 10 + one trailing single.
         assert_eq!(sends.len(), 2);
         match &sends[0] {
-            Send::Group { items, .. } => assert_eq!(items.len(), 10),
+            OutboundSend::Group { items, .. } => assert_eq!(items.len(), 10),
             other => panic!("expected Group first, got {other:?}"),
         }
-        assert!(matches!(sends[1], Send::Single(_)));
+        assert!(matches!(sends[1], OutboundSend::Single(_)));
+    }
+
+    #[test]
+    fn partition_split_oversize_group_merges_captions_per_chunk() {
+        // 11 photos in a group — split into a chunk of 10 + 1 trailing single.
+        // Give every photo a distinct caption and assert the first item of the
+        // 10-chunk carries all 10 captions joined with "\n\n" and the trailing
+        // single retains only its own caption.
+        let captions: Vec<String> = (0..11).map(|i| format!("c{i}")).collect();
+        let atts: Vec<OutboundAttachment> = captions
+            .iter()
+            .map(|c| att_with(OutboundKind::Photo, Some("big"), Some(c)))
+            .collect();
+        let (sends, warnings) = partition_sends(&atts);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(sends.len(), 2);
+
+        // First send: 10-item Group, first item's caption = "c0\n\nc1\n\n...\n\nc9".
+        match &sends[0] {
+            OutboundSend::Group { items, .. } => {
+                assert_eq!(items.len(), 10);
+                let expected: String = (0..10)
+                    .map(|i| format!("c{i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                assert_eq!(items[0].caption.as_deref(), Some(expected.as_str()));
+                for it in &items[1..] {
+                    assert!(it.caption.is_none(), "non-first items must be blanked");
+                }
+            }
+            other => panic!("expected Group, got {other:?}"),
+        }
+
+        // Second send: trailing Single for the 11th photo — caption "c10".
+        match &sends[1] {
+            OutboundSend::Single(att) => {
+                assert_eq!(att.caption.as_deref(), Some("c10"));
+            }
+            other => panic!("expected Single, got {other:?}"),
+        }
     }
 
     #[test]
