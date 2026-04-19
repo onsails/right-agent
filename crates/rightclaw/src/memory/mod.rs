@@ -128,7 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_12() {
+    fn user_version_is_14() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
         let conn =

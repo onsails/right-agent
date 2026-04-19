@@ -536,4 +536,82 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "idx_pending_retains_created should exist");
     }
+
+    #[test]
+    fn v14_idempotent_when_tables_already_exist() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Apply up to v13 (version index is 1-based in to_version).
+        MIGRATIONS.to_version(&mut conn, 13).unwrap();
+
+        // Manually pre-create the tables that v14 would create, matching the
+        // schema in sql/v14_memory_failure_handling.sql.
+        conn.execute_batch(
+            "CREATE TABLE pending_retains (
+                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                 content         TEXT NOT NULL,
+                 context         TEXT,
+                 document_id     TEXT,
+                 update_mode     TEXT,
+                 tags_json       TEXT,
+                 created_at      TEXT NOT NULL,
+                 attempts        INTEGER NOT NULL DEFAULT 0,
+                 last_attempt_at TEXT,
+                 last_error      TEXT,
+                 source          TEXT NOT NULL
+             );
+             CREATE TABLE memory_alerts (
+                 alert_type    TEXT PRIMARY KEY,
+                 first_sent_at TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+
+        // v14 must not fail even though tables already exist.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let pending_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('pending_retains')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for col in [
+            "id", "content", "context", "document_id", "update_mode",
+            "tags_json", "created_at", "attempts", "last_attempt_at",
+            "last_error", "source",
+        ] {
+            assert!(
+                pending_cols.contains(&col.to_string()),
+                "{col} column missing from pending_retains"
+            );
+        }
+
+        let alert_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('memory_alerts')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for col in ["alert_type", "first_sent_at"] {
+            assert!(
+                alert_cols.contains(&col.to_string()),
+                "{col} column missing from memory_alerts"
+            );
+        }
+
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name='idx_pending_retains_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_count, 1,
+            "idx_pending_retains_created should exist after idempotent v14"
+        );
+    }
 }
