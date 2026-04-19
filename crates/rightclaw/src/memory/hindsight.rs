@@ -55,17 +55,17 @@ pub struct BankProfile {
 }
 
 /// Retain request item.
-#[derive(Debug, Serialize)]
-struct RetainItem {
-    content: String,
+#[derive(Debug, Clone, Serialize)]
+pub struct RetainItem {
+    pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    context: Option<String>,
+    pub context: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    document_id: Option<String>,
+    pub document_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    update_mode: Option<String>,
+    pub update_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tags: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
 }
 
 /// Retain request body.
@@ -151,18 +151,27 @@ impl HindsightClient {
         update_mode: Option<&str>,
         tags: Option<&[String]>,
     ) -> Result<RetainResponse, MemoryError> {
+        self.retain_many(&[RetainItem {
+            content: content.to_owned(),
+            context: context.map(|s| s.to_owned()),
+            document_id: document_id.map(|s| s.to_owned()),
+            update_mode: update_mode.map(|s| s.to_owned()),
+            tags: tags.map(|t| t.to_vec()),
+        }])
+        .await
+    }
+
+    /// Store multiple items in the memory bank in a single batched POST.
+    pub async fn retain_many(
+        &self,
+        items: &[RetainItem],
+    ) -> Result<RetainResponse, MemoryError> {
         let url = format!(
             "{}/v1/default/banks/{}/memories",
             self.base_url, self.bank_id
         );
         let body = RetainRequest {
-            items: vec![RetainItem {
-                content: content.to_owned(),
-                context: context.map(|s| s.to_owned()),
-                document_id: document_id.map(|s| s.to_owned()),
-                update_mode: update_mode.map(|s| s.to_owned()),
-                tags: tags.map(|t| t.to_vec()),
-            }],
+            items: items.to_vec(),
             is_async: true,
         };
 
@@ -436,6 +445,42 @@ mod tests {
             parsed["items"][0]["context"],
             "conversation between RightClaw Agent and the User"
         );
+    }
+
+    #[tokio::test]
+    async fn retain_many_batches_items_in_single_post() {
+        let (handle, url) = mock_hindsight_server(
+            r#"{"success": true, "operation_id": "op-batch"}"#,
+            200,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let items = vec![
+            RetainItem {
+                content: "first".into(),
+                context: Some("c1".into()),
+                document_id: Some("doc-1".into()),
+                update_mode: Some("append".into()),
+                tags: None,
+            },
+            RetainItem {
+                content: "second".into(),
+                context: None,
+                document_id: None,
+                update_mode: None,
+                tags: Some(vec!["t".into()]),
+            },
+        ];
+        client.retain_many(&items).await.unwrap();
+
+        let (method, _auth, body) = handle.await.unwrap();
+        assert!(method.starts_with("POST"));
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["items"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["items"][0]["content"], "first");
+        assert_eq!(parsed["items"][1]["content"], "second");
+        assert_eq!(parsed["async"], true);
     }
 
     #[tokio::test]
