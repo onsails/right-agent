@@ -98,9 +98,11 @@ impl ProcessGroupChild {
 impl Drop for ProcessGroupChild {
     fn drop(&mut self) {
         if let Some(pgid) = self.pgid {
-            // Best-effort. ESRCH (group already gone) is fine to ignore.
+            // Best-effort. ESRCH (group already gone) and EPERM (macOS returns
+            // this instead of ESRCH for reaped process groups) are fine to ignore.
             if let Err(e) = killpg(Pid::from_raw(pgid), Signal::SIGKILL)
                 && e != nix::errno::Errno::ESRCH
+                && e != nix::errno::Errno::EPERM
             {
                 tracing::warn!(pgid, error = %e, "killpg failed during ProcessGroupChild drop");
             }
