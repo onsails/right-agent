@@ -4,6 +4,7 @@ pub mod error;
 pub mod guard;
 pub mod hindsight;
 pub mod prefetch;
+pub mod retain_queue;
 pub mod status;
 pub mod store;
 pub(crate) mod migrations;
