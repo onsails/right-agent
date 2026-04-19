@@ -1,3 +1,4 @@
+pub mod circuit;
 pub mod classify;
 pub mod error;
 pub mod guard;
