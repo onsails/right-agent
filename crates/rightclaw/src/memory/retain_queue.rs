@@ -78,13 +78,11 @@ pub fn count(conn: &Connection) -> Result<usize, MemoryError> {
 
 /// Age of the oldest row (None if queue empty).
 pub fn oldest_age(conn: &Connection) -> Result<Option<Duration>, MemoryError> {
-    let iso: Option<String> = conn
-        .query_row(
-            "SELECT MIN(created_at) FROM pending_retains",
-            [],
-            |r| r.get(0),
-        )
-        .ok();
+    let iso: Option<String> = conn.query_row(
+        "SELECT MIN(created_at) FROM pending_retains",
+        [],
+        |r| r.get(0),
+    )?;
     let Some(iso) = iso else { return Ok(None) };
     let parsed = chrono::DateTime::parse_from_rfc3339(&iso).map_err(|e| {
         MemoryError::HindsightOther(format!("oldest_age parse: {e:#}"))
