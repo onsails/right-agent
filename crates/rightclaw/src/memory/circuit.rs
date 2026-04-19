@@ -6,6 +6,10 @@
 //! - HalfOpen + success → Closed
 //! - HalfOpen + failure → Open { until = now + 2 * previous_open_dur }, capped at 10 min
 //! - Any state + Auth kind → Open { until = now + 1h }
+//!
+//! All methods except `new()` / `Default::default()` must be called from within a
+//! tokio runtime context — they call `tokio::time::Instant::now()` which panics
+//! outside a runtime.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -125,6 +129,7 @@ impl Breaker {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum Outcome {
     Success,
     Failure(ErrorKind),
