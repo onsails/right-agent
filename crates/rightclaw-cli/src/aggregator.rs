@@ -103,11 +103,11 @@ pub(crate) fn split_prefix(tool_name: &str) -> Option<(&str, &str)> {
 
 /// MCP backend for Hindsight memory tools.
 pub(crate) struct HindsightBackend {
-    client: rightclaw::memory::hindsight::HindsightClient,
+    client: std::sync::Arc<rightclaw::memory::ResilientHindsight>,
 }
 
 impl HindsightBackend {
-    pub fn new(client: rightclaw::memory::hindsight::HindsightClient) -> Self {
+    pub fn new(client: std::sync::Arc<rightclaw::memory::ResilientHindsight>) -> Self {
         Self { client }
     }
 
@@ -186,7 +186,14 @@ impl HindsightBackend {
                 let context = args["context"].as_str();
                 let result = self
                     .client
-                    .retain(content, context, None, None, None)
+                    .retain(
+                        content,
+                        context,
+                        None,
+                        None,
+                        None,
+                        rightclaw::memory::resilient::POLICY_MCP_RETAIN,
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("{e:#}"))?;
                 let json = serde_json::json!({
@@ -203,7 +210,12 @@ impl HindsightBackend {
                     .ok_or_else(|| anyhow::anyhow!("missing required param: query"))?;
                 let results = self
                     .client
-                    .recall(query, None, None)
+                    .recall(
+                        query,
+                        None,
+                        None,
+                        rightclaw::memory::resilient::POLICY_MCP_RECALL,
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("{e:#}"))?;
                 let json = serde_json::json!({ "results": results });
@@ -217,7 +229,7 @@ impl HindsightBackend {
                     .ok_or_else(|| anyhow::anyhow!("missing required param: query"))?;
                 let result = self
                     .client
-                    .reflect(query)
+                    .reflect(query, rightclaw::memory::resilient::POLICY_MCP_REFLECT)
                     .await
                     .map_err(|e| anyhow::anyhow!("{e:#}"))?;
                 let json = serde_json::json!({ "text": result.text });
