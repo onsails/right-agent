@@ -692,3 +692,87 @@ fn doctor_bootstrap_pending_skips_identity_checks() {
         "should not check identity when bootstrap present"
     );
 }
+
+// ---- check_memory tests (Plan: Memory Failure Handling, Task 11) ----
+
+mod memory_tests {
+    use super::*;
+    use crate::memory::open_connection;
+    use tempfile::tempdir;
+
+    #[test]
+    fn check_memory_passes_on_empty_queue() {
+        let dir = tempdir().unwrap();
+        let _ = open_connection(dir.path(), true).unwrap();
+        let checks = check_memory(dir.path());
+        assert!(
+            checks.iter().all(|c| matches!(c.status, CheckStatus::Pass)),
+            "expected all pass, got {checks:#?}"
+        );
+    }
+
+    #[test]
+    fn check_memory_warns_on_500_rows() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        for i in 0..600 {
+            crate::memory::retain_queue::enqueue(
+                &conn,
+                "bot",
+                &format!("c-{i}"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let checks = check_memory(dir.path());
+        assert!(
+            checks.iter().any(|c| c.status == CheckStatus::Warn
+                && c.name.contains("retain backlog")),
+            "expected warn on retain backlog, got {checks:#?}"
+        );
+    }
+
+    #[test]
+    fn check_memory_fails_on_901_rows() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        for i in 0..901 {
+            crate::memory::retain_queue::enqueue(
+                &conn,
+                "bot",
+                &format!("c-{i}"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        let checks = check_memory(dir.path());
+        assert!(
+            checks.iter().any(|c| c.status == CheckStatus::Fail
+                && c.name.contains("retain backlog")),
+            "expected fail on retain backlog, got {checks:#?}"
+        );
+    }
+
+    #[test]
+    fn check_memory_fails_on_24h_auth_alert() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        conn.execute(
+            "INSERT INTO memory_alerts(alert_type, first_sent_at) VALUES ('auth_failed', datetime('now','-25 hours'))",
+            [],
+        )
+        .unwrap();
+        let checks = check_memory(dir.path());
+        assert!(
+            checks.iter().any(|c| c.status == CheckStatus::Fail
+                && c.name.contains("auth")),
+            "expected fail on auth alert, got {checks:#?}"
+        );
+    }
+}

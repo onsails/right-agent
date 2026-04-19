@@ -896,6 +896,182 @@ fn check_openshell_gateway_health() -> DoctorCheck {
     }
 }
 
+/// Run memory-subsystem checks against a single agent directory.
+///
+/// Hardened from the plan's `if let Ok(...)` scaffolding: when an underlying
+/// SQLite query fails (retain count, oldest age, alert existence), we emit a
+/// `Fail` check with the error detail rather than silently dropping the check.
+/// This preserves FAIL-FAST semantics while still letting the doctor emit all
+/// other checks (one failing check shouldn't hide the rest).
+pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
+    let mut out = Vec::new();
+    let db_path = agent_dir.join("data.db");
+
+    // 1. data.db opens.
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(DoctorCheck {
+                name: "memory db".into(),
+                status: CheckStatus::Fail,
+                detail: format!("open {}: {e:#}", db_path.display()),
+                fix: Some("verify agent dir and permissions".into()),
+            });
+            return out;
+        }
+    };
+
+    // 2. journal_mode.
+    let mode: Result<String, _> = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0));
+    match mode {
+        Ok(m) if m.eq_ignore_ascii_case("wal") => {
+            out.push(DoctorCheck {
+                name: "memory db WAL".into(),
+                status: CheckStatus::Pass,
+                detail: "journal_mode=wal".into(),
+                fix: None,
+            });
+        }
+        Ok(other) => out.push(DoctorCheck {
+            name: "memory db WAL".into(),
+            status: CheckStatus::Fail,
+            detail: format!("journal_mode={other}"),
+            fix: Some("re-run bot startup to apply PRAGMA".into()),
+        }),
+        Err(e) => out.push(DoctorCheck {
+            name: "memory db WAL".into(),
+            status: CheckStatus::Fail,
+            detail: format!("PRAGMA failed: {e:#}"),
+            fix: None,
+        }),
+    }
+
+    // 3. user_version matches migration.
+    let expected: u32 = 14;
+    match conn.query_row::<u32, _, _>("PRAGMA user_version", [], |r| r.get(0)) {
+        Ok(version) if version == expected => out.push(DoctorCheck {
+            name: "memory schema".into(),
+            status: CheckStatus::Pass,
+            detail: format!("user_version={version}"),
+            fix: None,
+        }),
+        Ok(version) => out.push(DoctorCheck {
+            name: "memory schema".into(),
+            status: CheckStatus::Fail,
+            detail: format!("user_version={version}, expected={expected}"),
+            fix: Some("start the bot to run pending migrations".into()),
+        }),
+        Err(e) => out.push(DoctorCheck {
+            name: "memory schema".into(),
+            status: CheckStatus::Fail,
+            detail: format!("PRAGMA user_version failed: {e:#}"),
+            fix: None,
+        }),
+    }
+
+    // 4. pending_retains row count.
+    match crate::memory::retain_queue::count(&conn) {
+        Ok(n) => {
+            let (st, detail) = match n {
+                n if n < 500 => (CheckStatus::Pass, format!("{n} entries")),
+                n if n <= 900 => (
+                    CheckStatus::Warn,
+                    format!("retain backlog growing: {n} entries"),
+                ),
+                n => (
+                    CheckStatus::Fail,
+                    format!("retain backlog near cap: {n}/1000 entries"),
+                ),
+            };
+            out.push(DoctorCheck {
+                name: "retain backlog count".into(),
+                status: st,
+                detail,
+                fix: None,
+            });
+        }
+        Err(e) => out.push(DoctorCheck {
+            name: "retain backlog count".into(),
+            status: CheckStatus::Fail,
+            detail: format!("query failed: {e:#}"),
+            fix: None,
+        }),
+    }
+
+    // 5. oldest age.
+    match crate::memory::retain_queue::oldest_age(&conn) {
+        Ok(Some(age)) => {
+            let hours = age.as_secs() / 3600;
+            let (st, detail) = if hours < 1 {
+                (CheckStatus::Pass, format!("oldest {hours}h"))
+            } else if hours <= 12 {
+                (
+                    CheckStatus::Warn,
+                    format!("drain behind by {hours}h — upstream may be degraded"),
+                )
+            } else {
+                (
+                    CheckStatus::Fail,
+                    format!("drain severely stuck ({hours}h) — investigate logs"),
+                )
+            };
+            out.push(DoctorCheck {
+                name: "retain backlog age".into(),
+                status: st,
+                detail,
+                fix: None,
+            });
+        }
+        Ok(None) => {
+            // Queue empty — no age to report. Skip silently (no check emitted).
+        }
+        Err(e) => out.push(DoctorCheck {
+            name: "retain backlog age".into(),
+            status: CheckStatus::Fail,
+            detail: format!("query failed: {e:#}"),
+            fix: None,
+        }),
+    }
+
+    // 6. memory_alerts rows older than 24h.
+    for alert_type in ["auth_failed", "client_flood"] {
+        match conn.query_row::<bool, _, _>(
+            "SELECT EXISTS(SELECT 1 FROM memory_alerts WHERE alert_type = ?1 \
+                 AND datetime(first_sent_at) < datetime('now', '-24 hours'))",
+            [alert_type],
+            |r| r.get(0),
+        ) {
+            Ok(true) => {
+                out.push(DoctorCheck {
+                    name: format!("memory alert: {alert_type}"),
+                    status: CheckStatus::Fail,
+                    detail: format!("{alert_type} standing for >24h"),
+                    fix: Some(
+                        match alert_type {
+                            "auth_failed" => {
+                                "rotate memory.api_key / HINDSIGHT_API_KEY and restart"
+                            }
+                            _ => "check ~/.rightclaw/logs/ for repeated 4xx",
+                        }
+                        .into(),
+                    ),
+                });
+            }
+            Ok(false) => {
+                // No standing alert of this type — no check emitted.
+            }
+            Err(e) => out.push(DoctorCheck {
+                name: format!("memory alert: {alert_type}"),
+                status: CheckStatus::Fail,
+                detail: format!("query failed: {e:#}"),
+                fix: None,
+            }),
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 #[path = "doctor_tests.rs"]
 mod tests;
