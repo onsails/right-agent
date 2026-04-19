@@ -17,11 +17,11 @@ pub const CLIENT_FLOOD_POLL: std::time::Duration = std::time::Duration::from_sec
 pub fn spawn_watcher(
     bot: BotType,
     wrapper: Arc<ResilientHindsight>,
-    agent_db_path: PathBuf,
+    agent_dir: PathBuf,
     allowlist_chats: Vec<i64>,
 ) {
     // Startup cleanup: delete alerts older than 1h so crash-loops re-notify.
-    match rightclaw::memory::open_connection(&agent_db_path, false) {
+    match rightclaw::memory::open_connection(&agent_dir, false) {
         Ok(conn) => {
             if let Err(e) = conn.execute(
                 "DELETE FROM memory_alerts WHERE datetime(first_sent_at) < datetime('now', '-1 hour')",
@@ -37,38 +37,22 @@ pub fn spawn_watcher(
     {
         let bot = bot.clone();
         let wrapper = wrapper.clone();
-        let db = agent_db_path.clone();
+        let db = agent_dir.clone();
         let chats = allowlist_chats.clone();
         tokio::spawn(async move {
             let mut rx = wrapper.subscribe_status();
+            // Initial check — watch channel's changed() only fires on transitions,
+            // so we must handle the current value once on startup (e.g. AuthFailed
+            // on boot when the Hindsight API key is bad).
+            // Copy out the status so the borrow Ref (not Send) isn't held across .await.
+            let initial = *rx.borrow();
+            handle_status_change(initial, &bot, &chats, &db).await;
             loop {
                 if rx.changed().await.is_err() {
                     return;
                 }
                 let status = *rx.borrow();
-                if matches!(status, MemoryStatus::AuthFailed { .. }) {
-                    if should_fire(&db, "auth_failed") {
-                        let msg = "\u{26a0} Memory provider authentication failed.\n\
-                                   Rotate the Hindsight API key — set `memory.api_key` in \
-                                   agent.yaml or the HINDSIGHT_API_KEY env var — and restart \
-                                   the agent. Memory ops are disabled until then.";
-                        send_to_chats(&bot, &chats, msg).await;
-                        record_fire(&db, "auth_failed");
-                    }
-                } else if matches!(status, MemoryStatus::Healthy) {
-                    // Clear dedup on recovery.
-                    match rightclaw::memory::open_connection(&db, false) {
-                        Ok(conn) => {
-                            if let Err(e) = conn.execute(
-                                "DELETE FROM memory_alerts WHERE alert_type = 'auth_failed'",
-                                [],
-                            ) {
-                                tracing::warn!("memory_alerts dedup clear failed: {e:#}");
-                            }
-                        }
-                        Err(e) => tracing::warn!("memory_alerts dedup clear open failed: {e:#}"),
-                    }
-                }
+                handle_status_change(status, &bot, &chats, &db).await;
             }
         });
     }
@@ -77,7 +61,7 @@ pub fn spawn_watcher(
     {
         let bot = bot.clone();
         let wrapper = wrapper.clone();
-        let db = agent_db_path.clone();
+        let db = agent_dir.clone();
         let chats = allowlist_chats.clone();
         tokio::spawn(async move {
             let mut t = tokio::time::interval(CLIENT_FLOOD_POLL);
@@ -97,6 +81,37 @@ pub fn spawn_watcher(
                 }
             }
         });
+    }
+}
+
+async fn handle_status_change(
+    status: MemoryStatus,
+    bot: &BotType,
+    chats: &[i64],
+    db: &std::path::Path,
+) {
+    if matches!(status, MemoryStatus::AuthFailed { .. }) {
+        if should_fire(db, "auth_failed") {
+            let msg = "\u{26a0} Memory provider authentication failed.\n\
+                       Rotate the Hindsight API key — set `memory.api_key` in \
+                       agent.yaml or the HINDSIGHT_API_KEY env var — and restart \
+                       the agent. Memory ops are disabled until then.";
+            send_to_chats(bot, chats, msg).await;
+            record_fire(db, "auth_failed");
+        }
+    } else if matches!(status, MemoryStatus::Healthy) {
+        // Clear dedup on recovery.
+        match rightclaw::memory::open_connection(db, false) {
+            Ok(conn) => {
+                if let Err(e) = conn.execute(
+                    "DELETE FROM memory_alerts WHERE alert_type = 'auth_failed'",
+                    [],
+                ) {
+                    tracing::warn!("memory_alerts dedup clear failed: {e:#}");
+                }
+            }
+            Err(e) => tracing::warn!("memory_alerts dedup clear open failed: {e:#}"),
+        }
     }
 }
 
