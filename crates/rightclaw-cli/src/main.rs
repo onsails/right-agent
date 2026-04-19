@@ -778,7 +778,14 @@ async fn main() -> miette::Result<()> {
                                     let client = rightclaw::memory::hindsight::HindsightClient::new(
                                         api_key, bank_id, &budget, mem_config.recall_max_tokens, None,
                                     );
-                                    Some(std::sync::Arc::new(aggregator::HindsightBackend::new(client)))
+                                    let wrapper = std::sync::Arc::new(
+                                        rightclaw::memory::ResilientHindsight::new(
+                                            client,
+                                            agent_dir.clone(),
+                                            "aggregator",
+                                        ),
+                                    );
+                                    Some(std::sync::Arc::new(aggregator::HindsightBackend::new(wrapper)))
                                 } else {
                                     tracing::warn!(
                                         agent = agent_name.as_str(),
