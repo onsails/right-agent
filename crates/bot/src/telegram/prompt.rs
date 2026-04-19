@@ -93,7 +93,8 @@ fi"#
                 r#"
 if [ -s {root_path}/MEMORY.md ]; then
   printf '\n## Long-Term Memory\n\n'
-  head -200 {root_path}/MEMORY.md
+  head -200 {root_path}/MEMORY.md 2>/dev/null \
+    || echo "<memory-status>MEMORY.md unreadable</memory-status>"
 fi"#
             ),
             Some(MemoryMode::Hindsight { composite_memory_path }) => format!(
