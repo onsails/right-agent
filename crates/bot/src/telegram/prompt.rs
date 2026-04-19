@@ -355,4 +355,39 @@ mod tests {
         );
         assert!(!script.contains("MEMORY.md"), "bootstrap mode must not include memory");
     }
+
+    #[test]
+    fn composite_memory_section_is_last_in_assembled_script() {
+        // With a hindsight-like memory_mode, the memory block must be the final
+        // appended section of the prompt-assembly script to preserve cache.
+        let script = build_prompt_assembly_script(
+            "Base",
+            false,
+            "/sandbox",
+            "/tmp/prompt.md",
+            "/sandbox",
+            &["claude".into(), "-p".into()],
+            None,
+            Some(&MemoryMode::Hindsight {
+                composite_memory_path: "/sandbox/.claude/composite-memory.md".into(),
+            }),
+        );
+
+        // Find the position of the last }-closing-brace before the `>` redirect.
+        let redirect_pos = script.rfind("} >").expect("redirect must exist");
+        let head = &script[..redirect_pos];
+
+        // Anything that would bust the cache (other sections like TOOLS.md,
+        // MCP instructions) must appear BEFORE the composite-memory section.
+        let memory_pos = head.rfind("composite-memory.md").expect("composite-memory.md must appear");
+        let tools_pos = head.find("TOOLS.md");
+        let mcp_pos = head.find("# MCP Server Instructions");
+
+        if let Some(tp) = tools_pos {
+            assert!(tp < memory_pos, "TOOLS.md must precede composite-memory.md");
+        }
+        if let Some(mp) = mcp_pos {
+            assert!(mp < memory_pos, "MCP instructions must precede composite-memory.md");
+        }
+    }
 }
