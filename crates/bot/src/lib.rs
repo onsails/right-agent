@@ -248,6 +248,68 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         rightclaw::agent::types::MemoryProvider::File => (None, None),
     };
 
+    // Spawn background drain task if wrapper is present.
+    // Periodically drains pending_retains from SQLite, calling drain_retain_item
+    // on each row. Skips when wrapper is non-Healthy (breaker open or auth failed).
+    //
+    // `drain_tick` holds `&rusqlite::Connection` across an `.await`, and
+    // `Connection` is `!Sync` -- so the future is `!Send` and cannot be handed
+    // to `tokio::spawn`. We drive it via a `LocalSet` from a dedicated
+    // `spawn_blocking` thread; async upstream calls (e.g. Hindsight HTTP) still
+    // run on the shared runtime through the `Handle` captured inside `LocalSet`.
+    if let Some(ref w) = hindsight_wrapper {
+        let w = w.clone();
+        let agent_db = agent_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let handle = tokio::runtime::Handle::current();
+            let local = tokio::task::LocalSet::new();
+            handle.block_on(local.run_until(async move {
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.tick().await; // first tick is immediate
+                loop {
+                    interval.tick().await;
+                    if !matches!(w.status(), rightclaw::memory::MemoryStatus::Healthy) {
+                        continue;
+                    }
+                    let conn = match rightclaw::memory::open_connection(&agent_db, false) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("drain: open_connection failed: {e:#}");
+                            continue;
+                        }
+                    };
+                    let w_call = w.clone();
+                    let report = rightclaw::memory::retain_queue::drain_tick(
+                        &conn,
+                        |items| {
+                            let w = w_call.clone();
+                            async move {
+                                let item = rightclaw::memory::hindsight::RetainItem {
+                                    content: items[0].content.clone(),
+                                    context: items[0].context.clone(),
+                                    document_id: items[0].document_id.clone(),
+                                    update_mode: items[0].update_mode.clone(),
+                                    tags: items[0].tags.clone(),
+                                };
+                                w.drain_retain_item(&item).await
+                            }
+                        },
+                    )
+                    .await;
+                    if report.deleted
+                        + report.dropped_age
+                        + report.dropped_client
+                        + report.bumped_attempts
+                        > 0
+                    {
+                        tracing::debug!(?report, "drain tick");
+                    }
+                }
+            }));
+        });
+    }
+
     // Re-install skills with correct memory variant.
     rightclaw::codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
 
