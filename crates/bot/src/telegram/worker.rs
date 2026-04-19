@@ -610,6 +610,7 @@ pub fn spawn_worker(
                                 Some(&retain_doc_id),
                                 Some("append"),
                                 Some(&retain_tags_v),
+                                rightclaw::memory::resilient::POLICY_AUTO_RETAIN,
                             )
                             .await
                         {
@@ -625,7 +626,15 @@ pub fn spawn_worker(
                 let cache_key = format!("{}:{}", chat_id, eff_thread_id);
                 let cache = ctx.prefetch_cache.clone();
                 tokio::spawn(async move {
-                    match hs_recall.recall(&recall_query, Some(&recall_tags_v), Some("any")).await {
+                    match hs_recall
+                        .recall(
+                            &recall_query,
+                            Some(&recall_tags_v),
+                            Some("any"),
+                            rightclaw::memory::resilient::POLICY_PREFETCH,
+                        )
+                        .await
+                    {
                         Ok(results) if !results.is_empty() => {
                             let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                             if let Some(ref c) = cache {
@@ -633,7 +642,12 @@ pub fn spawn_worker(
                             }
                         }
                         Ok(_) => {}
-                        Err(e) => tracing::warn!("prefetch recall failed: {e:#}"),
+                        Err(rightclaw::memory::ResilientError::CircuitOpen { .. }) => {
+                            tracing::warn!("prefetch recall skipped: circuit open");
+                        }
+                        Err(rightclaw::memory::ResilientError::Upstream(e)) => {
+                            tracing::warn!("prefetch recall failed: {e:#}");
+                        }
                     }
                 });
             }
@@ -913,24 +927,29 @@ async fn invoke_cc(
             tracing::info!(?chat_id, "prefetch cache miss, blocking recall");
             let truncated_query = truncate_to_chars(input, RECALL_MAX_CHARS);
             let recall_tags_v = recall_tags(chat_id);
-            match tokio::time::timeout(
-                Duration::from_secs(5),
-                hs.recall(truncated_query, Some(&recall_tags_v), Some("any")),
-            ).await {
-                Ok(Ok(results)) if !results.is_empty() => {
+            match hs
+                .recall(
+                    truncated_query,
+                    Some(&recall_tags_v),
+                    Some("any"),
+                    rightclaw::memory::resilient::POLICY_BLOCKING_RECALL,
+                )
+                .await
+            {
+                Ok(results) if !results.is_empty() => {
                     let content = rightclaw::memory::hindsight::join_recall_texts(&results);
                     if let Some(ref cache) = ctx.prefetch_cache {
                         cache.put(&cache_key, content.clone()).await;
                     }
                     Some(content)
                 }
-                Ok(Ok(_)) => None,
-                Ok(Err(e)) => {
-                    tracing::warn!(?chat_id, "blocking recall failed: {e:#}");
+                Ok(_) => None,
+                Err(rightclaw::memory::ResilientError::CircuitOpen { .. }) => {
+                    tracing::warn!(?chat_id, "blocking recall skipped: circuit open");
                     None
                 }
-                Err(_) => {
-                    tracing::warn!(?chat_id, "blocking recall timed out");
+                Err(rightclaw::memory::ResilientError::Upstream(e)) => {
+                    tracing::warn!(?chat_id, "blocking recall failed: {e:#}");
                     None
                 }
             }
