@@ -114,27 +114,35 @@ fi"#
 /// Deploy pre-recalled content as composite-memory.md to host (and sandbox if applicable).
 ///
 /// Formats `content` into a `<memory-context>` fence with the given `label`,
-/// writes to `agent_dir/.claude/composite-memory.md`, and uploads to sandbox.
+/// optionally appends a `<memory-status>` marker, writes to
+/// `agent_dir/.claude/composite-memory.md`, and uploads to sandbox.
 pub(crate) async fn deploy_composite_memory(
     content: &str,
     label: &str,
     agent_dir: &std::path::Path,
     resolved_sandbox: Option<&str>,
-) {
+    status_marker: Option<&str>,
+) -> Result<(), DeployError> {
+    let marker_tail = status_marker.map(|m| format!("\n\n{m}")).unwrap_or_default();
     let fenced = format!(
-        "<memory-context>\n[System: recalled memory context, {label}.]\n\n{content}\n</memory-context>"
+        "<memory-context>\n[System: recalled memory context, {label}.]\n\n{content}\n</memory-context>{marker_tail}"
     );
     let host_path = agent_dir.join(".claude").join("composite-memory.md");
-    if let Err(e) = tokio::fs::write(&host_path, &fenced).await {
-        tracing::warn!("failed to write composite-memory.md: {e:#}");
-    }
+    tokio::fs::write(&host_path, &fenced).await.map_err(DeployError::Write)?;
     if let Some(sandbox) = resolved_sandbox {
-        if let Err(e) =
-            rightclaw::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/").await
-        {
-            tracing::warn!("failed to upload composite-memory.md: {e:#}");
-        }
+        rightclaw::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
+            .await
+            .map_err(|e| DeployError::Upload(format!("{e:#}")))?;
     }
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DeployError {
+    #[error("write composite-memory.md: {0}")]
+    Write(std::io::Error),
+    #[error("upload composite-memory.md: {0}")]
+    Upload(String),
 }
 
 /// Remove composite-memory.md from host disk (best-effort).
