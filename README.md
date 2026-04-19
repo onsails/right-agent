@@ -30,10 +30,10 @@ rightclaw up
 Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
 <p align="center">
-  <a href="#what-you-get-out-of-the-box">what you get</a> ·
-  <a href="#self-evolving-by-design">self-evolving</a> ·
+  <a href="#what-you-get-out-of-the-box">features</a> ·
+  <a href="#self-evolving-by-design">evolution</a> ·
   <a href="#architecture">architecture</a> ·
-  <a href="#how-it-compares">how it compares</a> ·
+  <a href="#how-it-compares">comparison</a> ·
   <a href="#roadmap">roadmap</a>
 </p>
 
