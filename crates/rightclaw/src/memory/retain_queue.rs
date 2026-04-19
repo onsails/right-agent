@@ -126,14 +126,6 @@ where
         return report;
     }
 
-    let tx = match conn.unchecked_transaction() {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!("drain: failed to begin tx: {e:#}");
-            return report;
-        }
-    };
-
     let now = chrono::Utc::now();
 
     for entry in batch {
@@ -147,7 +139,7 @@ where
             }
         };
         if let Some(c) = created && now.signed_duration_since(c) > MAX_AGE {
-            match tx.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
+            match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
                 Ok(_) => {
                     tracing::warn!(id = entry.id, "retain dropped: >24h");
                     report.dropped_age += 1;
@@ -161,7 +153,7 @@ where
 
         match call(vec![entry.clone()]).await {
             Ok(()) => {
-                match tx.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
+                match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
                     Ok(_) => report.deleted += 1,
                     Err(e) => {
                         tracing::error!(id = entry.id, error = %e, "drain: success DELETE failed");
@@ -169,7 +161,7 @@ where
                 }
             }
             Err(ErrorKind::Client) => {
-                match tx.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
+                match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
                     Ok(_) => {
                         tracing::error!(id = entry.id, "retain dropped on 4xx: {entry:?}");
                         report.dropped_client += 1;
@@ -186,7 +178,7 @@ where
                 break;
             }
             Err(_) => {
-                if let Err(e) = tx.execute(
+                if let Err(e) = conn.execute(
                     "UPDATE pending_retains SET attempts = attempts + 1, \
                        last_attempt_at = ?1, last_error = ?2 WHERE id = ?3",
                     params![now.to_rfc3339(), "classified_transient", entry.id],
@@ -199,9 +191,6 @@ where
         }
     }
 
-    if let Err(e) = tx.commit() {
-        tracing::error!("drain: tx.commit failed: {e:#}");
-    }
     report
 }
 
@@ -398,5 +387,50 @@ mod tests {
 
         assert_eq!(report.dropped_age, 1);
         assert_eq!(count(&conn).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn drain_does_not_block_concurrent_enqueue() {
+        // Verifies the drain loop does not hold a write lock across the closure await.
+        // Without the fix, this test deadlocks (drain holds tx; enqueue waits on busy_timeout).
+        let dir = tempdir().unwrap();
+        let path = dir.keep();
+        let drain_conn = crate::memory::open_connection(&path, true).unwrap();
+        let enq_conn = crate::memory::open_connection(&path, false).unwrap();
+
+        // Seed with one row to drain.
+        enqueue(&drain_conn, "bot", "first", None, None, None, None).unwrap();
+
+        // Trigger drain where the closure blocks on a oneshot until the concurrent
+        // enqueue succeeds; if a tx was held, the enqueue would starve.
+        let (tx_unblock, rx_unblock) = tokio::sync::oneshot::channel::<()>();
+        let (tx_entered, rx_entered) = tokio::sync::oneshot::channel::<()>();
+        let mut tx_entered_opt = Some(tx_entered);
+        let mut rx_unblock_opt = Some(rx_unblock);
+
+        let drain_fut = drain_tick(&drain_conn, |_items| {
+            let signal = tx_entered_opt.take();
+            let wait = rx_unblock_opt.take();
+            async move {
+                if let Some(s) = signal { let _ = s.send(()); }
+                // Wait for the other task to finish its enqueue.
+                if let Some(w) = wait { let _ = w.await; }
+                Ok(())
+            }
+        });
+
+        let enqueue_fut = async move {
+            // Wait until drain is mid-await.
+            rx_entered.await.unwrap();
+            // This must succeed even though drain_tick is suspended in its closure.
+            enqueue(&enq_conn, "bot", "concurrent", None, None, None, None).unwrap();
+            let _ = tx_unblock.send(());
+        };
+
+        let (report, _) = tokio::join!(drain_fut, enqueue_fut);
+
+        assert_eq!(report.deleted, 1);
+        // After drain: "first" gone, "concurrent" still enqueued
+        assert_eq!(count(&drain_conn).unwrap(), 1);
     }
 }
