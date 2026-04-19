@@ -47,6 +47,7 @@ fs4 = { workspace = true }
 nix = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
+fastrand = "2"
 
 [features]
 test-support = []
