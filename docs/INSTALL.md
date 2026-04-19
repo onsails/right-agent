@@ -2,56 +2,26 @@
 
 ## Prerequisites
 
-### Rust Toolchain
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-RightClaw uses Rust edition 2024. Any recent stable toolchain will work.
-
-### process-compose
-
-Process orchestrator that powers multi-agent management. Version **1.100.0+** required.
-
-```sh
-# macOS
-brew install f1bonacc1/tap/process-compose
-
-# Linux — download from GitHub releases
-# https://github.com/F1bonacc1/process-compose/releases
-```
-
-### NVIDIA OpenShell
-
-Sandbox runtime for agent isolation. Currently in alpha.
-
-```sh
-# Follow install instructions at:
-# https://github.com/NVIDIA/OpenShell
-# https://docs.nvidia.com/openshell/latest/index.html
-```
-
-Requires Docker. OpenShell runs k3s containers inside Docker.
+Install these before running the installer:
 
 ### Claude Code CLI
 
 ```sh
 npm install -g @anthropic-ai/claude-code
-claude  # follow prompts to authenticate
+claude  # authenticate
 ```
 
-You must have an active Claude subscription. RightClaw calls `claude -p` directly — no API keys needed.
+Requires an active Claude subscription. RightClaw calls `claude -p` directly — no API key needed.
 
-### Telegram Bot Token
+### Telegram bot token
 
-1. Open [@BotFather](https://t.me/BotFather) in Telegram
-2. Send `/newbot`, follow prompts
-3. Save the bot token — you'll pass it to `rightclaw init`
+1. Open [@BotFather](https://t.me/BotFather) in Telegram.
+2. Send `/newbot`, follow the prompts.
+3. Save the bot token. The installer's wizard will ask for it.
 
-### cloudflared (Highly Recommended)
+### cloudflared
 
-Required for Telegram webhook tunneling. Without it, your bot needs a publicly reachable IP.
+A Cloudflare account plus the `cloudflared` CLI, authenticated. The installer creates the named tunnel for you.
 
 ```sh
 # macOS
@@ -59,42 +29,44 @@ brew install cloudflare/cloudflare/cloudflared
 
 # Linux
 # https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+
+cloudflared tunnel login   # authenticate against your Cloudflare account
 ```
 
-After installing, authenticate and create a named tunnel:
-
-```sh
-cloudflared tunnel login
-cloudflared tunnel create rightclaw
-```
+If you don't have a Cloudflare account yet, sign up at https://dash.cloudflare.com/sign-up (free tier is sufficient).
 
 ## Quick Install
 
-Installs RightClaw, process-compose, and OpenShell:
+One command installs `rightclaw`, `process-compose`, and NVIDIA OpenShell:
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
 ```
 
+The installer then runs the interactive `rightclaw init` wizard (asks for the Telegram bot token, sandbox mode, network policy) and `rightclaw doctor` to verify the setup.
+
+Supported platforms: linux x86_64, linux aarch64, darwin aarch64 (Apple Silicon).
+
 ## Build from Source
+
+For platforms without a prebuilt binary, or when you want to run from a checkout:
 
 ```sh
 git clone https://github.com/onsails/rightclaw.git
 cd rightclaw
 cargo install --path crates/rightclaw-cli
+rightclaw init
+rightclaw doctor
 ```
 
-## Setup
+This path requires a Rust toolchain (edition 2024).
+
+## After install
 
 ```sh
-# Initialize with your Telegram bot token
-rightclaw init --telegram-token <YOUR_BOT_TOKEN>
-
-# Verify everything is configured correctly
-rightclaw doctor
-
-# Launch your agents
 rightclaw up
 ```
 
-`rightclaw doctor` checks all dependencies, validates agent configuration, verifies sandbox connectivity, MCP status, and tunnel health. Run it whenever something seems off.
+`rightclaw up` launches your agents via process-compose. Message your Telegram bot from your account — the agent replies.
+
+Re-run `rightclaw doctor` whenever something seems off. It checks dependencies, agent configuration, sandbox connectivity, MCP status, and tunnel health.

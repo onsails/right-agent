@@ -95,9 +95,8 @@ install_rightclaw() {
   case "${PLATFORM}-${ARCH}" in
     linux-x86_64)   target="rightclaw-x86_64-unknown-linux-gnu" ;;
     linux-aarch64)  target="rightclaw-aarch64-unknown-linux-gnu" ;;
-    darwin-x86_64)  target="rightclaw-x86_64-apple-darwin" ;;
     darwin-aarch64) target="rightclaw-aarch64-apple-darwin" ;;
-    *)              die "No prebuilt binary for ${PLATFORM}-${ARCH}" ;;
+    *)              die "Unsupported platform: ${PLATFORM}-${ARCH}. RightClaw ships for linux-x86_64, linux-aarch64, and darwin-aarch64 (Apple Silicon)." ;;
   esac
 
   if [ "$version" = "latest" ]; then
@@ -106,18 +105,7 @@ install_rightclaw() {
     download_url="https://github.com/onsails/rightclaw/releases/download/${version}/${target}"
   fi
 
-  # Platforms with prebuilt binaries on GitHub releases (as of v0.2.0).
-  # Others fall through to source build via cargo.
-  case "${PLATFORM}-${ARCH}" in
-    linux-x86_64|darwin-aarch64)
-      echo "  downloading: $download_url"
-      ;;
-    *)
-      warn "No prebuilt binary yet for ${PLATFORM}-${ARCH}."
-      echo "       Falling back to source build (requires Rust toolchain)."
-      http_code="000"
-      ;;
-  esac
+  echo "  downloading: $download_url"
 
   if [ -z "${http_code:-}" ]; then
     http_code=$(curl -LsSf -w '%{http_code}' -o "$INSTALL_DIR/rightclaw" "$download_url" 2>/dev/null) || http_code="000"
