@@ -31,7 +31,7 @@ Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
 <p align="center">
   <a href="#what-you-get-out-of-the-box">features</a> ·
-  <a href="#self-evolving-by-design">evolution</a> ·
+  <a href="#self-evolving-by-design">personality</a> ·
   <a href="#architecture">architecture</a> ·
   <a href="#how-it-compares">comparison</a> ·
   <a href="#roadmap">roadmap</a>
