@@ -14,6 +14,7 @@ const V10_SCHEMA: &str = include_str!("sql/v10_mcp_auth.sql");
 const V11_SCHEMA: &str = include_str!("sql/v11_auth_tokens.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V13_SCHEMA: &str = include_str!("sql/v13_one_shot_cron.sql");
+const V14_SCHEMA: &str = include_str!("sql/v14_memory_failure_handling.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -107,6 +108,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
             M::up(V11_SCHEMA),
             M::up_with_hook("", v12_cron_diagnostics),
             M::up_with_hook("", v13_one_shot_cron),
+            M::up(V14_SCHEMA),
         ])
     });
 
@@ -482,5 +484,56 @@ mod tests {
             )
             .unwrap();
         assert!(run_at.is_none(), "existing specs must have run_at=NULL");
+    }
+
+    #[test]
+    fn v14_pending_retains_table_exists() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('pending_retains')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for col in [
+            "id", "content", "context", "document_id", "update_mode",
+            "tags_json", "created_at", "attempts", "last_attempt_at",
+            "last_error", "source",
+        ] {
+            assert!(cols.contains(&col.to_string()), "{col} column missing");
+        }
+    }
+
+    #[test]
+    fn v14_memory_alerts_table_exists() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('memory_alerts')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for col in ["alert_type", "first_sent_at"] {
+            assert!(cols.contains(&col.to_string()), "{col} column missing");
+        }
+    }
+
+    #[test]
+    fn v14_pending_retains_created_index_exists() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name='idx_pending_retains_created'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "idx_pending_retains_created should exist");
     }
 }
