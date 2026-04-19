@@ -1,3 +1,4 @@
+pub mod classify;
 pub mod error;
 pub mod guard;
 pub mod hindsight;
@@ -5,6 +6,7 @@ pub mod prefetch;
 pub mod store;
 pub(crate) mod migrations;
 
+pub use classify::ErrorKind;
 pub use error::MemoryError;
 
 /// Opens (or creates) the per-agent SQLite memory database at `agent_path/data.db`.
