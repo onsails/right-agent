@@ -136,7 +136,7 @@ mod tests {
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13, "user_version should be 13 after V13 migration");
+        assert_eq!(version, 14, "user_version should be 14 after V14 migration");
     }
 
     #[test]
