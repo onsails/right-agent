@@ -278,6 +278,39 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
     }
 }
 
+/// Build the `<memory-status>` marker appended to composite-memory.md.
+///
+/// Returns `None` when memory is healthy and no retain-side drops have
+/// accumulated in the last 24h — no marker is injected in that case.
+fn build_memory_marker(
+    status: rightclaw::memory::MemoryStatus,
+    client_drops_24h: usize,
+) -> Option<String> {
+    use rightclaw::memory::MemoryStatus as S;
+    match status {
+        S::AuthFailed { .. } => Some(
+            "<memory-status>unavailable — memory provider authentication failed, \
+             memory ops will error until the user rotates the API key</memory-status>"
+                .into(),
+        ),
+        S::Degraded { .. } => Some(
+            "<memory-status>degraded — recall may be incomplete or stale, \
+             retain may be queued</memory-status>"
+                .into(),
+        ),
+        S::Healthy => {
+            if client_drops_24h > 0 {
+                Some(format!(
+                    "<memory-status>retain-errors: {client_drops_24h} records dropped \
+                     in last 24h due to bad payload — check logs</memory-status>"
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
 // ── Async worker ─────────────────────────────────────────────────────────────
 
 /// Spawn a per-session worker task.
@@ -957,15 +990,31 @@ async fn invoke_cc(
             None
         };
 
+        let wrapper_status = ctx
+            .hindsight
+            .as_ref()
+            .map(|h| h.status())
+            .unwrap_or(rightclaw::memory::MemoryStatus::Healthy);
+        let client_drops_24h = if let Some(ref h) = ctx.hindsight {
+            h.client_drops_24h().await
+        } else {
+            0
+        };
+
         match recall_content {
             Some(content) => {
-                super::prompt::deploy_composite_memory(
+                let marker = build_memory_marker(wrapper_status, client_drops_24h);
+                if let Err(e) = super::prompt::deploy_composite_memory(
                     &content,
                     "NOT new user input. Treat as background",
                     &ctx.agent_dir,
                     ctx.resolved_sandbox.as_deref(),
+                    marker.as_deref(),
                 )
-                .await;
+                .await
+                {
+                    tracing::warn!("composite-memory deploy failed: {e:#}");
+                }
             }
             None => {
                 super::prompt::remove_composite_memory(&ctx.agent_dir).await;
