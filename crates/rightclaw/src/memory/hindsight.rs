@@ -136,6 +136,12 @@ impl HindsightClient {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_http_client(mut self, http: reqwest::Client) -> Self {
+        self.http = http;
+        self
+    }
+
     /// Store content in the memory bank.
     pub async fn retain(
         &self,
@@ -168,7 +174,7 @@ impl HindsightClient {
             .timeout(RETAIN_TIMEOUT)
             .send()
             .await
-            .map_err(|e| MemoryError::HindsightRequest(format!("{e:#}")))?;
+            .map_err(MemoryError::from_reqwest)?;
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
@@ -178,7 +184,7 @@ impl HindsightClient {
 
         resp.json::<RetainResponse>()
             .await
-            .map_err(|e| MemoryError::HindsightRequest(format!("parse retain response: {e:#}")))
+            .map_err(MemoryError::from_parse)
     }
 
     /// Recall memories relevant to a query.
@@ -208,7 +214,7 @@ impl HindsightClient {
             .timeout(RECALL_TIMEOUT)
             .send()
             .await
-            .map_err(|e| MemoryError::HindsightRequest(format!("{e:#}")))?;
+            .map_err(MemoryError::from_reqwest)?;
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
@@ -219,7 +225,7 @@ impl HindsightClient {
         let response: RecallResponse = resp
             .json()
             .await
-            .map_err(|e| MemoryError::HindsightRequest(format!("parse recall response: {e:#}")))?;
+            .map_err(MemoryError::from_parse)?;
         Ok(response.results)
     }
 
@@ -245,7 +251,7 @@ impl HindsightClient {
             .timeout(REFLECT_TIMEOUT)
             .send()
             .await
-            .map_err(|e| MemoryError::HindsightRequest(format!("{e:#}")))?;
+            .map_err(MemoryError::from_reqwest)?;
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
@@ -255,9 +261,7 @@ impl HindsightClient {
 
         resp.json::<ReflectResponse>()
             .await
-            .map_err(|e| {
-                MemoryError::HindsightRequest(format!("parse reflect response: {e:#}"))
-            })
+            .map_err(MemoryError::from_parse)
     }
 
     /// Get the bank profile, creating the bank if it doesn't exist.
@@ -274,7 +278,7 @@ impl HindsightClient {
             .timeout(RECALL_TIMEOUT)
             .send()
             .await
-            .map_err(|e| MemoryError::HindsightRequest(format!("{e:#}")))?;
+            .map_err(MemoryError::from_reqwest)?;
 
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
@@ -284,9 +288,7 @@ impl HindsightClient {
 
         resp.json::<BankProfile>()
             .await
-            .map_err(|e| {
-                MemoryError::HindsightRequest(format!("parse bank profile response: {e:#}"))
-            })
+            .map_err(MemoryError::from_parse)
     }
 }
 
@@ -602,5 +604,49 @@ mod tests {
             MemoryError::Hindsight { status, .. } => assert_eq!(status, 401),
             other => panic!("expected Hindsight error, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn retain_timeout_maps_to_timeout_variant() {
+        // Mock server accepts the TCP connection and holds the stream open so
+        // the client waits for a response body that never comes. The code's
+        // per-request `.timeout(RETAIN_TIMEOUT)` fires and produces a timeout
+        // error classified as HindsightTimeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let _keep = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                drop(stream);
+            }
+        });
+
+        // Client-level timeout is ignored once the method sets its own
+        // `.timeout(RETAIN_TIMEOUT)` per-request — this test tolerates the
+        // real 10s wait as the tradeoff for exercising the real code path.
+        let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(&url))
+            .with_http_client(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_millis(200))
+                    .build()
+                    .unwrap(),
+            );
+        let err = client.retain("x", None, None, None, None).await.unwrap_err();
+        assert!(
+            matches!(err, MemoryError::HindsightTimeout),
+            "expected HindsightTimeout, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retain_connect_failure_maps_to_connect_variant() {
+        // Port 1 is unprivileged-closed on typical dev machines.
+        let client = HindsightClient::new("hs_x", "b", "high", 1024, Some("http://127.0.0.1:1"));
+        let err = client.retain("x", None, None, None, None).await.unwrap_err();
+        assert!(
+            matches!(err, MemoryError::HindsightConnect(_)),
+            "expected HindsightConnect, got: {err:?}"
+        );
     }
 }
