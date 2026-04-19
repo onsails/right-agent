@@ -184,7 +184,7 @@ impl HindsightClient {
 
         resp.json::<RetainResponse>()
             .await
-            .map_err(MemoryError::from_parse)
+            .map_err(MemoryError::from_reqwest)
     }
 
     /// Recall memories relevant to a query.
@@ -225,7 +225,7 @@ impl HindsightClient {
         let response: RecallResponse = resp
             .json()
             .await
-            .map_err(MemoryError::from_parse)?;
+            .map_err(MemoryError::from_reqwest)?;
         Ok(response.results)
     }
 
@@ -261,7 +261,7 @@ impl HindsightClient {
 
         resp.json::<ReflectResponse>()
             .await
-            .map_err(MemoryError::from_parse)
+            .map_err(MemoryError::from_reqwest)
     }
 
     /// Get the bank profile, creating the bank if it doesn't exist.
@@ -288,7 +288,7 @@ impl HindsightClient {
 
         resp.json::<BankProfile>()
             .await
-            .map_err(MemoryError::from_parse)
+            .map_err(MemoryError::from_reqwest)
     }
 }
 
@@ -647,6 +647,49 @@ mod tests {
         assert!(
             matches!(err, MemoryError::HindsightConnect(_)),
             "expected HindsightConnect, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retain_json_body_timeout_maps_to_timeout_variant() {
+        // Simulate a mid-body-stream timeout: server accepts the request,
+        // writes valid response headers advertising a body larger than what
+        // it sends, then stalls past the per-request RETAIN_TIMEOUT (10s).
+        // The client's `.json()` call (which reads the full body via
+        // `bytes().await`) observes the per-request timeout firing during
+        // body read. reqwest classifies this as both `is_timeout() == true`
+        // and `is_decode() == true` — because `is_timeout()` walks the source
+        // chain looking for the internal `TimedOut` marker. Since our
+        // `from_reqwest` checks `is_timeout()` FIRST, this must surface as
+        // `HindsightTimeout`, not `HindsightParse`. This guards against
+        // routing `.json()` errors through `from_parse` (which would
+        // type-erase the timeout kind and misclassify a transient timeout
+        // as a malformed-body poison pill).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+
+        let _keep = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 8192];
+                let _ = stream.read(&mut buf).await;
+                let header = "HTTP/1.1 200 OK\r\nContent-Length: 999\r\nContent-Type: application/json\r\n\r\n";
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(b"{\"id\":\"x\"").await;
+                let _ = stream.flush().await;
+                // Sleep past RETAIN_TIMEOUT (10s) so the per-request timeout
+                // fires during body read instead of EOF on stream drop.
+                tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+                drop(stream);
+            }
+        });
+
+        let client = test_client(&url);
+        let err = client.retain("x", None, None, None, None).await.unwrap_err();
+        assert!(
+            matches!(err, MemoryError::HindsightTimeout),
+            "expected HindsightTimeout, got: {err:?}"
         );
     }
 }
