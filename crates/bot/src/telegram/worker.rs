@@ -93,7 +93,7 @@ pub struct WorkerContext {
     /// Internal API client for aggregator IPC (Unix socket).
     pub internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
     /// Hindsight client for auto-retain/recall (None when memory.provider=file).
-    pub hindsight: Option<std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
+    pub hindsight: Option<std::sync::Arc<rightclaw::memory::ResilientHindsight>>,
     /// Prefetch cache for auto-recall results (None when memory.provider=file).
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     /// RwLock gate — worker acquires read lock before invoke_cc to block during upgrades.

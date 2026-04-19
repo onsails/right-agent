@@ -76,7 +76,7 @@ pub struct AgentSettings {
     /// Resolved sandbox name (None when running without sandbox).
     pub resolved_sandbox: Option<String>,
     /// Hindsight memory client (None when using file-based memory).
-    pub hindsight: Option<std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
+    pub hindsight: Option<std::sync::Arc<rightclaw::memory::ResilientHindsight>>,
     /// Prefetch cache for Hindsight recall results.
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     /// RwLock gate — upgrade takes write (exclusive), CC invocations take read (shared).

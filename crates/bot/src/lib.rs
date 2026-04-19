@@ -148,7 +148,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let _allowlist_watcher = allowlist::spawn_watcher(&agent_dir, allowlist.clone())
         .map_err(|e| miette::miette!("allowlist watcher: {e:#}"))?;
 
-    // Memory: initialize HindsightClient and prefetch cache if configured.
+    // Memory: initialize ResilientHindsight wrapper + prefetch cache if configured.
     let memory_provider = config
         .memory
         .as_ref()
@@ -156,8 +156,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .cloned()
         .unwrap_or_default();
 
-    let (hindsight_client, prefetch_cache): (
-        Option<Arc<rightclaw::memory::hindsight::HindsightClient>>,
+    let (hindsight_wrapper, prefetch_cache): (
+        Option<Arc<rightclaw::memory::ResilientHindsight>>,
         Option<rightclaw::memory::prefetch::PrefetchCache>,
     ) = match &memory_provider {
         rightclaw::agent::types::MemoryProvider::Hindsight => {
@@ -171,27 +171,79 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         "Hindsight memory provider requires an API key"
                     )
                 })?;
-            let bank_id = mem_config.bank_id.as_deref().unwrap_or(&args.agent);
+            let bank_id = mem_config.bank_id.as_deref().unwrap_or(&args.agent).to_string();
             let budget = mem_config.recall_budget.to_string();
             let client = rightclaw::memory::hindsight::HindsightClient::new(
                 &api_key,
-                bank_id,
+                &bank_id,
                 &budget,
                 mem_config.recall_max_tokens,
                 None,
             );
-            match client.get_or_create_bank().await {
-                Ok(profile) => {
-                    tracing::info!(agent = %args.agent, bank_id = %profile.bank_id, "Hindsight memory bank ready");
+
+            let wrapper = Arc::new(rightclaw::memory::ResilientHindsight::new(
+                client,
+                agent_dir.clone(),
+                "bot",
+            ));
+
+            match wrapper
+                .get_or_create_bank(rightclaw::memory::resilient::POLICY_STARTUP_BANK)
+                .await
+            {
+                Ok(profile) => tracing::info!(
+                    agent = %args.agent,
+                    bank_id = %profile.bank_id,
+                    "Hindsight bank ready"
+                ),
+                Err(rightclaw::memory::ResilientError::Upstream(e)) => {
+                    match e.classify() {
+                        rightclaw::memory::ErrorKind::Auth => tracing::error!(
+                            agent = %args.agent,
+                            "Hindsight AUTH failed at startup: {e:#} — booting in degraded mode"
+                        ),
+                        rightclaw::memory::ErrorKind::Client => tracing::error!(
+                            agent = %args.agent,
+                            "Hindsight 4xx at startup: {e:#} — payload or API-drift bug"
+                        ),
+                        _ => {
+                            tracing::warn!(
+                                agent = %args.agent,
+                                "Hindsight transient at startup: {e:#} — will retry in background"
+                            );
+                            let w_bg = wrapper.clone();
+                            tokio::spawn(async move {
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                    match w_bg
+                                        .get_or_create_bank(
+                                            rightclaw::memory::resilient::POLICY_STARTUP_BANK,
+                                        )
+                                        .await
+                                    {
+                                        Ok(p) => {
+                                            tracing::info!(
+                                                bank_id = %p.bank_id,
+                                                "background bank probe succeeded"
+                                            );
+                                            return;
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            "background bank probe failed: {e:#}"
+                                        ),
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
-                Err(e) => {
-                    return Err(miette::miette!(
-                        "Hindsight bank init failed: {e:#}. Check api_key in agent.yaml."
-                    ));
+                Err(rightclaw::memory::ResilientError::CircuitOpen { .. }) => {
+                    tracing::warn!("unexpected CircuitOpen at startup");
                 }
             }
+
             let cache = rightclaw::memory::prefetch::PrefetchCache::new();
-            (Some(Arc::new(client)), Some(cache))
+            (Some(wrapper), Some(cache))
         }
         rightclaw::agent::types::MemoryProvider::File => (None, None),
     };
@@ -537,7 +589,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             Arc::clone(&idle_timestamp),
             Arc::clone(&internal_client),
             resolved_sandbox,
-            hindsight_client,
+            hindsight_wrapper,
             prefetch_cache,
             upgrade_lock,
         ) => result,

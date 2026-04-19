@@ -87,7 +87,7 @@ pub async fn run_telegram(
     idle_ts: Arc<IdleTimestamp>,
     internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
     resolved_sandbox: Option<String>,
-    hindsight_client: Option<std::sync::Arc<rightclaw::memory::hindsight::HindsightClient>>,
+    hindsight_wrapper: Option<std::sync::Arc<rightclaw::memory::ResilientHindsight>>,
     prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
 ) -> miette::Result<()> {
@@ -126,7 +126,7 @@ pub async fn run_telegram(
         show_thinking,
         model,
         resolved_sandbox,
-        hindsight: hindsight_client,
+        hindsight: hindsight_wrapper,
         prefetch_cache,
         upgrade_lock,
         debug,
