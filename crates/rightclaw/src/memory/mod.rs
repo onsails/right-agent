@@ -4,6 +4,7 @@ pub mod error;
 pub mod guard;
 pub mod hindsight;
 pub mod prefetch;
+pub mod resilient;
 pub mod retain_queue;
 pub mod status;
 pub mod store;
@@ -11,6 +12,7 @@ pub(crate) mod migrations;
 
 pub use classify::ErrorKind;
 pub use error::MemoryError;
+pub use resilient::{ResilientError, ResilientHindsight};
 pub use status::MemoryStatus;
 
 /// Opens (or creates) the per-agent SQLite memory database at `agent_path/data.db`.
