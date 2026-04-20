@@ -101,12 +101,12 @@ fn v13_one_shot_cron(tx: &Transaction) -> Result<(), HookError> {
 /// to 'none' which matches the setup-token (subscription) auth mode all
 /// current RightClaw deployments use.
 fn v16_usage_api_key_source(tx: &Transaction) -> Result<(), HookError> {
-    let has_column: bool = tx.query_row(
-        "SELECT COUNT(*) > 0 FROM pragma_table_info('usage_events') WHERE name = ?1",
+    let count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('usage_events') WHERE name = ?1",
         ["api_key_source"],
         |r| r.get(0),
     )?;
-    if !has_column {
+    if count == 0 {
         tx.execute_batch(
             "ALTER TABLE usage_events ADD COLUMN api_key_source TEXT NOT NULL DEFAULT 'none'",
         )?;
