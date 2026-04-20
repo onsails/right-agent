@@ -1,3 +1,8 @@
+// Shared integration-test helpers. `#[allow(dead_code)]` silences per-test-file
+// dead_code warnings that fire when a helper is used in some test files but
+// not others.
+#![allow(dead_code)]
+
 use rightclaw::memory::ResilientHindsight;
 use rightclaw::memory::hindsight::HindsightClient;
 

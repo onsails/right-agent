@@ -1,6 +1,6 @@
 //! Integration scenarios covering memory failure handling.
 
-use rightclaw::memory::hindsight::{HindsightClient, RetainItem};
+use rightclaw::memory::hindsight::RetainItem;
 use rightclaw::memory::resilient::{
     POLICY_AUTO_RETAIN, POLICY_MCP_RECALL,
 };
