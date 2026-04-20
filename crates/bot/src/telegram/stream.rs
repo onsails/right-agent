@@ -117,6 +117,26 @@ pub fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
     })
 }
 
+/// Parse `apiKeySource` from the CC `system/init` NDJSON line.
+///
+/// Returns `None` when:
+/// - line is not valid JSON
+/// - `type` is not `"system"` or `subtype` is not `"init"`
+/// - `apiKeySource` key is absent
+///
+/// Callers fall back to `"none"` (subscription) if `None` is returned —
+/// matching the column default in the `usage_events` table.
+pub fn parse_api_key_source(init_json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(init_json).ok()?;
+    if v.get("type")?.as_str()? != "system" {
+        return None;
+    }
+    if v.get("subtype")?.as_str()? != "init" {
+        return None;
+    }
+    v.get("apiKeySource")?.as_str().map(|s| s.to_string())
+}
+
 /// Format a single event for Telegram display (HTML mode).
 ///
 /// All dynamic content is HTML-escaped for safe use with ParseMode::Html.
@@ -462,6 +482,42 @@ mod tests {
         let summary = summarize_tool_input("UnknownTool", &long_json);
         assert!(summary.chars().count() <= 81); // 80 + "…"
         assert!(summary.contains('…'));
+    }
+
+    #[test]
+    fn parse_api_key_source_happy_path() {
+        let line = r#"{"type":"system","subtype":"init","cwd":"/x","session_id":"s","tools":[],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"bypassPermissions","slash_commands":[],"apiKeySource":"none"}"#;
+        assert_eq!(parse_api_key_source(line).as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn parse_api_key_source_api_key_mode() {
+        let line = r#"{"type":"system","subtype":"init","apiKeySource":"ANTHROPIC_API_KEY"}"#;
+        assert_eq!(parse_api_key_source(line).as_deref(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn parse_api_key_source_wrong_type_returns_none() {
+        // Result event has apiKeySource-adjacent fields but different type.
+        let line = r#"{"type":"result","apiKeySource":"none"}"#;
+        assert!(parse_api_key_source(line).is_none());
+    }
+
+    #[test]
+    fn parse_api_key_source_wrong_subtype_returns_none() {
+        let line = r#"{"type":"system","subtype":"other","apiKeySource":"none"}"#;
+        assert!(parse_api_key_source(line).is_none());
+    }
+
+    #[test]
+    fn parse_api_key_source_missing_field_returns_none() {
+        let line = r#"{"type":"system","subtype":"init"}"#;
+        assert!(parse_api_key_source(line).is_none());
+    }
+
+    #[test]
+    fn parse_api_key_source_malformed_json_returns_none() {
+        assert!(parse_api_key_source("not json").is_none());
     }
 
     #[test]
