@@ -1,6 +1,7 @@
 //! Stream event parsing, formatting, and ring buffer for CC stream-json output.
 
 use std::collections::VecDeque;
+use rightclaw::usage::UsageBreakdown;
 
 /// A parsed stream event from CC's stream-json output.
 #[derive(Debug, Clone)]
@@ -78,6 +79,40 @@ pub fn parse_usage(result_json: &str) -> StreamUsage {
             .and_then(|n| n.as_f64())
             .unwrap_or(0.0),
     }
+}
+
+/// Parse the full `result` event JSON into `UsageBreakdown`. Returns `None` if
+/// required fields (`total_cost_usd`, `num_turns`, `session_id`) are missing or
+/// the JSON is malformed. The `modelUsage` object is preserved as a JSON string
+/// for per-model reduction at read time.
+pub fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
+    let v: serde_json::Value = serde_json::from_str(result_json).ok()?;
+
+    let total_cost_usd = v.get("total_cost_usd")?.as_f64()?;
+    let num_turns = u32::try_from(v.get("num_turns")?.as_u64()?).ok()?;
+    let session_uuid = v.get("session_id")?.as_str()?.to_string();
+
+    let get_u64 = |ptr: &str| -> u64 {
+        v.pointer(ptr).and_then(|n| n.as_u64()).unwrap_or(0)
+    };
+
+    let model_usage_json = v
+        .get("modelUsage")
+        .map(|m| m.to_string())
+        .unwrap_or_else(|| "{}".to_string());
+
+    Some(UsageBreakdown {
+        session_uuid,
+        total_cost_usd,
+        num_turns,
+        input_tokens: get_u64("/usage/input_tokens"),
+        output_tokens: get_u64("/usage/output_tokens"),
+        cache_creation_tokens: get_u64("/usage/cache_creation_input_tokens"),
+        cache_read_tokens: get_u64("/usage/cache_read_input_tokens"),
+        web_search_requests: get_u64("/usage/server_tool_use/web_search_requests"),
+        web_fetch_requests: get_u64("/usage/server_tool_use/web_fetch_requests"),
+        model_usage_json,
+    })
 }
 
 /// Format a single event for Telegram display (HTML mode).
@@ -425,5 +460,75 @@ mod tests {
         let summary = summarize_tool_input("UnknownTool", &long_json);
         assert!(summary.chars().count() <= 81); // 80 + "…"
         assert!(summary.contains('…'));
+    }
+
+    #[test]
+    fn parse_usage_full_happy_path() {
+        let line = r#"{
+            "type":"result","subtype":"success","is_error":false,
+            "session_id":"abc-123",
+            "total_cost_usd":0.24,"num_turns":5,
+            "usage":{
+                "input_tokens":10,"output_tokens":200,
+                "cache_creation_input_tokens":500,"cache_read_input_tokens":1500,
+                "server_tool_use":{"web_search_requests":2,"web_fetch_requests":3}
+            },
+            "modelUsage":{
+                "claude-sonnet-4-6":{
+                    "inputTokens":10,"outputTokens":200,
+                    "cacheReadInputTokens":1500,"cacheCreationInputTokens":500,
+                    "costUSD":0.24,"contextWindow":200000,"maxOutputTokens":32000
+                }
+            }
+        }"#;
+        let breakdown = parse_usage_full(line).expect("happy path must parse");
+        assert_eq!(breakdown.session_uuid, "abc-123");
+        assert!((breakdown.total_cost_usd - 0.24).abs() < 1e-9);
+        assert_eq!(breakdown.num_turns, 5);
+        assert_eq!(breakdown.input_tokens, 10);
+        assert_eq!(breakdown.output_tokens, 200);
+        assert_eq!(breakdown.cache_creation_tokens, 500);
+        assert_eq!(breakdown.cache_read_tokens, 1500);
+        assert_eq!(breakdown.web_search_requests, 2);
+        assert_eq!(breakdown.web_fetch_requests, 3);
+        assert!(breakdown.model_usage_json.contains("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn parse_usage_full_missing_cost_returns_none() {
+        let line = r#"{"type":"result","session_id":"x","num_turns":1}"#;
+        assert!(parse_usage_full(line).is_none());
+    }
+
+    #[test]
+    fn parse_usage_full_missing_turns_returns_none() {
+        let line = r#"{"type":"result","session_id":"x","total_cost_usd":0.1}"#;
+        assert!(parse_usage_full(line).is_none());
+    }
+
+    #[test]
+    fn parse_usage_full_missing_session_id_returns_none() {
+        let line = r#"{"type":"result","total_cost_usd":0.1,"num_turns":1}"#;
+        assert!(parse_usage_full(line).is_none());
+    }
+
+    #[test]
+    fn parse_usage_full_missing_model_usage_uses_empty_object() {
+        let line = r#"{
+            "type":"result","session_id":"x",
+            "total_cost_usd":0.1,"num_turns":1,
+            "usage":{"input_tokens":5,"output_tokens":7}
+        }"#;
+        let b = parse_usage_full(line).expect("must parse");
+        assert_eq!(b.model_usage_json, "{}");
+        assert_eq!(b.input_tokens, 5);
+        assert_eq!(b.output_tokens, 7);
+        assert_eq!(b.cache_creation_tokens, 0);
+        assert_eq!(b.web_search_requests, 0);
+    }
+
+    #[test]
+    fn parse_usage_full_invalid_json_returns_none() {
+        assert!(parse_usage_full("not json").is_none());
     }
 }
