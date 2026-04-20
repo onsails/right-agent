@@ -1,6 +1,7 @@
 //! Stream event parsing, formatting, and ring buffer for CC stream-json output.
 
 use std::collections::VecDeque;
+
 use rightclaw::usage::UsageBreakdown;
 
 /// A parsed stream event from CC's stream-json output.

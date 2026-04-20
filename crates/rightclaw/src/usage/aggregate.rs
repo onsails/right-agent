@@ -71,10 +71,17 @@ fn aggregate_per_model(
     let mut out: BTreeMap<String, ModelTotals> = BTreeMap::new();
     for row in rows {
         let json = row?;
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else {
-            continue; // skip malformed rows rather than failing the whole query
+        let v: serde_json::Value = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(source, "skipping row with malformed model_usage_json: {e}");
+                continue;
+            }
         };
-        let Some(obj) = v.as_object() else { continue };
+        let Some(obj) = v.as_object() else {
+            tracing::warn!(source, "skipping row: model_usage_json is not an object");
+            continue;
+        };
         for (model_name, fields) in obj {
             let cost = fields.get("costUSD").and_then(|n| n.as_f64()).unwrap_or(0.0);
             let input = fields.get("inputTokens").and_then(|n| n.as_u64()).unwrap_or(0);

@@ -582,17 +582,10 @@ async fn execute_job(
             }
         }
     } else {
-        // Build failure notification (Fix 3)
         let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
-        let error_detail = collected_lines
-            .iter()
-            .rev()
-            .find_map(|line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .ok()
-                    .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("result"))
-                    .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
-            })
+        let error_detail = find_last_result_line(&collected_lines)
+            .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
             .unwrap_or_else(|| stderr_str.to_string());
         let content =
             format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{error_detail}");
@@ -615,19 +608,26 @@ async fn execute_job(
         }
     }
 
-    // Write usage_events row (best-effort — telemetry must not block cron outcome).
-    if let Some(result_line) = collected_lines.iter().rev().find(|line| {
-        serde_json::from_str::<serde_json::Value>(line)
-            .ok()
-            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "result"))
-            .unwrap_or(false)
-    }) {
-        if let Some(breakdown) = crate::telegram::stream::parse_usage_full(result_line) {
-            if let Err(e) = rightclaw::usage::insert::insert_cron(&conn, &breakdown, job_name) {
-                tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
+    if let Some(result_line) = find_last_result_line(&collected_lines) {
+        match crate::telegram::stream::parse_usage_full(result_line) {
+            Some(breakdown) => {
+                if let Err(e) = rightclaw::usage::insert::insert_cron(&conn, &breakdown, job_name) {
+                    tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
+                }
+            }
+            None => {
+                tracing::warn!(job = %job_name, "result event missing required usage fields");
             }
         }
     }
+}
+
+/// Return the last NDJSON line whose `type` field equals `"result"`.
+fn find_last_result_line(lines: &[String]) -> Option<&str> {
+    lines.iter().rev().find_map(|line| {
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        (v.get("type").and_then(|t| t.as_str()) == Some("result")).then_some(line.as_str())
+    })
 }
 
 /// Parse CC stream-json output (NDJSON lines) into `CronReplyOutput`.

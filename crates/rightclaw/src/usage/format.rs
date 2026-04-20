@@ -1,7 +1,4 @@
 //! Telegram HTML message rendering for `/usage`.
-//!
-//! Input: 4 windows × 2 sources = 8 `WindowSummary` values, passed as the
-//! `AllWindows` struct. Output: HTML string, HTML-escaped, ≤ 4096 chars.
 
 use crate::usage::WindowSummary;
 

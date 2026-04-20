@@ -1465,7 +1465,6 @@ pub async fn handle_usage(
         tracing::debug!(cmd = "usage", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
-    tracing::info!("handle_usage: running");
     let text = match build_usage_summary(&agent_dir.0).await {
         Ok(t) => t,
         Err(e) => format!("Failed to read usage: {e:#}"),
