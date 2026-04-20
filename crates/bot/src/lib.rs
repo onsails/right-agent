@@ -264,6 +264,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             let local = tokio::task::LocalSet::new();
             handle.block_on(local.run_until(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 interval.tick().await; // first tick is immediate
                 loop {
                     interval.tick().await;

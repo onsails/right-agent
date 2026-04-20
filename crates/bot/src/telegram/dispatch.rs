@@ -142,18 +142,15 @@ pub async fn run_telegram(
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
 
     // Spawn memory-alerts watcher (AuthFailed + client-flood) — only when Hindsight is configured.
-    // Snapshot allowlist chats at startup: union of trusted user ids and opened group ids.
+    // Pass the live allowlist handle; recipients are resolved at broadcast time so
+    // /allow / /deny / allowlist.yaml hot-reload changes after startup are honored.
     if let Some(ref w) = settings_arc.hindsight {
-        let chats: Vec<i64> = {
-            let state = allowlist.0.read().expect("allowlist lock poisoned");
-            state
-                .users()
-                .iter()
-                .map(|u| u.id)
-                .chain(state.groups().iter().map(|g| g.id))
-                .collect()
-        };
-        super::memory_alerts::spawn_watcher(bot.clone(), w.clone(), agent_dir_arc.0.clone(), chats);
+        super::memory_alerts::spawn_watcher(
+            bot.clone(),
+            w.clone(),
+            agent_dir_arc.0.clone(),
+            allowlist.clone(),
+        );
     }
 
     let mut dispatcher = build_dispatcher(
