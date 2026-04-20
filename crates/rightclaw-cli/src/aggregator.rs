@@ -184,7 +184,7 @@ impl HindsightBackend {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing required param: content"))?;
                 let context = args["context"].as_str();
-                let result = self
+                let res = self
                     .client
                     .retain(
                         content,
@@ -194,15 +194,62 @@ impl HindsightBackend {
                         None,
                         rightclaw::memory::resilient::POLICY_MCP_RETAIN,
                     )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-                let json = serde_json::json!({
-                    "status": "accepted",
-                    "operation_id": result.operation_id,
-                });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json)?,
-                )]))
+                    .await;
+                match res {
+                    Ok(result) => {
+                        let json = serde_json::json!({
+                            "status": "accepted",
+                            "operation_id": result.operation_id,
+                        });
+                        Ok(CallToolResult::success(vec![Content::text(
+                            serde_json::to_string_pretty(&json)?,
+                        )]))
+                    }
+                    Err(rightclaw::memory::ResilientError::Upstream(e)) => {
+                        // ResilientHindsight::retain enqueues for later drain on
+                        // Transient/RateLimited. Surface that as a success with a
+                        // "queued" marker so the agent does not report a hard
+                        // failure nor retry (which would double-enqueue — the
+                        // pending_retains queue does not dedup).
+                        match e.classify() {
+                            rightclaw::memory::ErrorKind::Transient
+                            | rightclaw::memory::ErrorKind::RateLimited => {
+                                let json = serde_json::json!({
+                                    "status": "queued",
+                                    "reason": "upstream degraded, queued for retry on next drain tick",
+                                    "detail": format!("{e:#}"),
+                                });
+                                Ok(CallToolResult::success(vec![Content::text(
+                                    serde_json::to_string_pretty(&json)?,
+                                )]))
+                            }
+                            rightclaw::memory::ErrorKind::Auth
+                            | rightclaw::memory::ErrorKind::Client
+                            | rightclaw::memory::ErrorKind::Malformed => {
+                                Err(anyhow::anyhow!("{e:#}"))
+                            }
+                        }
+                    }
+                    Err(rightclaw::memory::ResilientError::CircuitOpen { retry_after }) => {
+                        // retain() only enqueues on CircuitOpen when status is
+                        // NOT AuthFailed. Mirror that distinction here.
+                        if matches!(
+                            self.client.status(),
+                            rightclaw::memory::MemoryStatus::AuthFailed { .. }
+                        ) {
+                            Err(anyhow::anyhow!("memory auth failed; retain rejected"))
+                        } else {
+                            let json = serde_json::json!({
+                                "status": "queued",
+                                "reason": "circuit breaker open; queued for retry on next drain tick",
+                                "retry_after_secs": retry_after.map(|d| d.as_secs()),
+                            });
+                            Ok(CallToolResult::success(vec![Content::text(
+                                serde_json::to_string_pretty(&json)?,
+                            )]))
+                        }
+                    }
+                }
             }
             "memory_recall" => {
                 let query = args["query"]
