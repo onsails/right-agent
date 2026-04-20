@@ -14,10 +14,10 @@ pub struct ModelPricing {
 /// callers must render gracefully (e.g. omit the dollar portion of a
 /// cache-savings line).
 pub fn lookup(model: &str) -> Option<ModelPricing> {
-    if model == "claude-sonnet-4-6" {
+    if model.starts_with("claude-sonnet-4-6") {
         return Some(ModelPricing { input_per_mtok: 3.0, output_per_mtok: 15.0 });
     }
-    if model == "claude-opus-4-7" {
+    if model.starts_with("claude-opus-4-7") {
         return Some(ModelPricing { input_per_mtok: 15.0, output_per_mtok: 75.0 });
     }
     if model.starts_with("claude-haiku-4-5") {
@@ -55,6 +55,7 @@ mod tests {
     fn haiku_undated_variant_matches() {
         let p = lookup("claude-haiku-4-5").expect("undated haiku must match");
         assert!((p.input_per_mtok - 0.80).abs() < 1e-9);
+        assert!((p.output_per_mtok - 4.0).abs() < 1e-9);
     }
 
     #[test]
