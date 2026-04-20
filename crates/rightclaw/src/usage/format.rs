@@ -36,13 +36,13 @@ pub fn format_summary_message(w: &AllWindows, detail: bool) -> String {
     // Total footer: plain when single mode, split when both present.
     if total_sub > 0.0 && total_api > 0.0 {
         out.push_str(&format!(
-            "\nTotal retail: {} · subscription: {} · API-billed: {}\n",
+            "\n<b>Total retail:</b> {} · subscription: {} · API-billed: {}\n",
             format_cost(total_cost),
             format_cost(total_sub),
             format_cost(total_api),
         ));
     } else {
-        out.push_str(&format!("\nTotal retail: {}\n", format_cost(total_cost)));
+        out.push_str(&format!("\n<b>Total retail:</b> {}\n", format_cost(total_cost)));
     }
     out
 }
@@ -362,7 +362,7 @@ mod tests {
         w.today_interactive = sub_only("interactive", 0.1, "claude-sonnet-4-6");
         w.all_interactive = sub_only("interactive", 0.1, "claude-sonnet-4-6");
         let msg = format_summary_message(&w, false);
-        assert!(msg.contains("Total retail: $0.10"));
+        assert!(msg.contains("<b>Total retail:</b> $0.10"));
         assert!(!msg.contains("subscription:"), "single-mode footer must not show split");
     }
 
@@ -392,7 +392,7 @@ mod tests {
             all_cron: ws_all_cron,
         };
         let msg = format_summary_message(&w, false);
-        assert!(msg.contains("Total retail: $0.15"));
+        assert!(msg.contains("<b>Total retail:</b> $0.15"));
         assert!(msg.contains("subscription: $0.10"));
         assert!(msg.contains("API-billed: $0.05"));
     }
