@@ -74,9 +74,9 @@ fn render_window(title: &str, interactive: &WindowSummary, cron: &WindowSummary,
             format_cost(sub),
             format_cost(api),
         ));
-    } else if api == 0.0 && sub > 0.0 {
+    } else if sub > 0.0 {
         s.push_str("Subscription covers this (Claude subscription via setup-token)\n");
-    } else if sub == 0.0 && api > 0.0 {
+    } else if api > 0.0 {
         s.push_str("Billed via API key\n");
     }
     s.push('\n');
