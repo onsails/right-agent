@@ -83,7 +83,7 @@ fn render_source(label: &str, w: &WindowSummary, unit: &str) -> String {
 
 fn format_cost(v: f64) -> String {
     if v > 0.0 && v < 0.01 {
-        "<$0.01".to_string()
+        "&lt;$0.01".to_string()
     } else {
         format!("${v:.2}")
     }
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn cost_below_one_cent_shown_as_less_than() {
-        assert_eq!(format_cost(0.003), "<$0.01");
+        assert_eq!(format_cost(0.003), "&lt;$0.01");
         assert_eq!(format_cost(0.0), "$0.00");
         assert_eq!(format_cost(1.234), "$1.23");
     }
