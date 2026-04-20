@@ -1510,7 +1510,7 @@ async fn build_usage_summary(agent_dir: &Path) -> Result<String, miette::Report>
             .map_err(|e| miette::miette!("aggregate all/cron: {e:#}"))?,
     };
 
-    Ok(format_summary_message(&windows))
+    Ok(format_summary_message(&windows, false))
 }
 
 // ---------------------------------------------------------------------------
