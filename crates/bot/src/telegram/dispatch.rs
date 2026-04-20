@@ -206,6 +206,24 @@ pub async fn run_telegram(
         }
     });
 
+    // Pre-delete any language-scoped command lists from prior deployments.
+    // Telegram's resolution order is: scope+language wins over scope-only, so
+    // stale language-scoped entries shadow our fresh per-scope set. Best-effort,
+    // errors ignored (e.g. the slot was never populated).
+    for scope in [
+        teloxide::types::BotCommandScope::Default,
+        teloxide::types::BotCommandScope::AllPrivateChats,
+        teloxide::types::BotCommandScope::AllGroupChats,
+    ] {
+        for lang in ["en", "ru"] {
+            let _ = bot
+                .delete_my_commands()
+                .scope(scope.clone())
+                .language_code(lang.to_string())
+                .await;
+        }
+    }
+
     // Register commands in three overlapping scopes so autocomplete works in both DMs and
     // groups. Setting only Default is not enough when another tool sharing this token has
     // previously written a narrower scope (e.g. AllPrivateChats) — that narrower scope wins
