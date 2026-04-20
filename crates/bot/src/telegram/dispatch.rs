@@ -62,8 +62,8 @@ enum BotCommand {
     AllowAll,
     #[command(description = "Close this group (group only)", rename = "deny_all")]
     DenyAll,
-    #[command(description = "Show usage summary (cost, turns, tokens)")]
-    Usage,
+    #[command(description = "Show usage summary (add 'detail' for raw tokens)")]
+    Usage(String),
 }
 
 /// Run the teloxide long-polling dispatcher.
@@ -273,7 +273,7 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
         .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
-        .branch(dptree::case![BotCommand::Usage].endpoint(handle_usage))
+        .branch(dptree::case![BotCommand::Usage(arg)].endpoint(handle_usage))
         .branch(
             dptree::case![BotCommand::Allow(args)]
                 .endpoint(super::allowlist_commands::handle_allow),

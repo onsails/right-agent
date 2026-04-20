@@ -1456,16 +1456,20 @@ pub async fn handle_doctor(
 // ---------------------------------------------------------------------------
 
 /// Handle the /usage command — aggregate and render a usage summary.
+/// `arg` is the trailing text after `/usage`; accepts `"detail"` or `"d"` to
+/// include raw-tokens lines, anything else → default (no detail).
 pub async fn handle_usage(
     bot: BotType,
     msg: Message,
+    arg: String,
     agent_dir: Arc<AgentDir>,
 ) -> ResponseResult<()> {
     if !is_private_chat(&msg.chat.kind) {
         tracing::debug!(cmd = "usage", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
-    let text = match build_usage_summary(&agent_dir.0).await {
+    let detail = matches!(arg.trim().to_ascii_lowercase().as_str(), "detail" | "d");
+    let text = match build_usage_summary(&agent_dir.0, detail).await {
         Ok(t) => t,
         Err(e) => format!("Failed to read usage: {e:#}"),
     };
@@ -1474,7 +1478,7 @@ pub async fn handle_usage(
     Ok(())
 }
 
-async fn build_usage_summary(agent_dir: &Path) -> Result<String, miette::Report> {
+async fn build_usage_summary(agent_dir: &Path, detail: bool) -> Result<String, miette::Report> {
     use chrono::{Duration, Utc};
     use rightclaw::usage::aggregate::aggregate;
     use rightclaw::usage::format::{AllWindows, format_summary_message};
@@ -1510,7 +1514,7 @@ async fn build_usage_summary(agent_dir: &Path) -> Result<String, miette::Report>
             .map_err(|e| miette::miette!("aggregate all/cron: {e:#}"))?,
     };
 
-    Ok(format_summary_message(&windows, false))
+    Ok(format_summary_message(&windows, detail))
 }
 
 // ---------------------------------------------------------------------------
