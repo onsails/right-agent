@@ -16,6 +16,8 @@ const V11_SCHEMA: &str = include_str!("sql/v11_auth_tokens.sql");
 const V13_SCHEMA: &str = include_str!("sql/v13_one_shot_cron.sql");
 const V14_SCHEMA: &str = include_str!("sql/v14_memory_failure_handling.sql");
 const V15_SCHEMA: &str = include_str!("sql/v15_usage_events.sql");
+#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
+const V16_SCHEMA: &str = include_str!("sql/v16_usage_api_key_source.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -93,6 +95,25 @@ fn v13_one_shot_cron(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v16: Add api_key_source column to usage_events.
+///
+/// Idempotent — checks pragma_table_info before ALTER. Column defaults
+/// to 'none' which matches the setup-token (subscription) auth mode all
+/// current RightClaw deployments use.
+fn v16_usage_api_key_source(tx: &Transaction) -> Result<(), HookError> {
+    let has_column: bool = tx.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('usage_events') WHERE name = ?1",
+        ["api_key_source"],
+        |r| r.get(0),
+    )?;
+    if !has_column {
+        tx.execute_batch(
+            "ALTER TABLE usage_events ADD COLUMN api_key_source TEXT NOT NULL DEFAULT 'none'",
+        )?;
+    }
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -110,6 +131,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v13_one_shot_cron),
         M::up(V14_SCHEMA),
         M::up(V15_SCHEMA),
+        M::up_with_hook("", v16_usage_api_key_source),
     ])
 });
 
@@ -702,5 +724,66 @@ mod tests {
         MIGRATIONS.to_latest(&mut conn).unwrap();
         // Second call must be a no-op.
         MIGRATIONS.to_latest(&mut conn).unwrap();
+    }
+
+    #[test]
+    fn v16_usage_events_has_api_key_source() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('usage_events')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.contains(&"api_key_source".to_string()),
+            "api_key_source column missing"
+        );
+    }
+
+    #[test]
+    fn v16_backfills_existing_rows_to_none() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Apply up to v15, insert a row without api_key_source.
+        MIGRATIONS.to_version(&mut conn, 15).unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (
+                ts, source, session_uuid, total_cost_usd, num_turns, model_usage_json
+             ) VALUES ('2026-04-20T00:00:00Z','interactive','s',0.0,1,'{}')",
+            [],
+        )
+        .unwrap();
+        // Apply v16.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let src: String = conn
+            .query_row(
+                "SELECT api_key_source FROM usage_events LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(src, "none");
+    }
+
+    #[test]
+    fn v16_idempotent_when_column_already_exists() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 15).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE usage_events ADD COLUMN api_key_source TEXT NOT NULL DEFAULT 'none'",
+        )
+        .unwrap();
+        // v16 must succeed even though the column already exists.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('usage_events')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(cols.contains(&"api_key_source".to_string()));
     }
 }
