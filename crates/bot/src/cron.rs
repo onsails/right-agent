@@ -610,7 +610,12 @@ async fn execute_job(
 
     if let Some(result_line) = find_last_result_line(&collected_lines) {
         match crate::telegram::stream::parse_usage_full(result_line) {
-            Some(breakdown) => {
+            Some(mut breakdown) => {
+                // Scan all lines for the init event (first line that matches wins).
+                breakdown.api_key_source = collected_lines
+                    .iter()
+                    .find_map(|l| crate::telegram::stream::parse_api_key_source(l))
+                    .unwrap_or_else(|| "none".into());
                 if let Err(e) = rightclaw::usage::insert::insert_cron(&conn, &breakdown, job_name) {
                     tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
                 }
