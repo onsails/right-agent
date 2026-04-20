@@ -13,12 +13,17 @@ pub fn aggregate(
 ) -> Result<WindowSummary, UsageError> {
     let since_str = since.map(|t| t.to_rfc3339());
 
-    let (cost_usd, turns, invocations, input, output, cache_c, cache_r, web_s, web_f): (
-        f64, i64, i64, i64, i64, i64, i64, i64, i64,
-    ) = conn
+    let (
+        cost_usd, sub_cost, api_cost,
+        turns, invocations,
+        input, output, cache_c, cache_r,
+        web_s, web_f,
+    ): (f64, f64, f64, i64, i64, i64, i64, i64, i64, i64, i64) = conn
         .query_row(
             "SELECT
                 COALESCE(SUM(total_cost_usd), 0.0),
+                COALESCE(SUM(CASE WHEN api_key_source = 'none' THEN total_cost_usd ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN api_key_source != 'none' THEN total_cost_usd ELSE 0.0 END), 0.0),
                 COALESCE(SUM(num_turns), 0),
                 COUNT(*),
                 COALESCE(SUM(input_tokens), 0),
@@ -33,8 +38,9 @@ pub fn aggregate(
             rusqlite::params![source, since_str],
             |r| Ok((
                 r.get(0)?, r.get(1)?, r.get(2)?,
-                r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
-                r.get(7)?, r.get(8)?,
+                r.get(3)?, r.get(4)?,
+                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
+                r.get(9)?, r.get(10)?,
             )),
         )?;
 
@@ -43,8 +49,8 @@ pub fn aggregate(
     Ok(WindowSummary {
         source: source.to_string(),
         cost_usd,
-        subscription_cost_usd: 0.0,
-        api_cost_usd: 0.0,
+        subscription_cost_usd: sub_cost,
+        api_cost_usd: api_cost,
         turns: turns as u64,
         invocations: invocations as u64,
         input_tokens: input as u64,
@@ -177,6 +183,48 @@ mod tests {
         assert!((i.cost_usd - 0.1).abs() < 1e-9);
         assert_eq!(c.invocations, 1);
         assert!((c.cost_usd - 0.2).abs() < 1e-9);
+    }
+
+    fn breakdown_with_src(cost: f64, model: &str, src: &str) -> UsageBreakdown {
+        let mut b = breakdown(cost, model);
+        b.api_key_source = src.into();
+        b
+    }
+
+    #[test]
+    fn aggregate_splits_subscription_and_api_costs() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "none"), 1, 0).unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.20, "sonnet", "none"), 1, 0).unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.05, "sonnet", "ANTHROPIC_API_KEY"), 1, 0).unwrap();
+
+        let s = aggregate(&conn, None, "interactive").unwrap();
+        assert!((s.cost_usd - 0.35).abs() < 1e-9);
+        assert!((s.subscription_cost_usd - 0.30).abs() < 1e-9);
+        assert!((s.api_cost_usd - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_subscription_only_has_zero_api_cost() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "none"), 1, 0).unwrap();
+
+        let s = aggregate(&conn, None, "interactive").unwrap();
+        assert!((s.subscription_cost_usd - 0.10).abs() < 1e-9);
+        assert_eq!(s.api_cost_usd, 0.0);
+    }
+
+    #[test]
+    fn aggregate_api_only_has_zero_subscription_cost() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "ANTHROPIC_API_KEY"), 1, 0).unwrap();
+
+        let s = aggregate(&conn, None, "interactive").unwrap();
+        assert_eq!(s.subscription_cost_usd, 0.0);
+        assert!((s.api_cost_usd - 0.10).abs() < 1e-9);
     }
 
     #[test]
