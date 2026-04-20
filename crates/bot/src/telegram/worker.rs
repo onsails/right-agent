@@ -1226,6 +1226,15 @@ async fn invoke_cc(
                             super::stream::StreamEvent::Result(json) => {
                                 usage = super::stream::parse_usage(json);
                                 result_line = Some(json.clone());
+
+                                // Write usage_events row (best-effort — telemetry must not block the turn).
+                                if let Some(breakdown) = super::stream::parse_usage_full(json)
+                                    && let Err(e) = rightclaw::usage::insert::insert_interactive(
+                                        &conn, &breakdown, chat_id, eff_thread_id,
+                                    )
+                                {
+                                    tracing::warn!(?chat_id, "usage insert failed: {e:#}");
+                                }
                             }
                             _ => {
                                 if let Some(formatted) = super::stream::format_event(&event) {
