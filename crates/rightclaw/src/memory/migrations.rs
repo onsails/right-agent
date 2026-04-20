@@ -15,6 +15,7 @@ const V11_SCHEMA: &str = include_str!("sql/v11_auth_tokens.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V13_SCHEMA: &str = include_str!("sql/v13_one_shot_cron.sql");
 const V14_SCHEMA: &str = include_str!("sql/v14_memory_failure_handling.sql");
+const V15_SCHEMA: &str = include_str!("sql/v15_usage_events.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -108,6 +109,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v12_cron_diagnostics),
         M::up_with_hook("", v13_one_shot_cron),
         M::up(V14_SCHEMA),
+        M::up(V15_SCHEMA),
     ])
 });
 
@@ -660,5 +662,45 @@ mod tests {
             idx_count, 1,
             "idx_pending_retains_created should exist after idempotent v14"
         );
+    }
+
+    #[test]
+    fn v15_creates_usage_events_table_with_indexes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        // Table exists and is writable.
+        conn.execute_batch(
+            "INSERT INTO usage_events (
+                ts, source, session_uuid, total_cost_usd, num_turns,
+                model_usage_json
+             ) VALUES (
+                '2026-04-20T00:00:00Z', 'interactive', 'test-uuid', 0.05, 3, '{}'
+             );"
+        ).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Indexes present.
+        let indexes: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='usage_events'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(indexes.iter().any(|n| n == "idx_usage_events_ts"));
+        assert!(indexes.iter().any(|n| n == "idx_usage_events_source_ts"));
+    }
+
+    #[test]
+    fn v15_migration_is_idempotent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        // Second call must be a no-op.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
     }
 }
