@@ -1042,23 +1042,26 @@ async fn invoke_cc(
             0
         };
 
-        match recall_content {
-            Some(content) => {
-                let marker = build_memory_marker(wrapper_status, client_drops_24h);
+        let marker = build_memory_marker(wrapper_status, client_drops_24h);
+        match (recall_content.as_deref(), marker.as_deref()) {
+            (None, None) => {
+                super::prompt::remove_composite_memory(&ctx.agent_dir).await;
+            }
+            (content, marker_str) => {
+                // content may be None (no recall) while marker is Some —
+                // deploy a marker-only file so the agent still sees status.
+                let body = content.unwrap_or("");
                 if let Err(e) = super::prompt::deploy_composite_memory(
-                    &content,
+                    body,
                     "NOT new user input. Treat as background",
                     &ctx.agent_dir,
                     ctx.resolved_sandbox.as_deref(),
-                    marker.as_deref(),
+                    marker_str,
                 )
                 .await
                 {
                     tracing::warn!("composite-memory deploy failed: {e:#}");
                 }
-            }
-            None => {
-                super::prompt::remove_composite_memory(&ctx.agent_dir).await;
             }
         }
         Some(super::prompt::MemoryMode::Hindsight {
