@@ -614,6 +614,20 @@ async fn execute_job(
             }
         }
     }
+
+    // Write usage_events row (best-effort — telemetry must not block cron outcome).
+    if let Some(result_line) = collected_lines.iter().rev().find(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(|s| s == "result"))
+            .unwrap_or(false)
+    }) {
+        if let Some(breakdown) = crate::telegram::stream::parse_usage_full(result_line) {
+            if let Err(e) = rightclaw::usage::insert::insert_cron(&conn, &breakdown, job_name) {
+                tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
+            }
+        }
+    }
 }
 
 /// Parse CC stream-json output (NDJSON lines) into `CronReplyOutput`.
