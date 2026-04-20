@@ -27,10 +27,6 @@ pub enum MemoryError {
 
     #[error("hindsight request error: {0}")]
     HindsightOther(String),
-
-    #[deprecated(note = "use HindsightTimeout/Connect/Parse/Other variants")]
-    #[error("hindsight request failed: {0}")]
-    HindsightRequest(String),
 }
 
 impl MemoryError {

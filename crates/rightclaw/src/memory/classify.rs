@@ -17,7 +17,6 @@ impl MemoryError {
     /// Classify this error. Non-Hindsight variants (Sqlite/Migration/Injection/NotFound)
     /// are unreachable at the wrapper boundary and classified as `Transient` defensively.
     pub fn classify(&self) -> ErrorKind {
-        #[allow(deprecated)] // legacy HindsightRequest arm for backwards compat
         match self {
             MemoryError::Hindsight { status, .. } => match *status {
                 401 | 403 => ErrorKind::Auth,
@@ -29,7 +28,6 @@ impl MemoryError {
             MemoryError::HindsightConnect(_) => ErrorKind::Transient,
             MemoryError::HindsightParse(_) => ErrorKind::Malformed,
             MemoryError::HindsightOther(_) => ErrorKind::Transient,
-            MemoryError::HindsightRequest(_) => ErrorKind::Transient, // legacy
             MemoryError::Sqlite(_)
             | MemoryError::Migration(_)
             | MemoryError::InjectionDetected
