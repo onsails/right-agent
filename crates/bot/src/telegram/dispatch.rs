@@ -26,7 +26,7 @@ use super::filter::make_routing_filter;
 use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
     RightclawHome, SshConfigPath, handle_cron, handle_doctor, handle_list, handle_mcp,
-    handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
+    handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, handle_usage,
 };
 use super::mention::BotIdentity;
 use super::oauth_callback::PendingAuthMap;
@@ -62,6 +62,8 @@ enum BotCommand {
     AllowAll,
     #[command(description = "Close this group (group only)", rename = "deny_all")]
     DenyAll,
+    #[command(description = "Show usage summary (add 'detail' for raw tokens)")]
+    Usage(String),
 }
 
 /// Run the teloxide long-polling dispatcher.
@@ -204,6 +206,24 @@ pub async fn run_telegram(
         }
     });
 
+    // Pre-delete any language-scoped command lists from prior deployments.
+    // Telegram's resolution order is: scope+language wins over scope-only, so
+    // stale language-scoped entries shadow our fresh per-scope set. Best-effort,
+    // errors ignored (e.g. the slot was never populated).
+    for scope in [
+        teloxide::types::BotCommandScope::Default,
+        teloxide::types::BotCommandScope::AllPrivateChats,
+        teloxide::types::BotCommandScope::AllGroupChats,
+    ] {
+        for lang in ["en", "ru"] {
+            let _ = bot
+                .delete_my_commands()
+                .scope(scope.clone())
+                .language_code(lang.to_string())
+                .await;
+        }
+    }
+
     // Register commands in three overlapping scopes so autocomplete works in both DMs and
     // groups. Setting only Default is not enough when another tool sharing this token has
     // previously written a narrower scope (e.g. AllPrivateChats) — that narrower scope wins
@@ -271,6 +291,7 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
         .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
+        .branch(dptree::case![BotCommand::Usage(arg)].endpoint(handle_usage))
         .branch(
             dptree::case![BotCommand::Allow(args)]
                 .endpoint(super::allowlist_commands::handle_allow),

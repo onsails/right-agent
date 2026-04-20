@@ -142,14 +142,14 @@ mod tests {
     }
 
     #[test]
-    fn user_version_is_14() {
+    fn user_version_is_16() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
         let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14, "user_version should be 14 after V14 migration");
+        assert_eq!(version, 16, "user_version should be 16 after V16 migration");
     }
 
     #[test]

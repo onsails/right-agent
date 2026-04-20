@@ -289,6 +289,11 @@ pub async fn run_delivery_loop(
         .await
         {
             Ok(()) => {
+                // TODO(usage): delivery stream capture lives elsewhere — follow up.
+                // deliver_through_session uses OutputFormat::Json (single JSON blob, not stream-json
+                // NDJSON), so there is no "result" event line to feed parse_usage_full. Usage
+                // tracking for delivery sessions requires either switching to stream-json output
+                // or extracting cost from the non-streaming JSON response format.
                 if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "delivered") {
                     tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
                     delivered_in_memory.insert(to_deliver.id.clone());
