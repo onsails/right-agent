@@ -8,6 +8,7 @@ pub mod aggregate;
 pub mod error;
 pub mod format;
 pub mod insert;
+pub mod pricing;
 
 use std::collections::BTreeMap;
 
