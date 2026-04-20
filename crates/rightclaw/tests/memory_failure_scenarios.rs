@@ -145,3 +145,21 @@ async fn queue_eviction_at_cap() {
     ).unwrap();
     assert_eq!(first_gone, 0, "row-0 should have been evicted");
 }
+
+#[tokio::test]
+async fn two_wrappers_have_independent_breakers() {
+    let (_h1, url_bad) = common::mock::always(500, r#"{"error":"x"}"#).await;
+    let (_h2, url_ok) = common::mock::always(200, r#"{"results":[]}"#).await;
+
+    let bot_wrapper = common::wrap(&url_bad, "bot").await;
+    let agg_wrapper = common::wrap(&url_ok, "aggregator").await;
+
+    for _ in 0..6 {
+        let _ = bot_wrapper.recall("q", None, None, POLICY_MCP_RECALL).await;
+    }
+    assert!(matches!(bot_wrapper.status(), MemoryStatus::Degraded { .. }));
+
+    let res = agg_wrapper.recall("q", None, None, POLICY_MCP_RECALL).await;
+    assert!(res.is_ok(), "independent wrapper must still serve");
+    assert!(matches!(agg_wrapper.status(), MemoryStatus::Healthy));
+}
