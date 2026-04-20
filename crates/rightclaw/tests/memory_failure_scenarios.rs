@@ -97,3 +97,51 @@ async fn recovery_drains_queue_after_breaker_closes() {
 
     assert!(report.deleted > 0, "drain should have deleted at least one entry");
 }
+
+#[tokio::test]
+async fn drain_poison_pill_deleted_good_records_still_processed() {
+    let (_h, url) = common::mock::always(200, r#"{"success":true}"#).await;
+    let wrapper = common::wrap(&url, "bot").await;
+    let conn = rightclaw::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
+
+    rightclaw::memory::retain_queue::enqueue(
+        &conn, "bot", "POISON", None, None, None, None,
+    ).unwrap();
+    rightclaw::memory::retain_queue::enqueue(
+        &conn, "bot", "GOOD", None, None, None, None,
+    ).unwrap();
+
+    let report = rightclaw::memory::retain_queue::drain_tick(&conn, |items| {
+        async move {
+            if items[0].content == "POISON" {
+                Err(rightclaw::memory::ErrorKind::Client)
+            } else {
+                Ok(())
+            }
+        }
+    }).await;
+
+    assert_eq!(report.dropped_client, 1);
+    assert_eq!(report.deleted, 1);
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn queue_eviction_at_cap() {
+    let (_h, url) = common::mock::always(200, r#"{"success":true}"#).await;
+    let wrapper = common::wrap(&url, "bot").await;
+    let conn = rightclaw::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
+
+    for i in 0..(rightclaw::memory::retain_queue::QUEUE_CAP + 5) {
+        let c = format!("row-{i}");
+        rightclaw::memory::retain_queue::enqueue(&conn, "bot", &c, None, None, None, None).unwrap();
+    }
+
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0)).unwrap();
+    assert_eq!(n as usize, rightclaw::memory::retain_queue::QUEUE_CAP);
+    let first_gone: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pending_retains WHERE content = 'row-0'", [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(first_gone, 0, "row-0 should have been evicted");
+}
