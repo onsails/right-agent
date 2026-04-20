@@ -26,7 +26,7 @@ use super::filter::make_routing_filter;
 use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
     RightclawHome, SshConfigPath, handle_cron, handle_doctor, handle_list, handle_mcp,
-    handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
+    handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, handle_usage,
 };
 use super::mention::BotIdentity;
 use super::oauth_callback::PendingAuthMap;
@@ -62,6 +62,8 @@ enum BotCommand {
     AllowAll,
     #[command(description = "Close this group (group only)", rename = "deny_all")]
     DenyAll,
+    #[command(description = "Show usage summary (cost, turns, tokens)")]
+    Usage,
 }
 
 /// Run the teloxide long-polling dispatcher.
@@ -271,6 +273,7 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
         .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
+        .branch(dptree::case![BotCommand::Usage].endpoint(handle_usage))
         .branch(
             dptree::case![BotCommand::Allow(args)]
                 .endpoint(super::allowlist_commands::handle_allow),

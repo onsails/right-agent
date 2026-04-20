@@ -1452,6 +1452,69 @@ pub async fn handle_doctor(
 }
 
 // ---------------------------------------------------------------------------
+// /usage command handler
+// ---------------------------------------------------------------------------
+
+/// Handle the /usage command — aggregate and render a usage summary.
+pub async fn handle_usage(
+    bot: BotType,
+    msg: Message,
+    agent_dir: Arc<AgentDir>,
+) -> ResponseResult<()> {
+    if !is_private_chat(&msg.chat.kind) {
+        tracing::debug!(cmd = "usage", "ignoring command in group chat (DM-only)");
+        return Ok(());
+    }
+    tracing::info!("handle_usage: running");
+    let text = match build_usage_summary(&agent_dir.0).await {
+        Ok(t) => t,
+        Err(e) => format!("Failed to read usage: {e:#}"),
+    };
+    let eff_thread_id = effective_thread_id(&msg);
+    send_html_reply(&bot, msg.chat.id, eff_thread_id, &text).await?;
+    Ok(())
+}
+
+async fn build_usage_summary(agent_dir: &Path) -> Result<String, miette::Report> {
+    use chrono::{Duration, Utc};
+    use rightclaw::usage::aggregate::aggregate;
+    use rightclaw::usage::format::{AllWindows, format_summary_message};
+
+    let conn = rightclaw::memory::open_connection(agent_dir, false)
+        .map_err(|e| miette::miette!("open_connection: {e:#}"))?;
+
+    let now = Utc::now();
+    let today_start = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let week_start = now - Duration::days(7);
+    let month_start = now - Duration::days(30);
+
+    let windows = AllWindows {
+        today_interactive: aggregate(&conn, Some(today_start), "interactive")
+            .map_err(|e| miette::miette!("aggregate today/interactive: {e:#}"))?,
+        today_cron: aggregate(&conn, Some(today_start), "cron")
+            .map_err(|e| miette::miette!("aggregate today/cron: {e:#}"))?,
+        week_interactive: aggregate(&conn, Some(week_start), "interactive")
+            .map_err(|e| miette::miette!("aggregate week/interactive: {e:#}"))?,
+        week_cron: aggregate(&conn, Some(week_start), "cron")
+            .map_err(|e| miette::miette!("aggregate week/cron: {e:#}"))?,
+        month_interactive: aggregate(&conn, Some(month_start), "interactive")
+            .map_err(|e| miette::miette!("aggregate month/interactive: {e:#}"))?,
+        month_cron: aggregate(&conn, Some(month_start), "cron")
+            .map_err(|e| miette::miette!("aggregate month/cron: {e:#}"))?,
+        all_interactive: aggregate(&conn, None, "interactive")
+            .map_err(|e| miette::miette!("aggregate all/interactive: {e:#}"))?,
+        all_cron: aggregate(&conn, None, "cron")
+            .map_err(|e| miette::miette!("aggregate all/cron: {e:#}"))?,
+    };
+
+    Ok(format_summary_message(&windows))
+}
+
+// ---------------------------------------------------------------------------
 // Stop button callback query handler
 // ---------------------------------------------------------------------------
 
