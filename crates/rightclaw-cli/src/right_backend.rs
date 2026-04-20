@@ -372,6 +372,7 @@ impl RightBackend {
                     &mut client,
                     &sandbox_id,
                     &["test", "-f", &path],
+                    rightclaw::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))

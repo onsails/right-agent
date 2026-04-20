@@ -88,13 +88,22 @@ network_policies:
         &self.name
     }
 
-    /// Execute a command inside the sandbox via gRPC. Returns `(stdout, exit_code)`.
+    /// Execute a command inside the sandbox via gRPC with the default 10s
+    /// timeout. For commands that do network I/O (e.g. `claude upgrade`) use
+    /// [`Self::exec_with_timeout`].
     pub async fn exec(&self, cmd: &[&str]) -> (String, i32) {
+        self.exec_with_timeout(cmd, openshell::DEFAULT_EXEC_TIMEOUT_SECS)
+            .await
+    }
+
+    /// Execute a command inside the sandbox with an explicit server-side
+    /// timeout (seconds). OpenShell returns exit 124 once the timer expires.
+    pub async fn exec_with_timeout(&self, cmd: &[&str], timeout_seconds: u32) -> (String, i32) {
         let mut client = openshell::connect_grpc(&self.mtls_dir).await.unwrap();
         let id = openshell::resolve_sandbox_id(&mut client, &self.name)
             .await
             .unwrap();
-        openshell::exec_in_sandbox(&mut client, &id, cmd)
+        openshell::exec_in_sandbox(&mut client, &id, cmd, timeout_seconds)
             .await
             .unwrap()
     }
