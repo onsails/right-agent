@@ -394,6 +394,27 @@ Old tools (`store_record`, `query_records`, `search_records`, `delete_record`)
 are removed. Old SQLite tables (`memories`, `memories_fts`, `memory_events`)
 are retained in schema but unused.
 
+### Memory Resilience Layer
+
+`memory::resilient::ResilientHindsight` wraps `HindsightClient` with:
+- per-process circuit breaker (closed→open after 5 fails in 30s; 30s initial
+  open with doubling backoff to a 10 min cap; 1h hard open on Auth)
+- classified retries (Transient/RateLimited yes; Auth/Client/Malformed no)
+- SQLite-backed `pending_retains` queue (1000-row cap, 24h age cap)
+- `watch::Sender<MemoryStatus>` signalling Healthy/Degraded/AuthFailed
+
+The bot runs a single drain task (30s interval, batch 20, stop on first
+non-Client failure). The aggregator shares the same SQLite queue via the
+per-agent `data.db`; it enqueues on failure but never drains.
+
+Telegram alerts (`memory_alerts` table, 24h dedup, 1h startup cleanup) fire
+on:
+- `AuthFailed` transition
+- >20 `Client`-kind drops in a 1h rolling window (`client_flood`)
+
+Doctor checks queue size (500/900 row thresholds), oldest-row age (1h/12h
+thresholds), and long-standing (>24h) alerts.
+
 ### Memory Schema (SQLite)
 
 ```

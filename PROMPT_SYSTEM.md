@@ -79,6 +79,25 @@ fetched from the aggregator's internal API (non-fatal if unavailable). Memory se
 is appended last: file mode inlines MEMORY.md contents, Hindsight mode inlines
 prefetched recall results.
 
+### Memory Status Marker
+
+When the agent runs with `memory.provider: hindsight`, the bot injects a
+`<memory-status>...</memory-status>` marker at the end of
+`composite-memory.md` whenever the ResilientHindsight wrapper is not
+`Healthy`. Three states:
+
+- `degraded — recall may be incomplete or stale, retain may be queued` —
+  circuit breaker is open or half-open, or a recent transient failure occurred.
+- `unavailable — memory provider authentication failed, memory ops will error
+  until the user rotates the API key` — 401/403 from Hindsight. Requires
+  user action.
+- `retain-errors: N records dropped in last 24h due to bad payload — check
+  logs` — in a Healthy state but Client-kind (4xx) retain drops occurred in
+  the last 24h.
+
+The marker is always the last section of the system prompt, preserving
+prompt cache for all preceding blocks.
+
 ### Bootstrap mode
 
 ```
