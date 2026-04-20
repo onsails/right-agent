@@ -1200,6 +1200,7 @@ async fn invoke_cc(
     let mut ring_buffer = super::stream::EventRingBuffer::new(5);
     let mut usage = super::stream::StreamUsage::default();
     let mut result_line: Option<String> = None;
+    let mut api_key_source: Option<String> = None;
     let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
     let mut last_edit = tokio::time::Instant::now();
     let mut total_assistant_events: u32 = 0;
@@ -1220,6 +1221,12 @@ async fn invoke_cc(
                             let _ = writeln!(log, "{line}");
                         }
 
+                        if api_key_source.is_none()
+                            && let Some(src) = super::stream::parse_api_key_source(&line)
+                        {
+                            api_key_source = Some(src);
+                        }
+
                         let event = super::stream::parse_stream_event(&line);
 
                         match &event {
@@ -1228,7 +1235,10 @@ async fn invoke_cc(
                                 result_line = Some(json.clone());
 
                                 match super::stream::parse_usage_full(json) {
-                                    Some(breakdown) => {
+                                    Some(mut breakdown) => {
+                                        breakdown.api_key_source = api_key_source
+                                            .clone()
+                                            .unwrap_or_else(|| "none".into());
                                         if let Err(e) =
                                             rightclaw::usage::insert::insert_interactive(
                                                 &conn,
