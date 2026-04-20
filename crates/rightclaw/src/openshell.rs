@@ -973,13 +973,14 @@ async fn exec_in_sandbox_once(
     client: &mut OpenShellClient<Channel>,
     sandbox_id: &str,
     command: &[&str],
+    timeout_seconds: u32,
 ) -> miette::Result<(String, i32)> {
     use crate::openshell_proto::openshell::v1::exec_sandbox_event::Payload;
 
     let req = ExecSandboxRequest {
         sandbox_id: sandbox_id.to_owned(),
         command: command.iter().map(|s| s.to_string()).collect(),
-        timeout_seconds: 10,
+        timeout_seconds,
         ..Default::default()
     };
 
@@ -1010,7 +1011,18 @@ async fn exec_in_sandbox_once(
     Ok((stdout_str, exit_code))
 }
 
+/// Default timeout for OpenShell `ExecSandbox` commands (seconds). Long enough
+/// for small shell operations (`test -f`, `getent`, etc.) but short enough to
+/// surface hung commands quickly. Callers that need more (e.g. `claude upgrade`)
+/// should pass an explicit timeout.
+pub const DEFAULT_EXEC_TIMEOUT_SECS: u32 = 10;
+
 /// Execute a command inside a sandbox via gRPC `ExecSandbox` and return (stdout, exit_code).
+///
+/// `timeout_seconds` is the server-side timer: OpenShell kills the process and
+/// returns exit 124 after this many seconds. Use `DEFAULT_EXEC_TIMEOUT_SECS`
+/// for cheap shell probes; bump it for commands that fetch over the network
+/// (`claude upgrade`, npm installs, etc.).
 ///
 /// Retries up to 5 times with 1s backoff if the SSH transport isn't ready yet
 /// (common immediately after sandbox creation — gRPC reports READY before SSH is up).
@@ -1019,6 +1031,7 @@ pub async fn exec_in_sandbox(
     client: &mut OpenShellClient<Channel>,
     sandbox_id: &str,
     command: &[&str],
+    timeout_seconds: u32,
 ) -> miette::Result<(String, i32)> {
     let mut last_err = String::new();
 
@@ -1028,7 +1041,7 @@ pub async fn exec_in_sandbox(
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        match exec_in_sandbox_once(client, sandbox_id, command).await {
+        match exec_in_sandbox_once(client, sandbox_id, command, timeout_seconds).await {
             Ok(result) => return Ok(result),
             Err(e) => {
                 last_err = format!("{e:#}");
@@ -1057,7 +1070,7 @@ pub async fn wait_for_ssh(
     let interval = Duration::from_secs(poll_interval_secs);
 
     loop {
-        match exec_in_sandbox_once(client, sandbox_id, &["echo", "ready"]).await {
+        match exec_in_sandbox_once(client, sandbox_id, &["echo", "ready"], DEFAULT_EXEC_TIMEOUT_SECS).await {
             Ok(_) => {
                 tracing::info!(sandbox_id, "SSH transport is ready");
                 return Ok(());
@@ -1095,6 +1108,7 @@ pub async fn resolve_host_ip(
         client,
         sandbox_id,
         &["getent", "ahostsv4", "host.openshell.internal"],
+        DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await?;
 
@@ -1150,6 +1164,7 @@ pub async fn verify_sandbox_files(
         &mut client,
         &sandbox_id,
         &["sh", "-c", &check_cmd],
+        DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await?;
 
@@ -1193,6 +1208,7 @@ pub async fn verify_sandbox_files(
         &mut client,
         &sandbox_id,
         &["sh", "-c", &check_cmd],
+        DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await?;
 

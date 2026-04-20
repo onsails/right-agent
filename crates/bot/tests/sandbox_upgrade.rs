@@ -13,8 +13,11 @@ async fn claude_upgrade_lifecycle() {
     let sbox = TestSandbox::create("claude-upgrade").await;
 
     // 1. `claude upgrade` exits 0 and reports either a fresh install or
-    //    "Current version" (idempotent re-run).
-    let (stdout, exit) = sbox.exec(&["claude", "upgrade"]).await;
+    //    "Current version" (idempotent re-run). 180s — fetch + install over
+    //    the network doesn't fit the 10s default.
+    let (stdout, exit) = sbox
+        .exec_with_timeout(&["claude", "upgrade"], 180)
+        .await;
     assert_eq!(exit, 0, "claude upgrade failed; stdout: {stdout}");
     assert!(
         stdout.contains("Successfully updated") || stdout.contains("Current version"),

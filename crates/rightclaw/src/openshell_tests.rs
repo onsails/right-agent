@@ -397,6 +397,7 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
         &mut client,
         &sandbox_id,
         &["echo", "hello-after-create"],
+        super::DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await;
 
