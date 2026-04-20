@@ -5,12 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
-use teloxide::prelude::*;
-use teloxide::types::ChatId;
 
+use rightclaw::memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
 use rightclaw::memory::{MemoryStatus, ResilientHindsight};
 
-use super::BotType;
+use super::{BotType, broadcast_to_chats};
 
 pub const CLIENT_FLOOD_POLL: std::time::Duration = std::time::Duration::from_secs(60);
 
@@ -69,15 +68,15 @@ pub fn spawn_watcher(
                 t.tick().await;
                 let drops_1h = wrapper.client_drops_1h().await;
                 if drops_1h > rightclaw::memory::resilient::CLIENT_FLOOD_THRESHOLD
-                    && should_fire(&db, "client_flood")
+                    && should_fire(&db, CLIENT_FLOOD)
                 {
                     let msg = format!(
                         "\u{26a0} Memory retains persistently rejected (HTTP 4xx) — \
                          possible Hindsight API drift or payload bug. {drops_1h} drops \
                          in the last hour. Check ~/.rightclaw/logs/ for details."
                     );
-                    send_to_chats(&bot, &chats, &msg).await;
-                    record_fire(&db, "client_flood");
+                    broadcast_to_chats(&bot, &chats, &msg).await;
+                    record_fire(&db, CLIENT_FLOOD);
                 }
             }
         });
@@ -91,21 +90,21 @@ async fn handle_status_change(
     db: &std::path::Path,
 ) {
     if matches!(status, MemoryStatus::AuthFailed { .. }) {
-        if should_fire(db, "auth_failed") {
+        if should_fire(db, AUTH_FAILED) {
             let msg = "\u{26a0} Memory provider authentication failed.\n\
                        Rotate the Hindsight API key — set `memory.api_key` in \
                        agent.yaml or the HINDSIGHT_API_KEY env var — and restart \
                        the agent. Memory ops are disabled until then.";
-            send_to_chats(bot, chats, msg).await;
-            record_fire(db, "auth_failed");
+            broadcast_to_chats(bot, chats, msg).await;
+            record_fire(db, AUTH_FAILED);
         }
     } else if matches!(status, MemoryStatus::Healthy) {
         // Clear dedup on recovery.
         match rightclaw::memory::open_connection(db, false) {
             Ok(conn) => {
                 if let Err(e) = conn.execute(
-                    "DELETE FROM memory_alerts WHERE alert_type = 'auth_failed'",
-                    [],
+                    "DELETE FROM memory_alerts WHERE alert_type = ?1",
+                    [AUTH_FAILED],
                 ) {
                     tracing::warn!("memory_alerts dedup clear failed: {e:#}");
                 }
@@ -162,10 +161,3 @@ fn record_fire(db: &std::path::Path, alert_type: &str) {
     }
 }
 
-async fn send_to_chats(bot: &BotType, chats: &[i64], text: &str) {
-    for &chat_id in chats {
-        if let Err(e) = bot.send_message(ChatId(chat_id), text).await {
-            tracing::warn!(chat_id, "memory alert send failed: {e:#}");
-        }
-    }
-}

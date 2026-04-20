@@ -1,8 +1,5 @@
 //! Resilient wrapper around `HindsightClient`: circuit breaker + classified retry
 //! + retain queue + status watch.
-//!
-//! Task 9 introduced the skeleton; Task 10 wires up the call methods (recall,
-//! retain, reflect, get_or_create_bank, drain_retain_item).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -36,37 +33,30 @@ pub struct RetryPolicy {
     pub attempts: u32,
 }
 
-#[allow(dead_code)] // policy constants come online as call sites are wired up
 pub const POLICY_BLOCKING_RECALL: RetryPolicy = RetryPolicy {
     per_attempt: Duration::from_secs(3),
     attempts: 0,
 };
-#[allow(dead_code)]
 pub const POLICY_AUTO_RETAIN: RetryPolicy = RetryPolicy {
     per_attempt: Duration::from_secs(10),
     attempts: 2,
 };
-#[allow(dead_code)]
 pub const POLICY_PREFETCH: RetryPolicy = RetryPolicy {
     per_attempt: Duration::from_secs(5),
     attempts: 1,
 };
-#[allow(dead_code)]
 pub const POLICY_MCP_RETAIN: RetryPolicy = RetryPolicy {
     per_attempt: Duration::from_secs(10),
     attempts: 1,
 };
-#[allow(dead_code)]
 pub const POLICY_MCP_RECALL: RetryPolicy = RetryPolicy {
     per_attempt: Duration::from_secs(5),
     attempts: 0,
 };
-#[allow(dead_code)]
 pub const POLICY_MCP_REFLECT: RetryPolicy = RetryPolicy {
     per_attempt: Duration::from_secs(15),
     attempts: 0,
 };
-#[allow(dead_code)]
 pub const POLICY_STARTUP_BANK: RetryPolicy = RetryPolicy {
     per_attempt: Duration::from_secs(10),
     attempts: 3,
@@ -83,7 +73,7 @@ pub struct ResilientHindsight {
     breaker: Mutex<Breaker>,
     status_tx: watch::Sender<MemoryStatus>,
     client_drops: Mutex<VecDeque<Instant>>,
-    /// "bot" or "aggregator" — used by Task 10 to tag `pending_retains.source`.
+    /// "bot" or "aggregator" — tags `pending_retains.source`.
     source: String,
 }
 
@@ -144,25 +134,31 @@ impl ResilientHindsight {
     }
 
     async fn refresh_status(&self) {
-        let mut b = self.breaker.lock().await;
-        let st = b.state();
-        let new = match st {
-            crate::memory::circuit::CircuitState::Closed => MemoryStatus::Healthy,
-            crate::memory::circuit::CircuitState::Open { .. }
-            | crate::memory::circuit::CircuitState::HalfOpen => MemoryStatus::Degraded {
-                since: std::time::Instant::now(),
-            },
+        let st = {
+            let mut b = self.breaker.lock().await;
+            b.state()
         };
-        let cur = *self.status_tx.borrow();
-        // Preserve AuthFailed — only startup probe reset clears it.
-        if matches!(cur, MemoryStatus::AuthFailed { .. }) {
-            return;
-        }
-        if cur.cmp(&new) != std::cmp::Ordering::Equal {
-            // Use send_replace so the stored value updates even with no receivers;
-            // `send()` silently drops the value if all receivers are dropped.
-            self.status_tx.send_replace(new);
-        }
+        // send_if_modified atomically reads-and-conditionally-writes, closing the
+        // race window between borrow() and send_replace(). AuthFailed is sticky —
+        // only the startup probe reset (or explicit recovery) clears it.
+        self.status_tx.send_if_modified(|cur| {
+            if matches!(*cur, MemoryStatus::AuthFailed { .. }) {
+                return false;
+            }
+            let new = match st {
+                crate::memory::circuit::CircuitState::Closed => MemoryStatus::Healthy,
+                crate::memory::circuit::CircuitState::Open { .. }
+                | crate::memory::circuit::CircuitState::HalfOpen => MemoryStatus::Degraded {
+                    since: std::time::Instant::now(),
+                },
+            };
+            if *cur != new {
+                *cur = new;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     fn backoff(attempt: u32) -> Duration {
@@ -218,8 +214,16 @@ impl ResilientHindsight {
                         b.record(Outcome::Failure(kind));
                     }
                     if matches!(kind, ErrorKind::Auth) {
-                        self.status_tx.send_replace(MemoryStatus::AuthFailed {
-                            since: std::time::Instant::now(),
+                        // send_if_modified avoids waking watchers on persistent 401s.
+                        self.status_tx.send_if_modified(|cur| {
+                            if matches!(*cur, MemoryStatus::AuthFailed { .. }) {
+                                false
+                            } else {
+                                *cur = MemoryStatus::AuthFailed {
+                                    since: std::time::Instant::now(),
+                                };
+                                true
+                            }
                         });
                         return Err(ResilientError::Upstream(e));
                     }

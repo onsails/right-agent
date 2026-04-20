@@ -23,7 +23,6 @@ impl MemoryError {
                 401 | 403 => ErrorKind::Auth,
                 429 => ErrorKind::RateLimited,
                 400 | 404 | 422 => ErrorKind::Client,
-                500..=599 => ErrorKind::Transient,
                 _ => ErrorKind::Transient,
             },
             MemoryError::HindsightTimeout => ErrorKind::Transient,

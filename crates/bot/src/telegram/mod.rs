@@ -22,6 +22,23 @@ pub use session::effective_thread_id;
 pub type BotType =
     teloxide::adaptors::CacheMe<teloxide::adaptors::throttle::Throttle<teloxide::Bot>>;
 
+/// Best-effort broadcast to a list of chat IDs. Errors are logged and swallowed
+/// (alerts and OAuth notifications shouldn't fail hard if one chat is unreachable).
+pub(crate) async fn broadcast_to_chats<R>(bot: &R, chat_ids: &[i64], text: &str)
+where
+    R: teloxide::prelude::Requester + Send + Sync,
+    R::Err: std::fmt::Display,
+{
+    for &chat_id in chat_ids {
+        if let Err(e) = bot
+            .send_message(teloxide::types::ChatId(chat_id), text)
+            .await
+        {
+            tracing::warn!(chat_id, "broadcast_to_chats send failed: {e}");
+        }
+    }
+}
+
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;

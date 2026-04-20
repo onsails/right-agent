@@ -346,6 +346,14 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
         if is_openshell && let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()) {
             checks.push(check);
         }
+
+        // Memory layer health (queue size, oldest-row age, long-standing alerts).
+        if path.join("data.db").exists() {
+            for mut chk in check_memory(&path) {
+                chk.name = format!("{name}/{}", chk.name);
+                checks.push(chk);
+            }
+        }
     }
 
     if valid_agents == 0 {
@@ -1039,7 +1047,8 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 6. memory_alerts rows older than 24h.
-    for alert_type in ["auth_failed", "client_flood"] {
+    use crate::memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
+    for alert_type in [AUTH_FAILED, CLIENT_FLOOD] {
         match conn.query_row::<bool, _, _>(
             "SELECT EXISTS(SELECT 1 FROM memory_alerts WHERE alert_type = ?1 \
                  AND datetime(first_sent_at) < datetime('now', '-24 hours'))",
@@ -1052,11 +1061,10 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
                     status: CheckStatus::Fail,
                     detail: format!("{alert_type} standing for >24h"),
                     fix: Some(
-                        match alert_type {
-                            "auth_failed" => {
-                                "rotate memory.api_key / HINDSIGHT_API_KEY and restart"
-                            }
-                            _ => "check ~/.rightclaw/logs/ for repeated 4xx",
+                        if alert_type == AUTH_FAILED {
+                            "rotate memory.api_key / HINDSIGHT_API_KEY and restart"
+                        } else {
+                            "check ~/.rightclaw/logs/ for repeated 4xx"
                         }
                         .into(),
                     ),

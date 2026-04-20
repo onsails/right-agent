@@ -248,18 +248,7 @@ async fn complete_oauth_flow(
     Ok(())
 }
 
-/// Send a message to all configured Telegram chat IDs (best-effort, errors logged).
-async fn notify_telegram(bot: &teloxide::Bot, chat_ids: &[i64], text: &str) {
-    use teloxide::requests::Requester as _;
-    for &chat_id in chat_ids {
-        if let Err(e) = bot
-            .send_message(teloxide::types::ChatId(chat_id), text)
-            .await
-        {
-            tracing::warn!(chat_id, "notify_telegram failed: {e:#}");
-        }
-    }
-}
+use super::broadcast_to_chats as notify_telegram;
 
 /// Bind axum to a Unix socket at `socket_path` and serve the OAuth callback router.
 ///

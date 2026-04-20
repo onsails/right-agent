@@ -725,7 +725,7 @@ fn doctor_bootstrap_pending_skips_identity_checks() {
     );
 }
 
-// ---- check_memory tests (Plan: Memory Failure Handling, Task 11) ----
+// ---- check_memory tests ----
 
 mod memory_tests {
     use super::*;

@@ -22,8 +22,9 @@ pub struct PendingRetain {
     pub attempts: i64,
 }
 
-/// Enqueue a retain attempt for later drain. Evicts the oldest row if cap exceeded.
-/// Uses a single transaction for the combined eviction + insert when needed.
+/// Enqueue a retain attempt for later drain. Evicts oldest rows if cap exceeded.
+/// Cap enforcement and insert happen atomically in one transaction so concurrent
+/// enqueuers can never blow past the cap.
 pub fn enqueue(
     conn: &Connection,
     source: &str,
@@ -33,19 +34,22 @@ pub fn enqueue(
     update_mode: Option<&str>,
     tags: Option<&[String]>,
 ) -> Result<(), MemoryError> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))?;
+    let tags_json = tags
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| MemoryError::HindsightOther(format!("tags_json: {e:#}")))?;
+    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let tx = conn.unchecked_transaction()?;
 
-    if count as usize >= QUEUE_CAP {
-        tx.execute(
-            "DELETE FROM pending_retains WHERE id = (SELECT id FROM pending_retains ORDER BY created_at ASC LIMIT 1)",
-            [],
-        )?;
-    }
-
-    let tags_json = tags.map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".into()));
-    let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Delete (count - (cap - 1)) oldest rows if over-cap, so we're at cap-1 before insert.
+    tx.execute(
+        "DELETE FROM pending_retains WHERE id IN (
+            SELECT id FROM pending_retains ORDER BY created_at ASC
+                LIMIT MAX(0, (SELECT COUNT(*) FROM pending_retains) - ?1)
+         )",
+        [(QUEUE_CAP as i64) - 1],
+    )?;
 
     tx.execute(
         "INSERT INTO pending_retains
