@@ -124,6 +124,8 @@ mod tests {
         WindowSummary {
             source: source.into(),
             cost_usd: cost,
+            subscription_cost_usd: cost,
+            api_cost_usd: 0.0,
             turns: 3,
             invocations,
             input_tokens: 10,

@@ -43,6 +43,8 @@ pub fn aggregate(
     Ok(WindowSummary {
         source: source.to_string(),
         cost_usd,
+        subscription_cost_usd: 0.0,
+        api_cost_usd: 0.0,
         turns: turns as u64,
         invocations: invocations as u64,
         input_tokens: input as u64,
@@ -122,6 +124,7 @@ mod tests {
             model_usage_json: format!(
                 r#"{{"{model}":{{"costUSD":{cost},"inputTokens":10,"outputTokens":20,"cacheCreationInputTokens":30,"cacheReadInputTokens":40}}}}"#
             ),
+            api_key_source: "none".into(),
         }
     }
 

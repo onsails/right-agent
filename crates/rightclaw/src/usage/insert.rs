@@ -90,6 +90,7 @@ mod tests {
             web_search_requests: 1,
             web_fetch_requests: 2,
             model_usage_json: r#"{"claude-sonnet-4-6":{"costUSD":0.05}}"#.into(),
+            api_key_source: "none".into(),
         }
     }
 
