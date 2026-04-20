@@ -921,7 +921,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     let db_path = agent_dir.join("data.db");
 
     // 1. data.db opens.
-    let conn = match rusqlite::Connection::open(&db_path) {
+    let conn = match crate::memory::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             out.push(DoctorCheck {
