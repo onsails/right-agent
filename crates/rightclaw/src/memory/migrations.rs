@@ -1,5 +1,5 @@
 use rusqlite::Transaction;
-use rusqlite_migration::{HookError, Migrations, M};
+use rusqlite_migration::{HookError, M, Migrations};
 
 const V1_SCHEMA: &str = include_str!("sql/v1_schema.sql");
 const V2_SCHEMA: &str = include_str!("sql/v2_telegram_sessions.sql");
@@ -92,25 +92,24 @@ fn v13_one_shot_cron(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
-pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> =
-    std::sync::LazyLock::new(|| {
-        Migrations::new(vec![
-            M::up(V1_SCHEMA),
-            M::up(V2_SCHEMA),
-            M::up(V3_SCHEMA),
-            M::up(V4_SCHEMA),
-            M::up(V5_SCHEMA),
-            M::up(V6_SCHEMA),
-            M::up(V7_SCHEMA),
-            M::up(V8_SCHEMA),
-            M::up(V9_SCHEMA),
-            M::up(V10_SCHEMA),
-            M::up(V11_SCHEMA),
-            M::up_with_hook("", v12_cron_diagnostics),
-            M::up_with_hook("", v13_one_shot_cron),
-            M::up(V14_SCHEMA),
-        ])
-    });
+pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
+    Migrations::new(vec![
+        M::up(V1_SCHEMA),
+        M::up(V2_SCHEMA),
+        M::up(V3_SCHEMA),
+        M::up(V4_SCHEMA),
+        M::up(V5_SCHEMA),
+        M::up(V6_SCHEMA),
+        M::up(V7_SCHEMA),
+        M::up(V8_SCHEMA),
+        M::up(V9_SCHEMA),
+        M::up(V10_SCHEMA),
+        M::up(V11_SCHEMA),
+        M::up_with_hook("", v12_cron_diagnostics),
+        M::up_with_hook("", v13_one_shot_cron),
+        M::up(V14_SCHEMA),
+    ])
+});
 
 #[cfg(test)]
 mod tests {
@@ -169,11 +168,9 @@ mod tests {
         )
         .unwrap();
         let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sessions WHERE chat_id=1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM sessions WHERE chat_id=1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(count, 2);
     }
@@ -189,9 +186,18 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
-        assert!(cols.contains(&"summary".to_string()), "summary column missing");
-        assert!(cols.contains(&"notify_json".to_string()), "notify_json column missing");
-        assert!(cols.contains(&"delivered_at".to_string()), "delivered_at column missing");
+        assert!(
+            cols.contains(&"summary".to_string()),
+            "summary column missing"
+        );
+        assert!(
+            cols.contains(&"notify_json".to_string()),
+            "notify_json column missing"
+        );
+        assert!(
+            cols.contains(&"delivered_at".to_string()),
+            "delivered_at column missing"
+        );
     }
 
     #[test]
@@ -356,14 +362,16 @@ mod tests {
             "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, summary) \
              VALUES ('s1', 'j1', '2026-01-01T02:00:00Z', 'success', '/log', 'quiet')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let status_of = |id: &str| -> Option<String> {
             conn.query_row(
                 "SELECT delivery_status FROM cron_runs WHERE id = ?1",
                 [id],
                 |r| r.get(0),
-            ).unwrap()
+            )
+            .unwrap()
         };
         assert_eq!(status_of("d1").as_deref(), Some("delivered"));
         assert_eq!(status_of("p1").as_deref(), Some("pending"));
@@ -377,8 +385,10 @@ mod tests {
         MIGRATIONS.to_version(&mut conn, 11).unwrap();
 
         // Manually add the columns that v12 would create.
-        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN delivery_status TEXT").unwrap();
-        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN no_notify_reason TEXT").unwrap();
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN delivery_status TEXT")
+            .unwrap();
+        conn.execute_batch("ALTER TABLE cron_runs ADD COLUMN no_notify_reason TEXT")
+            .unwrap();
 
         // v12 must not fail even though columns already exist.
         MIGRATIONS.to_latest(&mut conn).unwrap();
@@ -405,13 +415,34 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
-        assert!(cols.contains(&"job_name".to_string()), "job_name column missing");
-        assert!(cols.contains(&"schedule".to_string()), "schedule column missing");
-        assert!(cols.contains(&"prompt".to_string()), "prompt column missing");
-        assert!(cols.contains(&"lock_ttl".to_string()), "lock_ttl column missing");
-        assert!(cols.contains(&"max_budget_usd".to_string()), "max_budget_usd column missing");
-        assert!(cols.contains(&"created_at".to_string()), "created_at column missing");
-        assert!(cols.contains(&"updated_at".to_string()), "updated_at column missing");
+        assert!(
+            cols.contains(&"job_name".to_string()),
+            "job_name column missing"
+        );
+        assert!(
+            cols.contains(&"schedule".to_string()),
+            "schedule column missing"
+        );
+        assert!(
+            cols.contains(&"prompt".to_string()),
+            "prompt column missing"
+        );
+        assert!(
+            cols.contains(&"lock_ttl".to_string()),
+            "lock_ttl column missing"
+        );
+        assert!(
+            cols.contains(&"max_budget_usd".to_string()),
+            "max_budget_usd column missing"
+        );
+        assert!(
+            cols.contains(&"created_at".to_string()),
+            "created_at column missing"
+        );
+        assert!(
+            cols.contains(&"updated_at".to_string()),
+            "updated_at column missing"
+        );
     }
 
     #[test]
@@ -498,9 +529,17 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         for col in [
-            "id", "content", "context", "document_id", "update_mode",
-            "tags_json", "created_at", "attempts", "last_attempt_at",
-            "last_error", "source",
+            "id",
+            "content",
+            "context",
+            "document_id",
+            "update_mode",
+            "tags_json",
+            "created_at",
+            "attempts",
+            "last_attempt_at",
+            "last_error",
+            "source",
         ] {
             assert!(cols.contains(&col.to_string()), "{col} column missing");
         }
@@ -577,9 +616,17 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         for col in [
-            "id", "content", "context", "document_id", "update_mode",
-            "tags_json", "created_at", "attempts", "last_attempt_at",
-            "last_error", "source",
+            "id",
+            "content",
+            "context",
+            "document_id",
+            "update_mode",
+            "tags_json",
+            "created_at",
+            "attempts",
+            "last_attempt_at",
+            "last_error",
+            "source",
         ] {
             assert!(
                 pending_cols.contains(&col.to_string()),

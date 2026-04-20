@@ -47,10 +47,7 @@ impl fmt::Display for DoctorCheck {
 /// -- never short-circuits.
 pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     let mut checks = vec![
-        check_binary(
-            "rightclaw",
-            Some("https://github.com/onsails/rightclaw"),
-        ),
+        check_binary("rightclaw", Some("https://github.com/onsails/rightclaw")),
         check_binary(
             "process-compose",
             Some("https://f1bonacc1.github.io/process-compose/installation/"),
@@ -59,10 +56,7 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
             "claude",
             Some("https://docs.anthropic.com/en/docs/claude-code"),
         ),
-        check_binary(
-            "openshell",
-            Some("https://github.com/NVIDIA/OpenShell"),
-        ),
+        check_binary("openshell", Some("https://github.com/NVIDIA/OpenShell")),
     ];
 
     // Linux-only sandbox dependency checks
@@ -83,7 +77,6 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
         if bwrap_found {
             checks.push(check_bwrap_sandbox());
         }
-
     }
 
     // Agent structure checks
@@ -111,7 +104,6 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     if let Some(check) = check_managed_settings(MANAGED_SETTINGS_PATH) {
         checks.push(check);
     }
-
 
     // cloudflared binary check — Warn severity (D-03, OAUTH-04)
     checks.push(check_cloudflared_binary());
@@ -175,7 +167,10 @@ fn check_binary(name: &str, fix_hint: Option<&str>) -> DoctorCheck {
 ///
 /// Returns `None` when OpenShell is not ready (certs missing, not installed) —
 /// the caller skips the check silently in that case.
-fn check_sandbox_for_agent(agent_name: &str, config: Option<&crate::agent::types::AgentConfig>) -> Option<DoctorCheck> {
+fn check_sandbox_for_agent(
+    agent_name: &str,
+    config: Option<&crate::agent::types::AgentConfig>,
+) -> Option<DoctorCheck> {
     // Only check if OpenShell is available.
     let mtls_dir = match crate::openshell::preflight_check() {
         crate::openshell::OpenShellStatus::Ready(dir) => dir,
@@ -210,7 +205,9 @@ fn check_sandbox_for_agent(agent_name: &str, config: Option<&crate::agent::types
             name: format!("sandbox/{agent_name}"),
             status: CheckStatus::Fail,
             detail: format!("sandbox '{sandbox}' not found"),
-            fix: Some(format!("Run `rightclaw agent init {agent_name}` to create it")),
+            fix: Some(format!(
+                "Run `rightclaw agent init {agent_name}` to create it"
+            )),
         }),
         Err(e) => Some(DoctorCheck {
             name: format!("sandbox/{agent_name}"),
@@ -339,7 +336,12 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
         // Check sandbox existence for openshell agents.
         let is_openshell = agent_config
             .as_ref()
-            .map(|c| matches!(c.sandbox_mode(), crate::agent::types::SandboxMode::Openshell))
+            .map(|c| {
+                matches!(
+                    c.sandbox_mode(),
+                    crate::agent::types::SandboxMode::Openshell
+                )
+            })
             .unwrap_or(true); // default sandbox mode is openshell
         if is_openshell && let Some(check) = check_sandbox_for_agent(&name, agent_config.as_ref()) {
             checks.push(check);
@@ -366,7 +368,13 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
 fn check_bwrap_sandbox() -> DoctorCheck {
     let result = std::process::Command::new("bwrap")
         .args([
-            "--ro-bind", "/", "/", "--unshare-net", "--dev", "/dev", "true",
+            "--ro-bind",
+            "/",
+            "/",
+            "--unshare-net",
+            "--dev",
+            "/dev",
+            "true",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -381,15 +389,14 @@ fn check_bwrap_sandbox() -> DoctorCheck {
         },
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = if stderr.contains("RTM_NEWADDR")
-                || stderr.contains("Operation not permitted")
-            {
-                "AppArmor restricts bubblewrap user namespaces".to_string()
-            } else if stderr.contains("No permissions") {
-                "unprivileged user namespaces disabled".to_string()
-            } else {
-                format!("bubblewrap sandbox test failed: {}", stderr.trim())
-            };
+            let detail =
+                if stderr.contains("RTM_NEWADDR") || stderr.contains("Operation not permitted") {
+                    "AppArmor restricts bubblewrap user namespaces".to_string()
+                } else if stderr.contains("No permissions") {
+                    "unprivileged user namespaces disabled".to_string()
+                } else {
+                    format!("bubblewrap sandbox test failed: {}", stderr.trim())
+                };
             DoctorCheck {
                 name: "bwrap-sandbox".to_string(),
                 status: CheckStatus::Fail,
@@ -419,11 +426,7 @@ fn check_managed_settings(path: &str) -> Option<DoctorCheck> {
 
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&content);
     let (detail, fix) = match parsed {
-        Ok(ref v)
-            if v.get("allowManagedDomainsOnly")
-                .and_then(|v| v.as_bool())
-                == Some(true) =>
-        {
+        Ok(ref v) if v.get("allowManagedDomainsOnly").and_then(|v| v.as_bool()) == Some(true) => {
             // D-06: strict mode active
             (
                 "allowManagedDomainsOnly:true \u{2014} per-agent allowedDomains may be overridden by system policy"
@@ -565,10 +568,7 @@ fn fetch_webhook_url(token: &str) -> Result<String, String> {
                 .json()
                 .await
                 .map_err(|e| format!("JSON parse error: {e}"))?;
-            Ok(body["result"]["url"]
-                .as_str()
-                .unwrap_or("")
-                .to_string())
+            Ok(body["result"]["url"].as_str().unwrap_or("").to_string())
         })
     })
 }
@@ -580,7 +580,9 @@ fn fetch_webhook_url(token: &str) -> Result<String, String> {
 fn check_cloudflared_binary() -> DoctorCheck {
     let raw = check_binary(
         "cloudflared",
-        Some("install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"),
+        Some(
+            "install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        ),
     );
     DoctorCheck {
         status: if raw.status == CheckStatus::Pass {
@@ -834,7 +836,10 @@ fn check_openshell_mtls_certs() -> DoctorCheck {
             name: "openshell-mtls".to_string(),
             status: CheckStatus::Fail,
             detail: format!("missing: {} in {}", missing.join(", "), mtls_dir.display()),
-            fix: Some("Install OpenShell and run `openshell auth login` to generate mTLS certificates".to_string()),
+            fix: Some(
+                "Install OpenShell and run `openshell auth login` to generate mTLS certificates"
+                    .to_string(),
+            ),
         }
     }
 }

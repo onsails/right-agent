@@ -35,7 +35,9 @@ pub fn make_routing_filter(
         match is_bot_addressed(&msg, &identity) {
             None => None, // group non-mention dropped
             Some(AddressKind::DirectMessage) => {
-                if !sender_trusted { return None; } // DM from non-trusted → drop
+                if !sender_trusted {
+                    return None;
+                } // DM from non-trusted → drop
                 Some(RoutingDecision {
                     address: AddressKind::DirectMessage,
                     sender_trusted: true,
@@ -44,8 +46,14 @@ pub fn make_routing_filter(
             }
             Some(addr) => {
                 debug_assert!(!matches!(msg.chat.kind, ChatKind::Private(_)));
-                if !sender_trusted && !group_open { return None; }
-                Some(RoutingDecision { address: addr, sender_trusted, group_open })
+                if !sender_trusted && !group_open {
+                    return None;
+                }
+                Some(RoutingDecision {
+                    address: addr,
+                    sender_trusted,
+                    group_open,
+                })
             }
         }
     }

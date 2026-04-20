@@ -10,7 +10,9 @@ pub(crate) enum MemoryMode {
 
 /// Shell-escape a string for safe inclusion in an SSH remote command.
 pub(crate) fn shell_escape(s: &str) -> String {
-    shlex::try_quote(s).expect("shlex::try_quote cannot fail for valid UTF-8").into_owned()
+    shlex::try_quote(s)
+        .expect("shlex::try_quote cannot fail for valid UTF-8")
+        .into_owned()
 }
 
 /// Prompt section: a file from disk that gets a markdown header.
@@ -21,11 +23,26 @@ struct PromptSection {
 
 /// Identity and config files included in the system prompt (normal mode).
 const PROMPT_SECTIONS: &[PromptSection] = &[
-    PromptSection { filename: "IDENTITY.md", header: "## Your Identity" },
-    PromptSection { filename: "SOUL.md", header: "## Your Personality and Values" },
-    PromptSection { filename: "USER.md", header: "## Your User" },
-    PromptSection { filename: "AGENTS.md", header: "## Agent Configuration" },
-    PromptSection { filename: "TOOLS.md", header: "## Environment and Tools" },
+    PromptSection {
+        filename: "IDENTITY.md",
+        header: "## Your Identity",
+    },
+    PromptSection {
+        filename: "SOUL.md",
+        header: "## Your Personality and Values",
+    },
+    PromptSection {
+        filename: "USER.md",
+        header: "## Your User",
+    },
+    PromptSection {
+        filename: "AGENTS.md",
+        header: "## Agent Configuration",
+    },
+    PromptSection {
+        filename: "TOOLS.md",
+        header: "## Environment and Tools",
+    },
 ];
 
 /// Generate a shell script that assembles a composite system prompt and runs `claude -p`.
@@ -51,17 +68,12 @@ pub(crate) fn build_prompt_assembly_script(
     let claude_cmd = escaped_args.join(" ");
 
     let file_sections = if bootstrap_mode {
-        let escaped_bootstrap =
-            rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
-        format!(
-            "\nprintf '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'"
-        )
+        let escaped_bootstrap = rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
+        format!("\nprintf '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'")
     } else {
-        let escaped_ops =
-            rightclaw::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
-        let mut sections = format!(
-            "\nprintf '\\n## Operating Instructions\\n'\nprintf '%s\\n' '{escaped_ops}'"
-        );
+        let escaped_ops = rightclaw::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
+        let mut sections =
+            format!("\nprintf '\\n## Operating Instructions\\n'\nprintf '%s\\n' '{escaped_ops}'");
         for s in PROMPT_SECTIONS {
             let filename = s.filename;
             let header = s.header;
@@ -97,7 +109,9 @@ if [ -s {root_path}/MEMORY.md ]; then
     || echo "<memory-status>MEMORY.md unreadable</memory-status>"
 fi"#
             ),
-            Some(MemoryMode::Hindsight { composite_memory_path }) => format!(
+            Some(MemoryMode::Hindsight {
+                composite_memory_path,
+            }) => format!(
                 r#"
 if [ -s {composite_memory_path} ]; then
   cat {composite_memory_path}
@@ -124,12 +138,16 @@ pub(crate) async fn deploy_composite_memory(
     resolved_sandbox: Option<&str>,
     status_marker: Option<&str>,
 ) -> Result<(), DeployError> {
-    let marker_tail = status_marker.map(|m| format!("\n\n{m}")).unwrap_or_default();
+    let marker_tail = status_marker
+        .map(|m| format!("\n\n{m}"))
+        .unwrap_or_default();
     let fenced = format!(
         "<memory-context>\n[System: recalled memory context, {label}.]\n\n{content}\n</memory-context>{marker_tail}"
     );
     let host_path = agent_dir.join(".claude").join("composite-memory.md");
-    tokio::fs::write(&host_path, &fenced).await.map_err(DeployError::Write)?;
+    tokio::fs::write(&host_path, &fenced)
+        .await
+        .map_err(DeployError::Write)?;
     if let Some(sandbox) = resolved_sandbox {
         rightclaw::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
             .await
@@ -152,25 +170,48 @@ pub(crate) async fn remove_composite_memory(agent_dir: &std::path::Path) {
     let _ = tokio::fs::remove_file(&host_path).await;
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Helper: build a script with sandbox-like paths for testing.
     fn test_script(base: &str, bootstrap: bool, args: &[String], mcp: Option<&str>) -> String {
-        build_prompt_assembly_script(base, bootstrap, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox", args, mcp, None)
+        build_prompt_assembly_script(
+            base,
+            bootstrap,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            args,
+            mcp,
+            None,
+        )
     }
 
     #[test]
     fn script_bootstrap_includes_bootstrap_md() {
         let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
-        assert!(script.contains("Bootstrap Instructions"), "must have Bootstrap Instructions header");
-        assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
-        assert!(!script.contains("cat /sandbox/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
-        assert!(!script.contains("cat /sandbox/SOUL.md"), "bootstrap must not cat SOUL.md");
+        assert!(
+            script.contains("Bootstrap Instructions"),
+            "must have Bootstrap Instructions header"
+        );
+        assert!(
+            script.contains("First-Time Setup"),
+            "must contain compiled-in bootstrap content"
+        );
+        assert!(
+            !script.contains("cat /sandbox/IDENTITY.md"),
+            "bootstrap must not cat IDENTITY.md"
+        );
+        assert!(
+            !script.contains("cat /sandbox/SOUL.md"),
+            "bootstrap must not cat SOUL.md"
+        );
         assert!(script.contains("claude"), "must contain claude command");
-        assert!(script.contains("--system-prompt-file"), "must pass --system-prompt-file");
+        assert!(
+            script.contains("--system-prompt-file"),
+            "must pass --system-prompt-file"
+        );
     }
 
     #[test]
@@ -181,8 +222,14 @@ mod tests {
         assert!(script.contains("USER.md"));
         assert!(script.contains("AGENTS.md"));
         assert!(script.contains("TOOLS.md"));
-        assert!(script.contains("Operating Instructions"), "must have compiled-in Operating Instructions");
-        assert!(!script.contains("cat /sandbox/.claude/agents/BOOTSTRAP.md"), "normal must not cat BOOTSTRAP.md");
+        assert!(
+            script.contains("Operating Instructions"),
+            "must have compiled-in Operating Instructions"
+        );
+        assert!(
+            !script.contains("cat /sandbox/.claude/agents/BOOTSTRAP.md"),
+            "normal must not cat BOOTSTRAP.md"
+        );
     }
 
     #[test]
@@ -198,7 +245,12 @@ mod tests {
         let script = test_script(
             "Base",
             false,
-            &["claude".into(), "-p".into(), "--json-schema".into(), r#"{"type":"object"}"#.into()],
+            &[
+                "claude".into(),
+                "-p".into(),
+                "--json-schema".into(),
+                r#"{"type":"object"}"#.into(),
+            ],
             None,
         );
         // JSON with braces and quotes must be shell-escaped
@@ -225,9 +277,18 @@ mod tests {
             None,
             None,
         );
-        assert!(script.contains("/home/agent/IDENTITY.md"), "must use custom root_path");
-        assert!(script.contains("/home/agent/.claude/composite-system-prompt.md"), "must use custom prompt_file");
-        assert!(script.contains("cd /home/agent"), "must cd to custom workdir");
+        assert!(
+            script.contains("/home/agent/IDENTITY.md"),
+            "must use custom root_path"
+        );
+        assert!(
+            script.contains("/home/agent/.claude/composite-system-prompt.md"),
+            "must use custom prompt_file"
+        );
+        assert!(
+            script.contains("cd /home/agent"),
+            "must cd to custom workdir"
+        );
     }
 
     #[test]
@@ -243,9 +304,15 @@ mod tests {
             None,
         );
         assert!(script.contains("## Bootstrap Instructions"));
-        assert!(script.contains("First-Time Setup"), "must use compiled-in content");
+        assert!(
+            script.contains("First-Time Setup"),
+            "must use compiled-in content"
+        );
         // Bootstrap never reads identity files regardless of path
-        assert!(!script.contains("cat /home/agent/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
+        assert!(
+            !script.contains("cat /home/agent/IDENTITY.md"),
+            "bootstrap must not cat IDENTITY.md"
+        );
     }
 
     #[test]
@@ -289,28 +356,54 @@ mod tests {
     fn script_bootstrap_uses_compiled_constant() {
         let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
         // Bootstrap uses compiled-in constant, NOT cat of file
-        assert!(!script.contains("cat /sandbox"), "bootstrap must not cat any sandbox file");
-        assert!(script.contains("First-Time Setup"), "must contain compiled-in bootstrap content");
-        assert!(!script.contains("cat /sandbox/IDENTITY.md"), "bootstrap must not cat IDENTITY.md");
+        assert!(
+            !script.contains("cat /sandbox"),
+            "bootstrap must not cat any sandbox file"
+        );
+        assert!(
+            script.contains("First-Time Setup"),
+            "must contain compiled-in bootstrap content"
+        );
+        assert!(
+            !script.contains("cat /sandbox/IDENTITY.md"),
+            "bootstrap must not cat IDENTITY.md"
+        );
     }
 
     #[test]
     fn script_normal_has_operating_instructions_before_identity() {
         let script = test_script("Base prompt", false, &["claude".into()], None);
-        let op_instr_pos = script.find("Operating Instructions").expect("must have Operating Instructions");
+        let op_instr_pos = script
+            .find("Operating Instructions")
+            .expect("must have Operating Instructions");
         let identity_pos = script.find("IDENTITY.md").expect("must have IDENTITY.md");
-        assert!(op_instr_pos < identity_pos, "Operating Instructions must come before IDENTITY.md");
+        assert!(
+            op_instr_pos < identity_pos,
+            "Operating Instructions must come before IDENTITY.md"
+        );
     }
 
     #[test]
     fn script_includes_memory_section_for_file_mode() {
         let script = build_prompt_assembly_script(
-            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
-            &["claude".into()], None, Some(&MemoryMode::File),
+            "Base",
+            false,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &["claude".into()],
+            None,
+            Some(&MemoryMode::File),
         );
-        assert!(script.contains("MEMORY.md"), "must reference MEMORY.md for file mode");
+        assert!(
+            script.contains("MEMORY.md"),
+            "must reference MEMORY.md for file mode"
+        );
         assert!(script.contains("head -200"), "must truncate to 200 lines");
-        assert!(script.contains("if [ -s"), "must check file exists and is non-empty");
+        assert!(
+            script.contains("if [ -s"),
+            "must check file exists and is non-empty"
+        );
     }
 
     #[test]
@@ -319,18 +412,33 @@ mod tests {
             composite_memory_path: "/sandbox/.claude/composite-memory.md".to_owned(),
         };
         let script = build_prompt_assembly_script(
-            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
-            &["claude".into()], None, Some(&hs_mode),
+            "Base",
+            false,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &["claude".into()],
+            None,
+            Some(&hs_mode),
         );
-        assert!(script.contains("composite-memory.md"), "must reference composite-memory");
+        assert!(
+            script.contains("composite-memory.md"),
+            "must reference composite-memory"
+        );
         assert!(script.contains("if [ -s"), "must check file exists");
     }
 
     #[test]
     fn script_no_memory_section_when_none() {
         let script = build_prompt_assembly_script(
-            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
-            &["claude".into()], None, None,
+            "Base",
+            false,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &["claude".into()],
+            None,
+            None,
         );
         assert!(!script.contains("MEMORY.md"));
         assert!(!script.contains("composite-memory"));
@@ -339,21 +447,39 @@ mod tests {
     #[test]
     fn script_memory_section_is_last() {
         let script = build_prompt_assembly_script(
-            "Base", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
-            &["claude".into()], Some("# MCP Instructions\n\n## composio\n"), Some(&MemoryMode::File),
+            "Base",
+            false,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &["claude".into()],
+            Some("# MCP Instructions\n\n## composio\n"),
+            Some(&MemoryMode::File),
         );
         let mcp_pos = script.rfind("MCP").unwrap();
         let memory_pos = script.rfind("MEMORY.md").unwrap();
-        assert!(memory_pos > mcp_pos, "memory section must come after MCP instructions");
+        assert!(
+            memory_pos > mcp_pos,
+            "memory section must come after MCP instructions"
+        );
     }
 
     #[test]
     fn script_bootstrap_no_memory() {
         let script = build_prompt_assembly_script(
-            "Base", true, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
-            &["claude".into()], None, Some(&MemoryMode::File),
+            "Base",
+            true,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &["claude".into()],
+            None,
+            Some(&MemoryMode::File),
         );
-        assert!(!script.contains("MEMORY.md"), "bootstrap mode must not include memory");
+        assert!(
+            !script.contains("MEMORY.md"),
+            "bootstrap mode must not include memory"
+        );
     }
 
     #[test]
@@ -379,7 +505,9 @@ mod tests {
 
         // Anything that would bust the cache (other sections like TOOLS.md,
         // MCP instructions) must appear BEFORE the composite-memory section.
-        let memory_pos = head.rfind("composite-memory.md").expect("composite-memory.md must appear");
+        let memory_pos = head
+            .rfind("composite-memory.md")
+            .expect("composite-memory.md must appear");
         let tools_pos = head.find("TOOLS.md");
         let mcp_pos = head.find("# MCP Server Instructions");
 
@@ -387,7 +515,10 @@ mod tests {
             assert!(tp < memory_pos, "TOOLS.md must precede composite-memory.md");
         }
         if let Some(mp) = mcp_pos {
-            assert!(mp < memory_pos, "MCP instructions must precede composite-memory.md");
+            assert!(
+                mp < memory_pos,
+                "MCP instructions must precede composite-memory.md"
+            );
         }
     }
 }

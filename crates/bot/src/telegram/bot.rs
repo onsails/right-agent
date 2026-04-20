@@ -1,5 +1,5 @@
-use teloxide::adaptors::{CacheMe, Throttle};
 use teloxide::adaptors::throttle::Limits;
+use teloxide::adaptors::{CacheMe, Throttle};
 use teloxide::prelude::*;
 
 /// Construct the bot adaptor with correct ordering: CacheMe<Throttle<Bot>>.
@@ -8,7 +8,5 @@ use teloxide::prelude::*;
 /// `.throttle(Limits::default()).cache_me()` — Throttle is inner, CacheMe is outer.
 /// NEVER use Throttle<CacheMe<Bot>> — deadlock risk.
 pub fn build_bot(token: String) -> CacheMe<Throttle<Bot>> {
-    Bot::new(token)
-        .throttle(Limits::default())
-        .cache_me()
+    Bot::new(token).throttle(Limits::default()).cache_me()
 }

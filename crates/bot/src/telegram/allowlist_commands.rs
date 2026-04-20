@@ -20,8 +20,14 @@ use super::handler::AgentDir;
 #[derive(Debug, Clone, PartialEq)]
 pub enum UserTarget {
     NumericId(i64),
-    TextMention { id: i64, name: Option<String> },
-    Reply { id: i64, name: Option<String> },
+    TextMention {
+        id: i64,
+        name: Option<String>,
+    },
+    Reply {
+        id: i64,
+        name: Option<String>,
+    },
     /// `@username` mention without entity-level user_id — unresolvable.
     UnresolvableUsername(String),
     None,
@@ -171,10 +177,20 @@ pub async fn handle_allow(
                 return Ok(());
             }
             let disp = label.unwrap_or_else(|| id.to_string());
-            reply(&bot, &msg, &format!("\u{2713} allowed user {disp} (id {id})")).await?;
+            reply(
+                &bot,
+                &msg,
+                &format!("\u{2713} allowed user {disp} (id {id})"),
+            )
+            .await?;
         }
         AddOutcome::AlreadyPresent => {
-            reply(&bot, &msg, &format!("\u{2713} user {id} already in allowlist")).await?;
+            reply(
+                &bot,
+                &msg,
+                &format!("\u{2713} user {id} already in allowlist"),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -303,7 +319,12 @@ pub async fn handle_allow_all(
     }
 
     if matches!(msg.chat.kind, ChatKind::Private(_)) {
-        reply(&bot, &msg, "\u{2717} /allow_all is only valid in group chats").await?;
+        reply(
+            &bot,
+            &msg,
+            "\u{2717} /allow_all is only valid in group chats",
+        )
+        .await?;
         return Ok(());
     }
     let chat_id = msg.chat.id.0;
@@ -347,7 +368,12 @@ pub async fn handle_deny_all(
     }
 
     if matches!(msg.chat.kind, ChatKind::Private(_)) {
-        reply(&bot, &msg, "\u{2717} /deny_all is only valid in group chats").await?;
+        reply(
+            &bot,
+            &msg,
+            "\u{2717} /deny_all is only valid in group chats",
+        )
+        .await?;
         return Ok(());
     }
     let chat_id = msg.chat.id.0;

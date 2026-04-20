@@ -9,7 +9,11 @@ pub(crate) mod right_backend;
 mod wizard;
 
 #[derive(Parser)]
-#[command(name = "rightclaw", version, about = "Multi-agent runtime for Claude Code")]
+#[command(
+    name = "rightclaw",
+    version,
+    about = "Multi-agent runtime for Claude Code"
+)]
 pub struct Cli {
     /// Path to RightClaw home directory
     #[arg(long, env = "RIGHTCLAW_HOME")]
@@ -328,7 +332,9 @@ pub enum Commands {
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
-    miette::set_hook(Box::new(|_| Box::new(miette::MietteHandlerOpts::new().build())))?;
+    miette::set_hook(Box::new(|_| {
+        Box::new(miette::MietteHandlerOpts::new().build())
+    }))?;
 
     let cli = Cli::parse();
 
@@ -337,7 +343,6 @@ async fn main() -> miette::Result<()> {
     if matches!(cli.command, Commands::MemoryServer) {
         return memory_server::run_memory_server().await;
     }
-
 
     let filter = if cli.verbose {
         "rightclaw=debug"
@@ -369,7 +374,11 @@ async fn main() -> miette::Result<()> {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-                .with(tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_ansi(false),
+                )
                 .init();
             _log_guard = Some(guard);
         }
@@ -380,7 +389,11 @@ async fn main() -> miette::Result<()> {
             tracing_subscriber::registry()
                 .with(env_filter)
                 .with(tracing_subscriber::fmt::layer())
-                .with(tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(non_blocking)
+                        .with_ansi(false),
+                )
                 .init();
             _log_guard = Some(guard);
         }
@@ -401,9 +414,26 @@ async fn main() -> miette::Result<()> {
     )?;
 
     match cli.command {
-        Commands::Init { telegram_token, telegram_allowed_chat_ids, tunnel_name, tunnel_hostname, yes, network_policy, sandbox_mode, force } => {
-            cmd_init(&home, telegram_token.as_deref(), &telegram_allowed_chat_ids, &tunnel_name, tunnel_hostname.as_deref(), yes, network_policy, sandbox_mode, force)
-        }
+        Commands::Init {
+            telegram_token,
+            telegram_allowed_chat_ids,
+            tunnel_name,
+            tunnel_hostname,
+            yes,
+            network_policy,
+            sandbox_mode,
+            force,
+        } => cmd_init(
+            &home,
+            telegram_token.as_deref(),
+            &telegram_allowed_chat_ids,
+            &tunnel_name,
+            tunnel_hostname.as_deref(),
+            yes,
+            network_policy,
+            sandbox_mode,
+            force,
+        ),
         Commands::List => cmd_list(&home),
         Commands::Doctor => cmd_doctor(&home),
         Commands::Up {
@@ -428,32 +458,58 @@ async fn main() -> miette::Result<()> {
                 match key.as_str() {
                     "tunnel.hostname" => println!(
                         "{}",
-                        config.tunnel.as_ref().map(|t| t.hostname.as_str()).unwrap_or("(not set)")
+                        config
+                            .tunnel
+                            .as_ref()
+                            .map(|t| t.hostname.as_str())
+                            .unwrap_or("(not set)")
                     ),
                     "tunnel.uuid" => println!(
                         "{}",
-                        config.tunnel.as_ref().map(|t| t.tunnel_uuid.as_str()).unwrap_or("(not set)")
+                        config
+                            .tunnel
+                            .as_ref()
+                            .map(|t| t.tunnel_uuid.as_str())
+                            .unwrap_or("(not set)")
                     ),
                     "tunnel.credentials-file" => println!(
                         "{}",
-                        config.tunnel.as_ref().map(|t| t.credentials_file.display().to_string()).unwrap_or("(not set)".to_string())
+                        config
+                            .tunnel
+                            .as_ref()
+                            .map(|t| t.credentials_file.display().to_string())
+                            .unwrap_or("(not set)".to_string())
                     ),
                     other => return Err(miette::miette!("Unknown config key: {other}")),
                 }
                 Ok(())
             }
-            Some(ConfigCommands::Set { key, value }) => {
-                Err(miette::miette!(
-                    "Direct set not yet implemented for key '{key}' with value '{value}'. Use `rightclaw config` for interactive mode."
-                ))
-            }
+            Some(ConfigCommands::Set { key, value }) => Err(miette::miette!(
+                "Direct set not yet implemented for key '{key}' with value '{value}'. Use `rightclaw config` for interactive mode."
+            )),
         },
         Commands::Agent { command } => match command {
-            AgentCommands::Init { name, yes, force, fresh, network_policy, sandbox_mode, from_backup } => {
+            AgentCommands::Init {
+                name,
+                yes,
+                force,
+                fresh,
+                network_policy,
+                sandbox_mode,
+                from_backup,
+            } => {
                 if let Some(backup_path) = from_backup {
                     cmd_agent_restore(&home, &name, &backup_path).await
                 } else {
-                    cmd_agent_init(&home, &name, yes, force, fresh, network_policy, sandbox_mode)
+                    cmd_agent_init(
+                        &home,
+                        &name,
+                        yes,
+                        force,
+                        fresh,
+                        network_policy,
+                        sandbox_mode,
+                    )
                 }
             }
             AgentCommands::List => cmd_list(&home),
@@ -474,16 +530,20 @@ async fn main() -> miette::Result<()> {
                 }
                 Ok(())
             }
-            AgentCommands::Ssh { name, command } => {
-                cmd_agent_ssh(&home, &name, &command).await
-            }
+            AgentCommands::Ssh { name, command } => cmd_agent_ssh(&home, &name, &command).await,
             AgentCommands::Backup { name, sandbox_only } => {
                 cmd_agent_backup(&home, &name, sandbox_only).await
             }
-            AgentCommands::Destroy { name, backup, force } => {
-                cmd_agent_destroy(&home, &name, backup, force).await
-            }
-            AgentCommands::Allow { name, user_id, label } => {
+            AgentCommands::Destroy {
+                name,
+                backup,
+                force,
+            } => cmd_agent_destroy(&home, &name, backup, force).await,
+            AgentCommands::Allow {
+                name,
+                user_id,
+                label,
+            } => {
                 if user_id < 0 {
                     miette::bail!(
                         "user_id cannot be negative (groups/channels use `rightclaw agent allow_all`)"
@@ -533,7 +593,11 @@ async fn main() -> miette::Result<()> {
                 }
                 Ok(())
             }
-            AgentCommands::AllowAll { name, chat_id, label } => {
+            AgentCommands::AllowAll {
+                name,
+                chat_id,
+                label,
+            } => {
                 let dir = rightclaw::config::agents_dir(&home).join(&name);
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
@@ -594,8 +658,7 @@ async fn main() -> miette::Result<()> {
                     });
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(&out)
-                            .map_err(|e| miette::miette!("{e:#}"))?
+                        serde_json::to_string_pretty(&out).map_err(|e| miette::miette!("{e:#}"))?
                     );
                 } else {
                     println!("Trusted users:");
@@ -627,21 +690,31 @@ async fn main() -> miette::Result<()> {
             }
         },
         Commands::Memory { command } => match command {
-            MemoryCommands::List { agent, limit, offset, json } =>
-                cmd_memory_list(&home, &agent, limit, offset, json),
-            MemoryCommands::Search { agent, query, limit, offset, json } =>
-                cmd_memory_search(&home, &agent, &query, limit, offset, json),
-            MemoryCommands::Delete { agent, id } =>
-                cmd_memory_delete(&home, &agent, id),
-            MemoryCommands::Stats { agent, json } =>
-                cmd_memory_stats(&home, &agent, json),
+            MemoryCommands::List {
+                agent,
+                limit,
+                offset,
+                json,
+            } => cmd_memory_list(&home, &agent, limit, offset, json),
+            MemoryCommands::Search {
+                agent,
+                query,
+                limit,
+                offset,
+                json,
+            } => cmd_memory_search(&home, &agent, &query, limit, offset, json),
+            MemoryCommands::Delete { agent, id } => cmd_memory_delete(&home, &agent, id),
+            MemoryCommands::Stats { agent, json } => cmd_memory_stats(&home, &agent, json),
         },
         Commands::Mcp { command } => match command {
             McpCommands::Status { agent } => cmd_mcp_status(&home, agent.as_deref()),
         },
         // Unreachable: MemoryServer is dispatched before reaching here.
         Commands::MemoryServer => unreachable!("MemoryServer dispatched before tracing init"),
-        Commands::McpServer { port, ref token_map } => {
+        Commands::McpServer {
+            port,
+            ref token_map,
+        } => {
             let agents_dir = rightclaw::config::agents_dir(&home);
             let token_map_path = token_map.clone();
             let token_map_content = std::fs::read_to_string(token_map)
@@ -712,71 +785,92 @@ async fn main() -> miette::Result<()> {
 
                 match rightclaw::memory::open_connection(&agent_dir, true) {
                     Ok(conn) => match rightclaw::mcp::credentials::db_list_servers(&conn) {
-                        Ok(servers) => for s in servers {
-                            let auth_method = rightclaw::mcp::proxy::AuthMethod::from_db(
-                                s.auth_type.as_deref(),
-                                s.auth_header.as_deref(),
-                            );
-                            let token = std::sync::Arc::new(
-                                tokio::sync::RwLock::new(s.auth_token.clone()),
-                            );
+                        Ok(servers) => {
+                            for s in servers {
+                                let auth_method = rightclaw::mcp::proxy::AuthMethod::from_db(
+                                    s.auth_type.as_deref(),
+                                    s.auth_header.as_deref(),
+                                );
+                                let token = std::sync::Arc::new(tokio::sync::RwLock::new(
+                                    s.auth_token.clone(),
+                                ));
 
-                            // Collect OAuth entries before moving token into ProxyBackend.
-                            if s.auth_type.as_deref() == Some("oauth") {
-                                oauth_server_names.insert(s.name.clone());
-                                if let (Some(te), Some(cid), Some(exp)) =
-                                    (&s.token_endpoint, &s.client_id, &s.expires_at)
-                                {
-                                    let expires_at =
-                                        chrono::DateTime::parse_from_rfc3339(exp)
+                                // Collect OAuth entries before moving token into ProxyBackend.
+                                if s.auth_type.as_deref() == Some("oauth") {
+                                    oauth_server_names.insert(s.name.clone());
+                                    if let (Some(te), Some(cid), Some(exp)) =
+                                        (&s.token_endpoint, &s.client_id, &s.expires_at)
+                                    {
+                                        let expires_at = chrono::DateTime::parse_from_rfc3339(exp)
                                             .map(|dt| dt.with_timezone(&chrono::Utc))
                                             .unwrap_or_else(|_| chrono::Utc::now());
-                                    oauth_entries.push((
-                                        s.name.clone(),
-                                        rightclaw::mcp::refresh::OAuthServerState {
-                                            refresh_token: s.refresh_token.clone(),
-                                            token_endpoint: te.clone(),
-                                            client_id: cid.clone(),
-                                            client_secret: s.client_secret.clone(),
-                                            expires_at,
-                                            server_url: s.url.clone(),
-                                        },
-                                        token.clone(),
-                                    ));
+                                        oauth_entries.push((
+                                            s.name.clone(),
+                                            rightclaw::mcp::refresh::OAuthServerState {
+                                                refresh_token: s.refresh_token.clone(),
+                                                token_endpoint: te.clone(),
+                                                client_id: cid.clone(),
+                                                client_secret: s.client_secret.clone(),
+                                                expires_at,
+                                                server_url: s.url.clone(),
+                                            },
+                                            token.clone(),
+                                        ));
+                                    }
                                 }
-                            }
 
-                            let backend = rightclaw::mcp::proxy::ProxyBackend::new(
-                                s.name.clone(),
-                                agent_dir.clone(),
-                                s.url.clone(),
-                                token,
-                                auth_method,
-                            );
-                            proxies.insert(s.name, std::sync::Arc::new(backend));
-                        },
-                        Err(e) => tracing::error!(agent = agent_name.as_str(), "failed to list MCP servers: {e:#}"),
+                                let backend = rightclaw::mcp::proxy::ProxyBackend::new(
+                                    s.name.clone(),
+                                    agent_dir.clone(),
+                                    s.url.clone(),
+                                    token,
+                                    auth_method,
+                                );
+                                proxies.insert(s.name, std::sync::Arc::new(backend));
+                            }
+                        }
+                        Err(e) => tracing::error!(
+                            agent = agent_name.as_str(),
+                            "failed to list MCP servers: {e:#}"
+                        ),
                     },
-                    Err(e) => tracing::error!(agent = agent_name.as_str(), "failed to open DB for MCP restore: {e:#}"),
+                    Err(e) => tracing::error!(
+                        agent = agent_name.as_str(),
+                        "failed to open DB for MCP restore: {e:#}"
+                    ),
                 }
 
                 // Clone proxies for reconnect tasks before moving into registry.
-                let proxies_snapshot: Vec<(String, std::sync::Arc<rightclaw::mcp::proxy::ProxyBackend>)> =
-                    proxies.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let proxies_snapshot: Vec<(
+                    String,
+                    std::sync::Arc<rightclaw::mcp::proxy::ProxyBackend>,
+                )> = proxies
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
 
                 // Wire up HindsightBackend if memory provider is configured.
                 let hindsight = match &agent_config {
                     Some(agent_config) => {
                         if let Some(ref mem_config) = agent_config.memory {
-                            if mem_config.provider == rightclaw::agent::types::MemoryProvider::Hindsight {
+                            if mem_config.provider
+                                == rightclaw::agent::types::MemoryProvider::Hindsight
+                            {
                                 let resolved_key = std::env::var("HINDSIGHT_API_KEY")
                                     .ok()
                                     .or_else(|| mem_config.api_key.clone());
                                 if let Some(ref api_key) = resolved_key {
-                                    let bank_id = mem_config.bank_id.as_deref().unwrap_or(agent_name.as_str());
+                                    let bank_id = mem_config
+                                        .bank_id
+                                        .as_deref()
+                                        .unwrap_or(agent_name.as_str());
                                     let budget = mem_config.recall_budget.to_string();
                                     let client = rightclaw::memory::hindsight::HindsightClient::new(
-                                        api_key, bank_id, &budget, mem_config.recall_max_tokens, None,
+                                        api_key,
+                                        bank_id,
+                                        &budget,
+                                        mem_config.recall_max_tokens,
+                                        None,
                                     );
                                     let wrapper = std::sync::Arc::new(
                                         rightclaw::memory::ResilientHindsight::new(
@@ -785,7 +879,9 @@ async fn main() -> miette::Result<()> {
                                             "aggregator",
                                         ),
                                     );
-                                    Some(std::sync::Arc::new(aggregator::HindsightBackend::new(wrapper)))
+                                    Some(std::sync::Arc::new(aggregator::HindsightBackend::new(
+                                        wrapper,
+                                    )))
                                 } else {
                                     tracing::warn!(
                                         agent = agent_name.as_str(),
@@ -881,9 +977,8 @@ async fn main() -> miette::Result<()> {
                                 // No refresh_token — cannot refresh.
                                 let b = backend.clone();
                                 tokio::spawn(async move {
-                                    b.set_status(
-                                        rightclaw::mcp::proxy::BackendStatus::NeedsAuth,
-                                    ).await;
+                                    b.set_status(rightclaw::mcp::proxy::BackendStatus::NeedsAuth)
+                                        .await;
                                 });
                             }
                         } else {
@@ -907,9 +1002,8 @@ async fn main() -> miette::Result<()> {
                         );
                         let b = backend.clone();
                         tokio::spawn(async move {
-                            b.set_status(
-                                rightclaw::mcp::proxy::BackendStatus::NeedsAuth,
-                            ).await;
+                            b.set_status(rightclaw::mcp::proxy::BackendStatus::NeedsAuth)
+                                .await;
                         });
                     } else {
                         // Non-OAuth server — just connect.
@@ -925,10 +1019,8 @@ async fn main() -> miette::Result<()> {
                     }
                 }
 
-                reconnect_managers_map.insert(
-                    agent_name.clone(),
-                    tokio::sync::Mutex::new(reconnect_mgr),
-                );
+                reconnect_managers_map
+                    .insert(agent_name.clone(), tokio::sync::Mutex::new(reconnect_mgr));
                 refresh_senders_map.insert(agent_name.clone(), refresh_tx);
             }
 
@@ -938,8 +1030,16 @@ async fn main() -> miette::Result<()> {
                 std::sync::Arc::new(reconnect_managers_map);
 
             aggregator::run_aggregator_http(
-                port, token_map, token_map_path, dispatcher, agents_dir, home, refresh_senders, reconnect_managers,
-            ).await
+                port,
+                token_map,
+                token_map_path,
+                dispatcher,
+                agents_dir,
+                home,
+                refresh_senders,
+                reconnect_managers,
+            )
+            .await
         }
         Commands::Bot { agent, debug } => {
             let needs_restart = rightclaw_bot::run(rightclaw_bot::BotArgs {
@@ -972,7 +1072,11 @@ fn filter_agents(
             .cloned()
             .ok_or_else(|| {
                 let available: Vec<&str> = all_agents.iter().map(|a| a.name.as_str()).collect();
-                miette::miette!("agent '{}' not found. Available agents: {}", name, available.join(", "))
+                miette::miette!(
+                    "agent '{}' not found. Available agents: {}",
+                    name,
+                    available.join(", ")
+                )
             })?;
         filtered.push(found);
     }
@@ -995,11 +1099,20 @@ fn cmd_init(
 
     // Non-interactive: use CLI flags or defaults.
     // Interactive: wizard with Esc-to-go-back between steps.
-    let (sandbox, network_policy_val, token, chat_ids, memory_provider, memory_api_key, memory_bank_id);
+    let (
+        sandbox,
+        network_policy_val,
+        token,
+        chat_ids,
+        memory_provider,
+        memory_api_key,
+        memory_bank_id,
+    );
 
     if !interactive {
         sandbox = sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
-        network_policy_val = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+        network_policy_val =
+            network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
         token = telegram_token.map(|t| {
             rightclaw::init::validate_telegram_token(t).unwrap();
             t.to_string()
@@ -1011,14 +1124,30 @@ fn cmd_init(
     } else {
         // Wizard state machine: Esc goes back to previous step.
         #[derive(Clone, Copy)]
-        enum Step { Sandbox, Network, Telegram, ChatIds, Memory, Done }
+        enum Step {
+            Sandbox,
+            Network,
+            Telegram,
+            ChatIds,
+            Memory,
+            Done,
+        }
 
-        let mut step = if sandbox_mode.is_some() { Step::Network } else { Step::Sandbox };
+        let mut step = if sandbox_mode.is_some() {
+            Step::Network
+        } else {
+            Step::Sandbox
+        };
         let mut w_sandbox = sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
-        let mut w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+        let mut w_network =
+            network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
         let mut w_token: Option<String> = telegram_token.map(|t| t.to_string());
         let mut w_chat_ids: Vec<i64> = telegram_allowed_chat_ids.to_vec();
-        let mut w_mem = (rightclaw::agent::types::MemoryProvider::Hindsight, None::<String>, None::<String>);
+        let mut w_mem = (
+            rightclaw::agent::types::MemoryProvider::Hindsight,
+            None::<String>,
+            None::<String>,
+        );
 
         loop {
             match step {
@@ -1046,21 +1175,32 @@ fn cmd_init(
                             step = Step::Sandbox; // back
                         }
                     } else {
-                        w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+                        w_network = network_policy
+                            .unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
                         step = Step::Telegram;
                     }
                 }
                 Step::Telegram => {
                     if telegram_token.is_some() {
                         w_token = telegram_token.map(|t| t.to_string());
-                        step = if w_token.is_some() { Step::ChatIds } else { Step::Memory };
+                        step = if w_token.is_some() {
+                            Step::ChatIds
+                        } else {
+                            Step::Memory
+                        };
                     } else {
                         match crate::wizard::telegram_setup(None, true) {
                             Ok(t) => {
                                 w_token = t;
-                                step = if w_token.is_some() { Step::ChatIds } else { Step::Memory };
+                                step = if w_token.is_some() {
+                                    Step::ChatIds
+                                } else {
+                                    Step::Memory
+                                };
                             }
-                            Err(_) => { step = Step::Network; } // back
+                            Err(_) => {
+                                step = Step::Network;
+                            } // back
                         }
                     }
                 }
@@ -1074,21 +1214,25 @@ fn cmd_init(
                                 w_chat_ids = ids;
                                 step = Step::Memory;
                             }
-                            Err(_) => { step = Step::Telegram; } // back
+                            Err(_) => {
+                                step = Step::Telegram;
+                            } // back
                         }
                     }
                 }
-                Step::Memory => {
-                    match rightclaw::init::prompt_memory_config("right")? {
-                        Some((p, k, b)) => {
-                            w_mem = (p, k, b);
-                            step = Step::Done;
-                        }
-                        None => {
-                            step = if w_token.is_some() { Step::ChatIds } else { Step::Telegram };
-                        }
+                Step::Memory => match rightclaw::init::prompt_memory_config("right")? {
+                    Some((p, k, b)) => {
+                        w_mem = (p, k, b);
+                        step = Step::Done;
                     }
-                }
+                    None => {
+                        step = if w_token.is_some() {
+                            Step::ChatIds
+                        } else {
+                            Step::Telegram
+                        };
+                    }
+                },
                 Step::Done => break,
             }
         }
@@ -1118,8 +1262,8 @@ fn cmd_init(
     // for schemas and settings before sandbox staging upload.
     {
         let agent_dir = home.join("agents/right");
-        let self_exe = std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
+        let self_exe =
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
         let agent_def = rightclaw::agent::AgentDef {
             name: "right".to_string(),
             path: agent_dir.clone(),
@@ -1205,9 +1349,7 @@ fn cmd_init(
     // Tunnel setup via wizard.
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
 
-    let config = rightclaw::config::GlobalConfig {
-        tunnel: tunnel_cfg,
-    };
+    let config = rightclaw::config::GlobalConfig { tunnel: tunnel_cfg };
     rightclaw::config::write_global_config(home, &config)?;
 
     println!();
@@ -1236,7 +1378,8 @@ fn cmd_agent_init(
     // Reject if exists and --force not given.
     if agent_dir.exists() && !force {
         return Err(miette::miette!(
-            help = "Use --force to wipe and re-create, or `rightclaw agent config` to change settings",
+            help =
+                "Use --force to wipe and re-create, or `rightclaw agent config` to change settings",
             "Agent directory already exists at {}",
             agent_dir.display()
         ));
@@ -1255,8 +1398,8 @@ fn cmd_agent_init(
                     "Could not read existing agent.yaml: {e:#}"
                 )
             })?;
-            let config: rightclaw::agent::types::AgentConfig =
-                serde_saphyr::from_str(&yaml_str).map_err(|e| {
+            let config: rightclaw::agent::types::AgentConfig = serde_saphyr::from_str(&yaml_str)
+                .map_err(|e| {
                     miette::miette!(
                         help = "Use --fresh to reconfigure from scratch",
                         "Could not parse existing agent.yaml: {e:#}"
@@ -1283,15 +1426,15 @@ fn cmd_agent_init(
             println!("Agent \"{name}\" already exists at {}", agent_dir.display());
             println!("This will permanently delete:");
             println!("  - All agent files (identity, memory, skills, config)");
-            let display_sb = saved.as_ref()
+            let display_sb = saved
+                .as_ref()
                 .map(|c| rightclaw::openshell::resolve_sandbox_name(name, c))
                 .unwrap_or_else(|| rightclaw::openshell::sandbox_name(name));
-            println!(
-                "  - OpenShell sandbox \"{}\" (if exists)",
-                display_sb
-            );
+            println!("  - OpenShell sandbox \"{}\" (if exists)", display_sb);
             print!("Continue? [y/N] ");
-            io::stdout().flush().map_err(|e| miette::miette!("stdout flush: {e}"))?;
+            io::stdout()
+                .flush()
+                .map_err(|e| miette::miette!("stdout flush: {e}"))?;
             let mut input = String::new();
             io::stdin()
                 .read_line(&mut input)
@@ -1302,7 +1445,8 @@ fn cmd_agent_init(
         }
 
         // Delete sandbox (best-effort, async).
-        let sb_name = saved.as_ref()
+        let sb_name = saved
+            .as_ref()
             .map(|c| rightclaw::openshell::resolve_sandbox_name(name, c))
             .unwrap_or_else(|| rightclaw::openshell::sandbox_name(name));
         tokio::task::block_in_place(|| {
@@ -1319,7 +1463,10 @@ fn cmd_agent_init(
 
         // Delete agent directory.
         std::fs::remove_dir_all(&agent_dir).map_err(|e| {
-            miette::miette!("Failed to delete agent directory {}: {e:#}", agent_dir.display())
+            miette::miette!(
+                "Failed to delete agent directory {}: {e:#}",
+                agent_dir.display()
+            )
         })?;
 
         tracing::info!(agent = name, "wiped agent directory and sandbox");
@@ -1367,8 +1514,11 @@ fn cmd_agent_init(
                     ));
                 }
                 return tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current()
-                        .block_on(cmd_agent_restore(home, name, &backup_path))
+                    tokio::runtime::Handle::current().block_on(cmd_agent_restore(
+                        home,
+                        name,
+                        &backup_path,
+                    ))
                 });
             }
         }
@@ -1376,8 +1526,10 @@ fn cmd_agent_init(
         // Run wizard or use CLI flags. Esc goes back to previous step.
         if !interactive {
             rightclaw::init::InitOverrides {
-                sandbox_mode: sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell),
-                network_policy: network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive),
+                sandbox_mode: sandbox_mode
+                    .unwrap_or(rightclaw::agent::types::SandboxMode::Openshell),
+                network_policy: network_policy
+                    .unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive),
                 telegram_token: None,
                 allowed_chat_ids: vec![],
                 model: None,
@@ -1388,14 +1540,31 @@ fn cmd_agent_init(
             }
         } else {
             #[derive(Clone, Copy)]
-            enum Step { Sandbox, Network, Telegram, ChatIds, Memory, Done }
+            enum Step {
+                Sandbox,
+                Network,
+                Telegram,
+                ChatIds,
+                Memory,
+                Done,
+            }
 
-            let mut step = if sandbox_mode.is_some() { Step::Network } else { Step::Sandbox };
-            let mut w_sandbox = sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
-            let mut w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+            let mut step = if sandbox_mode.is_some() {
+                Step::Network
+            } else {
+                Step::Sandbox
+            };
+            let mut w_sandbox =
+                sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
+            let mut w_network =
+                network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
             let mut w_token: Option<String> = None;
             let mut w_chat_ids: Vec<i64> = vec![];
-            let mut w_mem = (rightclaw::agent::types::MemoryProvider::Hindsight, None::<String>, None::<String>);
+            let mut w_mem = (
+                rightclaw::agent::types::MemoryProvider::Hindsight,
+                None::<String>,
+                None::<String>,
+            );
 
             loop {
                 match step {
@@ -1419,39 +1588,46 @@ fn cmd_agent_init(
                                 step = Step::Sandbox;
                             }
                         } else {
-                            w_network = network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
+                            w_network = network_policy
+                                .unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
                             step = Step::Telegram;
                         }
                     }
-                    Step::Telegram => {
-                        match crate::wizard::telegram_setup(None, true) {
-                            Ok(t) => {
-                                w_token = t;
-                                step = if w_token.is_some() { Step::ChatIds } else { Step::Memory };
-                            }
-                            Err(_) => { step = Step::Network; }
+                    Step::Telegram => match crate::wizard::telegram_setup(None, true) {
+                        Ok(t) => {
+                            w_token = t;
+                            step = if w_token.is_some() {
+                                Step::ChatIds
+                            } else {
+                                Step::Memory
+                            };
                         }
-                    }
-                    Step::ChatIds => {
-                        match crate::wizard::chat_ids_setup() {
-                            Ok(ids) => {
-                                w_chat_ids = ids;
-                                step = Step::Memory;
-                            }
-                            Err(_) => { step = Step::Telegram; }
+                        Err(_) => {
+                            step = Step::Network;
                         }
-                    }
-                    Step::Memory => {
-                        match rightclaw::init::prompt_memory_config(name)? {
-                            Some((p, k, b)) => {
-                                w_mem = (p, k, b);
-                                step = Step::Done;
-                            }
-                            None => {
-                                step = if w_token.is_some() { Step::ChatIds } else { Step::Telegram };
-                            }
+                    },
+                    Step::ChatIds => match crate::wizard::chat_ids_setup() {
+                        Ok(ids) => {
+                            w_chat_ids = ids;
+                            step = Step::Memory;
                         }
-                    }
+                        Err(_) => {
+                            step = Step::Telegram;
+                        }
+                    },
+                    Step::Memory => match rightclaw::init::prompt_memory_config(name)? {
+                        Some((p, k, b)) => {
+                            w_mem = (p, k, b);
+                            step = Step::Done;
+                        }
+                        None => {
+                            step = if w_token.is_some() {
+                                Step::ChatIds
+                            } else {
+                                Step::Telegram
+                            };
+                        }
+                    },
                     Step::Done => break,
                 }
             }
@@ -1476,8 +1652,8 @@ fn cmd_agent_init(
     // Per-agent codegen was moved to bot startup (59243d0) but init/agent-init
     // need it for schemas and settings before sandbox staging upload.
     {
-        let self_exe = std::env::current_exe()
-            .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
+        let self_exe =
+            std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
         let agent_def = rightclaw::agent::AgentDef {
             name: name.to_string(),
             path: agent_dir.clone(),
@@ -1508,7 +1684,10 @@ fn cmd_agent_init(
     }
 
     // Create sandbox for openshell agents.
-    if matches!(overrides.sandbox_mode, rightclaw::agent::types::SandboxMode::Openshell) {
+    if matches!(
+        overrides.sandbox_mode,
+        rightclaw::agent::types::SandboxMode::Openshell
+    ) {
         let staging = agent_dir.join("staging");
         rightclaw::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
@@ -1520,9 +1699,8 @@ fn cmd_agent_init(
             // Check if sandbox exists — if so, we need to recreate. If not, false is fine
             // (ensure_sandbox will create fresh).
             let exists = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    check_sandbox_exists_async(&sb_name).await
-                })
+                tokio::runtime::Handle::current()
+                    .block_on(async { check_sandbox_exists_async(&sb_name).await })
             });
             exists.unwrap_or(false)
         } else {
@@ -1586,7 +1764,10 @@ async fn check_sandbox_exists_async(sandbox_name: &str) -> miette::Result<bool> 
 /// Returns `true` if sandbox exists and should be recreated.
 /// Returns `false` if sandbox doesn't exist (fresh create).
 /// Errors if user declines recreate.
-fn prompt_sandbox_recreate_if_exists(sandbox_name: &str, interactive: bool) -> miette::Result<bool> {
+fn prompt_sandbox_recreate_if_exists(
+    sandbox_name: &str,
+    interactive: bool,
+) -> miette::Result<bool> {
     let exists = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current().block_on(check_sandbox_exists_async(sandbox_name))
     })?;
@@ -1610,7 +1791,9 @@ fn prompt_sandbox_recreate_if_exists(sandbox_name: &str, interactive: bool) -> m
     println!("  2. Cancel — use `rightclaw agent config` to update existing agent");
     loop {
         print!("Choose [1/2]: ");
-        io::stdout().flush().map_err(|e| miette::miette!("stdout flush: {e}"))?;
+        io::stdout()
+            .flush()
+            .map_err(|e| miette::miette!("stdout flush: {e}"))?;
         let mut input = String::new();
         io::stdin()
             .read_line(&mut input)
@@ -1721,7 +1904,12 @@ async fn cmd_up(
     let any_sandboxed = agents.iter().any(|a| {
         a.config
             .as_ref()
-            .map(|c| matches!(c.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell))
+            .map(|c| {
+                matches!(
+                    c.sandbox_mode(),
+                    rightclaw::agent::types::SandboxMode::Openshell
+                )
+            })
             .unwrap_or(true) // default is openshell
     });
     if any_sandboxed {
@@ -1813,9 +2001,9 @@ async fn cmd_up(
 
     if detach {
         cmd.arg("--detached");
-        let child = cmd.spawn().map_err(|e| {
-            miette::miette!("failed to spawn process-compose: {e:#}")
-        })?;
+        let child = cmd
+            .spawn()
+            .map_err(|e| miette::miette!("failed to spawn process-compose: {e:#}"))?;
 
         // Wait briefly for process-compose to start.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1834,9 +2022,10 @@ async fn cmd_up(
         // Drop child handle without killing -- it's detached.
         drop(child);
     } else {
-        let status = cmd.status().await.map_err(|e| {
-            miette::miette!("failed to run process-compose: {e:#}")
-        })?;
+        let status = cmd
+            .status()
+            .await
+            .map_err(|e| miette::miette!("failed to run process-compose: {e:#}"))?;
 
         if !status.success() {
             return Err(miette::miette!(
@@ -1987,7 +2176,10 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
     }
 
     let has_bot = all_agents.iter().any(|a| {
-        a.config.as_ref().map(|c| c.telegram_token.is_some()).unwrap_or(false)
+        a.config
+            .as_ref()
+            .map(|c| c.telegram_token.is_some())
+            .unwrap_or(false)
     });
     if !has_bot {
         eprintln!("rightclaw: warning: no agents have Telegram tokens — nothing will run");
@@ -1995,8 +2187,16 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
 
     println!("Reloaded. Active agents:");
     for agent in &all_agents {
-        let has_token = agent.config.as_ref().map(|c| c.telegram_token.is_some()).unwrap_or(false);
-        let status = if has_token { "bot" } else { "no token (skipped)" };
+        let has_token = agent
+            .config
+            .as_ref()
+            .map(|c| c.telegram_token.is_some())
+            .unwrap_or(false);
+        let status = if has_token {
+            "bot"
+        } else {
+            "no token (skipped)"
+        };
         println!("  {:<20} {}", agent.name, status);
     }
 
@@ -2016,10 +2216,7 @@ async fn cmd_status(_home: &Path) -> miette::Result<()> {
     if processes.is_empty() {
         println!("No processes running.");
     } else {
-        println!(
-            "{:<20} {:<12} {:<10} UPTIME",
-            "NAME", "STATUS", "PID"
-        );
+        println!("{:<20} {:<12} {:<10} UPTIME", "NAME", "STATUS", "PID");
         for p in &processes {
             println!(
                 "{:<20} {:<12} {:<10} {}",
@@ -2051,7 +2248,11 @@ fn cmd_attach(_home: &Path) -> miette::Result<()> {
     Err(miette::miette!("Failed to attach: {err}"))
 }
 
-async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) -> miette::Result<()> {
+async fn cmd_agent_restore(
+    home: &Path,
+    agent_name: &str,
+    backup_path: &Path,
+) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
     // 1. Validate preconditions.
@@ -2087,7 +2288,9 @@ async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) ->
     // 2. Create agent dir and restore config files.
     std::fs::create_dir_all(&agent_dir)
         .into_diagnostic()
-        .map_err(|e| miette::miette!("failed to create agent dir {}: {e:#}", agent_dir.display()))?;
+        .map_err(|e| {
+            miette::miette!("failed to create agent dir {}: {e:#}", agent_dir.display())
+        })?;
 
     for filename in &["agent.yaml", "policy.yaml", "data.db"] {
         let src = backup_path.join(filename);
@@ -2102,10 +2305,7 @@ async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) ->
 
     // 3. Parse restored config to determine sandbox mode.
     let config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)?;
-    let is_sandboxed = config
-        .as_ref()
-        .map(|c| c.is_sandboxed())
-        .unwrap_or(true);
+    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
 
     if is_sandboxed {
         // 4. Sandboxed restore: create new sandbox, upload tar contents.
@@ -2151,23 +2351,26 @@ async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) ->
         let mtls_dir = match rightclaw::openshell::preflight_check() {
             rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
             rightclaw::openshell::OpenShellStatus::NotInstalled => {
-                return Err(miette::miette!("openshell not installed — required for sandboxed agent restore"));
+                return Err(miette::miette!(
+                    "openshell not installed — required for sandboxed agent restore"
+                ));
             }
             rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
-                return Err(miette::miette!("openshell gateway not started — start it before restoring"));
+                return Err(miette::miette!(
+                    "openshell gateway not started — start it before restoring"
+                ));
             }
             rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
-                return Err(miette::miette!("openshell mTLS certs missing or corrupt — try reinstalling openshell"));
+                return Err(miette::miette!(
+                    "openshell mTLS certs missing or corrupt — try reinstalling openshell"
+                ));
             }
         };
 
         // Spawn sandbox.
         println!("Creating sandbox '{new_sandbox_name}'...");
-        let mut child = rightclaw::openshell::spawn_sandbox(
-            &new_sandbox_name,
-            &policy_path,
-            Some(&staging),
-        )?;
+        let mut child =
+            rightclaw::openshell::spawn_sandbox(&new_sandbox_name, &policy_path, Some(&staging))?;
 
         let mut grpc = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
 
@@ -2189,7 +2392,8 @@ async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) ->
         }
 
         // Wait for SSH transport.
-        let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox_name).await?;
+        let sandbox_id =
+            rightclaw::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox_name).await?;
         rightclaw::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
 
         // Generate SSH config.
@@ -2197,10 +2401,8 @@ async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) ->
         std::fs::create_dir_all(&ssh_config_dir)
             .into_diagnostic()
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-        let ssh_config_path = rightclaw::openshell::generate_ssh_config(
-            &new_sandbox_name,
-            &ssh_config_dir,
-        ).await?;
+        let ssh_config_path =
+            rightclaw::openshell::generate_ssh_config(&new_sandbox_name, &ssh_config_dir).await?;
 
         let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(&new_sandbox_name);
 
@@ -2223,21 +2425,31 @@ async fn cmd_agent_restore(home: &Path, agent_name: &str, backup_path: &Path) ->
         let status = std::process::Command::new("tar")
             .args([
                 "xzpf",
-                tar_path.to_str().ok_or_else(|| miette::miette!("non-UTF-8 tar path"))?,
+                tar_path
+                    .to_str()
+                    .ok_or_else(|| miette::miette!("non-UTF-8 tar path"))?,
                 "--strip-components=1",
                 "-C",
-                agent_dir.to_str().ok_or_else(|| miette::miette!("non-UTF-8 agent dir"))?,
+                agent_dir
+                    .to_str()
+                    .ok_or_else(|| miette::miette!("non-UTF-8 agent dir"))?,
             ])
             .status()
             .into_diagnostic()
             .map_err(|e| miette::miette!("failed to spawn tar: {e:#}"))?;
         if !status.success() {
-            return Err(miette::miette!("tar extraction failed with status {status}"));
+            return Err(miette::miette!(
+                "tar extraction failed with status {status}"
+            ));
         }
         println!("Agent files restored");
     }
 
-    println!("Restore complete: agent '{}' at {}", agent_name, agent_dir.display());
+    println!(
+        "Restore complete: agent '{}' at {}",
+        agent_name,
+        agent_dir.display()
+    );
     Ok(())
 }
 
@@ -2252,16 +2464,17 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
         .find(|a| a.name == agent_name)
         .ok_or_else(|| {
             let available: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-            miette::miette!("Agent '{}' not found. Available: {}", agent_name, available.join(", "))
+            miette::miette!(
+                "Agent '{}' not found. Available: {}",
+                agent_name,
+                available.join(", ")
+            )
         })?;
 
     let agent_dir = agents_dir.join(agent_name);
     let config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)?;
 
-    let is_sandboxed = config
-        .as_ref()
-        .map(|c| c.is_sandboxed())
-        .unwrap_or(true);
+    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
 
     // 2. Create backup directory: ~/.rightclaw/backups/<agent>/<YYYYMMDD-HHMM>/
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
@@ -2269,7 +2482,12 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
     let backup_dir = backup_base.join(&timestamp);
     std::fs::create_dir_all(&backup_dir)
         .into_diagnostic()
-        .map_err(|e| miette::miette!("failed to create backup dir {}: {e:#}", backup_dir.display()))?;
+        .map_err(|e| {
+            miette::miette!(
+                "failed to create backup dir {}: {e:#}",
+                backup_dir.display()
+            )
+        })?;
 
     tracing::info!(agent = agent_name, backup_dir = %backup_dir.display(), "starting backup");
 
@@ -2284,13 +2502,19 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
         let mtls_dir = match rightclaw::openshell::preflight_check() {
             rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
             rightclaw::openshell::OpenShellStatus::NotInstalled => {
-                return Err(miette::miette!("openshell not installed — required for sandboxed agent backup"));
+                return Err(miette::miette!(
+                    "openshell not installed — required for sandboxed agent backup"
+                ));
             }
             rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
-                return Err(miette::miette!("openshell gateway not started — start it before backing up"));
+                return Err(miette::miette!(
+                    "openshell gateway not started — start it before backing up"
+                ));
             }
             rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
-                return Err(miette::miette!("openshell mTLS certs missing or corrupt — try reinstalling openshell"));
+                return Err(miette::miette!(
+                    "openshell mTLS certs missing or corrupt — try reinstalling openshell"
+                ));
             }
         };
 
@@ -2305,7 +2529,10 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
             ));
         }
 
-        let ssh_config = home.join("run").join("ssh").join(format!("{}.ssh-config", sb_name));
+        let ssh_config = home
+            .join("run")
+            .join("ssh")
+            .join(format!("{}.ssh-config", sb_name));
         if !ssh_config.exists() {
             return Err(miette::miette!(
                 help = "Try restarting the agent",
@@ -2318,8 +2545,12 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
         let dest_tar = backup_dir.join("sandbox.tar.gz");
 
         tracing::info!(sandbox = %sb_name, dest = %dest_tar.display(), "downloading sandbox via SSH tar");
-        rightclaw::openshell::ssh_tar_download(&ssh_config, &ssh_host, "sandbox", &dest_tar, 300).await?;
-        println!("sandbox.tar.gz written ({} bytes)", std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0));
+        rightclaw::openshell::ssh_tar_download(&ssh_config, &ssh_host, "sandbox", &dest_tar, 300)
+            .await?;
+        println!(
+            "sandbox.tar.gz written ({} bytes)",
+            std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0)
+        );
     } else {
         // No-sandbox: tar the agent dir (excluding data.db — backed up separately via VACUUM)
         let dest_tar = backup_dir.join("sandbox.tar.gz");
@@ -2327,10 +2558,15 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
         let status = std::process::Command::new("tar")
             .args([
                 "czpf",
-                dest_tar.to_str().ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?,
+                dest_tar
+                    .to_str()
+                    .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?,
                 "--exclude=data.db",
                 "-C",
-                agent_dir.parent().ok_or_else(|| miette::miette!("agent_dir has no parent"))?.to_str()
+                agent_dir
+                    .parent()
+                    .ok_or_else(|| miette::miette!("agent_dir has no parent"))?
+                    .to_str()
                     .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?,
                 agent_name,
             ])
@@ -2340,7 +2576,10 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
         if !status.success() {
             return Err(miette::miette!("tar exited with status {status}"));
         }
-        println!("sandbox.tar.gz written ({} bytes)", std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0));
+        println!(
+            "sandbox.tar.gz written ({} bytes)",
+            std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0)
+        );
     }
 
     // 4. Config files (unless --sandbox-only)
@@ -2363,12 +2602,18 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
                 .into_diagnostic()
                 .map_err(|e| miette::miette!("failed to open data.db: {e:#}"))?;
             conn.execute(
-                &format!("VACUUM INTO '{}'", backup_db.display().to_string().replace('\'', "''")),
+                &format!(
+                    "VACUUM INTO '{}'",
+                    backup_db.display().to_string().replace('\'', "''")
+                ),
                 [],
             )
             .into_diagnostic()
             .map_err(|e| miette::miette!("VACUUM INTO failed: {e:#}"))?;
-            println!("data.db vacuumed ({} bytes)", std::fs::metadata(&backup_db).map(|m| m.len()).unwrap_or(0));
+            println!(
+                "data.db vacuumed ({} bytes)",
+                std::fs::metadata(&backup_db).map(|m| m.len()).unwrap_or(0)
+            );
         }
     }
 
@@ -2376,7 +2621,12 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
     Ok(())
 }
 
-async fn cmd_agent_destroy(home: &Path, agent_name: &str, backup_flag: bool, force: bool) -> miette::Result<()> {
+async fn cmd_agent_destroy(
+    home: &Path,
+    agent_name: &str,
+    backup_flag: bool,
+    force: bool,
+) -> miette::Result<()> {
     use inquire::ui::{Color, RenderConfig, Styled};
 
     // Validate agent exists
@@ -2435,8 +2685,8 @@ async fn cmd_agent_destroy(home: &Path, agent_name: &str, backup_flag: bool, for
         };
 
         // Final confirmation — red styled
-        let red_config = RenderConfig::default()
-            .with_prompt_prefix(Styled::new("⚠").with_fg(Color::LightRed));
+        let red_config =
+            RenderConfig::default().with_prompt_prefix(Styled::new("⚠").with_fg(Color::LightRed));
 
         let confirmed = inquire::Confirm::new(&format!(
             "Permanently destroy agent '{agent_name}'? This cannot be undone."
@@ -2486,7 +2736,10 @@ async fn cmd_agent_destroy(home: &Path, agent_name: &str, backup_flag: bool, for
 
 fn dir_size(path: &Path) -> std::io::Result<u64> {
     let mut total = 0;
-    for entry in walkdir::WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() {
             total += entry.metadata().map(|m| m.len()).unwrap_or(0);
         }
@@ -2514,11 +2767,18 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
         .find(|a| a.name == agent_name)
         .ok_or_else(|| {
             let available: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
-            miette::miette!("Agent '{}' not found. Available: {}", agent_name, available.join(", "))
+            miette::miette!(
+                "Agent '{}' not found. Available: {}",
+                agent_name,
+                available.join(", ")
+            )
         })?;
 
     // 2. Check sandbox mode
-    if !matches!(agent.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell) {
+    if !matches!(
+        agent.sandbox_mode(),
+        rightclaw::agent::types::SandboxMode::Openshell
+    ) {
         return Err(miette::miette!(
             "Agent '{}' runs without sandbox, SSH not available",
             agent_name
@@ -2527,13 +2787,13 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 
     // 3. Check agent is running via process-compose
     let pc = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
-    pc.health_check()
-        .await
-        .map_err(|_| miette::miette!(
+    pc.health_check().await.map_err(|_| {
+        miette::miette!(
             help = "Start it with: rightclaw up",
             "Agent '{}' is not running",
             agent_name,
-        ))?;
+        )
+    })?;
 
     let processes = pc.list_processes().await?;
     let pc_process_name = format!("{}-bot", agent_name);
@@ -2558,7 +2818,9 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     }
 
     // 4. Locate SSH config
-    let sb_name = agent.config.as_ref()
+    let sb_name = agent
+        .config
+        .as_ref()
         .map(|c| rightclaw::openshell::resolve_sandbox_name(agent_name, c))
         .unwrap_or_else(|| rightclaw::openshell::sandbox_name(agent_name));
     let ssh_config = home.join(format!("run/ssh/{}.ssh-config", sb_name));
@@ -2585,7 +2847,9 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_agent_db, truncate_content, write_managed_settings, ConfigCommands, MemoryCommands};
+    use super::{
+        ConfigCommands, MemoryCommands, resolve_agent_db, truncate_content, write_managed_settings,
+    };
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -2668,8 +2932,14 @@ mod tests {
         let s = "a".repeat(65);
         let result = truncate_content(&s, 60);
         let char_count: usize = result.chars().count();
-        assert_eq!(char_count, 61, "truncated string should be 61 chars (60 + ellipsis), got {char_count}");
-        assert!(result.ends_with('…'), "truncated string should end with ellipsis");
+        assert_eq!(
+            char_count, 61,
+            "truncated string should be 61 chars (60 + ellipsis), got {char_count}"
+        );
+        assert!(
+            result.ends_with('…'),
+            "truncated string should end with ellipsis"
+        );
     }
 
     #[test]
@@ -2684,7 +2954,10 @@ mod tests {
         let result = truncate_content("你好世界test", 4);
         // should not panic; 4 chars taken + ellipsis = 5 chars
         let char_count: usize = result.chars().count();
-        assert_eq!(char_count, 5, "should be 5 chars (4 + ellipsis), got {char_count}");
+        assert_eq!(
+            char_count, 5,
+            "should be 5 chars (4 + ellipsis), got {char_count}"
+        );
         assert!(result.ends_with('…'));
     }
 
@@ -2723,11 +2996,8 @@ mod tests {
         let dir = tmp.path().join("etc").join("claude-code");
         let path = dir.join("managed-settings.json");
 
-        write_managed_settings(
-            dir.to_str().unwrap(),
-            path.to_str().unwrap(),
-        )
-        .expect("should succeed in writable temp dir");
+        write_managed_settings(dir.to_str().unwrap(), path.to_str().unwrap())
+            .expect("should succeed in writable temp dir");
 
         let content = fs::read_to_string(&path).unwrap();
         assert!(
@@ -2745,10 +3015,7 @@ mod tests {
         );
         let err = result.expect_err("should fail on unwritable path");
         let msg = format!("{err:?}");
-        assert!(
-            msg.contains("sudo"),
-            "error must mention sudo, got: {msg}"
-        );
+        assert!(msg.contains("sudo"), "error must mention sudo, got: {msg}");
     }
 
     #[test]
@@ -2782,7 +3049,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let agent_dir = make_agent_dir(&tmp, "agent-git-test");
 
-        assert!(!agent_dir.join(".git").exists(), "pre-condition: no .git yet");
+        assert!(
+            !agent_dir.join(".git").exists(),
+            "pre-condition: no .git yet"
+        );
 
         // Run git init logic (same block as in cmd_up).
         if !agent_dir.join(".git").exists() {
@@ -2797,7 +3067,10 @@ mod tests {
             }
         }
 
-        assert!(agent_dir.join(".git").exists(), ".git/ should exist after init");
+        assert!(
+            agent_dir.join(".git").exists(),
+            ".git/ should exist after init"
+        );
     }
 
     #[test]
@@ -2826,7 +3099,10 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(agent_dir.join(".git").exists(), ".git/ still present after idempotent run");
+        assert!(
+            agent_dir.join(".git").exists(),
+            ".git/ still present after idempotent run"
+        );
     }
 
     // ---- settings.local.json tests ----
@@ -2839,13 +3115,19 @@ mod tests {
         fs::create_dir_all(&claude_dir).unwrap();
 
         let settings_local = claude_dir.join("settings.local.json");
-        assert!(!settings_local.exists(), "pre-condition: no settings.local.json");
+        assert!(
+            !settings_local.exists(),
+            "pre-condition: no settings.local.json"
+        );
 
         if !settings_local.exists() {
             fs::write(&settings_local, "{}").unwrap();
         }
 
-        assert!(settings_local.exists(), "settings.local.json should be created");
+        assert!(
+            settings_local.exists(),
+            "settings.local.json should be created"
+        );
         assert_eq!(fs::read_to_string(&settings_local).unwrap(), "{}");
     }
 
@@ -2866,7 +3148,10 @@ mod tests {
         }
 
         let after = fs::read_to_string(&settings_local).unwrap();
-        assert_eq!(after, original_content, "pre-existing content must not be overwritten");
+        assert_eq!(
+            after, original_content,
+            "pre-existing content must not be overwritten"
+        );
     }
 
     // ---- skills install tests ----
@@ -2876,12 +3161,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let agent_dir = make_agent_dir(&tmp, "agent-skills");
 
-        rightclaw::codegen::install_builtin_skills(&agent_dir, &rightclaw::agent::types::MemoryProvider::File)
-            .expect("install_builtin_skills should succeed");
+        rightclaw::codegen::install_builtin_skills(
+            &agent_dir,
+            &rightclaw::agent::types::MemoryProvider::File,
+        )
+        .expect("install_builtin_skills should succeed");
 
         let skills_dir = agent_dir.join(".claude").join("skills");
         let skills_skill = skills_dir.join("rightskills").join("SKILL.md");
-        assert!(skills_skill.exists(), "rightskills/SKILL.md should be installed");
+        assert!(
+            skills_skill.exists(),
+            "rightskills/SKILL.md should be installed"
+        );
     }
 
     #[test]
@@ -2898,7 +3189,10 @@ mod tests {
         // Run cleanup (same logic as cmd_up inserts)
         let _ = std::fs::remove_dir_all(agent_dir.join(".claude/skills/clawhub"));
 
-        assert!(!stale.exists(), "stale clawhub dir should be removed after cleanup");
+        assert!(
+            !stale.exists(),
+            "stale clawhub dir should be removed after cleanup"
+        );
     }
 
     #[test]
@@ -2925,7 +3219,10 @@ mod tests {
         // Run cleanup (same logic as cmd_up inserts)
         let _ = std::fs::remove_dir_all(agent_dir.join(".claude/skills/skills"));
 
-        assert!(!stale.exists(), "stale skills dir should be removed after cleanup");
+        assert!(
+            !stale.exists(),
+            "stale skills dir should be removed after cleanup"
+        );
     }
 
     #[test]
@@ -2944,7 +3241,9 @@ mod tests {
     fn mcp_commands_status_variant_exists() {
         use super::McpCommands;
         let _ = McpCommands::Status { agent: None };
-        let _ = McpCommands::Status { agent: Some("right".to_string()) };
+        let _ = McpCommands::Status {
+            agent: Some("right".to_string()),
+        };
     }
 
     // ---- cmd_mcp_status error paths ----
@@ -3070,7 +3369,13 @@ fn cmd_memory_list(
         .map_err(|e| miette::miette!("failed to list memories: {e:#}"))?;
     let entries: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
         .query_map(rusqlite::params![limit, offset], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .map_err(|e| miette::miette!("failed to list memories: {e:#}"))?
         .collect::<Result<Vec<_>, _>>()
@@ -3099,7 +3404,10 @@ fn cmd_memory_list(
         return Ok(());
     }
 
-    println!("{:<6} {:<61} {:<20} CREATED_AT", "ID", "CONTENT", "STORED_BY");
+    println!(
+        "{:<6} {:<61} {:<20} CREATED_AT",
+        "ID", "CONTENT", "STORED_BY"
+    );
     for (id, content, _tags, stored_by, created_at) in &entries {
         let truncated = truncate_content(content, 60);
         let stored_by = stored_by.as_deref().unwrap_or("(unknown)");
@@ -3134,7 +3442,9 @@ fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> 
     let conn = resolve_agent_db(home, agent)?;
 
     // db_path needed only for fs metadata (file size) — derive from home, not conn.
-    let db_path = rightclaw::config::agents_dir(home).join(agent).join("data.db");
+    let db_path = rightclaw::config::agents_dir(home)
+        .join(agent)
+        .join("data.db");
     let db_size = std::fs::metadata(&db_path)
         .map_err(|e| miette::miette!("failed to stat data.db: {e:#}"))?
         .len();
@@ -3229,7 +3539,10 @@ fn cmd_memory_search(
         return Ok(());
     }
 
-    println!("{:<6} {:<61} {:<20} CREATED_AT", "ID", "CONTENT", "STORED_BY");
+    println!(
+        "{:<6} {:<61} {:<20} CREATED_AT",
+        "ID", "CONTENT", "STORED_BY"
+    );
     for (id, content, _tags, stored_by, created_at) in &entries {
         let truncated = truncate_content(content, 60);
         let stored_by = stored_by.as_deref().unwrap_or("(unknown)");
@@ -3269,12 +3582,17 @@ fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
 
     match any_row {
         None => {
-            return Err(miette::miette!("memory entry {id} not found for agent '{agent}'"));
+            return Err(miette::miette!(
+                "memory entry {id} not found for agent '{agent}'"
+            ));
         }
         Some((content, stored_by)) => {
             println!("  id:        {id}");
             println!("  content:   {}", truncate_content(&content, 60));
-            println!("  stored_by: {}", stored_by.as_deref().unwrap_or("(unknown)"));
+            println!(
+                "  stored_by: {}",
+                stored_by.as_deref().unwrap_or("(unknown)")
+            );
         }
     }
 
@@ -3296,7 +3614,9 @@ fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
         .execute("DELETE FROM memories WHERE id = ?1", [id])
         .map_err(|e| miette::miette!("failed to delete memory: {e:#}"))?;
     if deleted == 0 {
-        return Err(miette::miette!("memory entry {id} not found for agent '{agent}'"));
+        return Err(miette::miette!(
+            "memory entry {id} not found for agent '{agent}'"
+        ));
     }
 
     println!("Deleted memory entry {id}.");
@@ -3325,13 +3645,31 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     let claude_dir = agent.path.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent_name))?;
-    std::fs::write(claude_dir.join("reply-schema.json"), rightclaw::codegen::REPLY_SCHEMA_JSON)
-        .map_err(|e| miette::miette!("failed to write reply-schema.json for '{}': {e:#}", agent_name))?;
-    std::fs::write(claude_dir.join("cron-schema.json"), rightclaw::codegen::CRON_SCHEMA_JSON)
-        .map_err(|e| miette::miette!("failed to write cron-schema.json for '{}': {e:#}", agent_name))?;
+    std::fs::write(
+        claude_dir.join("reply-schema.json"),
+        rightclaw::codegen::REPLY_SCHEMA_JSON,
+    )
+    .map_err(|e| {
+        miette::miette!(
+            "failed to write reply-schema.json for '{}': {e:#}",
+            agent_name
+        )
+    })?;
+    std::fs::write(
+        claude_dir.join("cron-schema.json"),
+        rightclaw::codegen::CRON_SCHEMA_JSON,
+    )
+    .map_err(|e| {
+        miette::miette!(
+            "failed to write cron-schema.json for '{}': {e:#}",
+            agent_name
+        )
+    })?;
 
     // Assemble system prompt on host.
-    let sandbox_mode = agent.config.as_ref()
+    let sandbox_mode = agent
+        .config
+        .as_ref()
         .map(|c| c.sandbox_mode().clone())
         .unwrap_or_default();
     let base_prompt = rightclaw::codegen::generate_system_prompt(
@@ -3357,14 +3695,13 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
         }
     }
     let prompt_path = claude_dir.join("composite-system-prompt.md");
-    std::fs::write(&prompt_path, &prompt)
-        .map_err(|e| miette::miette!("failed to write system prompt for '{}': {e:#}", agent_name))?;
+    std::fs::write(&prompt_path, &prompt).map_err(|e| {
+        miette::miette!("failed to write system prompt for '{}': {e:#}", agent_name)
+    })?;
 
     let claude_bin = which::which("claude")
         .or_else(|_| which::which("claude-bun"))
-        .map_err(|_| {
-            miette::miette!("claude CLI not found in PATH (tried: claude, claude-bun)")
-        })?;
+        .map_err(|_| miette::miette!("claude CLI not found in PATH (tried: claude, claude-bun)"))?;
 
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(claude_bin)
@@ -3498,17 +3835,18 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
 
     if rightclaw::openshell::filesystem_policy_changed(&active_policy, &new_policy) {
         println!("\nFilesystem policy changed — sandbox migration required.");
-        let confirmed = inquire::Confirm::new(
-            "Migrate sandbox now? (backup old, create new, restore data)",
-        )
-        .with_default(true)
-        .prompt()
-        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+        let confirmed =
+            inquire::Confirm::new("Migrate sandbox now? (backup old, create new, restore data)")
+                .with_default(true)
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
         if confirmed {
             perform_migration(home, agent_name, &sb_name, &mtls_dir).await?;
         } else {
-            println!("Migration skipped. Filesystem policy changes will NOT take effect until the sandbox is recreated.");
+            println!(
+                "Migration skipped. Filesystem policy changes will NOT take effect until the sandbox is recreated."
+            );
         }
     } else {
         println!("Network-only changes will apply on next bot restart.");
@@ -3535,7 +3873,10 @@ async fn perform_migration(
     // --- Step 1/6: Backup ---
     println!("Step 1/6: Backing up sandbox '{old_sandbox}'...");
 
-    let old_ssh_config = home.join("run").join("ssh").join(format!("{old_sandbox}.ssh-config"));
+    let old_ssh_config = home
+        .join("run")
+        .join("ssh")
+        .join(format!("{old_sandbox}.ssh-config"));
     if !old_ssh_config.exists() {
         return Err(miette::miette!(
             help = "Try restarting the agent first so SSH config is generated",
@@ -3554,11 +3895,19 @@ async fn perform_migration(
 
     let backup_tar = backup_dir.join("sandbox.tar.gz");
     rightclaw::openshell::ssh_tar_download(
-        &old_ssh_config, &old_ssh_host, "sandbox", &backup_tar, 300,
-    ).await?;
+        &old_ssh_config,
+        &old_ssh_host,
+        "sandbox",
+        &backup_tar,
+        300,
+    )
+    .await?;
 
     let tar_size = std::fs::metadata(&backup_tar).map(|m| m.len()).unwrap_or(0);
-    println!("  Backup complete ({tar_size} bytes) at {}", backup_dir.display());
+    println!(
+        "  Backup complete ({tar_size} bytes) at {}",
+        backup_dir.display()
+    );
 
     // --- Step 2/6: Create new sandbox ---
     let new_sandbox = format!("rightclaw-{agent_name}-{timestamp}");
@@ -3582,9 +3931,8 @@ async fn perform_migration(
         .map(|p| agent_dir.join(p))
         .unwrap_or_else(|| agent_dir.join("policy.yaml"));
 
-    let mut child = rightclaw::openshell::spawn_sandbox(
-        &new_sandbox, &policy_path, Some(&staging),
-    )?;
+    let mut child =
+        rightclaw::openshell::spawn_sandbox(&new_sandbox, &policy_path, Some(&staging))?;
 
     let mut grpc = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
 
@@ -3619,17 +3967,16 @@ async fn perform_migration(
     std::fs::create_dir_all(&ssh_config_dir)
         .into_diagnostic()
         .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-    let new_ssh_config = rightclaw::openshell::generate_ssh_config(
-        &new_sandbox, &ssh_config_dir,
-    ).await?;
+    let new_ssh_config =
+        rightclaw::openshell::generate_ssh_config(&new_sandbox, &ssh_config_dir).await?;
     println!("  SSH config written to {}", new_ssh_config.display());
 
     // --- Step 5/6: Restore data ---
     println!("Step 5/6: Restoring sandbox data...");
     let new_ssh_host = rightclaw::openshell::ssh_host_for_sandbox(&new_sandbox);
-    if let Err(e) = rightclaw::openshell::ssh_tar_upload(
-        &new_ssh_config, &new_ssh_host, &backup_tar, 600,
-    ).await {
+    if let Err(e) =
+        rightclaw::openshell::ssh_tar_upload(&new_ssh_config, &new_ssh_host, &backup_tar, 600).await
+    {
         // Rollback: delete new sandbox, keep old, report error.
         eprintln!("Restore failed — rolling back: deleting new sandbox '{new_sandbox}'...");
         rightclaw::openshell::delete_sandbox(&new_sandbox).await;
@@ -3638,7 +3985,8 @@ async fn perform_migration(
         let _ = std::fs::remove_file(&new_ssh_config);
         return Err(miette::miette!(
             "Sandbox restore failed (old sandbox '{}' preserved): {:#}",
-            old_sandbox, e
+            old_sandbox,
+            e
         ));
     }
     println!("  Sandbox data restored.");

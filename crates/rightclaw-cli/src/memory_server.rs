@@ -1,11 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use rmcp::{
+    ErrorData as McpError, ServiceExt,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::stdio,
-    ErrorData as McpError, ServiceExt,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer};
@@ -30,13 +30,19 @@ pub struct CronShowRunParams {
 pub struct CronCreateParams {
     #[schemars(description = "Job name (lowercase alphanumeric and hyphens, e.g. 'health-check')")]
     pub job_name: String,
-    #[schemars(description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5'). Required if run_at is not set. Mutually exclusive with run_at.")]
+    #[schemars(
+        description = "5-field cron expression in UTC (e.g. '17 9 * * 1-5'). Required if run_at is not set. Mutually exclusive with run_at."
+    )]
     pub schedule: Option<String>,
     #[schemars(description = "Task prompt that Claude executes when the cron fires")]
     pub prompt: String,
-    #[schemars(description = "Whether the job fires repeatedly (true, default) or once then auto-deletes (false). Ignored if run_at is set.")]
+    #[schemars(
+        description = "Whether the job fires repeatedly (true, default) or once then auto-deletes (false). Ignored if run_at is set."
+    )]
     pub recurring: Option<bool>,
-    #[schemars(description = "ISO8601 UTC datetime to fire once (e.g. '2026-04-15T15:30:00Z'). Mutually exclusive with schedule. Job auto-deletes after firing.")]
+    #[schemars(
+        description = "ISO8601 UTC datetime to fire once (e.g. '2026-04-15T15:30:00Z'). Mutually exclusive with schedule. Job auto-deletes after firing."
+    )]
     pub run_at: Option<String>,
     #[schemars(description = "Lock TTL duration (e.g. '30m', '1h'). Default: 30m")]
     pub lock_ttl: Option<String>,
@@ -51,7 +57,9 @@ pub struct CronUpdateParams {
     pub job_name: String,
     #[schemars(description = "New 5-field cron expression. Clears run_at if set.")]
     pub schedule: Option<String>,
-    #[schemars(description = "New ISO8601 UTC datetime. Clears schedule and forces recurring=false.")]
+    #[schemars(
+        description = "New ISO8601 UTC datetime. Clears schedule and forces recurring=false."
+    )]
     pub run_at: Option<String>,
     #[schemars(description = "New task prompt")]
     pub prompt: Option<String>,
@@ -138,7 +146,9 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes summary and notify (the structured output produced by the cron session).")]
+    #[tool(
+        description = "List recent cron job runs with results. Returns runs sorted by started_at descending. Optionally filter by job_name and/or limit the count. Each result includes summary and notify (the structured output produced by the cron session)."
+    )]
     async fn cron_list_runs(
         &self,
         Parameters(params): Parameters<CronListRunsParams>,
@@ -182,7 +192,9 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Get full details for a single cron job run by its run_id (UUID). Returns status, summary, and notify (the structured output with content and optional attachments).")]
+    #[tool(
+        description = "Get full details for a single cron job run by its run_id (UUID). Returns status, summary, and notify (the structured output with content and optional attachments)."
+    )]
     async fn cron_show_run(
         &self,
         Parameters(params): Parameters<CronShowRunParams>,
@@ -214,8 +226,9 @@ impl MemoryServer {
         );
         match result {
             Ok(val) => {
-                let output = serde_json::to_string_pretty(&val)
-                    .map_err(|e| McpError::internal_error(format!("serialization error: {e:#}"), None))?;
+                let output = serde_json::to_string_pretty(&val).map_err(|e| {
+                    McpError::internal_error(format!("serialization error: {e:#}"), None)
+                })?;
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -228,7 +241,9 @@ impl MemoryServer {
         }
     }
 
-    #[tool(description = "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false).")]
+    #[tool(
+        description = "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false)."
+    )]
     async fn cron_create(
         &self,
         Parameters(params): Parameters<CronCreateParams>,
@@ -253,7 +268,9 @@ impl MemoryServer {
         )]))
     }
 
-    #[tool(description = "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values.")]
+    #[tool(
+        description = "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values."
+    )]
     async fn cron_update(
         &self,
         Parameters(params): Parameters<CronUpdateParams>,
@@ -292,7 +309,9 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "List all current cron job specs. Returns a JSON array of all configured cron jobs.")]
+    #[tool(
+        description = "List all current cron job specs. Returns a JSON array of all configured cron jobs."
+    )]
     async fn cron_list(
         &self,
         Parameters(_params): Parameters<CronListParams>,
@@ -306,7 +325,9 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Trigger a cron job for immediate execution. The job is queued and will run on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped.")]
+    #[tool(
+        description = "Trigger a cron job for immediate execution. The job is queued and will run on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped."
+    )]
     async fn cron_trigger(
         &self,
         Parameters(params): Parameters<CronTriggerParams>,
@@ -320,14 +341,17 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 
-    #[tool(description = "List all registered MCP servers for this agent. Shows name, URL, and optional instructions.")]
+    #[tool(
+        description = "List all registered MCP servers for this agent. Shows name, URL, and optional instructions."
+    )]
     async fn mcp_list(
         &self,
         Parameters(_params): Parameters<McpListParams>,
     ) -> Result<CallToolResult, McpError> {
-        let conn = self.conn.lock().map_err(|e| {
-            McpError::internal_error(format!("mutex poisoned: {e}"), None)
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
         let servers = rightclaw::mcp::credentials::db_list_servers(&conn)
             .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
         let items: Vec<serde_json::Value> = servers
@@ -345,7 +369,9 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
-    #[tool(description = "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist.")]
+    #[tool(
+        description = "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist."
+    )]
     async fn bootstrap_done(&self) -> Result<CallToolResult, McpError> {
         let required = ["IDENTITY.md", "SOUL.md", "USER.md"];
         let missing: Vec<&str> = required
@@ -371,7 +397,6 @@ impl MemoryServer {
             ))]))
         }
     }
-
 }
 
 #[tool_handler]
@@ -471,7 +496,9 @@ pub async fn run_memory_server() -> miette::Result<()> {
     let rightclaw_home = match std::env::var("RC_RIGHTCLAW_HOME") {
         Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => {
-            tracing::warn!("RC_RIGHTCLAW_HOME not set — mcp_auth tunnel commands will be unavailable");
+            tracing::warn!(
+                "RC_RIGHTCLAW_HOME not set — mcp_auth tunnel commands will be unavailable"
+            );
             std::path::PathBuf::from(".")
         }
     };

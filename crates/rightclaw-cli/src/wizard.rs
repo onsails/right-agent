@@ -5,7 +5,7 @@ use std::process::Command;
 use serde::Deserialize;
 
 use rightclaw::agent::discover_agents;
-use rightclaw::config::{read_global_config, write_global_config, TunnelConfig};
+use rightclaw::config::{TunnelConfig, read_global_config, write_global_config};
 use rightclaw::init::validate_telegram_token;
 
 // ---------------------------------------------------------------------------
@@ -74,13 +74,23 @@ fn find_tunnel_by_name(cf_bin: &Path, name: &str) -> miette::Result<Option<Tunne
 /// Create a new named tunnel via cloudflared CLI.
 fn create_tunnel(cf_bin: &Path, name: &str) -> miette::Result<TunnelListEntry> {
     let output = Command::new(cf_bin)
-        .args(["tunnel", "--loglevel", "error", "create", "-o", "json", name])
+        .args([
+            "tunnel",
+            "--loglevel",
+            "error",
+            "create",
+            "-o",
+            "json",
+            name,
+        ])
         .output()
         .map_err(|e| miette::miette!("failed to run cloudflared tunnel create: {e:#}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(miette::miette!("cloudflared tunnel create failed: {stderr}"));
+        return Err(miette::miette!(
+            "cloudflared tunnel create failed: {stderr}"
+        ));
     }
 
     let entry: TunnelListEntry = serde_json::from_slice(&output.stdout)
@@ -103,7 +113,9 @@ fn delete_tunnel(cf_bin: &Path, name: &str) -> miette::Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(miette::miette!("cloudflared tunnel delete failed: {stderr}"));
+        return Err(miette::miette!(
+            "cloudflared tunnel delete failed: {stderr}"
+        ));
     }
 
     Ok(())
@@ -112,7 +124,16 @@ fn delete_tunnel(cf_bin: &Path, name: &str) -> miette::Result<()> {
 /// Route a DNS CNAME record for the tunnel. Non-fatal: logs a warning on failure.
 fn route_dns(cf_bin: &Path, uuid: &str, hostname: &str) {
     let result = Command::new(cf_bin)
-        .args(["tunnel", "--loglevel", "error", "route", "dns", "--overwrite-dns", uuid, hostname])
+        .args([
+            "tunnel",
+            "--loglevel",
+            "error",
+            "route",
+            "dns",
+            "--overwrite-dns",
+            uuid,
+            hostname,
+        ])
         .output();
 
     match result {
@@ -136,8 +157,8 @@ fn detect_cloudflared_cert() -> bool {
 
 /// Return the path to the cloudflared credentials file for a given tunnel UUID.
 fn cloudflared_credentials_path(uuid: &str) -> miette::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| miette::miette!("cannot determine home directory"))?;
     Ok(home.join(".cloudflared").join(format!("{uuid}.json")))
 }
 
@@ -575,12 +596,10 @@ pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Resu
         }
         options.push(opt_done.clone());
 
-        let selection = inquire::Select::new(
-            &format!("Agent '{}' settings:", chosen_name),
-            options,
-        )
-        .prompt()
-        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+        let selection =
+            inquire::Select::new(&format!("Agent '{}' settings:", chosen_name), options)
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
         if selection == opt_done {
             break;
@@ -590,7 +609,11 @@ pub fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Resu
             let new_token = telegram_setup(config.telegram_token.as_deref(), true)?;
             match new_token {
                 Some(token) => {
-                    update_agent_yaml_field(&agent_yaml_path, "telegram_token", &format!("\"{token}\""))?;
+                    update_agent_yaml_field(
+                        &agent_yaml_path,
+                        "telegram_token",
+                        &format!("\"{token}\""),
+                    )?;
                 }
                 None if config.telegram_token.is_some() => {
                     // User cleared the token.

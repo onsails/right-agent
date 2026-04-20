@@ -150,14 +150,8 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_else(|| "document".to_string());
-                output.push_str(&format!(
-                    "        - type: \"{}\"\n",
-                    yaml_escape(&kind_str)
-                ));
-                output.push_str(&format!(
-                    "          path: \"{}\"\n",
-                    yaml_escape(&att.path)
-                ));
+                output.push_str(&format!("        - type: \"{}\"\n", yaml_escape(&kind_str)));
+                output.push_str(&format!("          path: \"{}\"\n", yaml_escape(&att.path)));
                 if let Some(ref caption) = att.caption {
                     output.push_str(&format!(
                         "          caption: \"{}\"\n",
@@ -305,9 +299,10 @@ pub async fn run_delivery_loop(
                 {
                     tracing::warn!(run_id = %to_deliver.id, "outbox cleanup failed: {e:#}");
                 }
-                idle_ts
-                    .0
-                    .store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+                idle_ts.0.store(
+                    chrono::Utc::now().timestamp(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             Err(e) => {
                 let attempts = attempt_counts
@@ -363,10 +358,7 @@ async fn deliver_through_session(
     // Delivery always uses Haiku — cheap relay task.
     const DELIVERY_MODEL: &str = "claude-haiku-4-5-20251001";
 
-    let mcp_path = crate::telegram::invocation::mcp_config_path(
-        ssh_config_path,
-        agent_dir,
-    );
+    let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
     let json_schema = std::fs::read_to_string(&reply_schema_path).unwrap_or_default();
@@ -389,16 +381,28 @@ async fn deliver_through_session(
 
     // Derive sandbox_mode and home_dir from ssh_config_path.
     let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
-        (rightclaw::agent::types::SandboxMode::Openshell, "/sandbox".to_owned())
+        (
+            rightclaw::agent::types::SandboxMode::Openshell,
+            "/sandbox".to_owned(),
+        )
     } else {
-        (rightclaw::agent::types::SandboxMode::None, agent_dir.to_string_lossy().into_owned())
+        (
+            rightclaw::agent::types::SandboxMode::None,
+            agent_dir.to_string_lossy().into_owned(),
+        )
     };
-    let base_prompt = rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+    let base_prompt =
+        rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
-    let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await {
+    let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
+    {
         Ok(resp) => {
-            if resp.instructions.trim().len() > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER.trim().len() {
+            if resp.instructions.trim().len()
+                > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                    .trim()
+                    .len()
+            {
                 Some(resp.instructions)
             } else {
                 None
@@ -426,7 +430,8 @@ async fn deliver_through_session(
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
-            assembly_script = format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
+            assembly_script =
+                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
         let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
@@ -502,8 +507,8 @@ async fn deliver_through_session(
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);
-    let (reply, _) =
-        crate::telegram::worker::parse_reply_output(&raw).map_err(|e| format!("reply parse: {e}"))?;
+    let (reply, _) = crate::telegram::worker::parse_reply_output(&raw)
+        .map_err(|e| format!("reply parse: {e}"))?;
 
     if let Some(ref content) = reply.content {
         use teloxide::prelude::Requester as _;
@@ -516,10 +521,16 @@ async fn deliver_through_session(
                     .send_message(chat_id, part)
                     .parse_mode(teloxide::types::ParseMode::Html);
                 if let Err(e) = send.await {
-                    tracing::warn!(chat_id = cid, "cron delivery: HTML send failed, retrying plain: {e:#}");
+                    tracing::warn!(
+                        chat_id = cid,
+                        "cron delivery: HTML send failed, retrying plain: {e:#}"
+                    );
                     let plain = crate::telegram::markdown::strip_html_tags(part);
                     if let Err(e2) = bot.send_message(chat_id, &plain).await {
-                        tracing::error!(chat_id = cid, "cron delivery: plain text fallback also failed: {e2:#}");
+                        tracing::error!(
+                            chat_id = cid,
+                            "cron delivery: plain text fallback also failed: {e2:#}"
+                        );
                     }
                 }
             }
@@ -541,7 +552,10 @@ async fn deliver_through_session(
             )
             .await
             {
-                tracing::error!(chat_id = cid, "cron delivery: attachment send failed: {e:#}");
+                tracing::error!(
+                    chat_id = cid,
+                    "cron delivery: attachment send failed: {e:#}"
+                );
             }
         }
     }

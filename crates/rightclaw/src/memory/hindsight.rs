@@ -162,10 +162,7 @@ impl HindsightClient {
     }
 
     /// Store multiple items in the memory bank in a single batched POST.
-    pub async fn retain_many(
-        &self,
-        items: &[RetainItem],
-    ) -> Result<RetainResponse, MemoryError> {
+    pub async fn retain_many(&self, items: &[RetainItem]) -> Result<RetainResponse, MemoryError> {
         let url = format!(
             "{}/v1/default/banks/{}/memories",
             self.base_url, self.bank_id
@@ -231,10 +228,7 @@ impl HindsightClient {
             return Err(MemoryError::Hindsight { status, body });
         }
 
-        let response: RecallResponse = resp
-            .json()
-            .await
-            .map_err(MemoryError::from_reqwest)?;
+        let response: RecallResponse = resp.json().await.map_err(MemoryError::from_reqwest)?;
         Ok(response.results)
     }
 
@@ -328,11 +322,7 @@ mod tests {
                 .find(|l| l.to_lowercase().starts_with("authorization:"))
                 .unwrap_or("")
                 .to_string();
-            let req_body = request
-                .split("\r\n\r\n")
-                .nth(1)
-                .unwrap_or("")
-                .to_string();
+            let req_body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
 
             let response = format!(
                 "HTTP/1.1 {response_status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -354,15 +344,18 @@ mod tests {
 
     #[tokio::test]
     async fn retain_sends_correct_request() {
-        let (handle, url) = mock_hindsight_server(
-            r#"{"success": true, "operation_id": "op-123"}"#,
-            200,
-        )
-        .await;
+        let (handle, url) =
+            mock_hindsight_server(r#"{"success": true, "operation_id": "op-123"}"#, 200).await;
 
         let client = test_client(&url);
         let resp = client
-            .retain("user likes dark mode", Some("preference setting"), None, None, None)
+            .retain(
+                "user likes dark mode",
+                Some("preference setting"),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -382,14 +375,13 @@ mod tests {
 
     #[tokio::test]
     async fn retain_without_context() {
-        let (handle, url) = mock_hindsight_server(
-            r#"{"success": true}"#,
-            200,
-        )
-        .await;
+        let (handle, url) = mock_hindsight_server(r#"{"success": true}"#, 200).await;
 
         let client = test_client(&url);
-        client.retain("some fact", None, None, None, None).await.unwrap();
+        client
+            .retain("some fact", None, None, None, None)
+            .await
+            .unwrap();
 
         let (_method, _auth, body) = handle.await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -398,14 +390,13 @@ mod tests {
 
     #[tokio::test]
     async fn retain_http_error_returns_error() {
-        let (_handle, url) = mock_hindsight_server(
-            r#"{"error": "unauthorized"}"#,
-            401,
-        )
-        .await;
+        let (_handle, url) = mock_hindsight_server(r#"{"error": "unauthorized"}"#, 401).await;
 
         let client = test_client(&url);
-        let err = client.retain("test", None, None, None, None).await.unwrap_err();
+        let err = client
+            .retain("test", None, None, None, None)
+            .await
+            .unwrap_err();
 
         match err {
             MemoryError::Hindsight { status, .. } => assert_eq!(status, 401),
@@ -415,11 +406,8 @@ mod tests {
 
     #[tokio::test]
     async fn retain_with_document_id_and_tags() {
-        let (handle, url) = mock_hindsight_server(
-            r#"{"success": true, "operation_id": "op-456"}"#,
-            200,
-        )
-        .await;
+        let (handle, url) =
+            mock_hindsight_server(r#"{"success": true, "operation_id": "op-456"}"#, 200).await;
 
         let client = test_client(&url);
         let tags = vec!["chat:12345".to_string()];
@@ -449,11 +437,8 @@ mod tests {
 
     #[tokio::test]
     async fn retain_many_batches_items_in_single_post() {
-        let (handle, url) = mock_hindsight_server(
-            r#"{"success": true, "operation_id": "op-batch"}"#,
-            200,
-        )
-        .await;
+        let (handle, url) =
+            mock_hindsight_server(r#"{"success": true, "operation_id": "op-batch"}"#, 200).await;
 
         let client = test_client(&url);
         let items = vec![
@@ -485,14 +470,13 @@ mod tests {
 
     #[tokio::test]
     async fn retain_without_document_id_omits_fields() {
-        let (handle, url) = mock_hindsight_server(
-            r#"{"success": true}"#,
-            200,
-        )
-        .await;
+        let (handle, url) = mock_hindsight_server(r#"{"success": true}"#, 200).await;
 
         let client = test_client(&url);
-        client.retain("a fact", None, None, None, None).await.unwrap();
+        client
+            .retain("a fact", None, None, None, None)
+            .await
+            .unwrap();
 
         let (_method, _auth, body) = handle.await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -513,7 +497,10 @@ mod tests {
         .await;
 
         let client = test_client(&url);
-        let results = client.recall("what does user prefer", None, None).await.unwrap();
+        let results = client
+            .recall("what does user prefer", None, None)
+            .await
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text, "user likes dark mode");
@@ -533,14 +520,13 @@ mod tests {
 
     #[tokio::test]
     async fn recall_empty_results() {
-        let (_handle, url) = mock_hindsight_server(
-            r#"{"results": []}"#,
-            200,
-        )
-        .await;
+        let (_handle, url) = mock_hindsight_server(r#"{"results": []}"#, 200).await;
 
         let client = test_client(&url);
-        let results = client.recall("nonexistent topic", None, None).await.unwrap();
+        let results = client
+            .recall("nonexistent topic", None, None)
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -569,11 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn recall_without_tags_omits_fields() {
-        let (handle, url) = mock_hindsight_server(
-            r#"{"results": []}"#,
-            200,
-        )
-        .await;
+        let (handle, url) = mock_hindsight_server(r#"{"results": []}"#, 200).await;
 
         let client = test_client(&url);
         client.recall("test query", None, None).await.unwrap();
@@ -616,11 +598,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_or_create_bank_success() {
-        let (handle, url) = mock_hindsight_server(
-            r#"{"bank_id": "test-bank", "name": "Test Bank"}"#,
-            200,
-        )
-        .await;
+        let (handle, url) =
+            mock_hindsight_server(r#"{"bank_id": "test-bank", "name": "Test Bank"}"#, 200).await;
 
         let client = test_client(&url);
         let profile = client.get_or_create_bank().await.unwrap();
@@ -636,11 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_or_create_bank_401_error() {
-        let (_handle, url) = mock_hindsight_server(
-            r#"{"error": "invalid api key"}"#,
-            401,
-        )
-        .await;
+        let (_handle, url) = mock_hindsight_server(r#"{"error": "invalid api key"}"#, 401).await;
 
         let client = test_client(&url);
         let err = client.get_or_create_bank().await.unwrap_err();
@@ -670,14 +645,16 @@ mod tests {
         // Client-level timeout is ignored once the method sets its own
         // `.timeout(RETAIN_TIMEOUT)` per-request — this test tolerates the
         // real 10s wait as the tradeoff for exercising the real code path.
-        let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(&url))
-            .with_http_client(
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_millis(200))
-                    .build()
-                    .unwrap(),
-            );
-        let err = client.retain("x", None, None, None, None).await.unwrap_err();
+        let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(&url)).with_http_client(
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(200))
+                .build()
+                .unwrap(),
+        );
+        let err = client
+            .retain("x", None, None, None, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, MemoryError::HindsightTimeout),
             "expected HindsightTimeout, got: {err:?}"
@@ -688,7 +665,10 @@ mod tests {
     async fn retain_connect_failure_maps_to_connect_variant() {
         // Port 1 is unprivileged-closed on typical dev machines.
         let client = HindsightClient::new("hs_x", "b", "high", 1024, Some("http://127.0.0.1:1"));
-        let err = client.retain("x", None, None, None, None).await.unwrap_err();
+        let err = client
+            .retain("x", None, None, None, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, MemoryError::HindsightConnect(_)),
             "expected HindsightConnect, got: {err:?}"
@@ -731,7 +711,10 @@ mod tests {
         });
 
         let client = test_client(&url);
-        let err = client.retain("x", None, None, None, None).await.unwrap_err();
+        let err = client
+            .retain("x", None, None, None, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, MemoryError::HindsightTimeout),
             "expected HindsightTimeout, got: {err:?}"

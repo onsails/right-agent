@@ -23,10 +23,7 @@ fn check_binary_includes_fix_hint_on_failure() {
         Some("https://example.com/install"),
     );
     assert_eq!(check.status, CheckStatus::Fail);
-    assert_eq!(
-        check.fix.as_deref(),
-        Some("https://example.com/install")
-    );
+    assert_eq!(check.fix.as_deref(), Some("https://example.com/install"));
 }
 
 #[test]
@@ -164,10 +161,19 @@ fn run_doctor_always_checks_all_three_binaries() {
         .map(|c| c.name.as_str())
         .collect();
 
-    assert!(binary_names.contains(&"rightclaw"), "missing rightclaw check");
-    assert!(binary_names.contains(&"process-compose"), "missing process-compose check");
+    assert!(
+        binary_names.contains(&"rightclaw"),
+        "missing rightclaw check"
+    );
+    assert!(
+        binary_names.contains(&"process-compose"),
+        "missing process-compose check"
+    );
     assert!(binary_names.contains(&"claude"), "missing claude check");
-    assert!(binary_names.contains(&"openshell"), "missing openshell check");
+    assert!(
+        binary_names.contains(&"openshell"),
+        "missing openshell check"
+    );
 }
 
 #[test]
@@ -200,7 +206,9 @@ fn bwrap_fix_guidance_contains_apparmor_profile() {
         "fix guidance must mention sysctl workaround"
     );
     assert!(
-        guidance.contains("https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces"),
+        guidance.contains(
+            "https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces"
+        ),
         "fix guidance must include Ubuntu docs link"
     );
 }
@@ -244,7 +252,10 @@ fn run_doctor_skips_bwrap_socat_on_non_linux() {
 #[test]
 fn check_managed_settings_returns_none_when_file_absent() {
     let result = check_managed_settings("/nonexistent-rightclaw-test/managed-settings.json");
-    assert!(result.is_none(), "should return None when file does not exist");
+    assert!(
+        result.is_none(),
+        "should return None when file does not exist"
+    );
 }
 
 #[test]
@@ -469,7 +480,10 @@ fn check_webhook_info_for_agents_skips_when_no_agents_dir() {
     let dir = tempdir().unwrap();
     // No agents/ directory
     let checks = check_webhook_info_for_agents(dir.path());
-    assert!(checks.is_empty(), "missing agents dir must produce no checks");
+    assert!(
+        checks.is_empty(),
+        "missing agents dir must produce no checks"
+    );
 }
 
 // ---- check_mcp_tokens tests (REFRESH-03, REFRESH-04) ----
@@ -493,12 +507,7 @@ fn check_mcp_tokens_counts_registered_servers() {
 
     // Create data.db with a registered server
     let conn = crate::memory::open_connection(&agent_dir, true).unwrap();
-    crate::mcp::credentials::db_add_server(
-        &conn,
-        "notion",
-        "https://mcp.notion.com/mcp",
-    )
-    .unwrap();
+    crate::mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);
@@ -541,9 +550,16 @@ fn tunnel_state_credentials_present_passes() {
     };
     crate::config::write_global_config(dir.path(), &config).unwrap();
     let checks = check_tunnel_state(dir.path());
-    let creds_check = checks.iter().find(|c| c.name == "tunnel-credentials").unwrap();
+    let creds_check = checks
+        .iter()
+        .find(|c| c.name == "tunnel-credentials")
+        .unwrap();
     assert_eq!(creds_check.status, CheckStatus::Pass);
-    assert!(creds_check.detail.contains("credentials file present"), "detail: {}", creds_check.detail);
+    assert!(
+        creds_check.detail.contains("credentials file present"),
+        "detail: {}",
+        creds_check.detail
+    );
 }
 
 #[test]
@@ -558,9 +574,16 @@ fn tunnel_state_credentials_missing_warns() {
     };
     crate::config::write_global_config(dir.path(), &config).unwrap();
     let checks = check_tunnel_state(dir.path());
-    let creds_check = checks.iter().find(|c| c.name == "tunnel-credentials").unwrap();
+    let creds_check = checks
+        .iter()
+        .find(|c| c.name == "tunnel-credentials")
+        .unwrap();
     assert_eq!(creds_check.status, CheckStatus::Warn);
-    assert!(creds_check.detail.contains("credentials file missing"), "detail: {}", creds_check.detail);
+    assert!(
+        creds_check.detail.contains("credentials file missing"),
+        "detail: {}",
+        creds_check.detail
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +647,10 @@ fn mcp_auth_issues_prefix_constant_matches_detail_format() {
     assert_eq!(MCP_ISSUES_PREFIX, "missing: ");
     let detail = format!("{}agent1/notion, agent2/linear", MCP_ISSUES_PREFIX);
     let stripped = detail.strip_prefix(MCP_ISSUES_PREFIX);
-    assert!(stripped.is_some(), "MCP_ISSUES_PREFIX does not match detail format");
+    assert!(
+        stripped.is_some(),
+        "MCP_ISSUES_PREFIX does not match detail format"
+    );
     assert_eq!(stripped.unwrap(), "agent1/notion, agent2/linear");
 }
 
@@ -640,7 +666,9 @@ fn doctor_warns_missing_identity_files_no_bootstrap() {
 
     let checks = check_agent_structure(home);
     assert!(
-        checks.iter().any(|c| c.detail.contains("IDENTITY.md missing")),
+        checks
+            .iter()
+            .any(|c| c.detail.contains("IDENTITY.md missing")),
         "should warn about missing IDENTITY.md, got: {:?}",
         checks.iter().map(|c| &c.detail).collect::<Vec<_>>()
     );
@@ -684,11 +712,15 @@ fn doctor_bootstrap_pending_skips_identity_checks() {
 
     let checks = check_agent_structure(home);
     assert!(
-        checks.iter().any(|c| c.detail.contains("onboarding pending")),
+        checks
+            .iter()
+            .any(|c| c.detail.contains("onboarding pending")),
         "should show onboarding pending"
     );
     assert!(
-        !checks.iter().any(|c| c.detail.contains("IDENTITY.md missing")),
+        !checks
+            .iter()
+            .any(|c| c.detail.contains("IDENTITY.md missing")),
         "should not check identity when bootstrap present"
     );
 }
@@ -729,8 +761,9 @@ mod memory_tests {
         }
         let checks = check_memory(dir.path());
         assert!(
-            checks.iter().any(|c| c.status == CheckStatus::Warn
-                && c.name.contains("retain backlog")),
+            checks
+                .iter()
+                .any(|c| c.status == CheckStatus::Warn && c.name.contains("retain backlog")),
             "expected warn on retain backlog, got {checks:#?}"
         );
     }
@@ -753,8 +786,9 @@ mod memory_tests {
         }
         let checks = check_memory(dir.path());
         assert!(
-            checks.iter().any(|c| c.status == CheckStatus::Fail
-                && c.name.contains("retain backlog")),
+            checks
+                .iter()
+                .any(|c| c.status == CheckStatus::Fail && c.name.contains("retain backlog")),
             "expected fail on retain backlog, got {checks:#?}"
         );
     }
@@ -770,8 +804,9 @@ mod memory_tests {
         .unwrap();
         let checks = check_memory(dir.path());
         assert!(
-            checks.iter().any(|c| c.status == CheckStatus::Fail
-                && c.name.contains("auth")),
+            checks
+                .iter()
+                .any(|c| c.status == CheckStatus::Fail && c.name.contains("auth")),
             "expected fail on auth alert, got {checks:#?}"
         );
     }

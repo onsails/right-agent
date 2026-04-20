@@ -224,7 +224,9 @@ pub(crate) enum OutboundSend {
 /// Partition a reply's attachments into the ordered sends the bot must perform.
 /// Returns the list of sends and a list of WARN strings describing any group
 /// that had to be degraded or split — the caller logs them.
-pub(crate) fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<OutboundSend>, Vec<String>) {
+pub(crate) fn partition_sends(
+    attachments: &[OutboundAttachment],
+) -> (Vec<OutboundSend>, Vec<String>) {
     use std::collections::BTreeMap;
 
     // Collect indices per group, preserving first-occurrence order via a
@@ -276,8 +278,10 @@ pub(crate) fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Outbou
                 let plan = classify_media_group(&group_items);
                 match plan {
                     GroupPlan::SendAsGroup(kind) => {
-                        let mut items: Vec<OutboundAttachment> =
-                            indices.iter().map(|&idx| attachments[idx].clone()).collect();
+                        let mut items: Vec<OutboundAttachment> = indices
+                            .iter()
+                            .map(|&idx| attachments[idx].clone())
+                            .collect();
                         let mut caps: Vec<Option<String>> =
                             items.iter().map(|it| it.caption.clone()).collect();
                         merge_group_captions(&mut caps);
@@ -286,7 +290,11 @@ pub(crate) fn partition_sends(attachments: &[OutboundAttachment]) -> (Vec<Outbou
                         }
                         sends.push(OutboundSend::Group { kind, items });
                     }
-                    GroupPlan::Split { chunks, kind, reason } => {
+                    GroupPlan::Split {
+                        chunks,
+                        kind,
+                        reason,
+                    } => {
                         warnings.push(format!(
                             "media_group_id={id:?}: {reason} — splitting into ≤10-item chunks"
                         ));
@@ -432,7 +440,10 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
     }
 
     // Check if all messages have no text and no attachments
-    if msgs.iter().all(|m| m.text.is_none() && m.attachments.is_empty()) {
+    if msgs
+        .iter()
+        .all(|m| m.text.is_none() && m.attachments.is_empty())
+    {
         return None;
     }
 
@@ -441,13 +452,21 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
     out.push_str("messages:\n");
     for m in msgs {
         writeln!(out, "  - id: {}", m.message_id).expect("infallible");
-        writeln!(out, "    ts: \"{}\"", m.timestamp.format("%Y-%m-%dT%H:%M:%SZ"))
-            .expect("infallible");
+        writeln!(
+            out,
+            "    ts: \"{}\"",
+            m.timestamp.format("%Y-%m-%dT%H:%M:%SZ")
+        )
+        .expect("infallible");
 
         // Author block (always present)
         out.push_str("    author:\n");
-        writeln!(out, "      name: \"{}\"", yaml_escape_string(&m.author.name))
-            .expect("infallible");
+        writeln!(
+            out,
+            "      name: \"{}\"",
+            yaml_escape_string(&m.author.name)
+        )
+        .expect("infallible");
         if let Some(ref username) = m.author.username {
             writeln!(out, "      username: \"{}\"", yaml_escape_string(username))
                 .expect("infallible");
@@ -457,13 +476,17 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         }
 
         // Chat block (group only; DM stays unchanged).
-        if let ChatContext::Group { id, title, topic_id } = &m.chat {
+        if let ChatContext::Group {
+            id,
+            title,
+            topic_id,
+        } = &m.chat
+        {
             out.push_str("    chat:\n");
             writeln!(out, "      kind: group").expect("infallible");
             writeln!(out, "      id: {id}").expect("infallible");
             if let Some(t) = title {
-                writeln!(out, "      title: \"{}\"", yaml_escape_string(t))
-                    .expect("infallible");
+                writeln!(out, "      title: \"{}\"", yaml_escape_string(t)).expect("infallible");
             }
             if let Some(tid) = topic_id {
                 writeln!(out, "      topic_id: {tid}").expect("infallible");
@@ -473,8 +496,12 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         // Forward info (only if forwarded)
         if let Some(ref fwd) = m.forward_info {
             out.push_str("    forward_from:\n");
-            writeln!(out, "      name: \"{}\"", yaml_escape_string(&fwd.from.name))
-                .expect("infallible");
+            writeln!(
+                out,
+                "      name: \"{}\"",
+                yaml_escape_string(&fwd.from.name)
+            )
+            .expect("infallible");
             if let Some(ref username) = fwd.from.username {
                 writeln!(out, "      username: \"{}\"", yaml_escape_string(username))
                     .expect("infallible");
@@ -482,8 +509,12 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             if let Some(user_id) = fwd.from.user_id {
                 writeln!(out, "      user_id: {user_id}").expect("infallible");
             }
-            writeln!(out, "    forward_date: \"{}\"", fwd.date.format("%Y-%m-%dT%H:%M:%SZ"))
-                .expect("infallible");
+            writeln!(
+                out,
+                "    forward_date: \"{}\"",
+                fwd.date.format("%Y-%m-%dT%H:%M:%SZ")
+            )
+            .expect("infallible");
         }
 
         // Reply-to (only if reply)
@@ -495,8 +526,12 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
         if let Some(ref r) = m.reply_to_body {
             out.push_str("    reply_to:\n");
             out.push_str("      author:\n");
-            writeln!(out, "        name: \"{}\"", yaml_escape_string(&r.author.name))
-                .expect("infallible");
+            writeln!(
+                out,
+                "        name: \"{}\"",
+                yaml_escape_string(&r.author.name)
+            )
+            .expect("infallible");
             if let Some(ref un) = r.author.username {
                 writeln!(out, "        username: \"{}\"", yaml_escape_string(un))
                     .expect("infallible");
@@ -505,8 +540,7 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
                 writeln!(out, "        user_id: {uid}").expect("infallible");
             }
             if let Some(ref t) = r.text {
-                writeln!(out, "      text: \"{}\"", yaml_escape_string(t))
-                    .expect("infallible");
+                writeln!(out, "      text: \"{}\"", yaml_escape_string(t)).expect("infallible");
             }
         }
 
@@ -894,7 +928,10 @@ async fn resolve_host_path(
         let dest = tmp_dir.join(&file_name);
         let sandbox = ctx.resolved_sandbox.unwrap();
         if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
-            let msg = format!("download_file failed for {}: {:#} — {log_suffix}", att.path, e);
+            let msg = format!(
+                "download_file failed for {}: {:#} — {log_suffix}",
+                att.path, e
+            );
             tracing::warn!("{msg}");
             return Err(msg);
         }
@@ -1195,9 +1232,13 @@ pub fn spawn_cleanup_task(
         let interval = std::time::Duration::from_secs(CLEANUP_INTERVAL_SECS);
         loop {
             tokio::time::sleep(interval).await;
-            if let Err(e) =
-                run_cleanup(&agent_dir, ssh_config_path.as_deref(), resolved_sandbox.as_deref(), retention_days)
-                    .await
+            if let Err(e) = run_cleanup(
+                &agent_dir,
+                ssh_config_path.as_deref(),
+                resolved_sandbox.as_deref(),
+                retention_days,
+            )
+            .await
             {
                 tracing::warn!("attachment cleanup failed: {e:#}");
             }
@@ -1768,7 +1809,11 @@ mod tests {
         // Russian / emoji caption, each copy is 500+ chars via chars().count() —
         // byte length is 2-4x that. Byte-slice truncation would panic mid-codepoint.
         let cyrillic: String = "а".repeat(600);
-        let mut caps = vec![Some(cyrillic.clone()), Some(cyrillic.clone()), Some(cyrillic)];
+        let mut caps = vec![
+            Some(cyrillic.clone()),
+            Some(cyrillic.clone()),
+            Some(cyrillic),
+        ];
         merge_group_captions(&mut caps);
         let first = caps[0].as_deref().unwrap();
         assert!(first.chars().count() <= TELEGRAM_CAPTION_LIMIT);
@@ -1796,7 +1841,10 @@ mod tests {
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
-        assert!(result.starts_with("messages:\n"), "should be YAML, not raw text");
+        assert!(
+            result.starts_with("messages:\n"),
+            "should be YAML, not raw text"
+        );
         assert!(result.contains("    author:\n"));
         assert!(result.contains("      name: \"\u{0410}\u{043d}\u{0434}\u{0440}\u{0435}\u{0439} \u{041a}\u{0443}\u{0437}\u{043d}\u{0435}\u{0446}\u{043e}\u{0432}\"\n"));
         assert!(result.contains("      username: \"@right\"\n"));
@@ -1863,10 +1911,18 @@ mod tests {
         assert!(result.contains("    reply_to_id: 3\n"));
     }
 
-    fn att_with(kind: OutboundKind, group: Option<&str>, caption: Option<&str>) -> OutboundAttachment {
+    fn att_with(
+        kind: OutboundKind,
+        group: Option<&str>,
+        caption: Option<&str>,
+    ) -> OutboundAttachment {
         OutboundAttachment {
             kind,
-            path: format!("/sandbox/outbox/{}-{}.bin", kind_to_ext(kind), caption.unwrap_or("x")),
+            path: format!(
+                "/sandbox/outbox/{}-{}.bin",
+                kind_to_ext(kind),
+                caption.unwrap_or("x")
+            ),
             filename: None,
             caption: caption.map(str::to_owned),
             media_group_id: group.map(str::to_owned),
@@ -1921,9 +1977,21 @@ mod tests {
         // Expected send order: group "a" (where it first appeared), then single,
         // then group "b".
         assert_eq!(sends.len(), 3);
-        assert!(matches!(sends[0], OutboundSend::Group { kind: GroupKind::PhotoVideo, .. }));
+        assert!(matches!(
+            sends[0],
+            OutboundSend::Group {
+                kind: GroupKind::PhotoVideo,
+                ..
+            }
+        ));
         assert!(matches!(sends[1], OutboundSend::Single(_)));
-        assert!(matches!(sends[2], OutboundSend::Group { kind: GroupKind::Document, .. }));
+        assert!(matches!(
+            sends[2],
+            OutboundSend::Group {
+                kind: GroupKind::Document,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1934,7 +2002,11 @@ mod tests {
         ];
         let (sends, warnings) = partition_sends(&atts);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("bad"), "warning must mention group id, got: {}", warnings[0]);
+        assert!(
+            warnings[0].contains("bad"),
+            "warning must mention group id, got: {}",
+            warnings[0]
+        );
         assert_eq!(sends.len(), 2, "both items fall back to Single");
         assert!(sends.iter().all(|s| matches!(s, OutboundSend::Single(_))));
     }
@@ -2075,7 +2147,10 @@ mod group_format_tests {
         };
         let yaml = format_cc_input(&[m]).unwrap();
         assert!(yaml.contains("messages:"));
-        assert!(!yaml.contains("chat:"), "DM must not emit chat block, got: {yaml}");
+        assert!(
+            !yaml.contains("chat:"),
+            "DM must not emit chat block, got: {yaml}"
+        );
     }
 
     #[test]

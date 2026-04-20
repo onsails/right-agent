@@ -6,11 +6,11 @@ use super::MemoryError;
 /// breaker-tick, enqueue, and surface behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    Transient,    // 5xx, timeout, connect error
-    RateLimited,  // 429
-    Auth,         // 401, 403
-    Client,       // 400, 404, 422 (caller bug or upstream API drift)
-    Malformed,    // response body parse error
+    Transient,   // 5xx, timeout, connect error
+    RateLimited, // 429
+    Auth,        // 401, 403
+    Client,      // 400, 404, 422 (caller bug or upstream API drift)
+    Malformed,   // response body parse error
 }
 
 impl MemoryError {
@@ -44,7 +44,10 @@ mod tests {
     use super::*;
 
     fn h(status: u16) -> MemoryError {
-        MemoryError::Hindsight { status, body: String::new() }
+        MemoryError::Hindsight {
+            status,
+            body: String::new(),
+        }
     }
 
     #[test]
@@ -75,7 +78,10 @@ mod tests {
 
     #[test]
     fn classify_timeout_transient() {
-        assert_eq!(MemoryError::HindsightTimeout.classify(), ErrorKind::Transient);
+        assert_eq!(
+            MemoryError::HindsightTimeout.classify(),
+            ErrorKind::Transient
+        );
     }
 
     #[test]

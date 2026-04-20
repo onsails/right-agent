@@ -42,27 +42,40 @@ pub async fn request_token(
     match open_db_and_delete_stale(&db_path) {
         Ok(()) => {}
         Err(e) => {
-            let _ = event_tx.send(LoginEvent::Error(format!("DB error: {e}"))).await;
+            let _ = event_tx
+                .send(LoginEvent::Error(format!("DB error: {e}")))
+                .await;
             return;
         }
     }
 
     // Wait for token from Telegram
-    tracing::info!(agent = agent_name, "login: waiting for setup-token from user");
+    tracing::info!(
+        agent = agent_name,
+        "login: waiting for setup-token from user"
+    );
     let token = match token_rx.await {
         Ok(t) => t.trim().to_string(),
         Err(_) => {
-            let _ = event_tx.send(LoginEvent::Error("token channel closed (timeout?)".into())).await;
+            let _ = event_tx
+                .send(LoginEvent::Error("token channel closed (timeout?)".into()))
+                .await;
             return;
         }
     };
 
     if token.is_empty() {
-        let _ = event_tx.send(LoginEvent::Error("received empty token".into())).await;
+        let _ = event_tx
+            .send(LoginEvent::Error("received empty token".into()))
+            .await;
         return;
     }
 
-    tracing::info!(agent = agent_name, token_len = token.len(), "login: received token, saving");
+    tracing::info!(
+        agent = agent_name,
+        token_len = token.len(),
+        "login: received token, saving"
+    );
 
     // Save token
     match save_token(&db_path, &token) {
@@ -70,15 +83,16 @@ pub async fn request_token(
             let _ = event_tx.send(LoginEvent::Done).await;
         }
         Err(e) => {
-            let _ = event_tx.send(LoginEvent::Error(format!("failed to save token: {e}"))).await;
+            let _ = event_tx
+                .send(LoginEvent::Error(format!("failed to save token: {e}")))
+                .await;
         }
     }
 }
 
 /// Open DB and delete any existing auth token (it's stale if we're here).
 fn open_db_and_delete_stale(db_path: &Path) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("open db: {e}"))?;
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("open db: {e}"))?;
     rightclaw::memory::store::delete_auth_token(&conn)
         .map_err(|e| format!("delete stale token: {e}"))?;
     Ok(())
@@ -86,8 +100,7 @@ fn open_db_and_delete_stale(db_path: &Path) -> Result<(), String> {
 
 /// Save token to DB.
 fn save_token(db_path: &Path, token: &str) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(db_path)
-        .map_err(|e| format!("open db: {e}"))?;
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("open db: {e}"))?;
     rightclaw::memory::store::save_auth_token(&conn, token)
         .map_err(|e| format!("save token: {e}"))?;
     Ok(())
@@ -98,7 +111,9 @@ fn save_token(db_path: &Path, token: &str) -> Result<(), String> {
 /// `agent_dir` is the agent directory (data.db lives inside it).
 pub fn load_auth_token(agent_dir: &Path) -> Option<String> {
     let conn = rusqlite::Connection::open(agent_dir.join("data.db")).ok()?;
-    rightclaw::memory::store::get_auth_token(&conn).ok().flatten()
+    rightclaw::memory::store::get_auth_token(&conn)
+        .ok()
+        .flatten()
 }
 
 /// Instruction message sent to user when auth is needed.

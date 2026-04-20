@@ -116,15 +116,15 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Per-agent codegen: regenerate all derived files from agent.yaml + identity files.
     // This ensures policy.yaml, settings.json, mcp.json, etc. reflect the current config
     // even after a config change triggered restart.
-    let self_exe = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
+    let self_exe =
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
     let agent_def = rightclaw::agent::discover_single_agent(&agent_dir)?;
     rightclaw::codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
     tracing::info!(agent = %args.agent, "per-agent codegen complete");
 
     // Parse config after codegen (secret may have been generated in agent.yaml).
-    let config = parse_agent_config(&agent_dir)?.unwrap_or_else(|| {
-        rightclaw::agent::types::AgentConfig {
+    let config =
+        parse_agent_config(&agent_dir)?.unwrap_or_else(|| rightclaw::agent::types::AgentConfig {
             allowed_chat_ids: vec![],
             telegram_token: None,
             restart: Default::default(),
@@ -138,8 +138,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             network_policy: Default::default(),
             show_thinking: true,
             memory: None,
-        }
-    });
+        });
 
     // Load (or migrate from legacy) the bot-managed allowlist, and spawn a
     // notify-based watcher so external edits hot-reload into the in-memory
@@ -171,7 +170,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         "Hindsight memory provider requires an API key"
                     )
                 })?;
-            let bank_id = mem_config.bank_id.as_deref().unwrap_or(&args.agent).to_string();
+            let bank_id = mem_config
+                .bank_id
+                .as_deref()
+                .unwrap_or(&args.agent)
+                .to_string();
             let budget = mem_config.recall_budget.to_string();
             let client = rightclaw::memory::hindsight::HindsightClient::new(
                 &api_key,
@@ -196,47 +199,43 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     bank_id = %profile.bank_id,
                     "Hindsight bank ready"
                 ),
-                Err(rightclaw::memory::ResilientError::Upstream(e)) => {
-                    match e.classify() {
-                        rightclaw::memory::ErrorKind::Auth => tracing::error!(
+                Err(rightclaw::memory::ResilientError::Upstream(e)) => match e.classify() {
+                    rightclaw::memory::ErrorKind::Auth => tracing::error!(
+                        agent = %args.agent,
+                        "Hindsight AUTH failed at startup: {e:#} — booting in degraded mode"
+                    ),
+                    rightclaw::memory::ErrorKind::Client => tracing::error!(
+                        agent = %args.agent,
+                        "Hindsight 4xx at startup: {e:#} — payload or API-drift bug"
+                    ),
+                    _ => {
+                        tracing::warn!(
                             agent = %args.agent,
-                            "Hindsight AUTH failed at startup: {e:#} — booting in degraded mode"
-                        ),
-                        rightclaw::memory::ErrorKind::Client => tracing::error!(
-                            agent = %args.agent,
-                            "Hindsight 4xx at startup: {e:#} — payload or API-drift bug"
-                        ),
-                        _ => {
-                            tracing::warn!(
-                                agent = %args.agent,
-                                "Hindsight transient at startup: {e:#} — will retry in background"
-                            );
-                            let w_bg = wrapper.clone();
-                            tokio::spawn(async move {
-                                loop {
-                                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                                    match w_bg
-                                        .get_or_create_bank(
-                                            rightclaw::memory::resilient::POLICY_STARTUP_BANK,
-                                        )
-                                        .await
-                                    {
-                                        Ok(p) => {
-                                            tracing::info!(
-                                                bank_id = %p.bank_id,
-                                                "background bank probe succeeded"
-                                            );
-                                            return;
-                                        }
-                                        Err(e) => tracing::warn!(
-                                            "background bank probe failed: {e:#}"
-                                        ),
+                            "Hindsight transient at startup: {e:#} — will retry in background"
+                        );
+                        let w_bg = wrapper.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                match w_bg
+                                    .get_or_create_bank(
+                                        rightclaw::memory::resilient::POLICY_STARTUP_BANK,
+                                    )
+                                    .await
+                                {
+                                    Ok(p) => {
+                                        tracing::info!(
+                                            bank_id = %p.bank_id,
+                                            "background bank probe succeeded"
+                                        );
+                                        return;
                                     }
+                                    Err(e) => tracing::warn!("background bank probe failed: {e:#}"),
                                 }
-                            });
-                        }
+                            }
+                        });
                     }
-                }
+                },
                 Err(rightclaw::memory::ResilientError::CircuitOpen { .. }) => {
                     tracing::warn!("unexpected CircuitOpen at startup");
                 }
@@ -264,8 +263,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             let handle = tokio::runtime::Handle::current();
             let local = tokio::task::LocalSet::new();
             handle.block_on(local.run_until(async move {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_secs(30));
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
                 interval.tick().await; // first tick is immediate
                 loop {
                     interval.tick().await;
@@ -280,22 +278,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         }
                     };
                     let w_call = w.clone();
-                    let report = rightclaw::memory::retain_queue::drain_tick(
-                        &conn,
-                        |items| {
-                            let w = w_call.clone();
-                            async move {
-                                let item = rightclaw::memory::hindsight::RetainItem {
-                                    content: items[0].content.clone(),
-                                    context: items[0].context.clone(),
-                                    document_id: items[0].document_id.clone(),
-                                    update_mode: items[0].update_mode.clone(),
-                                    tags: items[0].tags.clone(),
-                                };
-                                w.drain_retain_item(&item).await
-                            }
-                        },
-                    )
+                    let report = rightclaw::memory::retain_queue::drain_tick(&conn, |items| {
+                        let w = w_call.clone();
+                        async move {
+                            let item = rightclaw::memory::hindsight::RetainItem {
+                                content: items[0].content.clone(),
+                                context: items[0].context.clone(),
+                                document_id: items[0].document_id.clone(),
+                                update_mode: items[0].update_mode.clone(),
+                                tags: items[0].tags.clone(),
+                            };
+                            w.drain_retain_item(&item).await
+                        }
+                    })
                     .await;
                     if report.deleted
                         + report.dropped_age
@@ -313,7 +308,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Re-install skills with correct memory variant.
     rightclaw::codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
 
-    let is_sandboxed = matches!(config.sandbox_mode(), rightclaw::agent::types::SandboxMode::Openshell);
+    let is_sandboxed = matches!(
+        config.sandbox_mode(),
+        rightclaw::agent::types::SandboxMode::Openshell
+    );
 
     let bootstrap_pending = agent_dir.join("BOOTSTRAP.md").exists();
     tracing::info!(
@@ -339,10 +337,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     {
         use teloxide::requests::Requester as _;
         let webhook_bot = teloxide::Bot::new(token.clone());
-        webhook_bot
-            .delete_webhook()
-            .await
-            .map_err(|e| miette::miette!("deleteWebhook failed -- long polling would compete with active webhook: {e:#}"))?;
+        webhook_bot.delete_webhook().await.map_err(|e| {
+            miette::miette!(
+                "deleteWebhook failed -- long polling would compete with active webhook: {e:#}"
+            )
+        })?;
 
         // Log bot identity -- helps detect token conflicts with other running CC sessions
         match webhook_bot.get_me().await {
@@ -354,7 +353,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             ),
             // getMe is diagnostic-only; a transient API failure here does not block operation.
             // Intentional FAIL FAST exception -- deleteWebhook already confirmed connectivity.
-            Err(e) => tracing::warn!(agent = %args.agent, "getMe failed (non-fatal, bot identity unknown): {e:#}"),
+            Err(e) => {
+                tracing::warn!(agent = %args.agent, "getMe failed (non-fatal, bot identity unknown): {e:#}")
+            }
         }
     }
 
@@ -394,12 +395,18 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let shutdown = CancellationToken::new();
     let config_changed = Arc::new(AtomicBool::new(false));
     let agent_yaml_path = agent_dir.join("agent.yaml");
-    config_watcher::spawn_config_watcher(&agent_yaml_path, shutdown.clone(), Arc::clone(&config_changed))?;
+    config_watcher::spawn_config_watcher(
+        &agent_yaml_path,
+        shutdown.clone(),
+        Arc::clone(&config_changed),
+    )?;
 
     // Build shared OAuth PendingAuth map
     use std::collections::HashMap;
     use std::sync::Arc;
-    use telegram::oauth_callback::{OAuthCallbackState, PendingAuthMap, run_oauth_callback_server, run_pending_auth_cleanup};
+    use telegram::oauth_callback::{
+        OAuthCallbackState, PendingAuthMap, run_oauth_callback_server, run_pending_auth_cleanup,
+    };
 
     let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
@@ -409,7 +416,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Internal API client for bot→aggregator IPC (MCP add/remove/set-token)
     let internal_socket = home.join("run/internal.sock");
-    let internal_client = Arc::new(rightclaw::mcp::internal_client::InternalClient::new(internal_socket));
+    let internal_client = Arc::new(rightclaw::mcp::internal_client::InternalClient::new(
+        internal_socket,
+    ));
 
     let oauth_state = OAuthCallbackState {
         pending_auth: Arc::clone(&pending_auth),
@@ -438,13 +447,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Resolve sandbox name once — used throughout the bot lifetime.
     // None when running without sandbox (mode: none).
     let resolved_sandbox: Option<String> = if is_sandboxed {
-        Some(rightclaw::openshell::resolve_sandbox_name(&args.agent, &config))
+        Some(rightclaw::openshell::resolve_sandbox_name(
+            &args.agent,
+            &config,
+        ))
     } else {
         None
     };
 
     // --- OpenShell sandbox lifecycle (when sandbox mode is active) ---
-    let (ssh_config_path, sandbox_ctx): (Option<std::path::PathBuf>, Option<(std::path::PathBuf, String)>) = if is_sandboxed {
+    let (ssh_config_path, sandbox_ctx): (
+        Option<std::path::PathBuf>,
+        Option<(std::path::PathBuf, String)>,
+    ) = if is_sandboxed {
         // Resolve policy path from agent.yaml sandbox config.
         let policy_path = config.resolve_policy_path(&agent_dir)?
             .ok_or_else(|| miette::miette!(
@@ -465,7 +480,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             }
             rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
                 return Err(miette::miette!(
-                    help = "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
+                    help =
+                        "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
                     "OpenShell gateway is not running"
                 ));
             }
@@ -481,18 +497,23 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         // Check if sandbox already exists and is READY.
         let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
-        let sandbox_exists = rightclaw::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
+        let sandbox_exists =
+            rightclaw::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
 
         if !sandbox_exists {
             return Err(miette::miette!(
-                help = format!("Run `rightclaw init` or `rightclaw agent init {}` to create the sandbox", args.agent),
+                help = format!(
+                    "Run `rightclaw init` or `rightclaw agent init {}` to create the sandbox",
+                    args.agent
+                ),
                 "Sandbox '{}' not found",
                 sandbox
             ));
         }
 
         // Resolve host IP from inside sandbox for policy allowed_ips.
-        let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
+        let sandbox_id =
+            rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
         let host_ip = rightclaw::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
 
         // Regenerate policy with resolved host IP and apply.
@@ -511,7 +532,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let ssh_config_dir = home.join("run").join("ssh");
         std::fs::create_dir_all(&ssh_config_dir)
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
-        let config_path = rightclaw::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
+        let config_path =
+            rightclaw::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
         tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
 
         (Some(config_path), Some((mtls_dir, sandbox_id)))
@@ -520,16 +542,17 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     };
 
     // Create inbox/outbox inside sandbox for attachment handling
-    if is_sandboxed
-        && let Some(ref cfg_path) = ssh_config_path
-    {
-        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
+    if is_sandboxed && let Some(ref cfg_path) = ssh_config_path {
+        let ssh_host =
+            rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
         rightclaw::openshell::ssh_exec(
-            cfg_path, &ssh_host,
+            cfg_path,
+            &ssh_host,
             &["mkdir", "-p", "/sandbox/inbox", "/sandbox/outbox"],
             10,
-        ).await
-            .map_err(|e| miette::miette!("failed to create sandbox attachment dirs: {e:#}"))?;
+        )
+        .await
+        .map_err(|e| miette::miette!("failed to create sandbox attachment dirs: {e:#}"))?;
     }
 
     // Sync config files to sandbox before starting teloxide.
@@ -545,7 +568,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         sync::initial_sync(&agent_dir, &sbox).await?;
         let sync_agent_dir = agent_dir.clone();
         let sync_shutdown = shutdown.clone();
-        Some(tokio::spawn(sync::run_sync_task(sync_agent_dir, sbox, sync_shutdown)))
+        Some(tokio::spawn(sync::run_sync_task(
+            sync_agent_dir,
+            sbox,
+            sync_shutdown,
+        )))
     } else {
         None
     };
@@ -583,7 +610,17 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let cron_sandbox = resolved_sandbox.clone();
     let cron_upgrade_lock = Arc::clone(&upgrade_lock);
     let cron_handle = tokio::spawn(async move {
-        cron::run_cron_task(cron_agent_dir, cron_agent_name, cron_model, cron_ssh_config, cron_internal_client, cron_shutdown, cron_sandbox, cron_upgrade_lock).await;
+        cron::run_cron_task(
+            cron_agent_dir,
+            cron_agent_name,
+            cron_model,
+            cron_ssh_config,
+            cron_internal_client,
+            cron_shutdown,
+            cron_sandbox,
+            cron_upgrade_lock,
+        )
+        .await;
     });
 
     // Shared idle timestamp: tracks last handler/worker interaction for cron delivery gating.
@@ -615,7 +652,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_shutdown,
             delivery_sandbox,
             delivery_upgrade_lock,
-        ).await;
+        )
+        .await;
     });
 
     // Spawn periodic claude upgrade task (sandbox-only).
@@ -718,14 +756,30 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
     let mut all_succeeded = true;
     if let Some(servers) = state.get("servers").and_then(|s| s.as_object()) {
         for (name, entry) in servers {
-            let token_endpoint = entry.get("token_endpoint").and_then(|v| v.as_str()).unwrap_or("");
-            let client_id = entry.get("client_id").and_then(|v| v.as_str()).unwrap_or("");
+            let token_endpoint = entry
+                .get("token_endpoint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let client_id = entry
+                .get("client_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let client_secret = entry.get("client_secret").and_then(|v| v.as_str());
             let refresh_token = entry.get("refresh_token").and_then(|v| v.as_str());
-            let expires_at = entry.get("expires_at").and_then(|v| v.as_str()).unwrap_or("");
+            let expires_at = entry
+                .get("expires_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             if let Err(e) = rightclaw::mcp::credentials::db_set_oauth_state(
-                &conn, name, "", refresh_token, token_endpoint, client_id, client_secret, expires_at,
+                &conn,
+                name,
+                "",
+                refresh_token,
+                token_endpoint,
+                client_id,
+                client_secret,
+                expires_at,
             ) {
                 tracing::warn!(server = %name, "skipping oauth-state migration: {e:#}");
                 all_succeeded = false;
@@ -744,4 +798,3 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
         tracing::info!("migrated oauth-state.json to SQLite and removed file");
     }
 }
-

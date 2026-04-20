@@ -14,13 +14,16 @@ pub mod mock {
         let body = body.to_owned();
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = listener.accept().await else { return; };
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let mut buf = vec![0u8; 8192];
                 let _ = s.read(&mut buf).await;
                 let resp = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                    body.len(), body,
+                    body.len(),
+                    body,
                 );
                 let _ = s.write_all(resp.as_bytes()).await;
             }
@@ -48,7 +51,9 @@ pub mod switch {
 
     impl ResponseSwitch {
         pub fn new(status: u16, body: &str) -> Self {
-            Self { inner: Arc::new(Mutex::new((status, body.to_owned()))) }
+            Self {
+                inner: Arc::new(Mutex::new((status, body.to_owned()))),
+            }
         }
 
         pub async fn set(&self, status: u16, body: &str) {
@@ -62,14 +67,17 @@ pub mod switch {
         let url = format!("http://127.0.0.1:{port}");
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((mut s, _)) = listener.accept().await else { return; };
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let mut buf = vec![0u8; 8192];
                 let _ = s.read(&mut buf).await;
                 let (status, body) = switch.inner.lock().await.clone();
                 let resp = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                    body.len(), body,
+                    body.len(),
+                    body,
                 );
                 let _ = s.write_all(resp.as_bytes()).await;
             }

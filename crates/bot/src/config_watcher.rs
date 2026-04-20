@@ -4,8 +4,8 @@
 //! On change detection, sets a flag and cancels the provided `CancellationToken`.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
 
 /// Spawn a blocking thread that watches `agent.yaml` for modifications.
@@ -18,7 +18,7 @@ pub fn spawn_config_watcher(
     token: CancellationToken,
     config_changed: Arc<AtomicBool>,
 ) -> miette::Result<()> {
-    use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+    use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
     use std::sync::mpsc;
     use std::time::Duration;
 

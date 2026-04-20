@@ -1,9 +1,7 @@
 //! Integration scenarios covering memory failure handling.
 
 use rightclaw::memory::hindsight::RetainItem;
-use rightclaw::memory::resilient::{
-    POLICY_AUTO_RETAIN, POLICY_MCP_RECALL,
-};
+use rightclaw::memory::resilient::{POLICY_AUTO_RETAIN, POLICY_MCP_RECALL};
 use rightclaw::memory::{MemoryStatus, ResilientError};
 
 mod common;
@@ -14,7 +12,14 @@ async fn outage_queues_retain_and_degrades_status() {
     let wrapper = common::wrap(&url, "bot").await;
 
     let err = wrapper
-        .retain("turn-1", None, Some("doc-1"), Some("append"), None, POLICY_AUTO_RETAIN)
+        .retain(
+            "turn-1",
+            None,
+            Some("doc-1"),
+            Some("append"),
+            None,
+            POLICY_AUTO_RETAIN,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, ResilientError::Upstream(_)));
@@ -29,7 +34,9 @@ async fn outage_queues_retain_and_degrades_status() {
     assert!(matches!(wrapper.status(), MemoryStatus::Degraded { .. }));
 
     let conn = rightclaw::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .unwrap();
     assert!(n >= 1, "expected queue non-empty, got {n}");
 }
 
@@ -51,15 +58,19 @@ async fn client_error_drops_record_bumps_counter_no_enqueue() {
     let (_h, url) = common::mock::always(400, r#"{"error":"bad payload"}"#).await;
     let wrapper = common::wrap(&url, "bot").await;
 
-    let _ = wrapper.retain("x", None, None, None, None, POLICY_AUTO_RETAIN).await;
+    let _ = wrapper
+        .retain("x", None, None, None, None, POLICY_AUTO_RETAIN)
+        .await;
 
     assert_eq!(wrapper.client_drops_24h().await, 1);
     let conn = rightclaw::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n, 0);
 }
 
-use common::switch::{server, ResponseSwitch};
+use common::switch::{ResponseSwitch, server};
 
 #[tokio::test]
 async fn recovery_drains_queue_after_breaker_closes() {
@@ -69,16 +80,26 @@ async fn recovery_drains_queue_after_breaker_closes() {
 
     for i in 0..6 {
         let _ = wrapper
-            .retain(&format!("turn-{i}"), None, Some("doc"), Some("append"), None, POLICY_AUTO_RETAIN)
+            .retain(
+                &format!("turn-{i}"),
+                None,
+                Some("doc"),
+                Some("append"),
+                None,
+                POLICY_AUTO_RETAIN,
+            )
             .await;
     }
 
     let conn = rightclaw::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
-    let queued: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0)).unwrap();
+    let queued: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .unwrap();
     assert!(queued > 0, "expected non-empty queue");
 
     // Flip mock to success. Wait past breaker open timer then drain.
-    sw.set(200, r#"{"success":true,"operation_id":"op-1"}"#).await;
+    sw.set(200, r#"{"success":true,"operation_id":"op-1"}"#)
+        .await;
     tokio::time::sleep(std::time::Duration::from_secs(31)).await;
 
     let report = rightclaw::memory::retain_queue::drain_tick(&conn, |items| {
@@ -93,9 +114,13 @@ async fn recovery_drains_queue_after_breaker_closes() {
             };
             w.drain_retain_item(&item).await
         }
-    }).await;
+    })
+    .await;
 
-    assert!(report.deleted > 0, "drain should have deleted at least one entry");
+    assert!(
+        report.deleted > 0,
+        "drain should have deleted at least one entry"
+    );
 }
 
 #[tokio::test]
@@ -104,26 +129,24 @@ async fn drain_poison_pill_deleted_good_records_still_processed() {
     let wrapper = common::wrap(&url, "bot").await;
     let conn = rightclaw::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
 
-    rightclaw::memory::retain_queue::enqueue(
-        &conn, "bot", "POISON", None, None, None, None,
-    ).unwrap();
-    rightclaw::memory::retain_queue::enqueue(
-        &conn, "bot", "GOOD", None, None, None, None,
-    ).unwrap();
+    rightclaw::memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None)
+        .unwrap();
+    rightclaw::memory::retain_queue::enqueue(&conn, "bot", "GOOD", None, None, None, None).unwrap();
 
-    let report = rightclaw::memory::retain_queue::drain_tick(&conn, |items| {
-        async move {
-            if items[0].content == "POISON" {
-                Err(rightclaw::memory::ErrorKind::Client)
-            } else {
-                Ok(())
-            }
+    let report = rightclaw::memory::retain_queue::drain_tick(&conn, |items| async move {
+        if items[0].content == "POISON" {
+            Err(rightclaw::memory::ErrorKind::Client)
+        } else {
+            Ok(())
         }
-    }).await;
+    })
+    .await;
 
     assert_eq!(report.dropped_client, 1);
     assert_eq!(report.deleted, 1);
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n, 0);
 }
 
@@ -138,11 +161,17 @@ async fn queue_eviction_at_cap() {
         rightclaw::memory::retain_queue::enqueue(&conn, "bot", &c, None, None, None, None).unwrap();
     }
 
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n as usize, rightclaw::memory::retain_queue::QUEUE_CAP);
-    let first_gone: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pending_retains WHERE content = 'row-0'", [], |r| r.get(0),
-    ).unwrap();
+    let first_gone: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pending_retains WHERE content = 'row-0'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(first_gone, 0, "row-0 should have been evicted");
 }
 
@@ -157,7 +186,10 @@ async fn two_wrappers_have_independent_breakers() {
     for _ in 0..6 {
         let _ = bot_wrapper.recall("q", None, None, POLICY_MCP_RECALL).await;
     }
-    assert!(matches!(bot_wrapper.status(), MemoryStatus::Degraded { .. }));
+    assert!(matches!(
+        bot_wrapper.status(),
+        MemoryStatus::Degraded { .. }
+    ));
 
     let res = agg_wrapper.recall("q", None, None, POLICY_MCP_RECALL).await;
     assert!(res.is_ok(), "independent wrapper must still serve");

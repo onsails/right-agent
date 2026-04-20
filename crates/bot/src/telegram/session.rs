@@ -108,10 +108,7 @@ pub fn activate_session(
 }
 
 /// Update last_used_at for a session by row id.
-pub fn touch_session(
-    conn: &rusqlite::Connection,
-    session_id: i64,
-) -> Result<(), rusqlite::Error> {
+pub fn touch_session(conn: &rusqlite::Connection, session_id: i64) -> Result<(), rusqlite::Error> {
     conn.execute(
         "UPDATE sessions SET last_used_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?1",
         rusqlite::params![session_id],
@@ -322,8 +319,14 @@ mod tests {
         // /list — both visible, session 2 active
         let all = list_sessions(&conn, 100, 0).unwrap();
         assert_eq!(all.len(), 2);
-        assert!(all.iter().any(|s| s.root_session_id == "uuid-2" && s.is_active));
-        assert!(all.iter().any(|s| s.root_session_id == "uuid-1" && !s.is_active));
+        assert!(
+            all.iter()
+                .any(|s| s.root_session_id == "uuid-2" && s.is_active)
+        );
+        assert!(
+            all.iter()
+                .any(|s| s.root_session_id == "uuid-1" && !s.is_active)
+        );
 
         // /switch — back to session 1
         deactivate_current(&conn, 100, 0).unwrap();
@@ -357,6 +360,11 @@ mod tests {
         activate_session(&conn, id1).unwrap();
         let active = get_active_session(&conn, 100, 0).unwrap().unwrap();
         assert_eq!(active.root_session_id, "uuid-1");
-        assert!(!list_sessions(&conn, 100, 0).unwrap().iter().any(|s| s.id == id2 && s.is_active));
+        assert!(
+            !list_sessions(&conn, 100, 0)
+                .unwrap()
+                .iter()
+                .any(|s| s.id == id2 && s.is_active)
+        );
     }
 }

@@ -68,12 +68,7 @@ async fn unknown_tool_returns_error() {
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
 
     let result = backend
-        .tools_call(
-            "test-agent",
-            &agent_dir,
-            "nonexistent_tool",
-            json!({}),
-        )
+        .tools_call("test-agent", &agent_dir, "nonexistent_tool", json!({}))
         .await;
 
     assert!(result.is_err(), "unknown tool should return Err");
@@ -187,10 +182,9 @@ network_policies:
         .expect("sandbox did not become READY");
     let _ = child.kill().await;
 
-    let sandbox_id =
-        rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
-            .await
-            .expect("resolve sandbox_id");
+    let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
+        .await
+        .expect("resolve sandbox_id");
 
     let sbox = rightclaw::sandbox_exec::SandboxExec::new(
         mtls_dir.to_path_buf(),

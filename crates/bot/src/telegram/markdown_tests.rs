@@ -8,7 +8,10 @@ fn plain_text_passes_through() {
 
 #[test]
 fn html_entities_escaped() {
-    assert_eq!(md_to_telegram_html("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+    assert_eq!(
+        md_to_telegram_html("a < b & c > d"),
+        "a &lt; b &amp; c &gt; d"
+    );
 }
 
 #[test]
@@ -111,7 +114,10 @@ fn ordered_list() {
 #[test]
 fn image_becomes_link() {
     let html = md_to_telegram_html("![photo](https://img.com/x.png)");
-    assert!(html.contains("<a href=\"https://img.com/x.png\">"), "got: {html}");
+    assert!(
+        html.contains("<a href=\"https://img.com/x.png\">"),
+        "got: {html}"
+    );
     assert!(html.contains("photo"), "got: {html}");
 }
 
@@ -184,7 +190,10 @@ fn short_message_no_split() {
 #[test]
 fn long_message_splits_at_newline() {
     let line = "a".repeat(100);
-    let msg: String = (0..50).map(|_| line.as_str()).collect::<Vec<_>>().join("\n");
+    let msg: String = (0..50)
+        .map(|_| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(msg.len() > 4096);
     let parts = split_html_message(&msg);
     assert!(parts.len() >= 2);
@@ -232,10 +241,7 @@ fn split_handles_pre_block_over_limit() {
         "first part must close pre: ...{}",
         &parts[0][parts[0].len().saturating_sub(20)..]
     );
-    assert!(
-        parts[1].starts_with("<pre>"),
-        "second part must reopen pre"
-    );
+    assert!(parts[1].starts_with("<pre>"), "second part must reopen pre");
 }
 
 #[test]

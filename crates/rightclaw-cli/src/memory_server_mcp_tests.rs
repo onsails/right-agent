@@ -74,8 +74,20 @@ async fn test_cron_list_runs_empty() {
 #[tokio::test]
 async fn test_cron_list_runs_two_rows() {
     let (server, _dir) = setup_server();
-    insert_cron_run(&server, "run-001", "deploy-check", "2026-04-01T10:00:00Z", "success");
-    insert_cron_run(&server, "run-002", "health-ping", "2026-04-01T11:00:00Z", "success");
+    insert_cron_run(
+        &server,
+        "run-001",
+        "deploy-check",
+        "2026-04-01T10:00:00Z",
+        "success",
+    );
+    insert_cron_run(
+        &server,
+        "run-002",
+        "health-ping",
+        "2026-04-01T11:00:00Z",
+        "success",
+    );
 
     let result = server
         .cron_list_runs(Parameters(CronListRunsParams {
@@ -95,8 +107,20 @@ async fn test_cron_list_runs_two_rows() {
 #[tokio::test]
 async fn test_cron_list_runs_filter_job_name() {
     let (server, _dir) = setup_server();
-    insert_cron_run(&server, "run-a1", "job-a", "2026-04-01T10:00:00Z", "success");
-    insert_cron_run(&server, "run-b1", "job-b", "2026-04-01T10:01:00Z", "success");
+    insert_cron_run(
+        &server,
+        "run-a1",
+        "job-a",
+        "2026-04-01T10:00:00Z",
+        "success",
+    );
+    insert_cron_run(
+        &server,
+        "run-b1",
+        "job-b",
+        "2026-04-01T10:01:00Z",
+        "success",
+    );
 
     let result = server
         .cron_list_runs(Parameters(CronListRunsParams {
@@ -139,7 +163,13 @@ async fn test_cron_list_runs_limit() {
 #[tokio::test]
 async fn test_cron_show_run_found() {
     let (server, _dir) = setup_server();
-    insert_cron_run(&server, "run-xyz", "nightly-report", "2026-04-01T02:00:00Z", "success");
+    insert_cron_run(
+        &server,
+        "run-xyz",
+        "nightly-report",
+        "2026-04-01T02:00:00Z",
+        "success",
+    );
 
     let result = server
         .cron_show_run(Parameters(CronShowRunParams {

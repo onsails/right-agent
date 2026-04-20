@@ -100,10 +100,7 @@ impl ClaudeInvocation {
 }
 
 /// Resolve MCP config path: sandbox path when SSH is configured, local path otherwise.
-pub(crate) fn mcp_config_path(
-    ssh_config_path: Option<&Path>,
-    agent_dir: &Path,
-) -> String {
+pub(crate) fn mcp_config_path(ssh_config_path: Option<&Path>, agent_dir: &Path) -> String {
     if ssh_config_path.is_some() {
         rightclaw::openshell::SANDBOX_MCP_JSON_PATH.to_string()
     } else {

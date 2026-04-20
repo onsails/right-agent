@@ -179,7 +179,10 @@ struct TableBuilder {
 
 /// Render a markdown table as a `<pre>` block with aligned columns.
 fn render_table(tb: &TableBuilder, out: &mut String) {
-    let col_count = tb.header.len().max(tb.rows.iter().map(|r| r.len()).max().unwrap_or(0));
+    let col_count = tb
+        .header
+        .len()
+        .max(tb.rows.iter().map(|r| r.len()).max().unwrap_or(0));
     if col_count == 0 {
         return;
     }
@@ -362,7 +365,10 @@ fn find_unclosed_tags(html: &str) -> Vec<String> {
 fn parse_telegram_tag(content: &str) -> Option<String> {
     let trimmed = content.trim_start_matches('/');
     let name = trimmed.split_whitespace().next().unwrap_or(trimmed);
-    let name = name.split(|c: char| !c.is_alphanumeric()).next().unwrap_or(name);
+    let name = name
+        .split(|c: char| !c.is_alphanumeric())
+        .next()
+        .unwrap_or(name);
 
     match name {
         "b" | "i" | "s" | "u" | "code" | "pre" | "a" | "blockquote" => Some(name.to_string()),

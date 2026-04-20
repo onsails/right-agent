@@ -4,11 +4,11 @@ pub mod bot;
 pub mod dispatch;
 pub mod filter;
 pub mod handler;
+pub(crate) mod invocation;
 pub mod markdown;
 pub mod memory_alerts;
 pub mod mention;
 pub mod oauth_callback;
-pub(crate) mod invocation;
 pub(crate) mod prompt;
 pub mod session;
 pub mod stream;
@@ -19,18 +19,19 @@ pub use session::effective_thread_id;
 
 /// Bot adaptor type alias used by WorkerContext and dispatch logic.
 /// Ordering: CacheMe<Throttle<Bot>> per BOT-03 (Throttle inner, CacheMe outer).
-pub type BotType = teloxide::adaptors::CacheMe<teloxide::adaptors::throttle::Throttle<teloxide::Bot>>;
+pub type BotType =
+    teloxide::adaptors::CacheMe<teloxide::adaptors::throttle::Throttle<teloxide::Bot>>;
 
-use std::sync::Arc;
 use dashmap::DashMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Shared map of active CC sessions that can be stopped via inline button.
 /// Key: (chat_id, eff_thread_id). Value: CancellationToken to kill the CC process.
 pub(crate) type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
 
-use std::path::Path;
 use rightclaw::agent::types::AgentConfig;
+use std::path::Path;
 
 /// Resolve Telegram token using priority chain (D-13):
 /// 1. RC_TELEGRAM_TOKEN env var

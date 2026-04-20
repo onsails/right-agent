@@ -15,7 +15,10 @@ pub async fn initial_sync(
     agent_dir: &Path,
     sbox: &rightclaw::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
-    tracing::info!(sandbox = sbox.sandbox_name(), "sync: initial cycle (blocking)");
+    tracing::info!(
+        sandbox = sbox.sandbox_name(),
+        "sync: initial cycle (blocking)"
+    );
     sync_cycle(agent_dir, sbox).await?;
 
     // Ensure /sandbox/.local/bin is in PATH for agent-installed CLI tools.
@@ -70,13 +73,7 @@ async fn sync_cycle(
 /// Files that CC creates/modifies inside the sandbox and should be synced back to host.
 /// Excludes codegen-only files (BOOTSTRAP.md) — those are uploaded by
 /// forward sync and never modified by CC.
-const REVERSE_SYNC_FILES: &[&str] = &[
-    "AGENTS.md",
-    "TOOLS.md",
-    "IDENTITY.md",
-    "SOUL.md",
-    "USER.md",
-];
+const REVERSE_SYNC_FILES: &[&str] = &["AGENTS.md", "TOOLS.md", "IDENTITY.md", "SOUL.md", "USER.md"];
 
 /// Sync .md files from sandbox back to host after a `claude -p` invocation.
 ///
@@ -106,8 +103,8 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
 
     // Process results sequentially.
     while let Some(join_result) = join_set.join_next().await {
-        let (filename, downloaded, dl_result) = join_result
-            .map_err(|e| miette::miette!("reverse sync: join error: {e:#}"))?;
+        let (filename, downloaded, dl_result) =
+            join_result.map_err(|e| miette::miette!("reverse sync: join error: {e:#}"))?;
         let host_path = agent_dir.join(filename);
 
         match dl_result {
@@ -159,7 +156,10 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
             if let Err(e) = std::fs::remove_file(&host_path) {
                 errors.push(format!("{filename}: host delete failed: {e:#}"));
             } else {
-                tracing::info!(file = filename, "reverse sync: deleted from host (absent in sandbox)");
+                tracing::info!(
+                    file = filename,
+                    "reverse sync: deleted from host (absent in sandbox)"
+                );
             }
         }
     } else if !pending_deletes.is_empty() {
@@ -197,17 +197,15 @@ fn atomic_write_bytes(path: &Path, content: &[u8]) -> miette::Result<()> {
 /// Download .claude.json from sandbox, verify rightclaw-managed keys are intact.
 /// CC may overwrite hasCompletedOnboarding or trust settings during its lifecycle.
 async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
-    let tmp_dir = tempfile::tempdir()
-        .map_err(|e| miette::miette!("failed to create temp dir: {e:#}"))?;
+    let tmp_dir =
+        tempfile::tempdir().map_err(|e| miette::miette!("failed to create temp dir: {e:#}"))?;
     let downloaded = tmp_dir.path().join(".claude.json");
 
     // Download .claude.json from sandbox
     if let Err(e) =
         rightclaw::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded).await
     {
-        tracing::warn!(
-            "sync: failed to download .claude.json (may not exist yet): {e:#}"
-        );
+        tracing::warn!("sync: failed to download .claude.json (may not exist yet): {e:#}");
         // Upload host version as baseline
         let host_claude_json = agent_dir.join(".claude.json");
         if host_claude_json.exists() {
@@ -251,8 +249,7 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
             .entry("/sandbox")
             .or_insert_with(|| serde_json::json!({}));
         if let Some(proj_obj) = project.as_object_mut()
-            && proj_obj.get("hasTrustDialogAccepted")
-                != Some(&serde_json::Value::Bool(true))
+            && proj_obj.get("hasTrustDialogAccepted") != Some(&serde_json::Value::Bool(true))
         {
             proj_obj.insert(
                 "hasTrustDialogAccepted".into(),
@@ -378,10 +375,9 @@ network_policies:
             .expect("sandbox did not become READY");
         let _ = child.kill().await;
 
-        let sandbox_id =
-            rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
-                .await
-                .expect("resolve sandbox_id");
+        let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
+            .await
+            .expect("resolve sandbox_id");
 
         // Poll exec until it succeeds — OpenShell reports READY before exec transport is available.
         let sbox = rightclaw::sandbox_exec::SandboxExec::new(

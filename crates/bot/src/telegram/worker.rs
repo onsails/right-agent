@@ -13,7 +13,7 @@ use dashmap::DashMap;
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, MessageId, ReplyParameters, ThreadId};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -195,7 +195,8 @@ pub fn extract_auth_url(lines: &[String]) -> Option<String> {
         let url = &url_part[..end];
 
         // Match OAuth-specific URLs on Anthropic/Claude domains.
-        let is_auth_domain = url.contains("anthropic") || url.contains("claude.ai") || url.contains("claude.com");
+        let is_auth_domain =
+            url.contains("anthropic") || url.contains("claude.ai") || url.contains("claude.com");
         let is_auth_path = url.contains("/oauth/") || url.contains("/authorize");
         if is_auth_domain && is_auth_path {
             return Some(url.to_string());
@@ -224,13 +225,19 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
         .get("structured_output")
         .filter(|v| !v.is_null())
         .or_else(|| parsed.get("result"))
-        .ok_or_else(|| "CC response missing both 'structured_output' and 'result' fields".to_string())?;
+        .ok_or_else(|| {
+            "CC response missing both 'structured_output' and 'result' fields".to_string()
+        })?;
 
     // CC sometimes returns result as a plain string (e.g. after multi-turn MCP tool use)
     // instead of complying with --json-schema. Wrap it as ReplyOutput so the message is delivered.
     let output: ReplyOutput = if let Some(text) = result_val.as_str() {
         ReplyOutput {
-            content: if text.is_empty() { None } else { Some(text.to_string()) },
+            content: if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            },
             reply_to_message_id: None,
             attachments: None,
             bootstrap_complete: None,
@@ -248,7 +255,12 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
 /// - DM: `["chat:<chat_id>"]`.
 /// - Group: `["chat:<chat_id>", "user:<sender_id>"]` plus `"topic:<thread_id>"`
 ///   when this is a supergroup topic (thread_id > 0).
-fn retain_tags(chat_id: i64, sender_id: Option<i64>, thread_id: i64, is_group: bool) -> Vec<String> {
+fn retain_tags(
+    chat_id: i64,
+    sender_id: Option<i64>,
+    thread_id: i64,
+    is_group: bool,
+) -> Vec<String> {
     let mut tags = vec![format!("chat:{chat_id}")];
     if is_group {
         if let Some(uid) = sender_id {
@@ -348,7 +360,11 @@ pub fn spawn_worker(
                 tracing::info!(?key, "worker channel closed — exiting");
                 break;
             };
-            tracing::info!(?key, batch_size = 1, "worker received message, starting debounce");
+            tracing::info!(
+                ?key,
+                batch_size = 1,
+                "worker received message, starting debounce"
+            );
             let mut batch = vec![first];
 
             // Collect additional messages within debounce window (D-01)
@@ -391,7 +407,9 @@ pub fn spawn_worker(
                         ctx.resolved_sandbox.as_deref(),
                         tg_chat_id,
                         eff_thread_id,
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(r) => r,
                         Err(e) => {
                             tracing::error!(?key, "attachment download failed: {:#}", e);
@@ -418,7 +436,10 @@ pub fn spawn_worker(
             }
 
             let Some(input) = super::attachments::format_cc_input(&input_messages) else {
-                tracing::warn!(?key, "empty input after formatting -- skipping CC invocation");
+                tracing::warn!(
+                    ?key,
+                    "empty input after formatting -- skipping CC invocation"
+                );
                 continue;
             };
 
@@ -428,8 +449,7 @@ pub fn spawn_worker(
             let bot_clone = ctx.bot.clone();
             let typing_task = tokio::spawn(async move {
                 loop {
-                    let mut action =
-                        bot_clone.send_chat_action(tg_chat_id, ChatAction::Typing);
+                    let mut action = bot_clone.send_chat_action(tg_chat_id, ChatAction::Typing);
                     if eff_thread_id != 0 {
                         action =
                             action.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
@@ -448,10 +468,11 @@ pub fn spawn_worker(
             // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
-            let (reply_result, session_uuid) = match invoke_cc(&input, first_text, chat_id, eff_thread_id, is_group, &ctx).await {
-                Ok((output, uuid)) => (Ok(output), uuid),
-                Err(e) => (Err(e), String::new()),
-            };
+            let (reply_result, session_uuid) =
+                match invoke_cc(&input, first_text, chat_id, eff_thread_id, is_group, &ctx).await {
+                    Ok((output, uuid)) => (Ok(output), uuid),
+                    Err(e) => (Err(e), String::new()),
+                };
 
             // Reverse sync .md changes from sandbox.
             // Bootstrap mode: BLOCK so files are on host for completion check.
@@ -460,9 +481,7 @@ pub fn spawn_worker(
             if ctx.ssh_config_path.is_some() {
                 let sandbox = ctx.resolved_sandbox.clone().unwrap();
                 if bootstrap_mode {
-                    if let Err(e) =
-                        crate::sync::reverse_sync_md(&ctx.agent_dir, &sandbox).await
-                    {
+                    if let Err(e) = crate::sync::reverse_sync_md(&ctx.agent_dir, &sandbox).await {
                         tracing::warn!(
                             agent = %ctx.agent_name,
                             "bootstrap reverse sync failed: {e:#}"
@@ -472,9 +491,7 @@ pub fn spawn_worker(
                     let agent_dir = ctx.agent_dir.clone();
                     let agent_name = ctx.agent_name.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            crate::sync::reverse_sync_md(&agent_dir, &sandbox).await
-                        {
+                        if let Err(e) = crate::sync::reverse_sync_md(&agent_dir, &sandbox).await {
                             tracing::warn!(agent = %agent_name, "reverse sync failed: {e:#}");
                         }
                     });
@@ -548,9 +565,8 @@ pub fn spawn_worker(
                             let mut send = ctx.bot.send_message(tg_chat_id, part);
                             send = send.parse_mode(teloxide::types::ParseMode::Html);
                             if eff_thread_id != 0 {
-                                send = send.message_thread_id(ThreadId(MessageId(
-                                    eff_thread_id as i32,
-                                )));
+                                send = send
+                                    .message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
                             }
                             if let Some(ref_id) = reply_to {
                                 send = send.reply_parameters(ReplyParameters {
@@ -559,7 +575,11 @@ pub fn spawn_worker(
                                 });
                             }
                             if let Err(e) = send.await {
-                                tracing::warn!(?key, "HTML send failed, retrying plain text: {:#}", e);
+                                tracing::warn!(
+                                    ?key,
+                                    "HTML send failed, retrying plain text: {:#}",
+                                    e
+                                );
                                 let plain = strip_html_tags(part);
                                 let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
                                 if eff_thread_id != 0 {
@@ -574,15 +594,16 @@ pub fn spawn_worker(
                                     });
                                 }
                                 if let Err(e2) = fallback.await {
-                                    tracing::error!(?key, "plain text fallback also failed: {:#}", e2);
+                                    tracing::error!(
+                                        ?key,
+                                        "plain text fallback also failed: {:#}",
+                                        e2
+                                    );
                                 }
                             }
                         }
                     } else {
-                        tracing::warn!(
-                            ?key,
-                            "CC returned content: null -- no text reply sent"
-                        );
+                        tracing::warn!(?key, "CC returned content: null -- no text reply sent");
                     }
 
                     // Send outbound attachments
@@ -598,9 +619,17 @@ pub fn spawn_worker(
                             &ctx.agent_dir,
                             ctx.ssh_config_path.as_deref(),
                             ctx.resolved_sandbox.as_deref(),
-                        ).await {
+                        )
+                        .await
+                        {
                             tracing::error!(?key, "failed to send attachments: {:#}", e);
-                            let _ = send_tg(&ctx.bot, tg_chat_id, eff_thread_id, &format!("Failed to send attachments: {e}")).await;
+                            let _ = send_tg(
+                                &ctx.bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &format!("Failed to send attachments: {e}"),
+                            )
+                            .await;
                         }
                     }
                 }
@@ -611,8 +640,7 @@ pub fn spawn_worker(
                     tracing::info!(?key, "sending error reply to Telegram");
                     let mut send = ctx.bot.send_message(tg_chat_id, &err_msg);
                     if eff_thread_id != 0 {
-                        send = send
-                            .message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+                        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
                     }
                     if let Err(e) = send.await {
                         tracing::error!(?key, "failed to send error reply: {:#}", e);
@@ -635,7 +663,8 @@ pub fn spawn_worker(
                         let content = serde_json::json!([
                             {"role": "user", "content": retain_input, "timestamp": now},
                             {"role": "assistant", "content": retain_response, "timestamp": now},
-                        ]).to_string();
+                        ])
+                        .to_string();
                         if let Err(e) = hs_retain
                             .retain(
                                 &content,
@@ -685,7 +714,10 @@ pub fn spawn_worker(
                 });
             }
 
-            ctx.idle_timestamp.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+            ctx.idle_timestamp.store(
+                chrono::Utc::now().timestamp(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         // Worker exiting — remove DashMap entry to prevent stale sender (Pitfall 3)
@@ -825,25 +857,28 @@ async fn invoke_cc(
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
 
     // Session lookup / create (SES-02, SES-03)
-    let (cmd_args, is_first_call, session_uuid) = match get_active_session(&conn, chat_id, eff_thread_id) {
-        Ok(Some(SessionRow { root_session_id, .. })) => {
-            // Resume: --resume <root_session_id>
-            let uuid = root_session_id.clone();
-            (vec!["--resume".to_string(), root_session_id], false, uuid)
-        }
-        Ok(None) => {
-            // First message: generate UUID, --session-id <uuid>
-            let new_uuid = Uuid::new_v4().to_string();
-            let label = first_text.map(truncate_label);
-            create_session(&conn, chat_id, eff_thread_id, &new_uuid, label)
-                .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
-            let uuid = new_uuid.clone();
-            (vec!["--session-id".to_string(), new_uuid], true, uuid)
-        }
-        Err(e) => {
-            return Err(format!("⚠️ Agent error: session lookup failed: {:#}", e));
-        }
-    };
+    let (cmd_args, is_first_call, session_uuid) =
+        match get_active_session(&conn, chat_id, eff_thread_id) {
+            Ok(Some(SessionRow {
+                root_session_id, ..
+            })) => {
+                // Resume: --resume <root_session_id>
+                let uuid = root_session_id.clone();
+                (vec!["--resume".to_string(), root_session_id], false, uuid)
+            }
+            Ok(None) => {
+                // First message: generate UUID, --session-id <uuid>
+                let new_uuid = Uuid::new_v4().to_string();
+                let label = first_text.map(truncate_label);
+                create_session(&conn, chat_id, eff_thread_id, &new_uuid, label)
+                    .map_err(|e| format!("⚠️ Agent error: session create failed: {:#}", e))?;
+                let uuid = new_uuid.clone();
+                (vec!["--session-id".to_string(), new_uuid], true, uuid)
+            }
+            Err(e) => {
+                return Err(format!("⚠️ Agent error: session lookup failed: {:#}", e));
+            }
+        };
 
     // Bootstrap mode detection: check if BOOTSTRAP.md exists in agent dir.
     let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
@@ -879,10 +914,8 @@ async fn invoke_cc(
     let reply_schema = std::fs::read_to_string(&reply_schema_path)
         .map_err(|e| format_error_reply(-1, &format!("{schema_filename} read failed: {:#}", e)))?;
 
-    let mcp_path = super::invocation::mcp_config_path(
-        ctx.ssh_config_path.as_deref(),
-        &ctx.agent_dir,
-    );
+    let mcp_path =
+        super::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
 
     let mut invocation = super::invocation::ClaudeInvocation {
         mcp_config_path: mcp_path,
@@ -908,33 +941,41 @@ async fn invoke_cc(
     let claude_args = invocation.into_args();
 
     // Fetch MCP server instructions from aggregator (non-fatal on error).
-    let mcp_instructions: Option<String> = match ctx.internal_client.mcp_instructions(&ctx.agent_name).await {
-        Ok(resp) => {
-            // Only include if there's actual content beyond the header
-            if resp.instructions.trim().len() > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER.trim().len() {
-                Some(resp.instructions)
-            } else {
+    let mcp_instructions: Option<String> =
+        match ctx.internal_client.mcp_instructions(&ctx.agent_name).await {
+            Ok(resp) => {
+                // Only include if there's actual content beyond the header
+                if resp.instructions.trim().len()
+                    > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                        .trim()
+                        .len()
+                {
+                    Some(resp.instructions)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to fetch MCP instructions from aggregator: {e:#}");
                 None
             }
-        }
-        Err(e) => {
-            tracing::warn!("failed to fetch MCP instructions from aggregator: {e:#}");
-            None
-        }
-    };
+        };
 
     // Generate base system prompt (identity-neutral — no agent name to avoid
     // contradicting IDENTITY.md which the agent may have customized).
     let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
-        (rightclaw::agent::types::SandboxMode::Openshell, "/sandbox".to_owned())
+        (
+            rightclaw::agent::types::SandboxMode::Openshell,
+            "/sandbox".to_owned(),
+        )
     } else {
-        (rightclaw::agent::types::SandboxMode::None, ctx.agent_dir.to_string_lossy().into_owned())
+        (
+            rightclaw::agent::types::SandboxMode::None,
+            ctx.agent_dir.to_string_lossy().into_owned(),
+        )
     };
-    let base_prompt = rightclaw::codegen::generate_system_prompt(
-        &ctx.agent_name,
-        &sandbox_mode,
-        &home_dir,
-    );
+    let base_prompt =
+        rightclaw::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let memory_mode = if ctx.hindsight.is_some() {
         let sandbox_path = if ctx.ssh_config_path.is_some() {
@@ -1030,7 +1071,8 @@ async fn invoke_cc(
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.
-        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
+        let ssh_host =
+            rightclaw::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
         let mut assembly_script = super::prompt::build_prompt_assembly_script(
             &base_prompt,
             bootstrap_mode,
@@ -1044,7 +1086,8 @@ async fn invoke_cc(
         // Inject auth token as env var in the remote shell
         if let Some(token) = crate::login::load_auth_token(&ctx.db_path) {
             let escaped_token = token.replace('\'', "'\\''");
-            assembly_script = format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped_token}'\n{assembly_script}");
+            assembly_script =
+                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped_token}'\n{assembly_script}");
         }
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
@@ -1055,7 +1098,10 @@ async fn invoke_cc(
     } else {
         // No-sandbox: same shell template, paths point to host agent_dir.
         let agent_dir_str = ctx.agent_dir.to_string_lossy();
-        let prompt_path = ctx.agent_dir.join(".claude").join("composite-system-prompt.md");
+        let prompt_path = ctx
+            .agent_dir
+            .join(".claude")
+            .join("composite-system-prompt.md");
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = super::prompt::build_prompt_assembly_script(
             &base_prompt,
@@ -1106,7 +1152,8 @@ async fn invoke_cc(
 
     // Insert stop token so callback handler can kill this CC session.
     let stop_token = CancellationToken::new();
-    ctx.stop_tokens.insert((chat_id, eff_thread_id), stop_token.clone());
+    ctx.stop_tokens
+        .insert((chat_id, eff_thread_id), stop_token.clone());
 
     // Stream stdout line-by-line: log to file, parse events, update thinking message.
     let stdout = child
@@ -1292,27 +1339,23 @@ async fn invoke_cc(
             // In groups we never rendered the thinking view, so reuse the
             // "Working..." placeholder for consistency with the initial send.
             let text = if ctx.show_thinking && !is_group {
-                let mut msg = super::stream::format_thinking_message(
-                    ring_buffer.events(),
-                    &usage,
-                );
+                let mut msg = super::stream::format_thinking_message(ring_buffer.events(), &usage);
                 msg.push_str("\n\u{26d4} Stopped");
                 msg
             } else {
                 "\u{23f3} Working...\n\u{26d4} Stopped".to_string()
             };
-            let _ = ctx.bot
+            let _ = ctx
+                .bot
                 .edit_message_text(tg_chat_id, msg_id, &text)
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
         } else if ctx.show_thinking && !is_group {
             // Normal finish with thinking — final cost/turns, remove keyboard.
-            let text = super::stream::format_thinking_message(
-                ring_buffer.events(),
-                &usage,
-            );
-            let _ = ctx.bot
+            let text = super::stream::format_thinking_message(ring_buffer.events(), &usage);
+            let _ = ctx
+                .bot
                 .edit_message_text(tg_chat_id, msg_id, &text)
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
@@ -1561,7 +1604,10 @@ mod tests {
         let result = parse_reply_output(json);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("missing both"), "error should mention both fields: {err}");
+        assert!(
+            err.contains("missing both"),
+            "error should mention both fields: {err}"
+        );
     }
 
     #[test]
@@ -1578,7 +1624,8 @@ mod tests {
 
     #[test]
     fn parse_reply_output_text_only() {
-        let json = r#"{"result":{"content":"hello","reply_to_message_id":null,"attachments":null}}"#;
+        let json =
+            r#"{"result":{"content":"hello","reply_to_message_id":null,"attachments":null}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("hello"));
         assert!(output.attachments.is_none());
@@ -1591,7 +1638,6 @@ mod tests {
         assert_eq!(output.content.as_deref(), Some("plain text fallback"));
         assert!(output.attachments.is_none());
     }
-
 
     // is_auth_error tests
     #[test]
@@ -1655,9 +1701,7 @@ mod tests {
 
     #[test]
     fn extract_auth_url_finds_claude_ai_url() {
-        let lines = vec![
-            "Please visit: https://claude.ai/oauth/login?token=xyz".to_string(),
-        ];
+        let lines = vec!["Please visit: https://claude.ai/oauth/login?token=xyz".to_string()];
         let url = extract_auth_url(&lines);
         assert!(url.is_some());
         assert!(url.unwrap().contains("claude.ai"));
@@ -1686,9 +1730,7 @@ mod tests {
 
     #[test]
     fn extract_auth_url_ignores_non_auth_urls() {
-        let lines = vec![
-            "Connecting to https://api.example.com/v1".to_string(),
-        ];
+        let lines = vec!["Connecting to https://api.example.com/v1".to_string()];
         assert!(extract_auth_url(&lines).is_none());
     }
 
@@ -1716,7 +1758,6 @@ mod tests {
         assert!(url.starts_with("https://"));
         assert!(!url.contains(" to continue"));
     }
-
 
     // bootstrap mode tests
     #[test]
@@ -1768,11 +1809,23 @@ mod tests {
     #[test]
     fn script_normal_has_agent_configuration_section() {
         let script = crate::telegram::prompt::build_prompt_assembly_script(
-            "Base prompt", false, "/sandbox", "/tmp/rightclaw-system-prompt.md", "/sandbox",
-            &["claude".into()], None, None,
+            "Base prompt",
+            false,
+            "/sandbox",
+            "/tmp/rightclaw-system-prompt.md",
+            "/sandbox",
+            &["claude".into()],
+            None,
+            None,
         );
-        assert!(script.contains("Agent Configuration"), "must have Agent Configuration section for per-agent AGENTS.md");
-        assert!(script.contains("cat /sandbox/AGENTS.md"), "must cat AGENTS.md from sandbox root");
+        assert!(
+            script.contains("Agent Configuration"),
+            "must have Agent Configuration section for per-agent AGENTS.md"
+        );
+        assert!(
+            script.contains("cat /sandbox/AGENTS.md"),
+            "must cat AGENTS.md from sandbox root"
+        );
     }
 
     #[test]

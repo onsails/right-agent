@@ -12,18 +12,17 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
+use rightclaw::mcp::proxy::ProxyBackend;
+use rightclaw::mcp::refresh::RefreshMessage;
+use rmcp::ErrorData as McpError;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
     PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
-use rmcp::ErrorData as McpError;
-use rightclaw::mcp::proxy::ProxyBackend;
-use rightclaw::mcp::refresh::RefreshMessage;
 use tokio_util::sync::CancellationToken;
 
 use crate::right_backend::RightBackend;
@@ -39,7 +38,8 @@ pub(crate) type AgentTokenMap = Arc<tokio::sync::RwLock<HashMap<String, AgentInf
 pub(crate) type RefreshSenders = Arc<HashMap<String, tokio::sync::mpsc::Sender<RefreshMessage>>>;
 
 /// Per-agent reconnect manager map (one manager per agent, mutex-protected for mutable access).
-pub(crate) type ReconnectManagers = Arc<HashMap<String, tokio::sync::Mutex<rightclaw::mcp::reconnect::ReconnectManager>>>;
+pub(crate) type ReconnectManagers =
+    Arc<HashMap<String, tokio::sync::Mutex<rightclaw::mcp::reconnect::ReconnectManager>>>;
 
 /// Agent identity resolved from a Bearer token.
 #[derive(Clone, Debug)]
@@ -273,9 +273,7 @@ impl BackendRegistry {
     ) -> Result<CallToolResult, anyhow::Error> {
         let proxies = self.proxies.read().await;
         let proxy = proxies.get(proxy_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Server '{proxy_name}' not found. It may have been removed."
-            )
+            anyhow::anyhow!("Server '{proxy_name}' not found. It may have been removed.")
         })?;
         Ok(proxy.tools_call(tool, args).await?)
     }
@@ -298,7 +296,9 @@ impl BackendRegistry {
                 url = rightclaw::mcp::credentials::redact_url(handle.url())
             ));
         }
-        Ok(CallToolResult::success(vec![Content::text(lines.join("\n"))]))
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
     }
 
     /// Return the tool definition for `rightmeta__mcp_list`.
@@ -311,7 +311,6 @@ impl BackendRegistry {
             schema,
         )
     }
-
 }
 
 /// Prefix-based tool routing across per-agent backend registries.
@@ -394,7 +393,6 @@ impl ToolDispatcher {
 
         tools
     }
-
 }
 
 /// Top-level aggregator: rmcp `ServerHandler` backed by prefix-based tool routing.
@@ -431,13 +429,9 @@ impl Aggregator {
             .ok_or_else(|| {
                 McpError::internal_error("HTTP request parts not found in context", None)
             })?;
-        parts
-            .extensions
-            .get::<AgentInfo>()
-            .cloned()
-            .ok_or_else(|| {
-                McpError::internal_error("agent context not found in request extensions", None)
-            })
+        parts.extensions.get::<AgentInfo>().cloned().ok_or_else(|| {
+            McpError::internal_error("agent context not found in request extensions", None)
+        })
     }
 }
 
@@ -463,7 +457,11 @@ impl rmcp::ServerHandler for Aggregator {
         async move {
             let agent = Self::agent_from_context(&context)?;
             let tools = self.dispatcher.tools_list(&agent.name);
-            Ok(ListToolsResult { tools, next_cursor: None, meta: None })
+            Ok(ListToolsResult {
+                tools,
+                next_cursor: None,
+                meta: None,
+            })
         }
     }
 
@@ -528,12 +526,9 @@ pub(crate) async fn run_aggregator_http(
     let mcp_service = StreamableHttpService::new(factory, session_manager, config);
 
     let token_map_for_reload = token_map.clone();
-    let app = axum::Router::new()
-        .nest_service("/mcp", mcp_service)
-        .layer(axum::middleware::from_fn_with_state(
-            token_map,
-            bearer_auth_middleware,
-        ));
+    let app = axum::Router::new().nest_service("/mcp", mcp_service).layer(
+        axum::middleware::from_fn_with_state(token_map, bearer_auth_middleware),
+    );
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
@@ -663,11 +658,7 @@ mod tests {
         // exercises RightBackend dispatch. bootstrap_done checks files — should
         // return a tool-level error (missing files), not an infrastructure error.
         let result = dispatcher
-            .dispatch(
-                "test-agent",
-                "bootstrap_done",
-                serde_json::json!({}),
-            )
+            .dispatch("test-agent", "bootstrap_done", serde_json::json!({}))
             .await;
 
         assert!(result.is_ok(), "dispatch should succeed: {result:?}");

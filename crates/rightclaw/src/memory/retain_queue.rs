@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use super::{ErrorKind, MemoryError};
 
@@ -33,11 +33,7 @@ pub fn enqueue(
     update_mode: Option<&str>,
     tags: Option<&[String]>,
 ) -> Result<(), MemoryError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pending_retains",
-        [],
-        |r| r.get(0),
-    )?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))?;
 
     let tx = conn.unchecked_transaction()?;
 
@@ -48,8 +44,7 @@ pub fn enqueue(
         )?;
     }
 
-    let tags_json = tags
-        .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".into()));
+    let tags_json = tags.map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".into()));
     let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     tx.execute(
@@ -79,15 +74,13 @@ pub fn count(conn: &Connection) -> Result<usize, MemoryError> {
 
 /// Age of the oldest row (None if queue empty).
 pub fn oldest_age(conn: &Connection) -> Result<Option<Duration>, MemoryError> {
-    let iso: Option<String> = conn.query_row(
-        "SELECT MIN(created_at) FROM pending_retains",
-        [],
-        |r| r.get(0),
-    )?;
+    let iso: Option<String> =
+        conn.query_row("SELECT MIN(created_at) FROM pending_retains", [], |r| {
+            r.get(0)
+        })?;
     let Some(iso) = iso else { return Ok(None) };
-    let parsed = chrono::DateTime::parse_from_rfc3339(&iso).map_err(|e| {
-        MemoryError::HindsightOther(format!("oldest_age parse: {e:#}"))
-    })?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(&iso)
+        .map_err(|e| MemoryError::HindsightOther(format!("oldest_age parse: {e:#}")))?;
     let now = chrono::Utc::now();
     let dur = now.signed_duration_since(parsed.with_timezone(&chrono::Utc));
     Ok(Some(Duration::from_secs(dur.num_seconds().max(0) as u64)))
@@ -98,10 +91,10 @@ pub const MAX_AGE: chrono::Duration = chrono::Duration::hours(24);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DrainReport {
-    pub deleted: usize,          // successfully retained + removed
-    pub dropped_age: usize,      // removed due to 24h age cap
-    pub dropped_client: usize,   // removed due to Client-kind error
-    pub bumped_attempts: usize,  // attempts incremented (Transient/RateLimited/Malformed)
+    pub deleted: usize,         // successfully retained + removed
+    pub dropped_age: usize,     // removed due to 24h age cap
+    pub dropped_client: usize,  // removed due to Client-kind error
+    pub bumped_attempts: usize, // attempts incremented (Transient/RateLimited/Malformed)
 }
 
 /// Run one drain tick.
@@ -138,7 +131,9 @@ where
                 None
             }
         };
-        if let Some(c) = created && now.signed_duration_since(c) > MAX_AGE {
+        if let Some(c) = created
+            && now.signed_duration_since(c) > MAX_AGE
+        {
             match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
                 Ok(_) => {
                     tracing::warn!(id = entry.id, "retain dropped: >24h");
@@ -152,14 +147,12 @@ where
         }
 
         match call(vec![entry.clone()]).await {
-            Ok(()) => {
-                match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
-                    Ok(_) => report.deleted += 1,
-                    Err(e) => {
-                        tracing::error!(id = entry.id, error = %e, "drain: success DELETE failed");
-                    }
+            Ok(()) => match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
+                Ok(_) => report.deleted += 1,
+                Err(e) => {
+                    tracing::error!(id = entry.id, error = %e, "drain: success DELETE failed");
                 }
-            }
+            },
             Err(ErrorKind::Client) => {
                 match conn.execute("DELETE FROM pending_retains WHERE id = ?1", [entry.id]) {
                     Ok(_) => {
@@ -243,7 +236,16 @@ mod tests {
     #[test]
     fn enqueue_inserts_row() {
         let conn = fresh_db();
-        enqueue(&conn, "bot", "content", Some("ctx"), Some("doc"), Some("append"), None).unwrap();
+        enqueue(
+            &conn,
+            "bot",
+            "content",
+            Some("ctx"),
+            Some("doc"),
+            Some("append"),
+            None,
+        )
+        .unwrap();
         assert_eq!(count(&conn).unwrap(), 1);
     }
 
@@ -256,16 +258,25 @@ mod tests {
         }
         assert_eq!(count(&conn).unwrap(), QUEUE_CAP);
         // Oldest remaining rows should not include the first 5.
-        let oldest_content: String = conn.query_row(
-            "SELECT content FROM pending_retains ORDER BY created_at ASC LIMIT 1",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert!(oldest_content.starts_with("content-"), "got {oldest_content}");
+        let oldest_content: String = conn
+            .query_row(
+                "SELECT content FROM pending_retains ORDER BY created_at ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            oldest_content.starts_with("content-"),
+            "got {oldest_content}"
+        );
         // The first inserted entry ("content-0") must be evicted.
-        let first_gone: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pending_retains WHERE content = 'content-0'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let first_gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pending_retains WHERE content = 'content-0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(first_gone, 0);
     }
 
@@ -280,10 +291,11 @@ mod tests {
         let conn = fresh_db();
         let tags = vec!["chat:42".to_string(), "user:7".to_string()];
         enqueue(&conn, "bot", "c", None, None, None, Some(&tags)).unwrap();
-        let json: String = conn.query_row(
-            "SELECT tags_json FROM pending_retains LIMIT 1",
-            [], |r| r.get(0),
-        ).unwrap();
+        let json: String = conn
+            .query_row("SELECT tags_json FROM pending_retains LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, tags);
     }
@@ -319,7 +331,8 @@ mod tests {
         let report = drain_tick(&conn, |items| {
             let kind = fake.next(&items[0]);
             async move { kind }
-        }).await;
+        })
+        .await;
 
         assert_eq!(report.deleted, 1);
         assert_eq!(count(&conn).unwrap(), 0);
@@ -337,7 +350,8 @@ mod tests {
         let report = drain_tick(&conn, |items| {
             let kind = fake.next(&items[0]);
             async move { kind }
-        }).await;
+        })
+        .await;
 
         assert_eq!(report.dropped_client, 1);
         assert_eq!(report.deleted, 1);
@@ -355,14 +369,18 @@ mod tests {
         let report = drain_tick(&conn, |items| {
             let kind = fake.next(&items[0]);
             async move { kind }
-        }).await;
+        })
+        .await;
 
         assert_eq!(report.deleted, 0);
         assert_eq!(report.bumped_attempts, 1);
-        let attempts: i64 = conn.query_row(
-            "SELECT attempts FROM pending_retains WHERE content = 'first'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let attempts: i64 = conn
+            .query_row(
+                "SELECT attempts FROM pending_retains WHERE content = 'first'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(attempts, 1);
         assert_eq!(count(&conn).unwrap(), 2);
     }
@@ -376,14 +394,13 @@ mod tests {
         // fail to parse, which would fall through to the call path).
         let t = (chrono::Utc::now() - chrono::Duration::hours(48))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        conn.execute(
-            "UPDATE pending_retains SET created_at = ?1",
-            [t],
-        ).unwrap();
+        conn.execute("UPDATE pending_retains SET created_at = ?1", [t])
+            .unwrap();
 
         let report = drain_tick(&conn, |_items| async move {
             panic!("should not call upstream for stale entries");
-        }).await;
+        })
+        .await;
 
         assert_eq!(report.dropped_age, 1);
         assert_eq!(count(&conn).unwrap(), 0);
@@ -412,9 +429,13 @@ mod tests {
             let signal = tx_entered_opt.take();
             let wait = rx_unblock_opt.take();
             async move {
-                if let Some(s) = signal { let _ = s.send(()); }
+                if let Some(s) = signal {
+                    let _ = s.send(());
+                }
                 // Wait for the other task to finish its enqueue.
-                if let Some(w) = wait { let _ = w.await; }
+                if let Some(w) = wait {
+                    let _ = w.await;
+                }
                 Ok(())
             }
         });

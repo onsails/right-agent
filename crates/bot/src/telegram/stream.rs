@@ -73,7 +73,10 @@ pub fn parse_usage(result_json: &str) -> StreamUsage {
     };
     StreamUsage {
         num_turns: v.get("num_turns").and_then(|n| n.as_u64()).unwrap_or(0) as u32,
-        cost_usd: v.get("total_cost_usd").and_then(|n| n.as_f64()).unwrap_or(0.0),
+        cost_usd: v
+            .get("total_cost_usd")
+            .and_then(|n| n.as_f64())
+            .unwrap_or(0.0),
     }
 }
 
@@ -89,7 +92,10 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
             Some(format!("\u{1f4dd} \"{escaped}\""))
         }
         StreamEvent::Thinking => Some("\u{1f4ad} thinking...".to_string()),
-        StreamEvent::ToolUse { tool, input_summary } => {
+        StreamEvent::ToolUse {
+            tool,
+            input_summary,
+        } => {
             // StructuredOutput is the final reply JSON — it will be sent as a
             // separate Telegram message, so showing it in the thinking indicator
             // is redundant noise (and the payload is huge).
@@ -112,10 +118,7 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
 }
 
 /// Format the full thinking message: events on top, status footer at bottom.
-pub fn format_thinking_message(
-    events: &VecDeque<StreamEvent>,
-    usage: &StreamUsage,
-) -> String {
+pub fn format_thinking_message(events: &VecDeque<StreamEvent>, usage: &StreamUsage) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     for event in events {
@@ -243,7 +246,8 @@ mod tests {
 
     #[test]
     fn parse_text_event() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello world"}]}}"#;
         match parse_stream_event(line) {
             StreamEvent::Text(t) => assert_eq!(t, "Hello world"),
             other => panic!("expected Text, got {other:?}"),
@@ -254,7 +258,10 @@ mod tests {
     fn parse_tool_use_event() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#;
         match parse_stream_event(line) {
-            StreamEvent::ToolUse { tool, input_summary } => {
+            StreamEvent::ToolUse {
+                tool,
+                input_summary,
+            } => {
                 assert_eq!(tool, "Bash");
                 assert_eq!(input_summary, "ls -la");
             }
@@ -264,7 +271,8 @@ mod tests {
 
     #[test]
     fn parse_thinking_event() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}"#;
         assert!(matches!(parse_stream_event(line), StreamEvent::Thinking));
     }
 
@@ -317,7 +325,10 @@ mod tests {
             input_summary: "ls -la".into(),
         });
         events.push_back(StreamEvent::Text("checking files".into()));
-        let usage = StreamUsage { num_turns: 2, cost_usd: 0.05 };
+        let usage = StreamUsage {
+            num_turns: 2,
+            cost_usd: 0.05,
+        };
         let msg = format_thinking_message(&events, &usage);
         assert!(msg.contains("Turn 2"));
         assert!(msg.contains("$0.05"));
@@ -346,7 +357,10 @@ mod tests {
         });
         // StructuredOutput should be filtered out by format_event → not stored in ring buffer
         assert_eq!(buf.events().len(), 1);
-        let usage = StreamUsage { num_turns: 3, cost_usd: 0.10 };
+        let usage = StreamUsage {
+            num_turns: 3,
+            cost_usd: 0.10,
+        };
         let msg = format_thinking_message(buf.events(), &usage);
         assert!(!msg.contains("StructuredOutput"));
         assert!(msg.contains("Bash"));
@@ -379,7 +393,10 @@ mod tests {
     fn skill_tool_shows_skill_name() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"rightcron","args":"big prompt..."}}]}}"#;
         match parse_stream_event(line) {
-            StreamEvent::ToolUse { tool, input_summary } => {
+            StreamEvent::ToolUse {
+                tool,
+                input_summary,
+            } => {
                 assert_eq!(tool, "Skill");
                 assert_eq!(input_summary, "/rightcron");
             }
@@ -391,7 +408,10 @@ mod tests {
     fn agent_tool_shows_description() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","input":{"description":"Build workspace","prompt":"long prompt..."}}]}}"#;
         match parse_stream_event(line) {
-            StreamEvent::ToolUse { tool, input_summary } => {
+            StreamEvent::ToolUse {
+                tool,
+                input_summary,
+            } => {
                 assert_eq!(tool, "Agent");
                 assert_eq!(input_summary, "Build workspace");
             }

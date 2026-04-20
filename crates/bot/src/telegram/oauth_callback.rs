@@ -13,16 +13,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use serde::Deserialize;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
 use rightclaw::mcp::internal_client::{InternalClient, SetTokenRequest};
-use rightclaw::mcp::oauth::{exchange_token, verify_state, PendingAuth};
+use rightclaw::mcp::oauth::{PendingAuth, exchange_token, verify_state};
 
 /// Shared in-memory map of OAuth state -> pending auth session.
 /// Key is the PKCE state parameter (random, one-shot).
@@ -54,10 +54,7 @@ pub struct OAuthCallbackState {
 /// Build the axum router for the OAuth callback server.
 fn build_router(state: OAuthCallbackState) -> Router {
     Router::new()
-        .route(
-            "/oauth/{agent_name}/callback",
-            get(handle_oauth_callback),
-        )
+        .route("/oauth/{agent_name}/callback", get(handle_oauth_callback))
         .with_state(state)
 }
 
@@ -139,7 +136,8 @@ async fn handle_oauth_callback(
             );
             return (
                 axum::http::StatusCode::BAD_REQUEST,
-                "invalid or expired state -- flow already completed or state is unknown".to_string(),
+                "invalid or expired state -- flow already completed or state is unknown"
+                    .to_string(),
             )
                 .into_response();
         }
@@ -279,8 +277,12 @@ pub async fn run_oauth_callback_server(
             .map_err(|e| miette::miette!("remove stale OAuth socket: {e:#}"))?;
     }
 
-    let listener = UnixListener::bind(&socket_path)
-        .map_err(|e| miette::miette!("bind OAuth callback socket {}: {e:#}", socket_path.display()))?;
+    let listener = UnixListener::bind(&socket_path).map_err(|e| {
+        miette::miette!(
+            "bind OAuth callback socket {}: {e:#}",
+            socket_path.display()
+        )
+    })?;
 
     tracing::info!(path = %socket_path.display(), "OAuth callback server listening");
 
@@ -355,7 +357,9 @@ mod tests {
     async fn test_valid_callback_consumes_pending_auth() {
         let state_val = "valid_state_abc123";
         let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
-        map.lock().await.insert(state_val.to_string(), make_pending(state_val));
+        map.lock()
+            .await
+            .insert(state_val.to_string(), make_pending(state_val));
 
         let received = state_val.to_string();
         let consumed = {
@@ -367,15 +371,24 @@ mod tests {
             matched_key.and_then(|key| m.remove(&key))
         };
 
-        assert!(consumed.is_some(), "valid state should produce a consumed PendingAuth");
-        assert_eq!(map.lock().await.len(), 0, "map should be empty after consumption (one-shot)");
+        assert!(
+            consumed.is_some(),
+            "valid state should produce a consumed PendingAuth"
+        );
+        assert_eq!(
+            map.lock().await.len(),
+            0,
+            "map should be empty after consumption (one-shot)"
+        );
     }
 
     /// Unknown state returns None from map lookup (does not modify map).
     #[tokio::test]
     async fn test_unknown_state_rejected() {
         let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
-        map.lock().await.insert("real_state".to_string(), make_pending("real_state"));
+        map.lock()
+            .await
+            .insert("real_state".to_string(), make_pending("real_state"));
 
         let received = "unknown_state_xyz".to_string();
         let consumed = {
@@ -396,17 +409,16 @@ mod tests {
     async fn test_replay_state_rejected_on_second_use() {
         let state_val = "one_shot_state";
         let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
-        map.lock().await.insert(state_val.to_string(), make_pending(state_val));
+        map.lock()
+            .await
+            .insert(state_val.to_string(), make_pending(state_val));
 
         let consume = |map: &PendingAuthMap| {
             let map = Arc::clone(map);
             let s = state_val.to_string();
             async move {
                 let mut m = map.lock().await;
-                let matched_key = m
-                    .keys()
-                    .find(|k| verify_state(k.as_str(), &s))
-                    .cloned();
+                let matched_key = m.keys().find(|k| verify_state(k.as_str(), &s)).cloned();
                 matched_key.and_then(|key| m.remove(&key))
             }
         };
@@ -422,7 +434,9 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_removes_expired_entries() {
         let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
-        map.lock().await.insert("fresh".to_string(), make_pending("fresh"));
+        map.lock()
+            .await
+            .insert("fresh".to_string(), make_pending("fresh"));
 
         let before = map.lock().await.len();
         {

@@ -19,7 +19,13 @@ pub fn spawn_keepalive(
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
-        run_keepalive_loop(&agent_dir, ssh_config_path.as_deref(), resolved_sandbox.as_deref(), shutdown).await;
+        run_keepalive_loop(
+            &agent_dir,
+            ssh_config_path.as_deref(),
+            resolved_sandbox.as_deref(),
+            shutdown,
+        )
+        .await;
     });
 }
 

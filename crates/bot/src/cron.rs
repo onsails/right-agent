@@ -125,7 +125,8 @@ async fn cleanup_old_logs(
             keep + 1
         );
         let mut c = tokio::process::Command::new("ssh");
-        c.arg("-F").arg(ssh_config)
+        c.arg("-F")
+            .arg(ssh_config)
             .arg(&ssh_host)
             .arg("--")
             .arg(&cleanup_cmd);
@@ -228,7 +229,11 @@ async fn execute_job(
     let sandbox_log_dir = if ssh_config_path.is_some() {
         "/sandbox/crons/logs".to_owned()
     } else {
-        agent_dir.join("crons").join("logs").to_string_lossy().into_owned()
+        agent_dir
+            .join("crons")
+            .join("logs")
+            .to_string_lossy()
+            .into_owned()
     };
     let log_path_str = format!("{sandbox_log_dir}/{log_filename}");
 
@@ -255,15 +260,24 @@ async fn execute_job(
     // Agent is disabled to prevent budget waste on parallel subagent branches.
     let disallowed_tools: Vec<String> = [
         "Agent",
-        "CronCreate", "CronList", "CronDelete",
-        "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskOutput", "TaskStop",
-        "EnterPlanMode", "ExitPlanMode", "RemoteTrigger",
-    ].iter().map(|&s| s.into()).collect();
+        "CronCreate",
+        "CronList",
+        "CronDelete",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+        "TaskOutput",
+        "TaskStop",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "RemoteTrigger",
+    ]
+    .iter()
+    .map(|&s| s.into())
+    .collect();
 
-    let mcp_path = crate::telegram::invocation::mcp_config_path(
-        ssh_config_path,
-        agent_dir,
-    );
+    let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let invocation = crate::telegram::invocation::ClaudeInvocation {
         mcp_config_path: mcp_path,
@@ -283,16 +297,28 @@ async fn execute_job(
 
     // Derive sandbox_mode and home_dir from ssh_config_path (same as worker).
     let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
-        (rightclaw::agent::types::SandboxMode::Openshell, "/sandbox".to_owned())
+        (
+            rightclaw::agent::types::SandboxMode::Openshell,
+            "/sandbox".to_owned(),
+        )
     } else {
-        (rightclaw::agent::types::SandboxMode::None, agent_dir.to_string_lossy().into_owned())
+        (
+            rightclaw::agent::types::SandboxMode::None,
+            agent_dir.to_string_lossy().into_owned(),
+        )
     };
-    let base_prompt = rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+    let base_prompt =
+        rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
-    let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await {
+    let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
+    {
         Ok(resp) => {
-            if resp.instructions.trim().len() > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER.trim().len() {
+            if resp.instructions.trim().len()
+                > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                    .trim()
+                    .len()
+            {
                 Some(resp.instructions)
             } else {
                 None
@@ -323,7 +349,8 @@ async fn execute_job(
         );
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
-            assembly_script = format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
+            assembly_script =
+                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
         assembly_script = format!(
             "set -o pipefail\nmkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
@@ -362,7 +389,8 @@ async fn execute_job(
             std::fs::remove_file(&lock_path).ok();
             return;
         }
-        let assembly_script = format!("set -o pipefail\n{assembly_script} | tee {sandbox_log_dir}/{log_filename}");
+        let assembly_script =
+            format!("set -o pipefail\n{assembly_script} | tee {sandbox_log_dir}/{log_filename}");
         let mut c = tokio::process::Command::new("bash");
         c.arg("-c");
         c.arg(&assembly_script);
@@ -451,7 +479,14 @@ async fn execute_job(
     let ssh_config_owned = ssh_config_path.map(|p| p.to_owned());
     let sandbox_owned = resolved_sandbox.map(|s| s.to_owned());
     tokio::spawn(async move {
-        cleanup_old_logs(&job_name_owned, &log_dir_owned, 10, ssh_config_owned.as_deref(), sandbox_owned.as_deref()).await;
+        cleanup_old_logs(
+            &job_name_owned,
+            &log_dir_owned,
+            10,
+            ssh_config_owned.as_deref(),
+            sandbox_owned.as_deref(),
+        )
+        .await;
     });
 
     tracing::info!(job = %job_name, run_id = %run_id, %status, "cron job completed");
@@ -470,10 +505,9 @@ async fn execute_job(
                             let sandbox = resolved_sandbox.unwrap();
                             for att in atts {
                                 let dest = outbox_dir.join(attachment_filename(&att.path));
-                                if let Err(e) = rightclaw::openshell::download_file(
-                                    &sandbox, &att.path, &dest,
-                                )
-                                .await
+                                if let Err(e) =
+                                    rightclaw::openshell::download_file(&sandbox, &att.path, &dest)
+                                        .await
                                 {
                                     tracing::error!(
                                         job = %job_name,
@@ -490,17 +524,15 @@ async fn execute_job(
                             content: notify.content.clone(),
                             attachments: Some(
                                 atts.iter()
-                                    .map(|att| {
-                                        crate::telegram::attachments::OutboundAttachment {
-                                            kind: att.kind,
-                                            path: outbox_dir
-                                                .join(attachment_filename(&att.path))
-                                                .to_string_lossy()
-                                                .into_owned(),
-                                            filename: att.filename.clone(),
-                                            caption: att.caption.clone(),
-                                            media_group_id: att.media_group_id.clone(),
-                                        }
+                                    .map(|att| crate::telegram::attachments::OutboundAttachment {
+                                        kind: att.kind,
+                                        path: outbox_dir
+                                            .join(attachment_filename(&att.path))
+                                            .to_string_lossy()
+                                            .into_owned(),
+                                        filename: att.filename.clone(),
+                                        caption: att.caption.clone(),
+                                        media_group_id: att.media_group_id.clone(),
                                     })
                                     .collect(),
                             ),
@@ -544,7 +576,6 @@ async fn execute_job(
                     no_notify_reason = cron_output.no_notify_reason.as_deref().unwrap_or("-"),
                     "cron output persisted to DB"
                 );
-
             }
             Err(reason) => {
                 tracing::warn!(job = %job_name, reason, "failed to parse cron output");
@@ -563,7 +594,8 @@ async fn execute_job(
                     .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
             })
             .unwrap_or_else(|| stderr_str.to_string());
-        let content = format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{error_detail}");
+        let content =
+            format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{error_detail}");
         let notify = CronNotify {
             content,
             attachments: None,
@@ -604,7 +636,11 @@ pub(crate) fn parse_cron_output(lines: &[String]) -> Result<CronReplyOutput, Str
         .ok_or_else(|| "no result line found in stream-json output".to_string())?;
 
     let payload = if let Some(so) = envelope.get("structured_output") {
-        if !so.is_null() { so } else { envelope.get("result").unwrap_or(so) }
+        if !so.is_null() {
+            so
+        } else {
+            envelope.get("result").unwrap_or(so)
+        }
     } else if let Some(r) = envelope.get("result") {
         r
     } else {
@@ -672,7 +708,19 @@ pub async fn run_cron_task(
     interval.tick().await; // consume immediate first tick
 
     // Run immediately on startup too
-    reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock);
+    reconcile_jobs(
+        &mut handles,
+        &mut triggered_handles,
+        &conn,
+        &agent_dir,
+        &agent_name,
+        &model,
+        &ssh_config_path,
+        &internal_client,
+        &execute_handles,
+        &resolved_sandbox,
+        &upgrade_lock,
+    );
 
     loop {
         tokio::select! {
@@ -703,7 +751,9 @@ pub async fn run_cron_task(
     // Phase 2: Wait for in-flight execute_job tasks with timeout.
     // Clean up finished handles first.
     let pending: Vec<(String, JoinHandle<()>)> = {
-        let mut guard = execute_handles.lock().expect("execute_handles mutex poisoned");
+        let mut guard = execute_handles
+            .lock()
+            .expect("execute_handles mutex poisoned");
         guard.drain(..).filter(|(_, h)| !h.is_finished()).collect()
     };
 
@@ -809,7 +859,18 @@ fn reconcile_jobs(
         let rs = resolved_sandbox.clone();
         let ul = Arc::clone(upgrade_lock);
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), ul).await;
+            execute_job(
+                &jn,
+                &sp,
+                &ad,
+                &an,
+                md.as_deref(),
+                sc.as_deref(),
+                &ic,
+                rs.as_deref(),
+                ul,
+            )
+            .await;
             delete_one_shot_spec(&ad, &jn);
         });
         if let Ok(mut guard) = execute_handles.lock() {
@@ -836,7 +897,10 @@ fn reconcile_jobs(
     // Spawn new handles for new or changed jobs
     for (name, spec) in &new_specs {
         // Skip RunAt specs — they are handled above via reconcile tick, not run_job_loop
-        if matches!(spec.schedule_kind, rightclaw::cron_spec::ScheduleKind::RunAt(_)) {
+        if matches!(
+            spec.schedule_kind,
+            rightclaw::cron_spec::ScheduleKind::RunAt(_)
+        ) {
             continue;
         }
         if handles.contains_key(name) {
@@ -854,8 +918,19 @@ fn reconcile_jobs(
         let job_upgrade_lock = Arc::clone(upgrade_lock);
 
         let handle = tokio::spawn(async move {
-            run_job_loop(job_name, job_spec, job_agent_dir, job_agent_name, job_model, job_ssh_config, job_internal_client, job_execute_handles, job_sandbox, job_upgrade_lock)
-                .await;
+            run_job_loop(
+                job_name,
+                job_spec,
+                job_agent_dir,
+                job_agent_name,
+                job_model,
+                job_ssh_config,
+                job_internal_client,
+                job_execute_handles,
+                job_sandbox,
+                job_upgrade_lock,
+            )
+            .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
         let sched_display = spec.schedule_kind.cron_schedule().unwrap_or("<run_at>");
@@ -890,7 +965,18 @@ fn reconcile_jobs(
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
-                execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), ul).await;
+                execute_job(
+                    &jn,
+                    &sp,
+                    &ad,
+                    &an,
+                    md.as_deref(),
+                    sc.as_deref(),
+                    &ic,
+                    rs.as_deref(),
+                    ul,
+                )
+                .await;
             });
             // Register for shutdown tracking
             if let Ok(mut guard) = execute_handles.lock() {
@@ -961,7 +1047,18 @@ async fn run_job_loop(
         let rs = resolved_sandbox.clone();
         let ul = Arc::clone(&upgrade_lock);
         let handle = tokio::spawn(async move {
-            execute_job(&jn, &sp, &ad, &an, md.as_deref(), sc.as_deref(), &ic, rs.as_deref(), ul).await;
+            execute_job(
+                &jn,
+                &sp,
+                &ad,
+                &an,
+                md.as_deref(),
+                sc.as_deref(),
+                &ic,
+                rs.as_deref(),
+                ul,
+            )
+            .await;
         });
         if spec.schedule_kind.is_one_shot() {
             // Wait for execution, then delete and exit loop
@@ -1081,7 +1178,10 @@ mod tests {
         let out = parse_cron_output(&lines).unwrap();
         assert!(out.notify.is_none());
         assert_eq!(out.summary, "Nothing interesting");
-        assert_eq!(out.no_notify_reason.as_deref(), Some("No changes since last run"));
+        assert_eq!(
+            out.no_notify_reason.as_deref(),
+            Some("No changes since last run")
+        );
     }
 
     #[test]
@@ -1102,7 +1202,10 @@ mod tests {
         let out = parse_cron_output(&lines).unwrap();
         let notify = out.notify.unwrap();
         assert_eq!(notify.attachments.as_ref().unwrap().len(), 1);
-        assert_eq!(notify.attachments.unwrap()[0].path, "/sandbox/outbox/chart.png");
+        assert_eq!(
+            notify.attachments.unwrap()[0].path,
+            "/sandbox/outbox/chart.png"
+        );
     }
 
     #[test]
@@ -1167,15 +1270,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let conn = rightclaw::memory::open_connection(dir.path(), true).unwrap();
 
-        rightclaw::cron_spec::create_spec(
-            &conn,
-            "clr-test",
-            "*/5 * * * *",
-            "test",
-            None,
-            None,
-        )
-        .unwrap();
+        rightclaw::cron_spec::create_spec(&conn, "clr-test", "*/5 * * * *", "test", None, None)
+            .unwrap();
         rightclaw::cron_spec::trigger_spec(&conn, "clr-test").unwrap();
         rightclaw::cron_spec::clear_triggered_at(&conn, "clr-test").unwrap();
 
@@ -1201,7 +1297,7 @@ mod tests {
         rightclaw::cron_spec::create_spec(
             &conn,
             "slow-job",
-            "0 0 1 1 *",  // Jan 1st at midnight — won't fire during test
+            "0 0 1 1 *", // Jan 1st at midnight — won't fire during test
             "echo test",
             None,
             None,
@@ -1212,7 +1308,9 @@ mod tests {
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();
 
-        let ic = Arc::new(rightclaw::mcp::internal_client::InternalClient::new("/nonexistent.sock"));
+        let ic = Arc::new(rightclaw::mcp::internal_client::InternalClient::new(
+            "/nonexistent.sock",
+        ));
         let cron_handle = tokio::spawn(run_cron_task(
             agent_dir,
             "test-agent".to_string(),
@@ -1231,11 +1329,7 @@ mod tests {
         shutdown.cancel();
 
         // Must complete within 2 seconds — if it hangs, the bug is present
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            cron_handle,
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), cron_handle).await;
 
         assert!(
             result.is_ok(),

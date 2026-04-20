@@ -14,10 +14,10 @@ pub struct BotIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddressKind {
     DirectMessage,
-    GroupMentionText,       // `@botname` in text
-    GroupMentionEntity,     // TextMention entity pointing at bot user_id
-    GroupReplyToBot,        // reply_to_message is from bot
-    GroupSlashCommand,      // /cmd@botname (or any cmd in a group-to-bot)
+    GroupMentionText,   // `@botname` in text
+    GroupMentionEntity, // TextMention entity pointing at bot user_id
+    GroupReplyToBot,    // reply_to_message is from bot
+    GroupSlashCommand,  // /cmd@botname (or any cmd in a group-to-bot)
 }
 
 /// Returns `Some(AddressKind)` when the message should be treated as addressed
@@ -38,7 +38,9 @@ pub fn is_bot_addressed(msg: &Message, identity: &BotIdentity) -> Option<Address
             // 2) parse entities with correct UTF-8 offsets (teloxide converts
             //    from UTF-16 code units). Use text entities first, fall back
             //    to caption entities.
-            let entities = msg.parse_entities().or_else(|| msg.parse_caption_entities());
+            let entities = msg
+                .parse_entities()
+                .or_else(|| msg.parse_caption_entities());
             if let Some(entities) = entities {
                 for e in entities {
                     match e.kind() {
@@ -174,8 +176,14 @@ mod tests {
             "text": "hi"
         }))
         .unwrap();
-        let identity = BotIdentity { username: "rightclaw_bot".into(), user_id: 999 };
-        assert_eq!(is_bot_addressed(&msg, &identity), Some(AddressKind::DirectMessage));
+        let identity = BotIdentity {
+            username: "rightclaw_bot".into(),
+            user_id: 999,
+        };
+        assert_eq!(
+            is_bot_addressed(&msg, &identity),
+            Some(AddressKind::DirectMessage)
+        );
     }
 
     #[test]
@@ -188,7 +196,10 @@ mod tests {
             "text": "just chatting"
         }))
         .unwrap();
-        let identity = BotIdentity { username: "rightclaw_bot".into(), user_id: 999 };
+        let identity = BotIdentity {
+            username: "rightclaw_bot".into(),
+            user_id: 999,
+        };
         assert_eq!(is_bot_addressed(&msg, &identity), None);
     }
 }

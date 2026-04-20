@@ -3,12 +3,12 @@ pub mod classify;
 pub mod error;
 pub mod guard;
 pub mod hindsight;
+pub(crate) mod migrations;
 pub mod prefetch;
 pub mod resilient;
 pub mod retain_queue;
 pub mod status;
 pub mod store;
-pub(crate) mod migrations;
 
 pub use classify::ErrorKind;
 pub use error::MemoryError;
@@ -79,8 +79,7 @@ mod tests {
     fn schema_has_memories_table() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
-        let conn =
-            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories'",
@@ -95,8 +94,7 @@ mod tests {
     fn schema_has_memory_events_table() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
-        let conn =
-            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memory_events'",
@@ -111,8 +109,7 @@ mod tests {
     fn schema_has_memories_fts() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
-        let conn =
-            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='memories_fts'",
@@ -127,8 +124,7 @@ mod tests {
     fn wal_mode_enabled() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
-        let conn =
-            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .unwrap();
@@ -139,8 +135,7 @@ mod tests {
     fn user_version_is_14() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
-        let conn =
-            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -183,8 +178,14 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        assert!(finished_at.is_none(), "finished_at should be NULL while running");
-        assert!(exit_code.is_none(), "exit_code should be NULL while running");
+        assert!(
+            finished_at.is_none(),
+            "finished_at should be NULL while running"
+        );
+        assert!(
+            exit_code.is_none(),
+            "exit_code should be NULL while running"
+        );
         assert_eq!(status, "running");
 
         // Update to success
@@ -235,24 +236,23 @@ mod tests {
             "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) VALUES (42, 0, 'uuid-2', 1)",
             [],
         );
-        assert!(result.is_err(), "partial unique index should prevent two active sessions per (chat_id, thread_id)");
+        assert!(
+            result.is_err(),
+            "partial unique index should prevent two active sessions per (chat_id, thread_id)"
+        );
     }
 
     #[test]
     fn memory_events_blocks_update() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
-        let conn =
-            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
             "INSERT INTO memory_events (event_type, actor) VALUES ('store', 'test-agent')",
             [],
         )
         .unwrap();
-        let result = conn.execute(
-            "UPDATE memory_events SET actor='x' WHERE id=1",
-            [],
-        );
+        let result = conn.execute("UPDATE memory_events SET actor='x' WHERE id=1", []);
         assert!(result.is_err(), "UPDATE on memory_events should be blocked");
     }
 
@@ -260,8 +260,7 @@ mod tests {
     fn memory_events_blocks_delete() {
         let dir = tempdir().unwrap();
         open_db(dir.path(), true).unwrap();
-        let conn =
-            rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
         conn.execute(
             "INSERT INTO memory_events (event_type, actor) VALUES ('store', 'test-agent')",
             [],
@@ -295,7 +294,10 @@ mod tests {
         assert!(conn1.is_ok(), "first open_connection call should succeed");
         drop(conn1);
         let conn2 = open_connection(dir.path(), true);
-        assert!(conn2.is_ok(), "second open_connection call should also succeed");
+        assert!(
+            conn2.is_ok(),
+            "second open_connection call should also succeed"
+        );
     }
 
     #[test]
@@ -324,7 +326,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0, "memories table should NOT exist with migrate=false");
+        assert_eq!(
+            count, 0,
+            "memories table should NOT exist with migrate=false"
+        );
     }
 
     #[test]

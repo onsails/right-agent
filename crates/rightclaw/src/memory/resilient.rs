@@ -88,11 +88,7 @@ pub struct ResilientHindsight {
 }
 
 impl ResilientHindsight {
-    pub fn new(
-        inner: HindsightClient,
-        agent_db_path: PathBuf,
-        source: impl Into<String>,
-    ) -> Self {
+    pub fn new(inner: HindsightClient, agent_db_path: PathBuf, source: impl Into<String>) -> Self {
         let (tx, _rx) = watch::channel(MemoryStatus::Healthy);
         Self {
             inner,
@@ -441,11 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn recall_success_returns_results() {
-        let (_h, url) = mock(
-            r#"{"results": [{"text": "hi", "score": 0.9}]}"#,
-            200,
-        )
-        .await;
+        let (_h, url) = mock(r#"{"results": [{"text": "hi", "score": 0.9}]}"#, 200).await;
         let w = wrap(&url);
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),

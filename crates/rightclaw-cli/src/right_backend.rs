@@ -123,7 +123,10 @@ impl RightBackend {
     // Connection helpers
     // ------------------------------------------------------------------
 
-    pub(crate) fn get_conn(&self, agent_name: &str) -> Result<Arc<Mutex<rusqlite::Connection>>, anyhow::Error> {
+    pub(crate) fn get_conn(
+        &self,
+        agent_name: &str,
+    ) -> Result<Arc<Mutex<rusqlite::Connection>>, anyhow::Error> {
         if let Some(entry) = self.conn_cache.get(agent_name) {
             return Ok(Arc::clone(entry.value()));
         }
@@ -131,7 +134,8 @@ impl RightBackend {
         let conn = rightclaw::memory::open_connection(&db_dir, false)
             .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
         let conn = Arc::new(Mutex::new(conn));
-        self.conn_cache.insert(agent_name.to_owned(), Arc::clone(&conn));
+        self.conn_cache
+            .insert(agent_name.to_owned(), Arc::clone(&conn));
         Ok(conn)
     }
 
@@ -215,8 +219,7 @@ impl RightBackend {
     fn call_cron_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
-        let output = rightclaw::cron_spec::list_specs(&conn)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let output = rightclaw::cron_spec::list_specs(&conn).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -294,9 +297,12 @@ impl RightBackend {
                 let output = serde_json::to_string_pretty(&val)?;
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(CallToolResult::success(vec![
-                Content::text(format!("cron run '{}' not found", params.run_id)),
-            ])),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "cron run '{}' not found",
+                    params.run_id
+                ))]))
+            }
             Err(e) => Err(e.into()),
         }
     }
@@ -354,20 +360,22 @@ impl RightBackend {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
                 .context("bootstrap_done: failed to connect to OpenShell gRPC")?;
-            let sandbox_id =
-                rightclaw::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e:#}"))
-                    .context("bootstrap_done: failed to resolve sandbox ID")?;
+            let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:#}"))
+                .context("bootstrap_done: failed to resolve sandbox ID")?;
 
             let mut missing = Vec::new();
             for &file in &required {
                 let path = format!("/sandbox/{file}");
-                let (_, exit_code) =
-                    rightclaw::openshell::exec_in_sandbox(&mut client, &sandbox_id, &["test", "-f", &path])
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e:#}"))
-                        .with_context(|| format!("bootstrap_done: exec test -f {path} failed"))?;
+                let (_, exit_code) = rightclaw::openshell::exec_in_sandbox(
+                    &mut client,
+                    &sandbox_id,
+                    &["test", "-f", &path],
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:#}"))
+                .with_context(|| format!("bootstrap_done: exec test -f {path} failed"))?;
                 if exit_code != 0 {
                     missing.push(file);
                 }
@@ -384,8 +392,7 @@ impl RightBackend {
         if missing.is_empty() {
             let bootstrap_path = agent_dir.join("BOOTSTRAP.md");
             if bootstrap_path.exists() {
-                std::fs::remove_file(&bootstrap_path)
-                    .context("failed to remove BOOTSTRAP.md")?;
+                std::fs::remove_file(&bootstrap_path).context("failed to remove BOOTSTRAP.md")?;
             }
             Ok(CallToolResult::success(vec![Content::text(
                 "Bootstrap complete! IDENTITY.md, SOUL.md, and USER.md verified. \

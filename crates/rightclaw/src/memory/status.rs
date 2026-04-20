@@ -46,8 +46,12 @@ mod tests {
     #[test]
     fn severity_ordering() {
         let h = MemoryStatus::Healthy;
-        let d = MemoryStatus::Degraded { since: Instant::now() };
-        let a = MemoryStatus::AuthFailed { since: Instant::now() };
+        let d = MemoryStatus::Degraded {
+            since: Instant::now(),
+        };
+        let a = MemoryStatus::AuthFailed {
+            since: Instant::now(),
+        };
         assert!(h < d);
         assert!(d < a);
         assert!(h < a);
@@ -56,8 +60,12 @@ mod tests {
     #[test]
     fn max_merges_by_severity() {
         let h = MemoryStatus::Healthy;
-        let d = MemoryStatus::Degraded { since: Instant::now() };
-        let a = MemoryStatus::AuthFailed { since: Instant::now() };
+        let d = MemoryStatus::Degraded {
+            since: Instant::now(),
+        };
+        let a = MemoryStatus::AuthFailed {
+            since: Instant::now(),
+        };
         assert_eq!(h.max(d).severity(), d.severity());
         assert_eq!(d.max(a).severity(), a.severity());
         assert_eq!(h.max(a).severity(), a.severity());
@@ -65,7 +73,9 @@ mod tests {
 
     #[test]
     fn equal_severity_eq() {
-        let d1 = MemoryStatus::Degraded { since: Instant::now() };
+        let d1 = MemoryStatus::Degraded {
+            since: Instant::now(),
+        };
         let d2 = MemoryStatus::Degraded {
             since: Instant::now() + std::time::Duration::from_secs(5),
         };

@@ -12,15 +12,18 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, Message};
-use teloxide::RequestError;
+use tokio::sync::mpsc;
 
-use super::oauth_callback::PendingAuthMap;
-use super::session::{activate_session, create_session, deactivate_current, effective_thread_id, find_sessions_by_uuid, list_sessions, truncate_label};
-use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 use super::BotType;
+use super::oauth_callback::PendingAuthMap;
+use super::session::{
+    activate_session, create_session, deactivate_current, effective_thread_id,
+    find_sessions_by_uuid, list_sessions, truncate_label,
+};
+use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
 /// Distinct from RightclawHome to prevent TypeId collision in dptree.
@@ -106,9 +109,9 @@ async fn send_html_reply(
         .send_message(chat_id, text)
         .parse_mode(teloxide::types::ParseMode::Html);
     if eff_thread_id != 0 {
-        send = send.message_thread_id(teloxide::types::ThreadId(
-            teloxide::types::MessageId(eff_thread_id as i32),
-        ));
+        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+            eff_thread_id as i32,
+        )));
     }
     send.await
 }
@@ -136,7 +139,10 @@ pub async fn handle_message(
     internal_api: Arc<InternalApi>,
     identity: Arc<super::mention::BotIdentity>,
 ) -> ResponseResult<()> {
-    idle_ts.0.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
+    idle_ts.0.store(
+        chrono::Utc::now().timestamp(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 
     // Extract text from message body OR caption (media messages use captions)
     let text = msg.text().or(msg.caption()).map(|t| t.to_string());
@@ -175,7 +181,10 @@ pub async fn handle_message(
                 },
                 *date,
             ),
-            MessageOrigin::HiddenUser { sender_user_name, date } => (
+            MessageOrigin::HiddenUser {
+                sender_user_name,
+                date,
+            } => (
                 super::attachments::MessageAuthor {
                     name: sender_user_name.clone(),
                     username: None,
@@ -183,7 +192,9 @@ pub async fn handle_message(
                 },
                 *date,
             ),
-            MessageOrigin::Chat { sender_chat, date, .. } => (
+            MessageOrigin::Chat {
+                sender_chat, date, ..
+            } => (
                 super::attachments::MessageAuthor {
                     name: sender_chat.title().unwrap_or("unknown").to_owned(),
                     username: sender_chat.username().map(|u| format!("@{u}")),
@@ -234,7 +245,13 @@ pub async fn handle_message(
     }
     let key: SessionKey = (chat_id.0, eff_thread_id);
     let worker_exists = worker_map.contains_key(&key);
-    tracing::info!(?key, worker_exists, has_text = text.is_some(), attachment_count = attachments.len(), "handle_message: routing");
+    tracing::info!(
+        ?key,
+        worker_exists,
+        has_text = text.is_some(),
+        attachment_count = attachments.len(),
+        "handle_message: routing"
+    );
 
     // Build ChatContext: DM emits nothing; Group emits id/title/topic_id.
     // General topic has thread_id = 1 in supergroups — normalise to "no topic".
@@ -243,10 +260,7 @@ pub async fn handle_message(
         _ => super::attachments::ChatContext::Group {
             id: msg.chat.id.0,
             title: msg.chat.title().map(|s| s.to_string()),
-            topic_id: msg
-                .thread_id
-                .map(|t| i64::from(t.0.0))
-                .filter(|&n| n > 1),
+            topic_id: msg.thread_id.map(|t| i64::from(t.0.0)).filter(|&n| n > 1),
         },
     };
 
@@ -304,7 +318,8 @@ pub async fn handle_message(
             },
             None => {
                 // No sender yet -- spawn a new worker task
-                let agent_name = agent_dir.0
+                let agent_name = agent_dir
+                    .0
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown")
@@ -348,15 +363,13 @@ pub async fn handle_message(
 ///
 /// Sends a greeting without invoking CC. Cron runtime starts automatically
 /// alongside the bot -- no explicit bootstrap needed.
-pub async fn handle_start(
-    bot: BotType,
-    msg: Message,
-) -> ResponseResult<()> {
+pub async fn handle_start(bot: BotType, msg: Message) -> ResponseResult<()> {
     if !is_private_chat(&msg.chat.kind) {
         tracing::debug!(cmd = "start", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
-    bot.send_message(msg.chat.id, "Agent is running. Send a message to start.").await?;
+    bot.send_message(msg.chat.id, "Agent is running. Send a message to start.")
+        .await?;
     Ok(())
 }
 
@@ -453,7 +466,10 @@ fn format_session_line(s: &super::session::SessionRow) -> String {
     let marker = if s.is_active { "●" } else { " " };
     let label = s.label.as_deref().unwrap_or("(unnamed)");
     let ago = format_relative_time(&s.last_used_at);
-    format!("{marker} {label} — {ago}\n<pre>{}</pre>\n", s.root_session_id)
+    format!(
+        "{marker} {label} — {ago}\n<pre>{}</pre>\n",
+        s.root_session_id
+    )
 }
 
 /// Map cron run status to a Unicode icon.
@@ -525,7 +541,9 @@ pub async fn handle_switch(
                 &bot,
                 chat_id,
                 eff_thread_id,
-                &format!("No session matching <pre>{uuid}</pre>. Use /list to see available sessions."),
+                &format!(
+                    "No session matching <pre>{uuid}</pre>. Use /list to see available sessions."
+                ),
             )
             .await?;
         }
@@ -547,7 +565,10 @@ pub async fn handle_switch(
                 &bot,
                 chat_id,
                 eff_thread_id,
-                &format!("Switched to: {label}\n<pre>{}</pre>", target.root_session_id),
+                &format!(
+                    "Switched to: {label}\n<pre>{}</pre>",
+                    target.root_session_id
+                ),
             )
             .await?;
 
@@ -590,7 +611,8 @@ pub async fn handle_mcp(
         return Ok(());
     }
     tracing::info!(agent_dir = %agent_dir.0.display(), "mcp: dispatching");
-    let agent_name = agent_dir.0
+    let agent_name = agent_dir
+        .0
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
@@ -602,34 +624,54 @@ pub async fn handle_mcp(
             let server = match parts.get(1) {
                 Some(s) => *s,
                 None => {
-                    bot.send_message(msg.chat.id, "Usage: /mcp auth <server>").await?;
+                    bot.send_message(msg.chat.id, "Usage: /mcp auth <server>")
+                        .await?;
                     return Ok(());
                 }
             };
-            handle_mcp_auth(&bot, &msg, server, &agent_dir.0, pending_auth, &home.0, &internal.0).await
+            handle_mcp_auth(
+                &bot,
+                &msg,
+                server,
+                &agent_dir.0,
+                pending_auth,
+                &home.0,
+                &internal.0,
+            )
+            .await
         }
         Some("add") => {
             let rest = parts[1..].join(" ");
-            handle_mcp_add(&bot, &msg, &rest, &agent_dir.0, &internal.0, &pending_token_slot, ssh_config.0.as_deref(), settings.resolved_sandbox.as_deref()).await
+            handle_mcp_add(
+                &bot,
+                &msg,
+                &rest,
+                &agent_dir.0,
+                &internal.0,
+                &pending_token_slot,
+                ssh_config.0.as_deref(),
+                settings.resolved_sandbox.as_deref(),
+            )
+            .await
         }
         Some("remove") => {
             let server = match parts.get(1) {
                 Some(s) => *s,
                 None => {
-                    bot.send_message(msg.chat.id, "Usage: /mcp remove <server>").await?;
+                    bot.send_message(msg.chat.id, "Usage: /mcp remove <server>")
+                        .await?;
                     return Ok(());
                 }
             };
             handle_mcp_remove(&bot, &msg, server, &agent_dir.0, &internal.0).await
         }
-        Some(unknown) => {
-            bot.send_message(
+        Some(unknown) => bot
+            .send_message(
                 msg.chat.id,
                 format!("Unknown /mcp subcommand: {unknown}\nUsage: /mcp [list|add|remove]"),
             )
             .await
-            .map(|_| ())
-        }
+            .map(|_| ()),
     };
     result.map_err(|e| to_request_err(format!("{e:#}")))?;
     Ok(())
@@ -661,9 +703,20 @@ async fn handle_mcp_list(
 
     let mut text = String::from("MCP Servers:\n\n");
     for s in &result.servers {
-        let url_part = s.url.as_deref().map(|u| format!(" [{u}]")).unwrap_or_default();
-        let auth_part = s.auth_type.as_deref().map(|a| format!(" [{a}]")).unwrap_or_default();
-        text.push_str(&format!("  {} -- {} ({} tools){}{}\n", s.name, s.status, s.tool_count, auth_part, url_part));
+        let url_part = s
+            .url
+            .as_deref()
+            .map(|u| format!(" [{u}]"))
+            .unwrap_or_default();
+        let auth_part = s
+            .auth_type
+            .as_deref()
+            .map(|a| format!(" [{a}]"))
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "  {} -- {} ({} tools){}{}\n",
+            s.name, s.status, s.tool_count, auth_part, url_part
+        ));
     }
     bot.send_message(msg.chat.id, text).await?;
     Ok(())
@@ -712,7 +765,8 @@ async fn handle_mcp_auth(
             }
         }
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot query MCP servers: {e:#}")).await?;
+            bot.send_message(msg.chat.id, format!("Cannot query MCP servers: {e:#}"))
+                .await?;
             return Ok(());
         }
     };
@@ -721,7 +775,8 @@ async fn handle_mcp_auth(
     let global_config = match rightclaw::config::read_global_config(home) {
         Ok(c) => c,
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("Cannot read config.yaml: {e:#}")).await?;
+            bot.send_message(msg.chat.id, format!("Cannot read config.yaml: {e:#}"))
+                .await?;
             return Ok(());
         }
     };
@@ -749,7 +804,9 @@ async fn handle_mcp_auth(
 
     // 4. AS discovery
     let http_client = reqwest::Client::new();
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .await
+        .ok();
     bot.send_message(
         msg.chat.id,
         format!("Discovering OAuth endpoints for {server_name}..."),
@@ -793,11 +850,8 @@ async fn handle_mcp_auth(
     {
         Ok(pair) => pair,
         Err(e) => {
-            bot.send_message(
-                msg.chat.id,
-                format!("Client registration failed: {e:#}"),
-            )
-            .await?;
+            bot.send_message(msg.chat.id, format!("Client registration failed: {e:#}"))
+                .await?;
             return Ok(());
         }
     };
@@ -852,7 +906,12 @@ async fn handle_mcp_auth(
 
     // 9. Build and send auth URL
     let auth_url = rightclaw::mcp::oauth::build_auth_url(
-        &metadata, &client_id, &redirect_uri, &state, &code_challenge, None,
+        &metadata,
+        &client_id,
+        &redirect_uri,
+        &state,
+        &code_challenge,
+        None,
     );
     bot.send_message(
         msg.chat.id,
@@ -914,7 +973,9 @@ async fn handle_mcp_add(
     let eff_thread_id = effective_thread_id(msg);
 
     // Step 1: Try OAuth AS discovery
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
+    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+        .await
+        .ok();
     tracing::info!(url = %bare_url, "mcp add: starting OAuth AS discovery");
     let http_client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -927,7 +988,9 @@ async fn handle_mcp_add(
 
     if oauth_discovered {
         // OAuth server — register without auth, tell user to run /mcp auth
-        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
+        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+            .await
+            .ok();
         tracing::info!(agent = agent_name, server = name, url = %bare_url, "mcp add: registering OAuth server via internal API");
         match internal
             .mcp_add(agent_name, name, &bare_url, Some("oauth"), None, None)
@@ -947,8 +1010,13 @@ async fn handle_mcp_add(
             Err(e) => {
                 tracing::warn!(server = name, err = %format!("{e:#}"), "mcp add: internal API registration failed");
                 let escaped_err = super::markdown::html_escape(&format!("{e:#}"));
-                send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {escaped_err}"))
-                    .await?;
+                send_html_reply(
+                    bot,
+                    msg.chat.id,
+                    eff_thread_id,
+                    &format!("Failed: {escaped_err}"),
+                )
+                .await?;
             }
         }
         return Ok(());
@@ -962,7 +1030,9 @@ async fn handle_mcp_add(
         ("query_string".into(), None)
     } else if is_public {
         // Public URL — dispatch haiku for classification
-        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing).await.ok();
+        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+            .await
+            .ok();
         bot.send_message(msg.chat.id, "Detecting authentication method...")
             .await?;
 
@@ -984,11 +1054,8 @@ async fn handle_mcp_add(
     // Step 3: If bearer or header — ask user for token
     let final_token = if auth_type == "bearer" || auth_type == "header" {
         let header_desc = auth_header.as_deref().unwrap_or("Bearer token");
-        bot.send_message(
-            msg.chat.id,
-            format!("Send the {header_desc} for {name}:"),
-        )
-        .await?;
+        bot.send_message(msg.chat.id, format!("Send the {header_desc} for {name}:"))
+            .await?;
 
         // Place a oneshot sender in the slot; message handler will consume it
         let (tx, rx) = tokio::sync::oneshot::channel::<String>();
@@ -1123,17 +1190,17 @@ async fn detect_auth_type_via_haiku(
             .map_err(|e| format!("stdin write failed: {e:#}"))?;
     }
 
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "haiku timed out after 60s".to_string())?
-    .map_err(|e| format!("haiku failed: {e:#}"))?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output())
+        .await
+        .map_err(|_| "haiku timed out after 60s".to_string())?
+        .map_err(|e| format!("haiku failed: {e:#}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json_start = stdout.find('{').ok_or("no JSON in haiku output")?;
-    let json_end = stdout.rfind('}').ok_or("no closing brace in haiku output")? + 1;
+    let json_end = stdout
+        .rfind('}')
+        .ok_or("no closing brace in haiku output")?
+        + 1;
     let json_str = &stdout[json_start..json_end];
 
     serde_json::from_str::<AuthDetectionResult>(json_str)
@@ -1178,13 +1245,7 @@ async fn handle_mcp_remove(
             .await?;
         }
         Err(e) => {
-            send_html_reply(
-                bot,
-                msg.chat.id,
-                eff_thread_id,
-                &format!("Failed: {e:#}"),
-            )
-            .await?;
+            send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}")).await?;
         }
     }
     Ok(())
@@ -1239,12 +1300,12 @@ async fn handle_cron_list(
     for name in names {
         let spec = &specs[name];
         let desc = match &spec.schedule_kind {
-            rightclaw::cron_spec::ScheduleKind::RunAt(dt) => {
-                super::markdown::html_escape(&format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")))
-            }
-            _ => super::markdown::html_escape(
-                &rightclaw::cron_spec::describe_schedule(spec.schedule_kind.cron_schedule().unwrap_or("")),
+            rightclaw::cron_spec::ScheduleKind::RunAt(dt) => super::markdown::html_escape(
+                &format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")),
             ),
+            _ => super::markdown::html_escape(&rightclaw::cron_spec::describe_schedule(
+                spec.schedule_kind.cron_schedule().unwrap_or(""),
+            )),
         };
 
         let last_run = rightclaw::cron_spec::get_recent_runs(&conn, name, 1)
@@ -1288,9 +1349,8 @@ async fn handle_cron_detail(
         return Ok(());
     };
 
-    let desc = super::markdown::html_escape(
-        &rightclaw::cron_spec::describe_schedule(&detail.schedule),
-    );
+    let desc =
+        super::markdown::html_escape(&rightclaw::cron_spec::describe_schedule(&detail.schedule));
     let schedule_escaped = super::markdown::html_escape(&detail.schedule);
     let mut text = format!(
         "<b>{}</b>\nSchedule: {} (<code>{}</code>)\nBudget: ${:.2}",
@@ -1373,15 +1433,20 @@ pub async fn handle_doctor(
         .count();
     body.push_str(&format!("\n{pass_count}/{} checks passed", checks.len()));
     // HTML-escape body before wrapping in <pre> -- doctor output may contain <, >, &
-    let escaped = body.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let escaped = body
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
     let text = format!("Doctor results:\n\n<pre>{}</pre>", escaped);
-    if let Err(e) = bot.send_message(msg.chat.id, &text)
+    if let Err(e) = bot
+        .send_message(msg.chat.id, &text)
         .parse_mode(teloxide::types::ParseMode::Html)
         .await
     {
         tracing::error!("handle_doctor: Telegram rejected HTML message: {e:#}");
         // Fallback: send as plain text without <pre> wrapper
-        bot.send_message(msg.chat.id, format!("Doctor results:\n\n{body}")).await?;
+        bot.send_message(msg.chat.id, format!("Doctor results:\n\n{body}"))
+            .await?;
     }
     Ok(())
 }
@@ -1438,14 +1503,16 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "type": "private",
             "first_name": "Test"
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     fn make_group_chat_kind() -> teloxide::types::ChatKind {
         serde_json::from_value(serde_json::json!({
             "type": "group",
             "title": "Group"
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[test]

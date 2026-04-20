@@ -152,6 +152,9 @@ mod tests {
 
         drop(write_guard);
         handle.await.unwrap();
-        assert!(!blocked.load(Ordering::SeqCst), "reader should have proceeded");
+        assert!(
+            !blocked.load(Ordering::SeqCst),
+            "reader should have proceeded"
+        );
     }
 }

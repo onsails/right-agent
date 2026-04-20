@@ -143,8 +143,7 @@ fn should_fire(db: &std::path::Path, alert_type: &str) -> bool {
             return true;
         }
     };
-    Utc::now().signed_duration_since(parsed.with_timezone(&Utc))
-        > chrono::Duration::hours(24)
+    Utc::now().signed_duration_since(parsed.with_timezone(&Utc)) > chrono::Duration::hours(24)
 }
 
 fn record_fire(db: &std::path::Path, alert_type: &str) {

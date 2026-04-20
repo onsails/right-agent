@@ -155,7 +155,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn open_transitions_to_half_open() {
         let mut b = Breaker::new();
-        for _ in 0..TRIP_THRESHOLD { fail(&mut b, ErrorKind::Transient); }
+        for _ in 0..TRIP_THRESHOLD {
+            fail(&mut b, ErrorKind::Transient);
+        }
         tokio::time::advance(INITIAL_OPEN + Duration::from_millis(10)).await;
         assert_eq!(b.state(), CircuitState::HalfOpen);
     }
@@ -163,7 +165,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn half_open_success_closes() {
         let mut b = Breaker::new();
-        for _ in 0..TRIP_THRESHOLD { fail(&mut b, ErrorKind::Transient); }
+        for _ in 0..TRIP_THRESHOLD {
+            fail(&mut b, ErrorKind::Transient);
+        }
         tokio::time::advance(INITIAL_OPEN + Duration::from_millis(10)).await;
         assert_eq!(b.state(), CircuitState::HalfOpen);
         b.record(Outcome::Success);
@@ -173,7 +177,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn half_open_failure_doubles_backoff() {
         let mut b = Breaker::new();
-        for _ in 0..TRIP_THRESHOLD { fail(&mut b, ErrorKind::Transient); }
+        for _ in 0..TRIP_THRESHOLD {
+            fail(&mut b, ErrorKind::Transient);
+        }
         tokio::time::advance(INITIAL_OPEN + Duration::from_millis(10)).await;
         fail(&mut b, ErrorKind::Transient);
         match b.state() {

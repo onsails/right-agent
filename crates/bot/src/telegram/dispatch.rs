@@ -13,20 +13,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use teloxide::RequestError;
 use teloxide::dispatching::{DefaultKey, UpdateFilterExt};
 use teloxide::prelude::*;
 use teloxide::utils::command::BotCommands;
-use teloxide::RequestError;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use super::BotType;
 use super::bot::build_bot;
 use super::filter::make_routing_filter;
+use super::handler::{
+    AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
+    RightclawHome, SshConfigPath, handle_cron, handle_doctor, handle_list, handle_mcp,
+    handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
+};
 use super::mention::BotIdentity;
-use super::handler::{handle_cron, handle_doctor, handle_list, handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot, RightclawHome, SshConfigPath};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
-use super::BotType;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
@@ -94,17 +98,22 @@ pub async fn run_telegram(
     let bot = build_bot(token);
 
     // Resolve bot identity (username + user_id) via getMe — required for group mention detection.
-    let me = bot.get_me().await
+    let me = bot
+        .get_me()
+        .await
         .map_err(|e| miette::miette!("bot.get_me() failed: {e:#}"))?;
-    let username = me.user.username.clone()
-        .ok_or_else(|| miette::miette!("bot has no username; cannot set up group-mention detection"))?;
-    let identity = BotIdentity { username: username.clone(), user_id: me.user.id.0 };
+    let username = me.user.username.clone().ok_or_else(|| {
+        miette::miette!("bot has no username; cannot set up group-mention detection")
+    })?;
+    let identity = BotIdentity {
+        username: username.clone(),
+        user_id: me.user.id.0,
+    };
     tracing::info!(%username, user_id = identity.user_id, "bot identity resolved");
     let identity_arc = Arc::new(identity);
 
     // Shared state
-    let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
-        Arc::new(DashMap::new());
+    let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> = Arc::new(DashMap::new());
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let ssh_config_arc: Arc<SshConfigPath> = Arc::new(SshConfigPath(ssh_config_path));
     let pending_auth_arc: PendingAuthMap = pending_auth;
@@ -118,9 +127,8 @@ pub async fn run_telegram(
         pending_token: Arc::clone(&pending_token_arc),
         auth_watcher: Arc::clone(&auth_watcher_arc),
     });
-    let pending_token_slot_arc: Arc<PendingTokenSlot> = Arc::new(PendingTokenSlot(
-        pending_token_arc,
-    ));
+    let pending_token_slot_arc: Arc<PendingTokenSlot> =
+        Arc::new(PendingTokenSlot(pending_token_arc));
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         show_thinking,
@@ -145,12 +153,7 @@ pub async fn run_telegram(
                 .chain(state.groups().iter().map(|g| g.id))
                 .collect()
         };
-        super::memory_alerts::spawn_watcher(
-            bot.clone(),
-            w.clone(),
-            agent_dir_arc.0.clone(),
-            chats,
-        );
+        super::memory_alerts::spawn_watcher(bot.clone(), w.clone(), agent_dir_arc.0.clone(), chats);
     }
 
     let mut dispatcher = build_dispatcher(
@@ -174,10 +177,8 @@ pub async fn run_telegram(
 
     // Signal handler task
     tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        )
-        .expect("failed to register SIGTERM handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
 
         tokio::select! {
             _ = sigterm.recv() => {
@@ -278,8 +279,7 @@ fn build_dispatcher(
                 .endpoint(super::allowlist_commands::handle_allow),
         )
         .branch(
-            dptree::case![BotCommand::Deny(args)]
-                .endpoint(super::allowlist_commands::handle_deny),
+            dptree::case![BotCommand::Deny(args)].endpoint(super::allowlist_commands::handle_deny),
         )
         .branch(
             dptree::case![BotCommand::Allowed].endpoint(super::allowlist_commands::handle_allowed),
@@ -289,8 +289,7 @@ fn build_dispatcher(
                 .endpoint(super::allowlist_commands::handle_allow_all),
         )
         .branch(
-            dptree::case![BotCommand::DenyAll]
-                .endpoint(super::allowlist_commands::handle_deny_all),
+            dptree::case![BotCommand::DenyAll].endpoint(super::allowlist_commands::handle_deny_all),
         );
 
     let message_handler = Update::filter_message()
@@ -325,8 +324,7 @@ fn build_dispatcher(
         .branch(command_handler)
         .endpoint(handle_message);
 
-    let callback_handler = Update::filter_callback_query()
-        .endpoint(handle_stop_callback);
+    let callback_handler = Update::filter_callback_query().endpoint(handle_stop_callback);
 
     let schema = dptree::entry()
         .branch(message_handler)
@@ -377,9 +375,8 @@ mod tests {
     async fn dispatcher_builds_without_panic() {
         let bot = build_bot("0:fake_token_for_smoke_test".to_string());
 
-        let allowlist = AllowlistHandle(Arc::new(std::sync::RwLock::new(
-            AllowlistState::default(),
-        )));
+        let allowlist =
+            AllowlistHandle(Arc::new(std::sync::RwLock::new(AllowlistState::default())));
         let identity = Arc::new(BotIdentity {
             username: "smoke_bot".to_string(),
             user_id: 1,
@@ -387,8 +384,7 @@ mod tests {
         let worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>> =
             Arc::new(DashMap::new());
         let agent_dir = Arc::new(AgentDir(PathBuf::from("/tmp/smoke")));
-        let pending_auth: PendingAuthMap =
-            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let pending_auth: PendingAuthMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let home = Arc::new(RightclawHome(PathBuf::from("/tmp/smoke")));
         let ssh_config = Arc::new(SshConfigPath(None));
         let intercept_slots = Arc::new(InterceptSlots {

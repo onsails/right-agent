@@ -11,7 +11,9 @@ use rightclaw::mcp::credentials::{self, CredentialError};
 use rightclaw::mcp::proxy::{AuthMethod, ProxyBackend};
 use serde::{Deserialize, Serialize};
 
-use crate::aggregator::{AgentInfo, AgentTokenMap, ReconnectManagers, RefreshSenders, ToolDispatcher};
+use crate::aggregator::{
+    AgentInfo, AgentTokenMap, ReconnectManagers, RefreshSenders, ToolDispatcher,
+};
 use rightclaw::mcp::refresh::{OAuthServerState, RefreshMessage};
 
 // ---------------------------------------------------------------------------
@@ -210,7 +212,11 @@ async fn handle_mcp_add(
             Ok(c) => c,
             Err(e) => return internal_error(format!("db open: {e:#}")).into_response(),
         };
-        (conn, registry.agent_dir.clone(), Arc::clone(&registry.proxies))
+        (
+            conn,
+            registry.agent_dir.clone(),
+            Arc::clone(&registry.proxies),
+        )
     };
 
     {
@@ -300,7 +306,7 @@ async fn handle_mcp_add(
                 let conn = match conn_arc.lock() {
                     Ok(c) => c,
                     Err(poison) => {
-                        return internal_error(format!("mutex poisoned: {poison}")).into_response()
+                        return internal_error(format!("mutex poisoned: {poison}")).into_response();
                     }
                 };
                 // Best-effort rollback — ignore ServerNotFound
@@ -460,7 +466,9 @@ async fn handle_set_token(
             .unwrap_or_else(|_| reqwest::Client::new());
         match handle_clone.connect(client).await {
             Ok(_) => tracing::info!(server = %server_name, "reconnected after OAuth token update"),
-            Err(e) => tracing::warn!(server = %server_name, err = %format!("{e:#}"), "reconnect after OAuth failed"),
+            Err(e) => {
+                tracing::warn!(server = %server_name, err = %format!("{e:#}"), "reconnect after OAuth failed")
+            }
         }
     });
 
@@ -482,7 +490,11 @@ async fn handle_set_token(
             })
             .await
         {
-            tracing::warn!(agent = req.agent.as_str(), server = req.server.as_str(), "failed to notify refresh scheduler: {e:#}");
+            tracing::warn!(
+                agent = req.agent.as_str(),
+                server = req.server.as_str(),
+                "failed to notify refresh scheduler: {e:#}"
+            );
         }
     }
 
@@ -586,18 +598,17 @@ async fn handle_mcp_instructions(
     .into_response()
 }
 
-async fn handle_reload(
-    State(state): State<InternalState>,
-) -> axum::response::Response {
+async fn handle_reload(State(state): State<InternalState>) -> axum::response::Response {
     // 1. Read token map from disk
     let content = match std::fs::read_to_string(&state.token_map_path) {
         Ok(c) => c,
         Err(e) => return internal_error(format!("read token map: {e:#}")).into_response(),
     };
-    let disk_entries: std::collections::HashMap<String, String> = match serde_json::from_str(&content) {
-        Ok(m) => m,
-        Err(e) => return internal_error(format!("parse token map: {e:#}")).into_response(),
-    };
+    let disk_entries: std::collections::HashMap<String, String> =
+        match serde_json::from_str(&content) {
+            Ok(m) => m,
+            Err(e) => return internal_error(format!("parse token map: {e:#}")).into_response(),
+        };
 
     // 2. Find new agents (in disk but not in dispatcher)
     let mut added = Vec::new();
@@ -608,7 +619,10 @@ async fn handle_reload(
 
         let agent_dir = state.agents_dir.join(agent_name);
         if !agent_dir.exists() {
-            tracing::warn!(agent = agent_name.as_str(), "reload: agent dir missing, skipping");
+            tracing::warn!(
+                agent = agent_name.as_str(),
+                "reload: agent dir missing, skipping"
+            );
             continue;
         }
 
@@ -617,9 +631,7 @@ async fn handle_reload(
             .ok()
             .flatten();
         let mtls_dir = match &agent_config {
-            Some(config)
-                if *config.sandbox_mode() == rightclaw::agent::SandboxMode::Openshell =>
-            {
+            Some(config) if *config.sandbox_mode() == rightclaw::agent::SandboxMode::Openshell => {
                 match rightclaw::openshell::preflight_check() {
                     rightclaw::openshell::OpenShellStatus::Ready(dir) => Some(dir),
                     _ => None,
@@ -641,10 +653,13 @@ async fn handle_reload(
         // Add to in-memory token map
         {
             let mut map = state.token_map.write().await;
-            map.insert(token.clone(), AgentInfo {
-                name: agent_name.clone(),
-                dir: agent_dir,
-            });
+            map.insert(
+                token.clone(),
+                AgentInfo {
+                    name: agent_name.clone(),
+                    dir: agent_dir,
+                },
+            );
         }
 
         added.push(agent_name.clone());
@@ -668,14 +683,21 @@ async fn handle_reload(
                 map.retain(|_token, info| info.name != agent_name);
             }
             removed.push(agent_name.clone());
-            tracing::info!(agent = agent_name.as_str(), "reload: removed destroyed agent");
+            tracing::info!(
+                agent = agent_name.as_str(),
+                "reload: removed destroyed agent"
+            );
         }
     }
 
     let total = state.dispatcher.agents.len();
     (
         StatusCode::OK,
-        Json(rightclaw::mcp::internal_client::ReloadResponse { added, removed, total }),
+        Json(rightclaw::mcp::internal_client::ReloadResponse {
+            added,
+            removed,
+            total,
+        }),
     )
         .into_response()
 }
@@ -726,10 +748,13 @@ mod tests {
         }
         let token_map: crate::aggregator::AgentTokenMap = {
             let mut map = std::collections::HashMap::new();
-            map.insert("tok-test".into(), crate::aggregator::AgentInfo {
-                name: "test-agent".into(),
-                dir: tmp.join("agents/test-agent"),
-            });
+            map.insert(
+                "tok-test".into(),
+                crate::aggregator::AgentInfo {
+                    name: "test-agent".into(),
+                    dir: tmp.join("agents/test-agent"),
+                },
+            );
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
 
@@ -1012,7 +1037,10 @@ mod tests {
             right["tool_count"].as_u64().unwrap() > 0,
             "right backend should have tools"
         );
-        assert!(right["url"].is_null(), "right backend should not have a url");
+        assert!(
+            right["url"].is_null(),
+            "right backend should not have a url"
+        );
     }
 
     #[tokio::test]
@@ -1076,10 +1104,13 @@ mod tests {
         let dispatcher = make_test_dispatcher(tmp.path());
         let token_map: crate::aggregator::AgentTokenMap = {
             let mut map = std::collections::HashMap::new();
-            map.insert("tok-test".into(), crate::aggregator::AgentInfo {
-                name: "test-agent".into(),
-                dir: tmp.path().join("agents/test-agent"),
-            });
+            map.insert(
+                "tok-test".into(),
+                crate::aggregator::AgentInfo {
+                    name: "test-agent".into(),
+                    dir: tmp.path().join("agents/test-agent"),
+                },
+            );
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
         let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
@@ -1124,10 +1155,13 @@ mod tests {
 
         let token_map: crate::aggregator::AgentTokenMap = {
             let mut map = std::collections::HashMap::new();
-            map.insert("tok-test".into(), crate::aggregator::AgentInfo {
-                name: "test-agent".into(),
-                dir: agent1_dir,
-            });
+            map.insert(
+                "tok-test".into(),
+                crate::aggregator::AgentInfo {
+                    name: "test-agent".into(),
+                    dir: agent1_dir,
+                },
+            );
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
 
