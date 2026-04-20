@@ -42,14 +42,14 @@ fn insert_row(
             input_tokens, output_tokens,
             cache_creation_tokens, cache_read_tokens,
             web_search_requests, web_fetch_requests,
-            model_usage_json
+            model_usage_json, api_key_source
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5,
             ?6, ?7, ?8,
             ?9, ?10,
             ?11, ?12,
             ?13, ?14,
-            ?15
+            ?15, ?16
          )",
         params![
             ts,
@@ -67,6 +67,7 @@ fn insert_row(
             b.web_search_requests as i64,
             b.web_fetch_requests as i64,
             b.model_usage_json,
+            b.api_key_source,
         ],
     )?;
     Ok(())
@@ -128,6 +129,41 @@ mod tests {
         assert_eq!(source, "cron");
         assert_eq!(chat_id, None);
         assert_eq!(job_name, Some("my-job".into()));
+    }
+
+    #[test]
+    fn insert_persists_api_key_source() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        let mut b = sample_breakdown();
+        b.api_key_source = "ANTHROPIC_API_KEY".into();
+        insert_interactive(&conn, &b, 1, 0).unwrap();
+
+        let src: String = conn
+            .query_row(
+                "SELECT api_key_source FROM usage_events LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(src, "ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn insert_default_api_key_source_is_none() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        // sample_breakdown sets api_key_source="none".
+        insert_interactive(&conn, &sample_breakdown(), 1, 0).unwrap();
+
+        let src: String = conn
+            .query_row(
+                "SELECT api_key_source FROM usage_events LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(src, "none");
     }
 
     #[test]
