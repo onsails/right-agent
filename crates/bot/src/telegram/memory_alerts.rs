@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
+use rightclaw::agent::allowlist::AllowlistHandle;
 use rightclaw::memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
 use rightclaw::memory::{MemoryStatus, ResilientHindsight};
 
@@ -13,11 +14,24 @@ use super::{BotType, broadcast_to_chats};
 
 pub const CLIENT_FLOOD_POLL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Resolve the current recipient chat list from the live allowlist handle.
+/// Union of trusted user ids and opened group ids. The read-lock is
+/// released before the value returns so the caller can safely `.await`.
+fn current_chats(allowlist: &AllowlistHandle) -> Vec<i64> {
+    let state = allowlist.0.read().expect("allowlist lock poisoned");
+    state
+        .users()
+        .iter()
+        .map(|u| u.id)
+        .chain(state.groups().iter().map(|g| g.id))
+        .collect()
+}
+
 pub fn spawn_watcher(
     bot: BotType,
     wrapper: Arc<ResilientHindsight>,
     agent_dir: PathBuf,
-    allowlist_chats: Vec<i64>,
+    allowlist: AllowlistHandle,
 ) {
     // Startup cleanup: delete alerts older than 1h so crash-loops re-notify.
     match rightclaw::memory::open_connection(&agent_dir, false) {
@@ -37,7 +51,7 @@ pub fn spawn_watcher(
         let bot = bot.clone();
         let wrapper = wrapper.clone();
         let db = agent_dir.clone();
-        let chats = allowlist_chats.clone();
+        let allowlist = allowlist.clone();
         tokio::spawn(async move {
             let mut rx = wrapper.subscribe_status();
             // Initial check — watch channel's changed() only fires on transitions,
@@ -45,13 +59,13 @@ pub fn spawn_watcher(
             // on boot when the Hindsight API key is bad).
             // Copy out the status so the borrow Ref (not Send) isn't held across .await.
             let initial = *rx.borrow();
-            handle_status_change(initial, &bot, &chats, &db).await;
+            handle_status_change(initial, &bot, &allowlist, &db).await;
             loop {
                 if rx.changed().await.is_err() {
                     return;
                 }
                 let status = *rx.borrow();
-                handle_status_change(status, &bot, &chats, &db).await;
+                handle_status_change(status, &bot, &allowlist, &db).await;
             }
         });
     }
@@ -61,7 +75,7 @@ pub fn spawn_watcher(
         let bot = bot.clone();
         let wrapper = wrapper.clone();
         let db = agent_dir.clone();
-        let chats = allowlist_chats.clone();
+        let allowlist = allowlist.clone();
         tokio::spawn(async move {
             let mut t = tokio::time::interval(CLIENT_FLOOD_POLL);
             loop {
@@ -75,6 +89,9 @@ pub fn spawn_watcher(
                          possible Hindsight API drift or payload bug. {drops_1h} drops \
                          in the last hour. Check ~/.rightclaw/logs/ for details."
                     );
+                    // Resolve recipients at broadcast time so /allow / /deny
+                    // changes after startup are honored.
+                    let chats = current_chats(&allowlist);
                     broadcast_to_chats(&bot, &chats, &msg).await;
                     record_fire(&db, CLIENT_FLOOD);
                 }
@@ -86,7 +103,7 @@ pub fn spawn_watcher(
 async fn handle_status_change(
     status: MemoryStatus,
     bot: &BotType,
-    chats: &[i64],
+    allowlist: &AllowlistHandle,
     db: &std::path::Path,
 ) {
     if matches!(status, MemoryStatus::AuthFailed { .. }) {
@@ -95,7 +112,10 @@ async fn handle_status_change(
                        Rotate the Hindsight API key — set `memory.api_key` in \
                        agent.yaml or the HINDSIGHT_API_KEY env var — and restart \
                        the agent. Memory ops are disabled until then.";
-            broadcast_to_chats(bot, chats, msg).await;
+            // Resolve recipients at broadcast time so /allow / /deny
+            // changes after startup are honored.
+            let chats = current_chats(allowlist);
+            broadcast_to_chats(bot, &chats, msg).await;
             record_fire(db, AUTH_FAILED);
         }
     } else if matches!(status, MemoryStatus::Healthy) {
