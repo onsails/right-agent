@@ -164,10 +164,63 @@ pub(crate) enum DeployError {
     Upload(String),
 }
 
-/// Remove composite-memory.md from host disk (best-effort).
-pub(crate) async fn remove_composite_memory(agent_dir: &std::path::Path) {
+/// Sandbox reference for best-effort remote cleanup in `remove_composite_memory`.
+///
+/// In sandbox mode the host copy of `composite-memory.md` is a staging file —
+/// the live copy lives at `/sandbox/.claude/composite-memory.md` inside the
+/// sandbox and is what the prompt-assembly script `cat`s. Removing only the
+/// host file leaves stale recall content (and a stale `<memory-status>`
+/// marker) in the sandbox that leaks into future system prompts.
+pub(crate) struct SandboxRef<'a> {
+    pub ssh_config: &'a std::path::Path,
+    pub sandbox_name: &'a str,
+}
+
+/// Remove composite-memory.md from host disk and (if sandboxed) from the
+/// sandbox. Best-effort: failures on the sandbox side are logged but not
+/// propagated — blocking the bot on cleanup would be worse than a stale file.
+pub(crate) async fn remove_composite_memory(
+    agent_dir: &std::path::Path,
+    sandbox: Option<SandboxRef<'_>>,
+) {
     let host_path = agent_dir.join(".claude").join("composite-memory.md");
     let _ = tokio::fs::remove_file(&host_path).await;
+
+    // In no-sandbox mode the host path IS the effective path the prompt
+    // script reads — nothing else to clean up.
+    let Some(sb) = sandbox else {
+        return;
+    };
+
+    let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sb.sandbox_name);
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.arg("-F").arg(sb.ssh_config);
+    cmd.arg(&ssh_host);
+    cmd.arg("--");
+    cmd.arg("rm -f /sandbox/.claude/composite-memory.md");
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+
+    match cmd.output().await {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                sandbox = sb.sandbox_name,
+                status = ?out.status,
+                stderr = %stderr,
+                "remove_composite_memory: sandbox rm failed (best-effort, continuing)"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                sandbox = sb.sandbox_name,
+                error = %e,
+                "remove_composite_memory: ssh spawn failed (best-effort, continuing)"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

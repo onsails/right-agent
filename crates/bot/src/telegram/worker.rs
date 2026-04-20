@@ -1045,7 +1045,16 @@ async fn invoke_cc(
         let marker = build_memory_marker(wrapper_status, client_drops_24h);
         match (recall_content.as_deref(), marker.as_deref()) {
             (None, None) => {
-                super::prompt::remove_composite_memory(&ctx.agent_dir).await;
+                let sandbox_ref = match (ctx.ssh_config_path.as_deref(), ctx.resolved_sandbox.as_deref()) {
+                    (Some(ssh_config), Some(sandbox_name)) => {
+                        Some(super::prompt::SandboxRef {
+                            ssh_config,
+                            sandbox_name,
+                        })
+                    }
+                    _ => None,
+                };
+                super::prompt::remove_composite_memory(&ctx.agent_dir, sandbox_ref).await;
             }
             (content, marker_str) => {
                 // content may be None (no recall) while marker is Some —
