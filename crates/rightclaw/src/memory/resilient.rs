@@ -282,14 +282,15 @@ impl ResilientHindsight {
         if let Err(ref err) = res {
             match err {
                 ResilientError::Upstream(e) => match e.classify() {
-                    ErrorKind::Transient | ErrorKind::RateLimited | ErrorKind::Malformed => {
+                    ErrorKind::Transient | ErrorKind::RateLimited => {
                         self.enqueue_for_retry(content, context, document_id, update_mode, tags)
                             .await;
                     }
-                    ErrorKind::Client => {
+                    ErrorKind::Client | ErrorKind::Malformed => {
                         self.bump_client_drop().await;
                         tracing::error!(
-                            "retain rejected (4xx) — dropping, not enqueueing; content_preview={:?}",
+                            "retain dropped ({:?}) — not enqueueing; content_preview={:?}",
+                            e.classify(),
                             &content.chars().take(80).collect::<String>()
                         );
                     }
