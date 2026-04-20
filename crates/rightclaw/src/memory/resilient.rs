@@ -294,8 +294,13 @@ impl ResilientHindsight {
                     }
                 },
                 ResilientError::CircuitOpen { .. } => {
-                    self.enqueue_for_retry(content, context, document_id, update_mode, tags)
-                        .await;
+                    // Don't enqueue when the breaker is open due to Auth — the queue
+                    // would grow with entries that can't drain (drain gates on
+                    // Healthy, which AuthFailed sticks against).
+                    if !matches!(*self.status_tx.borrow(), MemoryStatus::AuthFailed { .. }) {
+                        self.enqueue_for_retry(content, context, document_id, update_mode, tags)
+                            .await;
+                    }
                 }
             }
         }
