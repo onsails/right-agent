@@ -123,6 +123,27 @@ Returns: job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at
 | `prompt` | string | Yes | - | The task prompt that Claude executes when the cron fires. |
 | `lock_ttl` | string | No | `30m` | Duration after which a lock is considered stale (e.g. `10m`, `1h`). |
 | `max_budget_usd` | number | No | `2.0` | Maximum dollar spend per invocation. Claude stops gracefully when budget is reached. |
+| `target_chat_id` | integer | No | - | Telegram chat ID to deliver cron notifications to. See guidance below. |
+| `target_thread_id` | integer | No | - | Message thread ID within a supergroup topic. Only relevant when `target_chat_id` is a supergroup with topics enabled. |
+
+## Delivery Target
+
+**Always pass `target_chat_id`** when creating a cron job in response to a user request. Set it to the `chat.id` from the incoming message YAML — this makes the cron deliver back to the same chat where the user asked for it. The runtime rejects any chat ID not in the agent's allowlist.
+
+For supergroup topics, also pass `target_thread_id` from the message's `chat.topic_id` if the user wants notifications in that specific topic thread.
+
+To change a cron's delivery destination, call `mcp__right__cron_update` with the new `target_chat_id` (and optionally `target_thread_id`). Only deviate from the current chat if the user explicitly requests a different destination.
+
+Example — creating a recurring job with delivery target:
+
+```
+mcp__right__cron_create(
+  job_name: "morning-briefing",
+  schedule: "17 9 * * 1-5",
+  prompt: "...",
+  target_chat_id: 123456789
+)
+```
 
 ## One-Shot Job Behavior
 
