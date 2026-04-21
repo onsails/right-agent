@@ -19,8 +19,6 @@ struct BotProcessAgent {
     exe_path: String,
     /// Agent directory path (both working_dir and RC_AGENT_DIR).
     working_dir: String,
-    /// Inline Telegram token value.
-    token_inline: Option<String>,
     restart_policy: String,
     backoff_seconds: u32,
     max_restarts: u32,
@@ -110,8 +108,7 @@ pub fn generate_process_compose(
             let config = agent.config.as_ref()?;
 
             // No telegram token configured — skip this agent.
-            let token_inline = config.telegram_token.clone();
-            token_inline.as_ref()?;
+            config.telegram_token.as_ref()?;
 
             let (restart, backoff, max) = (
                 restart_policy_str(&config.restart),
@@ -143,7 +140,6 @@ pub fn generate_process_compose(
                 agent_name: agent.name.clone(),
                 exe_path: exe_path.display().to_string(),
                 working_dir: agent.path.display().to_string(),
-                token_inline,
                 restart_policy: restart.to_owned(),
                 backoff_seconds: backoff,
                 max_restarts: max,
