@@ -5,7 +5,7 @@ description: >-
   and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, reminders, one-shot tasks, or recurring tasks.
-version: 3.1.0
+version: 3.2.0
 ---
 
 # /rightcron -- Cron Job Manager
@@ -24,7 +24,7 @@ Cron specs are stored in the agent database. The Rust runtime polls specs every 
 
 ## Creating a Cron Job
 
-**Always ask the user for `max_budget_usd` before creating or updating a job.** Do not silently use the default. Explain that this is the maximum dollar spend per invocation — Claude stops gracefully when the budget is reached. Suggest a value based on the task complexity (e.g. $0.30–$0.50 for simple checks, $1–$3 for multi-step research).
+`max_budget_usd` caps the dollar spend per invocation — Claude stops gracefully when the budget is reached. The default is `$2.0`, which covers most jobs including multi-step research. Only override it when the user explicitly asks for a different cap or the task is unusually expensive.
 
 Three job types are supported:
 
@@ -34,8 +34,7 @@ Three job types are supported:
 mcp__right__cron_create(
   job_name: "health-check",
   schedule: "17 9 * * 1-5",
-  prompt: "Check system health and report status",
-  max_budget_usd: 0.50
+  prompt: "Check system health and report status"
 )
 ```
 
@@ -46,8 +45,7 @@ mcp__right__cron_create(
   job_name: "deploy-check",
   schedule: "30 15 * * *",
   recurring: false,
-  prompt: "Verify deployment completed successfully",
-  max_budget_usd: 0.30
+  prompt: "Verify deployment completed successfully"
 )
 ```
 
@@ -57,8 +55,7 @@ mcp__right__cron_create(
 mcp__right__cron_create(
   job_name: "remind-deploy",
   run_at: "2026-04-15T15:30:00Z",
-  prompt: "Remind the user to review PR #42",
-  max_budget_usd: 0.30
+  prompt: "Remind the user to review PR #42"
 )
 ```
 
