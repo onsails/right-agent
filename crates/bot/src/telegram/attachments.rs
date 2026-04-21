@@ -395,11 +395,11 @@ pub struct ForwardInfo {
     pub date: DateTime<Utc>,
 }
 
-/// Chat kind + identity for the incoming message. DM emits no attribution block;
-/// Group emits a `chat:` block in the prompt.
+/// Chat kind + identity for the incoming message. Always emits a `chat:` block.
+/// DM uses `kind: dm`; Group uses `kind: group` with optional title/topic_id.
 #[derive(Debug, Clone)]
 pub enum ChatContext {
-    Private,
+    Private { id: i64 },
     Group {
         id: i64,
         title: Option<String>,
@@ -475,21 +475,23 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             writeln!(out, "      user_id: {user_id}").expect("infallible");
         }
 
-        // Chat block (group only; DM stays unchanged).
-        if let ChatContext::Group {
-            id,
-            title,
-            topic_id,
-        } = &m.chat
-        {
-            out.push_str("    chat:\n");
-            writeln!(out, "      kind: group").expect("infallible");
-            writeln!(out, "      id: {id}").expect("infallible");
-            if let Some(t) = title {
-                writeln!(out, "      title: \"{}\"", yaml_escape_string(t)).expect("infallible");
+        // Chat block — always present.
+        out.push_str("    chat:\n");
+        match &m.chat {
+            ChatContext::Private { id } => {
+                writeln!(out, "      kind: dm").expect("infallible");
+                writeln!(out, "      id: {id}").expect("infallible");
             }
-            if let Some(tid) = topic_id {
-                writeln!(out, "      topic_id: {tid}").expect("infallible");
+            ChatContext::Group { id, title, topic_id } => {
+                writeln!(out, "      kind: group").expect("infallible");
+                writeln!(out, "      id: {id}").expect("infallible");
+                if let Some(t) = title {
+                    writeln!(out, "      title: \"{}\"", yaml_escape_string(t))
+                        .expect("infallible");
+                }
+                if let Some(tid) = topic_id {
+                    writeln!(out, "      topic_id: {tid}").expect("infallible");
+                }
             }
         }
 
@@ -1405,7 +1407,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -1429,7 +1431,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         assert!(format_cc_input(&msgs).is_none());
@@ -1449,7 +1451,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
-                chat: ChatContext::Private,
+                chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
             InputMessage {
@@ -1460,7 +1462,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
-                chat: ChatContext::Private,
+                chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
         ];
@@ -1490,7 +1492,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -1518,7 +1520,7 @@ mod tests {
             author: test_author(),
             forward_info: None,
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -1537,7 +1539,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
-                chat: ChatContext::Private,
+                chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
             InputMessage {
@@ -1548,7 +1550,7 @@ mod tests {
                 author: test_author(),
                 forward_info: None,
                 reply_to_id: None,
-                chat: ChatContext::Private,
+                chat: ChatContext::Private { id: 99 },
                 reply_to_body: None,
             },
         ];
@@ -1837,7 +1839,7 @@ mod tests {
             },
             forward_info: None,
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -1878,7 +1880,7 @@ mod tests {
                 date: fwd_date,
             }),
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -1904,7 +1906,7 @@ mod tests {
             },
             forward_info: None,
             reply_to_id: Some(3),
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -2104,7 +2106,7 @@ mod tests {
                 date: fwd_date,
             }),
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 99 },
             reply_to_body: None,
         }];
         let result = format_cc_input(&msgs).unwrap();
@@ -2129,7 +2131,8 @@ mod group_format_tests {
     }
 
     #[test]
-    fn dm_single_message_emits_yaml_with_no_chat_block() {
+    fn dm_single_message_emits_yaml_with_chat_block() {
+        // In DM, Telegram-side chat_id == user_id.
         let m = InputMessage {
             message_id: 1,
             text: Some("hi".into()),
@@ -2142,15 +2145,14 @@ mod group_format_tests {
             },
             forward_info: None,
             reply_to_id: None,
-            chat: ChatContext::Private,
+            chat: ChatContext::Private { id: 42 },
             reply_to_body: None,
         };
         let yaml = format_cc_input(&[m]).unwrap();
         assert!(yaml.contains("messages:"));
-        assert!(
-            !yaml.contains("chat:"),
-            "DM must not emit chat block, got: {yaml}"
-        );
+        assert!(yaml.contains("chat:"), "DM must include a chat block, got:\n{yaml}");
+        assert!(yaml.contains("kind: dm"), "DM block must mark kind: dm, got:\n{yaml}");
+        assert!(yaml.contains("id: 42"), "DM chat block must include id, got:\n{yaml}");
     }
 
     #[test]

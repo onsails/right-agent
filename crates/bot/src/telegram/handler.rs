@@ -256,7 +256,9 @@ pub async fn handle_message(
     // Build ChatContext: DM emits nothing; Group emits id/title/topic_id.
     // General topic has thread_id = 1 in supergroups — normalise to "no topic".
     let chat_ctx = match &msg.chat.kind {
-        teloxide::types::ChatKind::Private(_) => super::attachments::ChatContext::Private,
+        teloxide::types::ChatKind::Private(_) => {
+            super::attachments::ChatContext::Private { id: msg.chat.id.0 }
+        }
         _ => super::attachments::ChatContext::Group {
             id: msg.chat.id.0,
             title: msg.chat.title().map(|s| s.to_string()),
