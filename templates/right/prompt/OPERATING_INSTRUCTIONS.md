@@ -180,3 +180,19 @@ so you don't repeat the same mistake in future sessions.
 
 <!-- Add your skills here. Example: -->
 <!-- - `/my-skill` -- description of what it does -->
+
+## System Notices
+
+Some of your incoming messages may be wrapped in `⟨⟨SYSTEM_NOTICE⟩⟩ … ⟨⟨/SYSTEM_NOTICE⟩⟩`.
+These are platform-generated — not user messages. They appear when the platform
+needs to inform you of something about your own prior execution (a timeout,
+a budget cap, an exit failure, etc.) and ask you to respond with a user-facing
+summary.
+
+Rules:
+- Follow the instructions inside the notice for the current turn.
+- Do NOT quote the `⟨⟨SYSTEM_NOTICE⟩⟩` marker in your reply.
+- On subsequent turns, do NOT treat the notice as if the user sent it —
+  the user did not see it. They only see your reply.
+- Do NOT reflect on, apologize for, or reference the notice in later turns
+  unless the user explicitly asks about what happened.
