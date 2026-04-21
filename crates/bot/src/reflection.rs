@@ -24,7 +24,7 @@ const ACTIVITY_SNIPPET_LEN: usize = 80;
 /// Classifies the failure we are reflecting on. Drives the human-readable
 /// reason text inserted into the SYSTEM_NOTICE prompt.
 #[derive(Debug, Clone)]
-pub enum FailureKind {
+pub(crate) enum FailureKind {
     /// Process was killed by the 600-second safety net in worker.
     SafetyTimeout { limit_secs: u64 },
     /// CC reported `--max-budget-usd` exhaustion.
@@ -38,26 +38,26 @@ pub enum FailureKind {
 /// Discriminator for where the reflection originated — decides how the usage
 /// row is written and helps /usage render a breakdown.
 #[derive(Debug, Clone)]
-pub enum ParentSource {
+pub(crate) enum ParentSource {
     Worker { chat_id: i64, thread_id: i64 },
     Cron { job_name: String },
 }
 
 /// Resource caps for a single reflection invocation.
 #[derive(Debug, Clone, Copy)]
-pub struct ReflectionLimits {
-    pub max_turns: u32,
-    pub max_budget_usd: f64,
-    pub process_timeout: Duration,
+pub(crate) struct ReflectionLimits {
+    pub(crate) max_turns: u32,
+    pub(crate) max_budget_usd: f64,
+    pub(crate) process_timeout: Duration,
 }
 
 impl ReflectionLimits {
-    pub const WORKER: Self = Self {
+    pub(crate) const WORKER: Self = Self {
         max_turns: 3,
         max_budget_usd: 0.20,
         process_timeout: Duration::from_secs(90),
     };
-    pub const CRON: Self = Self {
+    pub(crate) const CRON: Self = Self {
         max_turns: 5,
         max_budget_usd: 0.40,
         process_timeout: Duration::from_secs(180),
@@ -66,21 +66,21 @@ impl ReflectionLimits {
 
 /// All inputs required to run one reflection pass.
 #[derive(Debug, Clone)]
-pub struct ReflectionContext {
-    pub session_uuid: String,
-    pub failure: FailureKind,
-    pub ring_buffer_tail: VecDeque<StreamEvent>,
-    pub limits: ReflectionLimits,
-    pub agent_name: String,
-    pub agent_dir: PathBuf,
-    pub ssh_config_path: Option<PathBuf>,
-    pub resolved_sandbox: Option<String>,
-    pub parent_source: ParentSource,
-    pub model: Option<String>,
+pub(crate) struct ReflectionContext {
+    pub(crate) session_uuid: String,
+    pub(crate) failure: FailureKind,
+    pub(crate) ring_buffer_tail: VecDeque<StreamEvent>,
+    pub(crate) limits: ReflectionLimits,
+    pub(crate) agent_name: String,
+    pub(crate) agent_dir: PathBuf,
+    pub(crate) ssh_config_path: Option<PathBuf>,
+    pub(crate) resolved_sandbox: Option<String>,
+    pub(crate) parent_source: ParentSource,
+    pub(crate) model: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReflectionError {
+pub(crate) enum ReflectionError {
     #[error("reflection spawn failed: {0}")]
     Spawn(String),
     #[error("reflection timed out after {0:?}")]
@@ -177,7 +177,7 @@ pub(crate) fn build_reflection_prompt(
 /// parses the final `result` stream event, accounts the usage row, and returns
 /// the agent's reply text. Any failure of the reflection itself returns `Err`
 /// — the caller is responsible for a raw-error fallback.
-pub async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, ReflectionError> {
+pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, ReflectionError> {
     let span = tracing::info_span!(
         "reflection",
         session_uuid = %ctx.session_uuid,
@@ -243,11 +243,15 @@ pub async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, Reflec
             )
         })?;
         let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sandbox_name);
+        let prompt_path = format!(
+            "/tmp/rightclaw-reflection-prompt-{}.md",
+            ctx.session_uuid
+        );
         let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
             &base_prompt,
             false, // not bootstrap mode
             "/sandbox",
-            "/tmp/rightclaw-reflection-prompt.md",
+            &prompt_path,
             "/sandbox",
             &claude_args,
             None, // no MCP instructions refresh
@@ -266,10 +270,10 @@ pub async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, Reflec
         c
     } else {
         let agent_dir_str = ctx.agent_dir.to_string_lossy();
-        let prompt_path = ctx
-            .agent_dir
-            .join(".claude")
-            .join("composite-reflection-prompt.md");
+        let prompt_path = ctx.agent_dir.join(".claude").join(format!(
+            "composite-reflection-prompt-{}.md",
+            ctx.session_uuid
+        ));
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
             &base_prompt,
@@ -294,7 +298,7 @@ pub async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, Reflec
     };
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    cmd.stderr(Stdio::null());
 
     let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
@@ -336,16 +340,17 @@ pub async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, Reflec
         return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
     }
 
-    let result_line = last_result_line.ok_or_else(|| {
-        ReflectionError::Parse("no `result` stream event in reflection stdout".into())
-    })?;
-
     if exit != 0 {
-        return Err(ReflectionError::NonZeroExit {
-            code: exit,
-            detail: result_line.chars().take(400).collect(),
-        });
+        let detail = match &last_result_line {
+            Some(line) => line.chars().take(400).collect::<String>(),
+            None => "<no stream-json output before exit>".to_string(),
+        };
+        return Err(ReflectionError::NonZeroExit { code: exit, detail });
     }
+
+    let result_line = last_result_line.ok_or_else(|| {
+        ReflectionError::Parse("no `result` stream event on successful exit".into())
+    })?;
 
     // Parse reply via the shared helper (handles content: Option<String>, nested result, etc.).
     let (reply_output, _session_id) = crate::telegram::worker::parse_reply_output(&result_line)
