@@ -10,6 +10,11 @@ use std::time::Duration;
 
 use crate::telegram::stream::StreamEvent;
 
+/// Maximum character length for one ring-buffer activity line's text snippet
+/// or tool-argument summary in the reflection prompt. Kept short so the prompt
+/// stays under a few hundred tokens.
+const ACTIVITY_SNIPPET_LEN: usize = 80;
+
 /// Classifies the failure we are reflecting on. Drives the human-readable
 /// reason text inserted into the SYSTEM_NOTICE prompt.
 #[derive(Debug, Clone)]
@@ -99,6 +104,8 @@ pub(crate) fn failure_reason_text(kind: &FailureKind) -> String {
 
 /// Render a short, inlinable description of one ring-buffer event for the
 /// "Your most recent activity" list.
+// Truncation is silent (no "…" suffix) because the output is consumed by the
+// LLM inside a SYSTEM_NOTICE prompt where an ellipsis would read as content.
 pub(crate) fn format_ring_event(event: &StreamEvent) -> Option<String> {
     match event {
         StreamEvent::Text(t) => {
@@ -106,12 +113,12 @@ pub(crate) fn format_ring_event(event: &StreamEvent) -> Option<String> {
             if trimmed.is_empty() {
                 return None;
             }
-            let snippet: String = trimmed.chars().take(80).collect();
+            let snippet: String = trimmed.chars().take(ACTIVITY_SNIPPET_LEN).collect();
             Some(format!("- said: {snippet}"))
         }
         StreamEvent::Thinking => Some("- was thinking".to_string()),
         StreamEvent::ToolUse { tool, input_summary } => {
-            let args: String = input_summary.chars().take(80).collect();
+            let args: String = input_summary.chars().take(ACTIVITY_SNIPPET_LEN).collect();
             Some(format!("- called {tool}({args})"))
         }
         StreamEvent::Result(_) | StreamEvent::Other => None,
@@ -192,6 +199,19 @@ mod tests {
         let out = format_ring_event(&ev).unwrap();
         assert!(out.contains("called Read"));
         assert!(out.contains("/x"));
+    }
+
+    #[test]
+    fn format_ring_event_tool_use_truncates_long_input_summary() {
+        let ev = StreamEvent::ToolUse {
+            tool: "Bash".into(),
+            input_summary: "a".repeat(200),
+        };
+        let out = format_ring_event(&ev).unwrap();
+        // prefix "- called Bash(" (14) + up to ACTIVITY_SNIPPET_LEN + ")" (1)
+        // A char-count upper bound is tighter than byte length.
+        assert!(out.chars().count() <= 14 + ACTIVITY_SNIPPET_LEN + 1);
+        assert!(out.starts_with("- called Bash("));
     }
 
     #[test]
