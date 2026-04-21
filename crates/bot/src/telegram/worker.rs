@@ -651,14 +651,146 @@ pub fn spawn_worker(
                     tracing::info!(?key, "sending non-reflectable error reply to Telegram");
                     send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &message).await;
                 }
-                Err(InvokeCcFailure::Reflectable { raw_message, .. }) => {
-                    // Task 7 replaces this with a reflection call.
-                    tracing::warn!(?key, "reflection not yet wired — sending raw error");
-                    send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &raw_message).await;
+                Err(InvokeCcFailure::Reflectable {
+                    kind,
+                    ring_buffer_tail,
+                    session_uuid: failed_session_uuid,
+                    raw_message,
+                    thinking_msg_id,
+                }) => {
+                    // 1. Edit the old thinking message to a short neutral banner
+                    //    (no ring-buffer dump) and clear the stop keyboard.
+                    let banner = match &kind {
+                        crate::reflection::FailureKind::SafetyTimeout { limit_secs } => {
+                            format!("\u{26a0}\u{fe0f} Hit {limit_secs}s safety limit — thinking again…")
+                        }
+                        crate::reflection::FailureKind::NonZeroExit { code } => {
+                            format!("\u{26a0}\u{fe0f} Claude exited with code {code} — thinking again…")
+                        }
+                        _ => "\u{26a0}\u{fe0f} Previous turn did not complete — thinking again…"
+                            .to_string(),
+                    };
+                    if let Some(msg_id) = thinking_msg_id {
+                        let _ = ctx
+                            .bot
+                            .edit_message_text(tg_chat_id, msg_id, &banner)
+                            .parse_mode(teloxide::types::ParseMode::Html)
+                            .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                            .await;
+                    }
+
+                    // 2. Run reflection.
+                    let refl_ctx = crate::reflection::ReflectionContext {
+                        session_uuid: failed_session_uuid,
+                        failure: kind,
+                        ring_buffer_tail,
+                        limits: crate::reflection::ReflectionLimits::WORKER,
+                        agent_name: ctx.agent_name.clone(),
+                        agent_dir: ctx.agent_dir.clone(),
+                        ssh_config_path: ctx.ssh_config_path.clone(),
+                        resolved_sandbox: ctx.resolved_sandbox.clone(),
+                        parent_source: crate::reflection::ParentSource::Worker {
+                            chat_id,
+                            thread_id: eff_thread_id,
+                        },
+                        model: ctx.model.clone(),
+                    };
+
+                    match crate::reflection::reflect_on_failure(refl_ctx).await {
+                        Ok(reply_text) => {
+                            tracing::info!(?key, "reflection reply produced");
+                            // Delete the banner — reply is the substantive update.
+                            if let Some(msg_id) = thinking_msg_id {
+                                let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
+                            }
+                            // Send reply via the same md→html pipeline as the success path.
+                            let html = super::markdown::md_to_telegram_html(&reply_text);
+                            let parts = super::markdown::split_html_message(&html);
+                            for part in &parts {
+                                let mut send = ctx.bot.send_message(tg_chat_id, part);
+                                send = send.parse_mode(teloxide::types::ParseMode::Html);
+                                if eff_thread_id != 0 {
+                                    send = send.message_thread_id(ThreadId(MessageId(
+                                        eff_thread_id as i32,
+                                    )));
+                                }
+                                if let Err(e) = send.await {
+                                    tracing::warn!(
+                                        ?key,
+                                        "reflection HTML send failed, retrying plain: {:#}",
+                                        e
+                                    );
+                                    let plain = strip_html_tags(part);
+                                    let mut fb = ctx.bot.send_message(tg_chat_id, &plain);
+                                    if eff_thread_id != 0 {
+                                        fb = fb.message_thread_id(ThreadId(MessageId(
+                                            eff_thread_id as i32,
+                                        )));
+                                    }
+                                    if let Err(e2) = fb.await {
+                                        tracing::error!(
+                                            ?key,
+                                            "reflection plain-text fallback also failed: {:#}",
+                                            e2
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                ?key,
+                                "reflection failed: {:#}; showing raw error",
+                                e
+                            );
+                            match thinking_msg_id {
+                                Some(msg_id) => {
+                                    // Try to edit the banner into the raw error.
+                                    // If the edit fails (e.g. HTML parse issue),
+                                    // delete the banner and send as a fresh message.
+                                    let edit_result = ctx
+                                        .bot
+                                        .edit_message_text(tg_chat_id, msg_id, &raw_message)
+                                        .parse_mode(teloxide::types::ParseMode::Html)
+                                        .reply_markup(
+                                            teloxide::types::InlineKeyboardMarkup::default(),
+                                        )
+                                        .await;
+                                    if let Err(edit_err) = edit_result {
+                                        tracing::warn!(
+                                            ?key,
+                                            "banner edit failed ({:#}); sending as new message",
+                                            edit_err
+                                        );
+                                        let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
+                                        send_error_to_telegram(
+                                            &ctx,
+                                            tg_chat_id,
+                                            eff_thread_id,
+                                            &raw_message,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                None => {
+                                    send_error_to_telegram(
+                                        &ctx,
+                                        tg_chat_id,
+                                        eff_thread_id,
+                                        &raw_message,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
             // Auto-retain and prefetch (fire-and-forget).
+            // reply_text_for_retain is only set on the Ok success path; reflection
+            // replies are intentionally excluded from Hindsight (SYSTEM_NOTICE prompts
+            // are platform noise, not user-agent conversation).
             if let Some(ref hs) = ctx.hindsight {
                 // Auto-retain this turn.
                 if let Some(ref reply_text) = reply_text_for_retain {
@@ -862,6 +994,11 @@ pub(crate) enum InvokeCcFailure {
         ring_buffer_tail: VecDeque<super::stream::StreamEvent>,
         session_uuid: String,
         raw_message: String,
+        /// The live "thinking" message created during the failed CC run, if any.
+        /// `spawn_worker` edits this into a banner before reflection and deletes
+        /// it on reflection success (so the reflection reply is the substantive
+        /// final update).
+        thinking_msg_id: Option<teloxide::types::MessageId>,
     },
     /// A failure we do NOT want to reflect on (parse failures, pre-CC setup
     /// errors, schema read failures). The `message` is sent to Telegram verbatim.
@@ -1467,6 +1604,7 @@ async fn invoke_cc(
             ring_buffer_tail: ring_buffer.events().clone(),
             session_uuid: session_uuid.clone(),
             raw_message: timeout_msg,
+            thinking_msg_id,
         });
     }
 
@@ -1550,6 +1688,7 @@ async fn invoke_cc(
             ring_buffer_tail: ring_buffer.events().clone(),
             session_uuid: session_uuid.clone(),
             raw_message: raw,
+            thinking_msg_id,
         });
     }
 
