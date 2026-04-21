@@ -15,6 +15,7 @@ pub struct PendingCronResult {
     pub notify_json: String,
     pub summary: String,
     pub finished_at: String,
+    pub status: String,
 }
 
 /// Query the oldest undelivered cron result with a non-null notify_json.
@@ -22,7 +23,7 @@ pub fn fetch_pending(
     conn: &rusqlite::Connection,
 ) -> Result<Option<PendingCronResult>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, job_name, notify_json, summary, finished_at FROM cron_runs \
+        "SELECT id, job_name, notify_json, summary, finished_at, status FROM cron_runs \
          WHERE status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
          ORDER BY finished_at ASC LIMIT 1",
     )?;
@@ -33,6 +34,7 @@ pub fn fetch_pending(
             notify_json: row.get(2)?,
             summary: row.get(3)?,
             finished_at: row.get(4)?,
+            status: row.get(5)?,
         })
     });
     match result {
@@ -66,7 +68,7 @@ pub fn deduplicate_job(
 ) -> Result<Option<(PendingCronResult, u32)>, rusqlite::Error> {
     let latest = conn
         .query_row(
-            "SELECT id, job_name, notify_json, summary, finished_at FROM cron_runs \
+            "SELECT id, job_name, notify_json, summary, finished_at, status FROM cron_runs \
              WHERE job_name = ?1 AND status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
              ORDER BY finished_at DESC LIMIT 1",
             rusqlite::params![job_name],
@@ -77,6 +79,7 @@ pub fn deduplicate_job(
                     notify_json: row.get(2)?,
                     summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                     finished_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    status: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
                 })
             },
         )
@@ -104,13 +107,13 @@ fn yaml_escape(s: &str) -> String {
         .replace('\n', "\\n")
 }
 
-/// Instruction prefix for the delivery CC session.
+/// Instruction prefix for the delivery CC session (success path).
 ///
 /// This is approach A: instruction in stdin. If Haiku ignores these instructions
 /// (summarizes instead of relaying verbatim), migrate to approach B: add a
 /// delivery-specific block to the system prompt via `build_prompt_assembly_script()`.
 /// See docs/superpowers/specs/2026-04-15-cron-delivery-verbatim-relay.md.
-const DELIVERY_INSTRUCTION: &str = "\
+const DELIVERY_INSTRUCTION_SUCCESS: &str = "\
 You are delivering a cron job result to the user.
 The `content` field below is the FINAL user-facing message — send it VERBATIM in your response.
 Do NOT summarize, rephrase, or omit any part of the content.
@@ -120,13 +123,33 @@ Ignore the attachments field — attachments are sent separately.
 Here is the YAML report of the cron job:
 ";
 
+/// Delivery instruction used when a cron job's `status` is 'failed'.
+///
+/// The `content` field carries a platform-generated failure summary (either
+/// produced by the agent's reflection pass in Task 9, or a raw exit-code
+/// fallback). Haiku should relay naturally, not verbatim.
+const DELIVERY_INSTRUCTION_FAILURE: &str = "\
+The cron job below did not complete successfully. The `content` field contains
+a platform-generated summary of the failure (produced by the agent's reflection
+pass). Relay it to the user in natural prose — you MAY rephrase lightly for
+flow with the recent conversation, but keep all factual claims intact. Do not
+invent details. Ignore the attachments field.
+
+Here is the YAML report of the cron job:
+";
+
 /// Format a pending cron result as YAML for the main CC session.
 ///
-/// The output begins with a [`DELIVERY_INSTRUCTION`] prefix that tells the
-/// delivery model to relay the content verbatim, followed by the YAML payload.
+/// The output begins with a [`DELIVERY_INSTRUCTION_SUCCESS`] or
+/// [`DELIVERY_INSTRUCTION_FAILURE`] prefix (depending on `pending.status`),
+/// followed by the YAML payload.
 pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
     let total = skipped + 1;
-    let mut output = String::from(DELIVERY_INSTRUCTION);
+    let instruction = match pending.status.as_str() {
+        "failed" => DELIVERY_INSTRUCTION_FAILURE,
+        _ => DELIVERY_INSTRUCTION_SUCCESS,
+    };
+    let mut output = String::from(instruction);
     output.push_str("\ncron_result:\n");
     output.push_str(&format!("  job: \"{}\"\n", yaml_escape(&pending.job_name)));
     output.push_str(&format!("  runs_total: {total}\n"));
@@ -711,6 +734,7 @@ mod tests {
             notify_json: r#"{"content":"BTC up 2%"}"#.into(),
             summary: "Checked 5 pairs".into(),
             finished_at: "2026-01-01T00:01:00Z".into(),
+            status: "success".into(),
         };
         let output = format_cron_yaml(&pending, 2);
         // Instruction prefix assertions
@@ -734,10 +758,40 @@ mod tests {
             notify_json: r#"{"content":"hello"}"#.into(),
             summary: "done".into(),
             finished_at: "2026-01-01T00:01:00Z".into(),
+            status: "success".into(),
         };
         let output = format_cron_yaml(&pending, 0);
         assert!(output.starts_with("You are delivering a cron job result"));
         assert!(output.contains("runs_total: 1"));
         assert!(!output.contains("skipped_runs"));
+    }
+
+    #[test]
+    fn format_cron_yaml_uses_failure_instruction_when_status_failed() {
+        let pending = PendingCronResult {
+            id: "r1".into(),
+            job_name: "watcher".into(),
+            notify_json: r#"{"content":"Partial data fetched then hit budget"}"#.into(),
+            summary: "failed".into(),
+            finished_at: "2026-04-21T10:00:00Z".into(),
+            status: "failed".into(),
+        };
+        let out = format_cron_yaml(&pending, 0);
+        assert!(out.contains("did not complete successfully"));
+        assert!(!out.contains("send it VERBATIM"));
+    }
+
+    #[test]
+    fn format_cron_yaml_uses_success_instruction_when_status_success() {
+        let pending = PendingCronResult {
+            id: "r2".into(),
+            job_name: "watcher".into(),
+            notify_json: r#"{"content":"BTC up 2%"}"#.into(),
+            summary: "ok".into(),
+            finished_at: "2026-04-21T10:00:00Z".into(),
+            status: "success".into(),
+        };
+        let out = format_cron_yaml(&pending, 0);
+        assert!(out.contains("VERBATIM"));
     }
 }
