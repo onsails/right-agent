@@ -4,10 +4,10 @@
 CREATE TABLE IF NOT EXISTS usage_events (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     ts                     TEXT    NOT NULL,       -- ISO8601 UTC
-    source                 TEXT    NOT NULL,       -- 'interactive' | 'cron'
-    chat_id                INTEGER,                -- NULL for cron
-    thread_id              INTEGER,                -- 0 if no thread, NULL for cron
-    job_name               TEXT,                   -- NULL for interactive
+    source                 TEXT    NOT NULL,       -- 'interactive' | 'cron' | 'reflection'
+    chat_id                INTEGER,                -- set for interactive + reflection(worker parent); NULL for cron + reflection(cron parent)
+    thread_id              INTEGER,                -- 0 if no thread, NULL for cron + reflection(cron parent)
+    job_name               TEXT,                   -- set for cron + reflection(cron parent); NULL for interactive + reflection(worker parent)
     session_uuid           TEXT    NOT NULL,
     total_cost_usd         REAL    NOT NULL,
     num_turns              INTEGER NOT NULL,
