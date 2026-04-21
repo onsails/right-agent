@@ -26,6 +26,25 @@ pub fn insert_cron(
     insert_row(conn, b, "cron", None, None, Some(job_name))
 }
 
+/// Insert a row for a reflection invocation whose parent was a Telegram worker turn.
+pub fn insert_reflection_worker(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    chat_id: i64,
+    thread_id: i64,
+) -> Result<(), UsageError> {
+    insert_row(conn, b, "reflection", Some(chat_id), Some(thread_id), None)
+}
+
+/// Insert a row for a reflection invocation whose parent was a cron job.
+pub fn insert_reflection_cron(
+    conn: &Connection,
+    b: &UsageBreakdown,
+    job_name: &str,
+) -> Result<(), UsageError> {
+    insert_row(conn, b, "reflection", None, None, Some(job_name))
+}
+
 fn insert_row(
     conn: &Connection,
     b: &UsageBreakdown,
@@ -179,5 +198,40 @@ mod tests {
             )
             .unwrap();
         assert_eq!((inp, out, cc, cr, ws, wf), (10, 20, 100, 200, 1, 2));
+    }
+
+    #[test]
+    fn insert_reflection_from_worker_has_chat_id() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_reflection_worker(&conn, &sample_breakdown(), 42, 7).unwrap();
+
+        let (source, chat_id, thread_id, job_name): (String, Option<i64>, Option<i64>, Option<String>) =
+            conn.query_row(
+                "SELECT source, chat_id, thread_id, job_name FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            ).unwrap();
+        assert_eq!(source, "reflection");
+        assert_eq!(chat_id, Some(42));
+        assert_eq!(thread_id, Some(7));
+        assert_eq!(job_name, None);
+    }
+
+    #[test]
+    fn insert_reflection_from_cron_has_job_name() {
+        let dir = tempdir().unwrap();
+        let conn = open_connection(dir.path(), true).unwrap();
+        insert_reflection_cron(&conn, &sample_breakdown(), "my-job").unwrap();
+
+        let (source, chat_id, job_name): (String, Option<i64>, Option<String>) =
+            conn.query_row(
+                "SELECT source, chat_id, job_name FROM usage_events LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ).unwrap();
+        assert_eq!(source, "reflection");
+        assert_eq!(chat_id, None);
+        assert_eq!(job_name, Some("my-job".to_string()));
     }
 }
