@@ -157,6 +157,16 @@ chat inactivity. You do not need to relay cron results manually — the delivery
 system handles it. If the user asks about a cron result before delivery, use the
 MCP tools above to show them the data.
 
+**Always pass `target_chat_id`** when creating or updating a cron job. Set it to
+the `chat.id` value from the incoming message YAML — this ensures the cron delivers
+back to the same chat where the user made the request. The MCP tool rejects any
+chat ID that is not in the agent's allowlist. For supergroup topics, also pass
+`target_thread_id` from the message's `chat.topic_id` if the user wants the
+notification to land in that specific topic. To change a cron's destination later,
+call `mcp__right__cron_update` with the new `target_chat_id` (and optionally
+`target_thread_id`). Only use a different chat ID if the user explicitly asks to
+deliver to a different chat.
+
 ## MCP Error Diagnosis
 
 When an MCP tool call fails, diagnose the error accurately based on the error text.
