@@ -30,12 +30,21 @@ rightclaw up
 Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
 <p align="center">
+  <a href="#why-right">why right</a> ·
   <a href="#what-you-get-out-of-the-box">features</a> ·
   <a href="#self-evolving-by-design">personality</a> ·
   <a href="#architecture">architecture</a> ·
   <a href="#how-it-compares">comparison</a> ·
   <a href="#roadmap">roadmap</a>
 </p>
+
+## Why "Right"
+
+"Right" is two promises.
+
+**Right with your data.** MCP tokens, OAuth refresh tokens, Claude auth — all live on the host, outside every sandbox. Agents call tools; they never see the credentials. Network egress goes through a policy engine with TLS inspection. Compromised agent? Worst case it misuses a tool. It cannot exfiltrate the key.
+
+**Right with Anthropic.** Everything — including the login flow — goes through the official `claude` binary. No private API calls, no scraped endpoints, no OAuth key juggling. Your Claude subscription, used the way Anthropic intends. One `rightclaw up` in the terminal; every other step, Claude login included, happens in Telegram.
 
 ## What you get out of the box
 
@@ -58,8 +67,6 @@ RightClaw runs a single MCP aggregator on the host, outside every sandbox. Your 
 - OAuth, bearer, custom header, query-string — all four auth patterns, auto-detected
 - Tokens refresh automatically, silently
 - Compromised agent? Worst case it misuses the MCP. It can never exfiltrate the key.
-
-This is what `right by default` means.
 
 ### Everything in Telegram
 
