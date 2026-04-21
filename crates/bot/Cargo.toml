@@ -27,6 +27,7 @@ tempfile = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 pulldown-cmark = { workspace = true }
+signal-hook = { workspace = true }
 
 [dev-dependencies]
 rightclaw = { path = "../rightclaw", version = "*", features = ["test-support"] }
