@@ -82,3 +82,155 @@ pub enum ReflectionError {
     #[error("reflection I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Render a human-readable reason text for the SYSTEM_NOTICE header.
+pub(crate) fn failure_reason_text(kind: &FailureKind) -> String {
+    match kind {
+        FailureKind::SafetyTimeout { limit_secs } =>
+            format!("hit the {limit_secs}-second safety limit before producing a reply"),
+        FailureKind::BudgetExceeded { limit_usd } =>
+            format!("exceeded the budget of ${limit_usd:.2}"),
+        FailureKind::MaxTurns { limit } =>
+            format!("reached the maximum turn count ({limit})"),
+        FailureKind::NonZeroExit { code } =>
+            format!("Claude process exited with code {code}"),
+    }
+}
+
+/// Render a short, inlinable description of one ring-buffer event for the
+/// "Your most recent activity" list.
+pub(crate) fn format_ring_event(event: &StreamEvent) -> Option<String> {
+    match event {
+        StreamEvent::Text(t) => {
+            let trimmed = t.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let snippet: String = trimmed.chars().take(80).collect();
+            Some(format!("- said: {snippet}"))
+        }
+        StreamEvent::Thinking => Some("- was thinking".to_string()),
+        StreamEvent::ToolUse { tool, input_summary } => {
+            let args: String = input_summary.chars().take(80).collect();
+            Some(format!("- called {tool}({args})"))
+        }
+        StreamEvent::Result(_) | StreamEvent::Other => None,
+    }
+}
+
+/// Build the full stdin prompt for a reflection `claude -p --resume` call.
+pub(crate) fn build_reflection_prompt(
+    kind: &FailureKind,
+    ring_buffer_tail: &VecDeque<StreamEvent>,
+    max_turns: u32,
+) -> String {
+    let reason = failure_reason_text(kind);
+    let mut activity = String::new();
+    for e in ring_buffer_tail {
+        if let Some(line) = format_ring_event(e) {
+            activity.push_str(&line);
+            activity.push('\n');
+        }
+    }
+    let activity_block = if activity.is_empty() {
+        "- (no tool activity recorded)\n".to_string()
+    } else {
+        activity
+    };
+    format!(
+        "⟨⟨SYSTEM_NOTICE⟩⟩\n\
+         \n\
+         Your previous turn did not complete successfully.\n\
+         \n\
+         Reason: {reason}.\n\
+         \n\
+         Your most recent activity:\n\
+         {activity_block}\
+         \n\
+         Please write a short reply for the user that:\n\
+         1. Acknowledges the interruption honestly (1 sentence).\n\
+         2. Summarizes what you were doing and any findings worth sharing.\n\
+         3. Suggests a concrete next step (narrower scope, different approach,\n\
+            or ask for clarification).\n\
+         \n\
+         Do NOT continue the original investigation — stay within {max_turns} turns.\n\
+         Do NOT call Agent or other long-running tools.\n\
+         ⟨⟨/SYSTEM_NOTICE⟩⟩\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reason_text_per_kind() {
+        assert!(failure_reason_text(&FailureKind::SafetyTimeout { limit_secs: 600 })
+            .contains("600-second safety limit"));
+        assert!(failure_reason_text(&FailureKind::BudgetExceeded { limit_usd: 2.0 })
+            .contains("$2.00"));
+        assert!(failure_reason_text(&FailureKind::MaxTurns { limit: 30 })
+            .contains("30"));
+        assert!(failure_reason_text(&FailureKind::NonZeroExit { code: 137 })
+            .contains("137"));
+    }
+
+    #[test]
+    fn format_ring_event_truncates_text() {
+        let ev = StreamEvent::Text("x".repeat(200));
+        let out = format_ring_event(&ev).unwrap();
+        assert!(out.starts_with("- said: "));
+        assert!(out.len() < 120);
+    }
+
+    #[test]
+    fn format_ring_event_tool_use() {
+        let ev = StreamEvent::ToolUse {
+            tool: "Read".into(),
+            input_summary: r#"{"path":"/x"}"#.into(),
+        };
+        let out = format_ring_event(&ev).unwrap();
+        assert!(out.contains("called Read"));
+        assert!(out.contains("/x"));
+    }
+
+    #[test]
+    fn format_ring_event_skips_empty_text_and_other() {
+        assert!(format_ring_event(&StreamEvent::Text("   ".into())).is_none());
+        assert!(format_ring_event(&StreamEvent::Other).is_none());
+        assert!(format_ring_event(&StreamEvent::Result("{}".into())).is_none());
+    }
+
+    #[test]
+    fn prompt_contains_markers_and_reason() {
+        let tail = VecDeque::from([
+            StreamEvent::ToolUse {
+                tool: "Read".into(),
+                input_summary: "{}".into(),
+            },
+            StreamEvent::Text("partial finding".into()),
+        ]);
+        let p = build_reflection_prompt(
+            &FailureKind::SafetyTimeout { limit_secs: 600 },
+            &tail,
+            3,
+        );
+        assert!(p.starts_with("⟨⟨SYSTEM_NOTICE⟩⟩"));
+        assert!(p.contains("⟨⟨/SYSTEM_NOTICE⟩⟩"));
+        assert!(p.contains("600-second safety limit"));
+        assert!(p.contains("called Read"));
+        assert!(p.contains("partial finding"));
+        assert!(p.contains("stay within 3 turns"));
+    }
+
+    #[test]
+    fn prompt_handles_empty_ring_buffer() {
+        let tail: VecDeque<StreamEvent> = VecDeque::new();
+        let p = build_reflection_prompt(
+            &FailureKind::NonZeroExit { code: 1 },
+            &tail,
+            3,
+        );
+        assert!(p.contains("(no tool activity recorded)"));
+    }
+}
