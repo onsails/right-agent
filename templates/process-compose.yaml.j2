@@ -23,9 +23,6 @@ processes:
     environment:
       - RC_AGENT_DIR={{ agent.working_dir }}
       - RC_AGENT_NAME={{ agent.agent_name }}
-{% if agent.token_inline %}
-      - RC_TELEGRAM_TOKEN={{ agent.token_inline }}
-{% endif %}
 {% if agent.sandbox_mode == "openshell" %}
       - RC_SANDBOX_MODE=openshell
 {% if agent.sandbox_policy_path %}

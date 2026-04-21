@@ -180,13 +180,18 @@ fn bot_agent_env_contains_rc_agent_name() {
 }
 
 #[test]
-fn inline_token_uses_rc_telegram_token() {
+fn token_not_leaked_to_process_compose_env() {
     let agents = vec![make_bot_agent("myagent", "999:mytoken")];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
     assert!(
-        output.contains("RC_TELEGRAM_TOKEN=999:mytoken"),
-        "expected RC_TELEGRAM_TOKEN in:\n{output}"
+        !output.contains("RC_TELEGRAM_TOKEN"),
+        "RC_TELEGRAM_TOKEN must not appear in process-compose output:\n{output}"
+    );
+    // Agent with token still produces a process entry
+    assert!(
+        output.contains("myagent-bot:"),
+        "agent with token must still appear in output:\n{output}"
     );
 }
 
