@@ -5,7 +5,7 @@ pub enum BotError {
     #[error("agent not found: {name}")]
     AgentNotFound { name: String },
 
-    #[error("no Telegram token found; set RC_TELEGRAM_TOKEN or configure agent.yaml")]
+    #[error("no Telegram token found; add telegram_token to agent.yaml")]
     NoToken,
 
     #[error("database error: {0}")]
