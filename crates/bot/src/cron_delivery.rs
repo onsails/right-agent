@@ -209,7 +209,7 @@ const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 
 /// Outcome of resolving a pending cron's delivery target against the live allowlist.
 #[derive(Debug)]
-pub enum TargetClassification {
+pub(crate) enum TargetClassification {
     NoTarget,
     Denied,
     Ready {
@@ -219,7 +219,7 @@ pub enum TargetClassification {
 }
 
 /// Classify a pending cron result. Pure function; no side effects.
-pub fn classify_pending_target(
+pub(crate) fn classify_pending_target(
     pending: &PendingCronResult,
     allowlist: &rightclaw::agent::allowlist::AllowlistState,
 ) -> TargetClassification {
@@ -328,6 +328,7 @@ pub async fn run_delivery_loop(
                 );
                 if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "no_target") {
                     tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
+                    delivered_in_memory.insert(to_deliver.id.clone());
                 }
                 continue;
             }
@@ -340,6 +341,7 @@ pub async fn run_delivery_loop(
                 );
                 if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "denied") {
                     tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
+                    delivered_in_memory.insert(to_deliver.id.clone());
                 }
                 continue;
             }
@@ -638,8 +640,7 @@ async fn deliver_through_session(
 
     if let Some(ref atts) = reply.attachments
         && !atts.is_empty()
-    {
-        if let Err(e) = crate::telegram::attachments::send_attachments(
+        && let Err(e) = crate::telegram::attachments::send_attachments(
             atts,
             bot,
             teloxide::types::ChatId(target_chat_id),
@@ -649,12 +650,11 @@ async fn deliver_through_session(
             resolved_sandbox,
         )
         .await
-        {
-            tracing::error!(
-                chat_id = target_chat_id,
-                "cron delivery: attachment send failed: {e:#}"
-            );
-        }
+    {
+        tracing::error!(
+            chat_id = target_chat_id,
+            "cron delivery: attachment send failed: {e:#}"
+        );
     }
 
     Ok(())
