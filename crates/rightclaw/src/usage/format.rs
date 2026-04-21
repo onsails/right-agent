@@ -296,6 +296,16 @@ mod tests {
     }
 
     #[test]
+    fn reflection_window_renders_passes_label() {
+        let mut w = all_empty();
+        w.today_reflection = sub_only("reflection", 0.05, "claude-sonnet-4-6");
+        w.all_reflection = sub_only("reflection", 0.05, "claude-sonnet-4-6");
+        let msg = format_summary_message(&w, false);
+        assert!(msg.contains("Reflection"), "reflection line should render when invocations > 0");
+        assert!(msg.contains("passes"), "reflection unit label must be 'passes'");
+    }
+
+    #[test]
     fn default_mode_omits_raw_tokens_line() {
         let mut w = all_empty();
         w.today_interactive = sub_only("interactive", 0.1, "claude-sonnet-4-6");
