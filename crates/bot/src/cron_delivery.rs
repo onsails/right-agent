@@ -16,6 +16,8 @@ pub struct PendingCronResult {
     pub summary: String,
     pub finished_at: String,
     pub status: String,
+    pub target_chat_id: Option<i64>,
+    pub target_thread_id: Option<i64>,
 }
 
 /// Query the oldest undelivered cron result with a non-null notify_json.
@@ -23,9 +25,12 @@ pub fn fetch_pending(
     conn: &rusqlite::Connection,
 ) -> Result<Option<PendingCronResult>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, job_name, notify_json, summary, finished_at, status FROM cron_runs \
-         WHERE status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
-         ORDER BY finished_at ASC LIMIT 1",
+        "SELECT cr.id, cr.job_name, cr.notify_json, cr.summary, cr.finished_at, cr.status, \
+                cs.target_chat_id, cs.target_thread_id \
+         FROM cron_runs cr \
+         LEFT JOIN cron_specs cs ON cs.job_name = cr.job_name \
+         WHERE cr.status IN ('success', 'failed') AND cr.notify_json IS NOT NULL AND cr.delivered_at IS NULL \
+         ORDER BY cr.finished_at ASC LIMIT 1",
     )?;
     let result = stmt.query_row([], |row| {
         Ok(PendingCronResult {
@@ -35,6 +40,8 @@ pub fn fetch_pending(
             summary: row.get(3)?,
             finished_at: row.get(4)?,
             status: row.get(5)?,
+            target_chat_id: row.get(6)?,
+            target_thread_id: row.get(7)?,
         })
     });
     match result {
@@ -68,9 +75,12 @@ pub fn deduplicate_job(
 ) -> Result<Option<(PendingCronResult, u32)>, rusqlite::Error> {
     let latest = conn
         .query_row(
-            "SELECT id, job_name, notify_json, summary, finished_at, status FROM cron_runs \
-             WHERE job_name = ?1 AND status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
-             ORDER BY finished_at DESC LIMIT 1",
+            "SELECT cr.id, cr.job_name, cr.notify_json, cr.summary, cr.finished_at, cr.status, \
+                    cs.target_chat_id, cs.target_thread_id \
+             FROM cron_runs cr \
+             LEFT JOIN cron_specs cs ON cs.job_name = cr.job_name \
+             WHERE cr.job_name = ?1 AND cr.status IN ('success', 'failed') AND cr.notify_json IS NOT NULL AND cr.delivered_at IS NULL \
+             ORDER BY cr.finished_at DESC LIMIT 1",
             rusqlite::params![job_name],
             |row| {
                 Ok(PendingCronResult {
@@ -80,6 +90,8 @@ pub fn deduplicate_job(
                     summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
                     finished_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     status: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    target_chat_id: row.get(6)?,
+                    target_thread_id: row.get(7)?,
                 })
             },
         )
@@ -735,6 +747,8 @@ mod tests {
             summary: "Checked 5 pairs".into(),
             finished_at: "2026-01-01T00:01:00Z".into(),
             status: "success".into(),
+            target_chat_id: None,
+            target_thread_id: None,
         };
         let output = format_cron_yaml(&pending, 2);
         // Instruction prefix assertions
@@ -759,6 +773,8 @@ mod tests {
             summary: "done".into(),
             finished_at: "2026-01-01T00:01:00Z".into(),
             status: "success".into(),
+            target_chat_id: None,
+            target_thread_id: None,
         };
         let output = format_cron_yaml(&pending, 0);
         assert!(output.starts_with("You are delivering a cron job result"));
@@ -775,6 +791,8 @@ mod tests {
             summary: "failed".into(),
             finished_at: "2026-04-21T10:00:00Z".into(),
             status: "failed".into(),
+            target_chat_id: None,
+            target_thread_id: None,
         };
         let out = format_cron_yaml(&pending, 0);
         assert!(out.contains("did not complete successfully"));
@@ -790,8 +808,74 @@ mod tests {
             summary: "ok".into(),
             finished_at: "2026-04-21T10:00:00Z".into(),
             status: "success".into(),
+            target_chat_id: None,
+            target_thread_id: None,
         };
         let out = format_cron_yaml(&pending, 0);
         assert!(out.contains("VERBATIM"));
+    }
+
+    #[test]
+    fn fetch_pending_carries_target_fields() {
+        let (_dir, conn) = setup_db();
+        // Seed cron_specs with target so the JOIN finds it.
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('job1', '*/5 * * * *', 'p', 1.0, -555, 9, ?1, ?1)",
+            [&now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
+             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
+            [],
+        ).unwrap();
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        assert_eq!(pending.target_chat_id, Some(-555));
+        assert_eq!(pending.target_thread_id, Some(9));
+    }
+
+    #[test]
+    fn fetch_pending_returns_none_target_when_spec_has_none() {
+        let (_dir, conn) = setup_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('legacy', '*/5 * * * *', 'p', 1.0, ?1, ?1)",
+            [&now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
+             VALUES ('a', 'legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
+            [],
+        ).unwrap();
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        assert!(pending.target_chat_id.is_none());
+        assert!(pending.target_thread_id.is_none());
+    }
+
+    #[test]
+    fn deduplicate_job_carries_target_fields() {
+        let (_dir, conn) = setup_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('job1', '*/5 * * * *', 'p', 1.0, -100, NULL, ?1, ?1)",
+            [&now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
+             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum1', '{\"content\":\"x\"}')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
+             VALUES ('b', 'job1', '2026-01-01T00:05:00Z', '2026-01-01T00:06:00Z', 'success', '/log', 'sum2', '{\"content\":\"y\"}')",
+            [],
+        ).unwrap();
+        let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
+        assert_eq!(latest.id, "b");
+        assert_eq!(skipped, 1);
+        assert_eq!(latest.target_chat_id, Some(-100));
     }
 }
