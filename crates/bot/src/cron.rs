@@ -618,8 +618,9 @@ async fn execute_job(
             classify_cron_failure(exit_code, &raw_detail, spec.max_budget_usd, None);
 
         // Best-effort ring buffer: parse last ~5 stream-json lines from collected_lines,
-        // keeping only displayable events.
-        let ring_tail: std::collections::VecDeque<_> = collected_lines
+        // keeping only displayable events. Chronological order (oldest → newest) to
+        // match worker's EventRingBuffer convention.
+        let mut tail_newest_first: Vec<_> = collected_lines
             .iter()
             .rev()
             .take(10)
@@ -634,6 +635,8 @@ async fn execute_job(
             })
             .take(5)
             .collect();
+        tail_newest_first.reverse();
+        let ring_tail: std::collections::VecDeque<_> = tail_newest_first.into();
 
         let refl_ctx = crate::reflection::ReflectionContext {
             session_uuid: run_id.clone(),
@@ -657,7 +660,7 @@ async fn execute_job(
             }
             Err(e) => {
                 tracing::warn!(job = %job_name, "cron reflection failed: {e:#}; using raw content");
-                raw_content.clone()
+                raw_content
             }
         };
 
