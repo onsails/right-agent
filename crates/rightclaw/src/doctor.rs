@@ -353,6 +353,10 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
                 chk.name = format!("{name}/{}", chk.name);
                 checks.push(chk);
             }
+            for mut chk in check_cron_targets(&path) {
+                chk.name = format!("{name}/{}", chk.name);
+                checks.push(chk);
+            }
         }
     }
 
@@ -909,6 +913,138 @@ fn check_openshell_gateway_health() -> DoctorCheck {
     }
 }
 
+/// Validate cron `target_chat_id` values for a single agent.
+///
+/// Surfaces:
+/// - cron_specs rows with `target_chat_id IS NULL` → WARN (operator must `cron_update`)
+/// - cron_specs rows whose `target_chat_id` is no longer in `allowlist.yaml` → WARN
+///
+/// Returns one `DoctorCheck` per problem found, plus a single Pass when the agent
+/// has crons and all of them are healthy. Returns an empty Vec if the agent has no crons.
+pub fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
+    let mut out = Vec::new();
+
+    let conn = match crate::memory::open_connection(agent_dir, false) {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(DoctorCheck {
+                name: "cron targets".into(),
+                status: CheckStatus::Fail,
+                detail: format!("open data.db: {e:#}"),
+                fix: None,
+            });
+            return out;
+        }
+    };
+
+    let allowlist_state = match crate::agent::allowlist::read_file(agent_dir) {
+        Ok(Some(file)) => crate::agent::allowlist::AllowlistState::from_file(file),
+        Ok(None) => {
+            out.push(DoctorCheck {
+                name: "cron targets".into(),
+                status: CheckStatus::Warn,
+                detail: "allowlist.yaml is missing — cron targets cannot be validated".into(),
+                fix: Some("run `rightclaw agent allow <user_id>` from a trusted account".into()),
+            });
+            return out;
+        }
+        Err(e) => {
+            out.push(DoctorCheck {
+                name: "cron targets".into(),
+                status: CheckStatus::Fail,
+                detail: format!("read allowlist.yaml: {e}"),
+                fix: None,
+            });
+            return out;
+        }
+    };
+
+    let mut stmt = match conn.prepare("SELECT job_name, target_chat_id FROM cron_specs") {
+        Ok(s) => s,
+        Err(e) => {
+            out.push(DoctorCheck {
+                name: "cron targets".into(),
+                status: CheckStatus::Fail,
+                detail: format!("prepare query: {e:#}"),
+                fix: None,
+            });
+            return out;
+        }
+    };
+
+    let rows = match stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            out.push(DoctorCheck {
+                name: "cron targets".into(),
+                status: CheckStatus::Fail,
+                detail: format!("query: {e:#}"),
+                fix: None,
+            });
+            return out;
+        }
+    };
+
+    let mut total = 0usize;
+    let mut warned = 0usize;
+    for row in rows {
+        let (job_name, target) = match row {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(DoctorCheck {
+                    name: "cron targets".into(),
+                    status: CheckStatus::Fail,
+                    detail: format!("row read: {e:#}"),
+                    fix: None,
+                });
+                continue;
+            }
+        };
+        total += 1;
+        match target {
+            None => {
+                warned += 1;
+                out.push(DoctorCheck {
+                    name: "cron targets".into(),
+                    status: CheckStatus::Warn,
+                    detail: format!("cron '{job_name}' has no target_chat_id"),
+                    fix: Some(format!(
+                        "call cron_update job_name={job_name} target_chat_id=<chat_id>; \
+                         or recreate the cron in the desired chat"
+                    )),
+                });
+            }
+            Some(id) if !allowlist_state.is_chat_allowed(id) => {
+                warned += 1;
+                out.push(DoctorCheck {
+                    name: "cron targets".into(),
+                    status: CheckStatus::Warn,
+                    detail: format!(
+                        "cron '{job_name}' targets chat {id} which is no longer in allowlist"
+                    ),
+                    fix: Some(format!(
+                        "call cron_update job_name={job_name} target_chat_id=<chat_id>; \
+                         or `rightclaw agent allow_all {id}` to re-open"
+                    )),
+                });
+            }
+            Some(_) => {}
+        }
+    }
+
+    if total > 0 && warned == 0 {
+        out.push(DoctorCheck {
+            name: "cron targets".into(),
+            status: CheckStatus::Pass,
+            detail: format!("{total} cron(s) with valid targets"),
+            fix: None,
+        });
+    }
+    out
+}
+
 /// Run memory-subsystem checks against a single agent directory.
 ///
 /// Hardened from the plan's `if let Ok(...)` scaffolding: when an underlying
@@ -960,7 +1096,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 3. user_version matches migration.
-    let expected: u32 = 16;
+    let expected: u32 = 17;
     match conn.query_row::<u32, _, _>("PRAGMA user_version", [], |r| r.get(0)) {
         Ok(version) if version == expected => out.push(DoctorCheck {
             name: "memory schema".into(),
@@ -1088,3 +1224,78 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
 #[cfg(test)]
 #[path = "doctor_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod cron_target_tests {
+    use super::*;
+    use crate::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistFile};
+
+    fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
+        let now = chrono::Utc::now();
+        let mut file = AllowlistFile::default();
+        for &id in users {
+            file.users.push(AllowedUser { id, label: None, added_by: None, added_at: now });
+        }
+        for &id in groups {
+            file.groups.push(AllowedGroup { id, label: None, opened_by: None, opened_at: now });
+        }
+        crate::agent::allowlist::write_file(agent_dir, &file).unwrap();
+    }
+
+    fn seed_cron(conn: &rusqlite::Connection, name: &str, target_chat_id: Option<i64>) {
+        let now = chrono::Utc::now().to_rfc3339();
+        match target_chat_id {
+            Some(id) => conn.execute(
+                "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, target_chat_id, created_at, updated_at) \
+                 VALUES (?1, '*/5 * * * *', 'p', 1.0, ?2, ?3, ?3)",
+                rusqlite::params![name, id, now],
+            ).unwrap(),
+            None => conn.execute(
+                "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+                 VALUES (?1, '*/5 * * * *', 'p', 1.0, ?2, ?2)",
+                rusqlite::params![name, now],
+            ).unwrap(),
+        };
+    }
+
+    #[test]
+    fn null_target_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        write_allowlist(dir.path(), &[100], &[]);
+        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        seed_cron(&conn, "j1", None);
+        drop(conn);
+
+        let checks = check_cron_targets(dir.path());
+        let warns: Vec<_> = checks.iter().filter(|c| c.status == CheckStatus::Warn).collect();
+        assert_eq!(warns.len(), 1, "expected 1 warn, got {checks:?}");
+        assert!(warns[0].detail.contains("j1"));
+    }
+
+    #[test]
+    fn target_outside_allowlist_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        write_allowlist(dir.path(), &[100], &[]);
+        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        seed_cron(&conn, "j1", Some(-999));
+        drop(conn);
+
+        let checks = check_cron_targets(dir.path());
+        let warns: Vec<_> = checks.iter().filter(|c| c.status == CheckStatus::Warn).collect();
+        assert_eq!(warns.len(), 1, "expected 1 warn, got {checks:?}");
+        assert!(warns[0].detail.contains("-999"));
+    }
+
+    #[test]
+    fn valid_target_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        write_allowlist(dir.path(), &[], &[-200]);
+        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        seed_cron(&conn, "j1", Some(-200));
+        drop(conn);
+
+        let checks = check_cron_targets(dir.path());
+        let warns: Vec<_> = checks.iter().filter(|c| c.status == CheckStatus::Warn).collect();
+        assert!(warns.is_empty(), "expected no warns, got {checks:?}");
+    }
+}
