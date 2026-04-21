@@ -368,3 +368,16 @@ mod watcher_tests {
         panic!("watcher did not propagate external write within 2s");
     }
 }
+
+#[test]
+fn is_chat_allowed_matches_user_or_group() {
+    let now = chrono::Utc::now();
+    let mut state = AllowlistState::default();
+    state.add_user(AllowedUser { id: 100, label: None, added_by: None, added_at: now });
+    state.add_group(AllowedGroup { id: -200, label: None, opened_by: None, opened_at: now });
+
+    assert!(state.is_chat_allowed(100), "trusted user must match");
+    assert!(state.is_chat_allowed(-200), "open group must match");
+    assert!(!state.is_chat_allowed(999), "stranger must not match");
+    assert!(!state.is_chat_allowed(-999), "unknown group must not match");
+}

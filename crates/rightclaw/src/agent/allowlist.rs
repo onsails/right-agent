@@ -194,6 +194,13 @@ impl AllowlistState {
         self.inner.groups.iter().any(|g| g.id == chat_id)
     }
 
+    /// True iff the given chat id is either a trusted user or an opened group.
+    /// Used by cron target validation and by anything else that needs a
+    /// uniform "is this a valid Telegram destination for this agent?" check.
+    pub fn is_chat_allowed(&self, chat_id: i64) -> bool {
+        self.is_user_trusted(chat_id) || self.is_group_open(chat_id)
+    }
+
     pub fn users(&self) -> &[AllowedUser] {
         &self.inner.users
     }
