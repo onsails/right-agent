@@ -169,6 +169,8 @@ impl RightBackend {
             params.max_budget_usd,
             params.recurring,
             params.run_at.as_deref(),
+            None,
+            None,
         )
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(
