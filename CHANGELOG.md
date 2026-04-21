@@ -1,4 +1,120 @@
 # Changelog
+## [0.2.1] - 2026-04-21
+
+
+### Bug Fixes
+
+- **bot**: Memory_alerts — handle initial AuthFailed before subscribe
+- **bot**: Memory_alerts live allowlist + drain Delay missed-tick
+- **bot**: Always emit <memory-status> marker even when recall returns None
+- **bot**: Remove_composite_memory also clears sandbox-side copy
+- **bot**: Pre-delete language-scoped commands to prevent menu-shadow
+- **bot**: Update NoToken error message — env var no longer supported
+- **openshell**: Download_file delivers to exact host_dest path
+- **process_group**: Suppress spurious EPERM warning on macOS
+- **memory**: Route .json() errors through from_reqwest to preserve timeout kind
+- **memory**: Propagate oldest_age query errors instead of swallowing
+- **memory**: Drop drain_tick transaction to avoid SQLITE_BUSY under concurrent enqueue
+- **memory**: Don't enqueue retains when breaker open due to AuthFailed
+- **memory**: Don't enqueue Malformed retains — they re-fail deterministically
+- **doctor**: Check_memory uses open_connection for WAL + busy_timeout
+- **usage**: HTML-escape '<' in format_cost for Telegram compat
+
+### Documentation
+
+- **prompt**: Describe media_group_id to the agent
+
+### Features
+
+- **attachments**: GroupKind enum categorising album compatibility
+- **attachments**: Classify_media_group pure helper
+- **attachments**: Merge_group_captions helper
+- **attachments**: Partition_sends turns reply into ordered sends
+- **attachments**: Execute partitioned sends via sendMediaGroup
+- **bot**: Spawn retain-queue drain task
+- **bot**: Inject <memory-status> marker into composite-memory.md
+- **bot**: Annotate unreadable MEMORY.md in file-mode prompt
+- **bot**: Memory_alerts — AuthFailed + ClientFlood Telegram watchers
+- **bot**: Parse_usage_full extracts full UsageBreakdown from result event
+- **bot**: Worker writes usage_events row on CC result
+- **bot**: Cron writes usage_events row on CC result
+- **bot**: /usage command — aggregate and render summary
+- **bot**: Parse_api_key_source extracts auth mode from init event
+- **bot**: Worker threads apiKeySource from init into usage insert
+- **bot**: Cron threads apiKeySource from init into usage insert
+- **bot**: /usage detail argument toggles raw-tokens rendering
+- **schema**: Add media_group_id to outbound attachment schemas
+- **memory**: V14 migration — pending_retains + memory_alerts tables
+- **memory**: Classify reqwest errors into MemoryError variants
+- **memory**: ErrorKind classifier
+- **memory**: MemoryStatus enum with severity ordering
+- **memory**: Circuit breaker state machine
+- **memory**: Retain_queue enqueue/count/oldest_age
+- **memory**: HindsightClient::retain_many for batched POST
+- **memory**: Retain_queue drain_tick with classified outcome
+- **memory**: ResilientHindsight skeleton with drop counters
+- **memory**: ResilientHindsight retain/recall/reflect with retry + enqueue
+- **doctor**: Check_memory — db/schema/queue/alerts
+- **memory**: V15 migration for usage_events table
+- **usage**: Scaffold usage module with types and error
+- **usage**: Insert_interactive and insert_cron
+- **usage**: Aggregate function with per-model reduction
+- **usage**: Format_summary_message renders Telegram HTML output
+- **memory**: V16 migration adds api_key_source to usage_events
+- **usage**: Pricing table for cache-savings estimation
+- **usage**: Add api_key_source and billing split fields
+- **usage**: Persist api_key_source on insert
+- **usage**: Aggregate splits subscription vs API cost
+- **usage**: Redesigned /usage rendering — cache line, billing split, detail mode
+- **mcp**: Memory_retain surfaces "queued" status to agent on enqueue
+- **openshell**: Exec_in_sandbox takes caller-supplied timeout
+
+### Miscellaneous
+
+- **memory**: Outcome derives + runtime-context doc note
+- **tests**: Silence dead_code/unused warnings in memory integration tests
+- **memory**: Mark MemoryError::HindsightRequest deprecated
+- **memory**: Delete deprecated HindsightRequest variant
+- **usage**: Clippy cleanup
+- **usage**: Simplify pass — warn on silent drops, dedupe result-line scan
+- Cargo fmt
+
+### Refactor
+
+- **attachments**: Rename Send to OutboundSend, add split-caption test
+- **attachments**: Allow(too_many_arguments) on send_single/send_group
+- **attachments**: Extract SendCtx + resolve_host_path
+- **bot**: Switch memory context type to Arc<ResilientHindsight> (WIP)
+- **bot**: Worker uses ResilientHindsight wrapper for recall/retain
+- **bot**: Resolve_token reads only from agent.yaml, remove env var indirection
+- **memory**: Simplify review cleanup
+- **usage**: Make pricing::lookup resilient to dated model variants
+- **usage**: Replace exact float equality with positive comparisons in billing footer
+- **codegen**: Remove RC_TELEGRAM_TOKEN from process-compose template
+- **agg**: HindsightBackend uses ResilientHindsight wrapper
+
+### Testing
+
+- **prompt**: Assert composite-memory is last section (cache invariant)
+- **agent_def**: Replace unwrap with expect in type-array test helper
+- **memory**: V14 idempotency test + rename user_version test
+- **memory**: Outage / auth-fail / client-drop scenarios
+- **memory**: Recovery + drain scenario
+- **memory**: Poison pill + queue eviction
+- **memory**: Independent breakers for bot vs aggregator wrappers
+
+### Review
+
+- **attachments**: Tighten visibility + cover boundary cases
+- **iter1**: Address major findings
+- **iter2**: Propagate silent skips through send_attachments errors
+
+### Style
+
+- **attachments**: Resolve new clippy warnings
+- **memory**: Align v16 hook with v12/v13 idiom
+- **usage**: Restore bold on total retail footer
+
 ## [0.2.0] - 2026-04-17
 
 
