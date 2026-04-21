@@ -106,7 +106,7 @@ impl RightBackend {
         args: serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
         match tool_name {
-            "cron_create" => self.call_cron_create(agent_name, &args),
+            "cron_create" => self.call_cron_create(agent_name, agent_dir, &args),
             "cron_update" => self.call_cron_update(agent_name, &args),
             "cron_delete" => self.call_cron_delete(agent_name, agent_dir, &args),
             "cron_list" => self.call_cron_list(agent_name),
@@ -154,12 +154,12 @@ impl RightBackend {
     fn call_cron_create(
         &self,
         agent_name: &str,
+        agent_dir: &Path,
         args: &serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronCreateParams =
             serde_json::from_value(args.clone()).context("invalid cron_create params")?;
-        let agent_dir = self.agents_dir.join(agent_name);
-        if let Err(msg) = validate_target_against_allowlist(&agent_dir, params.target_chat_id) {
+        if let Err(msg) = validate_target_against_allowlist(agent_dir, params.target_chat_id) {
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
         let conn_arc = self.get_conn(agent_name)?;

@@ -400,3 +400,32 @@ async fn cron_create_rejects_missing_target_chat_id() {
     let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await;
     assert!(result.is_err(), "missing required field must surface as error");
 }
+
+#[tokio::test]
+async fn cron_create_rejects_when_allowlist_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // Note: NOT calling write_allowlist — file does not exist.
+    rightclaw::memory::open_connection(&agent_dir, true).unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    let args = serde_json::json!({
+        "job_name": "j1",
+        "schedule": "*/5 * * * *",
+        "prompt": "p",
+        "target_chat_id": -200_i64,
+    });
+    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await.unwrap();
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(
+        text.contains("does not exist") || text.contains("cannot be validated"),
+        "expected missing-allowlist error, got: {text}"
+    );
+}
