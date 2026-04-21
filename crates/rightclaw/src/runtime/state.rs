@@ -2,12 +2,24 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::pc_client::PC_PORT;
+
 /// Persistent state written during `rightclaw up`, read during `rightclaw down`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeState {
     pub agents: Vec<AgentState>,
     pub socket_path: String,
     pub started_at: String,
+    /// TCP port the running process-compose instance listens on.
+    ///
+    /// Defaults to `PC_PORT` so older state files (pre-isolation fix) deserialize
+    /// cleanly and still point callers at the current process-compose.
+    #[serde(default = "default_pc_port")]
+    pub pc_port: u16,
+}
+
+fn default_pc_port() -> u16 {
+    PC_PORT
 }
 
 /// Tracks a single agent in the runtime.

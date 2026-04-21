@@ -6,7 +6,6 @@ use crate::agent::types::AgentConfig;
 pub struct DestroyOptions {
     pub agent_name: String,
     pub backup: bool,
-    pub pc_port: u16,
 }
 
 /// Result of a destroy operation — booleans reflect what actually happened.
@@ -169,10 +168,24 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         pc_reloaded: false,
     };
 
-    let pc_client = crate::runtime::PcClient::new(options.pc_port)?;
-    let pc_running = pc_client.health_check().await.is_ok();
+    // `PcClient::from_home` enforces --home isolation: it reads the PC port
+    // from `<home>/run/state.json` and returns None when that file is absent.
+    // Without this guard, destroy invoked against an isolated --home would
+    // health-check the user's live PC on the default port and SIGTERM a
+    // same-named process there. See ARCHITECTURE.md "Runtime isolation — mandatory".
+    let pc_client = crate::runtime::PcClient::from_home(home)?;
+    if pc_client.is_none() {
+        tracing::debug!(
+            home = %home.display(),
+            "no runtime state — skipping PC interaction"
+        );
+    }
+    let pc_running = match &pc_client {
+        Some(c) => c.health_check().await.is_ok(),
+        None => false,
+    };
 
-    if pc_running {
+    if let (Some(pc_client), true) = (&pc_client, pc_running) {
         let process_name = format!("{}-bot", options.agent_name);
         match pc_client.stop_process(&process_name).await {
             Ok(()) => {
@@ -208,7 +221,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     result.dir_removed = true;
     tracing::info!(agent = %options.agent_name, dir = %agent_dir.display(), "removed agent directory");
 
-    if pc_running {
+    if let (Some(pc_client), true) = (pc_client, pc_running) {
         let all_agents = crate::agent::discover_agents(&agents_dir)?;
         let self_exe = std::env::current_exe().map_err(|e| {
             miette::miette!("failed to resolve current executable path: {e:#}")
@@ -249,7 +262,6 @@ mod tests {
         let options = DestroyOptions {
             agent_name: "test-agent".into(),
             backup: false,
-            pc_port: 19999,
         };
 
         let result = destroy_agent(home, &options).await.unwrap();
@@ -271,11 +283,43 @@ mod tests {
         let options = DestroyOptions {
             agent_name: "nonexistent".into(),
             backup: false,
-            pc_port: 19999,
         };
 
         let result = destroy_agent(home, &options).await;
         assert!(result.is_err());
+    }
+
+    /// Guards the `--home` isolation invariant: when `<home>/run/state.json`
+    /// does not exist, `destroy_agent` must not touch process-compose at all.
+    /// `PcClient::from_home` is the only public constructor, so there is no
+    /// way for destroy to contact the user's live PC from an isolated home.
+    #[tokio::test]
+    async fn destroy_skips_pc_when_no_runtime_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+
+        let agents_dir = home.join("agents").join("isolated");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("agent.yaml"),
+            "sandbox:\n  mode: none\n",
+        )
+        .unwrap();
+
+        // No <home>/run/state.json exists.
+        assert!(!home.join("run").join("state.json").exists());
+
+        let options = DestroyOptions {
+            agent_name: "isolated".into(),
+            backup: false,
+        };
+
+        let result = destroy_agent(home, &options).await.unwrap();
+
+        assert!(!result.agent_stopped, "no runtime state → PC skipped → agent not stopped");
+        assert!(!result.pc_reloaded, "no runtime state → PC skipped → not reloaded");
+        assert!(result.dir_removed, "agent dir should still be removed");
+        assert!(!agents_dir.exists(), "agent dir should be deleted");
     }
 
     #[tokio::test]
@@ -295,7 +339,6 @@ mod tests {
         let options = DestroyOptions {
             agent_name: "backup-test".into(),
             backup: true,
-            pc_port: 19999,
         };
 
         let result = destroy_agent(home, &options).await.unwrap();

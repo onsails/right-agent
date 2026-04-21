@@ -478,6 +478,31 @@ LoginEvent      // Token request→async: Done, Error
 | Cloudflare Tunnel | CLI (`cloudflared`) | Named tunnel, DNS CNAME, credentials file |
 | MCP Aggregator | HTTP (:8100/mcp) + Unix socket (internal API) | Aggregates built-in + external MCP backends, per-agent Bearer auth |
 
+## Runtime isolation — mandatory
+
+All interaction with the running `process-compose` instance MUST go through
+`PcClient::from_home(home)`. The `PcClient::new(port)` constructor is
+crate-private; external callers cannot construct a client without a `home`.
+
+This guarantees that `rightclaw --home <path>` is actually isolated: when a
+command is run against a tempdir home with no `state.json`, `from_home`
+returns `None` and callers skip PC-touching logic. This property is what
+protects tests (which run with a `--home=<tempdir>`) from accidentally hitting
+the user's live PC on port 18927 and SIGTERM-ing a same-named process there.
+
+`<home>/run/state.json` carries the port the running PC listens on; it is
+written by `codegen::pipeline` during `rightclaw up` and read by every
+subsequent command that needs to talk to PC. Older state files without the
+`pc_port` field deserialize to `PC_PORT` via `#[serde(default)]`.
+
+**When adding new CLI commands that touch PC, never import `PC_PORT` directly —
+always resolve through `from_home(home)`.** For "is PC running?" probes,
+treat `Ok(None)` as "no — skip or fail with a clear message pointing at
+`rightclaw up`". `PC_PORT` may still be referenced in two places: by
+`cmd_up` when passing `--port` to launch PC, and by `pipeline.rs` when
+writing the default into `state.json`. Both are the same constant by
+construction.
+
 ## SQLite Rules
 
 ### Migration Ownership
@@ -581,7 +606,7 @@ Rules:
 │   ├── process-compose.yaml
 │   ├── ssh/<agent>.ssh-config
 │   ├── internal.sock         # Unix socket for bot→aggregator IPC
-│   └── runtime-state.json
+│   └── state.json            # RuntimeState (agents, pc_port, socket_path, started_at)
 ├── backups/<agent>/<YYYYMMDD-HHMM>/
 │   ├── sandbox.tar.gz    # Sandbox files (tar czpf -p)
 │   ├── agent.yaml        # (full backup only)

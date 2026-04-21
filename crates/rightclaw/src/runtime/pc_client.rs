@@ -36,7 +36,11 @@ pub struct PcClient {
 
 impl PcClient {
     /// Create a new client connected to process-compose via TCP.
-    pub fn new(port: u16) -> miette::Result<Self> {
+    ///
+    /// Crate-private: external callers must construct through [`PcClient::from_home`]
+    /// so that `rightclaw --home <path>` isolation is enforced. See the
+    /// "Runtime isolation — mandatory" section in ARCHITECTURE.md.
+    pub(crate) fn new(port: u16) -> miette::Result<Self> {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|e| miette::miette!("failed to create process-compose client: {e:#}"))?;
@@ -44,6 +48,26 @@ impl PcClient {
             client,
             base_url: format!("http://localhost:{port}"),
         })
+    }
+
+    /// Construct a client from the rightclaw home directory.
+    ///
+    /// Reads the running PC port from `<home>/run/state.json`.
+    /// Returns `Ok(None)` when no PC was started from this home (state file absent) —
+    /// this is the normal case for tempdir-isolated tests and for commands run before
+    /// `rightclaw up`. Returns `Err` on malformed state or other I/O errors.
+    ///
+    /// This is the only public constructor — it guarantees that commands run
+    /// against an isolated `--home <tempdir>` never accidentally hit the
+    /// user's live process-compose on the default port.
+    pub fn from_home(home: &std::path::Path) -> miette::Result<Option<Self>> {
+        let state_path = home.join("run").join("state.json");
+        if !state_path.exists() {
+            return Ok(None);
+        }
+        let state = crate::runtime::state::read_state(&state_path)?;
+        let client = Self::new(state.pc_port)?;
+        Ok(Some(client))
     }
 
     /// Check if process-compose is alive.
