@@ -3,6 +3,7 @@
 //! Pure helpers are tested in isolation (TDD). `spawn_worker` and `invoke_cc` require
 //! live infrastructure and are covered by code review pattern only.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -16,6 +17,8 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::reflection::FailureKind;
 
 use super::session::{
     SessionRow, create_session, deactivate_current, get_active_session, touch_session,
@@ -471,7 +474,15 @@ pub fn spawn_worker(
             let (reply_result, session_uuid) =
                 match invoke_cc(&input, first_text, chat_id, eff_thread_id, is_group, &ctx).await {
                     Ok((output, uuid)) => (Ok(output), uuid),
-                    Err(e) => (Err(e), String::new()),
+                    Err(failure) => {
+                        let uuid = match &failure {
+                            InvokeCcFailure::Reflectable { session_uuid, .. } => {
+                                session_uuid.clone()
+                            }
+                            InvokeCcFailure::NonReflectable { .. } => String::new(),
+                        };
+                        (Err(failure), uuid)
+                    }
                 };
 
             // Reverse sync .md changes from sandbox.
@@ -636,15 +647,14 @@ pub fn spawn_worker(
                 Ok(None) => {
                     tracing::warn!(?key, "unexpected Ok(None) from invoke_cc — no reply sent");
                 }
-                Err(err_msg) => {
-                    tracing::info!(?key, "sending error reply to Telegram");
-                    let mut send = ctx.bot.send_message(tg_chat_id, &err_msg);
-                    if eff_thread_id != 0 {
-                        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
-                    }
-                    if let Err(e) = send.await {
-                        tracing::error!(?key, "failed to send error reply: {:#}", e);
-                    }
+                Err(InvokeCcFailure::NonReflectable { message }) => {
+                    tracing::info!(?key, "sending non-reflectable error reply to Telegram");
+                    send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &message).await;
+                }
+                Err(InvokeCcFailure::Reflectable { raw_message, .. }) => {
+                    // Task 7 replaces this with a reflection call.
+                    tracing::warn!(?key, "reflection not yet wired — sending raw error");
+                    send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &raw_message).await;
                 }
             }
 
@@ -840,10 +850,34 @@ fn spawn_token_request(
     });
 }
 
+/// Classification of why `invoke_cc` failed, used by `spawn_worker` to decide
+/// between sending the raw error text and running a reflection pass.
+#[derive(Debug)]
+pub(crate) enum InvokeCcFailure {
+    /// A failure we want to reflect on (safety timeout, non-zero exit of CC).
+    /// The `raw_message` is preserved so callers can fall back to it if the
+    /// reflection pass itself fails.
+    Reflectable {
+        kind: FailureKind,
+        ring_buffer_tail: VecDeque<super::stream::StreamEvent>,
+        session_uuid: String,
+        raw_message: String,
+    },
+    /// A failure we do NOT want to reflect on (parse failures, pre-CC setup
+    /// errors, schema read failures). The `message` is sent to Telegram verbatim.
+    NonReflectable { message: String },
+}
+
+impl From<String> for InvokeCcFailure {
+    fn from(message: String) -> Self {
+        InvokeCcFailure::NonReflectable { message }
+    }
+}
+
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
 ///
 /// Returns `Ok((Some(ReplyOutput), session_uuid))` on success,
-/// `Err(error_message_for_telegram)` on subprocess failure or missing reply tool.
+/// `Err(InvokeCcFailure)` on subprocess failure or missing reply tool.
 async fn invoke_cc(
     input: &str,
     first_text: Option<&str>,
@@ -851,7 +885,7 @@ async fn invoke_cc(
     eff_thread_id: i64,
     is_group: bool,
     ctx: &WorkerContext,
-) -> Result<(Option<ReplyOutput>, String), String> {
+) -> Result<(Option<ReplyOutput>, String), InvokeCcFailure> {
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
     let conn = rightclaw::memory::open_connection(&ctx.agent_dir, false)
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
@@ -876,7 +910,7 @@ async fn invoke_cc(
                 (vec!["--session-id".to_string(), new_uuid], true, uuid)
             }
             Err(e) => {
-                return Err(format!("⚠️ Agent error: session lookup failed: {:#}", e));
+                return Err(format!("⚠️ Agent error: session lookup failed: {:#}", e).into());
             }
         };
 
@@ -1428,7 +1462,12 @@ async fn invoke_cc(
             }
         }
         timeout_msg.push_str(&format!("\nStream log: {}", stream_log_path.display()));
-        return Err(timeout_msg);
+        return Err(InvokeCcFailure::Reflectable {
+            kind: FailureKind::SafetyTimeout { limit_secs: CC_TIMEOUT_SECS },
+            ring_buffer_tail: ring_buffer.events().clone(),
+            session_uuid: session_uuid.clone(),
+            raw_message: timeout_msg,
+        });
     }
 
     let stdout_str = result_line.unwrap_or_default();
@@ -1505,7 +1544,13 @@ async fn invoke_cc(
         } else {
             stderr_str.to_string()
         };
-        return Err(format_error_reply(exit_code, &error_detail));
+        let raw = format_error_reply(exit_code, &error_detail);
+        return Err(InvokeCcFailure::Reflectable {
+            kind: FailureKind::NonZeroExit { code: exit_code },
+            ring_buffer_tail: ring_buffer.events().clone(),
+            session_uuid: session_uuid.clone(),
+            raw_message: raw,
+        });
     }
 
     // DIS-04: parse session_id for debug verification (D-15: mismatch only warns)
@@ -1541,8 +1586,25 @@ async fn invoke_cc(
             Err(format!(
                 "⚠️ Agent error: {reason}\nRaw output (truncated): {}",
                 &stdout_str.chars().take(200).collect::<String>()
-            ))
+            )
+            .into())
         }
+    }
+}
+
+async fn send_error_to_telegram(
+    ctx: &WorkerContext,
+    tg_chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    message: &str,
+) {
+    let mut send = ctx.bot.send_message(tg_chat_id, message);
+    if eff_thread_id != 0 {
+        use teloxide::types::{MessageId, ThreadId};
+        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+    }
+    if let Err(e) = send.await {
+        tracing::error!("failed to send error reply: {:#}", e);
     }
 }
 
