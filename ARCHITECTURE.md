@@ -331,6 +331,30 @@ vectors is forbidden — the builder enforces invariant flags at compile time.
 call `.into_args()`, pass result to `build_prompt_assembly_script()`. Never build
 args manually.
 
+### Reflection Primitive
+
+`crates/bot/src/reflection.rs` exposes `reflect_on_failure(ctx) -> Result<String, ReflectionError>`.
+On CC invocation failure the worker (`telegram::worker`) and cron (`cron.rs`)
+call it to give the agent a short `--resume`-d turn wrapped in
+`⟨⟨SYSTEM_NOTICE⟩⟩ … ⟨⟨/SYSTEM_NOTICE⟩⟩`, so the agent produces a human-friendly
+summary of the failure instead of the raw ring-buffer dump.
+
+- Worker uses `ReflectionLimits::WORKER` (3 turns, $0.20, 90s process timeout).
+  Reflection reply is sent to Telegram directly; on reflection failure, the
+  caller falls back to the raw error message.
+- Cron uses `ReflectionLimits::CRON` (5 turns, $0.40, 180s process timeout).
+  Reflection reply is stored in `cron_runs.notify_json`; `cron_delivery` picks
+  it up and relays using `DELIVERY_INSTRUCTION_FAILURE` (non-verbatim — agent
+  may rephrase lightly, must preserve facts).
+- `usage_events` rows for reflection use `source = "reflection"`, discriminated
+  by `chat_id` (worker parent) vs `job_name` (cron parent). `/usage` shows them
+  on a separate "🧠 Reflection" line per window.
+- Reflection never reflects on itself. Hindsight `memory_retain` is skipped for
+  reflection turns.
+- `cron_runs.status` gates delivery: `'failed'` routes to
+  `DELIVERY_INSTRUCTION_FAILURE`, any other status (currently `'success'`)
+  routes to `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
+
 ### Stream Logging
 
 CC is invoked with `--verbose --output-format stream-json`. Worker reads stdout
