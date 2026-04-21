@@ -48,48 +48,18 @@ use tokio_util::sync::CancellationToken;
 pub(crate) type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
 
 use rightclaw::agent::types::AgentConfig;
-use std::path::Path;
 
-/// Resolve Telegram token using priority chain (D-13):
-/// 1. RC_TELEGRAM_TOKEN env var
-/// 2. RC_TELEGRAM_TOKEN_FILE env var (read file contents)
-/// 3. agent.yaml telegram_token field
+/// Resolve Telegram token from agent.yaml config.
 ///
-/// Returns Err if no non-empty value found.
-///
-/// Extract token value from file contents.
-/// Handles both raw token and `KEY=VALUE` env-file format.
-/// Splits on the first `=` if present; returns trimmed value. Falls back to full trimmed content.
-fn token_from_file_content(content: &str) -> String {
-    let trimmed = content.trim();
-    if let Some((_, value)) = trimmed.split_once('=') {
-        value.trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-pub fn resolve_token(_agent_dir: &Path, config: &AgentConfig) -> miette::Result<String> {
-    // 1. RC_TELEGRAM_TOKEN env var
-    if let Ok(token) = std::env::var("RC_TELEGRAM_TOKEN")
-        && !token.is_empty()
-    {
-        return Ok(token);
-    }
-    // 2. RC_TELEGRAM_TOKEN_FILE env var
-    if let Ok(path) = std::env::var("RC_TELEGRAM_TOKEN_FILE") {
-        return std::fs::read_to_string(&path)
-            .map(|s| token_from_file_content(&s))
-            .map_err(|e| miette::miette!("RC_TELEGRAM_TOKEN_FILE read error: {e}"));
-    }
-    // 3. agent.yaml telegram_token
+/// Returns Err if `telegram_token` is absent or empty.
+pub fn resolve_token(config: &AgentConfig) -> miette::Result<String> {
     if let Some(token) = &config.telegram_token
         && !token.is_empty()
     {
         return Ok(token.clone());
     }
     Err(miette::miette!(
-        help = "Set RC_TELEGRAM_TOKEN env var or add telegram_token to agent.yaml",
+        help = "Add telegram_token to agent.yaml",
         "No Telegram token found for this agent"
     ))
 }
@@ -119,24 +89,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_token_inline_field() {
-        let dir = tempfile::tempdir().unwrap();
+    fn resolve_token_from_config() {
         let mut config = minimal_config();
         config.telegram_token = Some("999:inline_token".to_string());
-
-        let token = resolve_token(dir.path(), &config).unwrap();
+        let token = resolve_token(&config).unwrap();
         assert_eq!(token, "999:inline_token");
     }
 
     #[test]
     fn resolve_token_returns_err_when_nothing_configured() {
-        let dir = tempfile::tempdir().unwrap();
         let config = minimal_config();
-        // Best-effort test; skip if env vars happen to be set.
-        if std::env::var("RC_TELEGRAM_TOKEN").is_err()
-            && std::env::var("RC_TELEGRAM_TOKEN_FILE").is_err()
-        {
-            assert!(resolve_token(dir.path(), &config).is_err());
-        }
+        assert!(resolve_token(&config).is_err());
+    }
+
+    #[test]
+    fn resolve_token_returns_err_when_empty_string() {
+        let mut config = minimal_config();
+        config.telegram_token = Some(String::new());
+        assert!(resolve_token(&config).is_err());
     }
 }

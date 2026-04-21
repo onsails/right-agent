@@ -331,7 +331,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     tracing::info!(agent = %args.agent, "data.db opened");
 
     // Resolve Telegram token
-    let token = telegram::resolve_token(&agent_dir, &config)?;
+    let token = telegram::resolve_token(&config)?;
 
     // PC-04: Clear any prior Telegram webhook before starting long-polling.
     // Fatal if this fails -- competing with an active webhook causes silent message drops.
