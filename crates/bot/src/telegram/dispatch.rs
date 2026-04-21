@@ -174,27 +174,68 @@ pub async fn run_telegram(
 
     let shutdown_token = dispatcher.shutdown_token();
 
-    // Signal handler task
-    tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
+    // SIGTERM/SIGINT listener -- runs in a dedicated std thread because signal-hook's
+    // SignalsInfo<WithOrigin> iterator is blocking. The thread reads siginfo_t origin
+    // (PID + UID of the sender), looks up the sender's command line via `ps`, logs it,
+    // then cancels `signal_cancel`. The tokio task below observes the cancellation and
+    // drives the actual dispatcher shutdown on the runtime.
+    let signal_cancel = CancellationToken::new();
+    let signal_cancel_thread = signal_cancel.clone();
+    std::thread::Builder::new()
+        .name("rightclaw-signal-listener".to_string())
+        .spawn(move || {
+            use signal_hook::consts::signal::{SIGINT, SIGTERM};
+            use signal_hook::iterator::SignalsInfo;
+            use signal_hook::iterator::exfiltrator::WithOrigin;
 
-        tokio::select! {
-            _ = sigterm.recv() => {
-                tracing::info!("SIGTERM received -- initiating graceful shutdown");
+            let mut signals = SignalsInfo::<WithOrigin>::new([SIGTERM, SIGINT])
+                .expect("failed to register SIGTERM/SIGINT handlers via signal-hook");
+
+            if let Some(origin) = (&mut signals).into_iter().next() {
+                let sig_name = match origin.signal {
+                    SIGTERM => "SIGTERM",
+                    SIGINT => "SIGINT",
+                    other => {
+                        tracing::warn!(
+                            signal = other,
+                            "signal listener received unexpected signal"
+                        );
+                        "UNKNOWN"
+                    }
+                };
+                let (pid, cmd) = match origin.process {
+                    Some(proc) => {
+                        let pid: i32 = proc.pid;
+                        (pid, lookup_sender_cmd(pid))
+                    }
+                    None => (0_i32, String::new()),
+                };
+                tracing::info!(
+                    signal = sig_name,
+                    sender_pid = pid,
+                    sender_cmd = %cmd,
+                    "{sig_name} received from pid={pid} ({cmd}) -- initiating graceful shutdown"
+                );
+                signal_cancel_thread.cancel();
             }
-            result = tokio::signal::ctrl_c() => {
-                if result.is_ok() {
-                    tracing::info!("SIGINT received -- initiating graceful shutdown");
-                }
+        })
+        .expect("failed to spawn signal listener thread");
+
+    // Shutdown driver task: waits for either a signal (via signal_cancel) or a
+    // config-change cancellation, then drives dispatcher shutdown. Worker tasks drain
+    // their mpsc channels and exit; in-flight CC subprocesses are killed by
+    // kill_on_drop(true) when workers are dropped.
+    let signal_cancel_task = signal_cancel.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = signal_cancel_task.cancelled() => {
+                // Signal listener thread already logged the PID/cmd. Nothing else to log here.
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("config change detected -- initiating graceful shutdown");
             }
         }
 
-        // Shutdown dispatcher -- worker tasks drain their mpsc channels and exit.
-        // In-flight CC subprocesses are killed by kill_on_drop(true) when workers are dropped.
         match shutdown_token.shutdown() {
             Ok(fut) => {
                 fut.await;
@@ -255,6 +296,34 @@ pub async fn run_telegram(
     dispatcher.dispatch().await;
     tracing::info!("dispatcher exited cleanly");
     Ok(())
+}
+
+/// Look up the command line of a process by PID, used to attribute SIGTERM/SIGINT senders.
+///
+/// Runs `ps -p <pid> -o command=` (no header) and returns its trimmed stdout. Returns
+/// an empty string on any failure -- the caller logs the PID even when the command is
+/// missing, which is enough to identify the sender. We intentionally do not propagate
+/// errors here: this is diagnostic metadata, not part of the shutdown contract.
+fn lookup_sender_cmd(pid: i32) -> String {
+    let output = match std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!(pid, error = %e, "ps lookup for signal sender failed");
+            return String::new();
+        }
+    };
+    if !output.status.success() {
+        tracing::debug!(
+            pid,
+            exit = ?output.status,
+            "ps returned non-zero for signal sender pid"
+        );
+        return String::new();
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 /// Build the teloxide `Dispatcher` with the full handler schema and dependency map.

@@ -62,6 +62,7 @@ url = "2.5"
 anyhow = "1.0"
 fs4 = "0.13"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
+signal-hook = { version = "0.4", features = ["extended-siginfo"] }
 
 [profile.dev]
 panic = "abort"
