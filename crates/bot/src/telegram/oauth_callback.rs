@@ -45,8 +45,8 @@ pub struct OAuthCallbackState {
     pub agent_name: String,
     /// Telegram Bot for sending notifications
     pub bot: teloxide::Bot,
-    /// Chat IDs to notify after OAuth completes
-    pub notify_chat_ids: Vec<i64>,
+    /// Live allowlist — DM users are notified after OAuth completes
+    pub allowlist: rightclaw::agent::allowlist::AllowlistHandle,
     /// Internal API client for delivering OAuth tokens to the aggregator
     pub internal_client: Arc<InternalClient>,
 }
@@ -225,7 +225,16 @@ async fn complete_oauth_flow(
                     pending.server_name,
                 )
             };
-            notify_telegram(&cb_state.bot, &cb_state.notify_chat_ids, &msg).await;
+            let chat_ids: Vec<i64> = cb_state
+                .allowlist
+                .0
+                .read()
+                .expect("allowlist lock poisoned")
+                .users()
+                .iter()
+                .map(|u| u.id)
+                .collect();
+            notify_telegram(&cb_state.bot, &chat_ids, &msg).await;
         }
         Err(e) => {
             tracing::error!(
@@ -233,9 +242,18 @@ async fn complete_oauth_flow(
                 server = %pending.server_name,
                 "set_token failed: {e:#}"
             );
+            let chat_ids: Vec<i64> = cb_state
+                .allowlist
+                .0
+                .read()
+                .expect("allowlist lock poisoned")
+                .users()
+                .iter()
+                .map(|u| u.id)
+                .collect();
             notify_telegram(
                 &cb_state.bot,
-                &cb_state.notify_chat_ids,
+                &chat_ids,
                 &format!(
                     "Authentication succeeded but token delivery failed for {} (agent {agent_name}): {e}",
                     pending.server_name,
@@ -318,11 +336,12 @@ mod tests {
 
     /// Build a minimal OAuthCallbackState for tests (no real bot/credentials)
     fn dummy_state(map: PendingAuthMap) -> OAuthCallbackState {
+        use rightclaw::agent::allowlist::{AllowlistHandle, AllowlistState};
         OAuthCallbackState {
             pending_auth: map,
             agent_name: "test-agent".to_string(),
             bot: teloxide::Bot::new("0:fake_token_for_tests"),
-            notify_chat_ids: vec![],
+            allowlist: AllowlistHandle::new(AllowlistState::default()),
             internal_client: Arc::new(InternalClient::new("/tmp/fake-internal.sock")),
         }
     }
@@ -441,5 +460,37 @@ mod tests {
     async fn test_dummy_state_construction() {
         let map: PendingAuthMap = Arc::new(Mutex::new(HashMap::new()));
         let _state = dummy_state(map);
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_state_uses_allowlist_users() {
+        use rightclaw::agent::allowlist::{AllowedUser, AllowlistHandle, AllowlistState};
+
+        let now = chrono::Utc::now();
+        let mut state = AllowlistState::default();
+        state.add_user(AllowedUser {
+            id: 100,
+            label: None,
+            added_by: None,
+            added_at: now,
+        });
+        let handle = AllowlistHandle::new(state);
+        let cb_state = OAuthCallbackState {
+            pending_auth: Arc::new(Mutex::new(Default::default())),
+            agent_name: "test".into(),
+            bot: teloxide::Bot::new("123:abc"),
+            allowlist: handle.clone(),
+            internal_client: Arc::new(InternalClient::new("/nonexistent.sock")),
+        };
+        let user_ids: Vec<i64> = cb_state
+            .allowlist
+            .0
+            .read()
+            .unwrap()
+            .users()
+            .iter()
+            .map(|u| u.id)
+            .collect();
+        assert_eq!(user_ids, vec![100]);
     }
 }

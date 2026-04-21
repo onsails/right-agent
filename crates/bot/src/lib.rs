@@ -413,7 +413,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     let notify_bot = teloxide::Bot::new(token.clone());
-    let notify_chat_ids = config.allowed_chat_ids.clone();
     let agent_name = args.agent.clone();
 
     // Internal API client for bot→aggregator IPC (MCP add/remove/set-token)
@@ -426,7 +425,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         pending_auth: Arc::clone(&pending_auth),
         agent_name: agent_name.clone(),
         bot: notify_bot,
-        notify_chat_ids,
+        allowlist: allowlist.clone(),
         internal_client: Arc::clone(&internal_client),
     };
 
