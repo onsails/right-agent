@@ -78,6 +78,15 @@ pub struct CronUpdateParams {
     #[schemars(description = "New maximum dollar spend per invocation")]
     #[serde(default, deserialize_with = "deserialize_lenient_f64")]
     pub max_budget_usd: Option<f64>,
+    #[schemars(
+        description = "New target_chat_id. Must be in the agent's allowlist."
+    )]
+    pub target_chat_id: Option<i64>,
+    #[schemars(
+        description = "New target_thread_id. Pass `null` to clear (cron will deliver to the chat without a topic). Omit the field entirely to leave unchanged."
+    )]
+    #[serde(default, deserialize_with = "deserialize_double_option_i64")]
+    pub target_thread_id: Option<Option<i64>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -123,6 +132,20 @@ where
             .map_err(|_| de::Error::custom(format!("invalid number: {s}"))),
         NumOrStr::Null => Ok(None),
     }
+}
+
+/// Distinguish between "field absent" (`None`) and "explicit null" (`Some(None)`)
+/// for nullable optional integers. Required so `cron_update` can clear a field.
+///
+/// When the field is present in JSON:
+///   - `null`    → `Some(None)`  (clear the column)
+///   - `7`       → `Some(Some(7))` (set to 7)
+/// When the field is absent from JSON, serde's `default` kicks in → `None`.
+fn deserialize_double_option_i64<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer).map(Some)
 }
 
 // --- Server struct ---
@@ -298,8 +321,8 @@ impl MemoryServer {
             params.recurring,
             params.lock_ttl.as_deref(),
             params.max_budget_usd,
-            None,
-            None,
+            params.target_chat_id,
+            params.target_thread_id,
         )
         .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(

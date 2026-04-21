@@ -429,3 +429,110 @@ async fn cron_create_rejects_when_allowlist_missing() {
         "expected missing-allowlist error, got: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// cron_update — target_chat_id + target_thread_id (Task 7)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cron_update_changes_target_chat_id_with_validation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[100], &[-200, -300]);
+    rightclaw::memory::open_connection(&agent_dir, true).unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            serde_json::json!({
+                "job_name": "j1",
+                "schedule": "*/5 * * * *",
+                "prompt": "p",
+                "target_chat_id": -200,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let result = backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_update",
+            serde_json::json!({
+                "job_name": "j1",
+                "target_chat_id": -300,
+            }),
+        )
+        .await
+        .unwrap();
+    let text = result.content.first().and_then(|c| c.as_text()).map(|t| t.text.clone()).unwrap_or_default();
+    assert!(text.contains("Updated"), "got: {text}");
+
+    // Reject change to non-allowlisted chat
+    let denied = backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_update",
+            serde_json::json!({
+                "job_name": "j1",
+                "target_chat_id": -999,
+            }),
+        )
+        .await
+        .unwrap();
+    let denied_text = denied.content.first().and_then(|c| c.as_text()).map(|t| t.text.clone()).unwrap_or_default();
+    assert!(denied_text.contains("not in allowlist"), "got: {denied_text}");
+}
+
+#[tokio::test]
+async fn cron_update_clears_target_thread_id_with_explicit_null() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[], &[-200]);
+    rightclaw::memory::open_connection(&agent_dir, true).unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            serde_json::json!({
+                "job_name": "j1",
+                "schedule": "*/5 * * * *",
+                "prompt": "p",
+                "target_chat_id": -200,
+                "target_thread_id": 7,
+            }),
+        )
+        .await
+        .unwrap();
+
+    backend
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_update",
+            serde_json::json!({
+                "job_name": "j1",
+                "target_thread_id": null,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let conn = rightclaw::memory::open_connection(&agent_dir, false).unwrap();
+    let thread: Option<i64> = conn
+        .query_row("SELECT target_thread_id FROM cron_specs WHERE job_name='j1'", [], |r| r.get(0))
+        .unwrap();
+    assert!(thread.is_none(), "explicit null must clear the column");
+}

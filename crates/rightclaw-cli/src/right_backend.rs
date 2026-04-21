@@ -107,7 +107,7 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         match tool_name {
             "cron_create" => self.call_cron_create(agent_name, agent_dir, &args),
-            "cron_update" => self.call_cron_update(agent_name, &args),
+            "cron_update" => self.call_cron_update(agent_name, agent_dir, &args),
             "cron_delete" => self.call_cron_delete(agent_name, agent_dir, &args),
             "cron_list" => self.call_cron_list(agent_name),
             "cron_list_runs" => self.call_cron_list_runs(agent_name, &args),
@@ -185,10 +185,16 @@ impl RightBackend {
     fn call_cron_update(
         &self,
         agent_name: &str,
+        agent_dir: &Path,
         args: &serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronUpdateParams =
             serde_json::from_value(args.clone()).context("invalid cron_update params")?;
+        if let Some(chat) = params.target_chat_id
+            && let Err(msg) = validate_target_against_allowlist(agent_dir, chat)
+        {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
         let result = rightclaw::cron_spec::update_spec_partial(
@@ -200,8 +206,8 @@ impl RightBackend {
             params.recurring,
             params.lock_ttl.as_deref(),
             params.max_budget_usd,
-            None,
-            None,
+            params.target_chat_id,
+            params.target_thread_id,
         )
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(
