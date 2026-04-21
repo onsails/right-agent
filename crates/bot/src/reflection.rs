@@ -6,9 +6,15 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
-use crate::telegram::stream::StreamEvent;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+use rightclaw::usage::insert::{insert_reflection_cron, insert_reflection_worker};
+
+use crate::telegram::invocation::{ClaudeInvocation, OutputFormat};
+use crate::telegram::stream::{StreamEvent, parse_stream_event};
 
 /// Maximum character length for one ring-buffer activity line's text snippet
 /// or tool-argument summary in the reflection prompt. Kept short so the prompt
@@ -69,7 +75,6 @@ pub struct ReflectionContext {
     pub agent_dir: PathBuf,
     pub ssh_config_path: Option<PathBuf>,
     pub resolved_sandbox: Option<String>,
-    pub db_path: PathBuf,
     pub parent_source: ParentSource,
     pub model: Option<String>,
 }
@@ -164,6 +169,225 @@ pub(crate) fn build_reflection_prompt(
          Do NOT call Agent or other long-running tools.\n\
          ⟨⟨/SYSTEM_NOTICE⟩⟩\n"
     )
+}
+
+/// Run one reflection pass for a failed CC invocation.
+///
+/// Resumes the failed session, pipes a SYSTEM_NOTICE-wrapped prompt via stdin,
+/// parses the final `result` stream event, accounts the usage row, and returns
+/// the agent's reply text. Any failure of the reflection itself returns `Err`
+/// — the caller is responsible for a raw-error fallback.
+pub async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String, ReflectionError> {
+    let span = tracing::info_span!(
+        "reflection",
+        session_uuid = %ctx.session_uuid,
+        parent = ?ctx.parent_source,
+        failure = ?ctx.failure,
+    );
+    let _enter = span.enter();
+
+    tracing::info!("reflection starting");
+
+    // 1. Build stdin prompt from pure helpers.
+    let input = build_reflection_prompt(
+        &ctx.failure,
+        &ctx.ring_buffer_tail,
+        ctx.limits.max_turns,
+    );
+
+    // 2. Reply schema (reuse worker's — sandbox vs no-sandbox both read same file).
+    let schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
+    let reply_schema = std::fs::read_to_string(&schema_path)?;
+
+    // 3. MCP config path (reuse worker's helper).
+    let mcp_path = crate::telegram::invocation::mcp_config_path(
+        ctx.ssh_config_path.as_deref(),
+        &ctx.agent_dir,
+    );
+
+    // 4. ClaudeInvocation — resume, stream-json, tight caps, no Agent tool.
+    let invocation = ClaudeInvocation {
+        mcp_config_path: mcp_path,
+        json_schema: reply_schema,
+        output_format: OutputFormat::StreamJson,
+        model: ctx.model.clone(),
+        max_budget_usd: Some(ctx.limits.max_budget_usd),
+        max_turns: Some(ctx.limits.max_turns),
+        resume_session_id: Some(ctx.session_uuid.clone()),
+        new_session_id: None,
+        disallowed_tools: vec!["Agent".into()],
+        extra_args: vec![],
+        prompt: None,
+    };
+    let claude_args = invocation.into_args();
+
+    // 5. System-prompt assembly (match worker's pattern; no MCP refresh, no memory).
+    let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
+        (
+            rightclaw::agent::types::SandboxMode::Openshell,
+            "/sandbox".to_owned(),
+        )
+    } else {
+        (
+            rightclaw::agent::types::SandboxMode::None,
+            ctx.agent_dir.to_string_lossy().into_owned(),
+        )
+    };
+    let base_prompt =
+        rightclaw::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+
+    let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
+        let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
+            ReflectionError::Spawn(
+                "ssh_config_path set but resolved_sandbox is None".into(),
+            )
+        })?;
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sandbox_name);
+        let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            false, // not bootstrap mode
+            "/sandbox",
+            "/tmp/rightclaw-reflection-prompt.md",
+            "/sandbox",
+            &claude_args,
+            None, // no MCP instructions refresh
+            None, // no memory section
+        );
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir) {
+            let escaped = token.replace('\'', "'\\''");
+            assembly_script =
+                format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
+        }
+        let mut c = tokio::process::Command::new("ssh");
+        c.arg("-F").arg(ssh_config);
+        c.arg(&ssh_host);
+        c.arg("--");
+        c.arg(assembly_script);
+        c
+    } else {
+        let agent_dir_str = ctx.agent_dir.to_string_lossy();
+        let prompt_path = ctx
+            .agent_dir
+            .join(".claude")
+            .join("composite-reflection-prompt.md");
+        let prompt_path_str = prompt_path.to_string_lossy();
+        let assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+            &base_prompt,
+            false,
+            &agent_dir_str,
+            &prompt_path_str,
+            &agent_dir_str,
+            &claude_args,
+            None,
+            None,
+        );
+        let mut c = tokio::process::Command::new("bash");
+        c.arg("-c");
+        c.arg(&assembly_script);
+        c.env("HOME", &ctx.agent_dir);
+        c.env("USE_BUILTIN_RIPGREP", "0");
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_dir) {
+            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
+        }
+        c.current_dir(&ctx.agent_dir);
+        c
+    };
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
+
+    // Pipe the prompt, then drop stdin to signal EOF.
+    if let Some(mut stdin) = child.stdin() {
+        stdin.write_all(input.as_bytes()).await?;
+        // drop at end of scope
+    }
+
+    // Read stdout streaming; capture the last `result` event's raw JSON.
+    let stdout = child
+        .stdout()
+        .ok_or_else(|| ReflectionError::Spawn("no stdout handle".into()))?;
+    let mut lines = BufReader::new(stdout).lines();
+
+    let mut last_result_line: Option<String> = None;
+    let read_fut = async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let StreamEvent::Result(raw) = parse_stream_event(&line) {
+                last_result_line = Some(raw);
+            }
+        }
+    };
+
+    let timed_out = tokio::time::timeout(ctx.limits.process_timeout, read_fut)
+        .await
+        .is_err();
+
+    // Kill the child regardless of outcome; collect exit code best-effort.
+    let _ = child.kill().await;
+    let exit = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+
+    if timed_out {
+        tracing::warn!(
+            duration_ms = ctx.limits.process_timeout.as_millis() as u64,
+            "reflection timed out"
+        );
+        return Err(ReflectionError::Timeout(ctx.limits.process_timeout));
+    }
+
+    let result_line = last_result_line.ok_or_else(|| {
+        ReflectionError::Parse("no `result` stream event in reflection stdout".into())
+    })?;
+
+    if exit != 0 {
+        return Err(ReflectionError::NonZeroExit {
+            code: exit,
+            detail: result_line.chars().take(400).collect(),
+        });
+    }
+
+    // Parse reply via the shared helper (handles content: Option<String>, nested result, etc.).
+    let (reply_output, _session_id) = crate::telegram::worker::parse_reply_output(&result_line)
+        .map_err(ReflectionError::Parse)?;
+    let content = reply_output
+        .content
+        .ok_or_else(|| ReflectionError::Parse("reply content was null".into()))?;
+
+    // Account usage (best-effort — log but don't fail reflection on usage insert error).
+    if let Some(breakdown) = crate::telegram::stream::parse_usage_full(&result_line) {
+        match rightclaw::memory::open_connection(&ctx.agent_dir, false) {
+            Ok(conn) => {
+                let res = match &ctx.parent_source {
+                    ParentSource::Worker { chat_id, thread_id } => {
+                        insert_reflection_worker(&conn, &breakdown, *chat_id, *thread_id)
+                    }
+                    ParentSource::Cron { job_name } => {
+                        insert_reflection_cron(&conn, &breakdown, job_name)
+                    }
+                };
+                if let Err(e) = res {
+                    tracing::warn!("reflection usage insert failed: {:#}", e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("reflection usage DB open failed: {:#}", e);
+            }
+        }
+    }
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&result_line).unwrap_or(serde_json::Value::Null);
+    tracing::info!(
+        cost_usd = parsed
+            .get("total_cost_usd")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        turns = parsed.get("num_turns").and_then(|v| v.as_u64()).unwrap_or(0),
+        "reflection completed"
+    );
+
+    Ok(content)
 }
 
 #[cfg(test)]
