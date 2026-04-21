@@ -449,7 +449,7 @@ async fn main() -> miette::Result<()> {
         Commands::Pair { agent } => cmd_pair(&home, agent.as_deref()),
         Commands::Config { command } => match command {
             None => {
-                crate::wizard::combined_setting_menu(&home)?;
+                crate::wizard::combined_setting_menu(&home).await?;
                 Ok(())
             }
             Some(ConfigCommands::StrictSandbox) => cmd_config_strict_sandbox(),
@@ -516,7 +516,7 @@ async fn main() -> miette::Result<()> {
             AgentCommands::Config { name, key, value } => {
                 match (key, value) {
                     (None, None) => {
-                        let agent_name = crate::wizard::agent_setting_menu(&home, name.as_deref())?;
+                        let agent_name = crate::wizard::agent_setting_menu(&home, name.as_deref()).await?;
                         maybe_migrate_sandbox(&home, &agent_name).await?;
                     }
                     (Some(_key), _) => {
@@ -1107,6 +1107,8 @@ fn cmd_init(
         memory_provider,
         memory_api_key,
         memory_bank_id,
+        memory_recall_budget,
+        memory_recall_max_tokens,
     );
 
     if !interactive {
@@ -1121,6 +1123,8 @@ fn cmd_init(
         memory_provider = rightclaw::agent::types::MemoryProvider::Hindsight;
         memory_api_key = None;
         memory_bank_id = None;
+        memory_recall_budget = rightclaw::init::DEFAULT_RECALL_BUDGET;
+        memory_recall_max_tokens = rightclaw::init::DEFAULT_RECALL_MAX_TOKENS;
     } else {
         // Wizard state machine: Esc goes back to previous step.
         #[derive(Clone, Copy)]
@@ -1147,6 +1151,8 @@ fn cmd_init(
             rightclaw::agent::types::MemoryProvider::Hindsight,
             None::<String>,
             None::<String>,
+            rightclaw::init::DEFAULT_RECALL_BUDGET,
+            rightclaw::init::DEFAULT_RECALL_MAX_TOKENS,
         );
 
         loop {
@@ -1221,8 +1227,8 @@ fn cmd_init(
                     }
                 }
                 Step::Memory => match rightclaw::init::prompt_memory_config("right")? {
-                    Some((p, k, b)) => {
-                        w_mem = (p, k, b);
+                    Some((p, k, b, rb, rt)) => {
+                        w_mem = (p, k, b, rb, rt);
                         step = Step::Done;
                     }
                     None => {
@@ -1244,6 +1250,8 @@ fn cmd_init(
         memory_provider = w_mem.0;
         memory_api_key = w_mem.1;
         memory_bank_id = w_mem.2;
+        memory_recall_budget = w_mem.3;
+        memory_recall_max_tokens = w_mem.4;
     }
 
     rightclaw::init::init_rightclaw_home(
@@ -1255,6 +1263,8 @@ fn cmd_init(
         memory_provider,
         memory_api_key,
         memory_bank_id,
+        memory_recall_budget,
+        memory_recall_max_tokens,
     )?;
 
     // Run codegen for the default "right" agent.
@@ -1493,6 +1503,16 @@ fn cmd_agent_init(
                 .unwrap_or_default(),
             memory_api_key: config.memory.as_ref().and_then(|m| m.api_key.clone()),
             memory_bank_id: config.memory.as_ref().and_then(|m| m.bank_id.clone()),
+            memory_recall_budget: config
+                .memory
+                .as_ref()
+                .map(|m| m.recall_budget.clone())
+                .unwrap_or(rightclaw::init::DEFAULT_RECALL_BUDGET),
+            memory_recall_max_tokens: config
+                .memory
+                .as_ref()
+                .map(|m| m.recall_max_tokens)
+                .unwrap_or(rightclaw::init::DEFAULT_RECALL_MAX_TOKENS),
         }
     } else {
         // Fresh init: optionally restore from backup or run wizard.
@@ -1537,6 +1557,8 @@ fn cmd_agent_init(
                 memory_provider: rightclaw::agent::types::MemoryProvider::Hindsight,
                 memory_api_key: None,
                 memory_bank_id: None,
+                memory_recall_budget: rightclaw::init::DEFAULT_RECALL_BUDGET,
+                memory_recall_max_tokens: rightclaw::init::DEFAULT_RECALL_MAX_TOKENS,
             }
         } else {
             #[derive(Clone, Copy)]
@@ -1564,6 +1586,8 @@ fn cmd_agent_init(
                 rightclaw::agent::types::MemoryProvider::Hindsight,
                 None::<String>,
                 None::<String>,
+                rightclaw::init::DEFAULT_RECALL_BUDGET,
+                rightclaw::init::DEFAULT_RECALL_MAX_TOKENS,
             );
 
             loop {
@@ -1616,8 +1640,8 @@ fn cmd_agent_init(
                         }
                     },
                     Step::Memory => match rightclaw::init::prompt_memory_config(name)? {
-                        Some((p, k, b)) => {
-                            w_mem = (p, k, b);
+                        Some((p, k, b, rb, rt)) => {
+                            w_mem = (p, k, b, rb, rt);
                             step = Step::Done;
                         }
                         None => {
@@ -1642,6 +1666,8 @@ fn cmd_agent_init(
                 memory_provider: w_mem.0,
                 memory_api_key: w_mem.1,
                 memory_bank_id: w_mem.2,
+                memory_recall_budget: w_mem.3,
+                memory_recall_max_tokens: w_mem.4,
             }
         }
     };

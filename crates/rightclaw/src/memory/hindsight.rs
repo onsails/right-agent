@@ -54,6 +54,13 @@ pub struct BankProfile {
     pub name: Option<String>,
 }
 
+/// Response from `GET /v1/default/banks` (list banks).
+#[derive(Debug, Deserialize)]
+struct ListBanksResponse {
+    #[serde(default)]
+    banks: Vec<BankProfile>,
+}
+
 /// Retain request item.
 #[derive(Debug, Clone, Serialize)]
 pub struct RetainItem {
@@ -292,6 +299,32 @@ impl HindsightClient {
         resp.json::<BankProfile>()
             .await
             .map_err(MemoryError::from_reqwest)
+    }
+
+    /// List all banks accessible with the configured API key.
+    ///
+    /// Read-only, no side effects — used for API-key validation in the
+    /// `agent config` wizard.
+    pub async fn list_banks(&self) -> Result<Vec<BankProfile>, MemoryError> {
+        let url = format!("{}/v1/default/banks", self.base_url);
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .timeout(RECALL_TIMEOUT)
+            .send()
+            .await
+            .map_err(MemoryError::from_reqwest)?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MemoryError::Hindsight { status, body });
+        }
+
+        let response: ListBanksResponse = resp.json().await.map_err(MemoryError::from_reqwest)?;
+        Ok(response.banks)
     }
 }
 
@@ -622,6 +655,66 @@ mod tests {
 
         match err {
             MemoryError::Hindsight { status, .. } => assert_eq!(status, 401),
+            other => panic!("expected Hindsight error, got: {other:?}"),
+        }
+    }
+
+    // --- list_banks tests ---
+
+    #[tokio::test]
+    async fn list_banks_success_non_empty() {
+        let (handle, url) = mock_hindsight_server(
+            r#"{"banks": [{"bank_id": "a", "name": "Bank A"}, {"bank_id": "b"}]}"#,
+            200,
+        )
+        .await;
+
+        let client = test_client(&url);
+        let banks = client.list_banks().await.unwrap();
+
+        assert_eq!(banks.len(), 2);
+        assert_eq!(banks[0].bank_id, "a");
+        assert_eq!(banks[0].name.as_deref(), Some("Bank A"));
+        assert_eq!(banks[1].bank_id, "b");
+        assert!(banks[1].name.is_none());
+
+        let (method_line, auth, _body) = handle.await.unwrap();
+        assert!(method_line.starts_with("GET"));
+        assert!(method_line.contains("/v1/default/banks"));
+        assert!(auth.to_lowercase().contains("bearer hs_testkey"));
+    }
+
+    #[tokio::test]
+    async fn list_banks_success_empty() {
+        let (_handle, url) = mock_hindsight_server(r#"{"banks": []}"#, 200).await;
+
+        let client = test_client(&url);
+        let banks = client.list_banks().await.unwrap();
+        assert!(banks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_banks_401_error() {
+        let (_handle, url) = mock_hindsight_server(r#"{"error": "invalid api key"}"#, 401).await;
+
+        let client = test_client(&url);
+        let err = client.list_banks().await.unwrap_err();
+
+        match err {
+            MemoryError::Hindsight { status, .. } => assert_eq!(status, 401),
+            other => panic!("expected Hindsight error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_banks_500_error() {
+        let (_handle, url) = mock_hindsight_server(r#"{"error": "upstream failure"}"#, 500).await;
+
+        let client = test_client(&url);
+        let err = client.list_banks().await.unwrap_err();
+
+        match err {
+            MemoryError::Hindsight { status, .. } => assert_eq!(status, 500),
             other => panic!("expected Hindsight error, got: {other:?}"),
         }
     }

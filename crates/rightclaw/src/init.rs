@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::agent::types::{MemoryProvider, NetworkPolicy, SandboxMode};
+use crate::agent::types::{MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode};
+
+/// Default recall budget used when the user doesn't override it.
+pub const DEFAULT_RECALL_BUDGET: RecallBudget = RecallBudget::Mid;
+/// Default recall max tokens used when the user doesn't override it.
+pub const DEFAULT_RECALL_MAX_TOKENS: u32 = 4096;
 
 /// Preserved config from a previous agent, used during `--force` re-init.
 pub struct InitOverrides {
@@ -14,6 +19,8 @@ pub struct InitOverrides {
     pub memory_provider: MemoryProvider,
     pub memory_api_key: Option<String>,
     pub memory_bank_id: Option<String>,
+    pub memory_recall_budget: RecallBudget,
+    pub memory_recall_max_tokens: u32,
 }
 
 const DEFAULT_AGENTS: &str = include_str!("../templates/right/agent/AGENTS.md");
@@ -45,6 +52,8 @@ pub fn init_agent(
         memory_provider: MemoryProvider::File,
         memory_api_key: None,
         memory_bank_id: None,
+        memory_recall_budget: DEFAULT_RECALL_BUDGET,
+        memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
     };
     let ov = overrides.unwrap_or(&default_overrides);
 
@@ -150,6 +159,16 @@ pub fn init_agent(
             if let Some(ref bank) = ov.memory_bank_id {
                 memory_section.push_str(&format!("  bank_id: \"{bank}\"\n"));
             }
+            if ov.memory_recall_budget != DEFAULT_RECALL_BUDGET {
+                memory_section
+                    .push_str(&format!("  recall_budget: {}\n", ov.memory_recall_budget));
+            }
+            if ov.memory_recall_max_tokens != DEFAULT_RECALL_MAX_TOKENS {
+                memory_section.push_str(&format!(
+                    "  recall_max_tokens: {}\n",
+                    ov.memory_recall_max_tokens
+                ));
+            }
             yaml.push_str(&memory_section);
         }
 
@@ -227,6 +246,8 @@ pub fn init_rightclaw_home(
     memory_provider: MemoryProvider,
     memory_api_key: Option<String>,
     memory_bank_id: Option<String>,
+    memory_recall_budget: RecallBudget,
+    memory_recall_max_tokens: u32,
 ) -> miette::Result<()> {
     let agents_parent = crate::config::agents_dir(home);
     if agents_parent.join("right").exists() {
@@ -246,6 +267,8 @@ pub fn init_rightclaw_home(
         memory_provider,
         memory_api_key,
         memory_bank_id,
+        memory_recall_budget,
+        memory_recall_max_tokens,
     };
     let _agents_dir = init_agent(&agents_parent, "right", Some(&overrides))?;
 
@@ -378,28 +401,125 @@ pub fn prompt_hindsight_bank_id(agent_name: &str) -> miette::Result<Option<Optio
     }
 }
 
+/// Prompt for Hindsight recall budget. Returns `Ok(None)` on Esc (back).
+pub fn prompt_recall_budget() -> miette::Result<Option<RecallBudget>> {
+    let options = vec![
+        "Mid — balanced (default)",
+        "Low — smaller context, cheaper",
+        "High — more context, higher cost",
+    ];
+    let result = inquire::Select::new("Recall budget:", options)
+        .with_starting_cursor(0)
+        .prompt();
+    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    Ok(Some(if choice.starts_with("Low") {
+        RecallBudget::Low
+    } else if choice.starts_with("High") {
+        RecallBudget::High
+    } else {
+        RecallBudget::Mid
+    }))
+}
+
+/// Prompt for recall max tokens. Returns `Ok(None)` on Esc (back).
+/// Empty input means "use default".
+pub fn prompt_recall_max_tokens() -> miette::Result<Option<u32>> {
+    let result = inquire::Text::new(&format!(
+        "Recall max tokens (default: {DEFAULT_RECALL_MAX_TOKENS}):"
+    ))
+    .prompt();
+    let Some(input) = inquire_back(result)? else { return Ok(None) };
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(Some(DEFAULT_RECALL_MAX_TOKENS));
+    }
+    let parsed: u32 = trimmed
+        .parse()
+        .map_err(|e| miette::miette!("invalid integer '{trimmed}': {e}"))?;
+    Ok(Some(parsed))
+}
+
+/// Result of `validate_hindsight_key`.
+#[derive(Debug, Clone)]
+pub enum ValidationResult {
+    /// API key is accepted — 200 from `GET /v1/default/banks`.
+    Valid { banks: usize },
+    /// API key is rejected — 401/403 from Hindsight.
+    Invalid { status: u16 },
+    /// Hindsight unreachable — timeout, 5xx, or network error.
+    /// Caller decides whether to proceed despite this.
+    Unreachable { detail: String },
+}
+
+/// Validate a Hindsight API key by calling `GET /v1/default/banks`.
+///
+/// Read-only, no side effects. Uses dummy `bank_id` and `budget` since the
+/// list-banks endpoint does not depend on either. Returns a classified
+/// [`ValidationResult`] so wizards can show contextual messages.
+pub async fn validate_hindsight_key(api_key: &str) -> ValidationResult {
+    let client = crate::memory::hindsight::HindsightClient::new(
+        api_key,
+        "_probe",
+        "mid",
+        DEFAULT_RECALL_MAX_TOKENS,
+        None,
+    );
+    match client.list_banks().await {
+        Ok(banks) => ValidationResult::Valid {
+            banks: banks.len(),
+        },
+        Err(crate::memory::MemoryError::Hindsight { status, .. })
+            if status == 401 || status == 403 =>
+        {
+            ValidationResult::Invalid { status }
+        }
+        Err(e) => ValidationResult::Unreachable {
+            detail: format!("{e:#}"),
+        },
+    }
+}
+
 /// Run the memory configuration wizard with Esc-to-go-back support.
 ///
 /// Returns `None` on Esc from the provider selection (caller should go back).
 pub fn prompt_memory_config(
     agent_name: &str,
-) -> miette::Result<Option<(MemoryProvider, Option<String>, Option<String>)>> {
+) -> miette::Result<
+    Option<(
+        MemoryProvider,
+        Option<String>,
+        Option<String>,
+        RecallBudget,
+        u32,
+    )>,
+> {
     loop {
         let Some(provider) = prompt_memory_provider()? else {
             return Ok(None);
         };
         if !matches!(provider, MemoryProvider::Hindsight) {
-            return Ok(Some((provider, None, None)));
+            return Ok(Some((
+                provider,
+                None,
+                None,
+                DEFAULT_RECALL_BUDGET,
+                DEFAULT_RECALL_MAX_TOKENS,
+            )));
         }
         // Hindsight: prompt for API key, Esc goes back to provider selection.
         let Some(api_key) = prompt_hindsight_api_key()? else {
             continue;
         };
-        // Prompt for bank ID, Esc goes back to API key? No — back to provider.
         let Some(bank_id) = prompt_hindsight_bank_id(agent_name)? else {
             continue;
         };
-        return Ok(Some((provider, api_key, bank_id)));
+        let Some(budget) = prompt_recall_budget()? else {
+            continue;
+        };
+        let Some(max_tokens) = prompt_recall_max_tokens()? else {
+            continue;
+        };
+        return Ok(Some((provider, api_key, bank_id, budget, max_tokens)));
     }
 }
 
@@ -415,7 +535,7 @@ mod tests {
     #[test]
     fn init_creates_default_agent_files() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let agents_dir = dir.path().join("agents").join("right");
         assert!(!agents_dir.join("IDENTITY.md").exists(), "IDENTITY.md must not be created by init");
@@ -448,9 +568,9 @@ mod tests {
     #[test]
     fn init_errors_if_already_initialized() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
-        let result = init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None);
+        let result = init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS);
         assert!(result.is_err());
         let err = format!("{:?}", result.unwrap_err());
         assert!(
@@ -467,7 +587,7 @@ mod tests {
     #[test]
     fn init_with_telegram_writes_token_inline_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -479,7 +599,7 @@ mod tests {
     #[test]
     fn init_creates_bootstrap_md() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let bootstrap = std::fs::read_to_string(
             dir.path().join("agents/right/BOOTSTRAP.md"),
@@ -526,7 +646,7 @@ mod tests {
     #[test]
     fn init_with_telegram_creates_settings_json() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let settings_path = dir
             .path()
@@ -560,7 +680,7 @@ mod tests {
     #[test]
     fn init_creates_settings_without_sandbox_section() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let settings_path = dir.path().join("agents/right/.claude/settings.json");
         let content = std::fs::read_to_string(&settings_path).unwrap();
@@ -577,7 +697,7 @@ mod tests {
     #[test]
     fn init_without_telegram_creates_settings_without_plugin() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let settings_path = dir
             .path()
@@ -618,6 +738,8 @@ mod tests {
             MemoryProvider::File,
             None,
             None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
         )
         .unwrap();
 
@@ -656,6 +778,8 @@ mod tests {
             MemoryProvider::File,
             None,
             None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
         )
         .unwrap();
 
@@ -677,7 +801,7 @@ mod tests {
     #[test]
     fn init_with_telegram_no_chat_ids_does_not_write_allowed_chat_ids() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -693,7 +817,7 @@ mod tests {
     #[test]
     fn init_writes_network_policy_restrictive_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Restrictive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Restrictive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -705,7 +829,7 @@ mod tests {
     #[test]
     fn init_writes_network_policy_permissive_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None).unwrap();
+        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -727,6 +851,8 @@ mod tests {
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
             memory_bank_id: None,
+            memory_recall_budget: DEFAULT_RECALL_BUDGET,
+            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
         init_agent(
             &dir.path().join("agents"),
@@ -759,6 +885,8 @@ mod tests {
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
             memory_bank_id: None,
+            memory_recall_budget: DEFAULT_RECALL_BUDGET,
+            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
         init_agent(
             &dir.path().join("agents"),
@@ -786,6 +914,8 @@ mod tests {
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
             memory_bank_id: None,
+            memory_recall_budget: DEFAULT_RECALL_BUDGET,
+            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
         init_agent(
             &dir.path().join("agents"),
@@ -814,6 +944,8 @@ mod tests {
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
             memory_bank_id: None,
+            memory_recall_budget: DEFAULT_RECALL_BUDGET,
+            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
         init_agent(&dir.path().join("agents"), "testbot", Some(&overrides)).unwrap();
 
@@ -843,6 +975,8 @@ mod tests {
             memory_provider: MemoryProvider::File,
             memory_api_key: None,
             memory_bank_id: None,
+            memory_recall_budget: DEFAULT_RECALL_BUDGET,
+            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
         init_agent(
             &dir.path().join("agents"),
