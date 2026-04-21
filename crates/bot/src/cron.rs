@@ -177,6 +177,30 @@ async fn cleanup_old_logs(
     }
 }
 
+/// Classify the FailureKind of a cron job based on its exit code, its last
+/// `result` stream event (if any), and the spec's configured limits.
+fn classify_cron_failure(
+    exit_code: Option<i32>,
+    raw_detail: &str,
+    max_budget_usd: f64,
+    max_turns: Option<u32>,
+) -> crate::reflection::FailureKind {
+    let lower = raw_detail.to_ascii_lowercase();
+    if lower.contains("max budget") || lower.contains("budget exceeded") {
+        return crate::reflection::FailureKind::BudgetExceeded {
+            limit_usd: max_budget_usd,
+        };
+    }
+    if lower.contains("max turns") || lower.contains("turn limit") {
+        return crate::reflection::FailureKind::MaxTurns {
+            limit: max_turns.unwrap_or(0),
+        };
+    }
+    crate::reflection::FailureKind::NonZeroExit {
+        code: exit_code.unwrap_or(-1),
+    }
+}
+
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
@@ -287,7 +311,7 @@ async fn execute_job(
         max_budget_usd: Some(spec.max_budget_usd),
         max_turns: None,
         resume_session_id: None,
-        new_session_id: None,
+        new_session_id: Some(run_id.clone()),
         disallowed_tools,
         extra_args: vec![],
         prompt: Some(spec.prompt.clone()),
@@ -583,14 +607,62 @@ async fn execute_job(
         }
     } else {
         let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
-        let error_detail = find_last_result_line(&collected_lines)
+        let raw_detail = find_last_result_line(&collected_lines)
             .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
             .and_then(|v| v.get("result").and_then(|r| r.as_str()).map(String::from))
             .unwrap_or_else(|| stderr_str.to_string());
-        let content =
-            format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{error_detail}");
+        let raw_content =
+            format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{raw_detail}");
+
+        let failure_kind =
+            classify_cron_failure(exit_code, &raw_detail, spec.max_budget_usd, None);
+
+        // Best-effort ring buffer: parse last ~5 stream-json lines from collected_lines,
+        // keeping only displayable events.
+        let ring_tail: std::collections::VecDeque<_> = collected_lines
+            .iter()
+            .rev()
+            .take(10)
+            .map(|line| crate::telegram::stream::parse_stream_event(line))
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::telegram::stream::StreamEvent::Text(_)
+                        | crate::telegram::stream::StreamEvent::Thinking
+                        | crate::telegram::stream::StreamEvent::ToolUse { .. }
+                )
+            })
+            .take(5)
+            .collect();
+
+        let refl_ctx = crate::reflection::ReflectionContext {
+            session_uuid: run_id.clone(),
+            failure: failure_kind,
+            ring_buffer_tail: ring_tail,
+            limits: crate::reflection::ReflectionLimits::CRON,
+            agent_name: agent_name.to_string(),
+            agent_dir: agent_dir.to_path_buf(),
+            ssh_config_path: ssh_config_path.map(std::path::PathBuf::from),
+            resolved_sandbox: resolved_sandbox.map(String::from),
+            parent_source: crate::reflection::ParentSource::Cron {
+                job_name: job_name.to_string(),
+            },
+            model: model.map(String::from),
+        };
+
+        let reflected_content = match crate::reflection::reflect_on_failure(refl_ctx).await {
+            Ok(text) => {
+                tracing::info!(job = %job_name, "cron reflection reply produced");
+                text
+            }
+            Err(e) => {
+                tracing::warn!(job = %job_name, "cron reflection failed: {e:#}; using raw content");
+                raw_content.clone()
+            }
+        };
+
         let notify = CronNotify {
-            content,
+            content: reflected_content,
             attachments: None,
         };
         match serde_json::to_string(&notify) {
@@ -1092,6 +1164,45 @@ async fn run_job_loop(
             // Clean up finished handles to prevent unbounded growth
             guard.retain(|(_, h)| !h.is_finished());
             guard.push((job_name.clone(), handle));
+        }
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+    use crate::reflection::FailureKind;
+
+    #[test]
+    fn classify_budget_exceeded_from_text() {
+        let kind = classify_cron_failure(Some(1), "the max budget was exceeded", 2.0, Some(30));
+        assert!(matches!(kind, FailureKind::BudgetExceeded { .. }));
+    }
+
+    #[test]
+    fn classify_max_turns_from_text() {
+        let kind = classify_cron_failure(
+            Some(1),
+            "reached the max turns for this session",
+            2.0,
+            Some(30),
+        );
+        assert!(matches!(kind, FailureKind::MaxTurns { .. }));
+    }
+
+    #[test]
+    fn classify_other_to_non_zero_exit() {
+        let kind = classify_cron_failure(Some(137), "OOM killed", 2.0, None);
+        assert!(matches!(kind, FailureKind::NonZeroExit { code: 137 }));
+    }
+
+    #[test]
+    fn classify_unknown_exit_defaults_to_minus_one() {
+        let kind = classify_cron_failure(None, "weird failure", 2.0, None);
+        if let FailureKind::NonZeroExit { code } = kind {
+            assert_eq!(code, -1);
+        } else {
+            panic!("expected NonZeroExit");
         }
     }
 }
