@@ -1604,7 +1604,12 @@ async fn send_error_to_telegram(
         send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
     }
     if let Err(e) = send.await {
-        tracing::error!("failed to send error reply: {:#}", e);
+        tracing::error!(
+            chat_id = ?tg_chat_id,
+            eff_thread_id,
+            "failed to send error reply: {:#}",
+            e
+        );
     }
 }
 
