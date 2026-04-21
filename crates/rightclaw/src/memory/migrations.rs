@@ -18,6 +18,8 @@ const V14_SCHEMA: &str = include_str!("sql/v14_memory_failure_handling.sql");
 const V15_SCHEMA: &str = include_str!("sql/v15_usage_events.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V16_SCHEMA: &str = include_str!("sql/v16_usage_api_key_source.sql");
+#[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
+const V17_SCHEMA: &str = include_str!("sql/v17_cron_target.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -114,6 +116,30 @@ fn v16_usage_api_key_source(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v17: Add target_chat_id and target_thread_id to cron_specs.
+///
+/// Idempotent — checks pragma_table_info before each ALTER. Both columns
+/// are nullable; the MCP layer validates presence on new rows. NULL on
+/// existing rows is surfaced by `doctor::check_cron_targets`.
+fn v17_cron_target(tx: &Transaction) -> Result<(), HookError> {
+    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    };
+
+    if !has_column("target_chat_id")? {
+        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN target_chat_id INTEGER")?;
+    }
+    if !has_column("target_thread_id")? {
+        tx.execute_batch("ALTER TABLE cron_specs ADD COLUMN target_thread_id INTEGER")?;
+    }
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -132,6 +158,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V14_SCHEMA),
         M::up(V15_SCHEMA),
         M::up_with_hook("", v16_usage_api_key_source),
+        M::up_with_hook("", v17_cron_target),
     ])
 });
 
@@ -785,5 +812,58 @@ mod tests {
             .filter_map(|r| r.ok())
             .collect();
         assert!(cols.contains(&"api_key_source".to_string()));
+    }
+
+    #[test]
+    fn v17_adds_cron_target_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let chat_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = 'target_chat_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(chat_present, 1, "target_chat_id column missing");
+        let thread_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('cron_specs') WHERE name = 'target_thread_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(thread_present, 1, "target_thread_id column missing");
+    }
+
+    #[test]
+    fn v17_is_idempotent_on_rerun() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        // Manually re-run the v17 hook; it must not error.
+        let tx = conn.transaction().unwrap();
+        super::v17_cron_target(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+
+    #[test]
+    fn v17_existing_rows_get_null_target() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('legacy', '*/5 * * * *', 'p', 1.0, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        let target: Option<i64> = conn
+            .query_row(
+                "SELECT target_chat_id FROM cron_specs WHERE job_name = 'legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(target.is_none(), "legacy row should have NULL target_chat_id");
     }
 }
