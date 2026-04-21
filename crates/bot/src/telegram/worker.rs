@@ -548,6 +548,19 @@ pub fn spawn_worker(
 
             // Send reply (D-04, D-05, DIS-05, DIS-06)
             let mut reply_text_for_retain: Option<String> = None;
+            // Common reply-to policy:
+            //  - group: always thread to the triggering message
+            //  - single-message batch: thread to that message
+            //  - multi-message batch: deferred to output.reply_to_message_id on the
+            //    success path; for reflection replies (Err path) we fall back to the
+            //    first message since we don't have a CC-picked id.
+            let default_reply_to = if is_group {
+                batch.first().map(|m| m.message_id)
+            } else if batch.len() == 1 {
+                Some(batch[0].message_id)
+            } else {
+                batch.first().map(|m| m.message_id)
+            };
             match reply_result {
                 Ok(Some(output)) => {
                     let reply_to = if is_group {
@@ -704,6 +717,9 @@ pub fn spawn_worker(
                                 let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
                             }
                             // Send reply via the same md→html pipeline as the success path.
+                            // Mirror the success path's reply-threading so reflection replies
+                            // don't appear unthreaded in group chats.
+                            let reply_to = default_reply_to;
                             let html = super::markdown::md_to_telegram_html(&reply_text);
                             let parts = super::markdown::split_html_message(&html);
                             for part in &parts {
@@ -713,6 +729,12 @@ pub fn spawn_worker(
                                     send = send.message_thread_id(ThreadId(MessageId(
                                         eff_thread_id as i32,
                                     )));
+                                }
+                                if let Some(ref_id) = reply_to {
+                                    send = send.reply_parameters(ReplyParameters {
+                                        message_id: MessageId(ref_id),
+                                        ..Default::default()
+                                    });
                                 }
                                 if let Err(e) = send.await {
                                     tracing::warn!(
@@ -726,6 +748,12 @@ pub fn spawn_worker(
                                         fb = fb.message_thread_id(ThreadId(MessageId(
                                             eff_thread_id as i32,
                                         )));
+                                    }
+                                    if let Some(ref_id) = reply_to {
+                                        fb = fb.reply_parameters(ReplyParameters {
+                                            message_id: MessageId(ref_id),
+                                            ..Default::default()
+                                        });
                                     }
                                     if let Err(e2) = fb.await {
                                         tracing::error!(
@@ -746,12 +774,13 @@ pub fn spawn_worker(
                             match thinking_msg_id {
                                 Some(msg_id) => {
                                     // Try to edit the banner into the raw error.
-                                    // If the edit fails (e.g. HTML parse issue),
-                                    // delete the banner and send as a fresh message.
+                                    // raw_message is plain text (stderr snippets, file paths) —
+                                    // do NOT set ParseMode::Html or the edit fails on stderr
+                                    // with <, >, & characters. Fall back to a fresh message
+                                    // if the edit fails for any other reason.
                                     let edit_result = ctx
                                         .bot
                                         .edit_message_text(tg_chat_id, msg_id, &raw_message)
-                                        .parse_mode(teloxide::types::ParseMode::Html)
                                         .reply_markup(
                                             teloxide::types::InlineKeyboardMarkup::default(),
                                         )
@@ -1547,6 +1576,13 @@ async fn invoke_cc(
         tracing::warn!(?chat_id, stderr = %stderr_str, "CC stderr");
     }
 
+    let stdout_str = result_line.unwrap_or_default();
+
+    // If we're about to return a Reflectable, spawn_worker will edit the
+    // thinking message into a banner — skip the cost/turns finalization here
+    // to avoid a visible flash of the final summary before the banner.
+    let will_reflect = timed_out || (exit_code != 0 && !is_auth_error(&stdout_str));
+
     // Final thinking message update based on completion mode.
     if let Some(msg_id) = thinking_msg_id {
         if stopped {
@@ -1566,7 +1602,7 @@ async fn invoke_cc(
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
-        } else if ctx.show_thinking && !is_group {
+        } else if !will_reflect && ctx.show_thinking && !is_group {
             // Normal finish with thinking — final cost/turns, remove keyboard.
             let text = super::stream::format_thinking_message(ring_buffer.events(), &usage);
             let _ = ctx
@@ -1575,10 +1611,12 @@ async fn invoke_cc(
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
-        } else {
+        } else if !will_reflect {
             // Normal finish without thinking (or group chat) — delete the anchor message.
             let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
         }
+        // When will_reflect is true, DO NOT touch the thinking message here —
+        // spawn_worker will edit it into a banner.
     }
 
     // Handle user-initiated stop.
@@ -1607,8 +1645,6 @@ async fn invoke_cc(
             thinking_msg_id,
         });
     }
-
-    let stdout_str = result_line.unwrap_or_default();
 
     // DIS-06: non-zero exit → error reply
     if exit_code != 0 {
