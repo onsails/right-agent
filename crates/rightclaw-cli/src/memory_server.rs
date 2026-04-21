@@ -49,6 +49,14 @@ pub struct CronCreateParams {
     #[schemars(description = "Maximum dollar spend per invocation. Default: 2.0")]
     #[serde(default, deserialize_with = "deserialize_lenient_f64")]
     pub max_budget_usd: Option<f64>,
+    #[schemars(
+        description = "Telegram chat id to deliver this cron's results to. Required. For DMs use the user_id; for groups use the negative chat id. Must be present in the agent's allowlist (allowlist.yaml). Read this from the `chat.id` field in the incoming message YAML unless the user explicitly asks for a different chat."
+    )]
+    pub target_chat_id: i64,
+    #[schemars(
+        description = "Optional supergroup topic (message_thread_id). Set only when the cron should reply to a specific topic; leave unset for ordinary chat delivery."
+    )]
+    pub target_thread_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -261,8 +269,8 @@ impl MemoryServer {
             params.max_budget_usd,
             params.recurring,
             params.run_at.as_deref(),
-            None,
-            None,
+            Some(params.target_chat_id),
+            params.target_thread_id,
         )
         .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(

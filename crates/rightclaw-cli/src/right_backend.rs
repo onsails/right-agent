@@ -158,6 +158,10 @@ impl RightBackend {
     ) -> Result<CallToolResult, anyhow::Error> {
         let params: CronCreateParams =
             serde_json::from_value(args.clone()).context("invalid cron_create params")?;
+        let agent_dir = self.agents_dir.join(agent_name);
+        if let Err(msg) = validate_target_against_allowlist(&agent_dir, params.target_chat_id) {
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
         let result = rightclaw::cron_spec::create_spec_v2(
@@ -169,8 +173,8 @@ impl RightBackend {
             params.max_budget_usd,
             params.recurring,
             params.run_at.as_deref(),
-            None,
-            None,
+            Some(params.target_chat_id),
+            params.target_thread_id,
         )
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(
@@ -410,6 +414,32 @@ impl RightBackend {
                 missing.join(", ")
             ))]))
         }
+    }
+}
+
+/// Validate that `chat_id` is in the agent's allowlist (users or groups).
+/// Reads `allowlist.yaml` on demand from `agent_dir`.
+fn validate_target_against_allowlist(agent_dir: &Path, chat_id: i64) -> Result<(), String> {
+    let file = match rightclaw::agent::allowlist::read_file(agent_dir) {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return Err(format!(
+                "target_chat_id {chat_id} cannot be validated: allowlist.yaml does not exist for this agent"
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "target_chat_id {chat_id} cannot be validated: failed to read allowlist.yaml: {e}"
+            ));
+        }
+    };
+    let state = rightclaw::agent::allowlist::AllowlistState::from_file(file);
+    if state.is_chat_allowed(chat_id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "target_chat_id {chat_id} is not in allowlist; use /allow (DM) or /allow_all (group) from a trusted account first"
+        ))
     }
 }
 

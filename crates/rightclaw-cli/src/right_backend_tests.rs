@@ -303,3 +303,100 @@ async fn bootstrap_done_sandbox_files_missing() {
     rightclaw::openshell::delete_sandbox(sandbox_name).await;
     rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
+
+// ---------------------------------------------------------------------------
+// Allowlist validation tests for cron_create
+// ---------------------------------------------------------------------------
+
+use rightclaw::agent::allowlist::{AllowedUser, AllowlistFile};
+
+fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
+    let now = chrono::Utc::now();
+    let mut file = AllowlistFile::default();
+    for &id in users {
+        file.users.push(AllowedUser { id, label: None, added_by: None, added_at: now });
+    }
+    for &id in groups {
+        file.groups.push(rightclaw::agent::allowlist::AllowedGroup {
+            id, label: None, opened_by: None, opened_at: now,
+        });
+    }
+    rightclaw::agent::allowlist::write_file(agent_dir, &file).unwrap();
+}
+
+#[tokio::test]
+async fn cron_create_rejects_target_not_in_allowlist() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[100], &[]);
+    // Initialize the agent's data.db so get_conn succeeds.
+    rightclaw::memory::open_connection(&agent_dir, true).unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    let args = serde_json::json!({
+        "job_name": "j1",
+        "schedule": "*/5 * * * *",
+        "prompt": "p",
+        "target_chat_id": -999_i64,
+    });
+    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await.unwrap();
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(
+        text.contains("not in allowlist") || text.contains("-999"),
+        "expected allowlist rejection, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn cron_create_accepts_target_in_allowlist_group() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[], &[-200]);
+    rightclaw::memory::open_connection(&agent_dir, true).unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    let args = serde_json::json!({
+        "job_name": "j1",
+        "schedule": "*/5 * * * *",
+        "prompt": "p",
+        "target_chat_id": -200_i64,
+        "target_thread_id": 7_i64,
+    });
+    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await.unwrap();
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(text.contains("Created"), "got: {text}");
+}
+
+#[tokio::test]
+async fn cron_create_rejects_missing_target_chat_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().to_path_buf();
+    let agent_dir = agents_dir.join("a1");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    write_allowlist(&agent_dir, &[100], &[]);
+    rightclaw::memory::open_connection(&agent_dir, true).unwrap();
+
+    let backend = RightBackend::new(agents_dir.clone(), None);
+    let args = serde_json::json!({
+        "job_name": "j1",
+        "schedule": "*/5 * * * *",
+        "prompt": "p",
+        // target_chat_id deliberately omitted
+    });
+    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await;
+    assert!(result.is_err(), "missing required field must surface as error");
+}
