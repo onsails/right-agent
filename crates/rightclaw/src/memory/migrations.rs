@@ -849,7 +849,9 @@ mod tests {
     #[test]
     fn v17_existing_rows_get_null_target() {
         let mut conn = Connection::open_in_memory().unwrap();
-        MIGRATIONS.to_latest(&mut conn).unwrap();
+        // Stop one version before v17 so the legacy row is inserted into a table
+        // without target_chat_id / target_thread_id columns.
+        MIGRATIONS.to_version(&mut conn, 16).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
@@ -857,6 +859,8 @@ mod tests {
             [&now],
         )
         .unwrap();
+        // Apply v17 — this is what we're actually testing.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
         let target: Option<i64> = conn
             .query_row(
                 "SELECT target_chat_id FROM cron_specs WHERE job_name = 'legacy'",
