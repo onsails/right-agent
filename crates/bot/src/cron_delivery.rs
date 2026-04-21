@@ -207,13 +207,39 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
 const IDLE_THRESHOLD_SECS: i64 = 180; // 3 minutes — within CC's 5-min prompt cache TTL
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 
+/// Outcome of resolving a pending cron's delivery target against the live allowlist.
+#[derive(Debug)]
+pub enum TargetClassification {
+    NoTarget,
+    Denied,
+    Ready {
+        chat_id: i64,
+        thread_id: Option<i64>,
+    },
+}
+
+/// Classify a pending cron result. Pure function; no side effects.
+pub fn classify_pending_target(
+    pending: &PendingCronResult,
+    allowlist: &rightclaw::agent::allowlist::AllowlistState,
+) -> TargetClassification {
+    match pending.target_chat_id {
+        None => TargetClassification::NoTarget,
+        Some(id) if !allowlist.is_chat_allowed(id) => TargetClassification::Denied,
+        Some(id) => TargetClassification::Ready {
+            chat_id: id,
+            thread_id: pending.target_thread_id,
+        },
+    }
+}
+
 /// Main delivery loop. Runs as a tokio task.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_delivery_loop(
     agent_dir: PathBuf,
     agent_name: String,
     bot: crate::telegram::BotType,
-    notify_chat_ids: Vec<i64>,
+    allowlist: rightclaw::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
     ssh_config_path: Option<PathBuf>,
     internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
@@ -288,33 +314,63 @@ pub async fn run_delivery_loop(
             continue;
         }
 
+        let allowlist_snapshot = {
+            let guard = allowlist.0.read().expect("allowlist lock poisoned");
+            guard.clone()
+        };
+
+        let (target_chat_id, target_thread_id) = match classify_pending_target(&to_deliver, &allowlist_snapshot) {
+            TargetClassification::NoTarget => {
+                tracing::warn!(
+                    job = %to_deliver.job_name,
+                    run_id = %to_deliver.id,
+                    "cron has no target_chat_id — call cron_update to set one or recreate the cron in the desired chat"
+                );
+                if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "no_target") {
+                    tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
+                }
+                continue;
+            }
+            TargetClassification::Denied => {
+                tracing::warn!(
+                    job = %to_deliver.job_name,
+                    run_id = %to_deliver.id,
+                    target_chat_id = ?to_deliver.target_chat_id,
+                    "cron target chat is not in allowlist — skipping delivery"
+                );
+                if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "denied") {
+                    tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
+                }
+                continue;
+            }
+            TargetClassification::Ready { chat_id, thread_id } => (chat_id, thread_id),
+        };
+
+        let session_id = match crate::telegram::session::get_active_session(&conn, target_chat_id, target_thread_id.unwrap_or(0)) {
+            Ok(s) => s.map(|s| s.root_session_id),
+            Err(e) => {
+                tracing::error!("cron delivery: session lookup failed: {e:#}");
+                None
+            }
+        };
+
         let yaml = format_cron_yaml(&to_deliver, skipped);
         tracing::info!(
             job = %to_deliver.job_name,
             run_id = %to_deliver.id,
             skipped,
+            target_chat_id,
+            ?target_thread_id,
             "delivering cron result through main session"
         );
-
-        let session_id = if notify_chat_ids.is_empty() {
-            None
-        } else {
-            let chat_id = notify_chat_ids[0];
-            match crate::telegram::session::get_active_session(&conn, chat_id, 0) {
-                Ok(s) => s.map(|s| s.root_session_id),
-                Err(e) => {
-                    tracing::error!("cron delivery: session lookup failed: {e:#}");
-                    None
-                }
-            }
-        };
 
         match deliver_through_session(
             &yaml,
             &agent_dir,
             &agent_name,
             &bot,
-            &notify_chat_ids,
+            target_chat_id,
+            target_thread_id,
             ssh_config_path.as_deref(),
             session_id,
             &internal_client,
@@ -379,7 +435,8 @@ async fn deliver_through_session(
     agent_dir: &Path,
     agent_name: &str,
     bot: &crate::telegram::BotType,
-    notify_chat_ids: &[i64],
+    target_chat_id: i64,
+    target_thread_id: Option<i64>,
     ssh_config_path: Option<&Path>,
     session_id: Option<String>,
     internal_client: &rightclaw::mcp::internal_client::InternalClient,
@@ -387,10 +444,6 @@ async fn deliver_through_session(
     upgrade_lock: &tokio::sync::RwLock<()>,
 ) -> Result<(), String> {
     use std::process::Stdio;
-
-    if notify_chat_ids.is_empty() {
-        return Err("no notify_chat_ids configured".into());
-    }
 
     // Block while upgrade is running.
     let _upgrade_guard = upgrade_lock.read().await;
@@ -552,26 +605,32 @@ async fn deliver_through_session(
 
     if let Some(ref content) = reply.content {
         use teloxide::prelude::Requester as _;
+        use teloxide::types::{ChatId, MessageId, ThreadId};
         let html = crate::telegram::markdown::md_to_telegram_html(content);
         let parts = crate::telegram::markdown::split_html_message(&html);
-        for &cid in notify_chat_ids {
-            let chat_id = teloxide::types::ChatId(cid);
-            for part in &parts {
-                let send = bot
-                    .send_message(chat_id, part)
-                    .parse_mode(teloxide::types::ParseMode::Html);
-                if let Err(e) = send.await {
-                    tracing::warn!(
-                        chat_id = cid,
-                        "cron delivery: HTML send failed, retrying plain: {e:#}"
+        let chat_id = ChatId(target_chat_id);
+        for part in &parts {
+            let mut send = bot
+                .send_message(chat_id, part)
+                .parse_mode(teloxide::types::ParseMode::Html);
+            if let Some(t) = target_thread_id {
+                send = send.message_thread_id(ThreadId(MessageId(t as i32)));
+            }
+            if let Err(e) = send.await {
+                tracing::warn!(
+                    chat_id = target_chat_id,
+                    "cron delivery: HTML send failed, retrying plain: {e:#}"
+                );
+                let plain = crate::telegram::markdown::strip_html_tags(part);
+                let mut fallback = bot.send_message(chat_id, &plain);
+                if let Some(t) = target_thread_id {
+                    fallback = fallback.message_thread_id(ThreadId(MessageId(t as i32)));
+                }
+                if let Err(e2) = fallback.await {
+                    tracing::error!(
+                        chat_id = target_chat_id,
+                        "cron delivery: plain text fallback also failed: {e2:#}"
                     );
-                    let plain = crate::telegram::markdown::strip_html_tags(part);
-                    if let Err(e2) = bot.send_message(chat_id, &plain).await {
-                        tracing::error!(
-                            chat_id = cid,
-                            "cron delivery: plain text fallback also failed: {e2:#}"
-                        );
-                    }
                 }
             }
         }
@@ -580,23 +639,21 @@ async fn deliver_through_session(
     if let Some(ref atts) = reply.attachments
         && !atts.is_empty()
     {
-        for &cid in notify_chat_ids {
-            if let Err(e) = crate::telegram::attachments::send_attachments(
-                atts,
-                bot,
-                teloxide::types::ChatId(cid),
-                0,
-                agent_dir,
-                ssh_config_path,
-                resolved_sandbox,
-            )
-            .await
-            {
-                tracing::error!(
-                    chat_id = cid,
-                    "cron delivery: attachment send failed: {e:#}"
-                );
-            }
+        if let Err(e) = crate::telegram::attachments::send_attachments(
+            atts,
+            bot,
+            teloxide::types::ChatId(target_chat_id),
+            target_thread_id.unwrap_or(0),
+            agent_dir,
+            ssh_config_path,
+            resolved_sandbox,
+        )
+        .await
+        {
+            tracing::error!(
+                chat_id = target_chat_id,
+                "cron delivery: attachment send failed: {e:#}"
+            );
         }
     }
 
@@ -852,6 +909,79 @@ mod tests {
         let pending = fetch_pending(&conn).unwrap().unwrap();
         assert!(pending.target_chat_id.is_none());
         assert!(pending.target_thread_id.is_none());
+    }
+
+    #[test]
+    fn null_target_classifies_as_no_target() {
+        let (_dir, conn) = setup_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at) \
+             VALUES ('legacy', '*/5 * * * *', 'p', 1.0, ?1, ?1)",
+            [&now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
+             VALUES ('a', 'legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
+            [],
+        ).unwrap();
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[]));
+        assert!(matches!(outcome, TargetClassification::NoTarget), "got: {outcome:?}");
+    }
+
+    #[test]
+    fn target_not_in_allowlist_classifies_as_denied() {
+        let (_dir, conn) = setup_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, target_chat_id, created_at, updated_at) \
+             VALUES ('agenda', '*/5 * * * *', 'p', 1.0, -777, ?1, ?1)",
+            [&now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
+             VALUES ('a', 'agenda', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
+            [],
+        ).unwrap();
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        let outcome = classify_pending_target(&pending, &fake_allowlist(&[100], &[-200]));
+        assert!(matches!(outcome, TargetClassification::Denied), "got: {outcome:?}");
+    }
+
+    #[test]
+    fn target_in_allowlist_classifies_as_ready() {
+        let (_dir, conn) = setup_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('agenda', '*/5 * * * *', 'p', 1.0, -200, 5, ?1, ?1)",
+            [&now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
+             VALUES ('a', 'agenda', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
+            [],
+        ).unwrap();
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[-200]));
+        assert!(
+            matches!(outcome, TargetClassification::Ready { chat_id: -200, thread_id: Some(5) }),
+            "got: {outcome:?}"
+        );
+    }
+
+    fn fake_allowlist(users: &[i64], groups: &[i64]) -> rightclaw::agent::allowlist::AllowlistState {
+        use rightclaw::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistState};
+        let now = chrono::Utc::now();
+        let mut state = AllowlistState::default();
+        for &id in users {
+            state.add_user(AllowedUser { id, label: None, added_by: None, added_at: now });
+        }
+        for &id in groups {
+            state.add_group(AllowedGroup { id, label: None, opened_by: None, opened_at: now });
+        }
+        state
     }
 
     #[test]
