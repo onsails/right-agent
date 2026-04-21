@@ -54,7 +54,10 @@ impl TunnelState {
 /// 1. Reads `config.yaml` — returns `NotConfigured` if no tunnel section.
 /// 2. Queries process-compose for a `cloudflared` process in `Running` status.
 /// 3. Probes `https://<hostname>/healthz-tunnel-probe` — any HTTP response (even 404) means healthy.
-pub async fn check_tunnel(home: &Path, pc_port: u16) -> TunnelState {
+///
+/// `PcClient::from_home` resolves the PC port from `<home>/run/state.json`; when
+/// this home has no recorded runtime, returns `NotRunning` without probing any port.
+pub async fn check_tunnel(home: &Path) -> TunnelState {
     // Step 1: read config
     let config = match read_global_config(home) {
         Ok(c) => c,
@@ -67,8 +70,9 @@ pub async fn check_tunnel(home: &Path, pc_port: u16) -> TunnelState {
     };
 
     // Step 2: check process-compose for cloudflared
-    let pc = match PcClient::new(pc_port) {
-        Ok(c) => c,
+    let pc = match PcClient::from_home(home) {
+        Ok(Some(c)) => c,
+        Ok(None) => return TunnelState::NotRunning,
         Err(_) => return TunnelState::NotRunning,
     };
 
@@ -156,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn check_tunnel_returns_not_configured_when_no_config() {
         let dir = TempDir::new().unwrap();
-        let state = check_tunnel(dir.path(), 19999).await;
+        let state = check_tunnel(dir.path()).await;
         assert_eq!(state, TunnelState::NotConfigured);
     }
 
@@ -172,8 +176,8 @@ mod tests {
         );
         std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
 
-        // Port 19999 has no server — should get NotRunning
-        let state = check_tunnel(dir.path(), 19999).await;
+        // No <home>/run/state.json → from_home returns None → NotRunning.
+        let state = check_tunnel(dir.path()).await;
         assert_eq!(state, TunnelState::NotRunning);
     }
 }

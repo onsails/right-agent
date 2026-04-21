@@ -670,11 +670,10 @@ fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
 
 /// Check tunnel reachability using the tunnel health module.
 fn check_tunnel_health(home: &Path) -> DoctorCheck {
-    use crate::runtime::pc_client::PC_PORT;
     use crate::tunnel::health::{TunnelState, check_tunnel};
 
     let state = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(check_tunnel(home, PC_PORT))
+        tokio::runtime::Handle::current().block_on(check_tunnel(home))
     });
 
     match state {

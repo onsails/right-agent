@@ -399,6 +399,7 @@ pub fn run_agent_codegen(
             .collect(),
         socket_path: socket_path.display().to_string(),
         started_at,
+        pc_port: crate::runtime::PC_PORT,
     };
     crate::runtime::write_state(&state, &state_path)?;
 

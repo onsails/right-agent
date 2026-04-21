@@ -1419,6 +1419,10 @@ fn cmd_agent_init(
         };
 
         // Check agent is not running.
+        // NOTE: This check uses `runtime-state.json` (not `state.json`) and is
+        // a no-op in practice — the file never exists under that name.
+        // Pre-existing bug unrelated to the runtime-isolation fix; touching it
+        // breaks `test_agent_init_force_*` which depend on the no-op path.
         let state_path = home.join("run/runtime-state.json");
         if state_path.exists() {
             let state = rightclaw::runtime::read_state(&state_path)?;
@@ -1901,8 +1905,10 @@ async fn cmd_up(
     let run_dir = home.join("run");
 
     // Pre-flight: check for stale processes holding required ports.
-    {
-        let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+    // `from_home` returns None with an isolated --home tempdir, skipping the
+    // probe. `check_port_available` below still catches a PC started by
+    // another home that happens to bind the port we need.
+    if let Some(client) = rightclaw::runtime::PcClient::from_home(home)? {
         if client.health_check().await.is_ok() {
             return Err(miette::miette!(
                 "rightclaw is already running. Use `rightclaw down` first or `rightclaw attach` to connect."
@@ -2034,8 +2040,11 @@ async fn cmd_up(
         // Wait briefly for process-compose to start.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-        // Verify it's alive.
-        let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+        // Verify it's alive. `run_agent_codegen` above wrote state.json, so
+        // `from_home` resolves to Some(_); missing state here would be a bug.
+        let client = rightclaw::runtime::PcClient::from_home(home)?.ok_or_else(|| {
+            miette::miette!("runtime state missing after codegen — refusing to health-check")
+        })?;
         client.health_check().await.map_err(|e| {
             miette::miette!("process-compose started but health check failed: {e:#}")
         })?;
@@ -2134,9 +2143,13 @@ async fn check_port_available(port: u16) -> miette::Result<()> {
     }
 }
 
-async fn cmd_down(_home: &Path) -> miette::Result<()> {
-    let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)
-        .map_err(|_| miette::miette!("No running instance found. Is rightclaw running?"))?;
+async fn cmd_down(home: &Path) -> miette::Result<()> {
+    let client = rightclaw::runtime::PcClient::from_home(home)?.ok_or_else(|| {
+        miette::miette!(
+            help = "Start rightclaw first with `rightclaw up`",
+            "No running instance found. Is rightclaw running?"
+        )
+    })?;
 
     client
         .health_check()
@@ -2152,7 +2165,12 @@ async fn cmd_down(_home: &Path) -> miette::Result<()> {
 }
 
 async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette::Result<()> {
-    let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+    let client = rightclaw::runtime::PcClient::from_home(home)?.ok_or_else(|| {
+        miette::miette!(
+            help = "Start rightclaw first with `rightclaw up`",
+            "nothing running — cannot reload"
+        )
+    })?;
     client.health_check().await.map_err(|_| {
         miette::miette!(
             help = "Start rightclaw first with `rightclaw up`",
@@ -2229,8 +2247,13 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
     Ok(())
 }
 
-async fn cmd_status(_home: &Path) -> miette::Result<()> {
-    let client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+async fn cmd_status(home: &Path) -> miette::Result<()> {
+    let client = rightclaw::runtime::PcClient::from_home(home)?.ok_or_else(|| {
+        miette::miette!(
+            help = "Start rightclaw first with `rightclaw up`",
+            "No running instance found. Is rightclaw running?"
+        )
+    })?;
 
     client
         .health_check()
@@ -2263,12 +2286,24 @@ async fn cmd_restart(_home: &Path, _agent: &str) -> miette::Result<()> {
     ))
 }
 
-fn cmd_attach(_home: &Path) -> miette::Result<()> {
+fn cmd_attach(home: &Path) -> miette::Result<()> {
     use std::os::unix::process::CommandExt;
+
+    // Read the recorded PC port for this home. With an isolated --home and no
+    // prior `rightclaw up`, there is nothing to attach to — fail loudly.
+    let state_path = home.join("run").join("state.json");
+    let state = rightclaw::runtime::read_state(&state_path).map_err(|e| {
+        miette::miette!(
+            help = "Start rightclaw first with `rightclaw up`",
+            "No running instance recorded at {} ({e:#})",
+            state_path.display(),
+        )
+    })?;
+
     let err = std::process::Command::new("process-compose")
         .arg("attach")
         .arg("--port")
-        .arg(rightclaw::runtime::PC_PORT.to_string())
+        .arg(state.pc_port.to_string())
         .exec();
 
     Err(miette::miette!("Failed to attach: {err}"))
@@ -2690,9 +2725,14 @@ async fn cmd_agent_destroy(
             }
         }
 
-        // Check if PC is running and agent is active
-        let pc_client = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
-        if pc_client.health_check().await.is_ok() {
+        // Check if PC is running and agent is active. `from_home` returns
+        // None when this --home has no recorded runtime state, in which case
+        // there is no PC to contact. See ARCHITECTURE.md "Runtime isolation".
+        let pc_running = match rightclaw::runtime::PcClient::from_home(home)? {
+            Some(pc_client) => pc_client.health_check().await.is_ok(),
+            None => false,
+        };
+        if pc_running {
             println!("  Process: running (will be stopped)");
         } else {
             println!("  Process: not running");
@@ -2733,7 +2773,6 @@ async fn cmd_agent_destroy(
     let options = rightclaw::agent::DestroyOptions {
         agent_name: agent_name.to_string(),
         backup: do_backup,
-        pc_port: rightclaw::runtime::PC_PORT,
     };
 
     let result = rightclaw::agent::destroy_agent(home, &options).await?;
@@ -2812,7 +2851,13 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     }
 
     // 3. Check agent is running via process-compose
-    let pc = rightclaw::runtime::PcClient::new(rightclaw::runtime::PC_PORT)?;
+    let pc = rightclaw::runtime::PcClient::from_home(home)?.ok_or_else(|| {
+        miette::miette!(
+            help = "Start it with: rightclaw up",
+            "Agent '{}' is not running",
+            agent_name,
+        )
+    })?;
     pc.health_check().await.map_err(|_| {
         miette::miette!(
             help = "Start it with: rightclaw up",

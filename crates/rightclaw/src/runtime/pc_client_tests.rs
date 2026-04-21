@@ -7,6 +7,59 @@ fn pc_client_constructs_with_port() {
 }
 
 #[test]
+fn from_home_returns_none_when_state_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    // No <home>/run/state.json.
+    let result = PcClient::from_home(dir.path()).unwrap();
+    assert!(
+        result.is_none(),
+        "from_home must return None when runtime state is absent",
+    );
+}
+
+#[test]
+fn from_home_reads_port_from_state() {
+    use crate::runtime::state::{AgentState, RuntimeState, write_state};
+
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+
+    let state = RuntimeState {
+        agents: vec![AgentState {
+            name: "from-home-test".to_string(),
+        }],
+        socket_path: "/tmp/pc.sock".to_string(),
+        started_at: "2026-04-22T00:00:00Z".to_string(),
+        pc_port: 19999,
+    };
+    write_state(&state, &run_dir.join("state.json")).unwrap();
+
+    let client = PcClient::from_home(dir.path())
+        .unwrap()
+        .expect("state.json exists, expected Some(client)");
+    assert!(
+        client.base_url.contains("19999"),
+        "base_url should carry pc_port from state; got {}",
+        client.base_url,
+    );
+}
+
+#[test]
+fn from_home_errors_on_malformed_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(run_dir.join("state.json"), "not valid json").unwrap();
+
+    let result = PcClient::from_home(dir.path());
+    assert!(
+        result.is_err(),
+        "from_home must propagate malformed-state errors",
+    );
+}
+
+#[test]
 fn process_info_deserializes_from_json() {
     let json = r#"{
         "name": "agent1",
