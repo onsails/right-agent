@@ -472,6 +472,7 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
         .prepare(
             "SELECT s.job_name, s.schedule, s.prompt, s.lock_ttl, s.max_budget_usd, \
                     s.created_at, s.updated_at, s.recurring, s.run_at, \
+                    s.target_chat_id, s.target_thread_id, \
                     r.started_at, r.status \
              FROM cron_specs s \
              LEFT JOIN ( \
@@ -494,8 +495,10 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
                 "updated_at": row.get::<_, String>(6)?,
                 "recurring": row.get::<_, i64>(7)? != 0,
                 "run_at": row.get::<_, Option<String>>(8)?,
-                "last_run_at": row.get::<_, Option<String>>(9)?,
-                "last_status": row.get::<_, Option<String>>(10)?,
+                "target_chat_id": row.get::<_, Option<i64>>(9)?,
+                "target_thread_id": row.get::<_, Option<i64>>(10)?,
+                "last_run_at": row.get::<_, Option<String>>(11)?,
+                "last_status": row.get::<_, Option<String>>(12)?,
             }))
         })
         .map_err(|e| format!("query failed: {e:#}"))?
@@ -1342,5 +1345,16 @@ mod tests {
             .unwrap();
         assert_eq!(chat, Some(-1));
         assert_eq!(thread, Some(42));
+    }
+
+    #[test]
+    fn list_specs_includes_target_fields() {
+        let conn = setup_db();
+        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, Some(-100), Some(5)).unwrap();
+        let json = list_specs(&conn).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let row = &value.as_array().unwrap()[0];
+        assert_eq!(row["target_chat_id"].as_i64(), Some(-100));
+        assert_eq!(row["target_thread_id"].as_i64(), Some(5));
     }
 }
