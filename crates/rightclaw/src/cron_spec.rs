@@ -318,6 +318,8 @@ pub fn update_spec_partial(
     recurring: Option<bool>,
     lock_ttl: Option<&str>,
     max_budget_usd: Option<f64>,
+    target_chat_id: Option<i64>,
+    target_thread_id: Option<Option<i64>>,
 ) -> Result<CronSpecResult, String> {
     validate_job_name(job_name)?;
 
@@ -327,6 +329,8 @@ pub fn update_spec_partial(
         && recurring.is_none()
         && lock_ttl.is_none()
         && max_budget_usd.is_none()
+        && target_chat_id.is_none()
+        && target_thread_id.is_none()
     {
         return Err("at least one field must be provided to update".into());
     }
@@ -389,6 +393,21 @@ pub fn update_spec_partial(
     if let Some(budget) = max_budget_usd {
         sets.push("max_budget_usd = ?");
         params.push(Box::new(budget));
+    }
+    if let Some(chat) = target_chat_id {
+        sets.push("target_chat_id = ?");
+        params.push(Box::new(chat));
+    }
+    if let Some(thread_opt) = target_thread_id {
+        match thread_opt {
+            Some(t) => {
+                sets.push("target_thread_id = ?");
+                params.push(Box::new(t));
+            }
+            None => {
+                sets.push("target_thread_id = NULL");
+            }
+        }
     }
 
     sets.push("updated_at = ?");
@@ -1173,7 +1192,7 @@ mod tests {
     fn update_spec_partial_prompt_only() {
         let conn = setup_db();
         create_spec_v2(&conn, "partial", Some("*/5 * * * *"), "old", None, Some(1.5), None, None, None, None).unwrap();
-        update_spec_partial(&conn, "partial", None, None, Some("new prompt"), None, None, None).unwrap();
+        update_spec_partial(&conn, "partial", None, None, Some("new prompt"), None, None, None, None, None).unwrap();
         let detail = get_spec_detail(&conn, "partial").unwrap().unwrap();
         assert_eq!(detail.prompt, "new prompt");
         assert_eq!(detail.schedule, "*/5 * * * *");
@@ -1184,7 +1203,7 @@ mod tests {
     fn update_spec_partial_schedule_clears_run_at() {
         let conn = setup_db();
         create_spec_v2(&conn, "switch", None, "p", None, None, None, Some("2026-12-25T15:30:00Z"), None, None).unwrap();
-        update_spec_partial(&conn, "switch", Some("*/10 * * * *"), None, None, None, None, None).unwrap();
+        update_spec_partial(&conn, "switch", Some("*/10 * * * *"), None, None, None, None, None, None, None).unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
         assert!(matches!(specs["switch"].schedule_kind, ScheduleKind::Recurring(_)));
     }
@@ -1193,7 +1212,7 @@ mod tests {
     fn update_spec_partial_run_at_clears_schedule() {
         let conn = setup_db();
         create_spec_v2(&conn, "switch2", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
-        update_spec_partial(&conn, "switch2", None, Some("2026-12-25T15:30:00Z"), None, None, None, None).unwrap();
+        update_spec_partial(&conn, "switch2", None, Some("2026-12-25T15:30:00Z"), None, None, None, None, None, None).unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
         assert!(matches!(specs["switch2"].schedule_kind, ScheduleKind::RunAt(_)));
     }
@@ -1204,7 +1223,7 @@ mod tests {
         create_spec_v2(&conn, "both", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
         let err = update_spec_partial(
             &conn, "both", Some("*/10 * * * *"), Some("2026-12-25T15:30:00Z"),
-            None, None, None, None,
+            None, None, None, None, None, None,
         ).unwrap_err();
         assert!(err.contains("mutually exclusive"));
     }
@@ -1213,14 +1232,14 @@ mod tests {
     fn update_spec_partial_no_fields_fails() {
         let conn = setup_db();
         create_spec_v2(&conn, "empty", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
-        let err = update_spec_partial(&conn, "empty", None, None, None, None, None, None).unwrap_err();
+        let err = update_spec_partial(&conn, "empty", None, None, None, None, None, None, None, None).unwrap_err();
         assert!(err.contains("at least one"));
     }
 
     #[test]
     fn update_spec_partial_not_found() {
         let conn = setup_db();
-        let err = update_spec_partial(&conn, "ghost", None, None, Some("p"), None, None, None).unwrap_err();
+        let err = update_spec_partial(&conn, "ghost", None, None, Some("p"), None, None, None, None, None).unwrap_err();
         assert!(err.contains("not found"));
     }
 
@@ -1278,5 +1297,50 @@ mod tests {
             .unwrap();
         assert!(chat.is_none());
         assert!(thread.is_none());
+    }
+
+    #[test]
+    fn update_spec_partial_sets_target_chat_id() {
+        let conn = setup_db();
+        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
+        update_spec_partial(
+            &conn, "j1", None, None, None, None, None, None,
+            Some(-555), None,
+        ).unwrap();
+        let chat: Option<i64> = conn
+            .query_row("SELECT target_chat_id FROM cron_specs WHERE job_name='j1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(chat, Some(-555));
+    }
+
+    #[test]
+    fn update_spec_partial_clears_target_thread_id() {
+        let conn = setup_db();
+        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, Some(-1), Some(42)).unwrap();
+        // Outer Some = field present; inner None = clear to NULL.
+        update_spec_partial(
+            &conn, "j1", None, None, None, None, None, None,
+            None, Some(None),
+        ).unwrap();
+        let thread: Option<i64> = conn
+            .query_row("SELECT target_thread_id FROM cron_specs WHERE job_name='j1'", [], |r| r.get(0))
+            .unwrap();
+        assert!(thread.is_none(), "thread must be cleared");
+    }
+
+    #[test]
+    fn update_spec_partial_leaves_target_when_omitted() {
+        let conn = setup_db();
+        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, Some(-1), Some(42)).unwrap();
+        // Update only the prompt; targets must stay.
+        update_spec_partial(
+            &conn, "j1", None, None, Some("new prompt"), None, None, None,
+            None, None,
+        ).unwrap();
+        let (chat, thread): (Option<i64>, Option<i64>) = conn
+            .query_row("SELECT target_chat_id, target_thread_id FROM cron_specs WHERE job_name='j1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(chat, Some(-1));
+        assert_eq!(thread, Some(42));
     }
 }

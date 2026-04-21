@@ -290,6 +290,8 @@ impl MemoryServer {
             params.recurring,
             params.lock_ttl.as_deref(),
             params.max_budget_usd,
+            None,
+            None,
         )
         .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(
