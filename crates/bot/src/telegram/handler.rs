@@ -1500,18 +1500,26 @@ async fn build_usage_summary(agent_dir: &Path, detail: bool) -> Result<String, m
             .map_err(|e| miette::miette!("aggregate today/interactive: {e:#}"))?,
         today_cron: aggregate(&conn, Some(today_start), "cron")
             .map_err(|e| miette::miette!("aggregate today/cron: {e:#}"))?,
+        today_reflection: aggregate(&conn, Some(today_start), "reflection")
+            .map_err(|e| miette::miette!("aggregate today/reflection: {e:#}"))?,
         week_interactive: aggregate(&conn, Some(week_start), "interactive")
             .map_err(|e| miette::miette!("aggregate week/interactive: {e:#}"))?,
         week_cron: aggregate(&conn, Some(week_start), "cron")
             .map_err(|e| miette::miette!("aggregate week/cron: {e:#}"))?,
+        week_reflection: aggregate(&conn, Some(week_start), "reflection")
+            .map_err(|e| miette::miette!("aggregate week/reflection: {e:#}"))?,
         month_interactive: aggregate(&conn, Some(month_start), "interactive")
             .map_err(|e| miette::miette!("aggregate month/interactive: {e:#}"))?,
         month_cron: aggregate(&conn, Some(month_start), "cron")
             .map_err(|e| miette::miette!("aggregate month/cron: {e:#}"))?,
+        month_reflection: aggregate(&conn, Some(month_start), "reflection")
+            .map_err(|e| miette::miette!("aggregate month/reflection: {e:#}"))?,
         all_interactive: aggregate(&conn, None, "interactive")
             .map_err(|e| miette::miette!("aggregate all/interactive: {e:#}"))?,
         all_cron: aggregate(&conn, None, "cron")
             .map_err(|e| miette::miette!("aggregate all/cron: {e:#}"))?,
+        all_reflection: aggregate(&conn, None, "reflection")
+            .map_err(|e| miette::miette!("aggregate all/reflection: {e:#}"))?,
     };
 
     Ok(format_summary_message(&windows, detail))

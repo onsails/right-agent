@@ -6,32 +6,42 @@ use crate::usage::{ModelTotals, WindowSummary, pricing};
 pub struct AllWindows {
     pub today_interactive: WindowSummary,
     pub today_cron: WindowSummary,
+    pub today_reflection: WindowSummary,
     pub week_interactive: WindowSummary,
     pub week_cron: WindowSummary,
+    pub week_reflection: WindowSummary,
     pub month_interactive: WindowSummary,
     pub month_cron: WindowSummary,
+    pub month_reflection: WindowSummary,
     pub all_interactive: WindowSummary,
     pub all_cron: WindowSummary,
+    pub all_reflection: WindowSummary,
 }
 
 /// Render the complete `/usage` summary as Telegram HTML. When `detail` is
 /// true each source block also renders a raw-tokens line.
 pub fn format_summary_message(w: &AllWindows, detail: bool) -> String {
-    let total_invocations = w.all_interactive.invocations + w.all_cron.invocations;
+    let total_invocations = w.all_interactive.invocations
+        + w.all_cron.invocations
+        + w.all_reflection.invocations;
     if total_invocations == 0 {
         return "No usage recorded yet.".to_string();
     }
 
-    let total_cost = w.all_interactive.cost_usd + w.all_cron.cost_usd;
-    let total_sub = w.all_interactive.subscription_cost_usd + w.all_cron.subscription_cost_usd;
-    let total_api = w.all_interactive.api_cost_usd + w.all_cron.api_cost_usd;
+    let total_cost = w.all_interactive.cost_usd + w.all_cron.cost_usd + w.all_reflection.cost_usd;
+    let total_sub = w.all_interactive.subscription_cost_usd
+        + w.all_cron.subscription_cost_usd
+        + w.all_reflection.subscription_cost_usd;
+    let total_api = w.all_interactive.api_cost_usd
+        + w.all_cron.api_cost_usd
+        + w.all_reflection.api_cost_usd;
 
     let mut out = String::new();
     out.push_str("\u{1f4ca} <b>Usage Summary</b> (UTC)\n\n");
-    out.push_str(&render_window("Today", &w.today_interactive, &w.today_cron, detail));
-    out.push_str(&render_window("Last 7 days", &w.week_interactive, &w.week_cron, detail));
-    out.push_str(&render_window("Last 30 days", &w.month_interactive, &w.month_cron, detail));
-    out.push_str(&render_window("All time", &w.all_interactive, &w.all_cron, detail));
+    out.push_str(&render_window("Today", &w.today_interactive, &w.today_cron, &w.today_reflection, detail));
+    out.push_str(&render_window("Last 7 days", &w.week_interactive, &w.week_cron, &w.week_reflection, detail));
+    out.push_str(&render_window("Last 30 days", &w.month_interactive, &w.month_cron, &w.month_reflection, detail));
+    out.push_str(&render_window("All time", &w.all_interactive, &w.all_cron, &w.all_reflection, detail));
 
     // Total footer: plain when single mode, split when both present.
     if total_sub > 0.0 && total_api > 0.0 {
@@ -47,9 +57,15 @@ pub fn format_summary_message(w: &AllWindows, detail: bool) -> String {
     out
 }
 
-fn render_window(title: &str, interactive: &WindowSummary, cron: &WindowSummary, detail: bool) -> String {
+fn render_window(
+    title: &str,
+    interactive: &WindowSummary,
+    cron: &WindowSummary,
+    reflection: &WindowSummary,
+    detail: bool,
+) -> String {
     let mut s = format!("\u{2501}\u{2501} <b>{}</b> \u{2501}\u{2501}\n", html_escape(title));
-    if interactive.invocations == 0 && cron.invocations == 0 {
+    if interactive.invocations == 0 && cron.invocations == 0 && reflection.invocations == 0 {
         s.push_str("(no activity)\n\n");
         return s;
     }
@@ -59,15 +75,24 @@ fn render_window(title: &str, interactive: &WindowSummary, cron: &WindowSummary,
     if cron.invocations > 0 {
         s.push_str(&render_source("\u{23f0} Cron", cron, "runs", detail));
     }
-    let web_s = interactive.web_search_requests + cron.web_search_requests;
-    let web_f = interactive.web_fetch_requests + cron.web_fetch_requests;
+    if reflection.invocations > 0 {
+        s.push_str(&render_source("\u{1f9e0} Reflection", reflection, "passes", detail));
+    }
+    let web_s = interactive.web_search_requests
+        + cron.web_search_requests
+        + reflection.web_search_requests;
+    let web_f = interactive.web_fetch_requests
+        + cron.web_fetch_requests
+        + reflection.web_fetch_requests;
     if web_s > 0 || web_f > 0 {
         s.push_str(&format!("\u{1f50e} Web: {web_s} searches, {web_f} fetches\n"));
     }
 
     // Footer per window.
-    let sub = interactive.subscription_cost_usd + cron.subscription_cost_usd;
-    let api = interactive.api_cost_usd + cron.api_cost_usd;
+    let sub = interactive.subscription_cost_usd
+        + cron.subscription_cost_usd
+        + reflection.subscription_cost_usd;
+    let api = interactive.api_cost_usd + cron.api_cost_usd + reflection.api_cost_usd;
     if sub > 0.0 && api > 0.0 {
         s.push_str(&format!(
             "Subscription: {} · API-billed: {}\n",
@@ -240,12 +265,16 @@ mod tests {
         AllWindows {
             today_interactive: empty("interactive"),
             today_cron: empty("cron"),
+            today_reflection: empty("reflection"),
             week_interactive: empty("interactive"),
             week_cron: empty("cron"),
+            week_reflection: empty("reflection"),
             month_interactive: empty("interactive"),
             month_cron: empty("cron"),
+            month_reflection: empty("reflection"),
             all_interactive: empty("interactive"),
             all_cron: empty("cron"),
+            all_reflection: empty("reflection"),
         }
     }
 
@@ -384,12 +413,16 @@ mod tests {
         let w = AllWindows {
             today_interactive: ws_sub.clone(),
             today_cron: ws_api.clone(),
+            today_reflection: empty("reflection"),
             week_interactive: ws_sub.clone(),
             week_cron: ws_api.clone(),
+            week_reflection: empty("reflection"),
             month_interactive: ws_sub,
             month_cron: ws_api,
+            month_reflection: empty("reflection"),
             all_interactive: ws_all,
             all_cron: ws_all_cron,
+            all_reflection: empty("reflection"),
         };
         let msg = format_summary_message(&w, false);
         assert!(msg.contains("<b>Total retail:</b> $0.15"));
