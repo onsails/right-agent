@@ -555,9 +555,6 @@ pub fn load_specs_from_db(
         } else if recurring == 0 {
             ScheduleKind::OneShotCron(schedule)
         } else {
-            if let Ok(Some(warning)) = validate_schedule(&schedule) {
-                tracing::warn!(job = %job_name, "{warning}");
-            }
             ScheduleKind::Recurring(schedule)
         };
 

@@ -1129,6 +1129,10 @@ async fn run_job_loop(
 
         tokio::time::sleep(delay).await;
 
+        if let Ok(Some(warning)) = rightclaw::cron_spec::validate_schedule(cron_expr) {
+            tracing::warn!(job = %job_name, "{warning}");
+        }
+
         // Spawn execution so the loop continues counting ticks while the job runs.
         // The lock in execute_job prevents concurrent executions of the same job.
         let jn = job_name.clone();
