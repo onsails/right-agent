@@ -134,8 +134,8 @@ rightclaw bot --agent <name>  (spawned by process-compose)
   │   ├─ Check if sandbox exists via gRPC → reuse with policy hot-reload
   │   ├─ Or create new: prepare staging dir, spawn sandbox, wait for READY
   │   └─ Generate SSH config for sandbox exec
-  ├─ Initial sync (blocking): deploy platform files to /platform/ (content-addressed + symlinks)
-  ├─ Start background sync task (every 5 min — re-deploys /platform/, GC stale entries)
+  ├─ Initial sync (blocking): deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
+  ├─ Start background sync task (every 5 min — re-deploys /sandbox/.platform/, GC stale entries)
   ├─ Start cron engine, OAuth callback server, refresh scheduler
   └─ Start teloxide long-polling dispatcher
 
@@ -202,9 +202,9 @@ Bot startup:
   │   └─ NO: prepare_staging_dir → spawn_sandbox → wait_for_ready
   ├─ generate_ssh_config (on every startup, host-side file)
   ├─ initial_sync (blocking — before teloxide starts)
-  │   ├─ Deploy platform files to /platform/ (content-addressed + symlinks)
+  │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
   │   └─ Download .claude.json, verify trust keys, fix if CC overwrote them
-  └─ Background sync (every 5 min, re-deploys /platform/, GC stale entries)
+  └─ Background sync (every 5 min, re-deploys /sandbox/.platform/, GC stale entries)
 
 Sandbox network:
   ├─ HTTP CONNECT proxy at 10.200.0.1:3128 (set via HTTPS_PROXY env)
@@ -213,17 +213,17 @@ Sandbox network:
   ├─ Policy controls which domains are allowed (wildcards supported)
   └─ tls: terminate REQUIRED on all HTTPS endpoints (OpenShell v0.0.23)
 
-Staging dir (minimal bootstrap — platform files deployed via /platform/ during initial_sync):
+Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platform/ during initial_sync):
   ├─ .claude/settings.json    — CC behavioral flags
   ├─ .claude/reply-schema.json — structured output schema
   ├─ .claude.json              — trust + onboarding
   └─ mcp.json                  — MCP server entries
-  EXCLUDED: skills (deployed to /platform/), credentials, plugins
+  EXCLUDED: skills (deployed to /sandbox/.platform/), credentials, plugins
 
-Platform store (/platform/ inside sandbox):
+Platform store (/sandbox/.platform/ inside sandbox):
   ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>, ...
   ├─ Content-addressed skill dirs: skills/rightmcp.<hash>/, skills/rightcron.<hash>/
-  ├─ Symlinked from /sandbox/.claude/ → /platform/
+  ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
   ├─ Read-only (chmod a-w after deploy)
   └─ GC removes stale entries after each sync cycle
 ```
