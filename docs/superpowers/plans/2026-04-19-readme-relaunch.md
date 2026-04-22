@@ -12,11 +12,11 @@
 
 ## File Structure
 
-- **Create/overwrite:** `/Users/user/dev/rightclaw/README.md` — the new document (~280 lines).
-- **Read-only reference:** `/Users/user/dev/rightclaw/docs/superpowers/specs/2026-04-19-readme-relaunch-design.md` — the spec.
+- **Create/overwrite:** `<repo root>/README.md` — the new document (~280 lines).
+- **Read-only reference:** `<repo root>/docs/superpowers/specs/2026-04-19-readme-relaunch-design.md` — the spec.
 - **Assets consumed (conditional):**
-  - `/Users/user/dev/rightclaw/docs/assets/rightclaw-wordmark.svg` (hero logo; fallback to plain H1 if missing)
-  - `/Users/user/dev/rightclaw/docs/assets/demo.gif` (hero demo; line omitted if missing)
+  - `<repo root>/docs/assets/rightclaw-wordmark.svg` (hero logo; fallback to plain H1 if missing)
+  - `<repo root>/docs/assets/demo.gif` (hero demo; line omitted if missing)
 
 No other files are created or modified by this plan.
 
@@ -32,7 +32,7 @@ No other files are created or modified by this plan.
 
 Run:
 ```sh
-test -f /Users/user/dev/rightclaw/docs/assets/rightclaw-wordmark.svg && echo FOUND || echo MISSING
+test -f <repo root>/docs/assets/rightclaw-wordmark.svg && echo FOUND || echo MISSING
 ```
 
 Record: `WORDMARK = FOUND` or `WORDMARK = MISSING`.
@@ -43,7 +43,7 @@ Record: `WORDMARK = FOUND` or `WORDMARK = MISSING`.
 
 Run:
 ```sh
-test -f /Users/user/dev/rightclaw/docs/assets/demo.gif && echo FOUND || echo MISSING
+test -f <repo root>/docs/assets/demo.gif && echo FOUND || echo MISSING
 ```
 
 Record: `DEMO_GIF = FOUND` or `DEMO_GIF = MISSING`.
@@ -75,7 +75,7 @@ Wait for user confirmation before proceeding.
 ## Task 2: Write the new README.md
 
 **Files:**
-- Create (overwrite): `/Users/user/dev/rightclaw/README.md`
+- Create (overwrite): `<repo root>/README.md`
 
 This task produces the entire new file content in one write. The content below is the final document in the `WORDMARK=FOUND, DEMO_GIF=FOUND, TELEGRAM_URL=provided` case. Apply the three conditional edits described at the bottom of this task.
 
@@ -309,7 +309,7 @@ Based on the decisions recorded in Task 1, edit the file just written:
 
 Run:
 ```sh
-wc -l /Users/user/dev/rightclaw/README.md
+wc -l <repo root>/README.md
 ```
 Expected: between 180 and 300 lines depending on which conditionals removed content.
 
@@ -318,13 +318,13 @@ Expected: between 180 and 300 lines depending on which conditionals removed cont
 ## Task 3: Guardrail — banned marketing tokens and emoji
 
 **Files:**
-- Check: `/Users/user/dev/rightclaw/README.md`
+- Check: `<repo root>/README.md`
 
 - [ ] **Step 1: Run the marketing-speak grep**
 
 Run:
 ```sh
-rg -iw 'revolutionize|empower|seamless|seamlessly|effortless|effortlessly|leverage|unlock the power|game-changing|cutting-edge|next-generation|synergy|blazingly' /Users/user/dev/rightclaw/README.md
+rg -iw 'revolutionize|empower|seamless|seamlessly|effortless|effortlessly|leverage|unlock the power|game-changing|cutting-edge|next-generation|synergy|blazingly' <repo root>/README.md
 ```
 Expected: zero matches (exit code 1).
 
@@ -334,13 +334,13 @@ If any match is found: the writer inserted marketing-speak that doesn't come fro
 
 Run:
 ```sh
-rg '🚀|🎉|✨|🔥|💡|🎯|⚡|🙌|👋' /Users/user/dev/rightclaw/README.md
+rg '🚀|🎉|✨|🔥|💡|🎯|⚡|🙌|👋' <repo root>/README.md
 ```
 Expected: zero matches.
 
 Run:
 ```sh
-rg -n '^## [A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+' /Users/user/dev/rightclaw/README.md
+rg -n '^## [A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+' <repo root>/README.md
 ```
 (This finds H2 headings with 3+ Title-Cased words like `## Quick Start Guide Here`.)
 Expected: **at most one match** — `## Quick Start` is allowed (it's the only Title-Case heading in the spec). Any additional match is a regression; lowercase it.
@@ -349,7 +349,7 @@ Expected: **at most one match** — `## Quick Start` is allowed (it's the only T
 
 Run:
 ```sh
-rg -iw 'openclaw|zeroclaw|hermes|claude-squad|claude-flow|claudeflow' /Users/user/dev/rightclaw/README.md
+rg -iw 'openclaw|zeroclaw|hermes|claude-squad|claude-flow|claudeflow' <repo root>/README.md
 ```
 Expected: zero matches.
 
@@ -358,13 +358,13 @@ Expected: zero matches.
 ## Task 4: Guardrail — structural integrity
 
 **Files:**
-- Check: `/Users/user/dev/rightclaw/README.md`
+- Check: `<repo root>/README.md`
 
 - [ ] **Step 1: Verify all eight H2 headings are present in order**
 
 Run:
 ```sh
-rg -n '^## ' /Users/user/dev/rightclaw/README.md
+rg -n '^## ' <repo root>/README.md
 ```
 Expected output (in this exact order, though absolute line numbers may vary):
 ```
@@ -387,14 +387,14 @@ If any heading is missing, misspelled, or out of order: locate the deviation in 
 
 Run:
 ```sh
-awk '/^```mermaid$/,/^```$/' /Users/user/dev/rightclaw/README.md | wc -l
+awk '/^```mermaid$/,/^```$/' <repo root>/README.md | wc -l
 ```
 Expected: at least 25 (the mermaid block is 27 lines including fences in the reference content; small variance OK).
 
 Also run:
 ```sh
-rg -n '^```mermaid$' /Users/user/dev/rightclaw/README.md
-rg -n '^```$' /Users/user/dev/rightclaw/README.md
+rg -n '^```mermaid$' <repo root>/README.md
+rg -n '^```$' <repo root>/README.md
 ```
 Expected: exactly one `` ```mermaid `` opener, and the count of closing `` ``` `` fences matches the count of all opening fences (mermaid + sh + markdown if any). If fences are unbalanced, rendering will break.
 
@@ -402,7 +402,7 @@ Expected: exactly one `` ```mermaid `` opener, and the count of closing `` ``` `
 
 Run:
 ```sh
-rg -n 'TELEGRAM_URL_HERE|TELEGRAM_CHAT_URL_PLACEHOLDER|TODO|TBD|FIXME|XXX' /Users/user/dev/rightclaw/README.md
+rg -n 'TELEGRAM_URL_HERE|TELEGRAM_CHAT_URL_PLACEHOLDER|TODO|TBD|FIXME|XXX' <repo root>/README.md
 ```
 Expected: zero matches. If any remain, the Task 2 conditional edits were not applied — re-apply them.
 
@@ -411,7 +411,7 @@ Expected: zero matches. If any remain, the Task 2 conditional edits were not app
 Run:
 ```sh
 for path in docs/INSTALL.md docs/SECURITY.md ARCHITECTURE.md PROMPT_SYSTEM.md LICENSE install.sh; do
-  test -f "/Users/user/dev/rightclaw/$path" && echo "OK  $path" || echo "MISSING  $path"
+  test -f "<repo root>/$path" && echo "OK  $path" || echo "MISSING  $path"
 done
 ```
 Expected: all six report `OK`. Any `MISSING` means a link in the README is broken — stop and report to the user; do not proceed to commit.
@@ -428,7 +428,7 @@ This task cannot be automated — GitHub's Markdown + Mermaid rendering is the g
 
 Run:
 ```sh
-cd /Users/user/dev/rightclaw
+cd ~/dev/rightclaw
 git checkout -b readme-relaunch-preview
 git add README.md
 git commit -m "preview: README relaunch for visual check"
@@ -463,7 +463,7 @@ Visually verify:
 
 Run:
 ```sh
-cd /Users/user/dev/rightclaw
+cd ~/dev/rightclaw
 git checkout master
 git checkout readme-relaunch-preview -- README.md
 git status --short

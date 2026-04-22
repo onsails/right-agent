@@ -1097,6 +1097,12 @@ fn cmd_init(
 ) -> miette::Result<()> {
     let interactive = !yes;
 
+    // Validate CLI-passed token up front so we fail fast before any prompt —
+    // both in interactive and non-interactive mode.
+    if let Some(t) = telegram_token {
+        rightclaw::init::validate_telegram_token(t)?;
+    }
+
     // Non-interactive: use CLI flags or defaults.
     // Interactive: wizard with Esc-to-go-back between steps.
     let (
@@ -1115,10 +1121,7 @@ fn cmd_init(
         sandbox = sandbox_mode.unwrap_or(rightclaw::agent::types::SandboxMode::Openshell);
         network_policy_val =
             network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
-        token = telegram_token.map(|t| {
-            rightclaw::init::validate_telegram_token(t).unwrap();
-            t.to_string()
-        });
+        token = telegram_token.map(|t| t.to_string());
         chat_ids = telegram_allowed_chat_ids.to_vec();
         memory_provider = rightclaw::agent::types::MemoryProvider::Hindsight;
         memory_api_key = None;

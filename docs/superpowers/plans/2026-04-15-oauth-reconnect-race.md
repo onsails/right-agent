@@ -32,7 +32,7 @@ wiremock = "0.6"
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd /Users/user/dev/rightclaw && cargo check -p rightclaw`
+Run: `cd ~/dev/rightclaw && cargo check -p rightclaw`
 Expected: compiles with no errors
 
 - [ ] **Step 3: Commit**
@@ -236,7 +236,7 @@ mod tests {
 
 - [ ] **Step 3: Run the test**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw cancellation_aborts_refresh_during_backoff -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw cancellation_aborts_refresh_during_backoff -- --nocapture`
 Expected: PASS — the cancellation token fires during the backoff sleep after the first 401, and the function returns `Cancelled` instead of retrying.
 
 - [ ] **Step 4: Commit**
@@ -328,7 +328,7 @@ Add to the `tests` module in `reconnect.rs`:
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw exhausted_retries_do_not_overwrite -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw exhausted_retries_do_not_overwrite -- --nocapture`
 Expected: FAIL — `reconnect_task` doesn't exist yet.
 
 - [ ] **Step 3: Implement `reconnect_task`**
@@ -397,7 +397,7 @@ pub async fn reconnect_task(
 
 - [ ] **Step 4: Run both tests**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw reconnect -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw reconnect -- --nocapture`
 Expected: both `cancellation_aborts_refresh_during_backoff` and `exhausted_retries_do_not_overwrite_connected_status` PASS.
 
 - [ ] **Step 5: Add `ReconnectManager` struct**
@@ -487,7 +487,7 @@ impl ReconnectManager {
 
 - [ ] **Step 6: Run all reconnect tests**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw reconnect -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw reconnect -- --nocapture`
 Expected: PASS
 
 - [ ] **Step 7: Commit**
@@ -591,12 +591,12 @@ Add to the `tests` module in `reconnect.rs`:
 
 - [ ] **Step 2: Run the test**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw successful_refresh_writes_token -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw successful_refresh_writes_token -- --nocapture`
 Expected: PASS — refresh succeeds, token is written, NewEntry is sent, connect fails (no real MCP) but we don't assert on that.
 
 - [ ] **Step 3: Run all reconnect tests together**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw reconnect -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw reconnect -- --nocapture`
 Expected: all 3 tests PASS.
 
 - [ ] **Step 4: Commit**
@@ -802,12 +802,12 @@ Update `make_test_router` in tests to pass a default:
 
 - [ ] **Step 5: Verify it compiles**
 
-Run: `cd /Users/user/dev/rightclaw && cargo check --workspace`
+Run: `cd ~/dev/rightclaw && cargo check --workspace`
 Expected: compiles with no errors.
 
 - [ ] **Step 6: Run all tests**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test --workspace`
+Run: `cd ~/dev/rightclaw && cargo test --workspace`
 Expected: all existing tests plus the 3 new reconnect tests PASS.
 
 - [ ] **Step 7: Commit**
@@ -837,12 +837,12 @@ In `handle_set_token` in `internal_api.rs`, add immediately before the `// Recon
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd /Users/user/dev/rightclaw && cargo check --workspace`
+Run: `cd ~/dev/rightclaw && cargo check --workspace`
 Expected: compiles with no errors.
 
 - [ ] **Step 3: Run all tests**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test --workspace`
+Run: `cd ~/dev/rightclaw && cargo test --workspace`
 Expected: all tests PASS.
 
 - [ ] **Step 4: Commit**
@@ -860,15 +860,15 @@ git commit -m "fix(mcp): cancel stale reconnect in handle_set_token before deliv
 
 - [ ] **Step 1: Full debug build**
 
-Run: `cd /Users/user/dev/rightclaw && cargo build --workspace`
+Run: `cd ~/dev/rightclaw && cargo build --workspace`
 Expected: compiles with no errors.
 
 - [ ] **Step 2: Full test suite**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test --workspace`
+Run: `cd ~/dev/rightclaw && cargo test --workspace`
 Expected: all tests PASS.
 
 - [ ] **Step 3: Clippy**
 
-Run: `cd /Users/user/dev/rightclaw && cargo clippy --workspace`
+Run: `cd ~/dev/rightclaw && cargo clippy --workspace`
 Expected: no warnings from project code (dependency warnings OK).

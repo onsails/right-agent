@@ -14,7 +14,7 @@
 
 ## Conventions
 
-- Workspace root: `/Users/user/dev/rightclaw`. All paths below are workspace-relative.
+- Workspace root: `<repo root>`. All paths below are workspace-relative.
 - All Rust crates use edition 2024.
 - Tests run with `cargo test -p <crate>` (single crate scope keeps cycle short). Final smoke: `cargo build --workspace`.
 - Commits: conventional commits (`feat`, `fix`, `refactor`, `test`, `docs`). Match the recent history style on the `reflect` branch.

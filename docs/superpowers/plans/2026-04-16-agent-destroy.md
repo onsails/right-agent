@@ -79,7 +79,7 @@ pub use types::{AgentConfig, AgentDef, RestartPolicy, SandboxConfig, SandboxMode
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cd /Users/user/dev/rightclaw && cargo check --workspace`
+Run: `cd ~/dev/rightclaw && cargo check --workspace`
 Expected: compiles (todo! is fine — not called yet)
 
 - [ ] **Step 4: Commit**
@@ -227,7 +227,7 @@ async fn try_sandbox_backup(
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd /Users/user/dev/rightclaw && cargo check -p rightclaw`
+Run: `cd ~/dev/rightclaw && cargo check -p rightclaw`
 Expected: compiles (functions are private, only called by `destroy_agent` which still has `todo!()`)
 
 - [ ] **Step 3: Commit**
@@ -334,7 +334,7 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw --lib agent::destroy::tests -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw --lib agent::destroy::tests -- --nocapture`
 Expected: FAIL (todo! panics)
 
 - [ ] **Step 3: Implement `destroy_agent()`**
@@ -437,7 +437,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw --lib agent::destroy::tests -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw --lib agent::destroy::tests -- --nocapture`
 Expected: all 3 tests PASS
 
 - [ ] **Step 5: Commit**
@@ -618,7 +618,7 @@ fn format_bytes(bytes: u64) -> String {
 
 - [ ] **Step 4: Verify it compiles**
 
-Run: `cd /Users/user/dev/rightclaw && cargo check --workspace`
+Run: `cd ~/dev/rightclaw && cargo check --workspace`
 Expected: compiles successfully
 
 - [ ] **Step 5: Commit**
@@ -725,7 +725,7 @@ fn test_help_lists_destroy() {
 
 - [ ] **Step 5: Run all tests**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test -p rightclaw-cli --test cli_integration -- --nocapture`
+Run: `cd ~/dev/rightclaw && cargo test -p rightclaw-cli --test cli_integration -- --nocapture`
 Expected: all new tests PASS
 
 - [ ] **Step 6: Commit**
@@ -741,20 +741,20 @@ git commit -m "test(cli): add integration tests for agent destroy"
 
 - [ ] **Step 1: Run full workspace build**
 
-Run: `cd /Users/user/dev/rightclaw && cargo build --workspace`
+Run: `cd ~/dev/rightclaw && cargo build --workspace`
 Expected: builds successfully
 
 - [ ] **Step 2: Run full test suite**
 
-Run: `cd /Users/user/dev/rightclaw && cargo test --workspace`
+Run: `cd ~/dev/rightclaw && cargo test --workspace`
 Expected: all tests pass, no regressions
 
 - [ ] **Step 3: Run clippy**
 
-Run: `cd /Users/user/dev/rightclaw && cargo clippy --workspace -- -D warnings`
+Run: `cd ~/dev/rightclaw && cargo clippy --workspace -- -D warnings`
 Expected: no warnings
 
 - [ ] **Step 4: Manual smoke test**
 
-Run: `cd /Users/user/dev/rightclaw && cargo run -- agent --help`
+Run: `cd ~/dev/rightclaw && cargo run -- agent --help`
 Expected: output includes `destroy` subcommand with description

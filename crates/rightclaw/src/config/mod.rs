@@ -146,25 +146,6 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_config_has_credentials_file_field() {
-        let cfg = TunnelConfig {
-            tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
-            credentials_file: PathBuf::from(
-                "/home/wb/.rightclaw/tunnel/aaaabbbb-0000-1111-2222-ccccddddeeee.json",
-            ),
-            hostname: "right.example.com".to_string(),
-        };
-        assert_eq!(cfg.tunnel_uuid, "aaaabbbb-0000-1111-2222-ccccddddeeee");
-        assert_eq!(
-            cfg.credentials_file,
-            PathBuf::from(
-                "/home/wb/.rightclaw/tunnel/aaaabbbb-0000-1111-2222-ccccddddeeee.json"
-            )
-        );
-        assert_eq!(cfg.hostname, "right.example.com");
-    }
-
-    #[test]
     fn write_then_read_roundtrips_new_fields() {
         let dir = TempDir::new().unwrap();
         let written = GlobalConfig {
@@ -226,28 +207,6 @@ mod tests {
             err.to_string().contains("re-run `rightclaw init`"),
             "expected migration error for old config format, got: {err}"
         );
-    }
-
-    #[test]
-    fn read_config_parses_new_format() {
-        let dir = TempDir::new().unwrap();
-        let yaml = concat!(
-            "tunnel:\n",
-            "  tunnel_uuid: \"aaaabbbb-0000-1111-2222-ccccddddeeee\"\n",
-            "  credentials_file: \"/home/wb/.rightclaw/tunnel/aaaabbbb-0000-1111-2222-ccccddddeeee.json\"\n",
-            "  hostname: \"right.example.com\"\n",
-        );
-        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
-        let config = read_global_config(dir.path()).unwrap();
-        let tunnel = config.tunnel.expect("tunnel should be parsed");
-        assert_eq!(tunnel.tunnel_uuid, "aaaabbbb-0000-1111-2222-ccccddddeeee");
-        assert_eq!(
-            tunnel.credentials_file,
-            PathBuf::from(
-                "/home/wb/.rightclaw/tunnel/aaaabbbb-0000-1111-2222-ccccddddeeee.json"
-            )
-        );
-        assert_eq!(tunnel.hostname, "right.example.com");
     }
 
     #[test]

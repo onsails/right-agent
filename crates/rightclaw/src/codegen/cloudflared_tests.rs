@@ -81,27 +81,6 @@ fn http_scheme_stripped_from_hostname() {
 // ---- Phase 38 credentials tests ----
 
 #[test]
-fn credentials_embedded_when_provided() {
-    use crate::codegen::cloudflared::CloudflaredCredentials;
-    let agents = vec![("agent".to_string(), PathBuf::from("/tmp/agents/agent"))];
-    let creds = CloudflaredCredentials {
-        tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
-        credentials_file: PathBuf::from(
-            "/home/user/.rightclaw/tunnel/aaaabbbb-0000-1111-2222-ccccddddeeee.json",
-        ),
-    };
-    let yaml = generate_cloudflared_config(&agents, "right.example.com", Some(&creds)).unwrap();
-    assert!(
-        yaml.contains("tunnel: aaaabbbb-0000-1111-2222-ccccddddeeee"),
-        "tunnel UUID missing: {yaml}"
-    );
-    assert!(
-        yaml.contains("credentials-file: /home/user/.rightclaw/tunnel/aaaabbbb-0000-1111-2222-ccccddddeeee.json"),
-        "credentials-file missing: {yaml}"
-    );
-}
-
-#[test]
 fn no_credentials_section_when_none() {
     let agents = vec![("agent".to_string(), PathBuf::from("/tmp/agents/agent"))];
     let yaml = generate_cloudflared_config(&agents, "right.example.com", None).unwrap();

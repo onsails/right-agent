@@ -16,7 +16,7 @@ to Telegram:
 🔧 mcp__right__notion__notion-fetch <code>{"id":"..."}</code>
 🔧 mcp__right__notion__notion-fetch <code>{"id":"..."}</code>
 ...
-Stream log: /Users/user/.rightclaw/logs/streams/eaad18de-....ndjson
+Stream log: ~/.rightclaw/logs/streams/eaad18de-....ndjson
 ```
 
 The user sees a log dump and a filesystem path. The agent — which has the full
