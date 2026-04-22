@@ -10,14 +10,15 @@ pub(crate) enum OutputFormat {
 /// Builder-style struct for assembling `claude -p` CLI arguments.
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeInvocation {
-    pub(crate) mcp_config_path: String,
-    pub(crate) json_schema: String,
+    pub(crate) mcp_config_path: Option<String>,
+    pub(crate) json_schema: Option<String>,
     pub(crate) output_format: OutputFormat,
     pub(crate) model: Option<String>,
     pub(crate) max_budget_usd: Option<f64>,
     pub(crate) max_turns: Option<u32>,
     pub(crate) resume_session_id: Option<String>,
     pub(crate) new_session_id: Option<String>,
+    pub(crate) allowed_tools: Vec<String>,
     pub(crate) disallowed_tools: Vec<String>,
     pub(crate) extra_args: Vec<String>,
     pub(crate) prompt: Option<String>,
@@ -32,11 +33,17 @@ impl ClaudeInvocation {
         args.extend(["claude", "-p", "--dangerously-skip-permissions"].map(Into::into));
 
         // 2. MCP config
-        args.push("--mcp-config".into());
-        args.push(self.mcp_config_path);
-        args.push("--strict-mcp-config".into());
+        if let Some(mcp_path) = self.mcp_config_path {
+            args.push("--mcp-config".into());
+            args.push(mcp_path);
+            args.push("--strict-mcp-config".into());
+        }
 
-        // 3. Disallowed tools
+        // 3. Allowed / disallowed tools
+        if !self.allowed_tools.is_empty() {
+            args.push("--allowedTools".into());
+            args.push(self.allowed_tools.join(","));
+        }
         if !self.disallowed_tools.is_empty() {
             args.push("--disallowedTools".into());
             args.extend(self.disallowed_tools);
@@ -86,8 +93,10 @@ impl ClaudeInvocation {
         }
 
         // 10. JSON schema
-        args.push("--json-schema".into());
-        args.push(self.json_schema);
+        if let Some(schema) = self.json_schema {
+            args.push("--json-schema".into());
+            args.push(schema);
+        }
 
         // 11. Prompt
         if let Some(prompt) = self.prompt {
@@ -108,6 +117,53 @@ pub(crate) fn mcp_config_path(ssh_config_path: Option<&Path>, agent_dir: &Path) 
     }
 }
 
+/// Build a `tokio::process::Command` from `ClaudeInvocation` args, with auth
+/// token injected, either inside an OpenShell sandbox (via SSH) or locally.
+///
+/// **SSH path**: shell-quotes args via `shlex`, prepends
+/// `export CLAUDE_CODE_OAUTH_TOKEN=...`, passes as single SSH remote command.
+///
+/// **Local path**: uses `Command::args()` directly (no shell), injects token
+/// via env var.
+///
+/// Stdio is NOT configured — caller must set stdin/stdout/stderr after.
+pub(crate) fn build_claude_command(
+    args: &[String],
+    agent_dir: &Path,
+    ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
+) -> tokio::process::Command {
+    if let Some(ssh_config) = ssh_config_path {
+        let ssh_host =
+            rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let mut script = String::new();
+        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+            let escaped = token.replace('\'', "'\\''");
+            script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
+        }
+        // shlex::try_join fails only on nul bytes — safe for CLI args.
+        let quoted = shlex::try_join(args.iter().map(|s| s.as_str()))
+            .expect("claude args should not contain nul bytes");
+        script.push_str(&quoted);
+        let mut c = tokio::process::Command::new("ssh");
+        c.arg("-F").arg(ssh_config);
+        c.arg(&ssh_host);
+        c.arg("--");
+        c.arg(script);
+        c
+    } else {
+        let mut c = tokio::process::Command::new(&args[0]);
+        c.args(&args[1..]);
+        c.env("HOME", agent_dir);
+        c.env("USE_BUILTIN_RIPGREP", "0");
+        if let Some(token) = crate::login::load_auth_token(agent_dir) {
+            c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
+        }
+        c.current_dir(agent_dir);
+        c
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,14 +171,15 @@ mod tests {
 
     fn minimal() -> ClaudeInvocation {
         ClaudeInvocation {
-            mcp_config_path: "/sandbox/mcp.json".into(),
-            json_schema: r#"{"type":"object"}"#.into(),
+            mcp_config_path: Some("/sandbox/mcp.json".into()),
+            json_schema: Some(r#"{"type":"object"}"#.into()),
             output_format: OutputFormat::StreamJson,
             model: None,
             max_budget_usd: None,
             max_turns: None,
             resume_session_id: None,
             new_session_id: None,
+            allowed_tools: vec![],
             disallowed_tools: vec![],
             extra_args: vec![],
             prompt: Some("hello".into()),
@@ -222,6 +279,26 @@ mod tests {
         assert!(args.contains(&"json".to_string()));
         assert!(!args.contains(&"stream-json".to_string()));
         assert!(!args.contains(&"--verbose".to_string()));
+    }
+
+    #[test]
+    fn allowed_tools_joined() {
+        let mut inv = minimal();
+        inv.allowed_tools = vec!["WebSearch".into(), "WebFetch".into()];
+        let args = inv.into_args();
+        let pos = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[pos + 1], "WebSearch,WebFetch");
+    }
+
+    #[test]
+    fn no_mcp_no_schema() {
+        let mut inv = minimal();
+        inv.mcp_config_path = None;
+        inv.json_schema = None;
+        let args = inv.into_args();
+        assert!(!args.contains(&"--mcp-config".to_string()));
+        assert!(!args.contains(&"--strict-mcp-config".to_string()));
+        assert!(!args.contains(&"--json-schema".to_string()));
     }
 
     #[test]

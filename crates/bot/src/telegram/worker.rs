@@ -1118,14 +1118,15 @@ async fn invoke_cc(
         super::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
 
     let mut invocation = super::invocation::ClaudeInvocation {
-        mcp_config_path: mcp_path,
-        json_schema: reply_schema,
+        mcp_config_path: Some(mcp_path),
+        json_schema: Some(reply_schema),
         output_format: super::invocation::OutputFormat::StreamJson,
         model: ctx.model.clone(),
         max_budget_usd: None,
         max_turns: None,
         resume_session_id: None,
         new_session_id: None,
+        allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],
         prompt: None, // stdin-piped

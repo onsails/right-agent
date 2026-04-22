@@ -459,14 +459,15 @@ async fn deliver_through_session(
     let json_schema = std::fs::read_to_string(&reply_schema_path).unwrap_or_default();
 
     let invocation = crate::telegram::invocation::ClaudeInvocation {
-        mcp_config_path: mcp_path,
-        json_schema,
+        mcp_config_path: Some(mcp_path),
+        json_schema: Some(json_schema),
         output_format: crate::telegram::invocation::OutputFormat::Json,
         model: Some(DELIVERY_MODEL.into()),
         max_budget_usd: None,
         max_turns: None,
         resume_session_id: session_id,
         new_session_id: None,
+        allowed_tools: vec![],
         disallowed_tools: vec![], // delivery is a relay — no tools to disable
         extra_args: vec![],
         prompt: None, // stdin-piped

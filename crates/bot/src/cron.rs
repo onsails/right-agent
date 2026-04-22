@@ -304,14 +304,15 @@ async fn execute_job(
     let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let invocation = crate::telegram::invocation::ClaudeInvocation {
-        mcp_config_path: mcp_path,
-        json_schema: rightclaw::codegen::CRON_SCHEMA_JSON.into(),
+        mcp_config_path: Some(mcp_path),
+        json_schema: Some(rightclaw::codegen::CRON_SCHEMA_JSON.into()),
         output_format: crate::telegram::invocation::OutputFormat::StreamJson,
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
         max_turns: None,
         resume_session_id: None,
         new_session_id: Some(run_id.clone()),
+        allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],
         prompt: Some(spec.prompt.clone()),
