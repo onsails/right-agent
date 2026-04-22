@@ -68,7 +68,7 @@ pub struct Manifest {
 }
 
 /// Base path for platform store inside sandbox.
-pub const PLATFORM_DIR: &str = "/platform";
+pub const PLATFORM_DIR: &str = "/sandbox/.platform";
 
 /// Scan agent directory, build manifest of platform-managed files.
 /// Excludes agent-owned files (IDENTITY.md, SOUL.md, USER.md, AGENTS.md, TOOLS.md).
@@ -383,7 +383,7 @@ pub async fn deploy_manifest(
 
     // Make writable (previous run made it a-w). Best-effort on first run.
     if let Err(e) = sbox.exec(&["chmod", "-R", "u+w", PLATFORM_DIR]).await {
-        tracing::warn!("chmod u+w /platform failed (may be first run): {e:#}");
+        tracing::warn!("chmod u+w {PLATFORM_DIR} failed (may be first run): {e:#}");
     }
 
     let mut active_targets: Vec<String> = Vec::new();

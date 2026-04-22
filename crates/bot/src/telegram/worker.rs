@@ -1710,6 +1710,17 @@ async fn invoke_cc(
             }
         }
 
+        // If this was the first call, CC never created the session — deactivate
+        // the DB record so the next message starts fresh instead of trying to
+        // --resume a session that doesn't exist on the CC side.
+        if is_first_call {
+            deactivate_current(&conn, chat_id, eff_thread_id)
+                .map_err(|e| {
+                    tracing::error!(?chat_id, "deactivate_current on first-call failure: {:#}", e)
+                })
+                .ok();
+        }
+
         // Non-auth error: generic error reply.
         let error_detail = if stderr_str.trim().is_empty() && !stdout_str.trim().is_empty() {
             format!(
