@@ -207,14 +207,15 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
 
     // 4. ClaudeInvocation — resume, stream-json, tight caps, no Agent tool.
     let invocation = ClaudeInvocation {
-        mcp_config_path: mcp_path,
-        json_schema: reply_schema,
+        mcp_config_path: Some(mcp_path),
+        json_schema: Some(reply_schema),
         output_format: OutputFormat::StreamJson,
         model: ctx.model.clone(),
         max_budget_usd: Some(ctx.limits.max_budget_usd),
         max_turns: Some(ctx.limits.max_turns),
         resume_session_id: Some(ctx.session_uuid.clone()),
         new_session_id: None,
+        allowed_tools: vec![],
         disallowed_tools: vec!["Agent".into()],
         extra_args: vec![],
         prompt: None,
