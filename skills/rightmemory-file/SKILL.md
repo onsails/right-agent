@@ -17,24 +17,41 @@ Use Claude Code's built-in `Edit` and `Write` tools to manage MEMORY.md:
 - **Update an entry:** Edit an existing line to correct or refine it
 - **Remove stale entries:** Delete lines that are no longer relevant
 
-## What to save
+## What belongs in MEMORY.md
 
-- User preferences ("prefers dark mode", "uses vim keybindings")
-- Correct API formats after fixing validation errors
-- Project decisions that affect future work
-- Lessons learned / mistakes to avoid
-- Important facts about the user's environment or workflow
+Things that don't have a home in your other files (`TOOLS.md`,
+`AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`):
 
-## What NOT to save
+- Granular or time-stamped observations too narrow for `USER.md`
+- Session-specific corrections worth carrying to the next turn
+- Cross-session context transcripts won't reconstruct
 
-- Regular conversation content (it's already in session context)
-- Information that's in code, configs, or documentation
-- Temporary debugging notes or one-off commands
+## What does NOT belong here
+
+Route these to the correct file instead of writing to MEMORY.md:
+
+- "Use tool X for task Y" → `TOOLS.md`
+- Stable user preferences → `USER.md`
+- Your identity / values / tone → `IDENTITY.md` / `SOUL.md`
+- Subagent routing → `AGENTS.md`
+- Reusable procedures → save as a skill
+- Task progress, TODO state, completed-work logs — transcripts cover these
+
+## Write declaratively, not imperatively
+
+MEMORY.md is re-read as context on every turn. Imperative phrasing
+("Always do X") gets interpreted as a directive and can override the
+user's current request.
+
+- `"User prefers pytest-xdist for parallel tests"` ✓
+- `"Always run tests with pytest -n 4"` ✗
+- `"API foo returns 422 when `input` is used instead of `arguments`"` ✓
+- `"Use `arguments` for API foo"` ✗ (this is a rule — goes in `TOOLS.md`)
 
 ## Keep it concise
 
-MEMORY.md is truncated to **200 lines** in your prompt. If it grows
-too large, periodically review and:
-- Remove entries that are no longer relevant
+MEMORY.md is truncated to **200 lines** in your prompt. Periodically:
+- Remove entries no longer relevant
 - Consolidate related entries into single lines
 - Remove duplicates
+- Move tool rules / user preferences / etc. to their proper homes

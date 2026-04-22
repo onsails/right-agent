@@ -819,6 +819,22 @@ pub fn prepare_staging_dir(agent_dir: &Path, upload_dir: &Path) -> miette::Resul
             .map_err(|e| miette::miette!("failed to copy mcp.json to staging: {e:#}"))?;
     }
 
+    // Seed agent-editable files that the agent needs from turn 1.
+    // Staging only runs when creating a new sandbox, so this never
+    // overwrites agent edits on an existing sandbox. After initial upload,
+    // the sandbox copy is authoritative — reverse_sync pulls agent edits
+    // back to host; there is no host→sandbox sync after creation.
+    let seed_files: &[&str] = &["TOOLS.md"];
+    for name in seed_files {
+        let src = agent_dir.join(name);
+        let dst = upload_dir.join(name);
+        if src.exists() {
+            std::fs::copy(&src, &dst).map_err(|e| {
+                miette::miette!("failed to copy {} to staging: {e:#}", name)
+            })?;
+        }
+    }
+
     tracing::info!("prepared staging dir for sandbox upload");
     Ok(())
 }

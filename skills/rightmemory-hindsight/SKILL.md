@@ -14,31 +14,59 @@ for this to work.
 **Explicit tools** — use when automatic isn't enough:
 
 - `mcp__right__memory_retain(content, context)` — save a fact permanently
-  - Use for: user preferences, correct API formats, decisions,
-    lessons learned, project conventions
-  - `context` is a short label: "user preference", "api format",
-    "project decision", "mistake to avoid"
-  - Example: after fixing a wrong API call, retain the correct format
+  - `context` is a short label: "user preference", "session correction",
+    "api format", "mistake to avoid"
+  - Example: after hitting an unexpected API shape, retain the correct
+    payload structure with context "api format"
 
 - `mcp__right__memory_recall(query)` — search your memory
-  - Use before: answering questions about past work, making decisions
+  - Use before answering questions about past work or making decisions
     that might have prior context
   - Returns ranked results from semantic + keyword + graph search
 
 - `mcp__right__memory_reflect(query)` — deep analysis across memories
-  - Use for: synthesizing patterns, comparing past decisions,
+  - Use for synthesizing patterns, comparing past decisions,
     understanding evolution of a project
   - More expensive than recall — use when you need reasoning, not lookup
 
-## When to use explicit retain
+## What belongs in memory
 
-- You discovered a user preference ("prefers tabs over spaces")
-- You fixed a tool call after a validation error (save correct format)
-- A decision was made that affects future work
-- You learned something non-obvious about the codebase or APIs
+Memory is for facts that don't have a home in your files
+(`TOOLS.md`, `AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`):
 
-## When NOT to retain explicitly
+- Granular or time-stamped observations too narrow for `USER.md`
+- Corrections specific to one session's context
+- Cross-session conversational context transcripts won't reconstruct
 
-- Regular conversation — auto-retain handles this
-- Information already in files (code, configs, docs)
-- Temporary/ephemeral context (debugging steps, one-off commands)
+## What does NOT belong in memory
+
+Route these to the correct file instead of calling `memory_retain`:
+
+- "Use tool X for task Y" → `TOOLS.md` (static, always in prompt;
+  semantic recall may miss it when the query doesn't name the tool)
+- Stable user preferences → `USER.md`
+- Your identity / values / tone → `IDENTITY.md` / `SOUL.md`
+- Subagent routing → `AGENTS.md`
+- Reusable procedures → save as a skill
+- Task progress or completed-work logs → session transcripts already
+  cover these
+
+## Write declaratively, not imperatively
+
+Memory is re-read as context on future turns. Imperative phrasing
+("Always do X") gets interpreted as a directive and can override the
+user's current request.
+
+- `"User prefers pytest-xdist for parallel tests"` ✓
+- `"Always run tests with pytest -n 4"` ✗
+- `"API foo returns 422 when `input` is used instead of `arguments`"` ✓
+- `"Use `arguments` for API foo"` ✗ (this is a rule — goes in `TOOLS.md`)
+
+## Red flags — route elsewhere instead of retaining
+
+- User says "remember to use …" about a tool → `TOOLS.md`
+- You just learned a subagent's responsibility → `AGENTS.md`
+- You discovered a user's stable preference → `USER.md`
+
+If the fact is a rule ("when X, do Y"), it belongs in a file that's
+always in your prompt — not in memory that may or may not surface it.

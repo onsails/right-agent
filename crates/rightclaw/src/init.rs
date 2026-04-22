@@ -25,6 +25,7 @@ pub struct InitOverrides {
 
 const DEFAULT_AGENTS: &str = include_str!("../templates/right/agent/AGENTS.md");
 const DEFAULT_BOOTSTRAP: &str = include_str!("../templates/right/agent/BOOTSTRAP.md");
+const DEFAULT_TOOLS: &str = include_str!("../templates/right/agent/TOOLS.md");
 const DEFAULT_AGENT_YAML: &str = include_str!("../templates/right/agent/agent.yaml");
 
 /// Initialize a single agent under `agents_parent_dir/<name>/`.
@@ -71,7 +72,7 @@ pub fn init_agent(
     let files: &[(&str, &str)] = &[
         ("AGENTS.md", DEFAULT_AGENTS),
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
-        ("TOOLS.md", ""),
+        ("TOOLS.md", DEFAULT_TOOLS),
         ("agent.yaml", DEFAULT_AGENT_YAML),
     ];
 
@@ -545,7 +546,10 @@ mod tests {
         assert!(agents_dir.join("AGENTS.md").exists());
         assert!(agents_dir.join("TOOLS.md").exists(), "TOOLS.md must be created by init");
         let tools_content = std::fs::read_to_string(agents_dir.join("TOOLS.md")).unwrap();
-        assert_eq!(tools_content, "", "TOOLS.md must be created empty");
+        assert!(
+            tools_content.contains("Tool selection"),
+            "TOOLS.md must be seeded from template"
+        );
         assert!(agents_dir.join("policy.yaml").exists(), "policy.yaml should be created for openshell mode");
         assert!(
             agents_dir.join("BOOTSTRAP.md").exists(),
