@@ -12,12 +12,15 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Spawn the keepalive loop as a background task.
+///
+/// Returns the `JoinHandle` so the caller can await it during shutdown,
+/// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
 pub fn spawn_keepalive(
     agent_dir: PathBuf,
     ssh_config_path: Option<PathBuf>,
     resolved_sandbox: Option<String>,
     shutdown: CancellationToken,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         run_keepalive_loop(
             &agent_dir,
@@ -26,7 +29,7 @@ pub fn spawn_keepalive(
             shutdown,
         )
         .await;
-    });
+    })
 }
 
 async fn run_keepalive_loop(
