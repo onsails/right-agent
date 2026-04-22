@@ -26,15 +26,18 @@ pub async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str) {
 ///
 /// Runs every 8 hours (first tick consumed since startup upgrade already ran).
 /// Errors are logged but never propagated — the task keeps running.
+///
+/// Returns the `JoinHandle` so the caller can await it during shutdown,
+/// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
 pub fn spawn_upgrade_task(
     ssh_config_path: PathBuf,
     agent_name: String,
     shutdown: CancellationToken,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         run_upgrade_loop(&ssh_config_path, &agent_name, shutdown, &upgrade_lock).await;
-    });
+    })
 }
 
 async fn run_upgrade_loop(

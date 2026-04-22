@@ -658,17 +658,17 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     });
 
     // Spawn periodic claude upgrade task (sandbox-only).
-    if let Some(ref cfg_path) = ssh_config_path {
+    let upgrade_handle = ssh_config_path.as_ref().map(|cfg_path| {
         upgrade::spawn_upgrade_task(
             cfg_path.clone(),
             args.agent.clone(),
             shutdown.clone(),
             Arc::clone(&upgrade_lock),
-        );
-    }
+        )
+    });
 
     // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token expiration.
-    keepalive::spawn_keepalive(
+    let keepalive_handle = keepalive::spawn_keepalive(
         agent_dir.clone(),
         ssh_config_path.clone(),
         resolved_sandbox.clone(),
@@ -708,6 +708,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let _ = delivery_handle.await;
     if let Some(handle) = sync_handle {
         tracing::info!("waiting for sync to finish");
+        let _ = handle.await;
+    }
+    // Await keepalive/upgrade so their in-flight Interval::tick() futures
+    // resolve before the tokio runtime is dropped. Without this, the runtime
+    // drop panics: "A Tokio 1.x context was found, but it is being shutdown."
+    let _ = keepalive_handle.await;
+    if let Some(handle) = upgrade_handle {
         let _ = handle.await;
     }
     tracing::info!("graceful shutdown complete");
