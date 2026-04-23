@@ -80,11 +80,10 @@ setup_install_dir() {
 # ── Step 1: Install RightClaw ──────────────────────────────────────
 
 install_rightclaw() {
-  info "Installing rightclaw..."
-
   if command -v rightclaw >/dev/null 2>&1; then
-    ok "rightclaw already installed: $(command -v rightclaw)"
-    return 0
+    info "Updating rightclaw..."
+  else
+    info "Installing rightclaw..."
   fi
 
   local version="${RIGHTCLAW_VERSION:-latest}"
@@ -107,9 +106,7 @@ install_rightclaw() {
 
   echo "  downloading: $download_url"
 
-  if [ -z "${http_code:-}" ]; then
-    http_code=$(curl -LsSf -w '%{http_code}' -o "$INSTALL_DIR/rightclaw" "$download_url" 2>/dev/null) || http_code="000"
-  fi
+  http_code=$(curl -LsSf -w '%{http_code}' -o "$INSTALL_DIR/rightclaw" "$download_url" 2>/dev/null) || http_code="000"
 
   if [ "$http_code" = "200" ]; then
     chmod +x "$INSTALL_DIR/rightclaw"
@@ -165,11 +162,10 @@ install_process_compose() {
 # ── Step 3: Install OpenShell ──────────────────────────────────────
 
 install_openshell() {
-  info "Installing OpenShell..."
-
   if command -v openshell >/dev/null 2>&1; then
-    ok "OpenShell already installed: $(command -v openshell)"
-    return 0
+    info "Updating OpenShell..."
+  else
+    info "Installing OpenShell..."
   fi
 
   echo "  using official installer..."
@@ -185,6 +181,11 @@ install_openshell() {
 # ── Step 4: Run rightclaw init ─────────────────────────────────────
 
 run_init() {
+  if [ -d "$HOME/.rightclaw" ]; then
+    ok "~/.rightclaw already exists, skipping init"
+    return 0
+  fi
+
   info "Running rightclaw init..."
 
   # Use full path to avoid PATH resolution issues (Pitfall 6)
