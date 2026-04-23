@@ -1577,6 +1577,7 @@ fn cmd_agent_init(
                 Network,
                 Telegram,
                 ChatIds,
+                Stt,
                 Memory,
                 Done,
             }
@@ -1592,6 +1593,8 @@ fn cmd_agent_init(
                 network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
             let mut w_token: Option<String> = None;
             let mut w_chat_ids: Vec<i64> = vec![];
+            let mut w_stt: rightclaw::agent::types::SttConfig =
+                rightclaw::agent::types::SttConfig::default();
             let mut w_mem = (
                 rightclaw::agent::types::MemoryProvider::Hindsight,
                 None::<String>,
@@ -1633,7 +1636,7 @@ fn cmd_agent_init(
                             step = if w_token.is_some() {
                                 Step::ChatIds
                             } else {
-                                Step::Memory
+                                Step::Stt
                             };
                         }
                         Err(_) => {
@@ -1643,11 +1646,25 @@ fn cmd_agent_init(
                     Step::ChatIds => match crate::wizard::chat_ids_setup() {
                         Ok(ids) => {
                             w_chat_ids = ids;
-                            step = Step::Memory;
+                            step = Step::Stt;
                         }
                         Err(_) => {
                             step = Step::Telegram;
                         }
+                    },
+                    Step::Stt => match crate::wizard::stt_setup() {
+                        Ok(Some((enabled, model))) => {
+                            w_stt = rightclaw::agent::types::SttConfig { enabled, model };
+                            step = Step::Memory;
+                        }
+                        Ok(None) => {
+                            step = if w_token.is_some() {
+                                Step::ChatIds
+                            } else {
+                                Step::Telegram
+                            };
+                        }
+                        Err(e) => return Err(e),
                     },
                     Step::Memory => match rightclaw::init::prompt_memory_config(name)? {
                         Some((p, k, b, rb, rt)) => {
@@ -1655,11 +1672,7 @@ fn cmd_agent_init(
                             step = Step::Done;
                         }
                         None => {
-                            step = if w_token.is_some() {
-                                Step::ChatIds
-                            } else {
-                                Step::Telegram
-                            };
+                            step = Step::Stt;
                         }
                     },
                     Step::Done => break,
@@ -1678,7 +1691,7 @@ fn cmd_agent_init(
                 memory_bank_id: w_mem.2,
                 memory_recall_budget: w_mem.3,
                 memory_recall_max_tokens: w_mem.4,
-                stt: rightclaw::agent::types::SttConfig::default(),
+                stt: w_stt,
             }
         }
     };

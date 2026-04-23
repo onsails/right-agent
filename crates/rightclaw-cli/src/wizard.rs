@@ -940,7 +940,6 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
 /// + install prompt as needed. Returns Some((enabled, model)) on completion,
 /// None if the user pressed Esc on the first prompt (back to previous step).
 // wired up by Task 7 (Step::Stt) and Task 10 (agent_setting_menu)
-#[allow(dead_code)]
 pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::WhisperModel)>> {
     use rightclaw::agent::types::WhisperModel;
 
