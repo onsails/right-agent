@@ -938,8 +938,7 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
 
 /// Wizard step: ask enable/disable + model selection, run ffmpeg detection
 /// + install prompt as needed. Returns Some((enabled, model)) on completion,
-/// None if the user pressed Esc on the first prompt (back to previous step).
-// wired up by Task 7 (Step::Stt) and Task 10 (agent_setting_menu)
+/// None if the user pressed Esc on either prompt (caller decides where to go back).
 pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::WhisperModel)>> {
     use rightclaw::agent::types::WhisperModel;
 
@@ -976,7 +975,7 @@ pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::Whis
         Ok(v) => v,
         Err(inquire::InquireError::OperationCanceled)
         | Err(inquire::InquireError::OperationInterrupted) => {
-            // Back up to "Enable?" — caller's loop will re-enter this fn.
+            // Caller routes the back navigation (skips two steps from the user's perspective).
             return Ok(None);
         }
         Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
