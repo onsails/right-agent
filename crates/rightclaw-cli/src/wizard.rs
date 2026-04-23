@@ -1255,6 +1255,7 @@ mod memory_yaml_tests {
 /// Removes any existing `stt:` block (header + indented body), then appends
 /// the new block.  Matches the style of the other `update_agent_yaml_*`
 /// helpers: line-by-line block stripping + unconditional append.
+#[allow(dead_code)] // wired up by Task 10 (agent_setting_menu STT entry)
 fn update_agent_yaml_stt(
     path: &Path,
     stt: &rightclaw::agent::types::SttConfig,
