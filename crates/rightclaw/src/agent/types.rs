@@ -353,6 +353,44 @@ pub enum WhisperModel {
     LargeV3,
 }
 
+impl WhisperModel {
+    pub fn filename(&self) -> &'static str {
+        match self {
+            Self::Tiny => "ggml-tiny.bin",
+            Self::Base => "ggml-base.bin",
+            Self::Small => "ggml-small.bin",
+            Self::Medium => "ggml-medium.bin",
+            Self::LargeV3 => "ggml-large-v3.bin",
+        }
+    }
+
+    pub fn download_url(&self) -> &'static str {
+        match self {
+            Self::Tiny => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+            Self::Base => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+            Self::Small => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+            }
+            Self::Medium => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+            }
+            Self::LargeV3 => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
+            }
+        }
+    }
+
+    pub fn approx_size_mb(&self) -> u64 {
+        match self {
+            Self::Tiny => 75,
+            Self::Base => 150,
+            Self::Small => 470,
+            Self::Medium => 1500,
+            Self::LargeV3 => 3100,
+        }
+    }
+}
+
 fn default_true_stt() -> bool {
     true
 }
@@ -625,7 +663,10 @@ sandbox:
     - "/tmp"
 "#;
         let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_err(), "old SandboxOverrides fields must be rejected");
+        assert!(
+            result.is_err(),
+            "old SandboxOverrides fields must be rejected"
+        );
     }
 
     #[test]
@@ -704,5 +745,28 @@ stt:
 ";
         let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn whisper_model_filename() {
+        assert_eq!(WhisperModel::Tiny.filename(), "ggml-tiny.bin");
+        assert_eq!(WhisperModel::Base.filename(), "ggml-base.bin");
+        assert_eq!(WhisperModel::Small.filename(), "ggml-small.bin");
+        assert_eq!(WhisperModel::Medium.filename(), "ggml-medium.bin");
+        assert_eq!(WhisperModel::LargeV3.filename(), "ggml-large-v3.bin");
+    }
+
+    #[test]
+    fn whisper_model_download_url_is_huggingface() {
+        let url = WhisperModel::Small.download_url();
+        assert!(url.starts_with("https://huggingface.co/ggerganov/whisper.cpp/"));
+        assert!(url.ends_with("ggml-small.bin"));
+    }
+
+    #[test]
+    fn whisper_model_approx_size_mb_is_sane() {
+        assert!(WhisperModel::Tiny.approx_size_mb() < 100);
+        assert!(WhisperModel::Small.approx_size_mb() < 600);
+        assert!(WhisperModel::LargeV3.approx_size_mb() > 2000);
     }
 }
