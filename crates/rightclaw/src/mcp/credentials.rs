@@ -85,10 +85,7 @@ pub fn add_http_server(
 /// Remove an HTTP MCP server from `mcp.json` under `mcpServers.<name>`.
 ///
 /// Returns `CredentialError::ServerNotFound` if the server entry does not exist.
-pub fn remove_http_server(
-    mcp_json_path: &Path,
-    server_name: &str,
-) -> Result<(), CredentialError> {
+pub fn remove_http_server(mcp_json_path: &Path, server_name: &str) -> Result<(), CredentialError> {
     let mut root = read_mcp_json(mcp_json_path)?;
 
     let removed = root
@@ -107,9 +104,7 @@ pub fn remove_http_server(
 ///
 /// Returns vec of `(name, url)` pairs sorted by name. Returns empty vec if file or
 /// `mcpServers` is absent.
-pub fn list_http_servers(
-    mcp_json_path: &Path,
-) -> Result<Vec<(String, String)>, CredentialError> {
+pub fn list_http_servers(mcp_json_path: &Path) -> Result<Vec<(String, String)>, CredentialError> {
     let root = read_mcp_json(mcp_json_path)?;
 
     let servers = match root.get("mcpServers").and_then(|s| s.as_object()) {
@@ -166,7 +161,10 @@ pub fn set_server_header(
 
 /// Map a `rusqlite::Error` into `CredentialError::Io`.
 fn map_db_err(e: rusqlite::Error) -> CredentialError {
-    CredentialError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("{e:#}")))
+    CredentialError::Io(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("{e:#}"),
+    ))
 }
 
 /// Validate an MCP server name.
@@ -255,11 +253,7 @@ pub struct McpServerEntry {
 }
 
 /// Register (or update) an external MCP server in the SQLite registry.
-pub fn db_add_server(
-    conn: &Connection,
-    name: &str,
-    url: &str,
-) -> Result<(), CredentialError> {
+pub fn db_add_server(conn: &Connection, name: &str, url: &str) -> Result<(), CredentialError> {
     validate_server_name(name)?;
     validate_server_url(url)?;
 
@@ -314,7 +308,9 @@ const SERVER_COLUMNS: &str = "name, url, instructions, auth_type, auth_header, a
     refresh_token, token_endpoint, client_id, client_secret, expires_at";
 
 /// Collect rows from a prepared statement into `McpServerEntry` values.
-fn collect_server_rows(stmt: &mut rusqlite::Statement<'_>) -> Result<Vec<McpServerEntry>, CredentialError> {
+fn collect_server_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+) -> Result<Vec<McpServerEntry>, CredentialError> {
     let rows = stmt
         .query_map([], |row| {
             Ok(McpServerEntry {
@@ -339,7 +335,9 @@ fn collect_server_rows(stmt: &mut rusqlite::Statement<'_>) -> Result<Vec<McpServ
 /// List all registered external MCP servers, sorted by name.
 pub fn db_list_servers(conn: &Connection) -> Result<Vec<McpServerEntry>, CredentialError> {
     let mut stmt = conn
-        .prepare(&format!("SELECT {SERVER_COLUMNS} FROM mcp_servers ORDER BY name"))
+        .prepare(&format!(
+            "SELECT {SERVER_COLUMNS} FROM mcp_servers ORDER BY name"
+        ))
         .map_err(map_db_err)?;
     collect_server_rows(&mut stmt)
 }
@@ -669,8 +667,14 @@ mod db_tests {
             "2026-04-13T12:00:00Z",
         )
         .unwrap();
-        db_update_oauth_token(&conn, "notion", "new-tok", Some("rt2"), "2026-04-13T13:00:00Z")
-            .unwrap();
+        db_update_oauth_token(
+            &conn,
+            "notion",
+            "new-tok",
+            Some("rt2"),
+            "2026-04-13T13:00:00Z",
+        )
+        .unwrap();
         let servers = db_list_servers(&conn).unwrap();
         assert_eq!(servers[0].auth_token.as_deref(), Some("new-tok"));
         assert_eq!(servers[0].refresh_token.as_deref(), Some("rt2"));
@@ -756,21 +760,35 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(content["mcpServers"]["notion"]["type"], "http");
-        assert_eq!(content["mcpServers"]["notion"]["url"], "https://mcp.notion.com/mcp");
+        assert_eq!(
+            content["mcpServers"]["notion"]["url"],
+            "https://mcp.notion.com/mcp"
+        );
     }
 
     #[test]
     fn add_merges_into_existing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("mcp.json");
-        std::fs::write(&path, serde_json::to_string_pretty(&serde_json::json!({
-            "mcpServers": { "right": { "type": "http", "url": "http://localhost:8100/mcp" } }
-        })).unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": { "right": { "type": "http", "url": "http://localhost:8100/mcp" } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         add_http_server(&path, "notion", "https://mcp.notion.com/mcp").unwrap();
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["mcpServers"]["notion"]["url"], "https://mcp.notion.com/mcp");
-        assert_eq!(content["mcpServers"]["right"]["url"], "http://localhost:8100/mcp");
+        assert_eq!(
+            content["mcpServers"]["notion"]["url"],
+            "https://mcp.notion.com/mcp"
+        );
+        assert_eq!(
+            content["mcpServers"]["right"]["url"],
+            "http://localhost:8100/mcp"
+        );
     }
 
     #[test]
@@ -783,7 +801,10 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(content["mcpServers"]["notion"].is_null());
-        assert_eq!(content["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
+        assert_eq!(
+            content["mcpServers"]["linear"]["url"],
+            "https://mcp.linear.app/mcp"
+        );
     }
 
     #[test]
@@ -823,7 +844,10 @@ mod tests {
         set_server_header(&path, "notion", "Authorization", "Bearer tok-abc").unwrap();
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(content["mcpServers"]["notion"]["headers"]["Authorization"], "Bearer tok-abc");
+        assert_eq!(
+            content["mcpServers"]["notion"]["headers"]["Authorization"],
+            "Bearer tok-abc"
+        );
     }
 
     #[test]

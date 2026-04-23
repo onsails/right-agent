@@ -93,9 +93,7 @@ pub fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
     let num_turns = u32::try_from(v.get("num_turns")?.as_u64()?).ok()?;
     let session_uuid = v.get("session_id")?.as_str()?.to_string();
 
-    let get_u64 = |ptr: &str| -> u64 {
-        v.pointer(ptr).and_then(|n| n.as_u64()).unwrap_or(0)
-    };
+    let get_u64 = |ptr: &str| -> u64 { v.pointer(ptr).and_then(|n| n.as_u64()).unwrap_or(0) };
 
     let model_usage_json = v
         .get("modelUsage")
@@ -493,7 +491,10 @@ mod tests {
     #[test]
     fn parse_api_key_source_api_key_mode() {
         let line = r#"{"type":"system","subtype":"init","apiKeySource":"ANTHROPIC_API_KEY"}"#;
-        assert_eq!(parse_api_key_source(line).as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(
+            parse_api_key_source(line).as_deref(),
+            Some("ANTHROPIC_API_KEY")
+        );
     }
 
     #[test]

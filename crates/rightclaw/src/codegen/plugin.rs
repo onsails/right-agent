@@ -16,14 +16,22 @@ pub fn ensure_telegram_plugin_installed() -> miette::Result<()> {
     // 1. Add marketplace (idempotent — "already on disk" if present).
     tracing::debug!("ensuring claude-plugins-official marketplace is registered");
     let marketplace_result = std::process::Command::new(&bin)
-        .args(["plugin", "marketplace", "add", "anthropics/claude-plugins-official"])
+        .args([
+            "plugin",
+            "marketplace",
+            "add",
+            "anthropics/claude-plugins-official",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output();
 
     match marketplace_result {
         Ok(output) if output.status.success() => {
-            tracing::debug!("marketplace add: {}", String::from_utf8_lossy(&output.stdout).trim());
+            tracing::debug!(
+                "marketplace add: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -37,7 +45,13 @@ pub fn ensure_telegram_plugin_installed() -> miette::Result<()> {
     // 2. Install plugin (idempotent — succeeds silently if already installed).
     tracing::debug!("ensuring telegram plugin is installed");
     let install_result = std::process::Command::new(&bin)
-        .args(["plugin", "install", "telegram@claude-plugins-official", "--scope", "user"])
+        .args([
+            "plugin",
+            "install",
+            "telegram@claude-plugins-official",
+            "--scope",
+            "user",
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output();
@@ -58,7 +72,11 @@ pub fn ensure_telegram_plugin_installed() -> miette::Result<()> {
             );
             eprintln!(
                 "warning: telegram plugin install failed: {}",
-                if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+                if stderr.trim().is_empty() {
+                    stdout.trim()
+                } else {
+                    stderr.trim()
+                }
             );
         }
         Err(e) => {
@@ -107,7 +125,11 @@ pub fn ensure_bun_installed() -> miette::Result<()> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(miette::miette!(
                 "bun installer failed: {}",
-                if stderr.trim().is_empty() { stdout.trim().to_string() } else { stderr.trim().to_string() }
+                if stderr.trim().is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    stderr.trim().to_string()
+                }
             ));
         }
         Err(e) => {
@@ -119,7 +141,8 @@ pub fn ensure_bun_installed() -> miette::Result<()> {
 
     // Verify bun is now available. The installer puts it in ~/.bun/bin which
     // may not be in the current process PATH yet. Check the default location.
-    let home = dirs::home_dir().ok_or_else(|| miette::miette!("cannot determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| miette::miette!("cannot determine home directory"))?;
     let bun_path = home.join(".bun").join("bin").join("bun");
 
     if bun_path.exists() {

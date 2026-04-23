@@ -116,9 +116,7 @@ pub fn validate_lock_ttl(s: &str) -> Result<(), String> {
     }
     let (num_part, suffix) = s.split_at(s.len() - 1);
     if !matches!(suffix, "m" | "h") {
-        return Err(format!(
-            "lock_ttl must end with 'm' or 'h', got '{s}'"
-        ));
+        return Err(format!("lock_ttl must end with 'm' or 'h', got '{s}'"));
     }
     num_part
         .parse::<i64>()
@@ -162,16 +160,15 @@ fn resolve_schedule_fields(
         (Some(_), Some(_)) => {
             Err("schedule and run_at are mutually exclusive — provide one or the other".into())
         }
-        (None, None) => {
-            Err("one of schedule or run_at must be provided".into())
-        }
+        (None, None) => Err("one of schedule or run_at must be provided".into()),
         (Some(sched), None) => {
             let warning = validate_schedule(sched)?;
             let rec = if recurring.unwrap_or(true) { 1 } else { 0 };
             Ok((sched.to_string(), rec, None, warning))
         }
         (None, Some(rat)) => {
-            let dt = rat.parse::<DateTime<Utc>>()
+            let dt = rat
+                .parse::<DateTime<Utc>>()
                 .map_err(|e| format!("invalid run_at datetime '{rat}': {e}"))?;
             let warning = if dt <= Utc::now() {
                 Some("run_at is in the past — job will fire on next reconcile tick".into())
@@ -192,7 +189,8 @@ pub fn create_spec(
     lock_ttl: Option<&str>,
     max_budget_usd: Option<f64>,
 ) -> Result<CronSpecResult, String> {
-    let schedule_warning = validate_spec_inputs(job_name, schedule, prompt, lock_ttl, max_budget_usd)?;
+    let schedule_warning =
+        validate_spec_inputs(job_name, schedule, prompt, lock_ttl, max_budget_usd)?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
@@ -280,7 +278,8 @@ pub fn update_spec(
     lock_ttl: Option<&str>,
     max_budget_usd: Option<f64>,
 ) -> Result<CronSpecResult, String> {
-    let schedule_warning = validate_spec_inputs(job_name, schedule, prompt, lock_ttl, max_budget_usd)?;
+    let schedule_warning =
+        validate_spec_inputs(job_name, schedule, prompt, lock_ttl, max_budget_usd)?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
@@ -369,7 +368,11 @@ pub fn update_spec_partial(
         sets.push("schedule = ?");
         params.push(Box::new(sched.to_string()));
         sets.push("run_at = NULL");
-        let rec = if recurring.unwrap_or(true) { 1i64 } else { 0i64 };
+        let rec = if recurring.unwrap_or(true) {
+            1i64
+        } else {
+            0i64
+        };
         sets.push("recurring = ?");
         params.push(Box::new(rec));
     } else if let Some(rat) = run_at {
@@ -504,8 +507,7 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
         .map_err(|e| format!("query failed: {e:#}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("row read failed: {e:#}"))?;
-    serde_json::to_string_pretty(&rows)
-        .map_err(|e| format!("serialization error: {e:#}"))
+    serde_json::to_string_pretty(&rows).map_err(|e| format!("serialization error: {e:#}"))
 }
 
 /// Format a [`CronSpecResult`] into a single message string with optional warning.
@@ -542,7 +544,8 @@ pub fn load_specs_from_db(
     })?;
 
     for row in rows {
-        let (job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at) = row?;
+        let (job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at) =
+            row?;
 
         let schedule_kind = if let Some(ref rat) = run_at {
             match rat.parse::<DateTime<Utc>>() {
@@ -757,8 +760,7 @@ mod tests {
     #[test]
     fn create_spec_success() {
         let conn = setup_db();
-        let result =
-            create_spec(&conn, "my-job", "*/5 * * * *", "do stuff", None, None).unwrap();
+        let result = create_spec(&conn, "my-job", "*/5 * * * *", "do stuff", None, None).unwrap();
         assert!(result.message.contains("Created"));
         assert!(result.warning.is_none());
 
@@ -776,8 +778,7 @@ mod tests {
     #[test]
     fn create_spec_with_warning() {
         let conn = setup_db();
-        let result =
-            create_spec(&conn, "my-job", "0 9 * * *", "do stuff", None, None).unwrap();
+        let result = create_spec(&conn, "my-job", "0 9 * * *", "do stuff", None, None).unwrap();
         assert!(result.warning.is_some());
     }
 
@@ -808,9 +809,15 @@ mod tests {
     fn update_spec_success() {
         let conn = setup_db();
         create_spec(&conn, "upd", "*/5 * * * *", "old", None, None).unwrap();
-        let result =
-            update_spec(&conn, "upd", "17 9 * * *", "new prompt", Some("1h"), Some(2.0))
-                .unwrap();
+        let result = update_spec(
+            &conn,
+            "upd",
+            "17 9 * * *",
+            "new prompt",
+            Some("1h"),
+            Some(2.0),
+        )
+        .unwrap();
         assert!(result.message.contains("Updated"));
 
         let prompt: String = conn
@@ -826,8 +833,7 @@ mod tests {
     #[test]
     fn update_spec_not_found() {
         let conn = setup_db();
-        let err =
-            update_spec(&conn, "ghost", "*/5 * * * *", "prompt", None, None).unwrap_err();
+        let err = update_spec(&conn, "ghost", "*/5 * * * *", "prompt", None, None).unwrap_err();
         assert!(err.contains("not found"));
     }
 
@@ -861,7 +867,15 @@ mod tests {
     fn list_specs_json() {
         let conn = setup_db();
         create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None).unwrap();
-        create_spec(&conn, "b-job", "17 9 * * *", "prompt b", Some("30m"), Some(2.5)).unwrap();
+        create_spec(
+            &conn,
+            "b-job",
+            "17 9 * * *",
+            "prompt b",
+            Some("30m"),
+            Some(2.5),
+        )
+        .unwrap();
         let output = list_specs(&conn).unwrap();
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed.len(), 2);
@@ -923,7 +937,10 @@ mod tests {
         .unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
         assert_eq!(specs.len(), 2);
-        assert_eq!(specs["job1"].schedule_kind.cron_schedule().unwrap(), "*/5 * * * *");
+        assert_eq!(
+            specs["job1"].schedule_kind.cron_schedule().unwrap(),
+            "*/5 * * * *"
+        );
         assert_eq!(specs["job1"].max_budget_usd, 0.5);
         assert_eq!(specs["job2"].lock_ttl.as_deref(), Some("1h"));
     }
@@ -998,8 +1015,15 @@ mod tests {
     #[test]
     fn get_spec_detail_found() {
         let conn = setup_db();
-        create_spec(&conn, "detail-job", "*/5 * * * *", "do stuff", Some("1h"), Some(2.5))
-            .unwrap();
+        create_spec(
+            &conn,
+            "detail-job",
+            "*/5 * * * *",
+            "do stuff",
+            Some("1h"),
+            Some(2.5),
+        )
+        .unwrap();
         let detail = get_spec_detail(&conn, "detail-job").unwrap().unwrap();
         assert_eq!(detail.job_name, "detail-job");
         assert_eq!(detail.schedule, "*/5 * * * *");
@@ -1118,9 +1142,18 @@ mod tests {
     fn create_spec_v2_with_run_at_succeeds() {
         let conn = setup_db();
         let result = create_spec_v2(
-            &conn, "run-at-job", None, "do stuff at specific time",
-            None, None, None, Some("2026-12-25T15:30:00Z"), None, None,
-        ).unwrap();
+            &conn,
+            "run-at-job",
+            None,
+            "do stuff at specific time",
+            None,
+            None,
+            None,
+            Some("2026-12-25T15:30:00Z"),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(result.message.contains("Created"));
     }
 
@@ -1128,9 +1161,18 @@ mod tests {
     fn create_spec_v2_with_both_schedule_and_run_at_fails() {
         let conn = setup_db();
         let err = create_spec_v2(
-            &conn, "both-job", Some("*/5 * * * *"), "prompt",
-            None, None, None, Some("2026-12-25T15:30:00Z"), None, None,
-        ).unwrap_err();
+            &conn,
+            "both-job",
+            Some("*/5 * * * *"),
+            "prompt",
+            None,
+            None,
+            None,
+            Some("2026-12-25T15:30:00Z"),
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("mutually exclusive"));
     }
 
@@ -1138,9 +1180,18 @@ mod tests {
     fn create_spec_v2_with_neither_schedule_nor_run_at_fails() {
         let conn = setup_db();
         let err = create_spec_v2(
-            &conn, "neither-job", None, "prompt",
-            None, None, None, None, None, None,
-        ).unwrap_err();
+            &conn,
+            "neither-job",
+            None,
+            "prompt",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("one of"));
     }
 
@@ -1148,9 +1199,18 @@ mod tests {
     fn create_spec_v2_with_invalid_run_at_fails() {
         let conn = setup_db();
         let err = create_spec_v2(
-            &conn, "bad-time", None, "prompt",
-            None, None, None, Some("not-a-datetime"), None, None,
-        ).unwrap_err();
+            &conn,
+            "bad-time",
+            None,
+            "prompt",
+            None,
+            None,
+            None,
+            Some("not-a-datetime"),
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("invalid"));
     }
 
@@ -1158,9 +1218,18 @@ mod tests {
     fn create_spec_v2_with_past_run_at_succeeds() {
         let conn = setup_db();
         let result = create_spec_v2(
-            &conn, "past-job", None, "prompt",
-            None, None, None, Some("2020-01-01T00:00:00Z"), None, None,
-        ).unwrap();
+            &conn,
+            "past-job",
+            None,
+            "prompt",
+            None,
+            None,
+            None,
+            Some("2020-01-01T00:00:00Z"),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(result.message.contains("Created"));
     }
 
@@ -1168,31 +1237,112 @@ mod tests {
     fn create_spec_v2_recurring_false_stored_as_one_shot_cron() {
         let conn = setup_db();
         create_spec_v2(
-            &conn, "oneshot-cron", Some("30 15 * * *"), "prompt",
-            None, None, Some(false), None, None, None,
-        ).unwrap();
+            &conn,
+            "oneshot-cron",
+            Some("30 15 * * *"),
+            "prompt",
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
-        assert!(matches!(specs["oneshot-cron"].schedule_kind, ScheduleKind::OneShotCron(_)));
+        assert!(matches!(
+            specs["oneshot-cron"].schedule_kind,
+            ScheduleKind::OneShotCron(_)
+        ));
     }
 
     #[test]
     fn load_specs_round_trips_all_schedule_kinds() {
         let conn = setup_db();
-        create_spec_v2(&conn, "recurring", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
-        create_spec_v2(&conn, "oneshot", Some("17 15 * * *"), "p", None, None, Some(false), None, None, None).unwrap();
-        create_spec_v2(&conn, "runat", None, "p", None, None, None, Some("2026-12-25T15:30:00Z"), None, None).unwrap();
+        create_spec_v2(
+            &conn,
+            "recurring",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        create_spec_v2(
+            &conn,
+            "oneshot",
+            Some("17 15 * * *"),
+            "p",
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        create_spec_v2(
+            &conn,
+            "runat",
+            None,
+            "p",
+            None,
+            None,
+            None,
+            Some("2026-12-25T15:30:00Z"),
+            None,
+            None,
+        )
+        .unwrap();
 
         let specs = load_specs_from_db(&conn).unwrap();
-        assert!(matches!(specs["recurring"].schedule_kind, ScheduleKind::Recurring(_)));
-        assert!(matches!(specs["oneshot"].schedule_kind, ScheduleKind::OneShotCron(_)));
-        assert!(matches!(specs["runat"].schedule_kind, ScheduleKind::RunAt(_)));
+        assert!(matches!(
+            specs["recurring"].schedule_kind,
+            ScheduleKind::Recurring(_)
+        ));
+        assert!(matches!(
+            specs["oneshot"].schedule_kind,
+            ScheduleKind::OneShotCron(_)
+        ));
+        assert!(matches!(
+            specs["runat"].schedule_kind,
+            ScheduleKind::RunAt(_)
+        ));
     }
 
     #[test]
     fn update_spec_partial_prompt_only() {
         let conn = setup_db();
-        create_spec_v2(&conn, "partial", Some("*/5 * * * *"), "old", None, Some(1.5), None, None, None, None).unwrap();
-        update_spec_partial(&conn, "partial", None, None, Some("new prompt"), None, None, None, None, None).unwrap();
+        create_spec_v2(
+            &conn,
+            "partial",
+            Some("*/5 * * * *"),
+            "old",
+            None,
+            Some(1.5),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        update_spec_partial(
+            &conn,
+            "partial",
+            None,
+            None,
+            Some("new prompt"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let detail = get_spec_detail(&conn, "partial").unwrap().unwrap();
         assert_eq!(detail.prompt, "new prompt");
         assert_eq!(detail.schedule, "*/5 * * * *");
@@ -1202,44 +1352,146 @@ mod tests {
     #[test]
     fn update_spec_partial_schedule_clears_run_at() {
         let conn = setup_db();
-        create_spec_v2(&conn, "switch", None, "p", None, None, None, Some("2026-12-25T15:30:00Z"), None, None).unwrap();
-        update_spec_partial(&conn, "switch", Some("*/10 * * * *"), None, None, None, None, None, None, None).unwrap();
+        create_spec_v2(
+            &conn,
+            "switch",
+            None,
+            "p",
+            None,
+            None,
+            None,
+            Some("2026-12-25T15:30:00Z"),
+            None,
+            None,
+        )
+        .unwrap();
+        update_spec_partial(
+            &conn,
+            "switch",
+            Some("*/10 * * * *"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
-        assert!(matches!(specs["switch"].schedule_kind, ScheduleKind::Recurring(_)));
+        assert!(matches!(
+            specs["switch"].schedule_kind,
+            ScheduleKind::Recurring(_)
+        ));
     }
 
     #[test]
     fn update_spec_partial_run_at_clears_schedule() {
         let conn = setup_db();
-        create_spec_v2(&conn, "switch2", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
-        update_spec_partial(&conn, "switch2", None, Some("2026-12-25T15:30:00Z"), None, None, None, None, None, None).unwrap();
+        create_spec_v2(
+            &conn,
+            "switch2",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        update_spec_partial(
+            &conn,
+            "switch2",
+            None,
+            Some("2026-12-25T15:30:00Z"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
-        assert!(matches!(specs["switch2"].schedule_kind, ScheduleKind::RunAt(_)));
+        assert!(matches!(
+            specs["switch2"].schedule_kind,
+            ScheduleKind::RunAt(_)
+        ));
     }
 
     #[test]
     fn update_spec_partial_both_schedule_and_run_at_fails() {
         let conn = setup_db();
-        create_spec_v2(&conn, "both", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
+        create_spec_v2(
+            &conn,
+            "both",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let err = update_spec_partial(
-            &conn, "both", Some("*/10 * * * *"), Some("2026-12-25T15:30:00Z"),
-            None, None, None, None, None, None,
-        ).unwrap_err();
+            &conn,
+            "both",
+            Some("*/10 * * * *"),
+            Some("2026-12-25T15:30:00Z"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("mutually exclusive"));
     }
 
     #[test]
     fn update_spec_partial_no_fields_fails() {
         let conn = setup_db();
-        create_spec_v2(&conn, "empty", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
-        let err = update_spec_partial(&conn, "empty", None, None, None, None, None, None, None, None).unwrap_err();
+        create_spec_v2(
+            &conn,
+            "empty",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let err = update_spec_partial(
+            &conn, "empty", None, None, None, None, None, None, None, None,
+        )
+        .unwrap_err();
         assert!(err.contains("at least one"));
     }
 
     #[test]
     fn update_spec_partial_not_found() {
         let conn = setup_db();
-        let err = update_spec_partial(&conn, "ghost", None, None, Some("p"), None, None, None, None, None).unwrap_err();
+        let err = update_spec_partial(
+            &conn,
+            "ghost",
+            None,
+            None,
+            Some("p"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("not found"));
     }
 
@@ -1302,13 +1554,38 @@ mod tests {
     #[test]
     fn update_spec_partial_sets_target_chat_id() {
         let conn = setup_db();
-        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, None, None).unwrap();
+        create_spec_v2(
+            &conn,
+            "j1",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         update_spec_partial(
-            &conn, "j1", None, None, None, None, None, None,
-            Some(-555), None,
-        ).unwrap();
+            &conn,
+            "j1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(-555),
+            None,
+        )
+        .unwrap();
         let chat: Option<i64> = conn
-            .query_row("SELECT target_chat_id FROM cron_specs WHERE job_name='j1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT target_chat_id FROM cron_specs WHERE job_name='j1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(chat, Some(-555));
     }
@@ -1316,14 +1593,39 @@ mod tests {
     #[test]
     fn update_spec_partial_clears_target_thread_id() {
         let conn = setup_db();
-        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, Some(-1), Some(42)).unwrap();
+        create_spec_v2(
+            &conn,
+            "j1",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            Some(-1),
+            Some(42),
+        )
+        .unwrap();
         // Outer Some = field present; inner None = clear to NULL.
         update_spec_partial(
-            &conn, "j1", None, None, None, None, None, None,
-            None, Some(None),
-        ).unwrap();
+            &conn,
+            "j1",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(None),
+        )
+        .unwrap();
         let thread: Option<i64> = conn
-            .query_row("SELECT target_thread_id FROM cron_specs WHERE job_name='j1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT target_thread_id FROM cron_specs WHERE job_name='j1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(thread.is_none(), "thread must be cleared");
     }
@@ -1331,14 +1633,39 @@ mod tests {
     #[test]
     fn update_spec_partial_leaves_target_when_omitted() {
         let conn = setup_db();
-        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, Some(-1), Some(42)).unwrap();
+        create_spec_v2(
+            &conn,
+            "j1",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            Some(-1),
+            Some(42),
+        )
+        .unwrap();
         // Update only the prompt; targets must stay.
         update_spec_partial(
-            &conn, "j1", None, None, Some("new prompt"), None, None, None,
-            None, None,
-        ).unwrap();
+            &conn,
+            "j1",
+            None,
+            None,
+            Some("new prompt"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let (chat, thread): (Option<i64>, Option<i64>) = conn
-            .query_row("SELECT target_chat_id, target_thread_id FROM cron_specs WHERE job_name='j1'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(
+                "SELECT target_chat_id, target_thread_id FROM cron_specs WHERE job_name='j1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(chat, Some(-1));
         assert_eq!(thread, Some(42));
@@ -1347,7 +1674,19 @@ mod tests {
     #[test]
     fn list_specs_includes_target_fields() {
         let conn = setup_db();
-        create_spec_v2(&conn, "j1", Some("*/5 * * * *"), "p", None, None, None, None, Some(-100), Some(5)).unwrap();
+        create_spec_v2(
+            &conn,
+            "j1",
+            Some("*/5 * * * *"),
+            "p",
+            None,
+            None,
+            None,
+            None,
+            Some(-100),
+            Some(5),
+        )
+        .unwrap();
         let json = list_specs(&conn).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         let row = &value.as_array().unwrap()[0];

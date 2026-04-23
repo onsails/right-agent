@@ -77,10 +77,7 @@ pub fn discover_single_agent(agent_dir: &Path) -> miette::Result<AgentDef> {
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| {
-            miette::miette!(
-                "agent directory has no valid name: {}",
-                agent_dir.display()
-            )
+            miette::miette!("agent directory has no valid name: {}", agent_dir.display())
         })?
         .to_string();
 

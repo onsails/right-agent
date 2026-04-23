@@ -115,7 +115,9 @@ impl PcClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(miette::miette!("restart process '{name}' failed ({status}): {body}"));
+            return Err(miette::miette!(
+                "restart process '{name}' failed ({status}): {body}"
+            ));
         }
         Ok(())
     }
@@ -131,7 +133,9 @@ impl PcClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(miette::miette!("stop process '{name}' failed ({status}): {body}"));
+            return Err(miette::miette!(
+                "stop process '{name}' failed ({status}): {body}"
+            ));
         }
         Ok(())
     }
@@ -147,7 +151,9 @@ impl PcClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(miette::miette!("start process '{name}' failed ({status}): {body}"));
+            return Err(miette::miette!(
+                "start process '{name}' failed ({status}): {body}"
+            ));
         }
         Ok(())
     }
@@ -181,7 +187,9 @@ impl PcClient {
             .post(format!("{}/project/configuration", self.base_url))
             .send()
             .await
-            .map_err(|e| miette::miette!("failed to reload process-compose configuration: {e:#}"))?;
+            .map_err(|e| {
+                miette::miette!("failed to reload process-compose configuration: {e:#}")
+            })?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();

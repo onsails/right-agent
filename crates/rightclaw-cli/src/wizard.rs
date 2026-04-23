@@ -824,9 +824,11 @@ async fn memory_setup(
     // - explicit key if user entered one
     // - HINDSIGHT_API_KEY env var as fallback
     // If neither is available, skip validation with a note.
-    let resolved_key = api_key
-        .clone()
-        .or_else(|| std::env::var("HINDSIGHT_API_KEY").ok().filter(|s| !s.is_empty()));
+    let resolved_key = api_key.clone().or_else(|| {
+        std::env::var("HINDSIGHT_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
 
     if let Some(k) = resolved_key.as_deref() {
         println!("Validating key against Hindsight...");
@@ -1200,14 +1202,19 @@ mod memory_yaml_tests {
     #[test]
     fn remove_agent_yaml_memory_strips_entire_block() {
         let dir = tempdir().unwrap();
-        let initial =
-            "model: \"sonnet\"\n\nmemory:\n  provider: hindsight\n  api_key: \"x\"\n  bank_id: \"b\"\n\nnetwork_policy: permissive\n";
+        let initial = "model: \"sonnet\"\n\nmemory:\n  provider: hindsight\n  api_key: \"x\"\n  bank_id: \"b\"\n\nnetwork_policy: permissive\n";
         let path = write_yaml(dir.path(), initial);
         remove_agent_yaml_memory(&path).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(!content.contains("memory:"), "memory block must be gone, got:\n{content}");
-        assert!(!content.contains("api_key"), "api_key must be gone, got:\n{content}");
+        assert!(
+            !content.contains("memory:"),
+            "memory block must be gone, got:\n{content}"
+        );
+        assert!(
+            !content.contains("api_key"),
+            "api_key must be gone, got:\n{content}"
+        );
         assert!(
             content.contains("network_policy: permissive"),
             "unrelated fields must survive, got:\n{content}"
@@ -1231,9 +1238,15 @@ mod memory_yaml_tests {
         update_agent_yaml_memory(&path, &cfg).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("model: \"sonnet\""), "pre-existing field survives");
+        assert!(
+            content.contains("model: \"sonnet\""),
+            "pre-existing field survives"
+        );
         assert!(content.contains("memory:"), "memory block added");
-        assert!(content.contains("recall_budget: low"), "non-default budget emitted");
+        assert!(
+            content.contains("recall_budget: low"),
+            "non-default budget emitted"
+        );
     }
 }
 

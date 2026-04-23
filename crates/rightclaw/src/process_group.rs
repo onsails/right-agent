@@ -126,9 +126,8 @@ mod tests {
         let pid_path = pid_file.path().to_str().expect("utf-8").to_owned();
 
         let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(format!(
-            "sleep 600 & echo $! > {pid_path}; wait"
-        ));
+        cmd.arg("-c")
+            .arg(format!("sleep 600 & echo $! > {pid_path}; wait"));
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
@@ -159,9 +158,8 @@ mod tests {
 
         let mut cmd = Command::new("bash");
         cmd.kill_on_drop(true);
-        cmd.arg("-c").arg(format!(
-            "sleep 600 & echo $! > {pid_path}; wait"
-        ));
+        cmd.arg("-c")
+            .arg(format!("sleep 600 & echo $! > {pid_path}; wait"));
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
 
@@ -203,9 +201,8 @@ mod tests {
         let pid_path = pid_file.path().to_str().expect("utf-8").to_owned();
 
         let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(format!(
-            "sleep 600 & echo $! > {pid_path}; wait"
-        ));
+        cmd.arg("-c")
+            .arg(format!("sleep 600 & echo $! > {pid_path}; wait"));
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
@@ -224,11 +221,8 @@ mod tests {
 
         // Wrap wait_with_output in a short timeout. When timeout fires,
         // the inner future drops — Drop on ProcessGroupChild must fire.
-        let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            child.wait_with_output(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_millis(200), child.wait_with_output()).await;
         assert!(result.is_err(), "timeout must elapse");
 
         drop(child);

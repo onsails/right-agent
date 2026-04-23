@@ -615,8 +615,7 @@ async fn execute_job(
         let raw_content =
             format!("Cron job `{job_name}` failed (exit code {exit_str}):\n{raw_detail}");
 
-        let failure_kind =
-            classify_cron_failure(exit_code, &raw_detail, spec.max_budget_usd, None);
+        let failure_kind = classify_cron_failure(exit_code, &raw_detail, spec.max_budget_usd, None);
 
         // Best-effort ring buffer: parse last ~5 stream-json lines from collected_lines,
         // keeping only displayable events. Chronological order (oldest → newest) to

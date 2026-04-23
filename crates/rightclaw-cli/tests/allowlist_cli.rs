@@ -61,7 +61,14 @@ fn allow_all_opens_group() {
     init_agent(home.path(), "testbot");
 
     run(home.path())
-        .args(["agent", "allow_all", "testbot", "-1001234", "--label", "Dev"])
+        .args([
+            "agent",
+            "allow_all",
+            "testbot",
+            "-1001234",
+            "--label",
+            "Dev",
+        ])
         .assert()
         .success()
         .stdout(contains("opened group -1001234"));

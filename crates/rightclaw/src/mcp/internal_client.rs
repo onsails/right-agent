@@ -153,11 +153,8 @@ impl InternalClient {
         &self,
         agent: &str,
     ) -> Result<McpInstructionsResponse, InternalClientError> {
-        self.post(
-            "/mcp-instructions",
-            &serde_json::json!({"agent": agent}),
-        )
-        .await
+        self.post("/mcp-instructions", &serde_json::json!({"agent": agent}))
+            .await
     }
 
     /// Set OAuth token for an MCP server.

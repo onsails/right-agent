@@ -91,11 +91,26 @@ fn aggregate_per_model(
             continue;
         };
         for (model_name, fields) in obj {
-            let cost = fields.get("costUSD").and_then(|n| n.as_f64()).unwrap_or(0.0);
-            let input = fields.get("inputTokens").and_then(|n| n.as_u64()).unwrap_or(0);
-            let output = fields.get("outputTokens").and_then(|n| n.as_u64()).unwrap_or(0);
-            let cache_c = fields.get("cacheCreationInputTokens").and_then(|n| n.as_u64()).unwrap_or(0);
-            let cache_r = fields.get("cacheReadInputTokens").and_then(|n| n.as_u64()).unwrap_or(0);
+            let cost = fields
+                .get("costUSD")
+                .and_then(|n| n.as_f64())
+                .unwrap_or(0.0);
+            let input = fields
+                .get("inputTokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let output = fields
+                .get("outputTokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let cache_c = fields
+                .get("cacheCreationInputTokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let cache_r = fields
+                .get("cacheReadInputTokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
 
             let entry = out.entry(model_name.clone()).or_default();
             entry.cost_usd += cost;
@@ -197,7 +212,13 @@ mod tests {
         let conn = open_connection(dir.path(), true).unwrap();
         insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "none"), 1, 0).unwrap();
         insert_interactive(&conn, &breakdown_with_src(0.20, "sonnet", "none"), 1, 0).unwrap();
-        insert_interactive(&conn, &breakdown_with_src(0.05, "sonnet", "ANTHROPIC_API_KEY"), 1, 0).unwrap();
+        insert_interactive(
+            &conn,
+            &breakdown_with_src(0.05, "sonnet", "ANTHROPIC_API_KEY"),
+            1,
+            0,
+        )
+        .unwrap();
 
         let s = aggregate(&conn, None, "interactive").unwrap();
         assert!((s.cost_usd - 0.35).abs() < 1e-9);
@@ -220,7 +241,13 @@ mod tests {
     fn aggregate_api_only_has_zero_subscription_cost() {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).unwrap();
-        insert_interactive(&conn, &breakdown_with_src(0.10, "sonnet", "ANTHROPIC_API_KEY"), 1, 0).unwrap();
+        insert_interactive(
+            &conn,
+            &breakdown_with_src(0.10, "sonnet", "ANTHROPIC_API_KEY"),
+            1,
+            0,
+        )
+        .unwrap();
 
         let s = aggregate(&conn, None, "interactive").unwrap();
         assert_eq!(s.subscription_cost_usd, 0.0);
@@ -236,7 +263,8 @@ mod tests {
         conn.execute(
             "UPDATE usage_events SET ts = '2020-01-01T00:00:00Z' WHERE id = 1",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         insert_interactive(&conn, &breakdown(0.2, "sonnet"), 1, 0).unwrap();
 
         let since = Utc::now() - chrono::Duration::hours(1);
