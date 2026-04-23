@@ -1562,7 +1562,8 @@ fn cmd_agent_init(
             if !ffmpeg_ok {
                 eprintln!(
                     "warning: STT disabled — ffmpeg not in PATH. \
-                     Install (macOS): brew install ffmpeg, then re-run with --force."
+                     Install (macOS): brew install ffmpeg, then enable via \
+                     `rightclaw agent config {name}`."
                 );
             }
             rightclaw::init::InitOverrides {
