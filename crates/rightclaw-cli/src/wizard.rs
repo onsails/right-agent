@@ -880,7 +880,6 @@ async fn memory_setup(
 /// macOS: detect brew, prompt to install ffmpeg, run, re-check.
 /// Linux: print install instructions only.
 /// Returns true iff ffmpeg is in PATH after this call.
-#[allow(dead_code)] // wired up by Task 6 (stt_setup wizard helper)
 pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
     if rightclaw::stt::ffmpeg_available() {
         return Ok(true);
@@ -889,19 +888,19 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
     match std::env::consts::OS {
         "macos" => {
             if which::which("brew").is_err() {
-                eprintln!("ffmpeg required, but Homebrew (brew) is not installed.");
-                eprintln!("Install Homebrew first: https://brew.sh");
-                eprintln!("Then run: brew install ffmpeg");
+                println!("ffmpeg required, but Homebrew (brew) is not installed.");
+                println!("Install Homebrew first: https://brew.sh");
+                println!("Then run: brew install ffmpeg");
                 return Ok(false);
             }
             let install = inquire::Confirm::new(
-                "ffmpeg required for voice transcription. Install via 'brew install ffmpeg' (~50 MB, ~30 sec)?"
+                "ffmpeg required for voice transcription. Install via 'brew install ffmpeg'?",
             )
             .with_default(true)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             if !install {
-                eprintln!("STT will be disabled. Install ffmpeg later: brew install ffmpeg");
+                println!("STT will be disabled. Install ffmpeg later: brew install ffmpeg");
                 return Ok(false);
             }
             // Spawn brew install with stdout/stderr inherited so user sees output.
@@ -910,11 +909,11 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 .status()
                 .map_err(|e| miette::miette!("spawn brew: {e:#}"))?;
             if !status.success() {
-                eprintln!("brew install ffmpeg exited with {status}; STT disabled.");
+                println!("brew install ffmpeg exited with {status}; STT disabled.");
                 return Ok(false);
             }
             if !rightclaw::stt::ffmpeg_available() {
-                eprintln!(
+                println!(
                     "brew completed but ffmpeg not yet in PATH — restart shell or check PATH; STT disabled."
                 );
                 return Ok(false);
@@ -923,18 +922,81 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
             Ok(true)
         }
         "linux" => {
-            eprintln!("ffmpeg required for voice transcription. Install:");
-            eprintln!("  Debian/Ubuntu:  sudo apt install ffmpeg");
-            eprintln!("  NixOS / devenv: add 'pkgs.ffmpeg' to your packages");
-            eprintln!("Then re-run this command.");
+            println!("ffmpeg required for voice transcription. Install:");
+            println!("  Debian/Ubuntu:  sudo apt install ffmpeg");
+            println!("  NixOS / devenv: add 'pkgs.ffmpeg' to your packages");
+            println!("Then re-run this command.");
             Ok(false)
         }
         other => {
-            eprintln!("ffmpeg required, but auto-install is not supported on '{other}'.");
-            eprintln!("Install ffmpeg from https://ffmpeg.org/download.html, then re-run.");
+            println!("ffmpeg required, but auto-install is not supported on '{other}'.");
+            println!("Install ffmpeg from https://ffmpeg.org/download.html, then re-run.");
             Ok(false)
         }
     }
+}
+
+/// Wizard step: ask enable/disable + model selection, run ffmpeg detection
+/// + install prompt as needed. Returns Some((enabled, model)) on completion,
+/// None if the user pressed Esc on the first prompt (back to previous step).
+// wired up by Task 7 (Step::Stt) and Task 10 (agent_setting_menu)
+#[allow(dead_code)]
+pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::WhisperModel)>> {
+    use rightclaw::agent::types::WhisperModel;
+
+    // Step 1: enable y/n
+    let enable = match inquire::Confirm::new("Enable voice transcription?")
+        .with_default(true)
+        .with_help_message(
+            "Telegram voice messages and video notes will be transcribed locally via whisper.cpp.",
+        )
+        .prompt()
+    {
+        Ok(v) => v,
+        Err(inquire::InquireError::OperationCanceled)
+        | Err(inquire::InquireError::OperationInterrupted) => return Ok(None),
+        Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
+    };
+
+    if !enable {
+        return Ok(Some((false, WhisperModel::Small)));
+    }
+
+    // Step 2: model select
+    let options = vec![
+        "tiny     — ~75 MB,   fastest, OK for short commands",
+        "base     — ~150 MB,  decent",
+        "small    — ~470 MB,  recommended (default)",
+        "medium   — ~1.5 GB,  very good",
+        "large-v3 — ~3.0 GB,  best quality, slow",
+    ];
+    let picked = match inquire::Select::new("Choose whisper model:", options.clone())
+        .with_starting_cursor(2) // small
+        .prompt()
+    {
+        Ok(v) => v,
+        Err(inquire::InquireError::OperationCanceled)
+        | Err(inquire::InquireError::OperationInterrupted) => {
+            // Back up to "Enable?" — caller's loop will re-enter this fn.
+            return Ok(None);
+        }
+        Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
+    };
+    let model = if picked.starts_with("tiny") {
+        WhisperModel::Tiny
+    } else if picked.starts_with("base") {
+        WhisperModel::Base
+    } else if picked.starts_with("small") {
+        WhisperModel::Small
+    } else if picked.starts_with("medium") {
+        WhisperModel::Medium
+    } else {
+        WhisperModel::LargeV3
+    };
+
+    // Step 3: ffmpeg check + optional install
+    let ffmpeg_ok = prompt_ffmpeg_install()?;
+    Ok(Some((ffmpeg_ok, model)))
 }
 
 // ---------------------------------------------------------------------------
