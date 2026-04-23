@@ -37,7 +37,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release -p rightclaw-cli --target ${{ matrix.target }}
+        run: cargo build --release --locked -p rightclaw-cli --target ${{ matrix.target }}
 
       - name: Rename binary
         run: cp target/${{ matrix.target }}/release/rightclaw ${{ matrix.artifact }}
