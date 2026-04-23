@@ -134,8 +134,7 @@ pub(crate) fn build_claude_command(
     resolved_sandbox: Option<&str>,
 ) -> tokio::process::Command {
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host =
-            rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut script = String::new();
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");

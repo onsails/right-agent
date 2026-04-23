@@ -119,20 +119,22 @@ pub fn preflight_check() -> OpenShellStatus {
 /// - `ca.crt`  — CA certificate
 /// - `tls.crt` — client certificate
 /// - `tls.key` — client private key
-pub async fn connect_grpc(
-    mtls_dir: &Path,
-) -> miette::Result<OpenShellClient<Channel>> {
+pub async fn connect_grpc(mtls_dir: &Path) -> miette::Result<OpenShellClient<Channel>> {
     let ca_pem = tokio::fs::read(mtls_dir.join("ca.crt"))
         .await
         .map_err(|e| miette::miette!("failed to read ca.crt from {}: {e:#}", mtls_dir.display()))?;
 
     let client_cert = tokio::fs::read(mtls_dir.join("tls.crt"))
         .await
-        .map_err(|e| miette::miette!("failed to read tls.crt from {}: {e:#}", mtls_dir.display()))?;
+        .map_err(|e| {
+            miette::miette!("failed to read tls.crt from {}: {e:#}", mtls_dir.display())
+        })?;
 
     let client_key = tokio::fs::read(mtls_dir.join("tls.key"))
         .await
-        .map_err(|e| miette::miette!("failed to read tls.key from {}: {e:#}", mtls_dir.display()))?;
+        .map_err(|e| {
+            miette::miette!("failed to read tls.key from {}: {e:#}", mtls_dir.display())
+        })?;
 
     let tls = ClientTlsConfig::new()
         .ca_certificate(Certificate::from_pem(ca_pem))
@@ -188,7 +190,10 @@ pub async fn wait_for_deleted(
             ));
         }
 
-        tracing::debug!(sandbox = name, "sandbox still exists, polling again in {poll_interval_secs}s");
+        tracing::debug!(
+            sandbox = name,
+            "sandbox still exists, polling again in {poll_interval_secs}s"
+        );
         tokio::time::sleep(interval).await;
     }
 }
@@ -210,7 +215,10 @@ pub async fn is_sandbox_ready(
     {
         Ok(r) => r,
         Err(status) if status.code() == tonic::Code::NotFound => {
-            tracing::debug!(sandbox = name, "sandbox not found yet (expected during creation)");
+            tracing::debug!(
+                sandbox = name,
+                "sandbox not found yet (expected during creation)"
+            );
             return Ok(false);
         }
         Err(e) => {
@@ -248,7 +256,10 @@ pub async fn wait_for_ready(
             ));
         }
 
-        tracing::debug!(sandbox = name, "sandbox not ready, polling again in {poll_interval_secs}s");
+        tracing::debug!(
+            sandbox = name,
+            "sandbox not ready, polling again in {poll_interval_secs}s"
+        );
         tokio::time::sleep(interval).await;
     }
 }
@@ -334,10 +345,7 @@ pub fn acquire_sandbox_slot() -> SandboxTestSlot {
 
 /// Run `openshell sandbox ssh-config NAME` and write the output to
 /// `config_dir/{name}.ssh-config`. Returns the path of the written file.
-pub async fn generate_ssh_config(
-    name: &str,
-    config_dir: &Path,
-) -> miette::Result<PathBuf> {
+pub async fn generate_ssh_config(name: &str, config_dir: &Path) -> miette::Result<PathBuf> {
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "ssh-config", name]);
     cmd.stdout(Stdio::piped());
@@ -466,9 +474,12 @@ pub async fn ssh_tar_download(
         .stdout()
         .ok_or_else(|| miette::miette!("no stdout handle from ssh tar download"))?;
 
-    let mut file = tokio::fs::File::create(dest_path)
-        .await
-        .map_err(|e| miette::miette!("failed to create backup file {}: {e:#}", dest_path.display()))?;
+    let mut file = tokio::fs::File::create(dest_path).await.map_err(|e| {
+        miette::miette!(
+            "failed to create backup file {}: {e:#}",
+            dest_path.display()
+        )
+    })?;
 
     // Run stdout→file copy concurrently with child wait via try_join! — no orphan
     // spawn to leak on timeout. Dropping the outer future cancels both branches.
@@ -487,11 +498,10 @@ pub async fn ssh_tar_download(
     };
 
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let ((), child_result) = tokio::time::timeout(timeout_dur, async {
-        tokio::try_join!(copy_fut, wait_fut)
-    })
-    .await
-    .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
+    let ((), child_result) =
+        tokio::time::timeout(timeout_dur, async { tokio::try_join!(copy_fut, wait_fut) })
+            .await
+            .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
 
     if !child_result.success() {
         return Err(miette::miette!(
@@ -531,9 +541,9 @@ pub async fn ssh_tar_upload(
     // Run the write task concurrently with child wait via try_join! — no orphan
     // spawn to leak on timeout. Dropping the outer future cancels both branches.
     let write_fut = async {
-        let mut file = tokio::fs::File::open(&src_path)
-            .await
-            .map_err(|e| miette::miette!("failed to open backup file {}: {e:#}", src_path.display()))?;
+        let mut file = tokio::fs::File::open(&src_path).await.map_err(|e| {
+            miette::miette!("failed to open backup file {}: {e:#}", src_path.display())
+        })?;
         tokio::io::copy(&mut file, &mut stdin)
             .await
             .map_err(|e| miette::miette!("I/O error during tar upload: {e:#}"))?;
@@ -550,11 +560,10 @@ pub async fn ssh_tar_upload(
     };
 
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let ((), output) = tokio::time::timeout(timeout_dur, async {
-        tokio::try_join!(write_fut, wait_fut)
-    })
-    .await
-    .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))??;
+    let ((), output) =
+        tokio::time::timeout(timeout_dur, async { tokio::try_join!(write_fut, wait_fut) })
+            .await
+            .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))??;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -585,7 +594,11 @@ pub async fn upload_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> 
 }
 
 /// Upload a single file to a sandbox directory.
-async fn upload_single_file(sandbox: &str, host_path: &Path, sandbox_dir: &str) -> miette::Result<()> {
+async fn upload_single_file(
+    sandbox: &str,
+    host_path: &Path,
+    sandbox_dir: &str,
+) -> miette::Result<()> {
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "upload", sandbox])
         .arg(host_path)
@@ -664,10 +677,14 @@ async fn upload_directory(sandbox: &str, host_dir: &Path, sandbox_dir: &str) -> 
 /// wrapper hides that quirk: it downloads into a private temp directory in
 /// `host_dest`'s parent, then renames the file into place. Missing parent
 /// directories are created. Any pre-existing file at `host_dest` is replaced.
-pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) -> miette::Result<()> {
-    let basename = Path::new(sandbox_path).file_name().ok_or_else(|| {
-        miette::miette!("sandbox_path has no file name: {sandbox_path}")
-    })?;
+pub async fn download_file(
+    sandbox: &str,
+    sandbox_path: &str,
+    host_dest: &Path,
+) -> miette::Result<()> {
+    let basename = Path::new(sandbox_path)
+        .file_name()
+        .ok_or_else(|| miette::miette!("sandbox_path has no file name: {sandbox_path}"))?;
 
     let parent = host_dest.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|e| {
@@ -680,7 +697,10 @@ pub async fn download_file(sandbox: &str, sandbox_path: &str, host_dest: &Path) 
     // Stage the download in a temp dir alongside host_dest so the final
     // rename stays on the same filesystem (atomic rename, no cross-device copy).
     let staging = tempfile::tempdir_in(parent).map_err(|e| {
-        miette::miette!("failed to create staging dir in {}: {e:#}", parent.display())
+        miette::miette!(
+            "failed to create staging dir in {}: {e:#}",
+            parent.display()
+        )
     })?;
 
     let mut cmd = Command::new("openshell");
@@ -766,10 +786,7 @@ pub async fn delete_sandbox(name: &str) {
             );
         }
         Err(e) => {
-            tracing::warn!(
-                sandbox = name,
-                "failed to wait for openshell delete: {e:#}"
-            );
+            tracing::warn!(sandbox = name, "failed to wait for openshell delete: {e:#}");
         }
     }
 }
@@ -829,9 +846,8 @@ pub fn prepare_staging_dir(agent_dir: &Path, upload_dir: &Path) -> miette::Resul
         let src = agent_dir.join(name);
         let dst = upload_dir.join(name);
         if src.exists() {
-            std::fs::copy(&src, &dst).map_err(|e| {
-                miette::miette!("failed to copy {} to staging: {e:#}", name)
-            })?;
+            std::fs::copy(&src, &dst)
+                .map_err(|e| miette::miette!("failed to copy {} to staging: {e:#}", name))?;
         }
     }
 
@@ -956,7 +972,11 @@ pub async fn ensure_sandbox(
     let sandbox_id = resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
     wait_for_ssh(&mut grpc_client, &sandbox_id, 60, 2).await?;
 
-    let outcome = if exists { SandboxOutcome::Recreated } else { SandboxOutcome::Created };
+    let outcome = if exists {
+        SandboxOutcome::Recreated
+    } else {
+        SandboxOutcome::Created
+    };
     tracing::info!(sandbox = %sandbox, ?outcome, "sandbox ready");
     Ok(outcome)
 }
@@ -1053,7 +1073,11 @@ pub async fn exec_in_sandbox(
 
     for attempt in 0..5u32 {
         if attempt > 0 {
-            tracing::debug!(sandbox_id, attempt, "exec: retrying after SSH transport delay");
+            tracing::debug!(
+                sandbox_id,
+                attempt,
+                "exec: retrying after SSH transport delay"
+            );
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
@@ -1086,7 +1110,14 @@ pub async fn wait_for_ssh(
     let interval = Duration::from_secs(poll_interval_secs);
 
     loop {
-        match exec_in_sandbox_once(client, sandbox_id, &["echo", "ready"], DEFAULT_EXEC_TIMEOUT_SECS).await {
+        match exec_in_sandbox_once(
+            client,
+            sandbox_id,
+            &["echo", "ready"],
+            DEFAULT_EXEC_TIMEOUT_SECS,
+        )
+        .await
+        {
             Ok(_) => {
                 tracing::info!(sandbox_id, "SSH transport is ready");
                 return Ok(());
@@ -1129,7 +1160,11 @@ pub async fn resolve_host_ip(
     .await?;
 
     if exit_code != 0 || stdout.trim().is_empty() {
-        tracing::warn!(sandbox_id, exit_code, "host.openshell.internal not resolvable in sandbox");
+        tracing::warn!(
+            sandbox_id,
+            exit_code,
+            "host.openshell.internal not resolvable in sandbox"
+        );
         return Ok(None);
     }
 
@@ -1167,7 +1202,11 @@ pub async fn verify_sandbox_files(
     let mut client = connect_grpc(&mtls_dir).await?;
     let sandbox_id = resolve_sandbox_id(&mut client, sandbox_name).await?;
 
-    tracing::info!(sandbox = sandbox_name, count = expected_files.len(), "verify: checking files");
+    tracing::info!(
+        sandbox = sandbox_name,
+        count = expected_files.len(),
+        "verify: checking files"
+    );
 
     // Build a single shell command to check all files at once.
     let checks: Vec<String> = expected_files
@@ -1237,7 +1276,10 @@ pub async fn verify_sandbox_files(
     }
 
     if still_missing.is_empty() {
-        tracing::info!(sandbox = sandbox_name, "verify: all files present after re-upload");
+        tracing::info!(
+            sandbox = sandbox_name,
+            "verify: all files present after re-upload"
+        );
         Ok(())
     } else {
         Err(miette::miette!(
@@ -1348,11 +1390,13 @@ pub fn parse_policy_yaml_filesystem(
             .to_owned(),
     });
 
-    Ok(crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy {
-        filesystem: fs_policy,
-        landlock,
-        ..Default::default()
-    })
+    Ok(
+        crate::openshell_proto::openshell::sandbox::v1::SandboxPolicy {
+            filesystem: fs_policy,
+            landlock,
+            ..Default::default()
+        },
+    )
 }
 
 #[cfg(test)]

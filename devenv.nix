@@ -7,6 +7,7 @@
     ripgrep          # SBOX-04: CC sandbox rg check; must be in agent launch PATH
     grpcurl
     protobuf
+    cmake            # required by whisper-rs-sys build script
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];

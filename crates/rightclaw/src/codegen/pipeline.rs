@@ -6,30 +6,29 @@ use crate::codegen::cloudflared::CloudflaredCredentials;
 
 /// Inject a secret into agent.yaml if not already present.
 /// Returns the existing or newly generated secret.
-fn ensure_agent_secret(agent_path: &Path, agent_name: &str, existing: Option<&str>) -> miette::Result<String> {
+fn ensure_agent_secret(
+    agent_path: &Path,
+    agent_name: &str,
+    existing: Option<&str>,
+) -> miette::Result<String> {
     if let Some(secret) = existing {
         return Ok(secret.to_owned());
     }
 
     let new_secret = crate::mcp::generate_agent_secret();
     let yaml_path = agent_path.join("agent.yaml");
-    let yaml_content = std::fs::read_to_string(&yaml_path).map_err(|e| {
-        miette::miette!("failed to read agent.yaml for '{agent_name}': {e:#}")
-    })?;
-    let mut doc: serde_json::Map<String, serde_json::Value> =
-        serde_saphyr::from_str(&yaml_content).map_err(|e| {
-            miette::miette!("failed to parse agent.yaml for '{agent_name}': {e:#}")
-        })?;
+    let yaml_content = std::fs::read_to_string(&yaml_path)
+        .map_err(|e| miette::miette!("failed to read agent.yaml for '{agent_name}': {e:#}"))?;
+    let mut doc: serde_json::Map<String, serde_json::Value> = serde_saphyr::from_str(&yaml_content)
+        .map_err(|e| miette::miette!("failed to parse agent.yaml for '{agent_name}': {e:#}"))?;
     doc.insert(
         "secret".to_owned(),
         serde_json::Value::String(new_secret.clone()),
     );
-    let updated_yaml = serde_saphyr::to_string(&doc).map_err(|e| {
-        miette::miette!("failed to serialize agent.yaml for '{agent_name}': {e:#}")
-    })?;
-    std::fs::write(&yaml_path, &updated_yaml).map_err(|e| {
-        miette::miette!("failed to write agent secret for '{agent_name}': {e:#}")
-    })?;
+    let updated_yaml = serde_saphyr::to_string(&doc)
+        .map_err(|e| miette::miette!("failed to serialize agent.yaml for '{agent_name}': {e:#}"))?;
+    std::fs::write(&yaml_path, &updated_yaml)
+        .map_err(|e| miette::miette!("failed to write agent secret for '{agent_name}': {e:#}"))?;
     tracing::info!(agent = %agent_name, "generated new agent secret");
     Ok(new_secret)
 }
@@ -62,9 +61,8 @@ pub fn run_single_agent_codegen(
     // Generate .claude/settings.json with behavioral flags.
     let settings = crate::codegen::generate_settings()?;
     let claude_dir = agent.path.join(".claude");
-    std::fs::create_dir_all(&claude_dir).map_err(|e| {
-        miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name)
-    })?;
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
 
     // Write reply-schema.json.
     std::fs::write(
@@ -132,18 +130,10 @@ pub fn run_single_agent_codegen(
     std::fs::write(
         claude_dir.join("settings.json"),
         serde_json::to_string_pretty(&settings).map_err(|e| {
-            miette::miette!(
-                "failed to serialize settings for '{}': {e:#}",
-                agent.name
-            )
+            miette::miette!("failed to serialize settings for '{}': {e:#}", agent.name)
         })?,
     )
-    .map_err(|e| {
-        miette::miette!(
-            "failed to write settings.json for '{}': {e:#}",
-            agent.name
-        )
-    })?;
+    .map_err(|e| miette::miette!("failed to write settings.json for '{}': {e:#}", agent.name))?;
     tracing::debug!(agent = %agent.name, "wrote settings.json");
 
     // Generate per-agent .claude.json with trust entries.
@@ -195,10 +185,7 @@ pub fn run_single_agent_codegen(
 
     // Initialize per-agent memory database.
     crate::memory::open_db(&agent.path, false).map_err(|e| {
-        miette::miette!(
-            "failed to open memory database for '{}': {e:#}",
-            agent.name
-        )
+        miette::miette!("failed to open memory database for '{}': {e:#}", agent.name)
     })?;
     tracing::debug!(agent = %agent.name, "data.db initialized");
 
@@ -214,12 +201,8 @@ pub fn run_single_agent_codegen(
         .unwrap_or_default();
     let mcp_port = crate::runtime::MCP_HTTP_PORT;
     let policy_content = crate::codegen::policy::generate_policy(mcp_port, &network_policy, None);
-    std::fs::write(agent.path.join("policy.yaml"), &policy_content).map_err(|e| {
-        miette::miette!(
-            "failed to write policy.yaml for '{}': {e:#}",
-            agent.name
-        )
-    })?;
+    std::fs::write(agent.path.join("policy.yaml"), &policy_content)
+        .map_err(|e| miette::miette!("failed to write policy.yaml for '{}': {e:#}", agent.name))?;
     tracing::debug!(agent = %agent.name, %network_policy, "wrote policy.yaml");
 
     // Generate mcp.json with right HTTP MCP server entry.
@@ -312,55 +295,53 @@ pub fn run_agent_codegen(
         }
     }
 
-    let cloudflared_script_path: Option<std::path::PathBuf> =
-        if let Some(ref tunnel_cfg) = global_cfg.tunnel {
-            let agent_pairs: Vec<(String, std::path::PathBuf)> = all_agents
-                .iter()
-                .map(|a| (a.name.clone(), a.path.clone()))
-                .collect();
+    let cloudflared_script_path: Option<std::path::PathBuf> = if let Some(ref tunnel_cfg) =
+        global_cfg.tunnel
+    {
+        let agent_pairs: Vec<(String, std::path::PathBuf)> = all_agents
+            .iter()
+            .map(|a| (a.name.clone(), a.path.clone()))
+            .collect();
 
-            let creds = CloudflaredCredentials {
-                tunnel_uuid: tunnel_cfg.tunnel_uuid.clone(),
-                credentials_file: tunnel_cfg.credentials_file.clone(),
-            };
-
-            let cf_config = crate::codegen::cloudflared::generate_cloudflared_config(
-                &agent_pairs,
-                &tunnel_cfg.hostname,
-                Some(&creds),
-            )?;
-            let cf_config_path = home.join("cloudflared-config.yml");
-            std::fs::write(&cf_config_path, &cf_config)
-                .map_err(|e| miette::miette!("write cloudflared config: {e:#}"))?;
-            tracing::info!(path = %cf_config_path.display(), "cloudflared config written");
-
-            // Write DNS routing wrapper script.
-            let scripts_dir = home.join("scripts");
-            std::fs::create_dir_all(&scripts_dir)
-                .map_err(|e| miette::miette!("create scripts dir: {e:#}"))?;
-            let uuid = &tunnel_cfg.tunnel_uuid;
-            let hostname = &tunnel_cfg.hostname;
-            let cf_config_path_str = cf_config_path.display();
-            let script_content = format!(
-                "#!/bin/sh\ncloudflared tunnel route dns --overwrite-dns {uuid} {hostname} || true\nexec cloudflared tunnel --config {cf_config_path_str} run\n"
-            );
-            let script_path = scripts_dir.join("cloudflared-start.sh");
-            std::fs::write(&script_path, &script_content)
-                .map_err(|e| miette::miette!("write cloudflared-start.sh: {e:#}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                std::fs::set_permissions(
-                    &script_path,
-                    std::fs::Permissions::from_mode(0o700),
-                )
-                .map_err(|e| miette::miette!("chmod cloudflared-start.sh: {e:#}"))?;
-            }
-            tracing::info!(path = %script_path.display(), "cloudflared wrapper script written");
-            Some(script_path)
-        } else {
-            None
+        let creds = CloudflaredCredentials {
+            tunnel_uuid: tunnel_cfg.tunnel_uuid.clone(),
+            credentials_file: tunnel_cfg.credentials_file.clone(),
         };
+
+        let cf_config = crate::codegen::cloudflared::generate_cloudflared_config(
+            &agent_pairs,
+            &tunnel_cfg.hostname,
+            Some(&creds),
+        )?;
+        let cf_config_path = home.join("cloudflared-config.yml");
+        std::fs::write(&cf_config_path, &cf_config)
+            .map_err(|e| miette::miette!("write cloudflared config: {e:#}"))?;
+        tracing::info!(path = %cf_config_path.display(), "cloudflared config written");
+
+        // Write DNS routing wrapper script.
+        let scripts_dir = home.join("scripts");
+        std::fs::create_dir_all(&scripts_dir)
+            .map_err(|e| miette::miette!("create scripts dir: {e:#}"))?;
+        let uuid = &tunnel_cfg.tunnel_uuid;
+        let hostname = &tunnel_cfg.hostname;
+        let cf_config_path_str = cf_config_path.display();
+        let script_content = format!(
+            "#!/bin/sh\ncloudflared tunnel route dns --overwrite-dns {uuid} {hostname} || true\nexec cloudflared tunnel --config {cf_config_path_str} run\n"
+        );
+        let script_path = scripts_dir.join("cloudflared-start.sh");
+        std::fs::write(&script_path, &script_content)
+            .map_err(|e| miette::miette!("write cloudflared-start.sh: {e:#}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| miette::miette!("chmod cloudflared-start.sh: {e:#}"))?;
+        }
+        tracing::info!(path = %script_path.display(), "cloudflared wrapper script written");
+        Some(script_path)
+    } else {
+        None
+    };
 
     // Generate process-compose.yaml.
     let pc_config = crate::codegen::generate_process_compose(
@@ -378,18 +359,24 @@ pub fn run_agent_codegen(
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
     tracing::debug!("wrote process-compose config: {}", config_path.display());
 
-    // Write runtime state.json, preserving started_at from existing state (reload case).
+    // Write runtime state.json, preserving started_at and pc_api_token from
+    // existing state (reload case — token must stay consistent with the running PC).
     let state_path = run_dir.join("state.json");
     let socket_path = run_dir.join("pc.sock");
-    let started_at = crate::runtime::read_state(&state_path)
-        .ok()
-        .map(|s| s.started_at)
+    let existing = crate::runtime::read_state(&state_path).ok();
+    let started_at = existing
+        .as_ref()
+        .map(|s| s.started_at.clone())
         .unwrap_or_else(|| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
             format!("{}Z", now.as_secs())
         });
+    // Reuse existing token on reload; generate a fresh one on first start.
+    let pc_api_token = existing
+        .and_then(|s| s.pc_api_token)
+        .unwrap_or_else(crate::runtime::generate_pc_api_token);
     let state = crate::runtime::RuntimeState {
         agents: all_agents
             .iter()
@@ -400,6 +387,7 @@ pub fn run_agent_codegen(
         socket_path: socket_path.display().to_string(),
         started_at,
         pc_port: crate::runtime::PC_PORT,
+        pc_api_token: Some(pc_api_token),
     };
     crate::runtime::write_state(&state, &state_path)?;
 
@@ -527,7 +515,9 @@ mod tests {
         run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
 
         // Codegen no longer creates TOOLS.md — that's init's responsibility
-        assert!(!agent_dir.join("TOOLS.md").exists(), "codegen must not create TOOLS.md");
+        assert!(
+            !agent_dir.join("TOOLS.md").exists(),
+            "codegen must not create TOOLS.md"
+        );
     }
-
 }

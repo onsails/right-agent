@@ -16,7 +16,10 @@ const SKILL_RIGHTMEMORY_HINDSIGHT: Dir =
 /// Writes all files from each embedded skill directory (SKILL.md, YAML configs, etc.).
 /// Always overwrites — ensures agents get the latest built-in skill content after upgrades.
 /// Only writes to named built-in paths; other directories under `.claude/skills/` are untouched.
-pub fn install_builtin_skills(agent_path: &Path, memory_provider: &MemoryProvider) -> miette::Result<()> {
+pub fn install_builtin_skills(
+    agent_path: &Path,
+    memory_provider: &MemoryProvider,
+) -> miette::Result<()> {
     let rightmemory_dir: &Dir = if *memory_provider == MemoryProvider::Hindsight {
         &SKILL_RIGHTMEMORY_HINDSIGHT
     } else {
@@ -71,7 +74,9 @@ mod tests {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         assert!(
-            dir.path().join(".claude/skills/rightskills/SKILL.md").exists(),
+            dir.path()
+                .join(".claude/skills/rightskills/SKILL.md")
+                .exists(),
             "rightskills/SKILL.md should exist"
         );
     }
@@ -81,7 +86,9 @@ mod tests {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         assert!(
-            dir.path().join(".claude/skills/rightcron/SKILL.md").exists(),
+            dir.path()
+                .join(".claude/skills/rightcron/SKILL.md")
+                .exists(),
             "rightcron/SKILL.md should exist"
         );
     }
@@ -100,7 +107,9 @@ mod tests {
     fn rightmcp_includes_known_endpoints_yaml() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
-        let yaml_path = dir.path().join(".claude/skills/rightmcp/known-endpoints.yaml");
+        let yaml_path = dir
+            .path()
+            .join(".claude/skills/rightmcp/known-endpoints.yaml");
         assert!(yaml_path.exists(), "known-endpoints.yaml should exist");
         let content = std::fs::read_to_string(&yaml_path).unwrap();
         assert!(
@@ -124,8 +133,16 @@ mod tests {
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         // Second call must not error
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
-        assert!(dir.path().join(".claude/skills/rightskills/SKILL.md").exists());
-        assert!(dir.path().join(".claude/skills/rightcron/SKILL.md").exists());
+        assert!(
+            dir.path()
+                .join(".claude/skills/rightskills/SKILL.md")
+                .exists()
+        );
+        assert!(
+            dir.path()
+                .join(".claude/skills/rightcron/SKILL.md")
+                .exists()
+        );
     }
 
     #[test]
@@ -142,8 +159,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&installed_path).unwrap();
         assert_eq!(
-            content,
-            r#"{"my-skill":"1.0"}"#,
+            content, r#"{"my-skill":"1.0"}"#,
             "installed.json must not be overwritten on subsequent install_builtin_skills calls"
         );
     }
@@ -152,10 +168,16 @@ mod tests {
     fn installed_json_created_on_first_call() {
         let dir = tempdir().unwrap();
         let installed_path = dir.path().join(".claude/skills/installed.json");
-        assert!(!installed_path.exists(), "should not exist before first call");
+        assert!(
+            !installed_path.exists(),
+            "should not exist before first call"
+        );
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         let content = std::fs::read_to_string(&installed_path).unwrap();
-        assert_eq!(content, "{}", "first call should create installed.json with empty object");
+        assert_eq!(
+            content, "{}",
+            "first call should create installed.json with empty object"
+        );
     }
 
     #[test]
@@ -216,10 +238,9 @@ mod tests {
     fn installs_rightmemory_file_variant() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
-        let content = std::fs::read_to_string(
-            dir.path().join(".claude/skills/rightmemory/SKILL.md"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/skills/rightmemory/SKILL.md"))
+                .unwrap();
         assert!(
             content.contains("MEMORY.md"),
             "file variant must reference MEMORY.md"
@@ -234,10 +255,9 @@ mod tests {
     fn installs_rightmemory_hindsight_variant() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::Hindsight).unwrap();
-        let content = std::fs::read_to_string(
-            dir.path().join(".claude/skills/rightmemory/SKILL.md"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/skills/rightmemory/SKILL.md"))
+                .unwrap();
         assert!(
             content.contains("memory_retain"),
             "hindsight variant must reference MCP tools"

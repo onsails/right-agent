@@ -14,6 +14,7 @@ fn runtime_state_json_roundtrip() {
         socket_path: "/tmp/pc.sock".to_string(),
         started_at: "2026-03-22T12:00:00Z".to_string(),
         pc_port: PC_PORT,
+        pc_api_token: None,
     };
 
     let json = serde_json::to_string_pretty(&state).unwrap();
@@ -33,6 +34,7 @@ fn write_state_and_read_state_roundtrip() {
         socket_path: "/run/pc.sock".to_string(),
         started_at: "2026-03-22T16:00:00Z".to_string(),
         pc_port: PC_PORT,
+        pc_api_token: None,
     };
 
     write_state(&state, &path).unwrap();

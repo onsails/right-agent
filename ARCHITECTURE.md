@@ -51,6 +51,7 @@ src/
 │   ├── proxy.rs        # ProxyBackend, DynamicAuthClient, BackendStatus
 │   └── refresh.rs      # Token refresh scheduler (runs in Aggregator process)
 ├── openshell.rs        # gRPC mTLS — sandbox create/poll/exec, CLI wrappers for upload/download, staging dir, file verification
+├── stt.rs              # whisper model cache paths, ffmpeg check, download_model, ensure_models_cached
 ├── doctor.rs           # Diagnostic checks (deps, structure, MCP, sandbox, tunnel)
 ├── init.rs             # rightclaw init workflow + init_agent() for per-agent init
 └── error.rs            # AgentError (miette diagnostics)
@@ -87,6 +88,11 @@ src/
 ├── sync.rs             # Background file sync: settings, schema, skills, .claude.json verification
 ├── cron.rs             # Cron engine: load specs, lock check, invoke CC with system prompt, persist results
 ├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery (haiku), cleanup. Resumes main session so cron results land in agent conversation context.
+├── stt/
+│   ├── mod.rs          # Transcriber, SttError, SttContext, transcribe_or_marker, combine_markers_with_text
+│   ├── decode.rs       # ffmpeg subprocess: file → Vec<f32> PCM 16k mono
+│   ├── whisper.rs      # WhisperEngine: lazy WhisperContext + serialized inference
+│   └── markers.rs      # Russian markers (voice/video_note × success/error)
 └── error.rs            # BotError types
 ```
 
@@ -105,7 +111,7 @@ rightclaw init
   └─ Write ~/.rightclaw/config.yaml
 
 rightclaw agent init <name>
-  ├─ Interactive wizard: sandbox mode, network policy, telegram, model
+  ├─ Interactive wizard: sandbox mode, network policy, telegram, chat IDs, stt, memory
   ├─ Create ~/.rightclaw/agents/<name>/ with template files
   ├─ Write AGENTS.md, BOOTSTRAP.md, agent.yaml
   │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
@@ -190,6 +196,26 @@ rightclaw agent init <name> --from-backup <path>
 rightclaw down
   └─ POST /project/stop to process-compose REST API
 ```
+
+### Voice transcription
+
+`voice` and `video_note` Telegram attachments are transcribed on the host
+inside `download_attachments` when `agent.yaml`'s `stt.enabled` is true and
+ffmpeg is present. The transcript is wrapped in a Russian marker
+(`[Пользователь надиктовал...]` / `[Пользователь записал кружок...]`) and
+prepended to the user-message text. The original audio file is dropped on
+the host — it never reaches the sandbox.
+
+Models live at `~/.rightclaw/cache/whisper/ggml-<model>.bin` and are
+downloaded at `rightclaw up` (skipped if ffmpeg is missing). Default model
+is `small`; per-agent override via `agent.yaml`:
+
+    stt:
+      enabled: true
+      model: small   # tiny | base | small | medium | large-v3
+
+When ffmpeg is missing or the model file is absent, the bot still runs;
+voice messages produce an error marker that the agent relays to the user.
 
 ### OpenShell Sandbox Architecture
 
@@ -477,6 +503,7 @@ LoginEvent      // Token request→async: Done, Error
 | Telegram | teloxide long-polling | CacheMe<Throttle<Bot>> adaptor, per-agent allowlist |
 | Cloudflare Tunnel | CLI (`cloudflared`) | Named tunnel, DNS CNAME, credentials file |
 | MCP Aggregator | HTTP (:8100/mcp) + Unix socket (internal API) | Aggregates built-in + external MCP backends, per-agent Bearer auth |
+| ffmpeg | system | Decode voice/video_note to PCM for whisper-rs | Optional — bot runs without it; voice transcription disabled. doctor warns. |
 
 ## Runtime isolation — mandatory
 
@@ -490,10 +517,22 @@ returns `None` and callers skip PC-touching logic. This property is what
 protects tests (which run with a `--home=<tempdir>`) from accidentally hitting
 the user's live PC on port 18927 and SIGTERM-ing a same-named process there.
 
-`<home>/run/state.json` carries the port the running PC listens on; it is
-written by `codegen::pipeline` during `rightclaw up` and read by every
+`<home>/run/state.json` carries the port and API token the running PC uses;
+it is written by `codegen::pipeline` during `rightclaw up` and read by every
 subsequent command that needs to talk to PC. Older state files without the
 `pc_port` field deserialize to `PC_PORT` via `#[serde(default)]`.
+
+### PC_API_TOKEN authentication
+
+`rightclaw up` generates a random bearer token (`pc_api_token` in
+`state.json`) and passes it to process-compose via `PC_API_TOKEN` env var.
+PcClient reads the token from state.json and includes it in every request as
+`Authorization: Bearer <token>`. Process-compose rejects unauthenticated
+requests when this env var is set.
+
+This prevents any stray HTTP caller (tests, debugging tools, browser
+extensions) from accidentally stopping or restarting production bots by
+hitting `localhost:18927`.
 
 **When adding new CLI commands that touch PC, never import `PC_PORT` directly —
 always resolve through `from_home(home)`.** For "is PC running?" probes,

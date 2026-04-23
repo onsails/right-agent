@@ -200,7 +200,12 @@ mod state_tests {
     #[test]
     fn add_user_inserted_then_already_present() {
         let mut s = AllowlistState::default();
-        let u = AllowedUser { id: 1, label: None, added_by: None, added_at: t() };
+        let u = AllowedUser {
+            id: 1,
+            label: None,
+            added_by: None,
+            added_at: t(),
+        };
         assert_eq!(s.add_user(u.clone()), AddOutcome::Inserted);
         assert_eq!(s.add_user(u), AddOutcome::AlreadyPresent);
         assert_eq!(s.users().len(), 1);
@@ -209,7 +214,12 @@ mod state_tests {
     #[test]
     fn remove_user_removed_then_not_found() {
         let mut s = AllowlistState::default();
-        let u = AllowedUser { id: 1, label: None, added_by: None, added_at: t() };
+        let u = AllowedUser {
+            id: 1,
+            label: None,
+            added_by: None,
+            added_at: t(),
+        };
         s.add_user(u);
         assert_eq!(s.remove_user(1), RemoveOutcome::Removed);
         assert_eq!(s.remove_user(1), RemoveOutcome::NotFound);
@@ -219,7 +229,12 @@ mod state_tests {
     fn is_user_trusted_reflects_state() {
         let mut s = AllowlistState::default();
         assert!(!s.is_user_trusted(99));
-        s.add_user(AllowedUser { id: 99, label: None, added_by: None, added_at: t() });
+        s.add_user(AllowedUser {
+            id: 99,
+            label: None,
+            added_by: None,
+            added_at: t(),
+        });
         assert!(s.is_user_trusted(99));
     }
 
@@ -227,7 +242,12 @@ mod state_tests {
     fn add_group_and_is_open() {
         let mut s = AllowlistState::default();
         assert!(!s.is_group_open(-1));
-        s.add_group(AllowedGroup { id: -1, label: None, opened_by: Some(1), opened_at: t() });
+        s.add_group(AllowedGroup {
+            id: -1,
+            label: None,
+            opened_by: Some(1),
+            opened_at: t(),
+        });
         assert!(s.is_group_open(-1));
     }
 
@@ -237,7 +257,12 @@ mod state_tests {
         let h2 = h.clone();
         tokio::spawn(async move {
             let mut w = h2.0.write().unwrap();
-            w.add_user(AllowedUser { id: 7, label: None, added_by: None, added_at: t() });
+            w.add_user(AllowedUser {
+                id: 7,
+                label: None,
+                added_by: None,
+                added_at: t(),
+            });
         })
         .await
         .unwrap();
@@ -354,14 +379,21 @@ mod watcher_tests {
 
         // Externally mutate the file.
         let mut file = AllowlistFile::default();
-        file.users.push(AllowedUser { id: 777, label: None, added_by: None, added_at: t() });
+        file.users.push(AllowedUser {
+            id: 777,
+            label: None,
+            added_by: None,
+            added_at: t(),
+        });
         write_file(dir.path(), &file).unwrap();
 
         // Poll up to 2s for the handle to reflect the change.
         for _ in 0..40 {
             {
                 let r = handle.0.read().unwrap();
-                if r.is_user_trusted(777) { return; }
+                if r.is_user_trusted(777) {
+                    return;
+                }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -373,8 +405,18 @@ mod watcher_tests {
 fn is_chat_allowed_matches_user_or_group() {
     let now = chrono::Utc::now();
     let mut state = AllowlistState::default();
-    state.add_user(AllowedUser { id: 100, label: None, added_by: None, added_at: now });
-    state.add_group(AllowedGroup { id: -200, label: None, opened_by: None, opened_at: now });
+    state.add_user(AllowedUser {
+        id: 100,
+        label: None,
+        added_by: None,
+        added_at: now,
+    });
+    state.add_group(AllowedGroup {
+        id: -200,
+        label: None,
+        opened_by: None,
+        opened_at: now,
+    });
 
     assert!(state.is_chat_allowed(100), "trusted user must match");
     assert!(state.is_chat_allowed(-200), "open group must match");

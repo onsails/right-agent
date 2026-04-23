@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
+use rmcp::ServiceExt as _;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientJsonRpcMessage, Tool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
     StreamableHttpError, StreamableHttpPostResponse,
 };
-use rmcp::ServiceExt as _;
 use sse_stream::{Error as SseError, Sse};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -180,7 +180,9 @@ impl StreamableHttpClient for DynamicAuthClient {
         mut custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         if auth_token.is_some() {
-            tracing::debug!("DynamicAuthClient: ignoring caller-provided auth_token for post_message");
+            tracing::debug!(
+                "DynamicAuthClient: ignoring caller-provided auth_token for post_message"
+            );
         }
         let (dynamic_auth, extra_headers) = self.build_auth().await;
         for (k, v) in extra_headers {
@@ -286,20 +288,23 @@ impl ProxyBackend {
 
         // `()` is a minimal no-op ClientHandler — we don't need server→client notifications.
         let client: RunningService<RoleClient, ()> =
-            ().serve(transport).await.map_err(|e| ProxyError::InitFailed {
-                server: self.server_name.clone(),
-                source: e,
-            })?;
+            ().serve(transport)
+                .await
+                .map_err(|e| ProxyError::InitFailed {
+                    server: self.server_name.clone(),
+                    source: e,
+                })?;
 
         // Fetch and cache upstream tools, filtering out internal tools (contain `__`).
-        let tools = client
-            .peer()
-            .list_all_tools()
-            .await
-            .map_err(|e| ProxyError::ListToolsFailed {
-                server: self.server_name.clone(),
-                source: e,
-            })?;
+        let tools =
+            client
+                .peer()
+                .list_all_tools()
+                .await
+                .map_err(|e| ProxyError::ListToolsFailed {
+                    server: self.server_name.clone(),
+                    source: e,
+                })?;
 
         let filtered: Vec<Tool> = tools
             .into_iter()
@@ -314,11 +319,12 @@ impl ProxyBackend {
             .peer()
             .peer_info()
             .and_then(|info| info.instructions.clone());
-        let conn = crate::memory::open_connection(&self.agent_dir, false)
-            .map_err(|e| ProxyError::InstructionsCacheFailed {
+        let conn = crate::memory::open_connection(&self.agent_dir, false).map_err(|e| {
+            ProxyError::InstructionsCacheFailed {
                 server: self.server_name.clone(),
                 source: e.into(),
-            })?;
+            }
+        })?;
         crate::mcp::credentials::db_update_instructions(
             &conn,
             &self.server_name,
@@ -372,19 +378,19 @@ impl ProxyBackend {
             _ => None,
         };
 
-        let params = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(
-            arguments.unwrap_or_default(),
-        );
+        let params = CallToolRequestParams::new(tool_name.to_owned())
+            .with_arguments(arguments.unwrap_or_default());
 
-        let result = client
-            .peer()
-            .call_tool(params)
-            .await
-            .map_err(|e| ProxyError::CallToolFailed {
-                server: self.server_name.clone(),
-                tool: tool_name.to_owned(),
-                source: e,
-            })?;
+        let result =
+            client
+                .peer()
+                .call_tool(params)
+                .await
+                .map_err(|e| ProxyError::CallToolFailed {
+                    server: self.server_name.clone(),
+                    tool: tool_name.to_owned(),
+                    source: e,
+                })?;
 
         Ok(result)
     }
@@ -443,17 +449,17 @@ mod tests {
     #[test]
     fn auth_method_display() {
         assert_eq!(AuthMethod::Bearer.to_string(), "bearer");
-        assert_eq!(
-            AuthMethod::Header("X-Api-Key".into()).to_string(),
-            "header"
-        );
+        assert_eq!(AuthMethod::Header("X-Api-Key".into()).to_string(), "header");
         assert_eq!(AuthMethod::QueryString.to_string(), "query_string");
     }
 
     #[test]
     fn auth_method_from_db() {
         assert_eq!(AuthMethod::from_db(None, None), AuthMethod::Bearer);
-        assert_eq!(AuthMethod::from_db(Some("bearer"), None), AuthMethod::Bearer);
+        assert_eq!(
+            AuthMethod::from_db(Some("bearer"), None),
+            AuthMethod::Bearer
+        );
         assert_eq!(
             AuthMethod::from_db(Some("header"), Some("X-Api-Key")),
             AuthMethod::Header("X-Api-Key".into())
@@ -462,7 +468,10 @@ mod tests {
             AuthMethod::from_db(Some("header"), None),
             AuthMethod::Header("Authorization".into())
         );
-        assert_eq!(AuthMethod::from_db(Some("query_string"), None), AuthMethod::QueryString);
+        assert_eq!(
+            AuthMethod::from_db(Some("query_string"), None),
+            AuthMethod::QueryString
+        );
     }
 
     #[tokio::test]
@@ -494,9 +503,7 @@ mod tests {
         );
         backend.set_status(BackendStatus::NeedsAuth).await;
 
-        let result = backend
-            .tools_call("search", serde_json::json!({}))
-            .await;
+        let result = backend.tools_call("search", serde_json::json!({})).await;
 
         let err = result.unwrap_err();
         let msg = format!("{err:#}");
@@ -523,9 +530,7 @@ mod tests {
         );
         // Status is Unreachable by default from `new()`.
 
-        let result = backend
-            .tools_call("search", serde_json::json!({}))
-            .await;
+        let result = backend.tools_call("search", serde_json::json!({})).await;
 
         let err = result.unwrap_err();
         let msg = format!("{err:#}");
@@ -587,8 +592,7 @@ mod tests {
     #[tokio::test]
     async fn dynamic_auth_query_string_no_injection() {
         let token = Arc::new(RwLock::new(Some("key-in-url".to_string())));
-        let client =
-            DynamicAuthClient::new(reqwest::Client::new(), token, AuthMethod::QueryString);
+        let client = DynamicAuthClient::new(reqwest::Client::new(), token, AuthMethod::QueryString);
 
         let (auth, extra) = client.build_auth().await;
         assert_eq!(auth, None, "QueryString should not set auth_token");

@@ -180,4 +180,3 @@ fn record_fire(db: &std::path::Path, alert_type: &str) {
         Err(e) => tracing::warn!("record_fire open failed: {e:#}"),
     }
 }
-

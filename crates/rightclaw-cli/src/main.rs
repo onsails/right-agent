@@ -516,7 +516,8 @@ async fn main() -> miette::Result<()> {
             AgentCommands::Config { name, key, value } => {
                 match (key, value) {
                     (None, None) => {
-                        let agent_name = crate::wizard::agent_setting_menu(&home, name.as_deref()).await?;
+                        let agent_name =
+                            crate::wizard::agent_setting_menu(&home, name.as_deref()).await?;
                         maybe_migrate_sandbox(&home, &agent_name).await?;
                     }
                     (Some(_key), _) => {
@@ -1520,6 +1521,7 @@ fn cmd_agent_init(
                 .as_ref()
                 .map(|m| m.recall_max_tokens)
                 .unwrap_or(rightclaw::init::DEFAULT_RECALL_MAX_TOKENS),
+            stt: config.stt,
         }
     } else {
         // Fresh init: optionally restore from backup or run wizard.
@@ -1552,6 +1554,18 @@ fn cmd_agent_init(
 
         // Run wizard or use CLI flags. Esc goes back to previous step.
         if !interactive {
+            let ffmpeg_ok = rightclaw::stt::ffmpeg_available();
+            let stt = rightclaw::agent::types::SttConfig {
+                enabled: ffmpeg_ok,
+                model: rightclaw::agent::types::WhisperModel::Small,
+            };
+            if !ffmpeg_ok {
+                eprintln!(
+                    "warning: STT disabled — ffmpeg not in PATH. \
+                     Install (macOS): brew install ffmpeg, then enable via \
+                     `rightclaw agent config {name}`."
+                );
+            }
             rightclaw::init::InitOverrides {
                 sandbox_mode: sandbox_mode
                     .unwrap_or(rightclaw::agent::types::SandboxMode::Openshell),
@@ -1566,6 +1580,7 @@ fn cmd_agent_init(
                 memory_bank_id: None,
                 memory_recall_budget: rightclaw::init::DEFAULT_RECALL_BUDGET,
                 memory_recall_max_tokens: rightclaw::init::DEFAULT_RECALL_MAX_TOKENS,
+                stt,
             }
         } else {
             #[derive(Clone, Copy)]
@@ -1574,6 +1589,7 @@ fn cmd_agent_init(
                 Network,
                 Telegram,
                 ChatIds,
+                Stt,
                 Memory,
                 Done,
             }
@@ -1589,6 +1605,8 @@ fn cmd_agent_init(
                 network_policy.unwrap_or(rightclaw::agent::types::NetworkPolicy::Permissive);
             let mut w_token: Option<String> = None;
             let mut w_chat_ids: Vec<i64> = vec![];
+            let mut w_stt: rightclaw::agent::types::SttConfig =
+                rightclaw::agent::types::SttConfig::default();
             let mut w_mem = (
                 rightclaw::agent::types::MemoryProvider::Hindsight,
                 None::<String>,
@@ -1630,7 +1648,7 @@ fn cmd_agent_init(
                             step = if w_token.is_some() {
                                 Step::ChatIds
                             } else {
-                                Step::Memory
+                                Step::Stt
                             };
                         }
                         Err(_) => {
@@ -1640,11 +1658,25 @@ fn cmd_agent_init(
                     Step::ChatIds => match crate::wizard::chat_ids_setup() {
                         Ok(ids) => {
                             w_chat_ids = ids;
-                            step = Step::Memory;
+                            step = Step::Stt;
                         }
                         Err(_) => {
                             step = Step::Telegram;
                         }
+                    },
+                    Step::Stt => match crate::wizard::stt_setup() {
+                        Ok(Some((enabled, model))) => {
+                            w_stt = rightclaw::agent::types::SttConfig { enabled, model };
+                            step = Step::Memory;
+                        }
+                        Ok(None) => {
+                            step = if w_token.is_some() {
+                                Step::ChatIds
+                            } else {
+                                Step::Telegram
+                            };
+                        }
+                        Err(e) => return Err(e),
                     },
                     Step::Memory => match rightclaw::init::prompt_memory_config(name)? {
                         Some((p, k, b, rb, rt)) => {
@@ -1652,11 +1684,7 @@ fn cmd_agent_init(
                             step = Step::Done;
                         }
                         None => {
-                            step = if w_token.is_some() {
-                                Step::ChatIds
-                            } else {
-                                Step::Telegram
-                            };
+                            step = Step::Stt;
                         }
                     },
                     Step::Done => break,
@@ -1675,6 +1703,7 @@ fn cmd_agent_init(
                 memory_bank_id: w_mem.2,
                 memory_recall_budget: w_mem.3,
                 memory_recall_max_tokens: w_mem.4,
+                stt: w_stt,
             }
         }
     };
@@ -1994,6 +2023,27 @@ async fn cmd_up(
         }
     }
 
+    // Download any whisper models needed by STT-enabled agents.
+    {
+        use rightclaw::agent::types::WhisperModel;
+        use std::collections::HashSet;
+
+        let mut models: HashSet<WhisperModel> = HashSet::new();
+        for agent in &agents {
+            if let Some(cfg) = agent.config.as_ref() {
+                if cfg.stt.enabled {
+                    models.insert(cfg.stt.model);
+                }
+            }
+        }
+        if !models.is_empty() {
+            println!("Ensuring whisper models are cached...");
+            if let Err(e) = rightclaw::stt::ensure_models_cached(home, &models).await {
+                eprintln!("warning: model cache step failed: {e:#}");
+            }
+        }
+    }
+
     // Clear rightcron init locks so the bootstrap hook fires on this session.
     for agent in &agents {
         let lock = agent.path.join(".rightcron-init-done");
@@ -2033,6 +2083,16 @@ async fn cmd_up(
         "--port",
         &pc_port,
     ]);
+
+    // Read the API token from state.json (just written by codegen) and inject
+    // as PC_API_TOKEN env var. process-compose then rejects any unauthenticated
+    // REST API request — prevents stray HTTP callers from stopping production bots.
+    let state_path = run_dir.join("state.json");
+    if let Ok(state) = rightclaw::runtime::read_state(&state_path) {
+        if let Some(token) = &state.pc_api_token {
+            cmd.env("PC_API_TOKEN", token);
+        }
+    }
 
     if detach {
         cmd.arg("--detached");

@@ -79,7 +79,12 @@ pub fn generate_process_compose(
     exe_path: &Path,
     config: &ProcessComposeConfig<'_>,
 ) -> miette::Result<String> {
-    let &ProcessComposeConfig { debug, home, cloudflared_script, token_map_path } = config;
+    let &ProcessComposeConfig {
+        debug,
+        home,
+        cloudflared_script,
+        token_map_path,
+    } = config;
     // Build cloudflared template context when tunnel script is provided.
     // working_dir = parent of scripts/ dir (i.e., rightclaw home).
     let cf_entry: Option<CloudflaredEntry> = cloudflared_script.map(|script| {

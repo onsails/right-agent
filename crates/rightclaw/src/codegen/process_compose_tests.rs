@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
-use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
 use crate::agent::types::{SandboxConfig, SandboxMode};
+use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
 use crate::codegen::{ProcessComposeConfig, generate_process_compose};
 
 const EXE_PATH: &str = "/usr/bin/rightclaw";
@@ -24,7 +24,11 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         backoff_seconds: 5,
         network_policy: Default::default(),
         model: None,
-        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None, name: None }),
+        sandbox: Some(SandboxConfig {
+            mode: SandboxMode::None,
+            policy_file: None,
+            name: None,
+        }),
         telegram_token: Some(token.to_string()),
 
         allowed_chat_ids: vec![],
@@ -33,13 +37,12 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
         path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
-        identity_path: PathBuf::from(format!(
-            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
-        )),
+        identity_path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}/IDENTITY.md")),
         config,
         soul_path: None,
         user_path: None,
@@ -57,7 +60,11 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         backoff_seconds: 5,
         network_policy: Default::default(),
         model: None,
-        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None, name: None }),
+        sandbox: Some(SandboxConfig {
+            mode: SandboxMode::None,
+            policy_file: None,
+            name: None,
+        }),
         telegram_token: None,
 
         allowed_chat_ids: vec![],
@@ -66,13 +73,12 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
         path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
-        identity_path: PathBuf::from(format!(
-            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
-        )),
+        identity_path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}/IDENTITY.md")),
         config,
         soul_path: None,
         user_path: None,
@@ -87,9 +93,7 @@ fn make_agent_no_config(name: &str) -> AgentDef {
     AgentDef {
         name: name.to_owned(),
         path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
-        identity_path: PathBuf::from(format!(
-            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
-        )),
+        identity_path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}/IDENTITY.md")),
         config: None,
         soul_path: None,
         user_path: None,
@@ -107,7 +111,11 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         backoff_seconds: 10,
         network_policy: Default::default(),
         model: None,
-        sandbox: Some(SandboxConfig { mode: SandboxMode::None, policy_file: None, name: None }),
+        sandbox: Some(SandboxConfig {
+            mode: SandboxMode::None,
+            policy_file: None,
+            name: None,
+        }),
         telegram_token: Some(token.to_string()),
 
         allowed_chat_ids: vec![],
@@ -116,13 +124,12 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
         path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}")),
-        identity_path: PathBuf::from(format!(
-            "/home/user/.rightclaw/agents/{name}/IDENTITY.md"
-        )),
+        identity_path: PathBuf::from(format!("/home/user/.rightclaw/agents/{name}/IDENTITY.md")),
         config,
         soul_path: None,
         user_path: None,
@@ -283,7 +290,11 @@ fn output_contains_is_strict_true() {
 
 #[test]
 fn restart_policy_on_failure_maps_correctly() {
-    let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::OnFailure)];
+    let agents = vec![make_agent_with_restart(
+        "bot",
+        "123:tok",
+        RestartPolicy::OnFailure,
+    )];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
     assert!(
@@ -294,7 +305,11 @@ fn restart_policy_on_failure_maps_correctly() {
 
 #[test]
 fn restart_policy_always_maps_correctly() {
-    let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::Always)];
+    let agents = vec![make_agent_with_restart(
+        "bot",
+        "123:tok",
+        RestartPolicy::Always,
+    )];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
     assert!(
@@ -305,7 +320,11 @@ fn restart_policy_always_maps_correctly() {
 
 #[test]
 fn restart_policy_never_maps_to_no() {
-    let agents = vec![make_agent_with_restart("bot", "123:tok", RestartPolicy::Never)];
+    let agents = vec![make_agent_with_restart(
+        "bot",
+        "123:tok",
+        RestartPolicy::Never,
+    )];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
     assert!(
@@ -345,10 +364,15 @@ fn cloudflared_with_script_produces_process_entry() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
     let script = Path::new("/home/user/.rightclaw/scripts/cloudflared-start.sh");
-    let output = generate_process_compose(&agents, exe, &ProcessComposeConfig {
-        cloudflared_script: Some(script),
-        ..default_config()
-    }).unwrap();
+    let output = generate_process_compose(
+        &agents,
+        exe,
+        &ProcessComposeConfig {
+            cloudflared_script: Some(script),
+            ..default_config()
+        },
+    )
+    .unwrap();
     assert!(
         output.contains("  cloudflared:"),
         "expected cloudflared process key in:\n{output}"
@@ -385,7 +409,12 @@ fn cloudflared_with_script_produces_process_entry() {
 
 // ── Sandbox mode env vars ───────────────────────────────────────────────────
 
-fn make_agent_with_sandbox(name: &str, token: &str, mode: SandboxMode, policy_file: Option<&str>) -> AgentDef {
+fn make_agent_with_sandbox(
+    name: &str,
+    token: &str,
+    mode: SandboxMode,
+    policy_file: Option<&str>,
+) -> AgentDef {
     let config = Some(AgentConfig {
         restart: RestartPolicy::OnFailure,
         max_restarts: 3,
@@ -404,6 +433,7 @@ fn make_agent_with_sandbox(name: &str, token: &str, mode: SandboxMode, policy_fi
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
@@ -421,27 +451,57 @@ fn make_agent_with_sandbox(name: &str, token: &str, mode: SandboxMode, policy_fi
 
 #[test]
 fn per_agent_sandbox_openshell_emits_openshell_mode() {
-    let agents = vec![make_agent_with_sandbox("sandboxed", "123:tok", SandboxMode::Openshell, Some("policy.yaml"))];
+    let agents = vec![make_agent_with_sandbox(
+        "sandboxed",
+        "123:tok",
+        SandboxMode::Openshell,
+        Some("policy.yaml"),
+    )];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(output.contains("RC_SANDBOX_MODE=openshell"), "expected RC_SANDBOX_MODE=openshell:\n{output}");
-    assert!(output.contains("RC_SANDBOX_POLICY=/home/user/.rightclaw/agents/sandboxed/policy.yaml"), "expected policy path:\n{output}");
-    assert!(!output.contains("--no-sandbox"), "--no-sandbox must not appear:\n{output}");
+    assert!(
+        output.contains("RC_SANDBOX_MODE=openshell"),
+        "expected RC_SANDBOX_MODE=openshell:\n{output}"
+    );
+    assert!(
+        output.contains("RC_SANDBOX_POLICY=/home/user/.rightclaw/agents/sandboxed/policy.yaml"),
+        "expected policy path:\n{output}"
+    );
+    assert!(
+        !output.contains("--no-sandbox"),
+        "--no-sandbox must not appear:\n{output}"
+    );
 }
 
 #[test]
 fn per_agent_sandbox_none_emits_none_mode() {
-    let agents = vec![make_agent_with_sandbox("unsandboxed", "123:tok", SandboxMode::None, None)];
+    let agents = vec![make_agent_with_sandbox(
+        "unsandboxed",
+        "123:tok",
+        SandboxMode::None,
+        None,
+    )];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(output.contains("RC_SANDBOX_MODE=none"), "expected RC_SANDBOX_MODE=none:\n{output}");
-    assert!(!output.contains("RC_SANDBOX_POLICY"), "RC_SANDBOX_POLICY must be absent:\n{output}");
+    assert!(
+        output.contains("RC_SANDBOX_MODE=none"),
+        "expected RC_SANDBOX_MODE=none:\n{output}"
+    );
+    assert!(
+        !output.contains("RC_SANDBOX_POLICY"),
+        "RC_SANDBOX_POLICY must be absent:\n{output}"
+    );
 }
 
 #[test]
 fn mixed_sandbox_modes_in_same_config() {
     let agents = vec![
-        make_agent_with_sandbox("sandboxed", "123:tok", SandboxMode::Openshell, Some("policy.yaml")),
+        make_agent_with_sandbox(
+            "sandboxed",
+            "123:tok",
+            SandboxMode::Openshell,
+            Some("policy.yaml"),
+        ),
         make_agent_with_sandbox("direct", "456:tok", SandboxMode::None, None),
     ];
     let exe = Path::new(EXE_PATH);
@@ -485,18 +545,34 @@ fn right_mcp_server_process_included_when_token_map_provided() {
         },
     )
     .unwrap();
-    assert!(yaml.contains("right-mcp-server:"), "must have right-mcp-server process");
+    assert!(
+        yaml.contains("right-mcp-server:"),
+        "must have right-mcp-server process"
+    );
     assert!(yaml.contains("mcp-server"), "must run mcp-server command");
     assert!(yaml.contains("--port 8100"), "must specify port");
-    assert!(yaml.contains("depends_on:"), "bot must depend on mcp server");
+    assert!(
+        yaml.contains("depends_on:"),
+        "bot must depend on mcp server"
+    );
 }
 
 #[test]
 fn mixed_mode_agents_correct_env_vars() {
     let agents = vec![
-        make_agent_with_sandbox("coder", "111:tok", SandboxMode::Openshell, Some("policy.yaml")),
+        make_agent_with_sandbox(
+            "coder",
+            "111:tok",
+            SandboxMode::Openshell,
+            Some("policy.yaml"),
+        ),
         make_agent_with_sandbox("browser", "222:tok", SandboxMode::None, None),
-        make_agent_with_sandbox("reviewer", "333:tok", SandboxMode::Openshell, Some("custom-policy.yaml")),
+        make_agent_with_sandbox(
+            "reviewer",
+            "333:tok",
+            SandboxMode::Openshell,
+            Some("custom-policy.yaml"),
+        ),
     ];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
@@ -509,7 +585,10 @@ fn mixed_mode_agents_correct_env_vars() {
     assert!(output.contains("browser-bot:"));
 
     // reviewer: sandboxed with custom policy
-    assert!(output.contains("RC_SANDBOX_POLICY=/home/user/.rightclaw/agents/reviewer/custom-policy.yaml"));
+    assert!(
+        output
+            .contains("RC_SANDBOX_POLICY=/home/user/.rightclaw/agents/reviewer/custom-policy.yaml")
+    );
 }
 
 #[test]
@@ -528,6 +607,7 @@ fn agent_without_sandbox_config_defaults_to_openshell_in_process_compose() {
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     let agents = vec![AgentDef {
         name: "default-agent".to_owned(),

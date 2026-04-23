@@ -167,12 +167,18 @@ mod tests {
     #[test]
     fn policy_is_valid_yaml_with_required_sections() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        let parsed: serde_json::Value = serde_saphyr::from_str(&policy)
-            .expect("policy must be valid YAML");
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("policy must be valid YAML");
         let obj = parsed.as_object().expect("policy root must be a mapping");
         assert!(obj.contains_key("version"), "missing 'version'");
-        assert!(obj.contains_key("filesystem_policy"), "missing 'filesystem_policy'");
-        assert!(obj.contains_key("network_policies"), "missing 'network_policies'");
+        assert!(
+            obj.contains_key("filesystem_policy"),
+            "missing 'filesystem_policy'"
+        );
+        assert!(
+            obj.contains_key("network_policies"),
+            "missing 'network_policies'"
+        );
         assert!(obj.contains_key("process"), "missing 'process'");
     }
 
@@ -186,21 +192,27 @@ mod tests {
         assert!(policy.contains(r#"host: "*.claude.ai""#));
         assert!(policy.contains(r#"host: "claude.ai""#));
         assert!(policy.contains(r#"host: "storage.googleapis.com""#));
-        assert!(!policy.contains(r#"host: "**.*""#), "restrictive must not contain wildcard");
+        assert!(
+            !policy.contains(r#"host: "**.*""#),
+            "restrictive must not contain wildcard"
+        );
     }
 
     #[test]
     fn permissive_policy_allows_all_https() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
         assert!(policy.contains(r#"host: "**.*""#));
-        assert!(!policy.contains(r#"host: "*.anthropic.com""#), "permissive uses wildcard, not explicit domains");
+        assert!(
+            !policy.contains(r#"host: "*.anthropic.com""#),
+            "permissive uses wildcard, not explicit domains"
+        );
     }
 
     #[test]
     fn restrictive_policy_is_valid_yaml() {
         let policy = generate_policy(8100, &NetworkPolicy::Restrictive, None);
-        let parsed: serde_json::Value = serde_saphyr::from_str(&policy)
-            .expect("restrictive policy must be valid YAML");
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("restrictive policy must be valid YAML");
         let obj = parsed.as_object().expect("policy root must be a mapping");
         assert!(obj.contains_key("network_policies"));
     }
@@ -212,10 +224,7 @@ mod tests {
             let trimmed = line.trim();
             if trimmed.starts_with("host:") {
                 let host_val = trimmed.trim_start_matches("host:").trim().trim_matches('"');
-                assert_ne!(
-                    host_val, "*",
-                    "bare '*' wildcard rejected by OpenShell"
-                );
+                assert_ne!(host_val, "*", "bare '*' wildcard rejected by OpenShell");
             }
         }
     }
@@ -223,8 +232,14 @@ mod tests {
     #[test]
     fn host_ip_none_uses_fallback_ranges() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        assert!(policy.contains("172.16.0.0/12"), "must include Docker bridge range");
-        assert!(policy.contains("192.168.0.0/16"), "must include Docker Desktop range");
+        assert!(
+            policy.contains("172.16.0.0/12"),
+            "must include Docker bridge range"
+        );
+        assert!(
+            policy.contains("192.168.0.0/16"),
+            "must include Docker Desktop range"
+        );
     }
 
     #[test]
@@ -232,14 +247,17 @@ mod tests {
         let ip: std::net::IpAddr = "192.168.65.254".parse().unwrap();
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, Some(ip));
         assert!(policy.contains("192.168.65.254/32"), "must use exact IP/32");
-        assert!(!policy.contains("172.16.0.0/12"), "must not include fallback range");
+        assert!(
+            !policy.contains("172.16.0.0/12"),
+            "must not include fallback range"
+        );
     }
 
     #[test]
     fn host_ip_some_produces_valid_yaml() {
         let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, Some(ip));
-        let _parsed: serde_json::Value = serde_saphyr::from_str(&policy)
-            .expect("policy with dynamic IP must be valid YAML");
+        let _parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("policy with dynamic IP must be valid YAML");
     }
 }

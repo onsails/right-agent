@@ -17,8 +17,11 @@ pub fn generate_telegram_channel_config(agent: &AgentDef) -> miette::Result<()> 
         .map_err(|e| miette::miette!("failed to create telegram channel dir: {e:#}"))?;
 
     // Always overwrite .env (idempotent, D-08)
-    std::fs::write(channel_dir.join(".env"), format!("TELEGRAM_BOT_TOKEN={token}\n"))
-        .map_err(|e| miette::miette!("failed to write telegram .env: {e:#}"))?;
+    std::fs::write(
+        channel_dir.join(".env"),
+        format!("TELEGRAM_BOT_TOKEN={token}\n"),
+    )
+    .map_err(|e| miette::miette!("failed to write telegram .env: {e:#}"))?;
 
     tracing::debug!(agent = %agent.name, "wrote telegram channel config");
     Ok(())
@@ -74,6 +77,7 @@ mod tests {
             attachments: Default::default(),
             show_thinking: true,
             memory: None,
+            stt: Default::default(),
         }
     }
 
@@ -83,9 +87,7 @@ mod tests {
         let agent = make_agent(dir.path(), None);
         generate_telegram_channel_config(&agent).unwrap();
         assert!(
-            !dir.path()
-                .join(".claude/channels/telegram/.env")
-                .exists(),
+            !dir.path().join(".claude/channels/telegram/.env").exists(),
             ".env should not be written when no config"
         );
     }
@@ -96,9 +98,7 @@ mod tests {
         let agent = make_agent(dir.path(), Some(base_config()));
         generate_telegram_channel_config(&agent).unwrap();
         assert!(
-            !dir.path()
-                .join(".claude/channels/telegram/.env")
-                .exists(),
+            !dir.path().join(".claude/channels/telegram/.env").exists(),
             ".env should not be written when no token"
         );
     }
@@ -113,10 +113,8 @@ mod tests {
         let agent = make_agent(dir.path(), Some(config));
         generate_telegram_channel_config(&agent).unwrap();
 
-        let content = std::fs::read_to_string(
-            dir.path().join(".claude/channels/telegram/.env"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/channels/telegram/.env")).unwrap();
         assert_eq!(content, "TELEGRAM_BOT_TOKEN=123456:ABCtoken\n");
     }
 
@@ -155,10 +153,11 @@ mod tests {
         let agent2 = make_agent(dir.path(), Some(config2));
         generate_telegram_channel_config(&agent2).unwrap();
 
-        let env_content = std::fs::read_to_string(
-            dir.path().join(".claude/channels/telegram/.env"),
-        )
-        .unwrap();
-        assert!(env_content.contains("TOKEN_V2"), ".env should be overwritten");
+        let env_content =
+            std::fs::read_to_string(dir.path().join(".claude/channels/telegram/.env")).unwrap();
+        assert!(
+            env_content.contains("TOKEN_V2"),
+            ".env should be overwritten"
+        );
     }
 }

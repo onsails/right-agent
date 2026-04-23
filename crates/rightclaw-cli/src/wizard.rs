@@ -581,6 +581,12 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         let opt_sandbox = format!("Sandbox mode: {sandbox_display}");
         let opt_network_policy = format!("Network policy: {network_policy_display}");
         let opt_memory = format!("Memory: {memory_display}");
+        let stt_display = if config.stt.enabled {
+            format!("on ({})", config.stt.model.yaml_str())
+        } else {
+            "off".to_string()
+        };
+        let opt_stt = format!("STT: {stt_display}");
         let opt_done = "Done".to_string();
 
         let mut options = vec![
@@ -596,6 +602,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         ) {
             options.push(opt_network_policy.clone());
         }
+        options.push(opt_stt.clone());
         options.push(opt_memory.clone());
         options.push(opt_done.clone());
 
@@ -693,6 +700,16 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                     } else {
                         update_agent_yaml_memory(&agent_yaml_path, &new_cfg)?;
                     }
+                }
+                None => {
+                    // User cancelled — no change.
+                }
+            }
+        } else if selection == opt_stt {
+            match stt_setup()? {
+                Some((enabled, model)) => {
+                    let stt = rightclaw::agent::types::SttConfig { enabled, model };
+                    update_agent_yaml_stt(&agent_yaml_path, &stt)?;
                 }
                 None => {
                     // User cancelled — no change.
@@ -824,9 +841,11 @@ async fn memory_setup(
     // - explicit key if user entered one
     // - HINDSIGHT_API_KEY env var as fallback
     // If neither is available, skip validation with a note.
-    let resolved_key = api_key
-        .clone()
-        .or_else(|| std::env::var("HINDSIGHT_API_KEY").ok().filter(|s| !s.is_empty()));
+    let resolved_key = api_key.clone().or_else(|| {
+        std::env::var("HINDSIGHT_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
 
     if let Some(k) = resolved_key.as_deref() {
         println!("Validating key against Hindsight...");
@@ -869,6 +888,132 @@ async fn memory_setup(
         recall_budget: budget,
         recall_max_tokens: max_tokens,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// STT setup helpers (public)
+// ---------------------------------------------------------------------------
+
+/// macOS: detect brew, prompt to install ffmpeg, run, re-check.
+/// Linux: print install instructions only.
+/// Returns true iff ffmpeg is in PATH after this call.
+pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
+    if rightclaw::stt::ffmpeg_available() {
+        return Ok(true);
+    }
+
+    match std::env::consts::OS {
+        "macos" => {
+            if which::which("brew").is_err() {
+                println!("ffmpeg required, but Homebrew (brew) is not installed.");
+                println!("Install Homebrew first: https://brew.sh");
+                println!("Then run: brew install ffmpeg");
+                return Ok(false);
+            }
+            let install = inquire::Confirm::new(
+                "ffmpeg required for voice transcription. Install via 'brew install ffmpeg'?",
+            )
+            .with_default(true)
+            .prompt()
+            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            if !install {
+                println!("STT will be disabled. Install ffmpeg later: brew install ffmpeg");
+                return Ok(false);
+            }
+            // Spawn brew install with stdout/stderr inherited so user sees output.
+            let status = std::process::Command::new("brew")
+                .args(["install", "ffmpeg"])
+                .status()
+                .map_err(|e| miette::miette!("spawn brew: {e:#}"))?;
+            if !status.success() {
+                println!("brew install ffmpeg exited with {status}; STT disabled.");
+                return Ok(false);
+            }
+            if !rightclaw::stt::ffmpeg_available() {
+                println!(
+                    "brew completed but ffmpeg not yet in PATH — restart shell or check PATH; STT disabled."
+                );
+                return Ok(false);
+            }
+            tracing::info!("ffmpeg installed via brew");
+            Ok(true)
+        }
+        "linux" => {
+            println!("ffmpeg required for voice transcription. Install:");
+            println!("  Debian/Ubuntu:  sudo apt install ffmpeg");
+            println!("  NixOS / devenv: add 'pkgs.ffmpeg' to your packages");
+            println!("Then re-run this command.");
+            Ok(false)
+        }
+        other => {
+            println!("ffmpeg required, but auto-install is not supported on '{other}'.");
+            println!("Install ffmpeg from https://ffmpeg.org/download.html, then re-run.");
+            Ok(false)
+        }
+    }
+}
+
+/// Wizard step: ask enable/disable + model selection, run ffmpeg detection
+/// + install prompt as needed. Returns Some((enabled, model)) on completion,
+/// None if the user pressed Esc on either prompt (caller decides where to go back).
+pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::WhisperModel)>> {
+    use rightclaw::agent::types::WhisperModel;
+
+    // Step 1: enable y/n
+    let enable = match inquire::Confirm::new("Enable voice transcription?")
+        .with_default(true)
+        .with_help_message(
+            "Telegram voice messages and video notes will be transcribed locally via whisper.cpp.",
+        )
+        .prompt()
+    {
+        Ok(v) => v,
+        Err(inquire::InquireError::OperationCanceled)
+        | Err(inquire::InquireError::OperationInterrupted) => return Ok(None),
+        Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
+    };
+
+    if !enable {
+        return Ok(Some((false, WhisperModel::Small)));
+    }
+
+    // Step 2: model select
+    let options = vec![
+        "tiny     — ~75 MB,   fastest, OK for short commands",
+        "base     — ~150 MB,  decent",
+        "small    — ~470 MB,  recommended (default)",
+        "medium   — ~1.5 GB,  very good",
+        "large-v3 — ~3.0 GB,  best quality, slow",
+    ];
+    let picked = match inquire::Select::new("Choose whisper model:", options)
+        .with_starting_cursor(2) // small
+        .prompt()
+    {
+        Ok(v) => v,
+        Err(inquire::InquireError::OperationCanceled)
+        | Err(inquire::InquireError::OperationInterrupted) => {
+            // Caller routes the back navigation (skips two steps from the user's perspective).
+            return Ok(None);
+        }
+        Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
+    };
+    let model = if picked.starts_with("tiny") {
+        WhisperModel::Tiny
+    } else if picked.starts_with("base") {
+        WhisperModel::Base
+    } else if picked.starts_with("small") {
+        WhisperModel::Small
+    } else if picked.starts_with("medium") {
+        WhisperModel::Medium
+    } else if picked.starts_with("large-v3") {
+        WhisperModel::LargeV3
+    } else {
+        unreachable!("unexpected whisper option label: {picked}")
+    };
+
+    // Step 3: ffmpeg check + optional install
+    let ffmpeg_ok = prompt_ffmpeg_install()?;
+    Ok(Some((ffmpeg_ok, model)))
 }
 
 // ---------------------------------------------------------------------------
@@ -1200,14 +1345,19 @@ mod memory_yaml_tests {
     #[test]
     fn remove_agent_yaml_memory_strips_entire_block() {
         let dir = tempdir().unwrap();
-        let initial =
-            "model: \"sonnet\"\n\nmemory:\n  provider: hindsight\n  api_key: \"x\"\n  bank_id: \"b\"\n\nnetwork_policy: permissive\n";
+        let initial = "model: \"sonnet\"\n\nmemory:\n  provider: hindsight\n  api_key: \"x\"\n  bank_id: \"b\"\n\nnetwork_policy: permissive\n";
         let path = write_yaml(dir.path(), initial);
         remove_agent_yaml_memory(&path).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(!content.contains("memory:"), "memory block must be gone, got:\n{content}");
-        assert!(!content.contains("api_key"), "api_key must be gone, got:\n{content}");
+        assert!(
+            !content.contains("memory:"),
+            "memory block must be gone, got:\n{content}"
+        );
+        assert!(
+            !content.contains("api_key"),
+            "api_key must be gone, got:\n{content}"
+        );
         assert!(
             content.contains("network_policy: permissive"),
             "unrelated fields must survive, got:\n{content}"
@@ -1231,10 +1381,61 @@ mod memory_yaml_tests {
         update_agent_yaml_memory(&path, &cfg).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("model: \"sonnet\""), "pre-existing field survives");
+        assert!(
+            content.contains("model: \"sonnet\""),
+            "pre-existing field survives"
+        );
         assert!(content.contains("memory:"), "memory block added");
-        assert!(content.contains("recall_budget: low"), "non-default budget emitted");
+        assert!(
+            content.contains("recall_budget: low"),
+            "non-default budget emitted"
+        );
     }
+}
+
+/// Replace the `stt:` block in an agent.yaml file.
+///
+/// Removes any existing `stt:` block (header + indented body), then appends
+/// the new block.  Matches the style of the other `update_agent_yaml_*`
+/// helpers: line-by-line block stripping + unconditional append.
+fn update_agent_yaml_stt(
+    path: &Path,
+    stt: &rightclaw::agent::types::SttConfig,
+) -> miette::Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
+
+    // Strip existing stt: block (header + indented lines).
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_stt_block = false;
+    for line in content.lines() {
+        if line == "stt:" {
+            in_stt_block = true;
+            continue;
+        }
+        if in_stt_block {
+            if line.starts_with("  ") {
+                continue;
+            }
+            in_stt_block = false;
+        }
+        lines.push(line.to_string());
+    }
+
+    // Append new stt block.
+    lines.push("stt:".to_string());
+    lines.push(format!("  enabled: {}", stt.enabled));
+    lines.push(format!("  model: {}", stt.model.yaml_str()));
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(path, &output)
+        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
+
+    Ok(())
 }
 
 /// Replace the `allowed_chat_ids` block in an agent.yaml file.
@@ -1281,4 +1482,50 @@ fn update_agent_yaml_chat_ids(path: &Path, ids: &[i64]) -> miette::Result<()> {
         .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod stt_yaml_tests {
+    use super::*;
+    use rightclaw::agent::types::{SttConfig, WhisperModel};
+
+    #[test]
+    fn append_stt_when_block_missing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "telegram_token: \"x\"\n").unwrap();
+
+        let stt = SttConfig {
+            enabled: true,
+            model: WhisperModel::Small,
+        };
+        update_agent_yaml_stt(tmp.path(), &stt).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("stt:"));
+        assert!(content.contains("enabled: true"));
+        assert!(content.contains("model: small"));
+    }
+
+    #[test]
+    fn replace_stt_when_block_present() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "telegram_token: \"x\"\nstt:\n  enabled: true\n  model: tiny\n",
+        )
+        .unwrap();
+
+        let stt = SttConfig {
+            enabled: false,
+            model: WhisperModel::Small,
+        };
+        update_agent_yaml_stt(tmp.path(), &stt).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        // Block replaced, not duplicated:
+        assert_eq!(content.matches("stt:").count(), 1, "exactly one stt: block");
+        assert!(content.contains("enabled: false"));
+        assert!(content.contains("model: small"));
+        assert!(!content.contains("model: tiny"));
+    }
 }

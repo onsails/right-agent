@@ -243,6 +243,10 @@ pub struct AgentConfig {
     /// Memory configuration (optional — defaults to file-based MEMORY.md).
     #[serde(default)]
     pub memory: Option<MemoryConfig>,
+
+    /// Speech-to-text configuration.
+    #[serde(default)]
+    pub stt: SttConfig,
 }
 
 impl Default for AgentConfig {
@@ -261,6 +265,7 @@ impl Default for AgentConfig {
             attachments: AttachmentsConfig::default(),
             show_thinking: default_show_thinking(),
             memory: None,
+            stt: SttConfig::default(),
         }
     }
 }
@@ -331,6 +336,89 @@ impl Default for AttachmentsConfig {
 
 fn default_retention_days() -> u32 {
     7
+}
+
+/// Whisper model size for speech-to-text transcription.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhisperModel {
+    Tiny,
+    Base,
+    #[default]
+    Small,
+    Medium,
+    #[serde(rename = "large-v3")]
+    LargeV3,
+}
+
+impl WhisperModel {
+    pub fn filename(&self) -> &'static str {
+        match self {
+            Self::Tiny => "ggml-tiny.bin",
+            Self::Base => "ggml-base.bin",
+            Self::Small => "ggml-small.bin",
+            Self::Medium => "ggml-medium.bin",
+            Self::LargeV3 => "ggml-large-v3.bin",
+        }
+    }
+
+    pub fn download_url(&self) -> &'static str {
+        match self {
+            Self::Tiny => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+            Self::Base => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+            Self::Small => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+            }
+            Self::Medium => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+            }
+            Self::LargeV3 => {
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
+            }
+        }
+    }
+
+    pub fn approx_size_mb(&self) -> u64 {
+        match self {
+            Self::Tiny => 75,
+            Self::Base => 150,
+            Self::Small => 470,
+            Self::Medium => 1500,
+            Self::LargeV3 => 3100,
+        }
+    }
+
+    /// Kebab-case YAML string for this model — mirrors serde's rename_all output.
+    pub fn yaml_str(self) -> &'static str {
+        match self {
+            Self::Tiny => "tiny",
+            Self::Base => "base",
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::LargeV3 => "large-v3",
+        }
+    }
+}
+
+/// Speech-to-text configuration for an agent.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SttConfig {
+    #[serde(default)] // bool::default() == false
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: WhisperModel,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: WhisperModel::default(),
+        }
+    }
 }
 
 /// A discovered agent definition from the filesystem.
@@ -582,7 +670,10 @@ sandbox:
     - "/tmp"
 "#;
         let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_err(), "old SandboxOverrides fields must be rejected");
+        assert!(
+            result.is_err(),
+            "old SandboxOverrides fields must be rejected"
+        );
     }
 
     #[test]
@@ -616,5 +707,88 @@ sandbox:
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let sb = config.sandbox.unwrap();
         assert!(sb.name.is_none());
+    }
+}
+
+#[cfg(test)]
+mod stt_config_tests {
+    use super::*;
+
+    #[test]
+    fn stt_config_defaults_when_missing() {
+        let yaml = "";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(
+            !cfg.stt.enabled,
+            "default must be false to grandfather existing agents"
+        );
+        assert_eq!(cfg.stt.model, WhisperModel::Small);
+    }
+
+    #[test]
+    fn pre_existing_yaml_without_stt_block_defaults_to_disabled() {
+        // Simulates an agent.yaml from before the STT feature shipped:
+        // it has other fields but no stt: block.
+        let yaml = "telegram_token: \"x\"\nmodel: sonnet\n";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(
+            !cfg.stt.enabled,
+            "existing agents without stt: block must NOT be silently enabled"
+        );
+    }
+
+    #[test]
+    fn stt_config_explicit_yaml_roundtrip() {
+        let yaml = "\
+stt:
+  enabled: false
+  model: tiny
+";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(!cfg.stt.enabled);
+        assert_eq!(cfg.stt.model, WhisperModel::Tiny);
+    }
+
+    #[test]
+    fn stt_config_large_v3_kebab_case() {
+        let yaml = "\
+stt:
+  model: large-v3
+";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(cfg.stt.model, WhisperModel::LargeV3);
+    }
+
+    #[test]
+    fn stt_config_invalid_model_errors() {
+        let yaml = "\
+stt:
+  model: huge
+";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn whisper_model_filename() {
+        assert_eq!(WhisperModel::Tiny.filename(), "ggml-tiny.bin");
+        assert_eq!(WhisperModel::Base.filename(), "ggml-base.bin");
+        assert_eq!(WhisperModel::Small.filename(), "ggml-small.bin");
+        assert_eq!(WhisperModel::Medium.filename(), "ggml-medium.bin");
+        assert_eq!(WhisperModel::LargeV3.filename(), "ggml-large-v3.bin");
+    }
+
+    #[test]
+    fn whisper_model_download_url_is_huggingface() {
+        let url = WhisperModel::Small.download_url();
+        assert!(url.starts_with("https://huggingface.co/ggerganov/whisper.cpp/"));
+        assert!(url.ends_with("ggml-small.bin"));
+    }
+
+    #[test]
+    fn whisper_model_approx_size_mb_is_sane() {
+        assert!(WhisperModel::Tiny.approx_size_mb() < 100);
+        assert!(WhisperModel::Small.approx_size_mb() < 600);
+        assert!(WhisperModel::LargeV3.approx_size_mb() > 2000);
     }
 }

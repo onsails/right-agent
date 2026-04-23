@@ -101,6 +101,8 @@ pub struct WorkerContext {
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     /// RwLock gate — worker acquires read lock before invoke_cc to block during upgrades.
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
+    /// STT context — None when stt.enabled=false or whisper model not yet cached.
+    pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
 }
 
 /// Parsed output from CC structured JSON response (`result` field per D-03).
@@ -398,8 +400,8 @@ pub fn spawn_worker(
             let mut input_messages = Vec::with_capacity(batch.len());
             let mut skip_batch = false;
             for msg in &batch {
-                let resolved = if msg.attachments.is_empty() {
-                    vec![]
+                let (resolved, voice_markers) = if msg.attachments.is_empty() {
+                    (vec![], vec![])
                 } else {
                     match super::attachments::download_attachments(
                         &msg.attachments,
@@ -410,6 +412,7 @@ pub fn spawn_worker(
                         ctx.resolved_sandbox.as_deref(),
                         tg_chat_id,
                         eff_thread_id,
+                        ctx.stt.as_deref(),
                     )
                     .await
                     {
@@ -424,7 +427,10 @@ pub fn spawn_worker(
                 };
                 input_messages.push(super::attachments::InputMessage {
                     message_id: msg.message_id,
-                    text: msg.text.clone(),
+                    text: crate::stt::combine_markers_with_text(
+                        &voice_markers,
+                        msg.text.as_deref(),
+                    ),
                     timestamp: msg.timestamp,
                     attachments: resolved,
                     author: msg.author.clone(),
@@ -675,10 +681,14 @@ pub fn spawn_worker(
                     //    (no ring-buffer dump) and clear the stop keyboard.
                     let banner = match &kind {
                         crate::reflection::FailureKind::SafetyTimeout { limit_secs } => {
-                            format!("\u{26a0}\u{fe0f} Hit {limit_secs}s safety limit — thinking again…")
+                            format!(
+                                "\u{26a0}\u{fe0f} Hit {limit_secs}s safety limit — thinking again…"
+                            )
                         }
                         crate::reflection::FailureKind::NonZeroExit { code } => {
-                            format!("\u{26a0}\u{fe0f} Claude exited with code {code} — thinking again…")
+                            format!(
+                                "\u{26a0}\u{fe0f} Claude exited with code {code} — thinking again…"
+                            )
                         }
                         _ => "\u{26a0}\u{fe0f} Previous turn did not complete — thinking again…"
                             .to_string(),
@@ -766,11 +776,7 @@ pub fn spawn_worker(
                             }
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                ?key,
-                                "reflection failed: {:#}; showing raw error",
-                                e
-                            );
+                            tracing::warn!(?key, "reflection failed: {:#}; showing raw error", e);
                             match thinking_msg_id {
                                 Some(msg_id) => {
                                     // Try to edit the banner into the raw error.
@@ -1246,13 +1252,14 @@ async fn invoke_cc(
         let marker = build_memory_marker(wrapper_status, client_drops_24h);
         match (recall_content.as_deref(), marker.as_deref()) {
             (None, None) => {
-                let sandbox_ref = match (ctx.ssh_config_path.as_deref(), ctx.resolved_sandbox.as_deref()) {
-                    (Some(ssh_config), Some(sandbox_name)) => {
-                        Some(super::prompt::SandboxRef {
-                            ssh_config,
-                            sandbox_name,
-                        })
-                    }
+                let sandbox_ref = match (
+                    ctx.ssh_config_path.as_deref(),
+                    ctx.resolved_sandbox.as_deref(),
+                ) {
+                    (Some(ssh_config), Some(sandbox_name)) => Some(super::prompt::SandboxRef {
+                        ssh_config,
+                        sandbox_name,
+                    }),
                     _ => None,
                 };
                 super::prompt::remove_composite_memory(&ctx.agent_dir, sandbox_ref).await;
@@ -1639,7 +1646,9 @@ async fn invoke_cc(
         }
         timeout_msg.push_str(&format!("\nStream log: {}", stream_log_path.display()));
         return Err(InvokeCcFailure::Reflectable {
-            kind: FailureKind::SafetyTimeout { limit_secs: CC_TIMEOUT_SECS },
+            kind: FailureKind::SafetyTimeout {
+                limit_secs: CC_TIMEOUT_SECS,
+            },
             ring_buffer_tail: ring_buffer.events().clone(),
             session_uuid: session_uuid.clone(),
             raw_message: timeout_msg,
@@ -1716,7 +1725,11 @@ async fn invoke_cc(
         if is_first_call {
             deactivate_current(&conn, chat_id, eff_thread_id)
                 .map_err(|e| {
-                    tracing::error!(?chat_id, "deactivate_current on first-call failure: {:#}", e)
+                    tracing::error!(
+                        ?chat_id,
+                        "deactivate_current on first-call failure: {:#}",
+                        e
+                    )
                 })
                 .ok();
         }

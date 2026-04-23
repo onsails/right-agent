@@ -11,8 +11,7 @@ pub const OPERATING_INSTRUCTIONS: &str =
 /// (BOOTSTRAP.md exists in agent dir). The on-disk file is only
 /// an existence flag — content always comes from this constant.
 /// Source: `templates/right/agent/BOOTSTRAP.md`
-pub const BOOTSTRAP_INSTRUCTIONS: &str =
-    include_str!("../../templates/right/agent/BOOTSTRAP.md");
+pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../../templates/right/agent/BOOTSTRAP.md");
 
 /// JSON schema for the structured reply format used by teloxide agents (D-02).
 ///
@@ -39,9 +38,15 @@ pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"
 /// This replaces CC's default system prompt via `--system-prompt-file`.
 /// Content: agent identity, RightClaw description, sandbox info, MCP reference.
 /// Behavior-specific instructions come from the agent definition (`--agent`).
-pub fn generate_system_prompt(agent_name: &str, sandbox_mode: &crate::agent::types::SandboxMode, home_dir: &str) -> String {
+pub fn generate_system_prompt(
+    agent_name: &str,
+    sandbox_mode: &crate::agent::types::SandboxMode,
+    home_dir: &str,
+) -> String {
     let sandbox_desc = match sandbox_mode {
-        crate::agent::types::SandboxMode::Openshell => "OpenShell sandbox (k3s container with network and filesystem policies)",
+        crate::agent::types::SandboxMode::Openshell => {
+            "OpenShell sandbox (k3s container with network and filesystem policies)"
+        }
         crate::agent::types::SandboxMode::None => "no sandbox (direct host access)",
     };
 

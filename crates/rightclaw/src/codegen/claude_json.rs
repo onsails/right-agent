@@ -87,12 +87,8 @@ pub fn create_credential_symlink(agent: &AgentDef, host_home: &Path) -> miette::
 
     let host_creds = host_home.join(".claude").join(".credentials.json");
     let agent_claude_dir = agent.path.join(".claude");
-    std::fs::create_dir_all(&agent_claude_dir).map_err(|e| {
-        miette::miette!(
-            "failed to create .claude dir for '{}': {e:#}",
-            agent.name
-        )
-    })?;
+    std::fs::create_dir_all(&agent_claude_dir)
+        .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
     let agent_creds = agent_claude_dir.join(".credentials.json");
 
     if host_creds.exists() {
@@ -148,6 +144,7 @@ mod tests {
                 attachments: Default::default(),
                 show_thinking: true,
                 memory: None,
+                stt: Default::default(),
             }),
             soul_path: None,
             user_path: None,
@@ -172,7 +169,9 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
 
         // Find the project entry (keyed by canonicalized path).
-        let projects = parsed["projects"].as_object().expect("projects should exist");
+        let projects = parsed["projects"]
+            .as_object()
+            .expect("projects should exist");
         let (_key, project) = projects
             .iter()
             .next()
@@ -296,7 +295,10 @@ mod tests {
         );
         // Verify it's a symlink pointing to host creds.
         let target = std::fs::read_link(&symlink_path).unwrap();
-        assert_eq!(target, host_creds, "symlink should point to host credentials");
+        assert_eq!(
+            target, host_creds,
+            "symlink should point to host credentials"
+        );
     }
 
     #[test]
@@ -307,7 +309,11 @@ mod tests {
 
         let host_claude_dir = host_home.path().join(".claude");
         std::fs::create_dir_all(&host_claude_dir).unwrap();
-        std::fs::write(host_claude_dir.join(".credentials.json"), r#"{"token":"test"}"#).unwrap();
+        std::fs::write(
+            host_claude_dir.join(".credentials.json"),
+            r#"{"token":"test"}"#,
+        )
+        .unwrap();
 
         // Call twice — second call should not error.
         create_credential_symlink(&agent, host_home.path()).unwrap();
@@ -392,5 +398,4 @@ mod tests {
             "agent path should not equal host home"
         );
     }
-
 }
