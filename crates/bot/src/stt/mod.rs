@@ -1,8 +1,7 @@
 //! Speech-to-text pipeline: ffmpeg → PCM → whisper-rs → text.
 
-// Items here are introduced staged across Tasks 8–13 of the voice-STT plan.
-// The allow drops naturally once Tasks 10/13 wire them up; if it survives
-// past Task 13, that's a sign of a missing wire.
+// All items here are wired up once Tasks 14-15 connect SttContext into
+// download_attachments and bot startup. Remove this allow after Task 15.
 #![allow(dead_code)]
 
 pub mod decode;
@@ -107,6 +106,85 @@ pub fn combine_markers_with_text(markers: &[String], user_text: Option<&str>) ->
         }
     }
     Some(out)
+}
+
+/// Try to transcribe `host_path`. On success, returns the success marker.
+/// On any error, returns the corresponding error marker. Always returns
+/// some marker — the caller injects it into the payload.
+pub async fn transcribe_or_marker(
+    ctx: &SttContext,
+    kind: markers::VoiceKind,
+    host_path: &std::path::Path,
+) -> String {
+    if !ctx.ffmpeg_available {
+        return markers::marker_for_error(kind, &SttError::FfmpegNotFound);
+    }
+    let result = match kind {
+        markers::VoiceKind::Voice => ctx.transcriber.transcribe_voice(host_path).await,
+        markers::VoiceKind::VideoNote => ctx.transcriber.transcribe_video_note(host_path).await,
+    };
+    match result {
+        Ok(r) => markers::marker_success(kind, &r.text),
+        Err(e) => {
+            tracing::warn!("STT failed for {}: {e}", host_path.display());
+            markers::marker_for_error(kind, &e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod transcribe_or_marker_tests {
+    use super::*;
+    use rightclaw::agent::types::WhisperModel;
+    use rightclaw::stt::model_cache_path;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    async fn tiny_ctx(ffmpeg_available: bool) -> SttContext {
+        let home = std::env::var_os("RIGHTCLAW_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".rightclaw"));
+        let p = model_cache_path(&home, WhisperModel::Tiny);
+        if !p.exists() {
+            rightclaw::stt::download_model(WhisperModel::Tiny, &p)
+                .await
+                .unwrap();
+        }
+        SttContext {
+            transcriber: Arc::new(Transcriber::new(p)),
+            ffmpeg_available,
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_success_returns_success_marker() {
+        let ctx = tiny_ctx(true).await;
+        let m = transcribe_or_marker(&ctx, markers::VoiceKind::Voice, &fixture("hello.oga")).await;
+        assert!(m.contains("надиктовал"));
+        assert!(m.to_lowercase().contains("test"));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_unavailable_returns_error_marker_without_running_ffmpeg() {
+        let ctx = tiny_ctx(false).await;
+        let m = transcribe_or_marker(&ctx, markers::VoiceKind::Voice, &fixture("hello.oga")).await;
+        assert!(m.contains("не установлен ffmpeg"));
+    }
+
+    #[tokio::test]
+    async fn missing_model_returns_model_missing_marker() {
+        let ctx = SttContext {
+            transcriber: Arc::new(Transcriber::new(PathBuf::from("/nonexistent/x.bin"))),
+            ffmpeg_available: true,
+        };
+        let m = transcribe_or_marker(&ctx, markers::VoiceKind::Voice, &fixture("hello.oga")).await;
+        assert!(m.contains("rightclaw up"));
+    }
 }
 
 #[cfg(test)]
