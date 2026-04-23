@@ -23,7 +23,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
 tokio = { version = "1.52", features = ["full"] }
-which = "8.0"
+which = "7.0"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rusqlite_migration = "2.5"
 rmcp = { version = "1.5", default-features = false, features = ["client", "server", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
@@ -42,9 +42,9 @@ tempfile = "3.27"
 chrono = { version = "0.4", features = ["serde"] }
 cron = "0.16"
 cron-descriptor = "0.1"
-sha2 = "0.11"
-hmac = "0.13"
-rand = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+rand = "0.9"
 base64 = "0.22"
 subtle = "2.6"
 axum = "0.8"
@@ -55,12 +55,12 @@ prost = "0.14"
 prost-types = "0.14"
 inquire = "0.9"
 notify = "8.0"
-notify-debouncer-mini = "0.7"
+notify-debouncer-mini = "0.6"
 owo-colors = { version = "4.2", features = ["supports-colors"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 url = "2.5"
 anyhow = "1.0"
-fs4 = "1.0"
+fs4 = "0.13"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 signal-hook = { version = "0.4", features = ["extended-siginfo"] }
 
