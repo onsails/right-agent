@@ -1,4 +1,900 @@
 # Changelog
+## [0.2.1] - 2026-04-23
+
+
+### Bug Fixes
+
+- **bot**: Parse KEY=VALUE env file format in resolve_token
+- **bot**: Sandbox compat — dangerously-skip-permissions, USE_BUILTIN_RIPGREP, /start command
+- **bot**: Log CC stderr at INFO when --debug (was DEBUG, invisible at default log level)
+- **worker**: Handle plain-string CC result in parse_reply_output
+- **30-01**: Collapse nested if in cron.rs to fix clippy collapsible_if warning
+- **v3.2-gaps**: /mcp list emoji icons + /doctor HTML code block
+- Invoke_cc uses SSH instead of non-existent openshell exec
+- Improve invoke_cc debuggability — log sandbox mode, exit code, stderr
+- Log stdout+stderr at ERROR level on claude -p failure
+- Copy .claude/ into staging before sandbox upload
+- Token refresh writes to agent_dir/.mcp.json, not staging/
+- Run sync immediately on startup, add /sandbox trust to .claude.json
+- Block bot startup until initial sync completes
+- Sync writes fixed .claude.json with correct filename (was .claude.json.fixed)
+- Two-step URL extraction — wait for 'Browser didn't open' then extract URL
+- Set PTY width to 500 cols so OAuth URL doesn't wrap across lines
+- Send auth code with \r (CC TUI needs carriage return), add API key to success patterns
+- Integration test sets CLAUDE_CONFIG_DIR to prevent host config pollution
+- Login code prompt detection and code submission
+- Add --mcp-config + --strict-mcp-config to invoke_cc
+- Add .mcp.json to sync_cycle
+- Add logging for every reply outcome in worker
+- **bot**: Resolve clippy warnings (collapsible-if, too-many-arguments)
+- Address review issues (iteration 1)
+- Address review issues (iteration 2)
+- Guard reverse sync deletions against sandbox unreachability
+- Add network_policy to bot test struct literal
+- Attachments used agent_name instead of sandbox_name for upload/download
+- Remove inline keyboard on completion, tighten StopTokens visibility
+- Atomic activate_session, label search in /switch, touch on switch, tests
+- Address review issues (2 iterations)
+- Address review issues (2 iterations)
+- Reverse sync downloaded from wrong path (.claude/agents/ instead of /sandbox/)
+- Reverse sync only CC-modified files, not codegen-generated ones
+- **cron**: Graceful shutdown — abort schedulers, await executing jobs
+- Parse URL early in /mcp add before network calls
+- Update ignored sync test to use SandboxExec
+- Add dispatch logging for message routing diagnostics
+- Add logging and timeouts to /mcp add OAuth discovery
+- Mcp auth looks up server from aggregator, not mcp.json
+- Run claude install before upgrade to register native build metadata
+- **login**: Probe ports instead of relying on ss process names
+- **login**: Fix curl quoting for SSH remote execution
+- **login**: Pass curl args directly, use localhost instead of [::1]
+- **login**: Keep stdout pipe alive to prevent SIGPIPE killing auth process
+- **login**: Disable auto-upgrade, pipe stderr for diagnostics
+- **login**: Use HEAD / instead of GET /callback for port probing
+- **login**: Discover callback port via baseline diff instead of probing
+- **login**: Shell-quote callback URL to prevent & splitting command
+- **login**: Strip #STATE suffix from auth code before submission
+- **login**: Use agent_dir.join("memory.db") instead of raw path
+- **login**: Use HTML parse mode for setup-token instruction message
+- **delivery**: Add --mcp-config via ClaudeInvocation builder
+- **cron**: Add --mcp-config via ClaudeInvocation builder
+- **delivery**: Send cron reports as HTML with markdown conversion
+- Update bot crate for CronSpec.schedule_kind rename
+- Address review issues (2 iterations)
+- Add verbatim relay instruction to cron delivery stdin
+- Truncate long thinking lines in Telegram live indicator
+- Crash on multi-byte UTF-8 in Telegram message splitting + panic=abort
+- **memory**: Add cron prefetch spawn after auto-retain for next run
+- **worker**: Truncate recall queries by character count, not bytes
+- **cron**: Remove auto-recall and auto-retain from cron jobs
+- **delivery**: Remove auto-recall from cron delivery sessions
+- **bot/mention**: Utf16-safe entity offsets, preserve whitespace, harden parse
+- **filter**: Use ? operator per clippy hint
+- **bot**: Wrap ssh/bash claude invocations in ProcessGroupChild
+- **bot**: Return singleton from routing filter; dptree filter_map does not unpack tuples
+- **bot**: Register commands in Default, AllPrivateChats, AllGroupChats scopes
+- **bot**: Memory_alerts — handle initial AuthFailed before subscribe
+- **bot**: Memory_alerts live allowlist + drain Delay missed-tick
+- **bot**: Always emit <memory-status> marker even when recall returns None
+- **bot**: Remove_composite_memory also clears sandbox-side copy
+- **bot**: Pre-delete language-scoped commands to prevent menu-shadow
+- **bot**: Update NoToken error message — env var no longer supported
+- **reflection**: Unique prompt path, drop stderr, order error checks, tighten visibility
+- **worker**: Reflection UX polish — no flash, no bogus HTML parse, thread replies
+- **cron**: Chronological ring buffer order matching worker, drop needless clone
+- **bot**: Await keepalive/upgrade JoinHandles to prevent tokio panic on shutdown
+- **stt**: Drop loser Arc on whisper race + concurrent stderr drain
+- Auto-install built-in skills + clean up PROJECT.md
+- Detect claude-bun as alternative to claude binary
+- Resolve claude/claude-bun in shell wrapper dynamically
+- Use positional prompt arg instead of --prompt flag
+- Pre-trust agent directory in Claude Code config
+- Skip bypass permissions mode warning dialog via settings
+- Write skipDangerousModePermissionPrompt to ~/.claude/settings.json
+- Create .mcp.json marker so wrapper adds --channels flag for Telegram
+- Include BOOTSTRAP.md onboarding trigger in system prompt
+- Expand ~ to absolute paths in policy.yaml (OpenShell requirement)
+- Install skills to .claude/skills/ (standard Agent Skills path)
+- Pre-create installed.json to avoid Claude Code file creation prompt
+- Always create .claude/settings.json with skipDangerousModePermissionPrompt
+- Add spinnerTipsEnabled=false and prefersReducedMotion=true to agent settings
+- Cronsync uses remote channel, not session-only wording
+- Remove unused has_yaml_files function
+- Remove SessionStart prompt hook (Claude Code bug: ToolUseContext required)
+- Update system_prompt tests for unconditional rightcron routing
+- **08-01**: Remove stale policy_path field refs and fix generate_wrapper arg count in tests
+- **09-01**: Resolve clippy warnings in telegram.rs and settings.rs
+- **16-01**: Update default start_prompt to remove MEMORY.md reference (D-07)
+- Set hasCompletedOnboarding in agent .claude.json to suppress CC first-run flow
+- **settings**: Disable CC native auto-memory in generated agent settings.json
+- **init**: Write telegram config to agent dir, record token_file in agent.yaml
+- **telegram**: Strip TELEGRAM_BOT_TOKEN= prefix when reading dotenv-format token file
+- Bypass channel plugin feature gate with --dangerously-load-development-channels
+- Run rightcron bootstrap as background agent
+- **28.2-02**: Fix fetch_webhook_url using tokio::task::block_in_place
+- **bot**: Stop CC Telegram plugin from racing with native bot for updates
+- **33-01**: Move test-only imports to #[cfg(test)] in detect.rs
+- Reap sandbox create child, make refresh scheduler sandbox-aware
+- Landlock compatibility best_effort — hard_requirement crashes in k3s
+- Sandbox create is long-lived monitor — drop handle instead of wait
+- Shell-escape SSH remote args — JSON schema breaks remote shell
+- Address code review findings for login flow
+- Wildcard anthropic domains in sandbox policy, tighten OAuth URL scraper
+- Add /sandbox trust entry to .claude.json for OpenShell sandbox mode
+- Extract_auth_url matches claude.com, cleaner Telegram messages
+- Policy binaries path "**" instead of "/sandbox/**"
+- Add tls: terminate to all HTTPS endpoints in sandbox policy
+- Remove stale rightmemory entry from mcp.json on generation
+- Update init test assertion + add Memory section to AGENTS.md
+- Default restart policy to always with 3s backoff
+- Address review issues (2 iterations)
+- Add trailing newline to pc_client_tests.rs
+- Permissive policy allows all outbound ports, not just 443
+- Use directory paths for all upload_file callers
+- Address review issues (2 iterations)
+- Update schema tests for V4 migration + add session lifecycle test
+- Rename cronsync skill dir to rightcron, fixing sandbox upload
+- Clippy collapsible_if + update schema version test to V5
+- Update schema version test to V7
+- **ci**: Use PAT for release-plz, disable library crate releases
+- **codegen**: Write .mcp.json from scratch, strip stale external entries
+- Update doctor tests for SQLite-based MCP check
+- Propagate instructions cache errors in ProxyBackend::connect()
+- Address review issues — printf escaping, MCP header constant, docs
+- Decompose directory uploads into parallel single-file uploads
+- Propagate walkdir errors in directory_hash
+- Log chmod error instead of discarding Result
+- Pass pre-computed hash to deploy_file, avoid redundant SHA-256
+- Pass pre-computed hash to deploy_directory, avoid redundant walk
+- Remove fallback, fail fast on stale sandbox policy
+- Instruct agents to call MCP tools directly, not via ToolSearch
+- Persist refresh_token in db_update_oauth_token
+- Update user_version assertion to 12 after v12 migration
+- Review cleanup — deduplicate delivery helper, fix TOCTOU in forget_memory
+- **cron**: Address clippy warnings in new cron_spec functions
+- Address review issues (2 iterations)
+- **cron**: Include last_run_at and last_status in cron_list MCP output
+- **bot**: Migrate own data.db instead of depending on aggregator
+- **migrations**: Make v4 and v6 SQL idempotent
+- **allowlist**: Deny unknown fields + escape control chars in label
+- **openshell**: Wrap upload/delete/keepalive in ProcessGroupChild
+- **openshell**: Wrap remaining openshell callsites + message consistency
+- **openshell**: Wrap ssh_exec/ssh_tar_download/ssh_tar_upload in ProcessGroupChild
+- **test_cleanup**: Delete_sandbox_sync uses positional name arg
+- **process_group**: Wait_with_output is now cancel-safe
+- **release-plz**: Include templates/skills/proto in packaged tarball
+- **openshell**: Download_file delivers to exact host_dest path
+- **process_group**: Suppress spurious EPERM warning on macOS
+- **memory**: Route .json() errors through from_reqwest to preserve timeout kind
+- **memory**: Propagate oldest_age query errors instead of swallowing
+- **memory**: Drop drain_tick transaction to avoid SQLITE_BUSY under concurrent enqueue
+- **memory**: Don't enqueue retains when breaker open due to AuthFailed
+- **memory**: Don't enqueue Malformed retains — they re-fail deterministically
+- **doctor**: Check_memory uses open_connection for WAL + busy_timeout
+- **usage**: HTML-escape '<' in format_cost for Telegram compat
+- **cron**: Move thundering-herd warning from reconciler to schedule fire
+- **stt**: Default enabled=false to grandfather existing agents
+- **stt**: Cover enabled=false round-trip and consolidate yaml_str on WhisperModel
+- Remove stale plugin install hint — settings.json handles it now
+- Require telegram user ID when token is provided
+- Add --use-uds flag so process-compose creates Unix socket
+- Switch PcClient from Unix socket to TCP (process-compose --use-uds crashes TUI)
+- Use process-compose CLI client for restart instead of REST API
+- Use script(1) for real PTY, disable restart (PC bug)
+- Use --detached instead of --detached-with-tui (TUI needs /dev/tty)
+- Stable lock file for rightcron hook, cleared on each rightclaw up
+- **260327-04d**: Use absolute binary path in .mcp.json command field
+- **up**: Pre-create .claude/shell-snapshots/ to prevent CC Bash tool source error
+- **19-01**: Telegram false-positive, RC_AGENT_NAME injection, mcp_config_path removal
+- **up**: Symlink agent .claude/plugins to host plugins — telegram plugin not installed
+- Auto-install Telegram plugin during rightclaw up
+- Auto-install bun runtime for Telegram channel plugin
+- **bot**: Inline json-schema, parse structured_output, add --debug passthrough
+- **bot**: Pass --debug through rightclaw up → process-compose → bot subprocess
+- **29-01**: Sandbox dependency detection for nix environments
+- **37**: Address post-review issues
+- **v3.2-gaps**: Cloudflared --config flag + bot startup MCP warn
+- **v3.2-gaps**: Cloudflared --config must precede 'run' subcommand
+- **cloudflared**: Use credentials-file for local ingress instead of --token
+- **38**: Suppress dead_code on legacy token field, remove needless borrow
+- **39-02**: Guard prompt_telegram_token with yes flag
+- Restore MCP OAuth implementation deleted in 53809e3
+- Cloudflared --overwrite-dns + doctor HTML escape fallback
+- **43**: Gate brew_prefix() under #[cfg(target_os = "macos")]
+- Restore v3.3 MCP tools + planning artifacts deleted by 975e997
+- Address code review findings — policy gen, child monitoring, doctor, ssh check
+- `down` checks REST API instead of stale state.json
+- Allow external MCP servers through OpenShell network policy
+- Remove stale "restart required" notes from MCP tool messages
+- Address review issues (2 iterations)
+- Cancel OAuth refresh timer on MCP server removal + rename memory tools to record
+- Fail early when tunnel credentials file is missing
+- Update generate_policy call sites with NetworkPolicy param
+- Address review issues (2 iterations)
+- Address review issues (2 iterations)
+- Address review issues (iteration 1)
+- Address review issues (2 iterations)
+- Resolve host IP dynamically for sandbox MCP connectivity
+- Extract agents_dir() helper, fix SSH discovery bug, add agent list
+- Clippy collapsible_if in MCP cron tools
+- Address review issues (2 iterations)
+- Address review issues — error handling, HTML escaping, trigger tracking
+- Address review issues (2 iterations)
+- Address simplify review findings
+- Address review iteration 1 findings
+- Stdio mcp_add/mcp_remove write to SQLite alongside mcp.json
+- Address simplify review findings
+- Address review iteration 1 — error propagation
+- Address review issues — printf escaping, MCP header constant, docs
+- Run per-agent codegen during init and agent-init
+- Add mcp__right__ prefix to all agent-facing tool references
+- Add logging and timeout to aggregator mcp-add upstream connect
+- Skip connect for OAuth servers without token in mcp-add
+- Reconnect after OAuth token + show auth_type from SQLite
+- MCP tools not loading — invalid inputSchema on rightmeta__mcp_list
+- Bootstrap_done checks files in sandbox via gRPC exec for openshell agents
+- Pass home_dir to generate_system_prompt() in all callers
+- Simplify review — hoist http client, log send errors, tighten visibility
+- Review iteration 1 — remove scheduler DB race, log errors, add timeouts
+- Review iteration 2 — prevent double-refresh race, log DB errors, add scheduler timeouts
+- Remove max_turns and max_budget_usd from chat path, keep cron budget
+- Include log_path in cron_run_to_json output
+- Pass refresh_token at reconnect callsite, revert debug hack
+- **mcp**: Cancel stale reconnect in handle_set_token before delivering fresh token
+- Review cleanup — deduplicate refresh logic, propagate channel error
+- Address review issues (2 iterations)
+- Address review issues (2 iterations)
+- Update retain/recall call sites for new signatures
+- **init**: Default network policy to permissive, fix CLI output garbling
+- Address review issues (2 iterations)
+- **openshell**: Spawn_sandbox now uses ProcessGroupChild
+- **tests**: Wire test_cleanup registry into all sandbox-creating tests
+- **runtime**: Isolate PcClient by --home to stop tests killing live bots
+- **stt**: Allow(dead_code) on update_agent_yaml_stt until Task 10 wires it
+- **stt**: Point --yes warning at agent config, not --force
+- **stt**: Match init wizard order + match-style dispatch in agent config menu
+- **runtime**: Authenticate process-compose API with PC_API_TOKEN
+
+### Documentation
+
+- Finding — CC does not load HTTP MCP servers in sandbox
+- **test_cleanup**: Correct function names in module comment
+- **prompt**: Describe media_group_id to the agent
+- **schema**: Document reflection source in v15_usage_events.sql
+- **prompt**: Route tool-rules to TOOLS.md, not memory
+- **38-01**: Complete TunnelConfig credentials-file refactor plan
+- One-shot cron jobs design spec
+- **stt**: Correct stt_setup esc-navigation comments
+
+### Features
+
+- **23-02**: Scaffold rightclaw-bot crate with full teloxide skeleton
+- **25-01**: Implement session.rs — effective_thread_id + DB CRUD with TDD
+- **25-02**: Implement pure helpers in worker.rs (TDD GREEN)
+- **25-02**: Implement spawn_worker, invoke_cc async functions
+- **25-03**: Create handler.rs with handle_message and handle_reset
+- **25-03**: Rewrite dispatch.rs with DashMap worker map + BotCommand schema
+- **25.5-02**: Migrate worker to --agent/--json-schema; replace parse_reply_tool
+- **26-02**: Add deleteWebhook before run_telegram in bot/src/lib.rs
+- **27-01**: Cron scheduling engine in crates/bot/src/cron.rs
+- **bot**: Add CC invocation timeout + message routing debug logs
+- **bot/diag**: Add diagnostic logging for update routing and filter drops
+- **cron**: Parse CC structured output and send reply to Telegram
+- **34-04**: Add oauth_callback.rs module with unit tests
+- **34-04**: Wire oauth_callback server into lib.rs + dispatch.rs
+- **34-04**: Implement /mcp and /doctor bot command handlers
+- **35-01**: Backfill OAuth callback to write client_id and client_secret into credential
+- **35-03**: Spawn run_refresh_scheduler in bot lib.rs at startup
+- **37-02**: Add tracing::info! at entry of all mcp bot handlers
+- Conditional SSH vs direct invoke_cc based on sandbox mode
+- **bot**: Add attachment types, mime_to_extension, and constants
+- **bot**: Add YAML input formatting and update DebounceMsg for attachments
+- **bot**: Add extract_attachments for all Telegram media types
+- **bot**: Extract text and attachments from all Telegram media types in handler
+- **bot**: Switch to stdin piping, YAML input, typed attachment output in worker
+- **bot**: Implement attachment download/upload and outbound send pipelines
+- **bot**: Create inbox/outbox directories on startup and add periodic cleanup
+- Wire graceful restart — CancellationToken through all subsystems
+- Add reverse_sync_md — sync .md files from sandbox to host
+- Wire reverse_sync_md into worker after each claude -p call
+- Define StopTokens type and inject into dispatch/handler
+- Add callback query handler for Stop button
+- Stop button keyboard, token lifecycle, and post-completion edits
+- Pass --model from agent.yaml to Telegram worker
+- Cron budget control + model passthrough
+- Warn when cron schedule uses :00 or :30 minutes
+- Disable CC built-in cron, task, plan, and remote tools
+- Rewrite session.rs for multi-session CRUD
+- Update worker to use multi-session CRUD with label support
+- Replace /reset with /new, /list, /switch commands
+- **cron**: CronReplyOutput struct and parse_cron_output parser
+- **cron**: Persist cron output to DB instead of direct Telegram delivery
+- **cron**: Shared idle timestamp across handler/worker
+- **cron**: Cron_delivery module — DB query/dedup/mark functions with tests
+- **cron**: Delivery poll loop — idle detection, CC session delivery, cleanup
+- **cron**: Wire delivery loop into bot startup
+- **cron**: Replace load_specs filesystem scan with load_specs_from_db
+- **cron**: Add /cron telegram command (list + detail)
+- **bot**: Route /mcp commands through internal API
+- **bot**: Rewrite /mcp list via internal API, sync MCP_INSTRUCTIONS.md
+- **bot**: Fetch MCP instructions from aggregator at prompt assembly time
+- **bot**: Sandbox prompt assembly uses compiled-in constants
+- **bot**: Host prompt assembly uses compiled-in constants
+- Rewrite /mcp add with OAuth discovery, haiku fallback, token prompt
+- One-time migration from oauth-state.json to SQLite
+- Rewrite sync_cycle to use platform store
+- Auto-upgrade claude code in sandboxes every 8 hours
+- **login**: Rewrite as setup-token request flow
+- **worker**: Use setup-token flow, inject CLAUDE_CODE_OAUTH_TOKEN
+- Cron stream-json logging, auth token injection, failure notifications
+- Add system prompt and MCP instructions to cron execute_job
+- Add system prompt and MCP instructions to cron delivery, use haiku
+- Add ClaudeInvocation builder for claude -p argument assembly
+- **cron**: Set delivery_status and no_notify_reason during execution
+- **cron**: Set delivery_status during delivery lifecycle
+- **cron**: Tee NDJSON logs into sandbox, remove host-side log files
+- **cron**: Add log retention — keep last 10 logs per job
+- **memory**: Add MemoryMode to prompt assembly with file/hindsight injection
+- Add token keepalive to prevent OAuth expiration during inactivity
+- **worker**: Structured JSON retain with document_id and chat tags
+- **worker**: Add recall tags and query truncation (800 chars)
+- **bot**: Add message authorship and forward metadata to pipeline
+- **bot**: Emit author/forward/reply metadata in YAML, update tests
+- Upgrade exclusivity via RwLock — upgrade blocks CC sessions, CC sessions block upgrade
+- **bot**: Mention/reply detection + command parser
+- **bot**: Add allowlist-based routing filter (old filter still wired)
+- **bot**: Wire AllowlistHandle as routing source; migrate legacy field on startup
+- **bot**: Gate session/mcp/doctor/cron commands to DM only
+- **bot**: /allow /deny /allowed /allow_all /deny_all handlers
+- **bot**: Group chat context + reply-to body in CC prompt
+- **bot**: Group retain tags, silent thinking, always reply-to in groups
+- **attachments**: GroupKind enum categorising album compatibility
+- **attachments**: Classify_media_group pure helper
+- **attachments**: Merge_group_captions helper
+- **attachments**: Partition_sends turns reply into ordered sends
+- **attachments**: Execute partitioned sends via sendMediaGroup
+- **bot**: Spawn retain-queue drain task
+- **bot**: Inject <memory-status> marker into composite-memory.md
+- **bot**: Annotate unreadable MEMORY.md in file-mode prompt
+- **bot**: Memory_alerts — AuthFailed + ClientFlood Telegram watchers
+- **bot**: Parse_usage_full extracts full UsageBreakdown from result event
+- **bot**: Worker writes usage_events row on CC result
+- **bot**: Cron writes usage_events row on CC result
+- **bot**: /usage command — aggregate and render summary
+- **bot**: Parse_api_key_source extracts auth mode from init event
+- **bot**: Worker threads apiKeySource from init into usage insert
+- **bot**: Cron threads apiKeySource from init into usage insert
+- **bot**: /usage detail argument toggles raw-tokens rendering
+- **bot**: Scaffold reflection module with core types
+- **bot**: Reflection prompt builder + failure-kind formatting
+- **bot**: Implement reflect_on_failure (resume + SYSTEM_NOTICE + usage)
+- **worker**: Reflection pass on safety-timeout / non-zero-exit
+- **cron-delivery**: Route failed runs through DELIVERY_INSTRUCTION_FAILURE
+- **cron**: Reflection pass on job failure populates notify_json
+- **yaml**: Always emit chat:{kind,id} block (DM + group)
+- **cron_delivery**: JOIN cron_specs to surface target fields
+- **cron_delivery**: Route per-target with allowlist gate; drop notify_chat_ids fan-out
+- **bot**: Log SIGTERM sender pid+cmdline via signal-hook
+- **mcp**: Auto-detect auth type via haiku web search + HeaderName: token override
+- **stt**: Ffmpeg subprocess wrapper decode_to_pcm_f32
+- **stt**: WhisperEngine with lazy context and serialized inference
+- **stt**: Transcriber API with file-size guard
+- **stt**: Russian markers for voice and video-note outcomes
+- **stt**: SttContext and combine_markers_with_text helper
+- **stt**: Transcribe_or_marker single-attachment helper
+- **stt**: Build SttContext at bot startup and plumb into WorkerContext
+- **01-02**: Agent discovery, config parsing, and init with embedded templates
+- **02-02**: Implement PcClient for process-compose REST API
+- **02-02**: Implement sandbox state management and dependency verification
+- **03-03**: Add doctor module with run_doctor() for dependency and agent validation
+- **03.1-01**: Create .claude/settings.json with Telegram plugin on init
+- Add model config to agent.yaml, default to sonnet
+- Replace ClawHub with skills.sh (Vercel) as skill registry
+- Add SessionStart hook for /rightcron reconciliation on agent startup
+- Rightcron bootstraps reconciler on every session start
+- Add SessionStart hook for rightcron bootstrap (prompt-based hooks fire on startup)
+- Use UserPromptSubmit hook for rightcron bootstrap (workaround for SessionStart bug)
+- Use positional prompt for rightcron bootstrap (runs as first message, stays interactive)
+- **08-01**: Add claude_json codegen module with tests
+- **09-01**: Extend AgentConfig with Telegram fields
+- **09-01**: Add codegen/telegram.rs and codegen/skills.rs, update mod.rs
+- **09-02**: Add git Warn-severity check to verify_dependencies
+- **10-01**: Add managed settings check to doctor
+- **11-02**: Fix installed.json create-if-absent + add TDD tests
+- **11-01**: Implement env var injection with single-quote escaping (GREEN)
+- **16-01**: Implement memory module open_db (GREEN)
+- **16-03**: Add sqlite3 Warn check to run_doctor (DOCTOR-01)
+- **17-01**: Injection guard module + open_connection helper
+- **17-01**: Memory CRUD store operations with injection guard + audit trail
+- **18-01**: Add list_memories and search_memories_paged store functions
+- **18-01**: Add hard_delete_memory, Serialize on MemoryEntry, re-exports in mod.rs
+- **24-01**: Rewrite generate_system_prompt — raw content concat, no hardcoded sections
+- **24-01**: Delete shell_wrapper, remove start_prompt, clean up codegen refs
+- **25.5-01**: Add agent_def codegen module with generate_agent_definition + REPLY_SCHEMA_JSON
+- **26-01**: Replace ProcessAgent with BotProcessAgent; bot-only PC template
+- **26-02**: Add check_webhook_info_for_agents to doctor.rs; wire into run_doctor
+- **27-01**: V3 migration — cron_runs table
+- **quick-260402-ip3**: Add ENABLE_CLAUDEAI_MCP_SERVERS and MCP_CONNECTION_NONBLOCKING env vars
+- **30-01**: Add DOC-01/DOC-02 doctor checks + extract tests to doctor_tests.rs
+- **32-01**: Mcp_oauth_key + CredentialToken + write/read_credential
+- **33-01**: Add mcp::detect module with AuthState enum and mcp_auth_status
+- **34-01**: Add workspace deps + OAuth types module with PKCE/state utilities
+- **34-03**: Cloudflared config template + generate_cloudflared_config
+- **35-01**: Extend CredentialToken with client_id and client_secret fields
+- **35-02**: Implement mcp::refresh module with scheduler and refresh grant
+- **35-03**: Add check_mcp_tokens doctor check (REFRESH-03, REFRESH-04)
+- **37-02**: AuthState::Missing display + doctor tunnel-token check + fix hint
+- **37-03**: Replace tunnel_token/cloudflared_config_path with cloudflared_script_path
+- **38-01**: Replace TunnelConfig with credentials-file based struct
+- **38-03**: Add check_tunnel_credentials_file to doctor.rs
+- **38-03**: Restore cloudflared.rs with CloudflaredCredentials + Phase 38 tests
+- **40-01**: Add CloudflaredEntry, extend generate_process_compose with cloudflared_script param
+- **41-01**: Rewrite credentials.rs -- .mcp.json header read/write
+- **41-02**: Remove credentials_path from run_refresh_scheduler
+- **41-02**: Complete .credentials.json migration — remove all OAuth credential file references
+- **quick-260405-srr**: Delete OAuth files, rewrite credentials.rs + detect.rs for .claude.json
+- Restore OAuth flow for headless agents, write tokens to .claude.json
+- **42-02**: Extend generate_settings() with Chrome sandbox overrides
+- Generate HTTP rightmemory entry with per-agent Bearer token
+- Add OpenShell policy.yaml generator with dynamic MCP domains
+- Add minimal settings generator for OpenShell-sandboxed agents
+- Add OAuth state persistence + refresh timing for MCP tokens
+- Add openshell.rs with gRPC client (mTLS) and readiness polling
+- Add SSH exec, spawn_sandbox, ssh-config, delete to openshell.rs
+- Add OpenShell mTLS + gateway health doctor checks
+- Add start_process and get_process_logs to PcClient
+- Persistent sandbox lifecycle + background sync + MCP upload
+- PTY-driven login flow replaces PC login process
+- Agent secret generation + HMAC token derivation
+- **codegen**: Replace media_paths with typed attachments in reply schema
+- **codegen**: Add message input/output format docs to agent definition
+- **config**: Add attachments.retention_days to AgentConfig
+- Add tunnel health module for checking cloudflared status
+- Include BOOTSTRAP.md in agent definition for CC onboarding
+- Add NetworkPolicy enum to AgentConfig
+- Branch policy codegen on NetworkPolicy (restrictive/permissive)
+- Add network_policy param to init + interactive prompt
+- Add sandbox config to agent.yaml template, add mixed-mode integration tests
+- Add reload_configuration to PcClient
+- Stream logging, live thinking, markdown rendering, response rules
+- Add discover_single_agent() for bot startup codegen
+- Add SSH awareness block to system prompt for openshell agents
+- Upload_file validates sandbox_dir ends with '/'
+- Add V4 migration — sessions table replaces telegram_sessions
+- **cron**: Add CRON_SCHEMA_JSON constant for cron structured output
+- **cron**: V5 migration — add summary, notify_json, delivered_at to cron_runs
+- **cron**: Persist results to DB instead of direct Telegram delivery
+- **cron**: V6 migration — cron_specs table
+- **cron**: Validation helpers and load_specs_from_db in core crate
+- **cron**: Add trigger, detail, runs, describe helpers to cron_spec.rs
+- **mcp**: Add mcp_servers SQLite migration (V8)
+- **mcp**: Add BackendStatus enum and DynamicAuthClient
+- **mcp**: Add SQLite-based server registry with validation
+- **mcp**: Add InternalClient for bot→aggregator IPC via Unix socket
+- **schema**: Add V9 migration — instructions column on mcp_servers
+- **credentials**: McpServerEntry, db_update_instructions, upsert fix
+- **codegen**: Add generate_mcp_instructions_md pure function
+- **proxy**: Add agent_dir, write instructions to SQLite on connect
+- **internal-client**: Add mcp_list() method
+- **codegen**: MCP_INSTRUCTIONS.md support, TOOLS.md agent-owned
+- **client**: Add mcp_instructions() to InternalClient
+- **codegen**: Add OPERATING_INSTRUCTIONS and BOOTSTRAP_INSTRUCTIONS constants
+- Add v10 migration for MCP auth columns
+- **mcp**: Extend McpServerEntry with auth fields and add credential DB functions
+- Wire rightmcp skill into codegen
+- Wire /rightmcp skill into codegen, sync, and system prompt
+- Add platform_store module with content hashing and manifest builder
+- Add platform deploy functions (upload, symlink, GC, manifest deploy)
+- Add /platform to sandbox filesystem policy
+- Graceful fallback for stale sandbox policy + .local/bin in PATH
+- Add SandboxExec gRPC wrapper for sandbox command execution
+- Add storage.googleapis.com to restrictive policy for claude upgrade
+- **policy**: Allow /dev/tty and /dev/pts for login PTY allocation
+- Rewrite login flow using SSH exec and local callback
+- **login**: Replace callback approach with Python PTY helper
+- **memory**: Add auth_tokens table migration (v11)
+- **memory**: Add auth_token CRUD helpers
+- Add home_dir parameter to generate_system_prompt()
+- **cron**: Add delivery_status and no_notify_reason columns (v12 migration)
+- **cron**: Add no_notify_reason to schema and CronReplyOutput
+- **mcp**: Add do_refresh_cancellable with CancellationToken support
+- **mcp**: Add reconnect_task and ReconnectManager with defense-in-depth guard
+- **cron**: Add v13 migration — recurring and run_at columns
+- **cron**: Add ScheduleKind, create_spec_v2, update_spec_partial
+- Add optional sandbox.name field to SandboxConfig
+- Add SSH tar download/upload primitives and backups_dir helper
+- Add gRPC policy status query and filesystem policy comparison
+- **memory**: Add HindsightClient types and error variants
+- **memory**: Implement HindsightClient::retain
+- **memory**: Implement HindsightClient::recall
+- **memory**: Implement HindsightClient::reflect and get_or_create_bank
+- **memory**: Add prefetch cache and rightmemory skill files
+- **hindsight**: Add document_id, update_mode, tags to retain API
+- **hindsight**: Add tags and tags_match to recall API
+- **core**: Add ReloadResponse type and reload() to InternalClient
+- **agent**: Add destroy module skeleton with types
+- **agent**: Add backup helper for destroy flow
+- **agent**: Implement core destroy_agent logic
+- **allowlist**: Schema types, parse, serialize
+- **allowlist**: AllowlistState + handle with add/remove ops
+- **allowlist**: Atomic file read/write + lockfile
+- **allowlist**: One-time migration from agent.yaml::allowed_chat_ids
+- **allowlist**: Notify watcher hot-reloads in-memory state
+- **init**: Seed allowlist.yaml from wizard-provided user IDs
+- **openshell**: Add ProcessGroupChild wrapper for multi-gen process cleanup
+- **rightclaw**: Add test_cleanup module (registry + panic hook + pkill)
+- **schema**: Add media_group_id to outbound attachment schemas
+- **memory**: V14 migration — pending_retains + memory_alerts tables
+- **memory**: Classify reqwest errors into MemoryError variants
+- **memory**: ErrorKind classifier
+- **memory**: MemoryStatus enum with severity ordering
+- **memory**: Circuit breaker state machine
+- **memory**: Retain_queue enqueue/count/oldest_age
+- **memory**: HindsightClient::retain_many for batched POST
+- **memory**: Retain_queue drain_tick with classified outcome
+- **memory**: ResilientHindsight skeleton with drop counters
+- **memory**: ResilientHindsight retain/recall/reflect with retry + enqueue
+- **doctor**: Check_memory — db/schema/queue/alerts
+- **memory**: V15 migration for usage_events table
+- **usage**: Scaffold usage module with types and error
+- **usage**: Insert_interactive and insert_cron
+- **usage**: Aggregate function with per-model reduction
+- **usage**: Format_summary_message renders Telegram HTML output
+- **memory**: V16 migration adds api_key_source to usage_events
+- **usage**: Pricing table for cache-savings estimation
+- **usage**: Add api_key_source and billing split fields
+- **usage**: Persist api_key_source on insert
+- **usage**: Aggregate splits subscription vs API cost
+- **usage**: Redesigned /usage rendering — cache line, billing split, detail mode
+- **usage**: Insert_reflection_worker / insert_reflection_cron helpers
+- **usage**: /usage shows separate Reflection line per window
+- **schema**: V17 — add target_chat_id/target_thread_id to cron_specs
+- **allowlist**: Is_chat_allowed unifies user + group lookup
+- **cron_spec**: List_specs surfaces target fields
+- **doctor**: Check_cron_targets + bump expected schema to v17
+- **stt**: Add SttConfig and WhisperModel to agent config
+- **stt**: Add filename/url/size methods to WhisperModel
+- **stt**: Add model_cache_path and ffmpeg_available helpers
+- **stt**: Add download_model with atomic rename
+- **stt**: Add ensure_models_cached for rightclaw up integration
+- **stt**: Doctor warns on missing ffmpeg and uncached models
+- **stt**: Init_agent writes stt: block to agent.yaml
+- **01-01**: Scaffold Cargo workspace, devenv, and project conventions
+- **01-02**: Wire CLI init/list commands and integration tests
+- **02-01**: Add Phase 2 workspace deps, templates, and codegen module structure
+- **02-03**: Wire all CLI subcommands into main.rs
+- **03-03**: Extend init with telegram_token, BOOTSTRAP.md, and policy variant
+- **03-04**: Wire Doctor subcommand and Init --telegram-token to CLI
+- **03-04**: Shell wrapper --channels support and integration tests
+- **04-02**: Add system prompt generation and update shell wrapper template
+- **04-02**: Wire system prompt generation into cmd_up
+- **03.2-01**: Add rightclaw pair subcommand for interactive agent setup
+- Add --telegram-user-id for auto-pairing via access.json
+- Add --debug flag to rightclaw up for Claude Code debug logging
+- Rename cronsync to rightcron
+- **08-01**: Wire generate_agent_claude_json and credential symlink into cmd_up and init
+- **08-02**: Add allow_read to SandboxOverrides and switch to absolute denyRead paths
+- **08-02**: Add HOME isolation integration tests and wire credential symlink into init
+- **09-02**: Extend cmd_up per-agent loop with Phase 9 steps 6-9
+- **10-01**: Add config strict-sandbox command to CLI
+- **12-01**: Rename clawhub to skills — source dir, constant, install path, all test assertions
+- **12-01**: Add stale .claude/skills/clawhub/ cleanup in cmd_up (SKILLS-05)
+- **14-01**: Update Rust constant, include path, install path, and test assertions
+- **15-01**: Remove stale .claude/skills/skills/ dir in cmd_up with unit tests (CLEANUP-02)
+- **16-02**: Remove memory_path from AgentDef and all struct literal sites
+- **16-03**: Wire open_db into cmd_up step 10
+- **17-02**: MCP memory server + MemoryServer subcommand
+- **17-02**: .mcp.json codegen in cmd_up + start_prompt memory reference
+- **18-02**: Wire rightclaw memory subcommand group into CLI
+- **23-03**: Wire rightclaw bot subcommand into CLI
+- **24-02**: Wire generate_system_prompt into cmd_up and cmd_pair
+- **25.5-01**: Wire agent_def into cmd_up + cmd_pair; delete system_prompt.rs
+- **26-01**: Update cmd_up callsite; remove channels block; add bot-agent early-exit
+- **27-02**: Rename MCP server to rightclaw + add cron_list_runs/cron_show_run tools
+- **init**: Replace --telegram-user-id with --telegram-allowed-chat-ids
+- **33-01**: Add McpCommands, cmd_mcp_status, and cmd_up auth warn
+- **34-01**: GlobalConfig + read/write config.yaml + init --tunnel-token/--tunnel-url
+- **34-02**: AS discovery RFC 9728->8414->OIDC, DCR, auth URL builder, token exchange
+- **36-01**: Implement TunnelConfig::hostname() and remove --tunnel-hostname arg
+- **37-01**: TunnelConfig hostname field + AgentDir/RightclawHome newtypes
+- **37-03**: Write cloudflared-start.sh in cmd_up + eprintln MCP warning
+- **v3.2-gaps**: Restore rightclaw mcp status CLI subcommand
+- **38-02**: Update cmd_init — accept credentials-file, copy to tunnel dir, write TunnelConfig
+- **38-02**: Update cmd_up — use TunnelConfig directly, add cloudflared module and wrapper script
+- **39-01**: Auto-detect/create cloudflared named tunnel in rightclaw init
+- **40-01**: Wire cloudflared pre-flight check and script passthrough in cmd_up
+- **41-01**: Rewrite detect.rs -- check headers instead of credentials file
+- **quick-260405-srr**: Rewire bot, delete oauth_callback.rs, clean workspace deps
+- Show stdio MCP servers in /mcp list, protect rightmemory from removal
+- **01-01**: Add agent_dir+rightclaw_home to MemoryServer, inject RC_RIGHTCLAW_HOME into .mcp.json
+- **01-02**: Add mcp_add, mcp_remove, mcp_list, mcp_auth tools to MemoryServer
+- **42-01**: Add ChromeConfig struct + RawChromeConfig + read/write support
+- **42-02**: Extend generate_mcp_config() with chrome-devtools injection
+- **42-03**: Wire chrome_cfg into cmd_up() per-agent loop
+- **43-01**: Add ChromeConfig to config.rs + Chrome/MCP detection helpers
+- **43-01**: --chrome-path arg + cmd_init single write path refactor
+- **43-02**: Per-run Chrome path revalidation in cmd_up()
+- HTTP MCP server, OpenShell sandbox module, refresh scheduler wiring
+- Wire OpenShell sandbox lifecycle into cmd_up
+- Cmd_down deletes OpenShell sandboxes
+- Add --no-sandbox flag to rightclaw bot CLI
+- Auth error detection + interactive login flow via Telegram
+- Comprehensive login logging + per-agent file logging
+- Per-agent secret in agent.yaml + HTTP mcp.json generation
+- Add right-mcp-server process to process-compose
+- Add memory-server-http CLI subcommand
+- Guard mcp_auth with tunnel health check before OAuth discovery
+- Add wizard module with interactive tunnel/telegram/config flows
+- Add rightclaw config set and rightclaw agent config subcommands
+- Add config watcher + notify deps for graceful restart
+- Add --network-policy CLI flag to rightclaw init
+- Add rightclaw agent init, sandbox mode in init wizard
+- Add rightclaw reload command
+- Agent init suggests rightclaw reload
+- Bootstrap onboarding via composite system prompt
+- Bot-owned codegen + config reload via wizard
+- Implement rightclaw agent ssh command
+- **cron**: Write cron-schema.json during codegen
+- **cron**: MCP CRUD tools for cron specs (stdio transport)
+- **cron**: MCP CRUD tools for cron specs (HTTP transport)
+- **mcp**: Add Aggregator, ToolDispatcher, BackendRegistry
+- **mcp**: Implement rmcp ServerHandler for Aggregator
+- **mcp**: Wire Aggregator into CLI, replacing HttpMemoryServer
+- **mcp**: Add ProxyBackend with upstream MCP client
+- **mcp**: Add internal REST API on Unix socket for bot IPC
+- **aggregator**: Regenerate MCP_INSTRUCTIONS.md after backend connect, fix callsites
+- **internal-api**: Add POST /mcp-list endpoint
+- Add mcp-server CLI command, replace deleted memory-server-http
+- **api**: Add POST /mcp-instructions endpoint
+- **mcp**: Add AuthMethod enum and update DynamicAuthClient for multi-auth support
+- Migrate refresh scheduler from oauth-state.json to SQLite
+- Redact query strings in agent-facing mcp_list
+- Show auth_type in user-facing /mcp list
+- **mcp**: Extend /mcp-add API with auth fields and eager connection
+- Restore proxy backends from SQLite on aggregator startup
+- Thread refresh senders through internal API, send NewEntry on set-token
+- Reconnect MCP servers on startup, spawn per-agent refresh schedulers
+- **aggregator**: Add file logging alongside colored stdout
+- **cron**: Expose delivered_at, delivery_status, no_notify_reason in MCP output
+- **cron**: Update MCP params for one-shot jobs and partial update
+- Implement rightclaw agent backup command
+- Implement rightclaw agent init --from-backup for restore
+- Implement sandbox migration on filesystem policy change
+- Add Restore from backup option to interactive agent init wizard
+- **memory**: Add auto-retain and prefetch to worker
+- **aggregator**: Add /reload endpoint to internal API
+- **init**: Prompt for memory provider in init and agent init wizards
+- **reload**: Call aggregator /reload from cmd_reload
+- **cli**: Add agent destroy command with interactive TUI
+- **cli**: Rightclaw agent allow|deny|allow_all|deny_all|allowed
+- **mcp**: Memory_retain surfaces "queued" status to agent on enqueue
+- **openshell**: Exec_in_sandbox takes caller-supplied timeout
+- **cli**: Add memory pane to agent config wizard with key validation
+- **cron_spec**: Create_spec_v2 persists target_chat_id/target_thread_id
+- **cron_spec**: Update_spec_partial supports target_chat_id/thread_id
+- **mcp**: Cron_create requires + validates target_chat_id
+- **mcp**: Cron_update accepts target fields with explicit-null clear
+- **stt**: Rightclaw up downloads whisper models when ffmpeg present
+- **stt**: Add stt field to InitOverrides
+- **stt**: Add update_agent_yaml_stt helper
+- **stt**: Add prompt_ffmpeg_install with macOS brew auto-install
+- **stt**: Add stt_setup wizard helper
+- **stt**: Add Step::Stt to agent init interactive wizard
+- **stt**: Agent init --yes auto-enables STT iff ffmpeg in PATH
+- **stt**: Add STT entry to agent config menu
+
+### Miscellaneous
+
+- **25-01**: Add uuid, dashmap, tokio-util, serde_json, which to bot crate
+- **bot**: Remove dead AuthWatcherFlag struct (folded into InterceptSlots)
+- **stt**: Add whisper-rs dependency
+- Merge executor worktree (38-03 doctor+cloudflared, resolve cloudflared conflict)
+- Add staging dir to init, fix clippy warnings
+- Add OpenShell proto files + tonic-prost-build for gRPC client generation
+- Add cron-descriptor dependency
+- Release v0.1.0
+- Add tokio-util and wiremock deps to rightclaw crate
+- **types**: Mark allowed_chat_ids deprecated; keep for migration
+- **memory**: Outcome derives + runtime-context doc note
+- **tests**: Silence dead_code/unused warnings in memory integration tests
+- **memory**: Mark MemoryError::HindsightRequest deprecated
+- **memory**: Delete deprecated HindsightRequest variant
+- **usage**: Clippy cleanup
+- **usage**: Simplify pass — warn on silent drops, dedupe result-line scan
+- Fix clippy warnings from OpenShell integration
+- Fix clippy warnings (collapsible_if, too_many_arguments, needless_borrow)
+- Suppress unused field warnings in aggregator and memory_server
+- Cargo fmt
+- Cosmetic cleanup + init token validation
+
+### Refactor
+
+- **bot**: Address review findings — doc, noise, blank line
+- **cron**: Address review issues — clippy, tests, comments
+- Invoke_cc uses openshell sandbox exec instead of direct claude -p
+- **bot**: Simplify attachment code (hoist dir creation, use writeln!, single mkdir)
+- Extract send_html_reply + format_session_line helpers, fold touch into activate
+- Update sync to use SandboxExec instead of exec_command
+- Wire SandboxExec into bot startup for sync tasks
+- Remove forward sync of agent-managed files, remove MEMORY.md from reverse sync
+- Unify prompt assembly into single shell template for sandbox and no-sandbox
+- Remove expectrl dependency, replace PTY integration test
+- Extract prompt assembly to telegram/prompt.rs
+- **worker**: Use ClaudeInvocation builder for claude -p args
+- Extract chat_tags helper, deduplicate tag construction
+- **attachments**: Rename Send to OutboundSend, add split-caption test
+- **attachments**: Allow(too_many_arguments) on send_single/send_group
+- **attachments**: Extract SendCtx + resolve_host_path
+- **bot**: Switch memory context type to Arc<ResilientHindsight> (WIP)
+- **bot**: Worker uses ResilientHindsight wrapper for recall/retain
+- **bot**: Resolve_token reads only from agent.yaml, remove env var indirection
+- **reflection**: Extract snippet-len const, document silent truncation
+- **worker**: InvokeCcFailure classifies Reflectable vs NonReflectable errors
+- **worker**: Preserve chat_id/eff_thread_id in send_error_to_telegram log
+- **cron_delivery**: Pub(crate), collapse if, dedup-on-mark-failure
+- **oauth**: Notify trusted users from allowlist (no more notify_chat_ids)
+- **stt**: Download_attachments returns (resolved, markers); voice short-circuits
+- **03.1-01**: Update doc comment to mention settings.json creation
+- Rewrite credential functions for flat .mcp.json structure
+- Delete old codegen/sandbox.rs, replaced by openshell.rs
+- Remove ChromeConfig from GlobalConfig
+- Remove chrome_config parameter from MCP codegen
+- Convert config.rs to config/ directory module
+- Doctor uses unified check_tunnel_state, fix messages reference rightclaw config
+- Polish doctor output with colors, remove rg check, add tunnel health
+- Replace SandboxOverrides with SandboxConfig (mode + policy_file)
+- **mcp**: Migrate refresh scheduler to in-memory token delivery
+- Simplify staging dir, platform files deployed via /platform/ store
+- Simplify platform_store — unified ManifestEntry, extracted atomic_symlink, cached content, batched GC
+- Update platform_store to use SandboxExec instead of exec_command
+- Delete broken CLI-based exec_command from openshell
+- Use include_dir! to embed entire skill directories
+- Remove dead agent definition code (generate_agent_definition, CONTENT_MD_FILES)
+- Remove agent def generation from codegen pipeline
+- Remove .claude/agents/ scanning from platform store
+- Remove PTY login dead code, urlencoding dep, /dev/tty policy
+- Make do_refresh public for startup reconnect
+- Remove notify_tx from refresh scheduler, use tracing instead
+- Use host.openshell.internal instead of host.docker.internal
+- **init**: Use inquire for wizard prompts, add Esc-to-go-back
+- **process_group**: Tempfile for tests, nix-only signals, clarify docs
+- **test_support**: Extract TestSandbox into its own module
+- **memory**: Simplify review cleanup
+- **usage**: Make pricing::lookup resilient to dated model variants
+- **usage**: Replace exact float equality with positive comparisons in billing footer
+- **codegen**: Remove RC_TELEGRAM_TOKEN from process-compose template
+- **01-01**: Extract memory_server.rs tests to memory_server_tests.rs
+- Update all callers to use flat .mcp.json credential functions
+- Remove telegram_token_file — token via RC_TELEGRAM_TOKEN env var only
+- Remove OpenShell sandbox lifecycle from cmd_up/cmd_down
+- Remove CC native sandbox from settings.json — OpenShell is the security layer
+- Remove plugin symlinks — Telegram CC plugin no longer used
+- Rename .mcp.json to mcp.json (OpenShell dot-file workaround)
+- Rename rightmemory → right across entire codebase
+- Remove Chrome detection and injection from CLI
+- Init delegates to wizard for tunnel and telegram setup
+- Replace __skip_tunnel__ sentinel with TunnelOutcome enum, use enum-based menu
+- Restructure config CLI + add combined settings wizard
+- Per-agent sandbox mode in process-compose codegen
+- Remove --no-sandbox CLI flag, bot reads sandbox mode from agent.yaml
+- Extract codegen pipeline from cmd_up into shared function
+- Extract filter_agents helper, avoid agent.yaml re-reads
+- Extract AgentDef::sandbox_mode(), clean up error messages
+- **mcp**: Extract RightBackend from HttpMemoryServer
+- Move AgentInfo, AgentTokenMap, bearer_auth_middleware to aggregator
+- Delete dead memory_server_http.rs (replaced by aggregator)
+- Migrate all mcp_auth_status callers to db_list_servers
+- Move AGENTS.md and TOOLS.md to agent root
+- Remove dead .claude/agents/ code from CLI, rewrite agent exec to use --system-prompt-file
+- Rename memory.db to data.db
+- Add mtls_dir field to RightBackend for sandbox-aware bootstrap
+- Add RefreshSenders type, thread through aggregator
+- **mcp**: Replace inline reconnect with ReconnectManager in main.rs
+- Replace sandbox_name() with resolve_sandbox_name() for configurable sandbox names
+- Remove old store_record/query_records/search_records/delete_record MCP tools
+- Remove old memory store functions (store/recall/search/forget)
+- Address review-loop findings
+- **agg**: HindsightBackend uses ResilientHindsight wrapper
+- **right_backend**: Use shared agent_dir param + test missing allowlist
+
+### Testing
+
+- **25.5-02**: Add failing tests for parse_reply_output structured output
+- **bot**: Add wait_with_timeout helper + tests for CC invocation timeout
+- **v3.2**: Complete MCP OAuth UAT — 8/9 passed, 1 blocked (tunnel DNS)
+- Integration test for claude login PTY flow
+- Add regression test for cron shutdown hang
+- Integration tests for claude upgrade in sandbox
+- **bot**: Rewrite sandbox_upgrade as self-sufficient TestSandbox-based test
+- **prompt**: Assert composite-memory is last section (cache invariant)
+- **stt**: Add hello.oga and circle.mp4 fixtures
+- **01-01**: Add unit tests for core types, error display, and resolve_home
+- **02-01**: Add codegen tests for shell wrapper and process-compose generation
+- **03.1-01**: Add failing tests for .claude/settings.json creation
+- **08-01**: Add failing tests for HOME override and env var forwarding
+- **11-01**: Add failing wrapper_env_* tests for env var injection
+- **16-01**: Add failing tests for memory module (RED)
+- **19-01**: Add failing regression tests for telegram false-positive and RC_AGENT_NAME
+- **28.2-02**: Add failing regression test for nested tokio runtime panic
+- **35-03**: Add failing tests for check_mcp_tokens doctor check
+- **36-01**: Add failing tests for JWT hostname derivation and token-only config shape
+- **37-02**: Add failing tests for tunnel_token check and AuthState display
+- Update init error message assertion to reference rightclaw config
+- Add TestSandbox helper for ephemeral sandbox lifecycle
+- Migrate live sandbox tests to ephemeral TestSandbox
+- Add upload_file integration tests with ephemeral sandboxes
+- Fix sandbox tests — serial execution, valid policy, kill create process
+- Add failing test for directory upload to sandbox
+- Add overwrite scenario to directory upload test
+- Remove .claude/agents/ from openshell test staging
+- Remove serial_test — OpenShell sandbox tests run fine in parallel
+- **mcp**: Add happy-path reconnect test
+- **mcp**: Add removed field to ReloadResponse test fixtures
+- **agent_def**: Replace unwrap with expect in type-array test helper
+- **memory**: V14 idempotency test + rename user_version test
+- **memory**: Outage / auth-fail / client-drop scenarios
+- **memory**: Recovery + drain scenario
+- **memory**: Poison pill + queue eviction
+- **memory**: Independent breakers for bot vs aggregator wrappers
+- **usage**: Positive assertion for reflection line rendering
+- **schema**: V17 existing-rows test exercises pre-migration insert
+- **02-03**: Integration tests for new CLI subcommands
+- **39-01**: Add failing tests for auto-tunnel helpers
+- **01-02**: Add tests for all four new MCP tools in memory_server_tests.rs
+- Remove stale CC-native sandbox tests from home_isolation
+- Fix integration tests for inquire-based interactive prompts
+- Integration tests for reload command and agent init hint
+- Add multi-session lifecycle integration test + fix clippy
+- Integration tests for sandbox-aware bootstrap_done
+- Integration tests for no-sandbox agent backup and restore
+- **cli**: Add integration tests for agent destroy
+- **openshell**: Cap parallel live-sandbox tests at 3 via file-lock slots
+
+### Build
+
+- **rightclaw**: Add test-support feature; bot uses it in dev-deps
+
+### Cleanup
+
+- Remove refresh scheduler from bot process
+- Remove dead write_mcp_json_for_doctor helpers
+- Remove MCP_INSTRUCTIONS.md from agent_def and pipeline
+- Remove TOOLS.md creation from codegen pipeline
+- Remove file-based MCP instructions sync
+
+### Deps
+
+- Add urlencoding for OAuth callback code encoding
+- Add inquire 0.9 for interactive terminal prompts
+
+### Merge
+
+- **24-01**: System-prompt codegen rewrite + shell wrapper removal
+- **08-01**: Home isolation shell wrapper and claude_json codegen
+
+### Review
+
+- **attachments**: Tighten visibility + cover boundary cases
+- **iter1**: Address major findings
+- **iter2**: Propagate silent skips through send_attachments errors
+
+### Security
+
+- Remove mcp_add/remove/auth from agent MCP tools
+
+### Style
+
+- **attachments**: Resolve new clippy warnings
+- **memory**: Align v16 hook with v12/v13 idiom
+- **usage**: Restore bold on total retail footer
+- Cargo fmt across workspace
+- **stt**: Drop redundant clone, FAIL FAST on unknown model label
+
+### Ux
+
+- Print next steps after init completes
+- Smart OpenShell pre-flight check with interactive recovery
+
 ## [0.2.0] - 2026-04-17
 
 
