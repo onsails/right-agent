@@ -134,18 +134,22 @@ fn should_accept_bootstrap(agent_dir: &Path) -> bool {
 
 /// Strip HTML tags for plain-text fallback when Telegram rejects HTML.
 /// Also decodes common entities back to their characters.
-use super::markdown::strip_html_tags;
+use super::markdown::{html_escape, strip_html_tags};
 
 /// Format a CC subprocess error as a Telegram message (D-16).
 ///
-/// Output: `⚠️ Agent error (exit N):\n```\n<stderr>\n````
+/// Returns HTML intended for `ParseMode::Html`. Callers must fall back to
+/// `strip_html_tags` if Telegram rejects the HTML.
 pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
     let truncated = if stderr.len() > 300 {
         &stderr[..300]
     } else {
         stderr
     };
-    format!("⚠️ Agent error (exit {exit_code}):\n```\n{truncated}\n```")
+    format!(
+        "\u{26a0}\u{fe0f} Agent error (exit {exit_code}):\n<pre>{}</pre>",
+        html_escape(truncated)
+    )
 }
 
 /// Check whether CC stdout JSON indicates an authentication failure (403/401).
@@ -779,14 +783,14 @@ pub fn spawn_worker(
                             tracing::warn!(?key, "reflection failed: {:#}; showing raw error", e);
                             match thinking_msg_id {
                                 Some(msg_id) => {
-                                    // Try to edit the banner into the raw error.
-                                    // raw_message is plain text (stderr snippets, file paths) —
-                                    // do NOT set ParseMode::Html or the edit fails on stderr
-                                    // with <, >, & characters. Fall back to a fresh message
-                                    // if the edit fails for any other reason.
+                                    // raw_message is HTML produced by format_error_reply
+                                    // (stderr is html-escaped, wrapped in <pre>). Try HTML
+                                    // edit first; on failure, fall through to the plain-text
+                                    // fallback path.
                                     let edit_result = ctx
                                         .bot
                                         .edit_message_text(tg_chat_id, msg_id, &raw_message)
+                                        .parse_mode(teloxide::types::ParseMode::Html)
                                         .reply_markup(
                                             teloxide::types::InlineKeyboardMarkup::default(),
                                         )
@@ -1781,11 +1785,13 @@ async fn invoke_cc(
             Ok((Some(reply_output), session_uuid))
         }
         Err(reason) => {
-            // D-05: parse failure → error reply
+            // D-05: parse failure → error reply (HTML; html-escaped stdout in <pre>)
             tracing::warn!(?chat_id, reason, "CC response parse failed");
+            let truncated: String = stdout_str.chars().take(200).collect();
             Err(format!(
-                "⚠️ Agent error: {reason}\nRaw output (truncated): {}",
-                &stdout_str.chars().take(200).collect::<String>()
+                "\u{26a0}\u{fe0f} Agent error: {}\nRaw output (truncated):\n<pre>{}</pre>",
+                html_escape(&reason),
+                html_escape(&truncated),
             )
             .into())
         }
@@ -1798,18 +1804,34 @@ async fn send_error_to_telegram(
     eff_thread_id: i64,
     message: &str,
 ) {
-    let mut send = ctx.bot.send_message(tg_chat_id, message);
+    use teloxide::types::{MessageId, ThreadId};
+    let mut send = ctx
+        .bot
+        .send_message(tg_chat_id, message)
+        .parse_mode(teloxide::types::ParseMode::Html);
     if eff_thread_id != 0 {
-        use teloxide::types::{MessageId, ThreadId};
         send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
     }
     if let Err(e) = send.await {
-        tracing::error!(
+        tracing::warn!(
             chat_id = ?tg_chat_id,
             eff_thread_id,
-            "failed to send error reply: {:#}",
+            "HTML error send failed, retrying plain text: {:#}",
             e
         );
+        let plain = strip_html_tags(message);
+        let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
+        if eff_thread_id != 0 {
+            fallback = fallback.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+        }
+        if let Err(e2) = fallback.await {
+            tracing::error!(
+                chat_id = ?tg_chat_id,
+                eff_thread_id,
+                "plain text fallback also failed: {:#}",
+                e2
+            );
+        }
     }
 }
 
@@ -1824,6 +1846,8 @@ mod tests {
         let reply = format_error_reply(1, "something failed");
         assert!(reply.contains("⚠️ Agent error (exit 1):"));
         assert!(reply.contains("something failed"));
+        assert!(reply.contains("<pre>"));
+        assert!(reply.contains("</pre>"));
     }
 
     #[test]
@@ -1833,6 +1857,16 @@ mod tests {
         // The y-block in the reply should not exceed 300 chars of stderr
         let y_block: String = reply.chars().filter(|&c| c == 'y').collect();
         assert_eq!(y_block.len(), 300);
+    }
+
+    #[test]
+    fn error_reply_escapes_html_special_chars() {
+        let stderr = "status: <FailedPrecondition> & \"sandbox is not ready\"";
+        let reply = format_error_reply(255, stderr);
+        // raw special characters must not leak through as active HTML
+        assert!(!reply.contains("<FailedPrecondition>"));
+        assert!(reply.contains("&lt;FailedPrecondition&gt;"));
+        assert!(reply.contains("&amp;"));
     }
 
     // parse_reply_output tests (new structured output format per D-03)
