@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::agent::types::{MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode};
+use crate::agent::types::{MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode, SttConfig, WhisperModel};
 
 /// Default recall budget used when the user doesn't override it.
 pub const DEFAULT_RECALL_BUDGET: RecallBudget = RecallBudget::Mid;
@@ -21,7 +21,17 @@ pub struct InitOverrides {
     pub memory_bank_id: Option<String>,
     pub memory_recall_budget: RecallBudget,
     pub memory_recall_max_tokens: u32,
-    pub stt: crate::agent::types::SttConfig,
+    pub stt: SttConfig,
+}
+
+fn whisper_model_to_yaml(m: WhisperModel) -> &'static str {
+    match m {
+        WhisperModel::Tiny => "tiny",
+        WhisperModel::Base => "base",
+        WhisperModel::Small => "small",
+        WhisperModel::Medium => "medium",
+        WhisperModel::LargeV3 => "large-v3",
+    }
 }
 
 const DEFAULT_AGENTS: &str = include_str!("../templates/right/agent/AGENTS.md");
@@ -56,7 +66,7 @@ pub fn init_agent(
         memory_bank_id: None,
         memory_recall_budget: DEFAULT_RECALL_BUDGET,
         memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-        stt: crate::agent::types::SttConfig::default(),
+        stt: SttConfig::default(),
     };
     let ov = overrides.unwrap_or(&default_overrides);
 
@@ -173,6 +183,13 @@ pub fn init_agent(
             yaml.push_str(&memory_section);
         }
 
+        // STT block — always written so explicit user choice survives round-trip.
+        yaml.push_str(&format!(
+            "\nstt:\n  enabled: {}\n  model: {}\n",
+            ov.stt.enabled,
+            whisper_model_to_yaml(ov.stt.model),
+        ));
+
         std::fs::write(&agent_yaml_path, &yaml)
             .map_err(|e| miette::miette!("Failed to update agent.yaml: {}", e))?;
     }
@@ -268,7 +285,7 @@ pub fn init_rightclaw_home(
         memory_bank_id,
         memory_recall_budget,
         memory_recall_max_tokens,
-        stt: crate::agent::types::SttConfig::default(),
+        stt: SttConfig::default(),
     };
     let _agents_dir = init_agent(&agents_parent, "right", Some(&overrides))?;
 
@@ -1016,7 +1033,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-            stt: crate::agent::types::SttConfig::default(),
+            stt: SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
@@ -1046,7 +1063,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-            stt: crate::agent::types::SttConfig::default(),
+            stt: SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
@@ -1071,7 +1088,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-            stt: crate::agent::types::SttConfig::default(),
+            stt: SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let yaml =
@@ -1097,7 +1114,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-            stt: crate::agent::types::SttConfig::default(),
+            stt: SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "testbot", Some(&overrides)).unwrap();
 
@@ -1112,6 +1129,36 @@ mod tests {
             content.contains("id: -1001234"),
             "group -1001234 must be seeded, got:\n{content}"
         );
+    }
+
+    #[test]
+    fn init_agent_writes_stt_block_to_yaml() {
+        use crate::agent::types::{SttConfig, WhisperModel};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_parent = tmp.path();
+
+        let overrides = InitOverrides {
+            sandbox_mode: SandboxMode::default(),
+            network_policy: NetworkPolicy::default(),
+            telegram_token: Some("t".into()),
+            allowed_chat_ids: vec![1],
+            model: None,
+            env: HashMap::new(),
+            memory_provider: MemoryProvider::File,
+            memory_api_key: None,
+            memory_bank_id: None,
+            memory_recall_budget: DEFAULT_RECALL_BUDGET,
+            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+            stt: SttConfig { enabled: true, model: WhisperModel::Tiny },
+        };
+
+        let agent_dir = init_agent(agents_parent, "test-stt", Some(&overrides)).unwrap();
+        let yaml = std::fs::read_to_string(agent_dir.join("agent.yaml")).unwrap();
+
+        let cfg: crate::agent::types::AgentConfig = serde_saphyr::from_str(&yaml).unwrap();
+        assert!(cfg.stt.enabled, "stt block must be written; default would be false");
+        assert_eq!(cfg.stt.model, WhisperModel::Tiny);
     }
 
     #[test]
@@ -1132,7 +1179,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-            stt: crate::agent::types::SttConfig::default(),
+            stt: SttConfig::default(),
         };
         init_agent(
             &dir.path().join("agents"),
