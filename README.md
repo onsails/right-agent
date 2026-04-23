@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
-  <a href="https://github.com/onsails/rightclaw/actions"><img src="https://github.com/onsails/rightclaw/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://github.com/onsails/rightclaw/actions"><img src="https://github.com/onsails/rightclaw/actions/workflows/build.yml/badge.svg" alt="build"></a>
   <a href="https://t.me/rightclaww"><img src="https://img.shields.io/badge/Telegram-chat-blue?logo=telegram" alt="telegram"></a>
 </p>
 
