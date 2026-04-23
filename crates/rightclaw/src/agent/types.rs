@@ -391,15 +391,11 @@ impl WhisperModel {
     }
 }
 
-fn default_true_stt() -> bool {
-    true
-}
-
 /// Speech-to-text configuration for an agent.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SttConfig {
-    #[serde(default = "default_true_stt")]
+    #[serde(default)]   // bool::default() == false
     pub enabled: bool,
     #[serde(default)]
     pub model: WhisperModel,
@@ -408,7 +404,7 @@ pub struct SttConfig {
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             model: WhisperModel::default(),
         }
     }
@@ -711,8 +707,20 @@ mod stt_config_tests {
     fn stt_config_defaults_when_missing() {
         let yaml = "";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert!(cfg.stt.enabled);
+        assert!(!cfg.stt.enabled, "default must be false to grandfather existing agents");
         assert_eq!(cfg.stt.model, WhisperModel::Small);
+    }
+
+    #[test]
+    fn pre_existing_yaml_without_stt_block_defaults_to_disabled() {
+        // Simulates an agent.yaml from before the STT feature shipped:
+        // it has other fields but no stt: block.
+        let yaml = "telegram_token: \"x\"\nmodel: sonnet\n";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(
+            !cfg.stt.enabled,
+            "existing agents without stt: block must NOT be silently enabled"
+        );
     }
 
     #[test]
