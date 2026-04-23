@@ -581,6 +581,12 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         let opt_sandbox = format!("Sandbox mode: {sandbox_display}");
         let opt_network_policy = format!("Network policy: {network_policy_display}");
         let opt_memory = format!("Memory: {memory_display}");
+        let stt_display = if config.stt.enabled {
+            format!("on ({})", config.stt.model.yaml_str())
+        } else {
+            "off".to_string()
+        };
+        let opt_stt = format!("STT: {stt_display}");
         let opt_done = "Done".to_string();
 
         let mut options = vec![
@@ -597,6 +603,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             options.push(opt_network_policy.clone());
         }
         options.push(opt_memory.clone());
+        options.push(opt_stt.clone());
         options.push(opt_done.clone());
 
         let selection =
@@ -698,6 +705,12 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                     // User cancelled — no change.
                 }
             }
+        } else if selection == opt_stt {
+            if let Some((enabled, model)) = stt_setup()? {
+                let stt = rightclaw::agent::types::SttConfig { enabled, model };
+                update_agent_yaml_stt(&agent_yaml_path, &stt)?;
+            }
+            // None = user cancelled, leave config unchanged.
         }
 
         println!("Saved.");
@@ -1381,7 +1394,6 @@ mod memory_yaml_tests {
 /// Removes any existing `stt:` block (header + indented body), then appends
 /// the new block.  Matches the style of the other `update_agent_yaml_*`
 /// helpers: line-by-line block stripping + unconditional append.
-#[allow(dead_code)] // wired up by Task 10 (agent_setting_menu STT entry)
 fn update_agent_yaml_stt(
     path: &Path,
     stt: &rightclaw::agent::types::SttConfig,
