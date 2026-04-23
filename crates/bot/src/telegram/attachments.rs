@@ -399,7 +399,9 @@ pub struct ForwardInfo {
 /// DM uses `kind: dm`; Group uses `kind: group` with optional title/topic_id.
 #[derive(Debug, Clone)]
 pub enum ChatContext {
-    Private { id: i64 },
+    Private {
+        id: i64,
+    },
     Group {
         id: i64,
         title: Option<String>,
@@ -482,7 +484,11 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
                 writeln!(out, "      kind: dm").expect("infallible");
                 writeln!(out, "      id: {id}").expect("infallible");
             }
-            ChatContext::Group { id, title, topic_id } => {
+            ChatContext::Group {
+                id,
+                title,
+                topic_id,
+            } => {
                 writeln!(out, "      kind: group").expect("infallible");
                 writeln!(out, "      id: {id}").expect("infallible");
                 if let Some(t) = title {
@@ -686,6 +692,9 @@ pub fn extract_attachments(msg: &Message) -> Vec<InboundAttachment> {
 }
 
 /// Download inbound attachments from Telegram, save to disk, optionally upload to sandbox.
+///
+/// Returns `(resolved, voice_markers)`. Voice and VideoNote attachments are transcribed (when
+/// `stt` is `Some`) and emitted as text markers instead of `ResolvedAttachment` entries.
 #[allow(clippy::too_many_arguments)]
 pub async fn download_attachments(
     attachments: &[InboundAttachment],
@@ -696,7 +705,8 @@ pub async fn download_attachments(
     resolved_sandbox: Option<&str>,
     chat_id: teloxide::types::ChatId,
     eff_thread_id: i64,
-) -> Result<Vec<ResolvedAttachment>, Box<dyn std::error::Error + Send + Sync>> {
+    stt: Option<&crate::stt::SttContext>,
+) -> Result<(Vec<ResolvedAttachment>, Vec<String>), Box<dyn std::error::Error + Send + Sync>> {
     use teloxide::net::Download;
     use teloxide::requests::Requester;
     use tokio::io::AsyncWriteExt;
@@ -710,6 +720,7 @@ pub async fn download_attachments(
     }
 
     let mut resolved = Vec::with_capacity(attachments.len());
+    let mut markers = Vec::new();
 
     for (idx, att) in attachments.iter().enumerate() {
         // Check size limit
@@ -743,6 +754,23 @@ pub async fn download_attachments(
         bot.download_file(&file.path, &mut dst).await?;
         dst.flush().await?;
 
+        // STT short-circuit for voice / video_note (when context provided).
+        if let Some(ctx) = stt {
+            let stt_kind = match att.kind {
+                AttachmentKind::Voice => Some(crate::stt::markers::VoiceKind::Voice),
+                AttachmentKind::VideoNote => Some(crate::stt::markers::VoiceKind::VideoNote),
+                _ => None,
+            };
+            if let Some(kind) = stt_kind {
+                let marker = crate::stt::transcribe_or_marker(ctx, kind, &host_path).await;
+                markers.push(marker);
+                if let Err(e) = tokio::fs::remove_file(&host_path).await {
+                    tracing::warn!("STT cleanup failed for {}: {e}", host_path.display());
+                }
+                continue;
+            }
+        }
+
         let final_path = if sandboxed {
             // Upload to sandbox, then clean up host temp file
             let sandbox = resolved_sandbox.unwrap();
@@ -766,7 +794,7 @@ pub async fn download_attachments(
         });
     }
 
-    Ok(resolved)
+    Ok((resolved, markers))
 }
 
 /// Download outbound attachments from sandbox and send to Telegram.
@@ -2150,9 +2178,18 @@ mod group_format_tests {
         };
         let yaml = format_cc_input(&[m]).unwrap();
         assert!(yaml.contains("messages:"));
-        assert!(yaml.contains("chat:"), "DM must include a chat block, got:\n{yaml}");
-        assert!(yaml.contains("kind: dm"), "DM block must mark kind: dm, got:\n{yaml}");
-        assert!(yaml.contains("id: 42"), "DM chat block must include id, got:\n{yaml}");
+        assert!(
+            yaml.contains("chat:"),
+            "DM must include a chat block, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("kind: dm"),
+            "DM block must mark kind: dm, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("id: 42"),
+            "DM chat block must include id, got:\n{yaml}"
+        );
     }
 
     #[test]
