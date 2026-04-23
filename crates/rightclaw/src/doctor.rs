@@ -118,6 +118,9 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
         checks.push(check_tunnel_health(home));
     }
 
+    // STT checks — ffmpeg presence and model cache (Task 17).
+    checks.extend(check_stt(home));
+
     // MCP token status check — Warn when any agent has missing/expired tokens (REFRESH-03)
     checks.push(check_mcp_tokens(home));
 
@@ -1220,6 +1223,75 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     out
 }
 
+/// Check STT prerequisites across all agents.
+///
+/// Emits:
+/// - Warn "ffmpeg" if any agent has `stt.enabled` and ffmpeg is absent from PATH.
+/// - Warn "stt-model/<name>" for each agent with `stt.enabled` whose model file is not cached.
+/// - Silent when no agents have `stt.enabled = true`.
+fn check_stt(home: &Path) -> Vec<DoctorCheck> {
+    let agents_dir = crate::config::agents_dir(home);
+    if !agents_dir.exists() {
+        return vec![];
+    }
+
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    // Collect agents with stt.enabled.
+    let mut stt_agents: Vec<(String, crate::agent::types::SttConfig)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let config = match crate::agent::discovery::parse_agent_config(&path) {
+            Ok(Some(c)) => c,
+            Ok(None) | Err(_) => continue,
+        };
+        if config.stt.enabled {
+            stt_agents.push((name, config.stt));
+        }
+    }
+
+    if stt_agents.is_empty() {
+        return vec![];
+    }
+
+    let mut out = Vec::new();
+
+    // ffmpeg check — one shared check for all stt agents.
+    if !crate::stt::ffmpeg_available() {
+        out.push(DoctorCheck {
+            name: "ffmpeg".to_string(),
+            status: CheckStatus::Warn,
+            detail: "ffmpeg not found in PATH — voice transcription disabled".to_string(),
+            fix: Some("brew install ffmpeg  # macOS\napt install ffmpeg  # Linux".to_string()),
+        });
+    }
+
+    // Per-agent model cache check.
+    for (name, stt) in &stt_agents {
+        let model_path = crate::stt::model_cache_path(home, stt.model);
+        if !model_path.exists() {
+            out.push(DoctorCheck {
+                name: format!("stt-model/{name}"),
+                status: CheckStatus::Warn,
+                detail: format!("{name}: whisper model {} not cached", stt.model.filename()),
+                fix: Some("run: rightclaw up".to_string()),
+            });
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 #[path = "doctor_tests.rs"]
 mod tests;
@@ -1233,10 +1305,20 @@ mod cron_target_tests {
         let now = chrono::Utc::now();
         let mut file = AllowlistFile::default();
         for &id in users {
-            file.users.push(AllowedUser { id, label: None, added_by: None, added_at: now });
+            file.users.push(AllowedUser {
+                id,
+                label: None,
+                added_by: None,
+                added_at: now,
+            });
         }
         for &id in groups {
-            file.groups.push(AllowedGroup { id, label: None, opened_by: None, opened_at: now });
+            file.groups.push(AllowedGroup {
+                id,
+                label: None,
+                opened_by: None,
+                opened_at: now,
+            });
         }
         crate::agent::allowlist::write_file(agent_dir, &file).unwrap();
     }
@@ -1266,7 +1348,10 @@ mod cron_target_tests {
         drop(conn);
 
         let checks = check_cron_targets(dir.path());
-        let warns: Vec<_> = checks.iter().filter(|c| c.status == CheckStatus::Warn).collect();
+        let warns: Vec<_> = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Warn)
+            .collect();
         assert_eq!(warns.len(), 1, "expected 1 warn, got {checks:?}");
         assert!(warns[0].detail.contains("j1"));
     }
@@ -1280,7 +1365,10 @@ mod cron_target_tests {
         drop(conn);
 
         let checks = check_cron_targets(dir.path());
-        let warns: Vec<_> = checks.iter().filter(|c| c.status == CheckStatus::Warn).collect();
+        let warns: Vec<_> = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Warn)
+            .collect();
         assert_eq!(warns.len(), 1, "expected 1 warn, got {checks:?}");
         assert!(warns[0].detail.contains("-999"));
     }
@@ -1294,7 +1382,111 @@ mod cron_target_tests {
         drop(conn);
 
         let checks = check_cron_targets(dir.path());
-        let warns: Vec<_> = checks.iter().filter(|c| c.status == CheckStatus::Warn).collect();
+        let warns: Vec<_> = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Warn)
+            .collect();
         assert!(warns.is_empty(), "expected no warns, got {checks:?}");
+    }
+}
+
+#[cfg(test)]
+mod stt_doctor_tests {
+    use super::*;
+    use crate::agent::types::{SttConfig, WhisperModel};
+    use std::path::PathBuf;
+
+    /// Write a minimal agent.yaml with the given stt config to `agent_dir`.
+    fn write_agent_yaml(agent_dir: &std::path::Path, stt: &SttConfig) {
+        let yaml = format!(
+            "stt:\n  enabled: {}\n  model: {}\n",
+            stt.enabled,
+            match stt.model {
+                WhisperModel::Tiny => "tiny",
+                WhisperModel::Base => "base",
+                WhisperModel::Small => "small",
+                WhisperModel::Medium => "medium",
+                WhisperModel::LargeV3 => "large-v3",
+            }
+        );
+        std::fs::write(agent_dir.join("agent.yaml"), yaml).unwrap();
+    }
+
+    /// Create a minimal agent dir under `home/agents/<name>/` and write agent.yaml.
+    fn make_agent(
+        home: &std::path::Path,
+        name: &str,
+        enabled: bool,
+        model: WhisperModel,
+    ) -> PathBuf {
+        let agents_dir = home.join("agents").join(name);
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let stt = SttConfig { enabled, model };
+        write_agent_yaml(&agents_dir, &stt);
+        agents_dir
+    }
+
+    #[test]
+    fn warn_on_missing_model_when_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        make_agent(tmp.path(), "a", true, WhisperModel::Small);
+        let reports = check_stt(tmp.path());
+        assert!(
+            reports.iter().any(|r| r.detail.contains("ggml-small.bin")),
+            "expected model warning, got {reports:?}"
+        );
+    }
+
+    #[test]
+    fn warn_severity_is_warn_not_fail() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        make_agent(tmp.path(), "a", true, WhisperModel::Tiny);
+        let reports = check_stt(tmp.path());
+        for r in &reports {
+            assert_ne!(
+                r.status,
+                CheckStatus::Fail,
+                "STT doctor should only emit Warn, not Fail: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn silent_when_stt_disabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        make_agent(tmp.path(), "a", false, WhisperModel::Small);
+        let reports = check_stt(tmp.path());
+        assert!(
+            reports.iter().all(|r| !r.detail.contains("ggml")),
+            "expected no model warning for disabled stt, got {reports:?}"
+        );
+        // Also no ffmpeg warning — no enabled stt agent means need_ffmpeg=false.
+        assert!(
+            reports.iter().all(|r| r.name != "ffmpeg"),
+            "expected no ffmpeg warning when stt disabled, got {reports:?}"
+        );
+    }
+
+    #[test]
+    fn pass_when_model_cached() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        make_agent(tmp.path(), "a", true, WhisperModel::Tiny);
+        // Create the model cache file.
+        let cache_path = crate::stt::model_cache_path(tmp.path(), WhisperModel::Tiny);
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        std::fs::write(&cache_path, b"fake model").unwrap();
+        let reports = check_stt(tmp.path());
+        assert!(
+            reports.iter().all(|r| !r.detail.contains("ggml-tiny.bin")),
+            "expected no model warning when model is cached, got {reports:?}"
+        );
+    }
+
+    #[test]
+    fn silent_when_no_agents_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Don't create agents/ at all.
+        let reports = check_stt(tmp.path());
+        assert!(reports.is_empty(), "expected empty, got {reports:?}");
     }
 }
