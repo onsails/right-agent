@@ -265,7 +265,6 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
             None => continue,
         };
 
-        let agents_md_exists = path.join("AGENTS.md").exists();
         let identity_exists = path.join("IDENTITY.md").exists();
         let soul_exists = path.join("SOUL.md").exists();
         let user_exists = path.join("USER.md").exists();
@@ -275,15 +274,6 @@ fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
         let agent_config = crate::agent::discovery::parse_agent_config(&path)
             .ok()
             .flatten();
-
-        if !agents_md_exists {
-            checks.push(DoctorCheck {
-                name: format!("agents/{name}/AGENTS.md"),
-                status: CheckStatus::Fail,
-                detail: "AGENTS.md missing".to_string(),
-                fix: Some("Run `rightclaw init` or create AGENTS.md manually".to_string()),
-            });
-        }
 
         if bootstrap_exists {
             valid_agents += 1;
