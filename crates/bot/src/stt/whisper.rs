@@ -31,9 +31,13 @@ impl WhisperEngine {
             WhisperContext::new_with_params(&self.model_path, WhisperContextParameters::default())
                 .map_err(|e| SttError::WhisperLoadFailed(format!("{e}")))?;
         let arc = Arc::new(Mutex::new(ctx));
-        // If another thread raced us here, just use their value.
-        let _ = self.ctx.set(arc.clone());
-        Ok(arc)
+        // If another thread raced us here, drop our copy and use the
+        // winner's. Without this, both Arcs stay alive while the loser's
+        // transcribe() call holds it — ~470MB orphaned per race.
+        match self.ctx.set(arc) {
+            Ok(()) => Ok(self.ctx.get().expect("just set").clone()),
+            Err(_orphan) => Ok(self.ctx.get().expect("loser of race; winner set first").clone()),
+        }
     }
 
     /// Run whisper on PCM f32 16 kHz mono. Returns the transcript and the

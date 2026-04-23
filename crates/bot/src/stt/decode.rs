@@ -30,21 +30,25 @@ pub async fn decode_to_pcm_f32(input: &Path) -> Result<Vec<f32>, SttError> {
         .spawn()
         .map_err(|e| SttError::FfmpegFailed(format!("spawn: {e}")))?;
 
+    // Drain stdout and stderr concurrently — sequential reads risk a
+    // deadlock if ffmpeg fills the stderr pipe buffer (~64 KB) while we
+    // are still reading stdout. `-loglevel error` keeps stderr small in
+    // the happy path, but a corrupt input can trigger verbose probe noise.
     let mut stdout = child.stdout.take().expect("piped");
+    let mut stderr_reader = child.stderr.take().expect("piped");
     let mut bytes = Vec::new();
-    stdout
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|e| SttError::FfmpegFailed(format!("read stdout: {e}")))?;
+    let mut err = String::new();
+    let (stdout_res, _) = tokio::join!(
+        stdout.read_to_end(&mut bytes),
+        stderr_reader.read_to_string(&mut err),
+    );
+    stdout_res.map_err(|e| SttError::FfmpegFailed(format!("read stdout: {e}")))?;
 
     let status = child
         .wait()
         .await
         .map_err(|e| SttError::FfmpegFailed(format!("wait: {e}")))?;
     if !status.success() {
-        let mut stderr_reader = child.stderr.take().expect("piped");
-        let mut err = String::new();
-        let _ = stderr_reader.read_to_string(&mut err).await;
         let trimmed: String = err.chars().take(200).collect();
         return Err(SttError::FfmpegFailed(trimmed));
     }
