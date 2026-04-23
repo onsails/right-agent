@@ -970,7 +970,7 @@ pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::Whis
         "medium   — ~1.5 GB,  very good",
         "large-v3 — ~3.0 GB,  best quality, slow",
     ];
-    let picked = match inquire::Select::new("Choose whisper model:", options.clone())
+    let picked = match inquire::Select::new("Choose whisper model:", options)
         .with_starting_cursor(2) // small
         .prompt()
     {
@@ -990,8 +990,10 @@ pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::Whis
         WhisperModel::Small
     } else if picked.starts_with("medium") {
         WhisperModel::Medium
-    } else {
+    } else if picked.starts_with("large-v3") {
         WhisperModel::LargeV3
+    } else {
+        unreachable!("unexpected whisper option label: {picked}")
     };
 
     // Step 3: ffmpeg check + optional install
