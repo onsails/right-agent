@@ -10,6 +10,7 @@ pub mod markers;
 pub mod whisper;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -81,6 +82,69 @@ impl Transcriber {
             text,
             detected_language: lang,
         })
+    }
+}
+
+/// Bundle passed through the worker pipeline so transcription is opt-in
+/// per-bot and ffmpeg presence is checked once at startup.
+pub struct SttContext {
+    pub transcriber: Arc<Transcriber>,
+    pub ffmpeg_available: bool,
+}
+
+/// Build the final text for a message: prepend each marker on its own line,
+/// blank line, then the user text (if any).
+pub fn combine_markers_with_text(markers: &[String], user_text: Option<&str>) -> Option<String> {
+    if markers.is_empty() {
+        return user_text.map(str::to_owned);
+    }
+    let mut out = markers.join("\n");
+    if let Some(t) = user_text {
+        let t = t.trim();
+        if !t.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(t);
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod combine_tests {
+    use super::*;
+
+    #[test]
+    fn no_markers_returns_user_text() {
+        assert_eq!(
+            combine_markers_with_text(&[], Some("hi")),
+            Some("hi".into())
+        );
+        assert_eq!(combine_markers_with_text(&[], None), None);
+    }
+
+    #[test]
+    fn marker_only_when_no_text() {
+        let m = vec!["[m]".to_string()];
+        assert_eq!(combine_markers_with_text(&m, None), Some("[m]".into()));
+        assert_eq!(combine_markers_with_text(&m, Some("")), Some("[m]".into()));
+    }
+
+    #[test]
+    fn marker_prepended_with_blank_line_above_text() {
+        let m = vec!["[m]".to_string()];
+        assert_eq!(
+            combine_markers_with_text(&m, Some("hello")),
+            Some("[m]\n\nhello".into()),
+        );
+    }
+
+    #[test]
+    fn multiple_markers_each_on_own_line() {
+        let m = vec!["[a]".to_string(), "[b]".to_string()];
+        assert_eq!(
+            combine_markers_with_text(&m, Some("x")),
+            Some("[a]\n[b]\n\nx".into()),
+        );
     }
 }
 
