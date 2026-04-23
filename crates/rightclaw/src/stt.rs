@@ -3,6 +3,7 @@
 //! crate for actual inference.
 
 use std::{
+    collections::HashSet,
     io,
     path::{Path, PathBuf},
 };
@@ -124,6 +125,48 @@ async fn download_url_to_path(
     Ok(())
 }
 
+/// Public entry: check ffmpeg, then download missing models. Logs warnings
+/// (does not error) if download fails — callers should not abort `up`.
+pub async fn ensure_models_cached(
+    home: &Path,
+    models: &HashSet<WhisperModel>,
+) -> Result<usize, DownloadError> {
+    ensure_models_cached_inner(home, models, ffmpeg_available()).await
+}
+
+pub(crate) async fn ensure_models_cached_inner(
+    home: &Path,
+    models: &HashSet<WhisperModel>,
+    ffmpeg_present: bool,
+) -> Result<usize, DownloadError> {
+    if !ffmpeg_present {
+        eprintln!(
+            "  ffmpeg not found in PATH — voice transcription disabled. \
+             Install: brew install ffmpeg / apt install ffmpeg. \
+             Skipping whisper model download."
+        );
+        return Ok(0);
+    }
+    let mut downloaded = 0;
+    for model in models {
+        let dest = model_cache_path(home, *model);
+        if is_model_cached(&dest) {
+            continue;
+        }
+        eprintln!(
+            "  downloading {} (~{} MB)...",
+            model.filename(),
+            model.approx_size_mb()
+        );
+        if let Err(e) = download_model(*model, &dest).await {
+            eprintln!("  WARN: download of {} failed: {e}", model.filename());
+            continue;
+        }
+        downloaded += 1;
+    }
+    Ok(downloaded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +243,42 @@ mod tests {
 
         tokio::fs::write(&dest, b"complete").await.unwrap();
         assert!(is_model_cached(&dest), "final file is a cache hit");
+    }
+
+    #[tokio::test]
+    async fn ensure_models_cached_skips_when_ffmpeg_missing() {
+        let tmp = TempDir::new().unwrap();
+        let mut models = HashSet::new();
+        models.insert(WhisperModel::Small);
+
+        // Simulate ffmpeg-missing by passing the bool explicitly
+        let downloaded =
+            ensure_models_cached_inner(tmp.path(), &models, /* ffmpeg_present= */ false)
+                .await
+                .unwrap();
+
+        assert_eq!(downloaded, 0);
+        assert!(!model_cache_path(tmp.path(), WhisperModel::Small).exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_models_cached_skips_already_cached() {
+        let tmp = TempDir::new().unwrap();
+        let mut models = HashSet::new();
+        models.insert(WhisperModel::Small);
+
+        // Pre-populate cache
+        let p = model_cache_path(tmp.path(), WhisperModel::Small);
+        tokio::fs::create_dir_all(p.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&p, b"already-cached").await.unwrap();
+
+        let downloaded =
+            ensure_models_cached_inner(tmp.path(), &models, /* ffmpeg_present= */ true)
+                .await
+                .unwrap();
+
+        assert_eq!(downloaded, 0);
     }
 }
