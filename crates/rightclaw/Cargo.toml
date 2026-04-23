@@ -55,7 +55,7 @@ test-support = []
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
 wiremock = "0.6"
-tokio = { version = "1.50", features = ["test-util"] }
+tokio = { version = "1.52", features = ["test-util"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
