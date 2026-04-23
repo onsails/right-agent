@@ -101,6 +101,8 @@ pub struct WorkerContext {
     pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     /// RwLock gate — worker acquires read lock before invoke_cc to block during upgrades.
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
+    /// STT context — None when stt.enabled=false or whisper model not yet cached.
+    pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
 }
 
 /// Parsed output from CC structured JSON response (`result` field per D-03).
@@ -410,7 +412,7 @@ pub fn spawn_worker(
                         ctx.resolved_sandbox.as_deref(),
                         tg_chat_id,
                         eff_thread_id,
-                        None, // STT context — wired in Task 15
+                        ctx.stt.as_deref(),
                     )
                     .await
                     {

@@ -677,6 +677,25 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         shutdown.clone(),
     );
 
+    // Build STT context once at startup — shared across all worker sessions via Arc.
+    let stt: Option<Arc<crate::stt::SttContext>> = if config.stt.enabled {
+        let model_path = rightclaw::stt::model_cache_path(&home, config.stt.model);
+        let transcriber = crate::stt::Transcriber::new(model_path);
+        let ffmpeg_available = rightclaw::stt::ffmpeg_available();
+        if !ffmpeg_available {
+            tracing::warn!(
+                "ffmpeg not found in PATH — voice messages will be answered with an error marker. \
+                 Install: brew install ffmpeg / apt install ffmpeg."
+            );
+        }
+        Some(Arc::new(crate::stt::SttContext {
+            transcriber,
+            ffmpeg_available,
+        }))
+    } else {
+        None
+    };
+
     let result = tokio::select! {
         result = telegram::run_telegram(
             token,
@@ -695,6 +714,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             hindsight_wrapper,
             prefetch_cache,
             upgrade_lock,
+            stt,
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,

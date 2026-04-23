@@ -1,15 +1,10 @@
 //! Speech-to-text pipeline: ffmpeg → PCM → whisper-rs → text.
 
-// All items here are wired up once Tasks 14-15 connect SttContext into
-// download_attachments and bot startup. Remove this allow after Task 15.
-#![allow(dead_code)]
-
 pub mod decode;
 pub mod markers;
 pub mod whisper;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -87,7 +82,7 @@ impl Transcriber {
 /// Bundle passed through the worker pipeline so transcription is opt-in
 /// per-bot and ffmpeg presence is checked once at startup.
 pub struct SttContext {
-    pub transcriber: Arc<Transcriber>,
+    pub transcriber: Transcriber,
     pub ffmpeg_available: bool,
 }
 
@@ -156,7 +151,7 @@ mod transcribe_or_marker_tests {
                 .unwrap();
         }
         SttContext {
-            transcriber: Arc::new(Transcriber::new(p)),
+            transcriber: Transcriber::new(p),
             ffmpeg_available,
         }
     }
@@ -179,7 +174,7 @@ mod transcribe_or_marker_tests {
     #[tokio::test]
     async fn missing_model_returns_model_missing_marker() {
         let ctx = SttContext {
-            transcriber: Arc::new(Transcriber::new(PathBuf::from("/nonexistent/x.bin"))),
+            transcriber: Transcriber::new(PathBuf::from("/nonexistent/x.bin")),
             ffmpeg_available: true,
         };
         let m = transcribe_or_marker(&ctx, markers::VoiceKind::Voice, &fixture("hello.oga")).await;

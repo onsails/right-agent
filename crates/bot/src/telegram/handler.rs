@@ -86,6 +86,8 @@ pub struct AgentSettings {
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// When true, CC subprocesses run with --verbose and stderr is logged at debug level.
     pub debug: bool,
+    /// STT context — None when stt.enabled=false or whisper model not yet cached.
+    pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
@@ -346,6 +348,7 @@ pub async fn handle_message(
                     hindsight: settings.hindsight.clone(),
                     prefetch_cache: settings.prefetch_cache.clone(),
                     upgrade_lock: Arc::clone(&settings.upgrade_lock),
+                    stt: settings.stt.clone(),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());
@@ -1053,7 +1056,9 @@ async fn handle_mcp_add(
             }
         });
 
-        let result = detect_auth_type_via_haiku(&bare_url, agent_dir, ssh_config_path, resolved_sandbox).await;
+        let result =
+            detect_auth_type_via_haiku(&bare_url, agent_dir, ssh_config_path, resolved_sandbox)
+                .await;
         typing_cancel.cancel();
 
         match result {
@@ -1093,8 +1098,7 @@ async fn handle_mcp_add(
                 send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
             }
             Err(e) => {
-                send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}"))
-                    .await?;
+                send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}")).await?;
             }
         }
         return Ok(());
@@ -1136,34 +1140,36 @@ async fn handle_mcp_add(
             Ok(Ok(input)) => input,
             _ => {
                 pending_token_slot.0.lock().await.take();
-                bot.send_message(
-                    chat_id,
-                    "Timed out waiting for token. /mcp add cancelled.",
-                )
-                .await
-                .ok();
+                bot.send_message(chat_id, "Timed out waiting for token. /mcp add cancelled.")
+                    .await
+                    .ok();
                 return;
             }
         };
 
         // Parse "HeaderName: token_value" format or treat as raw token
-        let (token, auth_type, auth_header) = if let Some((header, value)) =
-            raw_input.split_once(": ")
-        {
-            let header = header.trim();
-            let value = value.trim();
-            if !header.is_empty()
-                && !header.contains(' ')
-                && header.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                tracing::info!(%header, "user specified custom auth header");
-                (value.to_string(), "header".to_string(), Some(header.to_string()))
+        let (token, auth_type, auth_header) =
+            if let Some((header, value)) = raw_input.split_once(": ") {
+                let header = header.trim();
+                let value = value.trim();
+                if !header.is_empty()
+                    && !header.contains(' ')
+                    && header
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    tracing::info!(%header, "user specified custom auth header");
+                    (
+                        value.to_string(),
+                        "header".to_string(),
+                        Some(header.to_string()),
+                    )
+                } else {
+                    (raw_input, auth_type, auth_header)
+                }
             } else {
                 (raw_input, auth_type, auth_header)
-            }
-        } else {
-            (raw_input, auth_type, auth_header)
-        };
+            };
 
         tracing::info!(url = %bare_url, %auth_type, "mcp add: registering server");
         match internal
@@ -1264,10 +1270,13 @@ async fn detect_auth_type_via_haiku(
     let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
 
-    let output = tokio::time::timeout(std::time::Duration::from_secs(120), child.wait_with_output())
-        .await
-        .map_err(|_| "haiku timed out after 120s".to_string())?
-        .map_err(|e| format!("haiku failed: {e:#}"))?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "haiku timed out after 120s".to_string())?
+    .map_err(|e| format!("haiku failed: {e:#}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1590,11 +1599,7 @@ async fn build_usage_summary(agent_dir: &Path, detail: bool) -> Result<String, m
         .map_err(|e| miette::miette!("open_connection: {e:#}"))?;
 
     let now = Utc::now();
-    let today_start = now
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc();
+    let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
     let week_start = now - Duration::days(7);
     let month_start = now - Duration::days(30);
 

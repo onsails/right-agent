@@ -96,6 +96,7 @@ pub async fn run_telegram(
     hindsight_wrapper: Option<std::sync::Arc<rightclaw::memory::ResilientHindsight>>,
     prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
+    stt: Option<std::sync::Arc<crate::stt::SttContext>>,
 ) -> miette::Result<()> {
     let bot = build_bot(token);
 
@@ -140,6 +141,7 @@ pub async fn run_telegram(
         prefetch_cache,
         upgrade_lock,
         debug,
+        stt,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
 
@@ -491,6 +493,7 @@ mod tests {
             prefetch_cache: Some(PrefetchCache::new()),
             upgrade_lock: Arc::new(RwLock::new(())),
             debug: false,
+            stt: None,
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
         let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
