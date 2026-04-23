@@ -874,6 +874,70 @@ async fn memory_setup(
 }
 
 // ---------------------------------------------------------------------------
+// STT setup helpers (public)
+// ---------------------------------------------------------------------------
+
+/// macOS: detect brew, prompt to install ffmpeg, run, re-check.
+/// Linux: print install instructions only.
+/// Returns true iff ffmpeg is in PATH after this call.
+#[allow(dead_code)] // wired up by Task 6 (stt_setup wizard helper)
+pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
+    if rightclaw::stt::ffmpeg_available() {
+        return Ok(true);
+    }
+
+    match std::env::consts::OS {
+        "macos" => {
+            if which::which("brew").is_err() {
+                eprintln!("ffmpeg required, but Homebrew (brew) is not installed.");
+                eprintln!("Install Homebrew first: https://brew.sh");
+                eprintln!("Then run: brew install ffmpeg");
+                return Ok(false);
+            }
+            let install = inquire::Confirm::new(
+                "ffmpeg required for voice transcription. Install via 'brew install ffmpeg' (~50 MB, ~30 sec)?"
+            )
+            .with_default(true)
+            .prompt()
+            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            if !install {
+                eprintln!("STT will be disabled. Install ffmpeg later: brew install ffmpeg");
+                return Ok(false);
+            }
+            // Spawn brew install with stdout/stderr inherited so user sees output.
+            let status = std::process::Command::new("brew")
+                .args(["install", "ffmpeg"])
+                .status()
+                .map_err(|e| miette::miette!("spawn brew: {e:#}"))?;
+            if !status.success() {
+                eprintln!("brew install ffmpeg exited with {status}; STT disabled.");
+                return Ok(false);
+            }
+            if !rightclaw::stt::ffmpeg_available() {
+                eprintln!(
+                    "brew completed but ffmpeg not yet in PATH — restart shell or check PATH; STT disabled."
+                );
+                return Ok(false);
+            }
+            tracing::info!("ffmpeg installed via brew");
+            Ok(true)
+        }
+        "linux" => {
+            eprintln!("ffmpeg required for voice transcription. Install:");
+            eprintln!("  Debian/Ubuntu:  sudo apt install ffmpeg");
+            eprintln!("  NixOS / devenv: add 'pkgs.ffmpeg' to your packages");
+            eprintln!("Then re-run this command.");
+            Ok(false)
+        }
+        other => {
+            eprintln!("ffmpeg required, but auto-install is not supported on '{other}'.");
+            eprintln!("Install ffmpeg from https://ffmpeg.org/download.html, then re-run.");
+            Ok(false)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // YAML mutation helpers (private)
 // ---------------------------------------------------------------------------
 
