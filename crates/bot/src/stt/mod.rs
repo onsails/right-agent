@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod decode;
+pub mod whisper;
 
 use std::path::PathBuf;
 use thiserror::Error;
