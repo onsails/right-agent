@@ -359,18 +359,24 @@ pub fn run_agent_codegen(
         .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
     tracing::debug!("wrote process-compose config: {}", config_path.display());
 
-    // Write runtime state.json, preserving started_at from existing state (reload case).
+    // Write runtime state.json, preserving started_at and pc_api_token from
+    // existing state (reload case — token must stay consistent with the running PC).
     let state_path = run_dir.join("state.json");
     let socket_path = run_dir.join("pc.sock");
-    let started_at = crate::runtime::read_state(&state_path)
-        .ok()
-        .map(|s| s.started_at)
+    let existing = crate::runtime::read_state(&state_path).ok();
+    let started_at = existing
+        .as_ref()
+        .map(|s| s.started_at.clone())
         .unwrap_or_else(|| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
             format!("{}Z", now.as_secs())
         });
+    // Reuse existing token on reload; generate a fresh one on first start.
+    let pc_api_token = existing
+        .and_then(|s| s.pc_api_token)
+        .unwrap_or_else(crate::runtime::generate_pc_api_token);
     let state = crate::runtime::RuntimeState {
         agents: all_agents
             .iter()
@@ -381,6 +387,7 @@ pub fn run_agent_codegen(
         socket_path: socket_path.display().to_string(),
         started_at,
         pc_port: crate::runtime::PC_PORT,
+        pc_api_token: Some(pc_api_token),
     };
     crate::runtime::write_state(&state, &state_path)?;
 

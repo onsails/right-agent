@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn pc_client_constructs_with_port() {
-    let client = PcClient::new(PC_PORT);
+    let client = PcClient::new(PC_PORT, None);
     assert!(client.is_ok(), "PcClient::new should succeed with any port");
 }
 
@@ -32,6 +32,7 @@ fn from_home_reads_port_from_state() {
         socket_path: "/tmp/pc.sock".to_string(),
         started_at: "2026-04-22T00:00:00Z".to_string(),
         pc_port: 19999,
+        pc_api_token: Some("test-token-123".to_string()),
     };
     write_state(&state, &run_dir.join("state.json")).unwrap();
 

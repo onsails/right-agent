@@ -2084,6 +2084,16 @@ async fn cmd_up(
         &pc_port,
     ]);
 
+    // Read the API token from state.json (just written by codegen) and inject
+    // as PC_API_TOKEN env var. process-compose then rejects any unauthenticated
+    // REST API request — prevents stray HTTP callers from stopping production bots.
+    let state_path = run_dir.join("state.json");
+    if let Ok(state) = rightclaw::runtime::read_state(&state_path) {
+        if let Some(token) = &state.pc_api_token {
+            cmd.env("PC_API_TOKEN", token);
+        }
+    }
+
     if detach {
         cmd.arg("--detached");
         let child = cmd

@@ -28,10 +28,17 @@ pub struct LogsResponse {
     pub logs: Vec<String>,
 }
 
-/// Async client for the process-compose REST API over a Unix domain socket.
+/// Async client for the process-compose REST API.
+///
+/// Optionally carries a `PC_API_TOKEN` bearer token. When the token is set,
+/// process-compose rejects unauthenticated requests — this prevents any
+/// stray HTTP caller (tests, debugging tools) from accidentally stopping
+/// production bots.
 pub struct PcClient {
     client: reqwest::Client,
-    base_url: String,
+    pub(crate) base_url: String,
+    /// Optional Bearer token for PC_API_TOKEN authentication.
+    api_token: Option<String>,
 }
 
 impl PcClient {
@@ -40,19 +47,20 @@ impl PcClient {
     /// Crate-private: external callers must construct through [`PcClient::from_home`]
     /// so that `rightclaw --home <path>` isolation is enforced. See the
     /// "Runtime isolation — mandatory" section in ARCHITECTURE.md.
-    pub(crate) fn new(port: u16) -> miette::Result<Self> {
+    pub(crate) fn new(port: u16, api_token: Option<String>) -> miette::Result<Self> {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|e| miette::miette!("failed to create process-compose client: {e:#}"))?;
         Ok(Self {
             client,
             base_url: format!("http://localhost:{port}"),
+            api_token,
         })
     }
 
     /// Construct a client from the rightclaw home directory.
     ///
-    /// Reads the running PC port from `<home>/run/state.json`.
+    /// Reads the running PC port and API token from `<home>/run/state.json`.
     /// Returns `Ok(None)` when no PC was started from this home (state file absent) —
     /// this is the normal case for tempdir-isolated tests and for commands run before
     /// `rightclaw up`. Returns `Err` on malformed state or other I/O errors.
@@ -66,15 +74,22 @@ impl PcClient {
             return Ok(None);
         }
         let state = crate::runtime::state::read_state(&state_path)?;
-        let client = Self::new(state.pc_port)?;
+        let client = Self::new(state.pc_port, state.pc_api_token)?;
         Ok(Some(client))
+    }
+
+    /// Apply authentication to a request builder if a token is configured.
+    fn auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.api_token {
+            Some(token) => builder.bearer_auth(token),
+            None => builder,
+        }
     }
 
     /// Check if process-compose is alive.
     pub async fn health_check(&self) -> miette::Result<()> {
         let resp = self
-            .client
-            .get(format!("{}/live", self.base_url))
+            .auth(self.client.get(format!("{}/live", self.base_url)))
             .send()
             .await
             .map_err(|e| miette::miette!("process-compose health check failed: {e:#}"))?;
@@ -91,8 +106,7 @@ impl PcClient {
     /// List all processes and their current status.
     pub async fn list_processes(&self) -> miette::Result<Vec<ProcessInfo>> {
         let resp = self
-            .client
-            .get(format!("{}/processes", self.base_url))
+            .auth(self.client.get(format!("{}/processes", self.base_url)))
             .send()
             .await
             .map_err(|e| miette::miette!("failed to list processes: {e:#}"))?;
@@ -107,8 +121,10 @@ impl PcClient {
     /// Restart a specific process by name.
     pub async fn restart_process(&self, name: &str) -> miette::Result<()> {
         let resp = self
-            .client
-            .post(format!("{}/process/restart/{name}", self.base_url))
+            .auth(
+                self.client
+                    .post(format!("{}/process/restart/{name}", self.base_url)),
+            )
             .send()
             .await
             .map_err(|e| miette::miette!("failed to restart process '{name}': {e:#}"))?;
@@ -125,8 +141,10 @@ impl PcClient {
     /// Stop a specific process by name.
     pub async fn stop_process(&self, name: &str) -> miette::Result<()> {
         let resp = self
-            .client
-            .patch(format!("{}/process/stop/{name}", self.base_url))
+            .auth(
+                self.client
+                    .patch(format!("{}/process/stop/{name}", self.base_url)),
+            )
             .send()
             .await
             .map_err(|e| miette::miette!("failed to stop process '{name}': {e:#}"))?;
@@ -143,8 +161,10 @@ impl PcClient {
     /// Start a disabled or stopped process by name.
     pub async fn start_process(&self, name: &str) -> miette::Result<()> {
         let resp = self
-            .client
-            .post(format!("{}/process/start/{name}", self.base_url))
+            .auth(
+                self.client
+                    .post(format!("{}/process/start/{name}", self.base_url)),
+            )
             .send()
             .await
             .map_err(|e| miette::miette!("failed to start process '{name}': {e:#}"))?;
@@ -164,8 +184,10 @@ impl PcClient {
     /// `endOffset=0` reads from the end, `limit` controls how many lines.
     pub async fn get_process_logs(&self, name: &str, limit: usize) -> miette::Result<Vec<String>> {
         let resp = self
-            .client
-            .get(format!("{}/process/logs/{name}/0/{limit}", self.base_url))
+            .auth(
+                self.client
+                    .get(format!("{}/process/logs/{name}/0/{limit}", self.base_url)),
+            )
             .send()
             .await
             .map_err(|e| miette::miette!("failed to get logs for '{name}': {e:#}"))?;
@@ -183,8 +205,10 @@ impl PcClient {
     /// against running state and adds/updates/removes processes accordingly.
     pub async fn reload_configuration(&self) -> miette::Result<()> {
         let resp = self
-            .client
-            .post(format!("{}/project/configuration", self.base_url))
+            .auth(
+                self.client
+                    .post(format!("{}/project/configuration", self.base_url)),
+            )
             .send()
             .await
             .map_err(|e| {
@@ -202,8 +226,7 @@ impl PcClient {
 
     /// Stop all processes (shutdown process-compose).
     pub async fn shutdown(&self) -> miette::Result<()> {
-        self.client
-            .post(format!("{}/project/stop", self.base_url))
+        self.auth(self.client.post(format!("{}/project/stop", self.base_url)))
             .send()
             .await
             .map_err(|e| miette::miette!("failed to shutdown process-compose: {e:#}"))?;

@@ -16,6 +16,12 @@ pub struct RuntimeState {
     /// cleanly and still point callers at the current process-compose.
     #[serde(default = "default_pc_port")]
     pub pc_port: u16,
+    /// Bearer token for the process-compose REST API (`PC_API_TOKEN`).
+    ///
+    /// When set, process-compose rejects unauthenticated requests — prevents
+    /// stray HTTP hits from tests or other tools from stopping production bots.
+    #[serde(default)]
+    pub pc_api_token: Option<String>,
 }
 
 fn default_pc_port() -> u16 {

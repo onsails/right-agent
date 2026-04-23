@@ -517,10 +517,22 @@ returns `None` and callers skip PC-touching logic. This property is what
 protects tests (which run with a `--home=<tempdir>`) from accidentally hitting
 the user's live PC on port 18927 and SIGTERM-ing a same-named process there.
 
-`<home>/run/state.json` carries the port the running PC listens on; it is
-written by `codegen::pipeline` during `rightclaw up` and read by every
+`<home>/run/state.json` carries the port and API token the running PC uses;
+it is written by `codegen::pipeline` during `rightclaw up` and read by every
 subsequent command that needs to talk to PC. Older state files without the
 `pc_port` field deserialize to `PC_PORT` via `#[serde(default)]`.
+
+### PC_API_TOKEN authentication
+
+`rightclaw up` generates a random bearer token (`pc_api_token` in
+`state.json`) and passes it to process-compose via `PC_API_TOKEN` env var.
+PcClient reads the token from state.json and includes it in every request as
+`Authorization: Bearer <token>`. Process-compose rejects unauthenticated
+requests when this env var is set.
+
+This prevents any stray HTTP caller (tests, debugging tools, browser
+extensions) from accidentally stopping or restarting production bots by
+hitting `localhost:18927`.
 
 **When adding new CLI commands that touch PC, never import `PC_PORT` directly —
 always resolve through `from_home(home)`.** For "is PC running?" probes,
