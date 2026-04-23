@@ -1,6 +1,12 @@
 # RightClaw
 
 <p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
+  <a href="https://github.com/onsails/rightclaw/actions"><img src="https://github.com/onsails/rightclaw/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://t.me/rightclaww"><img src="https://img.shields.io/badge/Telegram-chat-blue?logo=telegram" alt="telegram"></a>
+</p>
+
+<p align="center">
   <b>the proper claude code runtime</b><br/>
   a fleet of claude code agents — one telegram thread each,
   sandboxed, with memory that survives restarts.<br/>
@@ -9,12 +15,6 @@
 
 <p align="center">
   <img src="images/screenshot.png" alt="RightClaw in Telegram" width="720"/>
-</p>
-
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
-  <a href="https://github.com/onsails/rightclaw/actions"><img src="https://github.com/onsails/rightclaw/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
-  <a href="https://t.me/rightclaww">Telegram</a>
 </p>
 
 ## Quick Start
