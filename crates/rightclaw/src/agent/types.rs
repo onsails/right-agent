@@ -389,13 +389,24 @@ impl WhisperModel {
             Self::LargeV3 => 3100,
         }
     }
+
+    /// Kebab-case YAML string for this model — mirrors serde's rename_all output.
+    pub fn yaml_str(self) -> &'static str {
+        match self {
+            Self::Tiny => "tiny",
+            Self::Base => "base",
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::LargeV3 => "large-v3",
+        }
+    }
 }
 
 /// Speech-to-text configuration for an agent.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SttConfig {
-    #[serde(default)]   // bool::default() == false
+    #[serde(default)] // bool::default() == false
     pub enabled: bool,
     #[serde(default)]
     pub model: WhisperModel,
@@ -707,7 +718,10 @@ mod stt_config_tests {
     fn stt_config_defaults_when_missing() {
         let yaml = "";
         let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
-        assert!(!cfg.stt.enabled, "default must be false to grandfather existing agents");
+        assert!(
+            !cfg.stt.enabled,
+            "default must be false to grandfather existing agents"
+        );
         assert_eq!(cfg.stt.model, WhisperModel::Small);
     }
 

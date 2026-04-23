@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::agent::types::{MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode, SttConfig, WhisperModel};
+use crate::agent::types::{MemoryProvider, NetworkPolicy, RecallBudget, SandboxMode, SttConfig};
 
 /// Default recall budget used when the user doesn't override it.
 pub const DEFAULT_RECALL_BUDGET: RecallBudget = RecallBudget::Mid;
@@ -22,16 +22,6 @@ pub struct InitOverrides {
     pub memory_recall_budget: RecallBudget,
     pub memory_recall_max_tokens: u32,
     pub stt: SttConfig,
-}
-
-fn whisper_model_to_yaml(m: WhisperModel) -> &'static str {
-    match m {
-        WhisperModel::Tiny => "tiny",
-        WhisperModel::Base => "base",
-        WhisperModel::Small => "small",
-        WhisperModel::Medium => "medium",
-        WhisperModel::LargeV3 => "large-v3",
-    }
 }
 
 const DEFAULT_AGENTS: &str = include_str!("../templates/right/agent/AGENTS.md");
@@ -187,7 +177,7 @@ pub fn init_agent(
         yaml.push_str(&format!(
             "\nstt:\n  enabled: {}\n  model: {}\n",
             ov.stt.enabled,
-            whisper_model_to_yaml(ov.stt.model),
+            ov.stt.model.yaml_str(),
         ));
 
         std::fs::write(&agent_yaml_path, &yaml)
@@ -1133,7 +1123,7 @@ mod tests {
 
     #[test]
     fn init_agent_writes_stt_block_to_yaml() {
-        use crate::agent::types::{SttConfig, WhisperModel};
+        use crate::agent::types::{AgentConfig, SttConfig, WhisperModel};
 
         let tmp = tempfile::TempDir::new().unwrap();
         let agents_parent = tmp.path();
@@ -1150,15 +1140,67 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
-            stt: SttConfig { enabled: true, model: WhisperModel::Tiny },
+            stt: SttConfig {
+                enabled: true,
+                model: WhisperModel::Tiny,
+            },
         };
 
         let agent_dir = init_agent(agents_parent, "test-stt", Some(&overrides)).unwrap();
         let yaml = std::fs::read_to_string(agent_dir.join("agent.yaml")).unwrap();
 
-        let cfg: crate::agent::types::AgentConfig = serde_saphyr::from_str(&yaml).unwrap();
-        assert!(cfg.stt.enabled, "stt block must be written; default would be false");
+        let cfg: AgentConfig = serde_saphyr::from_str(&yaml).unwrap();
+        assert!(
+            cfg.stt.enabled,
+            "stt block must be written; default would be false"
+        );
         assert_eq!(cfg.stt.model, WhisperModel::Tiny);
+    }
+
+    #[test]
+    fn init_agent_writes_stt_block_with_enabled_false_round_trips() {
+        use crate::agent::types::{SttConfig, WhisperModel};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_parent = tmp.path();
+
+        let overrides = InitOverrides {
+            sandbox_mode: SandboxMode::default(),
+            network_policy: NetworkPolicy::default(),
+            telegram_token: None,
+            allowed_chat_ids: vec![],
+            model: None,
+            env: HashMap::new(),
+            memory_provider: MemoryProvider::File,
+            memory_api_key: None,
+            memory_bank_id: None,
+            memory_recall_budget: DEFAULT_RECALL_BUDGET,
+            memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+            stt: SttConfig {
+                enabled: false,
+                model: WhisperModel::Medium,
+            },
+        };
+
+        let agent_dir = init_agent(agents_parent, "test-stt-false", Some(&overrides)).unwrap();
+        let yaml = std::fs::read_to_string(agent_dir.join("agent.yaml")).unwrap();
+
+        // The stt: block must be present even when enabled=false.
+        assert!(
+            yaml.contains("stt:"),
+            "stt: block must be written even when enabled=false; got:\n{yaml}"
+        );
+
+        let cfg: crate::agent::types::AgentConfig = serde_saphyr::from_str(&yaml).unwrap();
+        assert!(
+            !cfg.stt.enabled,
+            "enabled: false must survive round-trip through agent.yaml"
+        );
+        assert_eq!(
+            cfg.stt.model,
+            WhisperModel::Medium,
+            "non-default model must survive round-trip (guards against revert to if-enabled gating)"
+        );
     }
 
     #[test]
