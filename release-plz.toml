@@ -11,10 +11,14 @@ semver_check = false
 [[package]]
 name = "rightclaw"
 version_group = "workspace"
+git_tag_enable = true
+git_tag_name = "rightclaw-v{{ version }}"
 
 [[package]]
 name = "rightclaw-bot"
 version_group = "workspace"
+git_tag_enable = true
+git_tag_name = "rightclaw-bot-v{{ version }}"
 
 [[package]]
 name = "rightclaw-cli"
