@@ -1521,6 +1521,7 @@ fn cmd_agent_init(
                 .as_ref()
                 .map(|m| m.recall_max_tokens)
                 .unwrap_or(rightclaw::init::DEFAULT_RECALL_MAX_TOKENS),
+            stt: config.stt,
         }
     } else {
         // Fresh init: optionally restore from backup or run wizard.
@@ -1567,6 +1568,7 @@ fn cmd_agent_init(
                 memory_bank_id: None,
                 memory_recall_budget: rightclaw::init::DEFAULT_RECALL_BUDGET,
                 memory_recall_max_tokens: rightclaw::init::DEFAULT_RECALL_MAX_TOKENS,
+                stt: rightclaw::agent::types::SttConfig::default(),
             }
         } else {
             #[derive(Clone, Copy)]
@@ -1676,6 +1678,7 @@ fn cmd_agent_init(
                 memory_bank_id: w_mem.2,
                 memory_recall_budget: w_mem.3,
                 memory_recall_max_tokens: w_mem.4,
+                stt: rightclaw::agent::types::SttConfig::default(),
             }
         }
     };

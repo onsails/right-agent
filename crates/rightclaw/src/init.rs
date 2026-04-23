@@ -21,6 +21,7 @@ pub struct InitOverrides {
     pub memory_bank_id: Option<String>,
     pub memory_recall_budget: RecallBudget,
     pub memory_recall_max_tokens: u32,
+    pub stt: crate::agent::types::SttConfig,
 }
 
 const DEFAULT_AGENTS: &str = include_str!("../templates/right/agent/AGENTS.md");
@@ -55,6 +56,7 @@ pub fn init_agent(
         memory_bank_id: None,
         memory_recall_budget: DEFAULT_RECALL_BUDGET,
         memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+        stt: crate::agent::types::SttConfig::default(),
     };
     let ov = overrides.unwrap_or(&default_overrides);
 
@@ -266,6 +268,7 @@ pub fn init_rightclaw_home(
         memory_bank_id,
         memory_recall_budget,
         memory_recall_max_tokens,
+        stt: crate::agent::types::SttConfig::default(),
     };
     let _agents_dir = init_agent(&agents_parent, "right", Some(&overrides))?;
 
@@ -1013,6 +1016,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+            stt: crate::agent::types::SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
@@ -1042,6 +1046,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+            stt: crate::agent::types::SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
@@ -1066,6 +1071,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+            stt: crate::agent::types::SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let yaml =
@@ -1091,6 +1097,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+            stt: crate::agent::types::SttConfig::default(),
         };
         init_agent(&dir.path().join("agents"), "testbot", Some(&overrides)).unwrap();
 
@@ -1125,6 +1132,7 @@ mod tests {
             memory_bank_id: None,
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
+            stt: crate::agent::types::SttConfig::default(),
         };
         init_agent(
             &dir.path().join("agents"),
