@@ -5,6 +5,7 @@ pub mod error;
 mod keepalive;
 pub mod login;
 pub mod reflection;
+mod stt;
 pub mod sync;
 pub mod telegram;
 mod upgrade;
