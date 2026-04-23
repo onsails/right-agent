@@ -148,6 +148,7 @@ mod tests {
                 attachments: Default::default(),
                 show_thinking: true,
                 memory: None,
+                stt: Default::default(),
             }),
             soul_path: None,
             user_path: None,

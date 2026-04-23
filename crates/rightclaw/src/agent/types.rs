@@ -243,6 +243,10 @@ pub struct AgentConfig {
     /// Memory configuration (optional — defaults to file-based MEMORY.md).
     #[serde(default)]
     pub memory: Option<MemoryConfig>,
+
+    /// Speech-to-text configuration.
+    #[serde(default)]
+    pub stt: SttConfig,
 }
 
 impl Default for AgentConfig {
@@ -261,6 +265,7 @@ impl Default for AgentConfig {
             attachments: AttachmentsConfig::default(),
             show_thinking: default_show_thinking(),
             memory: None,
+            stt: SttConfig::default(),
         }
     }
 }
@@ -331,6 +336,44 @@ impl Default for AttachmentsConfig {
 
 fn default_retention_days() -> u32 {
     7
+}
+
+/// Whisper model size for speech-to-text transcription.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhisperModel {
+    Tiny,
+    Base,
+    #[default]
+    Small,
+    Medium,
+    #[serde(rename = "large-v3")]
+    LargeV3,
+}
+
+fn default_true_stt() -> bool {
+    true
+}
+
+/// Speech-to-text configuration for an agent.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SttConfig {
+    #[serde(default = "default_true_stt")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: WhisperModel,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: WhisperModel::default(),
+        }
+    }
 }
 
 /// A discovered agent definition from the filesystem.
@@ -616,5 +659,50 @@ sandbox:
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let sb = config.sandbox.unwrap();
         assert!(sb.name.is_none());
+    }
+}
+
+#[cfg(test)]
+mod stt_config_tests {
+    use super::*;
+
+    #[test]
+    fn stt_config_defaults_when_missing() {
+        let yaml = "";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(cfg.stt.enabled);
+        assert_eq!(cfg.stt.model, WhisperModel::Small);
+    }
+
+    #[test]
+    fn stt_config_explicit_yaml_roundtrip() {
+        let yaml = "\
+stt:
+  enabled: false
+  model: tiny
+";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(!cfg.stt.enabled);
+        assert_eq!(cfg.stt.model, WhisperModel::Tiny);
+    }
+
+    #[test]
+    fn stt_config_large_v3_kebab_case() {
+        let yaml = "\
+stt:
+  model: large-v3
+";
+        let cfg: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(cfg.stt.model, WhisperModel::LargeV3);
+    }
+
+    #[test]
+    fn stt_config_invalid_model_errors() {
+        let yaml = "\
+stt:
+  model: huge
+";
+        let result: Result<AgentConfig, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_err());
     }
 }

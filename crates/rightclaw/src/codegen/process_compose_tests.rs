@@ -33,6 +33,7 @@ fn make_bot_agent(name: &str, token: &str) -> AgentDef {
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
@@ -66,6 +67,7 @@ fn make_agent_no_token(name: &str) -> AgentDef {
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
@@ -116,6 +118,7 @@ fn make_agent_with_restart(name: &str, token: &str, restart: RestartPolicy) -> A
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
@@ -404,6 +407,7 @@ fn make_agent_with_sandbox(name: &str, token: &str, mode: SandboxMode, policy_fi
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     AgentDef {
         name: name.to_owned(),
@@ -528,6 +532,7 @@ fn agent_without_sandbox_config_defaults_to_openshell_in_process_compose() {
         attachments: Default::default(),
         show_thinking: true,
         memory: None,
+        stt: Default::default(),
     });
     let agents = vec![AgentDef {
         name: "default-agent".to_owned(),

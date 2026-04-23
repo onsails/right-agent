@@ -74,6 +74,7 @@ mod tests {
             attachments: Default::default(),
             show_thinking: true,
             memory: None,
+            stt: Default::default(),
         }
     }
 

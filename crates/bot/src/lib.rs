@@ -139,6 +139,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             network_policy: Default::default(),
             show_thinking: true,
             memory: None,
+            stt: Default::default(),
         });
 
     // Load (or migrate from legacy) the bot-managed allowlist, and spawn a

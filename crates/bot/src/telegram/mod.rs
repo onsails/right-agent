@@ -85,6 +85,7 @@ mod tests {
             network_policy: Default::default(),
             show_thinking: true,
             memory: None,
+            stt: Default::default(),
         }
     }
 
