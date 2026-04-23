@@ -602,8 +602,8 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         ) {
             options.push(opt_network_policy.clone());
         }
-        options.push(opt_memory.clone());
         options.push(opt_stt.clone());
+        options.push(opt_memory.clone());
         options.push(opt_done.clone());
 
         let selection =
@@ -706,11 +706,15 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                 }
             }
         } else if selection == opt_stt {
-            if let Some((enabled, model)) = stt_setup()? {
-                let stt = rightclaw::agent::types::SttConfig { enabled, model };
-                update_agent_yaml_stt(&agent_yaml_path, &stt)?;
+            match stt_setup()? {
+                Some((enabled, model)) => {
+                    let stt = rightclaw::agent::types::SttConfig { enabled, model };
+                    update_agent_yaml_stt(&agent_yaml_path, &stt)?;
+                }
+                None => {
+                    // User cancelled — no change.
+                }
             }
-            // None = user cancelled, leave config unchanged.
         }
 
         println!("Saved.");
