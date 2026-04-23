@@ -1250,6 +1250,51 @@ mod memory_yaml_tests {
     }
 }
 
+/// Replace the `stt:` block in an agent.yaml file.
+///
+/// Removes any existing `stt:` block (header + indented body), then appends
+/// the new block.  Matches the style of the other `update_agent_yaml_*`
+/// helpers: line-by-line block stripping + unconditional append.
+fn update_agent_yaml_stt(
+    path: &Path,
+    stt: &rightclaw::agent::types::SttConfig,
+) -> miette::Result<()> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| miette::miette!("read {}: {e:#}", path.display()))?;
+
+    // Strip existing stt: block (header + indented lines).
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_stt_block = false;
+    for line in content.lines() {
+        if line == "stt:" {
+            in_stt_block = true;
+            continue;
+        }
+        if in_stt_block {
+            if line.starts_with("  ") {
+                continue;
+            }
+            in_stt_block = false;
+        }
+        lines.push(line.to_string());
+    }
+
+    // Append new stt block.
+    lines.push("stt:".to_string());
+    lines.push(format!("  enabled: {}", stt.enabled));
+    lines.push(format!("  model: {}", stt.model.yaml_str()));
+
+    let mut output = lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(path, &output)
+        .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
+
+    Ok(())
+}
+
 /// Replace the `allowed_chat_ids` block in an agent.yaml file.
 ///
 /// Removes any existing `allowed_chat_ids:` block (header + indented list items),
@@ -1294,4 +1339,50 @@ fn update_agent_yaml_chat_ids(path: &Path, ids: &[i64]) -> miette::Result<()> {
         .map_err(|e| miette::miette!("write {}: {e:#}", path.display()))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod stt_yaml_tests {
+    use super::*;
+    use rightclaw::agent::types::{SttConfig, WhisperModel};
+
+    #[test]
+    fn append_stt_when_block_missing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "telegram_token: \"x\"\n").unwrap();
+
+        let stt = SttConfig {
+            enabled: true,
+            model: WhisperModel::Small,
+        };
+        update_agent_yaml_stt(tmp.path(), &stt).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("stt:"));
+        assert!(content.contains("enabled: true"));
+        assert!(content.contains("model: small"));
+    }
+
+    #[test]
+    fn replace_stt_when_block_present() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "telegram_token: \"x\"\nstt:\n  enabled: true\n  model: tiny\n",
+        )
+        .unwrap();
+
+        let stt = SttConfig {
+            enabled: false,
+            model: WhisperModel::Small,
+        };
+        update_agent_yaml_stt(tmp.path(), &stt).unwrap();
+
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        // Block replaced, not duplicated:
+        assert_eq!(content.matches("stt:").count(), 1, "exactly one stt: block");
+        assert!(content.contains("enabled: false"));
+        assert!(content.contains("model: small"));
+        assert!(!content.contains("model: tiny"));
+    }
 }
