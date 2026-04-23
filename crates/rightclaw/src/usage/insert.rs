@@ -139,12 +139,13 @@ mod tests {
         let conn = open_connection(dir.path(), true).unwrap();
         insert_cron(&conn, &sample_breakdown(), "my-job").unwrap();
 
-        let (source, chat_id, job_name): (String, Option<i64>, Option<String>) =
-            conn.query_row(
+        let (source, chat_id, job_name): (String, Option<i64>, Option<String>) = conn
+            .query_row(
                 "SELECT source, chat_id, job_name FROM usage_events LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            ).unwrap();
+            )
+            .unwrap();
         assert_eq!(source, "cron");
         assert_eq!(chat_id, None);
         assert_eq!(job_name, Some("my-job".into()));
@@ -159,11 +160,9 @@ mod tests {
         insert_interactive(&conn, &b, 1, 0).unwrap();
 
         let src: String = conn
-            .query_row(
-                "SELECT api_key_source FROM usage_events LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT api_key_source FROM usage_events LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(src, "ANTHROPIC_API_KEY");
     }
@@ -176,11 +175,9 @@ mod tests {
         insert_interactive(&conn, &sample_breakdown(), 1, 0).unwrap();
 
         let src: String = conn
-            .query_row(
-                "SELECT api_key_source FROM usage_events LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT api_key_source FROM usage_events LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(src, "none");
     }
@@ -206,12 +203,18 @@ mod tests {
         let conn = open_connection(dir.path(), true).unwrap();
         insert_reflection_worker(&conn, &sample_breakdown(), 42, 7).unwrap();
 
-        let (source, chat_id, thread_id, job_name): (String, Option<i64>, Option<i64>, Option<String>) =
-            conn.query_row(
+        let (source, chat_id, thread_id, job_name): (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+        ) = conn
+            .query_row(
                 "SELECT source, chat_id, thread_id, job_name FROM usage_events LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            ).unwrap();
+            )
+            .unwrap();
         assert_eq!(source, "reflection");
         assert_eq!(chat_id, Some(42));
         assert_eq!(thread_id, Some(7));
@@ -224,12 +227,13 @@ mod tests {
         let conn = open_connection(dir.path(), true).unwrap();
         insert_reflection_cron(&conn, &sample_breakdown(), "my-job").unwrap();
 
-        let (source, chat_id, job_name): (String, Option<i64>, Option<String>) =
-            conn.query_row(
+        let (source, chat_id, job_name): (String, Option<i64>, Option<String>) = conn
+            .query_row(
                 "SELECT source, chat_id, job_name FROM usage_events LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            ).unwrap();
+            )
+            .unwrap();
         assert_eq!(source, "reflection");
         assert_eq!(chat_id, None);
         assert_eq!(job_name, Some("my-job".to_string()));

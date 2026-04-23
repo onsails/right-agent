@@ -44,9 +44,15 @@ pub fn load_oauth_entries_from_db(
 
     let mut entries = Vec::new();
     for s in servers {
-        let Some(ref token_endpoint) = s.token_endpoint else { continue };
-        let Some(ref client_id) = s.client_id else { continue };
-        let Some(ref expires_at_str) = s.expires_at else { continue };
+        let Some(ref token_endpoint) = s.token_endpoint else {
+            continue;
+        };
+        let Some(ref client_id) = s.client_id else {
+            continue;
+        };
+        let Some(ref expires_at_str) = s.expires_at else {
+            continue;
+        };
 
         let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at_str)
             .map(|dt| dt.with_timezone(&chrono::Utc))

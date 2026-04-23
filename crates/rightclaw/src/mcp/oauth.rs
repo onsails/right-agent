@@ -131,7 +131,9 @@ pub fn discovery_urls(server_url: &str) -> Vec<String> {
     if path.is_empty() || path == "/" {
         urls.push(format!("{origin}/.well-known/oauth-protected-resource"));
     } else {
-        urls.push(format!("{origin}/.well-known/oauth-protected-resource{path}"));
+        urls.push(format!(
+            "{origin}/.well-known/oauth-protected-resource{path}"
+        ));
     }
 
     // Steps 2 & 3 — RFC 8414 and OIDC (no-path variants used here; path variants
@@ -165,7 +167,9 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
         urls.push(format!("{origin}/.well-known/openid-configuration"));
     } else {
         // Path-bearing AS URL: try all variants
-        urls.push(format!("{origin}/.well-known/oauth-authorization-server{path}"));
+        urls.push(format!(
+            "{origin}/.well-known/oauth-authorization-server{path}"
+        ));
         urls.push(format!("{origin}/.well-known/openid-configuration{path}"));
         urls.push(format!("{origin}{path}/.well-known/openid-configuration"));
     }
@@ -185,8 +189,9 @@ pub async fn discover_as(
     client: &reqwest::Client,
     server_url: &str,
 ) -> Result<AsMetadata, OAuthError> {
-    let parsed = reqwest::Url::parse(server_url)
-        .map_err(|e| OAuthError::DiscoveryFailed(format!("invalid server URL {server_url}: {e}")))?;
+    let parsed = reqwest::Url::parse(server_url).map_err(|e| {
+        OAuthError::DiscoveryFailed(format!("invalid server URL {server_url}: {e}"))
+    })?;
     let origin = {
         let scheme = parsed.scheme();
         let host = parsed.host_str().unwrap_or("");
@@ -214,7 +219,10 @@ pub async fn discover_as(
                         "failed to parse RFC 9728 response from {rfc9728_url}: {e}"
                     ))
                 })?;
-                debug!("discover_as: RFC 9728 succeeded, AS URL = {:?}", meta.authorization_servers.first());
+                debug!(
+                    "discover_as: RFC 9728 succeeded, AS URL = {:?}",
+                    meta.authorization_servers.first()
+                );
                 Some(
                     meta.authorization_servers
                         .into_iter()
@@ -332,7 +340,9 @@ pub async fn register_client(
     }
 
     let dcr: DcrResponse = resp.json().await.map_err(|e| {
-        OAuthError::DcrFailed(format!("failed to parse DCR response from {registration_endpoint}: {e}"))
+        OAuthError::DcrFailed(format!(
+            "failed to parse DCR response from {registration_endpoint}: {e}"
+        ))
     })?;
 
     Ok(dcr)
@@ -431,7 +441,9 @@ pub async fn exchange_token(
         .form(&params)
         .send()
         .await
-        .map_err(|e| OAuthError::TokenExchangeFailed(format!("token exchange request failed: {e}")))?;
+        .map_err(|e| {
+            OAuthError::TokenExchangeFailed(format!("token exchange request failed: {e}"))
+        })?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -457,32 +469,50 @@ mod tests {
     #[test]
     fn generate_pkce_verifier_is_43_chars() {
         let (verifier, _) = generate_pkce();
-        assert_eq!(verifier.len(), 43, "code_verifier should be 43 chars (32 bytes base64url-no-pad)");
+        assert_eq!(
+            verifier.len(),
+            43,
+            "code_verifier should be 43 chars (32 bytes base64url-no-pad)"
+        );
     }
 
     #[test]
     fn generate_pkce_challenge_is_43_chars() {
         let (_, challenge) = generate_pkce();
-        assert_eq!(challenge.len(), 43, "code_challenge should be 43 chars (SHA-256 base64url-no-pad)");
+        assert_eq!(
+            challenge.len(),
+            43,
+            "code_challenge should be 43 chars (SHA-256 base64url-no-pad)"
+        );
     }
 
     #[test]
     fn generate_pkce_challenge_matches_s256_of_verifier() {
         let (verifier, challenge) = generate_pkce();
         let expected_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-        assert_eq!(challenge, expected_challenge, "code_challenge must be S256(code_verifier)");
+        assert_eq!(
+            challenge, expected_challenge,
+            "code_challenge must be S256(code_verifier)"
+        );
     }
 
     #[test]
     fn generate_state_is_22_chars() {
         let state = generate_state();
-        assert_eq!(state.len(), 22, "state should be 22 chars (16 bytes base64url-no-pad)");
+        assert_eq!(
+            state.len(),
+            22,
+            "state should be 22 chars (16 bytes base64url-no-pad)"
+        );
     }
 
     #[test]
     fn verify_state_returns_true_for_matching() {
         let state = generate_state();
-        assert!(verify_state(&state, &state), "matching states should return true");
+        assert!(
+            verify_state(&state, &state),
+            "matching states should return true"
+        );
     }
 
     #[test]
@@ -491,7 +521,10 @@ mod tests {
         let b = generate_state();
         // Extremely unlikely to collide (128-bit random), but handle it defensively
         if a != b {
-            assert!(!verify_state(&a, &b), "different states should return false");
+            assert!(
+                !verify_state(&a, &b),
+                "different states should return false"
+            );
         }
     }
 
@@ -499,7 +532,10 @@ mod tests {
     fn verify_state_returns_false_for_different_lengths() {
         let state = generate_state();
         let short = &state[..10];
-        assert!(!verify_state(&state, short), "different-length states should return false");
+        assert!(
+            !verify_state(&state, short),
+            "different-length states should return false"
+        );
     }
 
     // Task 1: AS discovery URL construction tests
@@ -507,20 +543,28 @@ mod tests {
     fn discovery_urls_with_path_rfc9728_appends_path() {
         let urls = discovery_urls("https://mcp.example.com/mcp");
         // RFC 9728: path appended after .well-known/oauth-protected-resource
-        assert_eq!(urls[0], "https://mcp.example.com/.well-known/oauth-protected-resource/mcp");
+        assert_eq!(
+            urls[0],
+            "https://mcp.example.com/.well-known/oauth-protected-resource/mcp"
+        );
     }
 
     #[test]
     fn discovery_urls_without_path_rfc9728_no_trailing_slash() {
         let urls = discovery_urls("https://api.example.com");
-        assert_eq!(urls[0], "https://api.example.com/.well-known/oauth-protected-resource");
+        assert_eq!(
+            urls[0],
+            "https://api.example.com/.well-known/oauth-protected-resource"
+        );
     }
 
     #[test]
     fn discovery_urls_rfc8414_no_path() {
         let urls = discovery_urls("https://api.example.com");
         assert!(
-            urls.contains(&"https://api.example.com/.well-known/oauth-authorization-server".to_string()),
+            urls.contains(
+                &"https://api.example.com/.well-known/oauth-authorization-server".to_string()
+            ),
             "RFC 8414 no-path URL must be in discovery list"
         );
     }
@@ -545,15 +589,18 @@ mod tests {
     fn discovery_urls_all_contain_well_known() {
         let urls = discovery_urls("https://mcp.example.com/mcp");
         for url in &urls {
-            assert!(url.contains(".well-known"), "All discovery URLs must contain .well-known: {url}");
+            assert!(
+                url.contains(".well-known"),
+                "All discovery URLs must contain .well-known: {url}"
+            );
         }
     }
 
     // Task 1: discover_as integration tests using mock HTTP server
     #[tokio::test]
     async fn discover_as_rfc9728_success_returns_as_metadata() {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         // JSON for ResourceMetadata pointing to the same host
         let resource_meta_body = r#"{"authorization_servers":["http://127.0.0.1:0"]}"#;
@@ -602,14 +649,17 @@ mod tests {
         let result = discover_as(&client, &server_url).await;
         assert!(result.is_ok(), "discover_as should succeed: {result:?}");
         let meta = result.unwrap();
-        assert_eq!(meta.authorization_endpoint, "https://auth.example.com/authorize");
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://auth.example.com/authorize"
+        );
         assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
     }
 
     #[tokio::test]
     async fn discover_as_5xx_aborts_immediately() {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -625,13 +675,16 @@ mod tests {
         let client = reqwest::Client::new();
         let server_url = format!("http://127.0.0.1:{port}/mcp");
         let result = discover_as(&client, &server_url).await;
-        assert!(matches!(result, Err(OAuthError::DiscoveryFailed(_))), "5xx should abort: {result:?}");
+        assert!(
+            matches!(result, Err(OAuthError::DiscoveryFailed(_))),
+            "5xx should abort: {result:?}"
+        );
     }
 
     #[tokio::test]
     async fn discover_as_all_404_returns_discovery_failed() {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -642,7 +695,8 @@ mod tests {
                 if let Ok((mut stream, _)) = listener.accept().await {
                     let mut buf = [0u8; 4096];
                     let _ = stream.read(&mut buf).await;
-                    let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let resp =
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                     let _ = stream.write_all(resp.as_bytes()).await;
                 }
             }
@@ -651,7 +705,10 @@ mod tests {
         let client = reqwest::Client::new();
         let server_url = format!("http://127.0.0.1:{port}");
         let result = discover_as(&client, &server_url).await;
-        assert!(matches!(result, Err(OAuthError::DiscoveryFailed(_))), "all-404 should fail: {result:?}");
+        assert!(
+            matches!(result, Err(OAuthError::DiscoveryFailed(_))),
+            "all-404 should fail: {result:?}"
+        );
     }
 
     // Task 2: build_auth_url tests (pure function, no HTTP needed)
@@ -663,13 +720,29 @@ mod tests {
             registration_endpoint: None,
             code_challenge_methods_supported: Some(vec!["S256".to_string()]),
         };
-        let url = build_auth_url(&metadata, "client123", "https://cb.example.com/callback", "state456", "challenge789", Some("read write"));
-        assert!(url.contains("response_type=code"), "must have response_type=code");
+        let url = build_auth_url(
+            &metadata,
+            "client123",
+            "https://cb.example.com/callback",
+            "state456",
+            "challenge789",
+            Some("read write"),
+        );
+        assert!(
+            url.contains("response_type=code"),
+            "must have response_type=code"
+        );
         assert!(url.contains("client_id=client123"), "must have client_id");
         assert!(url.contains("redirect_uri="), "must have redirect_uri");
         assert!(url.contains("state=state456"), "must have state");
-        assert!(url.contains("code_challenge=challenge789"), "must have code_challenge");
-        assert!(url.contains("code_challenge_method=S256"), "must have S256 method");
+        assert!(
+            url.contains("code_challenge=challenge789"),
+            "must have code_challenge"
+        );
+        assert!(
+            url.contains("code_challenge_method=S256"),
+            "must have S256 method"
+        );
         assert!(url.contains("scope="), "must have scope when provided");
     }
 
@@ -681,15 +754,25 @@ mod tests {
             registration_endpoint: None,
             code_challenge_methods_supported: None,
         };
-        let url = build_auth_url(&metadata, "client123", "https://cb.example.com/callback", "state456", "challenge789", None);
-        assert!(!url.contains("scope="), "scope param must be absent when None");
+        let url = build_auth_url(
+            &metadata,
+            "client123",
+            "https://cb.example.com/callback",
+            "state456",
+            "challenge789",
+            None,
+        );
+        assert!(
+            !url.contains("scope="),
+            "scope param must be absent when None"
+        );
     }
 
     // Task 2: register_client tests
     #[tokio::test]
     async fn register_client_posts_correct_body_and_returns_client_id() {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -700,13 +783,20 @@ mod tests {
             let n = stream.read(&mut buf).await.unwrap();
             let request = String::from_utf8_lossy(&buf[..n]);
             // Verify RightClaw client_name is in body
-            assert!(request.contains("RightClaw"), "DCR body must contain RightClaw");
-            assert!(request.contains("authorization_code"), "DCR body must contain authorization_code");
+            assert!(
+                request.contains("RightClaw"),
+                "DCR body must contain RightClaw"
+            );
+            assert!(
+                request.contains("authorization_code"),
+                "DCR body must contain authorization_code"
+            );
 
             let body = r#"{"client_id":"dcr-client-id-123","client_secret":null}"#;
             let resp = format!(
                 "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
+                body.len(),
+                body
             );
             let _ = stream.write_all(resp.as_bytes()).await;
         });
@@ -720,8 +810,8 @@ mod tests {
 
     #[tokio::test]
     async fn register_client_non_2xx_returns_dcr_failed() {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -737,7 +827,10 @@ mod tests {
         let client = reqwest::Client::new();
         let reg_ep = format!("http://127.0.0.1:{port}/register");
         let result = register_client(&client, &reg_ep, "https://cb.example.com/callback").await;
-        assert!(matches!(result, Err(OAuthError::DcrFailed(_))), "non-2xx should be DcrFailed: {result:?}");
+        assert!(
+            matches!(result, Err(OAuthError::DcrFailed(_))),
+            "non-2xx should be DcrFailed: {result:?}"
+        );
     }
 
     #[test]
@@ -752,7 +845,13 @@ mod tests {
                 registration_endpoint: None,
                 code_challenge_methods_supported: None,
             };
-            let result = register_client_or_fallback(&client, &metadata, Some("static-id-abc"), "https://cb.example.com/callback").await;
+            let result = register_client_or_fallback(
+                &client,
+                &metadata,
+                Some("static-id-abc"),
+                "https://cb.example.com/callback",
+            )
+            .await;
             assert!(result.is_ok(), "static fallback should succeed");
             let (client_id, secret) = result.unwrap();
             assert_eq!(client_id, "static-id-abc");
@@ -771,16 +870,25 @@ mod tests {
                 registration_endpoint: None,
                 code_challenge_methods_supported: None,
             };
-            let result = register_client_or_fallback(&client, &metadata, None, "https://cb.example.com/callback").await;
-            assert!(matches!(result, Err(OAuthError::MissingClientId)), "no endpoint + no static id = MissingClientId");
+            let result = register_client_or_fallback(
+                &client,
+                &metadata,
+                None,
+                "https://cb.example.com/callback",
+            )
+            .await;
+            assert!(
+                matches!(result, Err(OAuthError::MissingClientId)),
+                "no endpoint + no static id = MissingClientId"
+            );
         });
     }
 
     // Task 2: exchange_token tests
     #[tokio::test]
     async fn exchange_token_posts_form_and_returns_token_response() {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -791,21 +899,37 @@ mod tests {
             let n = stream.read(&mut buf).await.unwrap();
             let request = String::from_utf8_lossy(&buf[..n]);
             // Verify form fields
-            assert!(request.contains("grant_type=authorization_code"), "must have grant_type");
+            assert!(
+                request.contains("grant_type=authorization_code"),
+                "must have grant_type"
+            );
             assert!(request.contains("code=auth-code-xyz"), "must have code");
-            assert!(request.contains("code_verifier="), "must have code_verifier");
+            assert!(
+                request.contains("code_verifier="),
+                "must have code_verifier"
+            );
 
             let body = r#"{"access_token":"tok-abc","token_type":"Bearer","expires_in":3600}"#;
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
+                body.len(),
+                body
             );
             let _ = stream.write_all(resp.as_bytes()).await;
         });
 
         let client = reqwest::Client::new();
         let token_ep = format!("http://127.0.0.1:{port}/token");
-        let result = exchange_token(&client, &token_ep, "auth-code-xyz", "https://cb.example.com/callback", "client123", None, "verifier-string").await;
+        let result = exchange_token(
+            &client,
+            &token_ep,
+            "auth-code-xyz",
+            "https://cb.example.com/callback",
+            "client123",
+            None,
+            "verifier-string",
+        )
+        .await;
         assert!(result.is_ok(), "exchange_token should succeed: {result:?}");
         let tok = result.unwrap();
         assert_eq!(tok.access_token, "tok-abc");
@@ -814,8 +938,8 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_token_non_2xx_returns_token_exchange_failed() {
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -827,14 +951,27 @@ mod tests {
             let body = r#"{"error":"invalid_grant"}"#;
             let resp = format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
+                body.len(),
+                body
             );
             let _ = stream.write_all(resp.as_bytes()).await;
         });
 
         let client = reqwest::Client::new();
         let token_ep = format!("http://127.0.0.1:{port}/token");
-        let result = exchange_token(&client, &token_ep, "bad-code", "https://cb.example.com/callback", "client123", None, "verifier").await;
-        assert!(matches!(result, Err(OAuthError::TokenExchangeFailed(_))), "non-2xx should be TokenExchangeFailed: {result:?}");
+        let result = exchange_token(
+            &client,
+            &token_ep,
+            "bad-code",
+            "https://cb.example.com/callback",
+            "client123",
+            None,
+            "verifier",
+        )
+        .await;
+        assert!(
+            matches!(result, Err(OAuthError::TokenExchangeFailed(_))),
+            "non-2xx should be TokenExchangeFailed: {result:?}"
+        );
     }
 }

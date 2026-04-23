@@ -314,11 +314,19 @@ fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
     let now = chrono::Utc::now();
     let mut file = AllowlistFile::default();
     for &id in users {
-        file.users.push(AllowedUser { id, label: None, added_by: None, added_at: now });
+        file.users.push(AllowedUser {
+            id,
+            label: None,
+            added_by: None,
+            added_at: now,
+        });
     }
     for &id in groups {
         file.groups.push(rightclaw::agent::allowlist::AllowedGroup {
-            id, label: None, opened_by: None, opened_at: now,
+            id,
+            label: None,
+            opened_by: None,
+            opened_at: now,
         });
     }
     rightclaw::agent::allowlist::write_file(agent_dir, &file).unwrap();
@@ -341,7 +349,10 @@ async fn cron_create_rejects_target_not_in_allowlist() {
         "prompt": "p",
         "target_chat_id": -999_i64,
     });
-    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await.unwrap();
+    let result = backend
+        .tools_call("a1", &agent_dir, "cron_create", args)
+        .await
+        .unwrap();
     let text = result
         .content
         .first()
@@ -371,7 +382,10 @@ async fn cron_create_accepts_target_in_allowlist_group() {
         "target_chat_id": -200_i64,
         "target_thread_id": 7_i64,
     });
-    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await.unwrap();
+    let result = backend
+        .tools_call("a1", &agent_dir, "cron_create", args)
+        .await
+        .unwrap();
     let text = result
         .content
         .first()
@@ -397,8 +411,13 @@ async fn cron_create_rejects_missing_target_chat_id() {
         "prompt": "p",
         // target_chat_id deliberately omitted
     });
-    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await;
-    assert!(result.is_err(), "missing required field must surface as error");
+    let result = backend
+        .tools_call("a1", &agent_dir, "cron_create", args)
+        .await;
+    assert!(
+        result.is_err(),
+        "missing required field must surface as error"
+    );
 }
 
 #[tokio::test]
@@ -417,7 +436,10 @@ async fn cron_create_rejects_when_allowlist_missing() {
         "prompt": "p",
         "target_chat_id": -200_i64,
     });
-    let result = backend.tools_call("a1", &agent_dir, "cron_create", args).await.unwrap();
+    let result = backend
+        .tools_call("a1", &agent_dir, "cron_create", args)
+        .await
+        .unwrap();
     let text = result
         .content
         .first()
@@ -471,7 +493,12 @@ async fn cron_update_changes_target_chat_id_with_validation() {
         )
         .await
         .unwrap();
-    let text = result.content.first().and_then(|c| c.as_text()).map(|t| t.text.clone()).unwrap_or_default();
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
     assert!(text.contains("Updated"), "got: {text}");
 
     // Reject change to non-allowlisted chat
@@ -487,8 +514,16 @@ async fn cron_update_changes_target_chat_id_with_validation() {
         )
         .await
         .unwrap();
-    let denied_text = denied.content.first().and_then(|c| c.as_text()).map(|t| t.text.clone()).unwrap_or_default();
-    assert!(denied_text.contains("not in allowlist"), "got: {denied_text}");
+    let denied_text = denied
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(
+        denied_text.contains("not in allowlist"),
+        "got: {denied_text}"
+    );
 }
 
 #[tokio::test]
@@ -532,7 +567,11 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
 
     let conn = rightclaw::memory::open_connection(&agent_dir, false).unwrap();
     let thread: Option<i64> = conn
-        .query_row("SELECT target_thread_id FROM cron_specs WHERE job_name='j1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT target_thread_id FROM cron_specs WHERE job_name='j1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert!(thread.is_none(), "explicit null must clear the column");
 }

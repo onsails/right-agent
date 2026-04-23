@@ -77,8 +77,8 @@ pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
     if !path.exists() {
         return Ok(GlobalConfig::default());
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| miette::miette!("read config.yaml: {e:#}"))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| miette::miette!("read config.yaml: {e:#}"))?;
     let raw: RawGlobalConfig = serde_saphyr::from_str(&content)
         .map_err(|e| miette::miette!("parse config.yaml: {e:#}"))?;
     Ok(GlobalConfig {
@@ -110,14 +110,17 @@ pub fn write_global_config(home: &Path, config: &GlobalConfig) -> miette::Result
     if let Some(ref tunnel) = config.tunnel {
         content.push_str("tunnel:\n");
         let uuid = tunnel.tunnel_uuid.replace('"', "\\\"");
-        let creds = tunnel.credentials_file.display().to_string().replace('"', "\\\"");
+        let creds = tunnel
+            .credentials_file
+            .display()
+            .to_string()
+            .replace('"', "\\\"");
         let hostname = tunnel.hostname.replace('"', "\\\"");
         content.push_str(&format!("  tunnel_uuid: \"{uuid}\"\n"));
         content.push_str(&format!("  credentials_file: \"{creds}\"\n"));
         content.push_str(&format!("  hostname: \"{hostname}\"\n"));
     }
-    std::fs::write(&path, &content)
-        .map_err(|e| miette::miette!("write config.yaml: {e:#}"))?;
+    std::fs::write(&path, &content).map_err(|e| miette::miette!("write config.yaml: {e:#}"))?;
     Ok(())
 }
 
@@ -215,5 +218,4 @@ mod tests {
         let config = read_global_config(dir.path()).unwrap();
         assert!(config.tunnel.is_none(), "no tunnel config when file absent");
     }
-
 }

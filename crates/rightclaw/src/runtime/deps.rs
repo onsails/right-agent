@@ -53,7 +53,10 @@ mod tests {
     fn verify_dependencies_checks_for_known_missing_binary() {
         // Test the `which` error path by checking for a binary that definitely doesn't exist.
         let result = which::which("rightclaw-nonexistent-binary-42");
-        assert!(result.is_err(), "expected nonexistent binary to fail which lookup");
+        assert!(
+            result.is_err(),
+            "expected nonexistent binary to fail which lookup"
+        );
     }
 
     #[test]
@@ -86,7 +89,10 @@ mod tests {
         }
         // If git is present, ensure which::which("git") succeeds:
         if git_result.is_ok() {
-            assert!(git_result.unwrap().exists(), "git path should exist if found");
+            assert!(
+                git_result.unwrap().exists(),
+                "git path should exist if found"
+            );
         }
     }
 }

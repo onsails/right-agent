@@ -42,7 +42,10 @@ pub fn directory_hash(dir: &Path) -> miette::Result<String> {
         hasher.update(&content);
     }
     let hash = hasher.finalize();
-    Ok(format!("{:08x}", u32::from_be_bytes(hash[..4].try_into().unwrap())))
+    Ok(format!(
+        "{:08x}",
+        u32::from_be_bytes(hash[..4].try_into().unwrap())
+    ))
 }
 
 /// Content-addressed name: `name.hash`
@@ -83,14 +86,17 @@ pub fn build_manifest(agent_dir: &Path) -> miette::Result<Manifest> {
         ("reply-schema.json", "/sandbox/.claude/reply-schema.json"),
         ("cron-schema.json", "/sandbox/.claude/cron-schema.json"),
         ("system-prompt.md", "/sandbox/.claude/system-prompt.md"),
-        ("bootstrap-schema.json", "/sandbox/.claude/bootstrap-schema.json"),
+        (
+            "bootstrap-schema.json",
+            "/sandbox/.claude/bootstrap-schema.json",
+        ),
     ];
 
     for &(name, link) in claude_files {
         let path = claude_dir.join(name);
         if path.exists() {
-            let content = std::fs::read(&path)
-                .map_err(|e| miette::miette!("read {name}: {e:#}"))?;
+            let content =
+                std::fs::read(&path).map_err(|e| miette::miette!("read {name}: {e:#}"))?;
             let hash = content_hash(&content);
             entries.push(ManifestEntry {
                 name: name.to_owned(),
@@ -107,8 +113,8 @@ pub fn build_manifest(agent_dir: &Path) -> miette::Result<Manifest> {
     // mcp.json at agent root
     let mcp_json = agent_dir.join("mcp.json");
     if mcp_json.exists() {
-        let content = std::fs::read(&mcp_json)
-            .map_err(|e| miette::miette!("read mcp.json: {e:#}"))?;
+        let content =
+            std::fs::read(&mcp_json).map_err(|e| miette::miette!("read mcp.json: {e:#}"))?;
         let hash = content_hash(&content);
         entries.push(ManifestEntry {
             name: "mcp.json".to_owned(),
@@ -199,18 +205,14 @@ pub async fn deploy_file(
     // Check if content-addressed file already exists (dedup).
     let (_, exit_code) = sbox.exec(&["test", "-e", &full_platform_path]).await?;
     if exit_code != 0 {
-        let platform_dir = format!(
-            "{PLATFORM_DIR}/{}",
-            platform_prefix.trim_end_matches('/')
-        );
+        let platform_dir = format!("{PLATFORM_DIR}/{}", platform_prefix.trim_end_matches('/'));
         let (_, code) = sbox.exec(&["mkdir", "-p", &platform_dir]).await?;
         if code != 0 {
             miette::bail!("mkdir -p {platform_dir} failed with exit code {code}");
         }
 
         // Write content to temp file, upload, rename to content-addressed name.
-        let tmp_dir = tempfile::tempdir()
-            .map_err(|e| miette::miette!("create tempdir: {e:#}"))?;
+        let tmp_dir = tempfile::tempdir().map_err(|e| miette::miette!("create tempdir: {e:#}"))?;
         let tmp_file = tmp_dir.path().join(name);
         std::fs::write(&tmp_file, content)
             .map_err(|e| miette::miette!("write temp file {}: {e:#}", tmp_file.display()))?;
@@ -219,9 +221,13 @@ pub async fn deploy_file(
         crate::openshell::upload_file(sbox.sandbox_name(), &tmp_file, &upload_dest).await?;
 
         let uploaded_path = format!("{platform_dir}/{name}");
-        let (_, code) = sbox.exec(&["mv", &uploaded_path, &full_platform_path]).await?;
+        let (_, code) = sbox
+            .exec(&["mv", &uploaded_path, &full_platform_path])
+            .await?;
         if code != 0 {
-            miette::bail!("mv {uploaded_path} -> {full_platform_path} failed with exit code {code}");
+            miette::bail!(
+                "mv {uploaded_path} -> {full_platform_path} failed with exit code {code}"
+            );
         }
     }
 
@@ -262,7 +268,10 @@ pub async fn deploy_directory(
                 .path()
                 .strip_prefix(host_dir)
                 .map_err(|e| miette::miette!("strip_prefix: {e:#}"))?;
-            file_entries.push((entry.path().to_path_buf(), rel.to_string_lossy().to_string()));
+            file_entries.push((
+                entry.path().to_path_buf(),
+                rel.to_string_lossy().to_string(),
+            ));
         }
 
         // Create subdirectories.
@@ -428,4 +437,3 @@ pub async fn deploy_manifest(
 
     Ok(())
 }
-

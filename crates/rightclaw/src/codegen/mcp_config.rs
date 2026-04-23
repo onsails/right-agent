@@ -114,18 +114,22 @@ mod tests {
     #[test]
     fn creates_mcp_json_when_absent() {
         let dir = tempdir().unwrap();
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["right"]["command"],
-            "rightclaw",
+            parsed["mcpServers"]["right"]["command"], "rightclaw",
             "right command should be 'rightclaw'"
         );
         assert_eq!(
-            parsed["mcpServers"]["right"]["args"][0],
-            "memory-server",
+            parsed["mcpServers"]["right"]["args"][0], "memory-server",
             "right args[0] should be 'memory-server'"
         );
     }
@@ -139,7 +143,13 @@ mod tests {
         )
         .unwrap();
 
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -148,8 +158,7 @@ mod tests {
             "existing 'other' server must be preserved"
         );
         assert_eq!(
-            parsed["mcpServers"]["right"]["command"],
-            "rightclaw",
+            parsed["mcpServers"]["right"]["command"], "rightclaw",
             "right server must be added"
         );
     }
@@ -163,7 +172,13 @@ mod tests {
         )
         .unwrap();
 
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -172,8 +187,7 @@ mod tests {
             "'otherService' key must be preserved"
         );
         assert_eq!(
-            parsed["mcpServers"]["right"]["command"],
-            "rightclaw",
+            parsed["mcpServers"]["right"]["command"], "rightclaw",
             "right must be present"
         );
     }
@@ -187,18 +201,22 @@ mod tests {
         )
         .unwrap();
 
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["right"]["command"],
-            "rightclaw",
+            parsed["mcpServers"]["right"]["command"], "rightclaw",
             "stale command should be replaced"
         );
         assert_eq!(
-            parsed["mcpServers"]["right"]["args"][0],
-            "memory-server",
+            parsed["mcpServers"]["right"]["args"][0], "memory-server",
             "stale args should be replaced"
         );
     }
@@ -206,24 +224,32 @@ mod tests {
     #[test]
     fn idempotent_on_repeated_calls() {
         let dir = tempdir().unwrap();
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         // Valid JSON with single right entry
         assert!(parsed.is_object(), "result must be valid JSON object");
         assert_eq!(
-            parsed["mcpServers"]["right"]["command"],
-            "rightclaw",
+            parsed["mcpServers"]["right"]["command"], "rightclaw",
             "right must be present after two calls"
         );
         // Ensure only one right key (no duplication)
         let servers = parsed["mcpServers"].as_object().unwrap();
-        let count = servers
-            .keys()
-            .filter(|k| k.as_str() == "right")
-            .count();
+        let count = servers.keys().filter(|k| k.as_str() == "right").count();
         assert_eq!(count, 1, "right should appear exactly once");
     }
 
@@ -232,17 +258,19 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("mcp.json"), r#"{"telegram": true}"#).unwrap();
 
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["telegram"], true, "'telegram' key must be preserved");
         assert_eq!(
-            parsed["telegram"], true,
-            "'telegram' key must be preserved"
-        );
-        assert_eq!(
-            parsed["mcpServers"]["right"]["command"],
-            "rightclaw",
+            parsed["mcpServers"]["right"]["command"], "rightclaw",
             "mcpServers.right must be added"
         );
     }
@@ -250,12 +278,17 @@ mod tests {
     #[test]
     fn uses_provided_binary_path() {
         let dir = tempdir().unwrap();
-        generate_mcp_config(dir.path(), Path::new("/usr/local/bin/rightclaw"), "test-agent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("/usr/local/bin/rightclaw"),
+            "test-agent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["right"]["command"],
-            "/usr/local/bin/rightclaw",
+            parsed["mcpServers"]["right"]["command"], "/usr/local/bin/rightclaw",
             "command must be the absolute path passed in, not a hardcoded name"
         );
     }
@@ -263,12 +296,17 @@ mod tests {
     #[test]
     fn mcp_config_env_contains_agent_name() {
         let dir = tempdir().unwrap();
-        generate_mcp_config(dir.path(), Path::new("rightclaw"), "myagent", Path::new("/home/user")).unwrap();
+        generate_mcp_config(
+            dir.path(),
+            Path::new("rightclaw"),
+            "myagent",
+            Path::new("/home/user"),
+        )
+        .unwrap();
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["right"]["env"]["RC_AGENT_NAME"],
-            "myagent",
+            parsed["mcpServers"]["right"]["env"]["RC_AGENT_NAME"], "myagent",
             "RC_AGENT_NAME must be injected into env"
         );
     }
@@ -281,8 +319,7 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["right"]["env"]["RC_RIGHTCLAW_HOME"],
-            "/home/user/.rightclaw",
+            parsed["mcpServers"]["right"]["env"]["RC_RIGHTCLAW_HOME"], "/home/user/.rightclaw",
             "RC_RIGHTCLAW_HOME must be injected into env"
         );
     }
@@ -323,8 +360,7 @@ mod tests {
             r#"{"mcpServers":{"notion":{"type":"http","url":"https://mcp.notion.com/mcp"},"rightmemory":{"command":"old"}}}"#,
         )
         .unwrap();
-        generate_mcp_config_http(dir.path(), "brain", "http://localhost:8100/mcp", "tok")
-            .unwrap();
+        generate_mcp_config_http(dir.path(), "brain", "http://localhost:8100/mcp", "tok").unwrap();
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
         let servers = content["mcpServers"].as_object().unwrap();
@@ -367,15 +403,17 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
         let servers = content["mcpServers"].as_object().unwrap();
-        assert_eq!(servers.len(), 1, "only 'right' should remain after overwrite");
         assert_eq!(
-            content["mcpServers"]["right"]["url"],
-            "http://host.openshell.internal:8100/mcp",
+            servers.len(),
+            1,
+            "only 'right' should remain after overwrite"
+        );
+        assert_eq!(
+            content["mcpServers"]["right"]["url"], "http://host.openshell.internal:8100/mcp",
             "right URL must be updated"
         );
         assert_eq!(
-            content["mcpServers"]["right"]["headers"]["Authorization"],
-            "Bearer new-token",
+            content["mcpServers"]["right"]["headers"]["Authorization"], "Bearer new-token",
             "right token must be updated"
         );
         // Top-level keys from old file should NOT survive (written from scratch)
@@ -394,5 +432,4 @@ mod tests {
         let token2 = generate_agent_token();
         assert_ne!(token, token2);
     }
-
 }

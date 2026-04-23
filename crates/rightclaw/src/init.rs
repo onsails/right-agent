@@ -87,16 +87,15 @@ pub fn init_agent(
     crate::codegen::install_builtin_skills(&agents_dir, &ov.memory_provider)?;
 
     // Resolve host HOME once, before any HOME env manipulation (Phase 8).
-    let host_home = dirs::home_dir()
-        .ok_or_else(|| miette::miette!("cannot determine home directory"))?;
+    let host_home =
+        dirs::home_dir().ok_or_else(|| miette::miette!("cannot determine home directory"))?;
 
     // Generate .claude/settings.json via codegen (D-17, D-18).
     {
         let settings = crate::codegen::generate_settings()?;
         let claude_dir = agents_dir.join(".claude");
-        std::fs::create_dir_all(&claude_dir).map_err(|e| {
-            miette::miette!("Failed to create {}: {}", claude_dir.display(), e)
-        })?;
+        std::fs::create_dir_all(&claude_dir)
+            .map_err(|e| miette::miette!("Failed to create {}: {}", claude_dir.display(), e))?;
         std::fs::write(
             claude_dir.join("settings.json"),
             serde_json::to_string_pretty(&settings)
@@ -161,8 +160,7 @@ pub fn init_agent(
                 memory_section.push_str(&format!("  bank_id: \"{bank}\"\n"));
             }
             if ov.memory_recall_budget != DEFAULT_RECALL_BUDGET {
-                memory_section
-                    .push_str(&format!("  recall_budget: {}\n", ov.memory_recall_budget));
+                memory_section.push_str(&format!("  recall_budget: {}\n", ov.memory_recall_budget));
             }
             if ov.memory_recall_max_tokens != DEFAULT_RECALL_MAX_TOKENS {
                 memory_section.push_str(&format!(
@@ -198,9 +196,7 @@ pub fn init_agent(
                 chrono::Utc::now(),
             )
             .map_err(|e| miette::miette!("seed allowlist.yaml: {e:#}"))?;
-            if !report.already_present
-                && (report.migrated_users + report.migrated_groups) > 0
-            {
+            if !report.already_present && (report.migrated_users + report.migrated_groups) > 0 {
                 tracing::info!(
                     users = report.migrated_users,
                     groups = report.migrated_groups,
@@ -318,7 +314,9 @@ pub fn validate_telegram_token(token: &str) -> miette::Result<()> {
 fn inquire_back<T>(result: Result<T, inquire::InquireError>) -> miette::Result<Option<T>> {
     match result {
         Ok(v) => Ok(Some(v)),
-        Err(inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted) => Ok(None),
+        Err(
+            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
+        ) => Ok(None),
         Err(e) => Err(miette::miette!("prompt failed: {e:#}")),
     }
 }
@@ -332,7 +330,9 @@ pub fn prompt_sandbox_mode() -> miette::Result<Option<SandboxMode>> {
     let result = inquire::Select::new("Sandbox mode:", options)
         .with_starting_cursor(0)
         .prompt();
-    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    let Some(choice) = inquire_back(result)? else {
+        return Ok(None);
+    };
     Ok(Some(if choice.starts_with("OpenShell") {
         SandboxMode::Openshell
     } else {
@@ -349,7 +349,9 @@ pub fn prompt_network_policy() -> miette::Result<Option<NetworkPolicy>> {
     let result = inquire::Select::new("Network policy for sandbox:", options)
         .with_starting_cursor(0)
         .prompt();
-    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    let Some(choice) = inquire_back(result)? else {
+        return Ok(None);
+    };
     Ok(Some(if choice.starts_with("Permissive") {
         NetworkPolicy::Permissive
     } else {
@@ -366,7 +368,9 @@ pub fn prompt_memory_provider() -> miette::Result<Option<MemoryProvider>> {
     let result = inquire::Select::new("Memory provider:", options)
         .with_starting_cursor(0)
         .prompt();
-    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    let Some(choice) = inquire_back(result)? else {
+        return Ok(None);
+    };
     Ok(Some(if choice.starts_with("Hindsight") {
         MemoryProvider::Hindsight
     } else {
@@ -377,9 +381,11 @@ pub fn prompt_memory_provider() -> miette::Result<Option<MemoryProvider>> {
 /// Prompt for Hindsight API key. Returns `Ok(None)` on Esc (back).
 /// Empty input means "use HINDSIGHT_API_KEY env var at runtime".
 pub fn prompt_hindsight_api_key() -> miette::Result<Option<Option<String>>> {
-    let result = inquire::Text::new("Hindsight API key (Enter to use HINDSIGHT_API_KEY env var):")
-        .prompt();
-    let Some(input) = inquire_back(result)? else { return Ok(None) };
+    let result =
+        inquire::Text::new("Hindsight API key (Enter to use HINDSIGHT_API_KEY env var):").prompt();
+    let Some(input) = inquire_back(result)? else {
+        return Ok(None);
+    };
     let trimmed = input.trim();
     if trimmed.is_empty() {
         Ok(Some(None))
@@ -391,9 +397,11 @@ pub fn prompt_hindsight_api_key() -> miette::Result<Option<Option<String>>> {
 /// Prompt for Hindsight bank ID. Returns `Ok(None)` on Esc (back).
 /// Empty input means "use agent name as default".
 pub fn prompt_hindsight_bank_id(agent_name: &str) -> miette::Result<Option<Option<String>>> {
-    let result = inquire::Text::new(&format!("Hindsight bank ID (default: {agent_name}):"))
-        .prompt();
-    let Some(input) = inquire_back(result)? else { return Ok(None) };
+    let result =
+        inquire::Text::new(&format!("Hindsight bank ID (default: {agent_name}):")).prompt();
+    let Some(input) = inquire_back(result)? else {
+        return Ok(None);
+    };
     let trimmed = input.trim();
     if trimmed.is_empty() {
         Ok(Some(None))
@@ -412,7 +420,9 @@ pub fn prompt_recall_budget() -> miette::Result<Option<RecallBudget>> {
     let result = inquire::Select::new("Recall budget:", options)
         .with_starting_cursor(0)
         .prompt();
-    let Some(choice) = inquire_back(result)? else { return Ok(None) };
+    let Some(choice) = inquire_back(result)? else {
+        return Ok(None);
+    };
     Ok(Some(if choice.starts_with("Low") {
         RecallBudget::Low
     } else if choice.starts_with("High") {
@@ -429,7 +439,9 @@ pub fn prompt_recall_max_tokens() -> miette::Result<Option<u32>> {
         "Recall max tokens (default: {DEFAULT_RECALL_MAX_TOKENS}):"
     ))
     .prompt();
-    let Some(input) = inquire_back(result)? else { return Ok(None) };
+    let Some(input) = inquire_back(result)? else {
+        return Ok(None);
+    };
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Ok(Some(DEFAULT_RECALL_MAX_TOKENS));
@@ -466,9 +478,7 @@ pub async fn validate_hindsight_key(api_key: &str) -> ValidationResult {
         None,
     );
     match client.list_banks().await {
-        Ok(banks) => ValidationResult::Valid {
-            banks: banks.len(),
-        },
+        Ok(banks) => ValidationResult::Valid { banks: banks.len() },
         Err(crate::memory::MemoryError::Hindsight { status, .. })
             if status == 401 || status == 403 =>
         {
@@ -536,21 +546,51 @@ mod tests {
     #[test]
     fn init_creates_default_agent_files() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
         let agents_dir = dir.path().join("agents").join("right");
-        assert!(!agents_dir.join("IDENTITY.md").exists(), "IDENTITY.md must not be created by init");
-        assert!(!agents_dir.join("SOUL.md").exists(), "SOUL.md must not be created by init");
-        assert!(!agents_dir.join("USER.md").exists(), "USER.md must not be created by init");
-        assert!(agents_dir.join("staging").is_dir(), "staging/ dir should be created");
+        assert!(
+            !agents_dir.join("IDENTITY.md").exists(),
+            "IDENTITY.md must not be created by init"
+        );
+        assert!(
+            !agents_dir.join("SOUL.md").exists(),
+            "SOUL.md must not be created by init"
+        );
+        assert!(
+            !agents_dir.join("USER.md").exists(),
+            "USER.md must not be created by init"
+        );
+        assert!(
+            agents_dir.join("staging").is_dir(),
+            "staging/ dir should be created"
+        );
         assert!(agents_dir.join("AGENTS.md").exists());
-        assert!(agents_dir.join("TOOLS.md").exists(), "TOOLS.md must be created by init");
+        assert!(
+            agents_dir.join("TOOLS.md").exists(),
+            "TOOLS.md must be created by init"
+        );
         let tools_content = std::fs::read_to_string(agents_dir.join("TOOLS.md")).unwrap();
         assert!(
             tools_content.contains("Tool selection"),
             "TOOLS.md must be seeded from template"
         );
-        assert!(agents_dir.join("policy.yaml").exists(), "policy.yaml should be created for openshell mode");
+        assert!(
+            agents_dir.join("policy.yaml").exists(),
+            "policy.yaml should be created for openshell mode"
+        );
         assert!(
             agents_dir.join("BOOTSTRAP.md").exists(),
             "BOOTSTRAP.md should always be created"
@@ -560,11 +600,15 @@ mod tests {
             "agent.yaml should always be created"
         );
         assert!(
-            agents_dir.join(".claude/skills/rightskills/SKILL.md").exists(),
+            agents_dir
+                .join(".claude/skills/rightskills/SKILL.md")
+                .exists(),
             "rightskills skill should be installed"
         );
         assert!(
-            agents_dir.join(".claude/skills/rightcron/SKILL.md").exists(),
+            agents_dir
+                .join(".claude/skills/rightcron/SKILL.md")
+                .exists(),
             "rightcron skill should be installed"
         );
     }
@@ -572,9 +616,32 @@ mod tests {
     #[test]
     fn init_errors_if_already_initialized() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
-        let result = init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS);
+        let result = init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        );
         assert!(result.is_err());
         let err = format!("{:?}", result.unwrap_err());
         assert!(
@@ -591,7 +658,19 @@ mod tests {
     #[test]
     fn init_with_telegram_writes_token_inline_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            Some("123456:ABCdef"),
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -603,12 +682,22 @@ mod tests {
     #[test]
     fn init_creates_bootstrap_md() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
-
-        let bootstrap = std::fs::read_to_string(
-            dir.path().join("agents/right/BOOTSTRAP.md"),
+        init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
         )
         .unwrap();
+
+        let bootstrap =
+            std::fs::read_to_string(dir.path().join("agents/right/BOOTSTRAP.md")).unwrap();
         assert!(
             bootstrap.contains("First-run onboarding"),
             "BOOTSTRAP.md should contain onboarding content"
@@ -650,11 +739,21 @@ mod tests {
     #[test]
     fn init_with_telegram_creates_settings_json() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            Some("123456:ABCdef"),
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
-        let settings_path = dir
-            .path()
-            .join("agents/right/.claude/settings.json");
+        let settings_path = dir.path().join("agents/right/.claude/settings.json");
         assert!(
             settings_path.exists(),
             "settings.json should be created when telegram token is provided"
@@ -684,7 +783,19 @@ mod tests {
     #[test]
     fn init_creates_settings_without_sandbox_section() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
         let settings_path = dir.path().join("agents/right/.claude/settings.json");
         let content = std::fs::read_to_string(&settings_path).unwrap();
@@ -701,11 +812,21 @@ mod tests {
     #[test]
     fn init_without_telegram_creates_settings_without_plugin() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
-        let settings_path = dir
-            .path()
-            .join("agents/right/.claude/settings.json");
+        let settings_path = dir.path().join("agents/right/.claude/settings.json");
         assert!(
             settings_path.exists(),
             "settings.json should always be created"
@@ -747,8 +868,7 @@ mod tests {
         )
         .unwrap();
 
-        let yaml =
-            std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
+        let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
             yaml.contains("allowed_chat_ids:"),
             "agent.yaml must contain allowed_chat_ids section, got:\n{yaml}"
@@ -805,7 +925,19 @@ mod tests {
     #[test]
     fn init_with_telegram_no_chat_ids_does_not_write_allowed_chat_ids() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), Some("123456:ABCdef"), &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            Some("123456:ABCdef"),
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -821,7 +953,19 @@ mod tests {
     #[test]
     fn init_writes_network_policy_restrictive_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Restrictive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Restrictive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -833,7 +977,19 @@ mod tests {
     #[test]
     fn init_writes_network_policy_permissive_to_agent_yaml() {
         let dir = tempdir().unwrap();
-        init_rightclaw_home(dir.path(), None, &[], &NetworkPolicy::Permissive, &SandboxMode::Openshell, MemoryProvider::File, None, None, DEFAULT_RECALL_BUDGET, DEFAULT_RECALL_MAX_TOKENS).unwrap();
+        init_rightclaw_home(
+            dir.path(),
+            None,
+            &[],
+            &NetworkPolicy::Permissive,
+            &SandboxMode::Openshell,
+            MemoryProvider::File,
+            None,
+            None,
+            DEFAULT_RECALL_BUDGET,
+            DEFAULT_RECALL_MAX_TOKENS,
+        )
+        .unwrap();
 
         let yaml = std::fs::read_to_string(dir.path().join("agents/right/agent.yaml")).unwrap();
         assert!(
@@ -858,12 +1014,7 @@ mod tests {
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
-        init_agent(
-            &dir.path().join("agents"),
-            "test-agent",
-            Some(&overrides),
-        )
-        .unwrap();
+        init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
         assert!(
             policy_path.exists(),
@@ -892,12 +1043,7 @@ mod tests {
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
-        init_agent(
-            &dir.path().join("agents"),
-            "test-agent",
-            Some(&overrides),
-        )
-        .unwrap();
+        init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let policy_path = dir.path().join("agents/test-agent/policy.yaml");
         assert!(
             !policy_path.exists(),
@@ -921,12 +1067,7 @@ mod tests {
             memory_recall_budget: DEFAULT_RECALL_BUDGET,
             memory_recall_max_tokens: DEFAULT_RECALL_MAX_TOKENS,
         };
-        init_agent(
-            &dir.path().join("agents"),
-            "test-agent",
-            Some(&overrides),
-        )
-        .unwrap();
+        init_agent(&dir.path().join("agents"), "test-agent", Some(&overrides)).unwrap();
         let yaml =
             std::fs::read_to_string(dir.path().join("agents/test-agent/agent.yaml")).unwrap();
         assert!(
@@ -956,7 +1097,10 @@ mod tests {
         let allowlist_path = dir.path().join("agents/testbot/allowlist.yaml");
         assert!(allowlist_path.exists(), "allowlist.yaml must be written");
         let content = std::fs::read_to_string(&allowlist_path).unwrap();
-        assert!(content.contains("id: 42"), "user 42 must be seeded, got:\n{content}");
+        assert!(
+            content.contains("id: 42"),
+            "user 42 must be seeded, got:\n{content}"
+        );
         assert!(
             content.contains("id: -1001234"),
             "group -1001234 must be seeded, got:\n{content}"

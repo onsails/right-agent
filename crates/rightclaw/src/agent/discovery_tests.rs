@@ -209,7 +209,6 @@ fn discover_rejects_invalid_agent_name() {
     fs::create_dir(&agent_dir).unwrap();
     fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
 
-
     let result = discover_agents(dir.path());
     assert!(result.is_err());
 }

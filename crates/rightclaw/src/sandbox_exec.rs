@@ -37,13 +37,7 @@ impl SandboxExec {
         timeout_seconds: u32,
     ) -> miette::Result<(String, i32)> {
         let mut client = crate::openshell::connect_grpc(&self.mtls_dir).await?;
-        crate::openshell::exec_in_sandbox(
-            &mut client,
-            &self.sandbox_id,
-            cmd,
-            timeout_seconds,
-        )
-        .await
+        crate::openshell::exec_in_sandbox(&mut client, &self.sandbox_id, cmd, timeout_seconds).await
     }
 
     /// Sandbox name for CLI operations (upload_file).

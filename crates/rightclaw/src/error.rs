@@ -30,7 +30,9 @@ pub enum AgentError {
     #[diagnostic(code(rightclaw::agent::invalid_config))]
     InvalidConfig { name: String, reason: String },
 
-    #[error("Invalid agent directory name '{name}': must contain only alphanumeric characters, hyphens, or underscores")]
+    #[error(
+        "Invalid agent directory name '{name}': must contain only alphanumeric characters, hyphens, or underscores"
+    )]
     #[diagnostic(code(rightclaw::agent::invalid_name))]
     InvalidName { name: String },
 
@@ -55,10 +57,7 @@ mod tests {
         };
         let msg = err.to_string();
         assert!(msg.contains("my-agent"), "expected agent name in: {msg}");
-        assert!(
-            msg.contains("IDENTITY.md"),
-            "expected file name in: {msg}"
-        );
+        assert!(msg.contains("IDENTITY.md"), "expected file name in: {msg}");
     }
 
     #[test]
@@ -101,10 +100,7 @@ mod tests {
         }
 
         let err = Outer(Inner);
-        assert_eq!(
-            display_error_chain(&err),
-            "top-level failure: root cause"
-        );
+        assert_eq!(display_error_chain(&err), "top-level failure: root cause");
     }
 
     #[test]

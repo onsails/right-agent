@@ -15,13 +15,22 @@ pub struct ModelPricing {
 /// cache-savings line).
 pub fn lookup(model: &str) -> Option<ModelPricing> {
     if model.starts_with("claude-sonnet-4-6") {
-        return Some(ModelPricing { input_per_mtok: 3.0, output_per_mtok: 15.0 });
+        return Some(ModelPricing {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+        });
     }
     if model.starts_with("claude-opus-4-7") {
-        return Some(ModelPricing { input_per_mtok: 15.0, output_per_mtok: 75.0 });
+        return Some(ModelPricing {
+            input_per_mtok: 15.0,
+            output_per_mtok: 75.0,
+        });
     }
     if model.starts_with("claude-haiku-4-5") {
-        return Some(ModelPricing { input_per_mtok: 0.80, output_per_mtok: 4.0 });
+        return Some(ModelPricing {
+            input_per_mtok: 0.80,
+            output_per_mtok: 4.0,
+        });
     }
     None
 }

@@ -54,20 +54,26 @@ pub struct AllowlistFile {
     pub groups: Vec<AllowedGroup>,
 }
 
-fn default_version() -> u32 { 1 }
+fn default_version() -> u32 {
+    1
+}
 
 pub const CURRENT_VERSION: u32 = 1;
 
 impl Default for AllowlistFile {
     fn default() -> Self {
-        Self { version: CURRENT_VERSION, users: Vec::new(), groups: Vec::new() }
+        Self {
+            version: CURRENT_VERSION,
+            users: Vec::new(),
+            groups: Vec::new(),
+        }
     }
 }
 
 /// Parse YAML text into `AllowlistFile`. Rejects unknown future `version`.
 pub fn parse_yaml(text: &str) -> Result<AllowlistFile, String> {
-    let parsed: AllowlistFile = serde_saphyr::from_str(text)
-        .map_err(|e| format!("allowlist.yaml parse error: {e:#}"))?;
+    let parsed: AllowlistFile =
+        serde_saphyr::from_str(text).map_err(|e| format!("allowlist.yaml parse error: {e:#}"))?;
     if parsed.version != CURRENT_VERSION {
         return Err(format!(
             "allowlist.yaml version {} is not supported (expected {})",
@@ -92,7 +98,13 @@ pub fn serialize_yaml(file: &AllowlistFile) -> String {
             writeln!(out, "  - id: {}", u.id).unwrap();
             write_label(&mut out, "label", u.label.as_deref(), 4);
             write_opt_i64(&mut out, "added_by", u.added_by, 4);
-            writeln!(out, "    added_at: {}", u.added_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap();
+            writeln!(
+                out,
+                "    added_at: {}",
+                u.added_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )
+            .unwrap();
         }
     }
     if file.groups.is_empty() {
@@ -103,7 +115,13 @@ pub fn serialize_yaml(file: &AllowlistFile) -> String {
             writeln!(out, "  - id: {}", g.id).unwrap();
             write_label(&mut out, "label", g.label.as_deref(), 4);
             write_opt_i64(&mut out, "opened_by", g.opened_by, 4);
-            writeln!(out, "    opened_at: {}", g.opened_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)).unwrap();
+            writeln!(
+                out,
+                "    opened_at: {}",
+                g.opened_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )
+            .unwrap();
         }
     }
     out
@@ -317,8 +335,8 @@ pub fn write_file_inner(agent_dir: &Path, file: &AllowlistFile) -> Result<(), St
     let target = allowlist_path(agent_dir);
     let tmp = target.with_extension("yaml.tmp");
     {
-        let mut f = std::fs::File::create(&tmp)
-            .map_err(|e| format!("create {}: {e:#}", tmp.display()))?;
+        let mut f =
+            std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e:#}", tmp.display()))?;
         f.write_all(text.as_bytes())
             .map_err(|e| format!("write {}: {e:#}", tmp.display()))?;
         f.sync_all()
@@ -357,23 +375,40 @@ pub fn migrate_from_legacy(
     now: DateTime<Utc>,
 ) -> Result<MigrationReport, String> {
     if allowlist_path(agent_dir).exists() {
-        return Ok(MigrationReport { already_present: true, ..Default::default() });
+        return Ok(MigrationReport {
+            already_present: true,
+            ..Default::default()
+        });
     }
     let mut file = AllowlistFile::default();
     let mut mu = 0usize;
     let mut mg = 0usize;
     for &id in legacy_chat_ids {
         if id > 0 {
-            file.users.push(AllowedUser { id, label: None, added_by: None, added_at: now });
+            file.users.push(AllowedUser {
+                id,
+                label: None,
+                added_by: None,
+                added_at: now,
+            });
             mu += 1;
         } else if id < 0 {
-            file.groups.push(AllowedGroup { id, label: None, opened_by: None, opened_at: now });
+            file.groups.push(AllowedGroup {
+                id,
+                label: None,
+                opened_by: None,
+                opened_at: now,
+            });
             mg += 1;
         }
         // id == 0 skipped (Telegram never uses 0).
     }
     write_file(agent_dir, &file)?;
-    Ok(MigrationReport { migrated_users: mu, migrated_groups: mg, already_present: false })
+    Ok(MigrationReport {
+        migrated_users: mu,
+        migrated_groups: mg,
+        already_present: false,
+    })
 }
 
 use std::time::Duration;
@@ -413,12 +448,16 @@ pub fn spawn_watcher(
         // is scoped to `agent_dir` with `NonRecursive`.
         let target_filename = std::ffi::OsStr::new(ALLOWLIST_FILENAME);
         for events in rx {
-            let Ok(evts) = events else { continue; };
+            let Ok(evts) = events else {
+                continue;
+            };
             let touches_allowlist = evts.iter().any(|e| {
                 matches!(e.kind, DebouncedEventKind::Any)
                     && e.path.file_name() == Some(target_filename)
             });
-            if !touches_allowlist { continue; }
+            if !touches_allowlist {
+                continue;
+            }
 
             match read_file(&dir_clone) {
                 Ok(Some(file)) => {

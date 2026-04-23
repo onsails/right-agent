@@ -77,24 +77,18 @@ pub async fn do_refresh_cancellable(
             form.push(("client_secret", secret.as_str()));
         }
 
-        let resp = client
-            .post(&entry.token_endpoint)
-            .form(&form)
-            .send()
-            .await;
+        let resp = client.post(&entry.token_endpoint).form(&form).send().await;
 
         match resp {
             Ok(r) if r.status().is_success() => {
-                let token_resp: crate::mcp::oauth::TokenResponse =
-                    r.json().await.map_err(|e| {
-                        tracing::warn!(attempt, "failed to parse token response: {e:#}");
-                        ReconnectError::RefreshFailed(attempt + 1)
-                    })?;
+                let token_resp: crate::mcp::oauth::TokenResponse = r.json().await.map_err(|e| {
+                    tracing::warn!(attempt, "failed to parse token response: {e:#}");
+                    ReconnectError::RefreshFailed(attempt + 1)
+                })?;
 
                 let expires_in = token_resp.expires_in.unwrap_or(3600);
                 let has_new_refresh = token_resp.refresh_token.is_some();
-                let expires_at =
-                    chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
+                let expires_at = chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64);
 
                 tracing::info!(
                     attempt,
@@ -339,9 +333,10 @@ mod tests {
 
         // Spawn the refresh in a background task so we can cancel from here.
         let cancel_clone = cancel.clone();
-        let handle = tokio::spawn(async move {
-            do_refresh_cancellable(&client, &entry, &cancel_clone).await
-        });
+        let handle =
+            tokio::spawn(
+                async move { do_refresh_cancellable(&client, &entry, &cancel_clone).await },
+            );
 
         // Let the first attempt complete (it hits the MockServer and gets 401).
         // Then advance time slightly — not enough to expire the 30s backoff,
@@ -426,7 +421,10 @@ mod tests {
         }
 
         let result = handle.await.expect("task panicked");
-        assert!(result.is_err(), "expected error after exhausted retries, got Ok");
+        assert!(
+            result.is_err(),
+            "expected error after exhausted retries, got Ok"
+        );
 
         // Status must still be Connected — the guard prevented the overwrite.
         assert_eq!(
@@ -448,14 +446,12 @@ mod tests {
     async fn successful_refresh_writes_token_and_sends_new_entry() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "new-access-tok",
-                    "refresh_token": "new-refresh-tok",
-                    "expires_in": 3600,
-                    "token_type": "Bearer"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-access-tok",
+                "refresh_token": "new-refresh-tok",
+                "expires_in": 3600,
+                "token_type": "Bearer"
+            })))
             .mount(&server)
             .await;
 
@@ -525,9 +521,7 @@ mod tests {
             .expect("expected RefreshMessage::NewEntry on refresh_rx");
         match msg {
             RefreshMessage::NewEntry {
-                server_name,
-                state,
-                ..
+                server_name, state, ..
             } => {
                 assert_eq!(server_name, "composio");
                 assert_eq!(

@@ -78,9 +78,7 @@ pub struct CronUpdateParams {
     #[schemars(description = "New maximum dollar spend per invocation")]
     #[serde(default, deserialize_with = "deserialize_lenient_f64")]
     pub max_budget_usd: Option<f64>,
-    #[schemars(
-        description = "New target_chat_id. Must be in the agent's allowlist."
-    )]
+    #[schemars(description = "New target_chat_id. Must be in the agent's allowlist.")]
     pub target_chat_id: Option<i64>,
     #[schemars(
         description = "New target_thread_id. Pass `null` to clear (cron will deliver to the chat without a topic). Omit the field entirely to leave unchanged."

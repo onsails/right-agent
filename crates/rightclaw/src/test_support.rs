@@ -71,8 +71,8 @@ network_policies:
 ";
         std::fs::write(&policy_path, policy).unwrap();
 
-        let mut child = openshell::spawn_sandbox(&name, &policy_path, None)
-            .expect("failed to spawn sandbox");
+        let mut child =
+            openshell::spawn_sandbox(&name, &policy_path, None).expect("failed to spawn sandbox");
         openshell::wait_for_ready(&mut client, &name, 120, 2)
             .await
             .expect("sandbox did not become READY");
@@ -80,7 +80,11 @@ network_policies:
         // Kill the create process — it doesn't exit on its own after READY.
         let _ = child.kill().await;
 
-        Self { name, mtls_dir, _tmp: tmp }
+        Self {
+            name,
+            mtls_dir,
+            _tmp: tmp,
+        }
     }
 
     /// Sandbox name (already prefixed with `rightclaw-test-`).

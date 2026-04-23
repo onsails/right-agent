@@ -37,7 +37,10 @@ async fn run_backup(
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir = crate::config::backups_dir(home, agent_name).join(&timestamp);
     std::fs::create_dir_all(&backup_dir).map_err(|e| {
-        miette::miette!("failed to create backup dir {}: {e:#}", backup_dir.display())
+        miette::miette!(
+            "failed to create backup dir {}: {e:#}",
+            backup_dir.display()
+        )
     })?;
 
     tracing::info!(agent = agent_name, backup_dir = %backup_dir.display(), "starting pre-destroy backup");
@@ -46,19 +49,28 @@ async fn run_backup(
         // Try SSH tar download from sandbox; skip if sandbox not ready
         let sandbox_backed_up = try_sandbox_backup(home, agent_name, config, &backup_dir).await;
         if !sandbox_backed_up {
-            tracing::warn!(agent = agent_name, "sandbox not available for backup — backing up config files only");
+            tracing::warn!(
+                agent = agent_name,
+                "sandbox not available for backup — backing up config files only"
+            );
         }
     } else {
         // Non-sandboxed: tar the agent dir (excluding data.db — backed up separately)
         let dest_tar = backup_dir.join("sandbox.tar.gz");
-        let parent = agent_dir.parent().ok_or_else(|| miette::miette!("agent_dir has no parent"))?;
+        let parent = agent_dir
+            .parent()
+            .ok_or_else(|| miette::miette!("agent_dir has no parent"))?;
         let status = tokio::process::Command::new("tar")
             .args([
                 "czpf",
-                dest_tar.to_str().ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?,
+                dest_tar
+                    .to_str()
+                    .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?,
                 "--exclude=data.db",
                 "-C",
-                parent.to_str().ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?,
+                parent
+                    .to_str()
+                    .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?,
                 agent_name,
             ])
             .status()
@@ -72,9 +84,8 @@ async fn run_backup(
     for filename in &["agent.yaml", "policy.yaml"] {
         let src = agent_dir.join(filename);
         if src.exists() {
-            std::fs::copy(&src, backup_dir.join(filename)).map_err(|e| {
-                miette::miette!("failed to copy {filename}: {e:#}")
-            })?;
+            std::fs::copy(&src, backup_dir.join(filename))
+                .map_err(|e| miette::miette!("failed to copy {filename}: {e:#}"))?;
         }
     }
 
@@ -83,12 +94,10 @@ async fn run_backup(
         let backup_db = backup_dir.join("data.db");
         let db_display = db_path.display().to_string();
         let backup_path_sql = backup_db.display().to_string().replace('\'', "''");
-        let conn = rusqlite::Connection::open(&db_path).map_err(|e| {
-            miette::miette!("failed to open {}: {e:#}", db_display)
-        })?;
-        conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), []).map_err(|e| {
-            miette::miette!("VACUUM INTO failed: {e:#}")
-        })?;
+        let conn = rusqlite::Connection::open(&db_path)
+            .map_err(|e| miette::miette!("failed to open {}: {e:#}", db_display))?;
+        conn.execute(&format!("VACUUM INTO '{backup_path_sql}'"), [])
+            .map_err(|e| miette::miette!("VACUUM INTO failed: {e:#}"))?;
     }
 
     tracing::info!(backup_dir = %backup_dir.display(), "pre-destroy backup complete");
@@ -125,7 +134,10 @@ async fn try_sandbox_backup(
         return false;
     }
 
-    let ssh_config = home.join("run").join("ssh").join(format!("{sb_name}.ssh-config"));
+    let ssh_config = home
+        .join("run")
+        .join("ssh")
+        .join(format!("{sb_name}.ssh-config"));
     if !ssh_config.exists() {
         return false;
     }
@@ -155,10 +167,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     }
 
     let config = crate::agent::parse_agent_config(&agent_dir)?;
-    let is_sandboxed = config
-        .as_ref()
-        .map(|c| c.is_sandboxed())
-        .unwrap_or(true);
+    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
 
     let mut result = DestroyResult {
         agent_stopped: false,
@@ -199,7 +208,8 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     }
 
     if options.backup {
-        let backup_path = run_backup(home, &options.agent_name, &agent_dir, &config, is_sandboxed).await?;
+        let backup_path =
+            run_backup(home, &options.agent_name, &agent_dir, &config, is_sandboxed).await?;
         result.backup_path = Some(backup_path);
     }
 
@@ -223,9 +233,8 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
 
     if let (Some(pc_client), true) = (pc_client, pc_running) {
         let all_agents = crate::agent::discover_agents(&agents_dir)?;
-        let self_exe = std::env::current_exe().map_err(|e| {
-            miette::miette!("failed to resolve current executable path: {e:#}")
-        })?;
+        let self_exe = std::env::current_exe()
+            .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
         crate::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
         match pc_client.reload_configuration().await {
@@ -234,7 +243,10 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
                 result.pc_reloaded = true;
             }
             Err(e) => {
-                tracing::warn!(error = format!("{e:#}"), "failed to reload process-compose (non-fatal)");
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "failed to reload process-compose (non-fatal)"
+                );
             }
         }
     }
@@ -253,11 +265,7 @@ mod tests {
 
         let agents_dir = home.join("agents").join("test-agent");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(
-            agents_dir.join("agent.yaml"),
-            "sandbox:\n  mode: none\n",
-        )
-        .unwrap();
+        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
 
         let options = DestroyOptions {
             agent_name: "test-agent".into(),
@@ -266,11 +274,20 @@ mod tests {
 
         let result = destroy_agent(home, &options).await.unwrap();
 
-        assert!(!result.agent_stopped, "PC not running, should not have stopped");
-        assert!(!result.sandbox_deleted, "non-sandboxed agent, no sandbox to delete");
+        assert!(
+            !result.agent_stopped,
+            "PC not running, should not have stopped"
+        );
+        assert!(
+            !result.sandbox_deleted,
+            "non-sandboxed agent, no sandbox to delete"
+        );
         assert!(result.backup_path.is_none());
         assert!(result.dir_removed);
-        assert!(!result.pc_reloaded, "PC not running, should not have reloaded");
+        assert!(
+            !result.pc_reloaded,
+            "PC not running, should not have reloaded"
+        );
         assert!(!agents_dir.exists(), "agent dir should be deleted");
     }
 
@@ -300,11 +317,7 @@ mod tests {
 
         let agents_dir = home.join("agents").join("isolated");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(
-            agents_dir.join("agent.yaml"),
-            "sandbox:\n  mode: none\n",
-        )
-        .unwrap();
+        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
 
         // No <home>/run/state.json exists.
         assert!(!home.join("run").join("state.json").exists());
@@ -316,8 +329,14 @@ mod tests {
 
         let result = destroy_agent(home, &options).await.unwrap();
 
-        assert!(!result.agent_stopped, "no runtime state → PC skipped → agent not stopped");
-        assert!(!result.pc_reloaded, "no runtime state → PC skipped → not reloaded");
+        assert!(
+            !result.agent_stopped,
+            "no runtime state → PC skipped → agent not stopped"
+        );
+        assert!(
+            !result.pc_reloaded,
+            "no runtime state → PC skipped → not reloaded"
+        );
         assert!(result.dir_removed, "agent dir should still be removed");
         assert!(!agents_dir.exists(), "agent dir should be deleted");
     }
@@ -329,11 +348,7 @@ mod tests {
 
         let agents_dir = home.join("agents").join("backup-test");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(
-            agents_dir.join("agent.yaml"),
-            "sandbox:\n  mode: none\n",
-        )
-        .unwrap();
+        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
         std::fs::write(agents_dir.join("AGENTS.md"), "# Test agent").unwrap();
 
         let options = DestroyOptions {
@@ -343,10 +358,19 @@ mod tests {
 
         let result = destroy_agent(home, &options).await.unwrap();
 
-        assert!(result.backup_path.is_some(), "backup should have been created");
+        assert!(
+            result.backup_path.is_some(),
+            "backup should have been created"
+        );
         let backup_path = result.backup_path.unwrap();
         assert!(backup_path.exists(), "backup dir should exist");
-        assert!(backup_path.join("sandbox.tar.gz").exists(), "sandbox.tar.gz should exist");
-        assert!(result.dir_removed, "agent dir should be removed after backup");
+        assert!(
+            backup_path.join("sandbox.tar.gz").exists(),
+            "sandbox.tar.gz should exist"
+        );
+        assert!(
+            result.dir_removed,
+            "agent dir should be removed after backup"
+        );
     }
 }

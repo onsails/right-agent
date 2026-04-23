@@ -90,15 +90,12 @@ pub async fn check_tunnel(home: &Path) -> TunnelState {
     }
 
     // Step 3: probe the hostname
-    let client = match reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => {
             return TunnelState::Unhealthy {
                 reason: format!("{e:#}"),
-            }
+            };
         }
     };
 

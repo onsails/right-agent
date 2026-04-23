@@ -21,9 +21,8 @@ pub struct AllWindows {
 /// Render the complete `/usage` summary as Telegram HTML. When `detail` is
 /// true each source block also renders a raw-tokens line.
 pub fn format_summary_message(w: &AllWindows, detail: bool) -> String {
-    let total_invocations = w.all_interactive.invocations
-        + w.all_cron.invocations
-        + w.all_reflection.invocations;
+    let total_invocations =
+        w.all_interactive.invocations + w.all_cron.invocations + w.all_reflection.invocations;
     if total_invocations == 0 {
         return "No usage recorded yet.".to_string();
     }
@@ -32,16 +31,39 @@ pub fn format_summary_message(w: &AllWindows, detail: bool) -> String {
     let total_sub = w.all_interactive.subscription_cost_usd
         + w.all_cron.subscription_cost_usd
         + w.all_reflection.subscription_cost_usd;
-    let total_api = w.all_interactive.api_cost_usd
-        + w.all_cron.api_cost_usd
-        + w.all_reflection.api_cost_usd;
+    let total_api =
+        w.all_interactive.api_cost_usd + w.all_cron.api_cost_usd + w.all_reflection.api_cost_usd;
 
     let mut out = String::new();
     out.push_str("\u{1f4ca} <b>Usage Summary</b> (UTC)\n\n");
-    out.push_str(&render_window("Today", &w.today_interactive, &w.today_cron, &w.today_reflection, detail));
-    out.push_str(&render_window("Last 7 days", &w.week_interactive, &w.week_cron, &w.week_reflection, detail));
-    out.push_str(&render_window("Last 30 days", &w.month_interactive, &w.month_cron, &w.month_reflection, detail));
-    out.push_str(&render_window("All time", &w.all_interactive, &w.all_cron, &w.all_reflection, detail));
+    out.push_str(&render_window(
+        "Today",
+        &w.today_interactive,
+        &w.today_cron,
+        &w.today_reflection,
+        detail,
+    ));
+    out.push_str(&render_window(
+        "Last 7 days",
+        &w.week_interactive,
+        &w.week_cron,
+        &w.week_reflection,
+        detail,
+    ));
+    out.push_str(&render_window(
+        "Last 30 days",
+        &w.month_interactive,
+        &w.month_cron,
+        &w.month_reflection,
+        detail,
+    ));
+    out.push_str(&render_window(
+        "All time",
+        &w.all_interactive,
+        &w.all_cron,
+        &w.all_reflection,
+        detail,
+    ));
 
     // Total footer: plain when single mode, split when both present.
     if total_sub > 0.0 && total_api > 0.0 {
@@ -52,7 +74,10 @@ pub fn format_summary_message(w: &AllWindows, detail: bool) -> String {
             format_cost(total_api),
         ));
     } else {
-        out.push_str(&format!("\n<b>Total retail:</b> {}\n", format_cost(total_cost)));
+        out.push_str(&format!(
+            "\n<b>Total retail:</b> {}\n",
+            format_cost(total_cost)
+        ));
     }
     out
 }
@@ -64,28 +89,41 @@ fn render_window(
     reflection: &WindowSummary,
     detail: bool,
 ) -> String {
-    let mut s = format!("\u{2501}\u{2501} <b>{}</b> \u{2501}\u{2501}\n", html_escape(title));
+    let mut s = format!(
+        "\u{2501}\u{2501} <b>{}</b> \u{2501}\u{2501}\n",
+        html_escape(title)
+    );
     if interactive.invocations == 0 && cron.invocations == 0 && reflection.invocations == 0 {
         s.push_str("(no activity)\n\n");
         return s;
     }
     if interactive.invocations > 0 {
-        s.push_str(&render_source("\u{1f4ac} Interactive", interactive, "sessions", detail));
+        s.push_str(&render_source(
+            "\u{1f4ac} Interactive",
+            interactive,
+            "sessions",
+            detail,
+        ));
     }
     if cron.invocations > 0 {
         s.push_str(&render_source("\u{23f0} Cron", cron, "runs", detail));
     }
     if reflection.invocations > 0 {
-        s.push_str(&render_source("\u{1f9e0} Reflection", reflection, "passes", detail));
+        s.push_str(&render_source(
+            "\u{1f9e0} Reflection",
+            reflection,
+            "passes",
+            detail,
+        ));
     }
-    let web_s = interactive.web_search_requests
-        + cron.web_search_requests
-        + reflection.web_search_requests;
-    let web_f = interactive.web_fetch_requests
-        + cron.web_fetch_requests
-        + reflection.web_fetch_requests;
+    let web_s =
+        interactive.web_search_requests + cron.web_search_requests + reflection.web_search_requests;
+    let web_f =
+        interactive.web_fetch_requests + cron.web_fetch_requests + reflection.web_fetch_requests;
     if web_s > 0 || web_f > 0 {
-        s.push_str(&format!("\u{1f50e} Web: {web_s} searches, {web_f} fetches\n"));
+        s.push_str(&format!(
+            "\u{1f50e} Web: {web_s} searches, {web_f} fetches\n"
+        ));
     }
 
     // Footer per window.
@@ -123,7 +161,11 @@ fn render_source(label: &str, w: &WindowSummary, unit: &str, detail: bool) -> St
 
     // Per-model lines sorted by cost desc for readability.
     let mut models: Vec<_> = w.per_model.iter().collect();
-    models.sort_by(|a, b| b.1.cost_usd.partial_cmp(&a.1.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
+    models.sort_by(|a, b| {
+        b.1.cost_usd
+            .partial_cmp(&a.1.cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for (name, totals) in &models {
         s.push_str(&format!(
             "  {} \u{2014} {}\n",
@@ -156,7 +198,9 @@ fn render_source(label: &str, w: &WindowSummary, unit: &str, detail: bool) -> St
 /// map. Returns `None` when every model has zero cache reads (nothing to say).
 /// When some models are priced and others aren't, the dollar savings still
 /// represents only the priced portion — accepted as "estimate", not audit.
-fn format_cache_line(per_model: &std::collections::BTreeMap<String, ModelTotals>) -> Option<String> {
+fn format_cache_line(
+    per_model: &std::collections::BTreeMap<String, ModelTotals>,
+) -> Option<String> {
     let mut total_cache_read: u64 = 0;
     let mut total_input_bearing: u64 = 0; // input + cache_creation + cache_read
     let mut total_savings_usd: f64 = 0.0;
@@ -188,7 +232,10 @@ fn format_cache_line(per_model: &std::collections::BTreeMap<String, ModelTotals>
     let pct = (hit_rate * 100.0).round() as u32;
 
     if any_priced {
-        Some(format!("Cache: {pct}% hit rate, saved ~{}", format_cost(total_savings_usd)))
+        Some(format!(
+            "Cache: {pct}% hit rate, saved ~{}",
+            format_cost(total_savings_usd)
+        ))
     } else {
         Some(format!("Cache: {pct}% hit rate"))
     }
@@ -225,18 +272,24 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn empty(source: &str) -> WindowSummary {
-        WindowSummary { source: source.into(), ..Default::default() }
+        WindowSummary {
+            source: source.into(),
+            ..Default::default()
+        }
     }
 
     fn sub_only(source: &str, cost: f64, model: &str) -> WindowSummary {
         let mut per_model = BTreeMap::new();
-        per_model.insert(model.to_string(), ModelTotals {
-            cost_usd: cost,
-            input_tokens: 10,
-            output_tokens: 20,
-            cache_creation_tokens: 50,
-            cache_read_tokens: 300,
-        });
+        per_model.insert(
+            model.to_string(),
+            ModelTotals {
+                cost_usd: cost,
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_creation_tokens: 50,
+                cache_read_tokens: 300,
+            },
+        );
         WindowSummary {
             source: source.into(),
             cost_usd: cost,
@@ -280,7 +333,10 @@ mod tests {
 
     #[test]
     fn empty_db_returns_no_usage_line() {
-        assert_eq!(format_summary_message(&all_empty(), false), "No usage recorded yet.");
+        assert_eq!(
+            format_summary_message(&all_empty(), false),
+            "No usage recorded yet."
+        );
     }
 
     #[test]
@@ -301,8 +357,14 @@ mod tests {
         w.today_reflection = sub_only("reflection", 0.05, "claude-sonnet-4-6");
         w.all_reflection = sub_only("reflection", 0.05, "claude-sonnet-4-6");
         let msg = format_summary_message(&w, false);
-        assert!(msg.contains("Reflection"), "reflection line should render when invocations > 0");
-        assert!(msg.contains("passes"), "reflection unit label must be 'passes'");
+        assert!(
+            msg.contains("Reflection"),
+            "reflection line should render when invocations > 0"
+        );
+        assert!(
+            msg.contains("passes"),
+            "reflection unit label must be 'passes'"
+        );
     }
 
     #[test]
@@ -311,7 +373,10 @@ mod tests {
         w.today_interactive = sub_only("interactive", 0.1, "claude-sonnet-4-6");
         w.all_interactive = sub_only("interactive", 0.1, "claude-sonnet-4-6");
         let msg = format_summary_message(&w, false);
-        assert!(!msg.contains("Tokens:"), "default mode must not include raw tokens");
+        assert!(
+            !msg.contains("Tokens:"),
+            "default mode must not include raw tokens"
+        );
     }
 
     #[test]
@@ -345,7 +410,10 @@ mod tests {
         w.all_interactive = sub_only("interactive", 0.1, "claude-fake-unknown");
         let msg = format_summary_message(&w, false);
         assert!(msg.contains("83%"));
-        assert!(!msg.contains("saved"), "unknown model must not render 'saved' clause");
+        assert!(
+            !msg.contains("saved"),
+            "unknown model must not render 'saved' clause"
+        );
     }
 
     #[test]
@@ -353,12 +421,18 @@ mod tests {
         let mut ws = sub_only("interactive", 0.1, "claude-sonnet-4-6");
         // Zero out cache reads on both the window totals and per-model.
         ws.cache_read_tokens = 0;
-        ws.per_model.get_mut("claude-sonnet-4-6").unwrap().cache_read_tokens = 0;
+        ws.per_model
+            .get_mut("claude-sonnet-4-6")
+            .unwrap()
+            .cache_read_tokens = 0;
         let mut w = all_empty();
         w.today_interactive = ws.clone();
         w.all_interactive = ws;
         let msg = format_summary_message(&w, false);
-        assert!(!msg.contains("Cache:"), "cache line must be omitted when cache_read=0");
+        assert!(
+            !msg.contains("Cache:"),
+            "cache line must be omitted when cache_read=0"
+        );
     }
 
     #[test]
@@ -402,7 +476,10 @@ mod tests {
         w.all_interactive = sub_only("interactive", 0.1, "claude-sonnet-4-6");
         let msg = format_summary_message(&w, false);
         assert!(msg.contains("<b>Total retail:</b> $0.10"));
-        assert!(!msg.contains("subscription:"), "single-mode footer must not show split");
+        assert!(
+            !msg.contains("subscription:"),
+            "single-mode footer must not show split"
+        );
     }
 
     #[test]
@@ -459,7 +536,10 @@ mod tests {
         let mut ws = sub_only("interactive", 0.1, "foo<script>");
         // Need cache_read=0 to skip pricing.lookup on the nonsense name.
         ws.cache_read_tokens = 0;
-        ws.per_model.get_mut("foo<script>").unwrap().cache_read_tokens = 0;
+        ws.per_model
+            .get_mut("foo<script>")
+            .unwrap()
+            .cache_read_tokens = 0;
         let mut w = all_empty();
         w.today_interactive = ws.clone();
         w.all_interactive = ws;

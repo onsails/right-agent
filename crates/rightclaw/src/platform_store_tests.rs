@@ -58,7 +58,10 @@ fn directory_hash_empty_dir() {
 
 #[test]
 fn platform_name_for_file() {
-    assert_eq!(platform_path("settings.json", "abcd1234"), "settings.json.abcd1234");
+    assert_eq!(
+        platform_path("settings.json", "abcd1234"),
+        "settings.json.abcd1234"
+    );
 }
 
 #[test]
@@ -75,9 +78,24 @@ fn build_manifest_from_files() {
     std::fs::write(claude_dir.join("skills/rightmcp/SKILL.md"), "# skill").unwrap();
     std::fs::write(dir.path().join("mcp.json"), "{}").unwrap();
     let manifest = build_manifest(dir.path()).unwrap();
-    assert!(manifest.entries.iter().any(|e| e.name == "settings.json" && !e.is_dir));
-    assert!(manifest.entries.iter().any(|e| e.name == "mcp.json" && !e.is_dir));
-    assert!(manifest.entries.iter().any(|e| e.name == "rightmcp" && e.is_dir));
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .any(|e| e.name == "settings.json" && !e.is_dir)
+    );
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .any(|e| e.name == "mcp.json" && !e.is_dir)
+    );
+    assert!(
+        manifest
+            .entries
+            .iter()
+            .any(|e| e.name == "rightmcp" && e.is_dir)
+    );
 }
 
 #[test]
@@ -87,7 +105,11 @@ fn build_manifest_caches_file_content() {
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(claude_dir.join("settings.json"), r#"{"cached": true}"#).unwrap();
     let manifest = build_manifest(dir.path()).unwrap();
-    let entry = manifest.entries.iter().find(|e| e.name == "settings.json").unwrap();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.name == "settings.json")
+        .unwrap();
     assert!(entry.content.is_some(), "file entries must cache content");
     assert_eq!(entry.content.as_ref().unwrap(), br#"{"cached": true}"#);
 }
@@ -99,7 +121,14 @@ fn build_manifest_dirs_have_no_cached_content() {
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(skills_dir.join("SKILL.md"), "# cron").unwrap();
     let manifest = build_manifest(dir.path()).unwrap();
-    let entry = manifest.entries.iter().find(|e| e.name == "rightcron").unwrap();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|e| e.name == "rightcron")
+        .unwrap();
     assert!(entry.is_dir);
-    assert!(entry.content.is_none(), "directory entries must not cache content");
+    assert!(
+        entry.content.is_none(),
+        "directory entries must not cache content"
+    );
 }

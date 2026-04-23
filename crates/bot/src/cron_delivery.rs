@@ -319,7 +319,10 @@ pub async fn run_delivery_loop(
             guard.clone()
         };
 
-        let (target_chat_id, target_thread_id) = match classify_pending_target(&to_deliver, &allowlist_snapshot) {
+        let (target_chat_id, target_thread_id) = match classify_pending_target(
+            &to_deliver,
+            &allowlist_snapshot,
+        ) {
             TargetClassification::NoTarget => {
                 tracing::warn!(
                     job = %to_deliver.job_name,
@@ -348,7 +351,11 @@ pub async fn run_delivery_loop(
             TargetClassification::Ready { chat_id, thread_id } => (chat_id, thread_id),
         };
 
-        let session_id = match crate::telegram::session::get_active_session(&conn, target_chat_id, target_thread_id.unwrap_or(0)) {
+        let session_id = match crate::telegram::session::get_active_session(
+            &conn,
+            target_chat_id,
+            target_thread_id.unwrap_or(0),
+        ) {
             Ok(s) => s.map(|s| s.root_session_id),
             Err(e) => {
                 tracing::error!("cron delivery: session lookup failed: {e:#}");
@@ -928,7 +935,10 @@ mod tests {
         ).unwrap();
         let pending = fetch_pending(&conn).unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[]));
-        assert!(matches!(outcome, TargetClassification::NoTarget), "got: {outcome:?}");
+        assert!(
+            matches!(outcome, TargetClassification::NoTarget),
+            "got: {outcome:?}"
+        );
     }
 
     #[test]
@@ -947,7 +957,10 @@ mod tests {
         ).unwrap();
         let pending = fetch_pending(&conn).unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[100], &[-200]));
-        assert!(matches!(outcome, TargetClassification::Denied), "got: {outcome:?}");
+        assert!(
+            matches!(outcome, TargetClassification::Denied),
+            "got: {outcome:?}"
+        );
     }
 
     #[test]
@@ -967,20 +980,39 @@ mod tests {
         let pending = fetch_pending(&conn).unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[-200]));
         assert!(
-            matches!(outcome, TargetClassification::Ready { chat_id: -200, thread_id: Some(5) }),
+            matches!(
+                outcome,
+                TargetClassification::Ready {
+                    chat_id: -200,
+                    thread_id: Some(5)
+                }
+            ),
             "got: {outcome:?}"
         );
     }
 
-    fn fake_allowlist(users: &[i64], groups: &[i64]) -> rightclaw::agent::allowlist::AllowlistState {
+    fn fake_allowlist(
+        users: &[i64],
+        groups: &[i64],
+    ) -> rightclaw::agent::allowlist::AllowlistState {
         use rightclaw::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistState};
         let now = chrono::Utc::now();
         let mut state = AllowlistState::default();
         for &id in users {
-            state.add_user(AllowedUser { id, label: None, added_by: None, added_at: now });
+            state.add_user(AllowedUser {
+                id,
+                label: None,
+                added_by: None,
+                added_at: now,
+            });
         }
         for &id in groups {
-            state.add_group(AllowedGroup { id, label: None, opened_by: None, opened_at: now });
+            state.add_group(AllowedGroup {
+                id,
+                label: None,
+                opened_by: None,
+                opened_at: now,
+            });
         }
         state
     }

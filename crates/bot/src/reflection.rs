@@ -96,14 +96,14 @@ pub(crate) enum ReflectionError {
 /// Render a human-readable reason text for the SYSTEM_NOTICE header.
 pub(crate) fn failure_reason_text(kind: &FailureKind) -> String {
     match kind {
-        FailureKind::SafetyTimeout { limit_secs } =>
-            format!("hit the {limit_secs}-second safety limit before producing a reply"),
-        FailureKind::BudgetExceeded { limit_usd } =>
-            format!("exceeded the budget of ${limit_usd:.2}"),
-        FailureKind::MaxTurns { limit } =>
-            format!("reached the maximum turn count ({limit})"),
-        FailureKind::NonZeroExit { code } =>
-            format!("Claude process exited with code {code}"),
+        FailureKind::SafetyTimeout { limit_secs } => {
+            format!("hit the {limit_secs}-second safety limit before producing a reply")
+        }
+        FailureKind::BudgetExceeded { limit_usd } => {
+            format!("exceeded the budget of ${limit_usd:.2}")
+        }
+        FailureKind::MaxTurns { limit } => format!("reached the maximum turn count ({limit})"),
+        FailureKind::NonZeroExit { code } => format!("Claude process exited with code {code}"),
     }
 }
 
@@ -122,7 +122,10 @@ pub(crate) fn format_ring_event(event: &StreamEvent) -> Option<String> {
             Some(format!("- said: {snippet}"))
         }
         StreamEvent::Thinking => Some("- was thinking".to_string()),
-        StreamEvent::ToolUse { tool, input_summary } => {
+        StreamEvent::ToolUse {
+            tool,
+            input_summary,
+        } => {
             let args: String = input_summary.chars().take(ACTIVITY_SNIPPET_LEN).collect();
             Some(format!("- called {tool}({args})"))
         }
@@ -189,11 +192,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     tracing::info!("reflection starting");
 
     // 1. Build stdin prompt from pure helpers.
-    let input = build_reflection_prompt(
-        &ctx.failure,
-        &ctx.ring_buffer_tail,
-        ctx.limits.max_turns,
-    );
+    let input = build_reflection_prompt(&ctx.failure, &ctx.ring_buffer_tail, ctx.limits.max_turns);
 
     // 2. Reply schema (reuse worker's — sandbox vs no-sandbox both read same file).
     let schema_path = ctx.agent_dir.join(".claude").join("reply-schema.json");
@@ -239,15 +238,10 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
-            ReflectionError::Spawn(
-                "ssh_config_path set but resolved_sandbox is None".into(),
-            )
+            ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())
         })?;
         let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sandbox_name);
-        let prompt_path = format!(
-            "/tmp/rightclaw-reflection-prompt-{}.md",
-            ctx.session_uuid
-        );
+        let prompt_path = format!("/tmp/rightclaw-reflection-prompt-{}.md", ctx.session_uuid);
         let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
             &base_prompt,
             false, // not bootstrap mode
@@ -389,7 +383,10 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             .get("total_cost_usd")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
-        turns = parsed.get("num_turns").and_then(|v| v.as_u64()).unwrap_or(0),
+        turns = parsed
+            .get("num_turns")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
         "reflection completed"
     );
 
@@ -402,14 +399,15 @@ mod tests {
 
     #[test]
     fn reason_text_per_kind() {
-        assert!(failure_reason_text(&FailureKind::SafetyTimeout { limit_secs: 600 })
-            .contains("600-second safety limit"));
-        assert!(failure_reason_text(&FailureKind::BudgetExceeded { limit_usd: 2.0 })
-            .contains("$2.00"));
-        assert!(failure_reason_text(&FailureKind::MaxTurns { limit: 30 })
-            .contains("30"));
-        assert!(failure_reason_text(&FailureKind::NonZeroExit { code: 137 })
-            .contains("137"));
+        assert!(
+            failure_reason_text(&FailureKind::SafetyTimeout { limit_secs: 600 })
+                .contains("600-second safety limit")
+        );
+        assert!(
+            failure_reason_text(&FailureKind::BudgetExceeded { limit_usd: 2.0 }).contains("$2.00")
+        );
+        assert!(failure_reason_text(&FailureKind::MaxTurns { limit: 30 }).contains("30"));
+        assert!(failure_reason_text(&FailureKind::NonZeroExit { code: 137 }).contains("137"));
     }
 
     #[test]
@@ -460,11 +458,7 @@ mod tests {
             },
             StreamEvent::Text("partial finding".into()),
         ]);
-        let p = build_reflection_prompt(
-            &FailureKind::SafetyTimeout { limit_secs: 600 },
-            &tail,
-            3,
-        );
+        let p = build_reflection_prompt(&FailureKind::SafetyTimeout { limit_secs: 600 }, &tail, 3);
         assert!(p.starts_with("⟨⟨SYSTEM_NOTICE⟩⟩"));
         assert!(p.contains("⟨⟨/SYSTEM_NOTICE⟩⟩"));
         assert!(p.contains("600-second safety limit"));
@@ -476,11 +470,7 @@ mod tests {
     #[test]
     fn prompt_handles_empty_ring_buffer() {
         let tail: VecDeque<StreamEvent> = VecDeque::new();
-        let p = build_reflection_prompt(
-            &FailureKind::NonZeroExit { code: 1 },
-            &tail,
-            3,
-        );
+        let p = build_reflection_prompt(&FailureKind::NonZeroExit { code: 1 }, &tail, 3);
         assert!(p.contains("(no tool activity recorded)"));
     }
 }

@@ -25,7 +25,16 @@ fn test_init_creates_structure() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "test.example.com",
+            "--sandbox-mode",
+            "none",
+        ])
         .assert()
         .success();
 
@@ -45,25 +54,58 @@ fn test_init_generates_per_agent_codegen() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--sandbox-mode", "none", "--tunnel-hostname", "test.example.com"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--sandbox-mode",
+            "none",
+            "--tunnel-hostname",
+            "test.example.com",
+        ])
         .assert()
         .success();
 
     let claude_dir = dir.path().join("agents/right/.claude");
 
     // AGENTS.md and TOOLS.md live at agent root
-    assert!(dir.path().join("agents/right/AGENTS.md").exists(), "missing AGENTS.md at agent root");
-    assert!(dir.path().join("agents/right/TOOLS.md").exists(), "missing TOOLS.md at agent root");
+    assert!(
+        dir.path().join("agents/right/AGENTS.md").exists(),
+        "missing AGENTS.md at agent root"
+    );
+    assert!(
+        dir.path().join("agents/right/TOOLS.md").exists(),
+        "missing TOOLS.md at agent root"
+    );
 
     // Schema and prompt files
-    assert!(claude_dir.join("system-prompt.md").exists(), "missing .claude/system-prompt.md");
-    assert!(claude_dir.join("reply-schema.json").exists(), "missing .claude/reply-schema.json");
-    assert!(claude_dir.join("cron-schema.json").exists(), "missing .claude/cron-schema.json");
-    assert!(claude_dir.join("bootstrap-schema.json").exists(), "missing .claude/bootstrap-schema.json");
+    assert!(
+        claude_dir.join("system-prompt.md").exists(),
+        "missing .claude/system-prompt.md"
+    );
+    assert!(
+        claude_dir.join("reply-schema.json").exists(),
+        "missing .claude/reply-schema.json"
+    );
+    assert!(
+        claude_dir.join("cron-schema.json").exists(),
+        "missing .claude/cron-schema.json"
+    );
+    assert!(
+        claude_dir.join("bootstrap-schema.json").exists(),
+        "missing .claude/bootstrap-schema.json"
+    );
 
     // MCP config and memory database
-    assert!(dir.path().join("agents/right/mcp.json").exists(), "missing mcp.json");
-    assert!(dir.path().join("agents/right/data.db").exists(), "missing data.db");
+    assert!(
+        dir.path().join("agents/right/mcp.json").exists(),
+        "missing mcp.json"
+    );
+    assert!(
+        dir.path().join("agents/right/data.db").exists(),
+        "missing data.db"
+    );
 }
 
 #[test]
@@ -72,12 +114,30 @@ fn test_init_twice_fails() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "test.example.com",
+            "--sandbox-mode",
+            "none",
+        ])
         .assert()
         .success();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "test.example.com",
+            "--sandbox-mode",
+            "none",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("already initialized"));
@@ -89,7 +149,16 @@ fn test_list_after_init() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "test.example.com",
+            "--sandbox-mode",
+            "none",
+        ])
         .assert()
         .success();
 
@@ -144,7 +213,16 @@ fn test_doctor_in_valid_home() {
 
     // Initialize first so agent structure exists.
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "test.example.com",
+            "--sandbox-mode",
+            "none",
+        ])
         .assert()
         .success();
 
@@ -176,12 +254,18 @@ fn test_init_with_telegram_token() {
 
     rightclaw()
         .args([
-            "--home", home,
-            "init", "-y",
-            "--tunnel-hostname", "test.example.com",
-            "--sandbox-mode", "none",
-            "--telegram-token", "123456:ABCdef",
-            "--telegram-allowed-chat-ids", "12345678,100200300",
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "test.example.com",
+            "--sandbox-mode",
+            "none",
+            "--telegram-token",
+            "123456:ABCdef",
+            "--telegram-allowed-chat-ids",
+            "12345678,100200300",
         ])
         .assert()
         .success()
@@ -325,7 +409,16 @@ fn test_init_yes_no_telegram_prompt() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "example.com", "--sandbox-mode", "none"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "example.com",
+            "--sandbox-mode",
+            "none",
+        ])
         .assert()
         .success();
 }
@@ -338,7 +431,18 @@ fn test_init_always_writes_config() {
 
     // Use -y to avoid interactive prompts (inquire requires TTY).
     rightclaw()
-        .args(["--home", home, "init", "-y", "--tunnel-hostname", "test.example.com", "--sandbox-mode", "none", "--telegram-token", "123456:ABCdef"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--tunnel-hostname",
+            "test.example.com",
+            "--sandbox-mode",
+            "none",
+            "--telegram-token",
+            "123456:ABCdef",
+        ])
         .assert()
         .success();
 
@@ -359,7 +463,11 @@ fn reload_fails_when_not_running() {
     // Create minimal agent structure so discovery doesn't fail first.
     let agent_dir = dir.path().join("agents").join("test-agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("agent.yaml"), "restart: never\nsandbox:\n  mode: none\n").unwrap();
+    std::fs::write(
+        agent_dir.join("agent.yaml"),
+        "restart: never\nsandbox:\n  mode: none\n",
+    )
+    .unwrap();
 
     rightclaw()
         .args(["--home", home, "reload"])
@@ -379,10 +487,14 @@ fn agent_init_suggests_reload() {
 
     rightclaw()
         .args([
-            "--home", home,
-            "agent", "init", "test-bot",
+            "--home",
+            home,
+            "agent",
+            "init",
+            "test-bot",
             "-y",
-            "--sandbox-mode", "none",
+            "--sandbox-mode",
+            "none",
         ])
         .assert()
         .success()
@@ -403,10 +515,14 @@ fn test_agent_init_force_recreates_agent() {
     // Create agent.
     rightclaw()
         .args([
-            "--home", home,
-            "agent", "init", "test-agent",
+            "--home",
+            home,
+            "agent",
+            "init",
+            "test-agent",
             "-y",
-            "--sandbox-mode", "none",
+            "--sandbox-mode",
+            "none",
         ])
         .assert()
         .success();
@@ -419,10 +535,15 @@ fn test_agent_init_force_recreates_agent() {
     // Re-init with --force.
     rightclaw()
         .args([
-            "--home", home,
-            "agent", "init", "test-agent",
-            "--force", "-y",
-            "--sandbox-mode", "none",
+            "--home",
+            home,
+            "agent",
+            "init",
+            "test-agent",
+            "--force",
+            "-y",
+            "--sandbox-mode",
+            "none",
         ])
         .assert()
         .success();
@@ -437,9 +558,13 @@ fn test_agent_init_force_recreates_agent() {
 fn test_agent_init_fresh_without_force_errors() {
     rightclaw()
         .args([
-            "--home", "/tmp/doesnt-matter",
-            "agent", "init", "test-agent",
-            "--fresh", "-y",
+            "--home",
+            "/tmp/doesnt-matter",
+            "agent",
+            "init",
+            "test-agent",
+            "--fresh",
+            "-y",
         ])
         .assert()
         .failure()
@@ -458,11 +583,16 @@ fn test_agent_init_force_preserves_config() {
     // Create agent with specific config.
     rightclaw()
         .args([
-            "--home", home,
-            "agent", "init", "preserve-test",
+            "--home",
+            home,
+            "agent",
+            "init",
+            "preserve-test",
             "-y",
-            "--sandbox-mode", "none",
-            "--network-policy", "permissive",
+            "--sandbox-mode",
+            "none",
+            "--network-policy",
+            "permissive",
         ])
         .assert()
         .success();
@@ -470,9 +600,13 @@ fn test_agent_init_force_preserves_config() {
     // Re-init with --force (no --fresh) — should preserve config.
     rightclaw()
         .args([
-            "--home", home,
-            "agent", "init", "preserve-test",
-            "--force", "-y",
+            "--home",
+            home,
+            "agent",
+            "init",
+            "preserve-test",
+            "--force",
+            "-y",
         ])
         .assert()
         .success();
@@ -496,10 +630,15 @@ fn test_agent_init_force_on_nonexistent_agent() {
     // --force on non-existent agent should just create it.
     rightclaw()
         .args([
-            "--home", home,
-            "agent", "init", "new-agent",
-            "--force", "-y",
-            "--sandbox-mode", "none",
+            "--home",
+            home,
+            "agent",
+            "init",
+            "new-agent",
+            "--force",
+            "-y",
+            "--sandbox-mode",
+            "none",
         ])
         .assert()
         .success();
@@ -597,7 +736,10 @@ async fn test_policy_validates_against_openshell() {
 
     // Clean up leftover from a previous failed run.
     let mut client = rightclaw::openshell::connect_grpc(&mtls_dir).await.unwrap();
-    if rightclaw::openshell::sandbox_exists(&mut client, sandbox_name).await.unwrap() {
+    if rightclaw::openshell::sandbox_exists(&mut client, sandbox_name)
+        .await
+        .unwrap()
+    {
         rightclaw::openshell::delete_sandbox(sandbox_name).await;
         rightclaw::openshell::wait_for_deleted(&mut client, sandbox_name, 60, 2)
             .await
@@ -605,12 +747,11 @@ async fn test_policy_validates_against_openshell() {
     }
 
     // Generate the policy under test.
-    let policy_yaml =
-        rightclaw::codegen::policy::generate_policy(
-            rightclaw::runtime::MCP_HTTP_PORT,
-            &rightclaw::agent::types::NetworkPolicy::Permissive,
-            None,
-        );
+    let policy_yaml = rightclaw::codegen::policy::generate_policy(
+        rightclaw::runtime::MCP_HTTP_PORT,
+        &rightclaw::agent::types::NetworkPolicy::Permissive,
+        None,
+    );
     let tmpdir = tempdir().unwrap();
     let policy_path = tmpdir.path().join("test-policy.yaml");
     fs::write(&policy_path, &policy_yaml).unwrap();
@@ -638,8 +779,16 @@ fn test_agent_backup_and_restore_no_sandbox() {
     // Set up a no-sandbox agent manually.
     let agent_dir = home.path().join("agents").join("test-agent");
     fs::create_dir_all(agent_dir.join(".claude")).unwrap();
-    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\nnetwork_policy: permissive\n").unwrap();
-    fs::write(agent_dir.join("IDENTITY.md"), "# Test Agent\nI am a test agent.\n").unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  mode: none\nnetwork_policy: permissive\n",
+    )
+    .unwrap();
+    fs::write(
+        agent_dir.join("IDENTITY.md"),
+        "# Test Agent\nI am a test agent.\n",
+    )
+    .unwrap();
     fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
     fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
     fs::write(agent_dir.join("test-file.txt"), "hello world\n").unwrap();
@@ -647,8 +796,10 @@ fn test_agent_backup_and_restore_no_sandbox() {
     // Create a data.db with a test table.
     let db_path = agent_dir.join("data.db");
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)", []).unwrap();
-    conn.execute("INSERT INTO test (val) VALUES ('backup-test')", []).unwrap();
+    conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, val TEXT)", [])
+        .unwrap();
+    conn.execute("INSERT INTO test (val) VALUES ('backup-test')", [])
+        .unwrap();
     drop(conn);
 
     // Run backup.
@@ -671,8 +822,14 @@ fn test_agent_backup_and_restore_no_sandbox() {
     let backup_dir = entries[0].path();
 
     // Verify backup contents.
-    assert!(backup_dir.join("sandbox.tar.gz").exists(), "should have sandbox.tar.gz");
-    assert!(backup_dir.join("agent.yaml").exists(), "should have agent.yaml");
+    assert!(
+        backup_dir.join("sandbox.tar.gz").exists(),
+        "should have sandbox.tar.gz"
+    );
+    assert!(
+        backup_dir.join("agent.yaml").exists(),
+        "should have agent.yaml"
+    );
     assert!(backup_dir.join("data.db").exists(), "should have data.db");
 
     // Delete original agent.
@@ -685,9 +842,13 @@ fn test_agent_backup_and_restore_no_sandbox() {
 
     rightclaw()
         .args([
-            "--home", home_str,
-            "agent", "init", "restored-agent",
-            "--from-backup", backup_dir.to_str().unwrap(),
+            "--home",
+            home_str,
+            "agent",
+            "init",
+            "restored-agent",
+            "--from-backup",
+            backup_dir.to_str().unwrap(),
         ])
         .assert()
         .success()
@@ -696,7 +857,10 @@ fn test_agent_backup_and_restore_no_sandbox() {
     // Verify restored files.
     let restored_dir = home.path().join("agents").join("restored-agent");
     assert!(restored_dir.exists(), "restored agent dir should exist");
-    assert!(restored_dir.join("agent.yaml").exists(), "should have agent.yaml");
+    assert!(
+        restored_dir.join("agent.yaml").exists(),
+        "should have agent.yaml"
+    );
 
     // Verify the test file was restored from tar (--strip-components=1 used during extraction).
     assert!(
@@ -728,7 +892,14 @@ fn test_agent_backup_sandbox_only() {
     fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
 
     rightclaw()
-        .args(["--home", home_str, "agent", "backup", "test-agent", "--sandbox-only"])
+        .args([
+            "--home",
+            home_str,
+            "agent",
+            "backup",
+            "test-agent",
+            "--sandbox-only",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("sandbox.tar.gz"));
@@ -742,8 +913,14 @@ fn test_agent_backup_sandbox_only() {
     let backup_dir = entries[0].path();
 
     assert!(backup_dir.join("sandbox.tar.gz").exists());
-    assert!(!backup_dir.join("agent.yaml").exists(), "sandbox-only should not have agent.yaml");
-    assert!(!backup_dir.join("data.db").exists(), "sandbox-only should not have data.db");
+    assert!(
+        !backup_dir.join("agent.yaml").exists(),
+        "sandbox-only should not have agent.yaml"
+    );
+    assert!(
+        !backup_dir.join("data.db").exists(),
+        "sandbox-only should not have data.db"
+    );
 }
 
 #[test]
@@ -764,9 +941,13 @@ fn test_agent_restore_fails_if_agent_exists() {
 
     rightclaw()
         .args([
-            "--home", home_str,
-            "agent", "init", "existing",
-            "--from-backup", backup_dir.to_str().unwrap(),
+            "--home",
+            home_str,
+            "agent",
+            "init",
+            "existing",
+            "--from-backup",
+            backup_dir.to_str().unwrap(),
         ])
         .assert()
         .failure()
@@ -797,7 +978,16 @@ fn test_destroy_agent_force() {
 
     // Create an agent via init first
     rightclaw()
-        .args(["--home", home, "init", "-y", "--sandbox-mode", "none", "--tunnel-hostname", "test.example.com"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--sandbox-mode",
+            "none",
+            "--tunnel-hostname",
+            "test.example.com",
+        ])
         .assert()
         .success();
 
@@ -821,19 +1011,36 @@ fn test_destroy_agent_force_with_backup() {
     let home = dir.path().to_str().unwrap();
 
     rightclaw()
-        .args(["--home", home, "init", "-y", "--sandbox-mode", "none", "--tunnel-hostname", "test.example.com"])
+        .args([
+            "--home",
+            home,
+            "init",
+            "-y",
+            "--sandbox-mode",
+            "none",
+            "--tunnel-hostname",
+            "test.example.com",
+        ])
         .assert()
         .success();
 
     rightclaw()
-        .args(["--home", home, "agent", "destroy", "right", "--force", "--backup"])
+        .args([
+            "--home", home, "agent", "destroy", "right", "--force", "--backup",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("Backup saved to"))
         .stdout(predicate::str::contains("Destroyed agent"));
 
-    assert!(!dir.path().join("agents/right").exists(), "agent dir should be removed");
-    assert!(dir.path().join("backups/right").exists(), "backup dir should exist");
+    assert!(
+        !dir.path().join("agents/right").exists(),
+        "agent dir should be removed"
+    );
+    assert!(
+        dir.path().join("backups/right").exists(),
+        "backup dir should exist"
+    );
 }
 
 #[test]

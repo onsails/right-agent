@@ -725,8 +725,9 @@ mod tests {
                 model_usage_json
              ) VALUES (
                 '2026-04-20T00:00:00Z', 'interactive', 'test-uuid', 0.05, 3, '{}'
-             );"
-        ).unwrap();
+             );",
+        )
+        .unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
@@ -735,7 +736,9 @@ mod tests {
 
         // Indexes present.
         let indexes: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='usage_events'")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='usage_events'",
+            )
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
@@ -785,11 +788,9 @@ mod tests {
         // Apply v16.
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let src: String = conn
-            .query_row(
-                "SELECT api_key_source FROM usage_events LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT api_key_source FROM usage_events LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(src, "none");
     }
@@ -868,6 +869,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(target.is_none(), "legacy row should have NULL target_chat_id");
+        assert!(
+            target.is_none(),
+            "legacy row should have NULL target_chat_id"
+        );
     }
 }
