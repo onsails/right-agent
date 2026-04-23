@@ -13,6 +13,7 @@ pub mod platform_store;
 pub mod process_group;
 pub mod runtime;
 pub mod sandbox_exec;
+pub mod stt;
 #[cfg(unix)]
 pub mod test_cleanup;
 #[cfg(all(unix, any(test, feature = "test-support")))]
