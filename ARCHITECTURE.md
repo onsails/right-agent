@@ -111,7 +111,7 @@ rightclaw init
   └─ Write ~/.rightclaw/config.yaml
 
 rightclaw agent init <name>
-  ├─ Interactive wizard: sandbox mode, network policy, telegram, model
+  ├─ Interactive wizard: sandbox mode, network policy, telegram, chat IDs, stt, memory
   ├─ Create ~/.rightclaw/agents/<name>/ with template files
   ├─ Write AGENTS.md, BOOTSTRAP.md, agent.yaml
   │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
