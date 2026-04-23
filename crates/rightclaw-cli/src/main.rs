@@ -516,7 +516,8 @@ async fn main() -> miette::Result<()> {
             AgentCommands::Config { name, key, value } => {
                 match (key, value) {
                     (None, None) => {
-                        let agent_name = crate::wizard::agent_setting_menu(&home, name.as_deref()).await?;
+                        let agent_name =
+                            crate::wizard::agent_setting_menu(&home, name.as_deref()).await?;
                         maybe_migrate_sandbox(&home, &agent_name).await?;
                     }
                     (Some(_key), _) => {
@@ -1990,6 +1991,27 @@ async fn cmd_up(
             }
             status @ rightclaw::openshell::OpenShellStatus::BrokenGateway(_) => {
                 return Err(openshell_status_error(status));
+            }
+        }
+    }
+
+    // Download any whisper models needed by STT-enabled agents.
+    {
+        use rightclaw::agent::types::WhisperModel;
+        use std::collections::HashSet;
+
+        let mut models: HashSet<WhisperModel> = HashSet::new();
+        for agent in &agents {
+            if let Some(cfg) = agent.config.as_ref() {
+                if cfg.stt.enabled {
+                    models.insert(cfg.stt.model);
+                }
+            }
+        }
+        if !models.is_empty() {
+            println!("Ensuring whisper models are cached...");
+            if let Err(e) = rightclaw::stt::ensure_models_cached(home, &models).await {
+                eprintln!("warning: model cache step failed: {e:#}");
             }
         }
     }
