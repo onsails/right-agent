@@ -1554,6 +1554,17 @@ fn cmd_agent_init(
 
         // Run wizard or use CLI flags. Esc goes back to previous step.
         if !interactive {
+            let ffmpeg_ok = rightclaw::stt::ffmpeg_available();
+            let stt = rightclaw::agent::types::SttConfig {
+                enabled: ffmpeg_ok,
+                model: rightclaw::agent::types::WhisperModel::Small,
+            };
+            if !ffmpeg_ok {
+                eprintln!(
+                    "warning: STT disabled — ffmpeg not in PATH. \
+                     Install (macOS): brew install ffmpeg, then re-run with --force."
+                );
+            }
             rightclaw::init::InitOverrides {
                 sandbox_mode: sandbox_mode
                     .unwrap_or(rightclaw::agent::types::SandboxMode::Openshell),
@@ -1568,7 +1579,7 @@ fn cmd_agent_init(
                 memory_bank_id: None,
                 memory_recall_budget: rightclaw::init::DEFAULT_RECALL_BUDGET,
                 memory_recall_max_tokens: rightclaw::init::DEFAULT_RECALL_MAX_TOKENS,
-                stt: rightclaw::agent::types::SttConfig::default(),
+                stt,
             }
         } else {
             #[derive(Clone, Copy)]
