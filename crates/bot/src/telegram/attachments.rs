@@ -1003,12 +1003,11 @@ async fn resolve_host_path(
         Err(e) => {
             let msg = format!("metadata failed for {}: {e} — {log_suffix}", host.display());
             tracing::warn!("{msg}");
-            if ctx.sandboxed {
-                if let Err(e) = tokio::fs::remove_file(&host).await
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    tracing::warn!("failed to remove temp file {}: {e}", host.display());
-                }
+            if ctx.sandboxed
+                && let Err(e) = tokio::fs::remove_file(&host).await
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("failed to remove temp file {}: {e}", host.display());
             }
             return Err(msg);
         }
@@ -1024,12 +1023,11 @@ async fn resolve_host_path(
             meta.len() as f64 / (1024.0 * 1024.0),
         );
         tracing::warn!("{msg}");
-        if ctx.sandboxed {
-            if let Err(e) = tokio::fs::remove_file(&host).await
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::warn!("failed to remove temp file {}: {e}", host.display());
-            }
+        if ctx.sandboxed
+            && let Err(e) = tokio::fs::remove_file(&host).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!("failed to remove temp file {}: {e}", host.display());
         }
         return Err(msg);
     }
@@ -1135,12 +1133,11 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
         }
     };
 
-    if ctx.sandboxed {
-        if let Err(e) = tokio::fs::remove_file(&host_path).await
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!("failed to remove temp file {}: {e}", host_path.display());
-        }
+    if ctx.sandboxed
+        && let Err(e) = tokio::fs::remove_file(&host_path).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("failed to remove temp file {}: {e}", host_path.display());
     }
     send_result.map_err(SendError::Api)
 }

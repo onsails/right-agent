@@ -148,13 +148,13 @@ impl DynamicAuthClient {
             }
             AuthMethod::Header(header_name) => {
                 let mut extra = Vec::new();
-                if let Some(ref token) = *self.token.read().await {
-                    if let (Ok(name), Ok(value)) = (
+                if let Some(ref token) = *self.token.read().await
+                    && let (Ok(name), Ok(value)) = (
                         HeaderName::from_bytes(header_name.as_bytes()),
                         HeaderValue::from_str(token),
-                    ) {
-                        extra.push((name, value));
-                    }
+                    )
+                {
+                    extra.push((name, value));
                 }
                 (None, extra)
             }

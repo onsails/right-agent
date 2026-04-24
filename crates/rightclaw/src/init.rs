@@ -197,23 +197,23 @@ pub fn init_agent(
 
     // Seed allowlist.yaml from the user-provided first trusted user.
     // Idempotent — skipped when allowlist.yaml already exists (wizard re-run, --force, etc.).
-    if let Some(ov) = overrides {
-        if !ov.allowed_chat_ids.is_empty() {
-            let report = crate::agent::allowlist::migrate_from_legacy(
-                &agents_dir,
-                &ov.allowed_chat_ids,
-                chrono::Utc::now(),
-            )
-            .map_err(|e| miette::miette!("seed allowlist.yaml: {e:#}"))?;
-            if !report.already_present && (report.migrated_users + report.migrated_groups) > 0 {
-                tracing::info!(
-                    users = report.migrated_users,
-                    groups = report.migrated_groups,
-                    "seeded allowlist.yaml with {} users, {} groups from wizard input",
-                    report.migrated_users,
-                    report.migrated_groups,
-                );
-            }
+    if let Some(ov) = overrides
+        && !ov.allowed_chat_ids.is_empty()
+    {
+        let report = crate::agent::allowlist::migrate_from_legacy(
+            &agents_dir,
+            &ov.allowed_chat_ids,
+            chrono::Utc::now(),
+        )
+        .map_err(|e| miette::miette!("seed allowlist.yaml: {e:#}"))?;
+        if !report.already_present && (report.migrated_users + report.migrated_groups) > 0 {
+            tracing::info!(
+                users = report.migrated_users,
+                groups = report.migrated_groups,
+                "seeded allowlist.yaml with {} users, {} groups from wizard input",
+                report.migrated_users,
+                report.migrated_groups,
+            );
         }
     }
 
