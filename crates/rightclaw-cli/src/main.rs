@@ -779,6 +779,8 @@ async fn main() -> miette::Result<()> {
                 // Load existing MCP servers from SQLite and create ProxyBackends.
                 // Collect OAuth entries for refresh scheduling.
                 let mut proxies = std::collections::HashMap::new();
+                // Local to this block; extracting a named type alias is out of scope.
+                #[allow(clippy::type_complexity)]
                 let mut oauth_entries: Vec<(
                     String,
                     rightclaw::mcp::refresh::OAuthServerState,
@@ -2983,6 +2985,9 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     Err(miette::miette!("Failed to exec ssh: {err}"))
 }
 
+// Tests are placed mid-file historically; moving them is a structural
+// change out of scope for this cleanup pass.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::{
@@ -3505,6 +3510,8 @@ fn cmd_memory_list(
              LIMIT ?1 OFFSET ?2",
         )
         .map_err(|e| miette::miette!("failed to list memories: {e:#}"))?;
+    // Local SQLite row projection; extracting a named alias is out of scope.
+    #[allow(clippy::type_complexity)]
     let entries: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
         .query_map(rusqlite::params![limit, offset], |row| {
             Ok((
@@ -3640,6 +3647,8 @@ fn cmd_memory_search(
             help = "FTS5 syntax: use simple words or phrases. Avoid special chars like * at start.",
             "search failed: {e:#}"
         ))?;
+    // Local SQLite row projection; extracting a named alias is out of scope.
+    #[allow(clippy::type_complexity)]
     let entries: Vec<(i64, String, Option<String>, Option<String>, String)> = stmt
         .query_map(rusqlite::params![query, limit, offset], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))

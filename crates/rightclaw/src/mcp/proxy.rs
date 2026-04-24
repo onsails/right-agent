@@ -18,6 +18,8 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 /// Errors from proxy backend operations.
+// allocator churn outweighs memory savings for the hot path
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Error)]
 pub enum ProxyError {
     #[error("MCP client initialization failed for '{server}': {source}")]

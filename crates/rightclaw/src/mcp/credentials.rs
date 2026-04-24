@@ -365,6 +365,8 @@ pub fn db_set_auth(
 ///
 /// Sets `auth_type` to `"oauth"`. Returns `CredentialError::ServerNotFound` if
 /// no matching row exists.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub fn db_set_oauth_state(
     conn: &Connection,
     name: &str,

@@ -460,6 +460,8 @@ impl rmcp::ServerHandler for MemoryServer {
 }
 
 /// Convert a cron_runs row to JSON value.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cron_run_to_json(
     id: &str,
     job_name: &str,

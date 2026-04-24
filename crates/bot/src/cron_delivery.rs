@@ -439,6 +439,8 @@ pub async fn run_delivery_loop(
 }
 
 /// Invoke the main CC session with cron result YAML and send the reply to Telegram.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 async fn deliver_through_session(
     yaml_input: &str,
     agent_dir: &Path,

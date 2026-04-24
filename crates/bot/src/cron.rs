@@ -206,6 +206,8 @@ fn classify_cron_failure(
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
 /// Results are persisted to the `cron_runs` table (summary + notify_json).
 /// A separate Telegram delivery loop reads pending rows and sends notifications.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 async fn execute_job(
     job_name: &str,
     spec: &CronSpec,
@@ -775,6 +777,8 @@ type ExecuteHandles = Arc<std::sync::Mutex<Vec<(String, JoinHandle<()>)>>>;
 /// and sends Telegram notifications.
 ///
 /// Signature expected by lib.rs spawn site (CRON-01, CRON-02, CRON-06).
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub async fn run_cron_task(
     agent_dir: std::path::PathBuf,
     agent_name: String,
@@ -904,6 +908,8 @@ fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
     }
 }
 
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 fn reconcile_jobs(
     handles: &mut HashMap<String, (CronSpec, JoinHandle<()>)>,
     triggered_handles: &mut Vec<JoinHandle<()>>,
@@ -1085,6 +1091,8 @@ fn reconcile_jobs(
 /// Per-job loop: sleep until next scheduled time, then execute. (CRON-03, D-03)
 ///
 /// Execute handles are pushed to `execute_handles` so shutdown can await them.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 async fn run_job_loop(
     job_name: String,
     spec: CronSpec,

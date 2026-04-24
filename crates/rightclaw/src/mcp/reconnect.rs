@@ -158,6 +158,8 @@ pub async fn do_refresh_cancellable(
 /// On connect failure: returns [`ReconnectError::ConnectFailed`].
 /// On cancellation: returns [`ReconnectError::Cancelled`] immediately.
 /// On all other errors: if backend is not already `Connected`, sets status to `NeedsAuth`.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub async fn reconnect_task(
     server_name: String,
     backend: Arc<ProxyBackend>,
