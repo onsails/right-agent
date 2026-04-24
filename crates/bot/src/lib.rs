@@ -526,10 +526,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             &network_policy,
             host_ip,
         );
-        std::fs::write(&policy_path, &policy_content)
-            .map_err(|e| miette::miette!("failed to write policy.yaml: {e:#}"))?;
         tracing::info!(agent = %args.agent, "reusing existing sandbox, applying policy with host_ip={:?}", host_ip);
-        rightclaw::openshell::apply_policy(&sandbox, &policy_path).await?;
+        rightclaw::codegen::contract::write_and_apply_sandbox_policy(
+            &sandbox,
+            &policy_path,
+            &policy_content,
+        )
+        .await?;
 
         // Generate SSH config.
         let ssh_config_dir = home.join("run").join("ssh");
