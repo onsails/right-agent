@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::agent::types::{AgentDef, SandboxMode};
 use crate::codegen::cloudflared::CloudflaredCredentials;
+use crate::codegen::contract::{write_agent_owned, write_merged_rmw, write_regenerated};
 
 /// Inject a secret into agent.yaml if not already present.
 /// Returns the existing or newly generated secret.
@@ -65,28 +66,16 @@ pub fn run_single_agent_codegen(
         .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
 
     // Write reply-schema.json.
-    std::fs::write(
-        claude_dir.join("reply-schema.json"),
+    write_regenerated(
+        &claude_dir.join("reply-schema.json"),
         crate::codegen::REPLY_SCHEMA_JSON,
-    )
-    .map_err(|e| {
-        miette::miette!(
-            "failed to write reply-schema.json for '{}': {e:#}",
-            agent.name
-        )
-    })?;
+    )?;
 
     // Write cron-schema.json.
-    std::fs::write(
-        claude_dir.join("cron-schema.json"),
+    write_regenerated(
+        &claude_dir.join("cron-schema.json"),
         crate::codegen::CRON_SCHEMA_JSON,
-    )
-    .map_err(|e| {
-        miette::miette!(
-            "failed to write cron-schema.json for '{}': {e:#}",
-            agent.name
-        )
-    })?;
+    )?;
 
     // Determine home directory: /sandbox for OpenShell agents, agent path for no-sandbox.
     let home_dir = match &agent_sandbox_mode {
@@ -95,28 +84,16 @@ pub fn run_single_agent_codegen(
     };
 
     // Write system-prompt.md (base identity for --system-prompt-file).
-    std::fs::write(
-        claude_dir.join("system-prompt.md"),
-        crate::codegen::generate_system_prompt(&agent.name, &agent_sandbox_mode, &home_dir),
-    )
-    .map_err(|e| {
-        miette::miette!(
-            "failed to write system-prompt.md for '{}': {e:#}",
-            agent.name
-        )
-    })?;
+    write_regenerated(
+        &claude_dir.join("system-prompt.md"),
+        &crate::codegen::generate_system_prompt(&agent.name, &agent_sandbox_mode, &home_dir),
+    )?;
 
     // Write bootstrap-schema.json (bootstrap mode structured output).
-    std::fs::write(
-        claude_dir.join("bootstrap-schema.json"),
+    write_regenerated(
+        &claude_dir.join("bootstrap-schema.json"),
         crate::codegen::BOOTSTRAP_SCHEMA_JSON,
-    )
-    .map_err(|e| {
-        miette::miette!(
-            "failed to write bootstrap-schema.json for '{}': {e:#}",
-            agent.name
-        )
-    })?;
+    )?;
 
     tracing::debug!(agent = %agent.name, "wrote schemas");
 
@@ -127,13 +104,10 @@ pub fn run_single_agent_codegen(
             agent.name
         )
     })?;
-    std::fs::write(
-        claude_dir.join("settings.json"),
-        serde_json::to_string_pretty(&settings).map_err(|e| {
-            miette::miette!("failed to serialize settings for '{}': {e:#}", agent.name)
-        })?,
-    )
-    .map_err(|e| miette::miette!("failed to write settings.json for '{}': {e:#}", agent.name))?;
+    let settings_json = serde_json::to_string_pretty(&settings).map_err(|e| {
+        miette::miette!("failed to serialize settings for '{}': {e:#}", agent.name)
+    })?;
+    write_regenerated(&claude_dir.join("settings.json"), &settings_json)?;
     tracing::debug!(agent = %agent.name, "wrote settings.json");
 
     // Generate per-agent .claude.json with trust entries.
