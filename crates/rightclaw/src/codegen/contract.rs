@@ -110,6 +110,85 @@ pub async fn write_and_apply_sandbox_policy(
     crate::openshell::apply_policy(sandbox, path).await
 }
 
+/// Per-agent codegen outputs. Source of truth for guard tests.
+///
+/// Every file produced by [`crate::codegen::run_single_agent_codegen`] MUST
+/// appear here or in the documented `KNOWN_EXCEPTIONS` inside
+/// `registry_covers_all_per_agent_writes`.
+pub fn codegen_registry(agent_dir: &Path) -> Vec<CodegenFile> {
+    let claude = agent_dir.join(".claude");
+    vec![
+        CodegenFile {
+            kind: CodegenKind::MergedRMW,
+            path: agent_dir.join("agent.yaml"),
+        },
+        CodegenFile {
+            kind: CodegenKind::MergedRMW,
+            path: agent_dir.join(".claude.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: agent_dir.join("mcp.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::SandboxRecreate),
+            path: agent_dir.join("policy.yaml"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: claude.join("settings.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::AgentOwned,
+            path: claude.join("settings.local.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: claude.join("reply-schema.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: claude.join("cron-schema.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: claude.join("bootstrap-schema.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: claude.join("system-prompt.md"),
+        },
+        // Skills are registered as a single tree-rooted entry; the installer
+        // manages content-addressed files beneath.
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: claude.join("skills"),
+        },
+    ]
+}
+
+/// Cross-agent codegen outputs under `<home>/run/` and peers.
+pub fn crossagent_codegen_registry(home: &Path) -> Vec<CodegenFile> {
+    let run = home.join("run");
+    vec![
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: run.join("process-compose.yaml"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: run.join("agent-tokens.json"),
+        },
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: home.join("scripts").join("cloudflared-start.sh"),
+        },
+        // cloudflared config path is added in Phase 4 Task 16 when the
+        // cross-agent refactor lands — leaving a stub here would become stale
+        // if the filename changes.
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +261,17 @@ mod tests {
         let path = dir.path().join("nested/new.json");
         write_merged_rmw(&path, |_| Ok("{}".to_owned())).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn codegen_registry_has_all_expected_categories() {
+        let dir = tempdir().unwrap();
+        let reg = codegen_registry(dir.path());
+        assert!(reg.iter().any(|f| matches!(f.kind, CodegenKind::MergedRMW)));
+        assert!(reg.iter().any(|f| matches!(f.kind, CodegenKind::AgentOwned)));
+        assert!(reg.iter().any(|f| matches!(f.kind,
+            CodegenKind::Regenerated(HotReload::BotRestart))));
+        assert!(reg.iter().any(|f| matches!(f.kind,
+            CodegenKind::Regenerated(HotReload::SandboxRecreate))));
     }
 }
