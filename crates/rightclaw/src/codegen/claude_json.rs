@@ -12,16 +12,6 @@ use crate::agent::AgentDef;
 /// Pattern follows `pre_trust_directory()` in `init.rs`.
 pub fn generate_agent_claude_json(agent: &AgentDef) -> miette::Result<()> {
     let claude_json_path = agent.path.join(".claude.json");
-
-    let mut config: serde_json::Value = if claude_json_path.exists() {
-        let content = std::fs::read_to_string(&claude_json_path)
-            .map_err(|e| miette::miette!("failed to read {}: {e:#}", claude_json_path.display()))?;
-        serde_json::from_str(&content)
-            .map_err(|e| miette::miette!("failed to parse {}: {e:#}", claude_json_path.display()))?
-    } else {
-        serde_json::json!({})
-    };
-
     let path_key = agent
         .path
         .canonicalize()
@@ -29,47 +19,48 @@ pub fn generate_agent_claude_json(agent: &AgentDef) -> miette::Result<()> {
         .display()
         .to_string();
 
-    let root = config
-        .as_object_mut()
-        .ok_or_else(|| miette::miette!(".claude.json is not a JSON object"))?;
+    crate::codegen::contract::write_merged_rmw(&claude_json_path, |existing| {
+        let mut config: serde_json::Value = match existing {
+            Some(content) => serde_json::from_str(content).map_err(|e| {
+                miette::miette!("failed to parse {}: {e:#}", claude_json_path.display())
+            })?,
+            None => serde_json::json!({}),
+        };
 
-    // Suppress CC's first-run onboarding flow (theme picker + auth prompt).
-    // Under HOME override, CC reads this .claude.json as its user config and
-    // shows onboarding when hasCompletedOnboarding is missing.
-    root.entry("hasCompletedOnboarding")
-        .or_insert(serde_json::Value::Bool(true));
+        let root = config
+            .as_object_mut()
+            .ok_or_else(|| miette::miette!(".claude.json is not a JSON object"))?;
 
-    let projects = root
-        .entry("projects")
-        .or_insert_with(|| serde_json::json!({}));
+        root.entry("hasCompletedOnboarding")
+            .or_insert(serde_json::Value::Bool(true));
 
-    let project = projects
-        .as_object_mut()
-        .ok_or_else(|| miette::miette!("projects is not a JSON object"))?
-        .entry(&path_key)
-        .or_insert_with(|| serde_json::json!({}));
+        let projects = root
+            .entry("projects")
+            .or_insert_with(|| serde_json::json!({}));
 
-    project
-        .as_object_mut()
-        .ok_or_else(|| miette::miette!("project entry is not a JSON object"))?
-        .insert(
-            "hasTrustDialogAccepted".to_owned(),
-            serde_json::Value::Bool(true),
-        );
+        let project = projects
+            .as_object_mut()
+            .ok_or_else(|| miette::miette!("projects is not a JSON object"))?
+            .entry(&path_key)
+            .or_insert_with(|| serde_json::json!({}));
 
-    // Trust /sandbox path for OpenShell sandbox mode (agent runs inside container at /sandbox).
-    projects
-        .as_object_mut()
-        .ok_or_else(|| miette::miette!("projects is not a JSON object"))?
-        .entry("/sandbox")
-        .or_insert_with(|| serde_json::json!({"hasTrustDialogAccepted": true}));
+        project
+            .as_object_mut()
+            .ok_or_else(|| miette::miette!("project entry is not a JSON object"))?
+            .insert(
+                "hasTrustDialogAccepted".to_owned(),
+                serde_json::Value::Bool(true),
+            );
 
-    std::fs::write(
-        &claude_json_path,
+        projects
+            .as_object_mut()
+            .ok_or_else(|| miette::miette!("projects is not a JSON object"))?
+            .entry("/sandbox")
+            .or_insert_with(|| serde_json::json!({"hasTrustDialogAccepted": true}));
+
         serde_json::to_string_pretty(&config)
-            .map_err(|e| miette::miette!("failed to serialize: {e:#}"))?,
-    )
-    .map_err(|e| miette::miette!("failed to write {}: {e:#}", claude_json_path.display()))?;
+            .map_err(|e| miette::miette!("failed to serialize .claude.json: {e:#}"))
+    })?;
 
     tracing::debug!(agent = %agent.name, "wrote .claude.json");
     Ok(())
