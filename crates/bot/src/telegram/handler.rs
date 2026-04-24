@@ -599,6 +599,8 @@ pub async fn handle_switch(
 ///
 /// Teloxide captures everything after `/mcp` as a single String (RESEARCH.md Pitfall 9).
 /// We split manually and dispatch.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_mcp(
     bot: BotType,
     msg: Message,
@@ -934,6 +936,8 @@ async fn handle_mcp_auth(
 /// 3. Otherwise determine auth type (query_string / haiku detection / bearer default)
 /// 4. If bearer/header: ask user for token via `PendingTokenSlot`
 /// 5. Register server with auth fields (connection verified server-side)
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 async fn handle_mcp_add(
     bot: &BotType,
     msg: &Message,

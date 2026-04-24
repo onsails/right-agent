@@ -243,6 +243,8 @@ pub fn init_agent(
 /// Creates `home/agents/right/` with template files via [`init_agent`].
 ///
 /// Returns an error if the agents directory already exists.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub fn init_rightclaw_home(
     home: &Path,
     telegram_token: Option<&str>,
@@ -503,6 +505,8 @@ pub async fn validate_hindsight_key(api_key: &str) -> ValidationResult {
 /// Run the memory configuration wizard with Esc-to-go-back support.
 ///
 /// Returns `None` on Esc from the provider selection (caller should go back).
+// interactive wizard return type; a dedicated struct is out of scope here
+#[allow(clippy::type_complexity)]
 pub fn prompt_memory_config(
     agent_name: &str,
 ) -> miette::Result<

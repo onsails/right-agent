@@ -53,6 +53,8 @@ const PROMPT_SECTIONS: &[PromptSection] = &[
 ///
 /// The script reads files from `root_path`, assembles them into `prompt_file`,
 /// then runs claude from `workdir`.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_prompt_assembly_script(
     base_prompt: &str,
     bootstrap_mode: bool,

@@ -582,6 +582,8 @@ fn build_streamable_config(
 ///
 /// Replaces `run_memory_server_http` — same auth middleware, but dispatches
 /// through the prefix-based `ToolDispatcher` instead of `HttpMemoryServer`.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_aggregator_http(
     port: u16,
     token_map: AgentTokenMap,

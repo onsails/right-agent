@@ -201,6 +201,9 @@ async fn test_cron_show_run_not_found() {
     );
 }
 
+// Guard is dropped before the .await below, so it is not held across it.
+// Clippy's analysis is not smart enough to see the explicit drop.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn test_cron_list_runs_includes_diagnostics_fields() {
     let (server, _dir) = setup_server();
