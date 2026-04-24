@@ -402,4 +402,73 @@ mod tests {
         );
         assert!(parsed["hasCompletedOnboarding"].is_boolean());
     }
+
+    /// Files that codegen (or its side effects) may create but that are
+    /// intentionally outside the codegen contract. Keep this list tight —
+    /// every entry is a gap in the upgrade story.
+    const KNOWN_EXCEPTIONS: &[&str] = &[
+        ".git",
+        "data.db",
+        "data.db-shm",
+        "data.db-wal",
+        "oauth-callback.sock",
+        ".claude/shell-snapshots",
+        ".claude/.credentials.json", // symlink, target owned by host
+        "inbox",
+        "outbox",
+        "tmp",
+    ];
+
+    fn walk_files_rel(root: &Path, base: &Path, out: &mut Vec<PathBuf>) {
+        if !root.exists() {
+            return;
+        }
+        for entry in std::fs::read_dir(root).unwrap().flatten() {
+            let p = entry.path();
+            let rel = p.strip_prefix(base).unwrap().to_owned();
+            if KNOWN_EXCEPTIONS.iter().any(|x| rel.starts_with(x)) {
+                continue;
+            }
+            if p.is_dir() {
+                walk_files_rel(&p, base, out);
+            } else if p.is_file() || p.is_symlink() {
+                out.push(rel);
+            }
+        }
+    }
+
+    #[test]
+    fn registry_covers_all_per_agent_writes() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let agent = minimal_agent_fixture(&home, "t4");
+
+        // Snapshot fixture seed files — they exist before codegen and are
+        // not codegen outputs. Only files that appear *after* codegen count.
+        let mut before = Vec::new();
+        walk_files_rel(&agent.path, &agent.path, &mut before);
+        let before: std::collections::HashSet<PathBuf> = before.into_iter().collect();
+
+        run_codegen_for(&home, &agent);
+
+        let reg_paths: std::collections::HashSet<PathBuf> = codegen_registry(&agent.path)
+            .into_iter()
+            .map(|f| f.path.strip_prefix(&agent.path).unwrap().to_owned())
+            .collect();
+
+        let mut found = Vec::new();
+        walk_files_rel(&agent.path, &agent.path, &mut found);
+
+        let uncovered: Vec<_> = found
+            .into_iter()
+            .filter(|rel| !before.contains(rel))
+            .filter(|rel| !reg_paths.iter().any(|r| rel == r || rel.starts_with(r)))
+            .collect();
+
+        assert!(
+            uncovered.is_empty(),
+            "files produced by codegen not in registry or KNOWN_EXCEPTIONS: {:#?}",
+            uncovered,
+        );
+    }
 }
