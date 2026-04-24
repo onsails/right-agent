@@ -520,7 +520,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let host_ip = rightclaw::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
 
         // Regenerate policy with resolved host IP and apply.
-        let network_policy = config.network_policy.clone();
+        let network_policy = config.network_policy;
         let policy_content = rightclaw::codegen::policy::generate_policy(
             rightclaw::runtime::MCP_HTTP_PORT,
             &network_policy,

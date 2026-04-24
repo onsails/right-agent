@@ -60,7 +60,7 @@ pub fn run_single_agent_codegen(
     let agent_sandbox_mode = agent
         .config
         .as_ref()
-        .map(|c| c.sandbox_mode().clone())
+        .map(|c| *c.sandbox_mode())
         .unwrap_or_default();
 
     // Generate .claude/settings.json with behavioral flags.
@@ -167,7 +167,7 @@ pub fn run_single_agent_codegen(
     let network_policy = agent
         .config
         .as_ref()
-        .map(|c| c.network_policy.clone())
+        .map(|c| c.network_policy)
         .unwrap_or_default();
     let mcp_port = crate::runtime::MCP_HTTP_PORT;
     let policy_content = crate::codegen::policy::generate_policy(mcp_port, &network_policy, None);
