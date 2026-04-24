@@ -234,10 +234,10 @@ Bot startup:
 
 Sandbox network:
   ├─ HTTP CONNECT proxy at 10.200.0.1:3128 (set via HTTPS_PROXY env)
-  ├─ TLS MITM: proxy terminates TLS, re-signs with per-sandbox CA
+  ├─ TLS MITM: proxy auto-detects TLS (ClientHello peek) and terminates
+  │   unconditionally for credential injection (OpenShell v0.0.30+)
   │   └─ Sandbox trusts CA via /etc/openshell-tls/ca-bundle.pem
-  ├─ Policy controls which domains are allowed (wildcards supported)
-  └─ tls: terminate REQUIRED on all HTTPS endpoints (OpenShell v0.0.23)
+  └─ Policy controls which domains are allowed (wildcards supported)
 
 Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platform/ during initial_sync):
   ├─ .claude/settings.json    — CC behavioral flags
@@ -588,7 +588,7 @@ Rules:
 - **Sandbox isolation**: OpenShell (k3s containers) — filesystem + network + TLS policies per agent
 - **TLS MITM**: OpenShell proxy terminates and re-signs TLS with per-sandbox CA for L7 inspection
 - **Credential isolation**: Host credentials never uploaded to sandbox. Each sandbox authenticates independently via OAuth login flow.
-- **Network policy**: Wildcard domain allowlists (*.anthropic.com, *.claude.com, *.claude.ai) + `tls: terminate` + `binaries: "**"`
+- **Network policy**: Wildcard domain allowlists (*.anthropic.com, *.claude.com, *.claude.ai) + `binaries: "**"`. TLS termination is automatic (OpenShell v0.0.30+).
 - **`--dangerously-skip-permissions`**: Always on for all CC invocations. OpenShell policy is the security layer, not CC's permission system.
 - **Prompt injection detection**: Pattern matching in memory guard before SQLite insert
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent in agent.yaml
@@ -606,13 +606,13 @@ Rules:
 
 ## OpenShell Policy Gotchas
 
-- `tls: terminate` is **required** on all HTTPS endpoints (OpenShell v0.0.23). Without it, proxy attempts raw L4 tunnel which fails with "Connection reset by peer" during TLS handshake.
+- **Do not emit `tls:` field** (OpenShell v0.0.30+). The proxy auto-detects TLS via ClientHello peek and terminates unconditionally for credential injection. Writing `tls: terminate` or `tls: passthrough` triggers a per-request `WARN` in the sandbox supervisor log and the field is slated for removal. Omit the field for auto-detect; use `tls: skip` only to explicitly disable termination (raw tunnel).
 - `binaries: path: "**"` not `"/sandbox/**"`. Claude binary lives at `/usr/local/bin/claude`, not under `/sandbox/`.
-- `protocol: rest` and `access: full` required when `tls: terminate` is set.
+- `protocol: rest` and `access: full` are required for HTTPS endpoints so the proxy applies L7 policy on the terminated plaintext.
 - Wildcard domains (`*.anthropic.com`) work — the earlier 403 was caused by the binaries restriction, not wildcard matching.
 - CC actively manages `.claude.json` — strips unknown project trust entries on startup. Use `--dangerously-skip-permissions` instead of relying on trust entries.
 - `HTTPS_PROXY=http://10.200.0.1:3128` is set automatically inside sandbox. All HTTP/HTTPS goes through the proxy.
-- **Host service access from sandbox** (`host.openshell.internal`): requires `allowed_ips` in the policy endpoint to bypass SSRF protection. Server must bind `0.0.0.0` (not `127.0.0.1` — loopback is always blocked). Plain HTTP works without `tls: terminate`. Prefer `host.openshell.internal` over `host.docker.internal` — both resolve to the same IP, but the OpenShell hostname is guaranteed available in all sandboxes regardless of Docker setup.
+- **Host service access from sandbox** (`host.openshell.internal`): requires `allowed_ips` in the policy endpoint to bypass SSRF protection. Server must bind `0.0.0.0` (not `127.0.0.1` — loopback is always blocked). Plain HTTP just works (no TLS to terminate). Prefer `host.openshell.internal` over `host.docker.internal` — both resolve to the same IP, but the OpenShell hostname is guaranteed available in all sandboxes regardless of Docker setup.
 - **NixOS users**: must add `networking.firewall.trustedInterfaces = [ "docker0" "br-+" ];` to NixOS config. OpenShell runs k3s inside a Docker container on a custom bridge network (`br-XXXXX`), not the default `docker0`. Without this, the NixOS firewall drops traffic from k3s pods to host services. The `+` suffix is iptables wildcard matching all `br-*` interfaces.
 - **Filesystem policy changes require sandbox recreation**: `openshell policy set --wait` hot-reloads network policies but does NOT apply filesystem policy changes to running sandboxes. Landlock rules are set at sandbox creation time. To apply filesystem_policy changes, the sandbox must be destroyed and recreated.
 
