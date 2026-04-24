@@ -547,6 +547,7 @@ fn tunnel_state_credentials_present_passes() {
             credentials_file: creds_file,
             hostname: "example.com".to_string(),
         }),
+        aggregator: crate::config::AggregatorConfig::default(),
     };
     crate::config::write_global_config(dir.path(), &config).unwrap();
     let checks = check_tunnel_state(dir.path());
@@ -571,6 +572,7 @@ fn tunnel_state_credentials_missing_warns() {
             credentials_file: std::path::PathBuf::from("/nonexistent/creds.json"),
             hostname: "example.com".to_string(),
         }),
+        aggregator: crate::config::AggregatorConfig::default(),
     };
     crate::config::write_global_config(dir.path(), &config).unwrap();
     let checks = check_tunnel_state(dir.path());

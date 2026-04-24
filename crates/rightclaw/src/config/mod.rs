@@ -19,6 +19,26 @@ pub fn resolve_home(cli_home: Option<&str>, env_home: Option<&str>) -> miette::R
 #[derive(Debug, Clone, Default)]
 pub struct GlobalConfig {
     pub tunnel: Option<TunnelConfig>,
+    pub aggregator: AggregatorConfig,
+}
+
+/// MCP Aggregator HTTP server configuration.
+///
+/// Controls rmcp's DNS-rebinding Host-header check. Since v1.4.0, rmcp's
+/// `StreamableHttpServerConfig::default()` only allows `localhost`/`127.0.0.1`/`::1`
+/// as Host values, which breaks sandbox access where the Host is e.g.
+/// `host.openshell.internal:8100`.
+///
+/// - Empty `allowed_hosts` (default) → `disable_allowed_hosts()`, skip the check
+///   entirely. This is safe because the aggregator already authenticates every
+///   request via per-agent Bearer tokens, and DNS rebinding protection only
+///   matters for browser-ambient-auth scenarios that don't apply here.
+/// - Non-empty → `with_allowed_hosts(...)`, enforce exactly that list. Use when
+///   the aggregator is exposed on a fixed public hostname and defence-in-depth
+///   is wanted.
+#[derive(Debug, Clone, Default)]
+pub struct AggregatorConfig {
+    pub allowed_hosts: Vec<String>,
 }
 
 /// Cloudflare Named Tunnel configuration (credentials-file based, Phase 38+).
@@ -36,6 +56,14 @@ pub struct TunnelConfig {
 #[derive(Debug, Deserialize)]
 struct RawGlobalConfig {
     tunnel: Option<RawTunnelConfig>,
+    #[serde(default)]
+    aggregator: Option<RawAggregatorConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAggregatorConfig {
+    #[serde(default)]
+    allowed_hosts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +126,12 @@ pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
                 })
             })
             .transpose()?,
+        aggregator: raw
+            .aggregator
+            .map(|a| AggregatorConfig {
+                allowed_hosts: a.allowed_hosts,
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -119,6 +153,14 @@ pub fn write_global_config(home: &Path, config: &GlobalConfig) -> miette::Result
         content.push_str(&format!("  tunnel_uuid: \"{uuid}\"\n"));
         content.push_str(&format!("  credentials_file: \"{creds}\"\n"));
         content.push_str(&format!("  hostname: \"{hostname}\"\n"));
+    }
+    if !config.aggregator.allowed_hosts.is_empty() {
+        content.push_str("aggregator:\n");
+        content.push_str("  allowed_hosts:\n");
+        for host in &config.aggregator.allowed_hosts {
+            let escaped = host.replace('"', "\\\"");
+            content.push_str(&format!("    - \"{escaped}\"\n"));
+        }
     }
     std::fs::write(&path, &content).map_err(|e| miette::miette!("write config.yaml: {e:#}"))?;
     Ok(())
@@ -157,6 +199,7 @@ mod tests {
                 credentials_file: PathBuf::from("/tmp/abc-123.json"),
                 hostname: "test.example.com".to_string(),
             }),
+            aggregator: AggregatorConfig::default(),
         };
         write_global_config(dir.path(), &written).unwrap();
         let read = read_global_config(dir.path()).unwrap();
@@ -175,6 +218,7 @@ mod tests {
                 credentials_file: PathBuf::from("/tmp/abc-123.json"),
                 hostname: "test.example.com".to_string(),
             }),
+            aggregator: AggregatorConfig::default(),
         };
         write_global_config(dir.path(), &config).unwrap();
         let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
@@ -217,5 +261,57 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = read_global_config(dir.path()).unwrap();
         assert!(config.tunnel.is_none(), "no tunnel config when file absent");
+        assert!(
+            config.aggregator.allowed_hosts.is_empty(),
+            "aggregator.allowed_hosts defaults to empty (host check disabled)"
+        );
+    }
+
+    #[test]
+    fn aggregator_defaults_to_empty_allowed_hosts_when_missing() {
+        let dir = TempDir::new().unwrap();
+        // Valid config with only tunnel — no aggregator section.
+        let yaml = "tunnel:\n  tunnel_uuid: \"u\"\n  credentials_file: \"/x\"\n  hostname: \"h\"\n";
+        std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+        let config = read_global_config(dir.path()).unwrap();
+        assert!(
+            config.aggregator.allowed_hosts.is_empty(),
+            "missing aggregator section → empty allowed_hosts → Host check disabled"
+        );
+    }
+
+    #[test]
+    fn aggregator_allowed_hosts_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let written = GlobalConfig {
+            tunnel: None,
+            aggregator: AggregatorConfig {
+                allowed_hosts: vec![
+                    "mcp.example.com".to_string(),
+                    "mcp.example.com:8100".to_string(),
+                ],
+            },
+        };
+        write_global_config(dir.path(), &written).unwrap();
+        let read = read_global_config(dir.path()).unwrap();
+        assert_eq!(
+            read.aggregator.allowed_hosts,
+            vec![
+                "mcp.example.com".to_string(),
+                "mcp.example.com:8100".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn write_skips_aggregator_block_when_allowed_hosts_empty() {
+        let dir = TempDir::new().unwrap();
+        let config = GlobalConfig::default();
+        write_global_config(dir.path(), &config).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
+        assert!(
+            !content.contains("aggregator:"),
+            "default (empty allowed_hosts) must not emit aggregator block, got: {content}"
+        );
     }
 }

@@ -499,7 +499,8 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
 
                 let result = tunnel_setup(tunnel_name.trim(), None, true)?;
 
-                let new_config = rightclaw::config::GlobalConfig { tunnel: result };
+                let mut new_config = read_global_config(home)?;
+                new_config.tunnel = result;
                 write_global_config(home, &new_config)?;
                 println!("Global config saved.");
             }

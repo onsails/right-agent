@@ -545,6 +545,33 @@ impl rmcp::ServerHandler for Aggregator {
 // HTTP entry point
 // ---------------------------------------------------------------------------
 
+/// Build the `StreamableHttpServerConfig` the Aggregator runs with.
+///
+/// Since rmcp v1.4.0, the default config enforces a DNS-rebinding Host-header
+/// allowlist (`localhost`, `127.0.0.1`, `::1` only). Sandbox clients reach the
+/// aggregator as `host.openshell.internal:<port>` and other non-loopback names,
+/// so the default 403s every authenticated request. This helper:
+/// - empty `allowed_hosts` → `.disable_allowed_hosts()` (host check off). Safe
+///   because per-agent Bearer already authenticates every request; DNS
+///   rebinding only bites browser-ambient-auth scenarios that don't apply.
+/// - non-empty → `.with_allowed_hosts(...)`. Use when the aggregator is
+///   exposed on a fixed public hostname and defence-in-depth is wanted.
+fn build_streamable_config(
+    ct: CancellationToken,
+    allowed_hosts: &[String],
+) -> StreamableHttpServerConfig {
+    let config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_sse_keep_alive(None)
+        .with_cancellation_token(ct);
+    if allowed_hosts.is_empty() {
+        config.disable_allowed_hosts()
+    } else {
+        config.with_allowed_hosts(allowed_hosts.iter().cloned())
+    }
+}
+
 /// Run the MCP Aggregator over HTTP with per-agent Bearer authentication.
 ///
 /// Replaces `run_memory_server_http` — same auth middleware, but dispatches
@@ -558,14 +585,11 @@ pub(crate) async fn run_aggregator_http(
     home: PathBuf,
     refresh_senders: RefreshSenders,
     reconnect_managers: ReconnectManagers,
+    allowed_hosts: Vec<String>,
 ) -> miette::Result<()> {
     let ct = CancellationToken::new();
 
-    let config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(false)
-        .with_json_response(true)
-        .with_sse_keep_alive(None)
-        .with_cancellation_token(ct.clone());
+    let config = build_streamable_config(ct.clone(), &allowed_hosts);
 
     let session_manager = Arc::new(LocalSessionManager::default());
     let factory = Aggregator::factory(dispatcher.clone());
@@ -777,5 +801,45 @@ mod tests {
             _ => panic!("expected text content"),
         };
         assert!(text.contains("(none)"), "should mention (none): {text}");
+    }
+
+    // ---- build_streamable_config: regression for rmcp 1.4+ Host-header 403 ----
+
+    #[test]
+    fn build_streamable_config_empty_disables_host_check() {
+        let config = build_streamable_config(CancellationToken::new(), &[]);
+        assert!(
+            config.allowed_hosts.is_empty(),
+            "empty input must produce empty allowed_hosts (host check disabled), got: {:?}",
+            config.allowed_hosts
+        );
+    }
+
+    #[test]
+    fn build_streamable_config_populates_host_check_when_provided() {
+        let hosts = vec![
+            "mcp.example.com".to_string(),
+            "mcp.example.com:8100".to_string(),
+        ];
+        let config = build_streamable_config(CancellationToken::new(), &hosts);
+        assert_eq!(config.allowed_hosts, hosts);
+    }
+
+    #[test]
+    fn build_streamable_config_rejects_rmcp_default_that_caused_outage() {
+        // Regression: rmcp 1.4.0 added a DNS-rebinding check and
+        // `StreamableHttpServerConfig::default()` ships with
+        // `["localhost", "127.0.0.1", "::1"]`. That breaks every sandbox
+        // request (Host: host.openshell.internal:<port>) with
+        // 403 "Forbidden: Host header is not allowed".
+        // The empty-list helper must NOT leak that default through.
+        let config = build_streamable_config(CancellationToken::new(), &[]);
+        for banned in ["localhost", "127.0.0.1", "::1"] {
+            assert!(
+                !config.allowed_hosts.iter().any(|h| h == banned),
+                "default loopback-only allowlist leaked: {banned} present in {:?}",
+                config.allowed_hosts
+            );
+        }
     }
 }

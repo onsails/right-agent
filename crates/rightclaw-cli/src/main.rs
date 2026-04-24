@@ -718,6 +718,9 @@ async fn main() -> miette::Result<()> {
         } => {
             let agents_dir = rightclaw::config::agents_dir(&home);
             let token_map_path = token_map.clone();
+            let allowed_hosts = rightclaw::config::read_global_config(&home)
+                .map(|c| c.aggregator.allowed_hosts)
+                .unwrap_or_default();
             let token_map_content = std::fs::read_to_string(token_map)
                 .map_err(|e| miette::miette!("failed to read token map: {e:#}"))?;
             let token_entries: std::collections::HashMap<String, String> =
@@ -1039,6 +1042,7 @@ async fn main() -> miette::Result<()> {
                 home,
                 refresh_senders,
                 reconnect_managers,
+                allowed_hosts,
             )
             .await
         }
@@ -1363,7 +1367,8 @@ fn cmd_init(
     // Tunnel setup via wizard.
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
 
-    let config = rightclaw::config::GlobalConfig { tunnel: tunnel_cfg };
+    let mut config = rightclaw::config::read_global_config(home).unwrap_or_default();
+    config.tunnel = tunnel_cfg;
     rightclaw::config::write_global_config(home, &config)?;
 
     println!();
