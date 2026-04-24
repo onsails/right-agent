@@ -264,8 +264,8 @@ pub fn init_rightclaw_home(
     }
 
     let overrides = InitOverrides {
-        sandbox_mode: sandbox_mode.clone(),
-        network_policy: network_policy.clone(),
+        sandbox_mode: *sandbox_mode,
+        network_policy: *network_policy,
         telegram_token: telegram_token.map(|t| t.to_string()),
         allowed_chat_ids: telegram_allowed_chat_ids.to_vec(),
         model: None,
