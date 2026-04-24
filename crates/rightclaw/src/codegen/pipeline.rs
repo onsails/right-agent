@@ -18,18 +18,22 @@ fn ensure_agent_secret(
 
     let new_secret = crate::mcp::generate_agent_secret();
     let yaml_path = agent_path.join("agent.yaml");
-    let yaml_content = std::fs::read_to_string(&yaml_path)
-        .map_err(|e| miette::miette!("failed to read agent.yaml for '{agent_name}': {e:#}"))?;
-    let mut doc: serde_json::Map<String, serde_json::Value> = serde_saphyr::from_str(&yaml_content)
-        .map_err(|e| miette::miette!("failed to parse agent.yaml for '{agent_name}': {e:#}"))?;
-    doc.insert(
-        "secret".to_owned(),
-        serde_json::Value::String(new_secret.clone()),
-    );
-    let updated_yaml = serde_saphyr::to_string(&doc)
-        .map_err(|e| miette::miette!("failed to serialize agent.yaml for '{agent_name}': {e:#}"))?;
-    std::fs::write(&yaml_path, &updated_yaml)
-        .map_err(|e| miette::miette!("failed to write agent secret for '{agent_name}': {e:#}"))?;
+
+    write_merged_rmw(&yaml_path, |existing| {
+        let content = existing
+            .ok_or_else(|| miette::miette!("agent.yaml missing for '{agent_name}'"))?;
+        let mut doc: serde_json::Map<String, serde_json::Value> = serde_saphyr::from_str(content)
+            .map_err(|e| {
+                miette::miette!("failed to parse agent.yaml for '{agent_name}': {e:#}")
+            })?;
+        doc.insert(
+            "secret".to_owned(),
+            serde_json::Value::String(new_secret.clone()),
+        );
+        serde_saphyr::to_string(&doc).map_err(|e| {
+            miette::miette!("failed to serialize agent.yaml for '{agent_name}': {e:#}")
+        })
+    })?;
     tracing::info!(agent = %agent_name, "generated new agent secret");
     Ok(new_secret)
 }
