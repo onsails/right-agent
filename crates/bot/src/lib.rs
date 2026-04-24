@@ -534,6 +534,36 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         )
         .await?;
 
+        // Drift check: filesystem section changes need sandbox migration, which is
+        // NOT triggered by a plain bot restart. Surface drift as a visible WARN
+        // pointing the operator at `rightclaw agent config`.
+        match rightclaw::openshell::get_active_policy(&mut grpc_client, &sandbox).await {
+            Ok(Some(active)) => {
+                match rightclaw::openshell::parse_policy_yaml_filesystem(&policy_content) {
+                    Ok(desired) => {
+                        if rightclaw::openshell::filesystem_policy_changed(&active, &desired) {
+                            tracing::warn!(
+                                agent = %args.agent,
+                                "Filesystem policy drift detected for '{}'. Landlock rules in the running sandbox do not match policy.yaml. Run `rightclaw agent config {}` (accept defaults) to trigger sandbox migration, or `rightclaw agent backup {} --sandbox-only` first if you want a recovery point.",
+                                args.agent, args.agent, args.agent,
+                            );
+                        } else {
+                            tracing::debug!(agent = %args.agent, "filesystem policy in sync with on-disk policy.yaml");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(agent = %args.agent, "could not parse on-disk policy.yaml for drift check: {e:#}");
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(agent = %args.agent, "active policy has no payload; skipping drift check");
+            }
+            Err(e) => {
+                tracing::warn!(agent = %args.agent, "could not fetch active policy for drift check: {e:#}");
+            }
+        }
+
         // Generate SSH config.
         let ssh_config_dir = home.join("run").join("ssh");
         std::fs::create_dir_all(&ssh_config_dir)
