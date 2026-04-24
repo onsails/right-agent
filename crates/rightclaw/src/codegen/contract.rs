@@ -208,6 +208,33 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    use crate::agent::AgentDef;
+    use std::path::PathBuf;
+
+    fn minimal_agent_fixture(home: &Path, name: &str) -> AgentDef {
+        let agent_path = home.join("agents").join(name);
+        std::fs::create_dir_all(agent_path.join(".claude")).unwrap();
+        std::fs::write(agent_path.join("IDENTITY.md"), "# Test Identity\n").unwrap();
+        std::fs::write(
+            agent_path.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: none\n",
+        )
+        .unwrap();
+        crate::agent::discover_single_agent(&agent_path).unwrap()
+    }
+
+    fn run_codegen_for(home: &Path, agent: &AgentDef) {
+        let self_exe = PathBuf::from("/usr/local/bin/rightclaw");
+        crate::codegen::run_single_agent_codegen(home, agent, &self_exe, false).unwrap();
+    }
+
+    fn sha256(path: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = std::fs::read(path).unwrap();
+        let hash = Sha256::digest(&bytes);
+        format!("{hash:x}")
+    }
+
     #[test]
     fn write_regenerated_overwrites_existing() {
         let dir = tempdir().unwrap();
@@ -297,5 +324,39 @@ mod tests {
             CodegenKind::Regenerated(HotReload::BotRestart))));
         assert!(reg.iter().any(|f| matches!(f.kind,
             CodegenKind::Regenerated(HotReload::SandboxRecreate))));
+    }
+
+    #[test]
+    fn regenerated_files_are_idempotent() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let agent = minimal_agent_fixture(&home, "t1");
+
+        run_codegen_for(&home, &agent);
+
+        // Re-discover to pick up the persisted secret; otherwise the stale
+        // in-memory `AgentDef` makes `ensure_agent_secret` mint a fresh one on
+        // the second run, churning any file derived from it (mcp.json bearer).
+        // This matches production: every bot start re-reads `agent.yaml`.
+        let agent = crate::agent::discover_single_agent(&agent.path).unwrap();
+
+        let reg = codegen_registry(&agent.path);
+        let first: std::collections::HashMap<_, _> = reg
+            .iter()
+            .filter(|f| matches!(f.kind, CodegenKind::Regenerated(_)))
+            .filter(|f| f.path.is_file())
+            .map(|f| (f.path.clone(), sha256(&f.path)))
+            .collect();
+
+        run_codegen_for(&home, &agent);
+
+        for (path, old_hash) in &first {
+            let new_hash = sha256(path);
+            assert_eq!(
+                &new_hash, old_hash,
+                "Regenerated file changed between codegen runs: {}",
+                path.display(),
+            );
+        }
     }
 }
