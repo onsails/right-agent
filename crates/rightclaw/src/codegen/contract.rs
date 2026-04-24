@@ -37,3 +37,45 @@ pub struct CodegenFile {
     pub kind: CodegenKind,
     pub path: PathBuf,
 }
+
+/// Unconditional write — the sanctioned writer for
+/// `Regenerated(BotRestart)` and `Regenerated(SandboxRecreate)` outputs.
+///
+/// `Regenerated(SandboxPolicyApply)` outputs MUST go through
+/// [`write_and_apply_sandbox_policy`] instead — there is no other writer for
+/// that category, so callers cannot skip `apply_policy`.
+///
+/// Creates parent directories if absent.
+pub fn write_regenerated(path: &Path, content: &str) -> miette::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
+        })?;
+    }
+    std::fs::write(path, content)
+        .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn write_regenerated_overwrites_existing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub/file.txt");
+        write_regenerated(&path, "first").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        write_regenerated(&path, "second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn write_regenerated_creates_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a/b/c/file.txt");
+        write_regenerated(&path, "hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+}
