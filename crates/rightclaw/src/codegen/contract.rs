@@ -359,4 +359,23 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn agent_owned_files_preserved_across_codegen() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let agent = minimal_agent_fixture(&home, "t2");
+
+        let settings_local = agent.path.join(".claude/settings.local.json");
+        std::fs::create_dir_all(settings_local.parent().unwrap()).unwrap();
+        std::fs::write(&settings_local, r#"{"__AGENT__":true}"#).unwrap();
+
+        run_codegen_for(&home, &agent);
+
+        assert_eq!(
+            std::fs::read_to_string(&settings_local).unwrap(),
+            r#"{"__AGENT__":true}"#,
+            "AgentOwned file settings.local.json was overwritten by codegen",
+        );
+    }
 }
