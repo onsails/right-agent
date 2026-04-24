@@ -71,6 +71,32 @@ pub fn write_agent_owned(path: &Path, initial: &str) -> miette::Result<()> {
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
 
+/// Read-modify-write. `merge_fn` receives `Some(existing)` if the file is
+/// present, `None` otherwise, and returns the final content. Merger must
+/// preserve unknown fields.
+///
+/// The sanctioned writer for `MergedRMW` outputs.
+pub fn write_merged_rmw<F>(path: &Path, merge_fn: F) -> miette::Result<()>
+where
+    F: FnOnce(Option<&str>) -> miette::Result<String>,
+{
+    let existing = if path.exists() {
+        Some(std::fs::read_to_string(path).map_err(|e| {
+            miette::miette!("failed to read {} for merge: {e:#}", path.display())
+        })?)
+    } else {
+        None
+    };
+    let content = merge_fn(existing.as_deref())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
+        })?;
+    }
+    std::fs::write(path, content)
+        .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +135,39 @@ mod tests {
         std::fs::write(&path, "agent-edited content").unwrap();
         write_agent_owned(&path, "# default (should be ignored)").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "agent-edited content");
+    }
+
+    #[test]
+    fn write_merged_rmw_passes_existing_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"a":1}"#).unwrap();
+        write_merged_rmw(&path, |existing| {
+            let existing = existing.expect("file should exist");
+            assert_eq!(existing, r#"{"a":1}"#);
+            Ok(format!("{}+merged", existing))
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"a":1}+merged"#);
+    }
+
+    #[test]
+    fn write_merged_rmw_passes_none_when_absent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("new.json");
+        write_merged_rmw(&path, |existing| {
+            assert!(existing.is_none());
+            Ok("{}".to_owned())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+    }
+
+    #[test]
+    fn write_merged_rmw_creates_parent_dirs() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nested/new.json");
+        write_merged_rmw(&path, |_| Ok("{}".to_owned())).unwrap();
+        assert!(path.exists());
     }
 }
