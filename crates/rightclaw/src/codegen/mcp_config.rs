@@ -17,51 +17,43 @@ pub fn generate_mcp_config(
 ) -> miette::Result<()> {
     let mcp_path = agent_path.join("mcp.json");
 
-    let mut root: serde_json::Value = if mcp_path.exists() {
-        let content = std::fs::read_to_string(&mcp_path)
-            .map_err(|e| miette::miette!("failed to read mcp.json: {e:#}"))?;
-        serde_json::from_str(&content)
-            .map_err(|e| miette::miette!("failed to parse mcp.json: {e:#}"))?
-    } else {
-        serde_json::json!({})
-    };
+    crate::codegen::contract::write_merged_rmw(&mcp_path, |existing| {
+        let mut root: serde_json::Value = match existing {
+            Some(content) => serde_json::from_str(content)
+                .map_err(|e| miette::miette!("failed to parse mcp.json: {e:#}"))?,
+            None => serde_json::json!({}),
+        };
 
-    let obj = root
-        .as_object_mut()
-        .ok_or_else(|| miette::miette!("mcp.json root is not a JSON object"))?;
+        let obj = root
+            .as_object_mut()
+            .ok_or_else(|| miette::miette!("mcp.json root is not a JSON object"))?;
 
-    // Ensure mcpServers key exists as object
-    if !obj.contains_key("mcpServers") {
-        obj.insert("mcpServers".to_string(), serde_json::json!({}));
-    }
+        if !obj.contains_key("mcpServers") {
+            obj.insert("mcpServers".to_string(), serde_json::json!({}));
+        }
 
-    let servers = obj
-        .get_mut("mcpServers")
-        .and_then(|v| v.as_object_mut())
-        .ok_or_else(|| miette::miette!("mcp.json mcpServers is not a JSON object"))?;
+        let servers = obj
+            .get_mut("mcpServers")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| miette::miette!("mcp.json mcpServers is not a JSON object"))?;
 
-    // Insert/update the right entry (per D-05)
-    servers.insert(
-        "right".to_string(),
-        serde_json::json!({
-            "command": binary.to_string_lossy(),
-            "args": ["memory-server"],
-            "env": {
-                "RC_AGENT_NAME": agent_name,
-                "RC_RIGHTCLAW_HOME": rightclaw_home.to_string_lossy().as_ref()
-            }
-        }),
-    );
+        servers.insert(
+            "right".to_string(),
+            serde_json::json!({
+                "command": binary.to_string_lossy(),
+                "args": ["memory-server"],
+                "env": {
+                    "RC_AGENT_NAME": agent_name,
+                    "RC_RIGHTCLAW_HOME": rightclaw_home.to_string_lossy().as_ref()
+                }
+            }),
+        );
 
-    // Remove stale "rightmemory" entry from pre-rename agents.
-    servers.remove("rightmemory");
+        servers.remove("rightmemory");
 
-    let output = serde_json::to_string_pretty(&root)
-        .map_err(|e| miette::miette!("failed to serialize mcp.json: {e:#}"))?;
-    std::fs::write(&mcp_path, output)
-        .map_err(|e| miette::miette!("failed to write mcp.json: {e:#}"))?;
-
-    Ok(())
+        serde_json::to_string_pretty(&root)
+            .map_err(|e| miette::miette!("failed to serialize mcp.json: {e:#}"))
+    })
 }
 
 /// Generate `mcp.json` with right as the sole HTTP MCP server entry.
@@ -92,10 +84,7 @@ pub fn generate_mcp_config_http(
 
     let output = serde_json::to_string_pretty(&root)
         .map_err(|e| miette::miette!("failed to serialize mcp.json: {e:#}"))?;
-    std::fs::write(&mcp_path, output)
-        .map_err(|e| miette::miette!("failed to write mcp.json: {e:#}"))?;
-
-    Ok(())
+    crate::codegen::contract::write_regenerated(&mcp_path, &output)
 }
 
 /// Generate a random 32-byte Bearer token, base64url-encoded (no padding).
