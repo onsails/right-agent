@@ -3,11 +3,18 @@
 //! Every file written by codegen belongs to exactly one [`CodegenKind`]. The
 //! helpers in this module are the only sanctioned writers for codegen files.
 //! Direct `std::fs::write` inside `codegen/*` modules is a review-blocking
-//! defect after this module lands.
-//!
-//! See `docs/superpowers/specs/2026-04-24-upgrade-migration-model-design.md`.
+//! defect.
 
 use std::path::{Path, PathBuf};
+
+fn ensure_parent_dir(path: &Path) -> miette::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
+        })?;
+    }
+    Ok(())
+}
 
 /// Category of a codegen output. Drives how changes propagate to running agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,11 +54,7 @@ pub struct CodegenFile {
 ///
 /// Creates parent directories if absent.
 pub fn write_regenerated(path: &Path, content: &str) -> miette::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
-        })?;
-    }
+    ensure_parent_dir(path)?;
     std::fs::write(path, content)
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
@@ -60,11 +63,7 @@ pub fn write_regenerated(path: &Path, content: &str) -> miette::Result<()> {
 /// (bundled binary assets, etc.). Identical semantics — unconditional
 /// overwrite, creates parent directories.
 pub fn write_regenerated_bytes(path: &Path, content: &[u8]) -> miette::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
-        })?;
-    }
+    ensure_parent_dir(path)?;
     std::fs::write(path, content)
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
@@ -75,11 +74,7 @@ pub fn write_agent_owned(path: &Path, initial: &str) -> miette::Result<()> {
     if path.exists() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
-        })?;
-    }
+    ensure_parent_dir(path)?;
     std::fs::write(path, initial)
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
@@ -101,11 +96,7 @@ where
         None
     };
     let content = merge_fn(existing.as_deref())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
-        })?;
-    }
+    ensure_parent_dir(path)?;
     std::fs::write(path, content)
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
