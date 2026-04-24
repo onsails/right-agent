@@ -56,6 +56,19 @@ pub fn write_regenerated(path: &Path, content: &str) -> miette::Result<()> {
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
 
+/// Byte-variant of [`write_regenerated`] for callers with non-UTF-8 content
+/// (bundled binary assets, etc.). Identical semantics — unconditional
+/// overwrite, creates parent directories.
+pub fn write_regenerated_bytes(path: &Path, content: &[u8]) -> miette::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            miette::miette!("failed to create parent dir for {}: {e:#}", path.display())
+        })?;
+    }
+    std::fs::write(path, content)
+        .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
+}
+
 /// No-op if the file exists. Otherwise writes `initial`, creating parent
 /// directories as needed. The sanctioned writer for `AgentOwned` outputs.
 pub fn write_agent_owned(path: &Path, initial: &str) -> miette::Result<()> {
@@ -211,6 +224,16 @@ mod tests {
         let path = dir.path().join("a/b/c/file.txt");
         write_regenerated(&path, "hello").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    #[test]
+    fn write_regenerated_bytes_overwrites_existing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub/blob.bin");
+        write_regenerated_bytes(&path, &[0u8, 1, 2, 0xff]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0u8, 1, 2, 0xff]);
+        write_regenerated_bytes(&path, &[0xaa, 0xbb]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0xaa, 0xbb]);
     }
 
     #[test]
