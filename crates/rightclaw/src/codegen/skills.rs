@@ -3,7 +3,7 @@ use std::path::Path;
 use include_dir::{Dir, include_dir};
 
 use crate::agent::types::MemoryProvider;
-use crate::codegen::contract::{write_agent_owned, write_regenerated, write_regenerated_bytes};
+use crate::codegen::contract::{write_agent_owned, write_regenerated_bytes};
 
 const SKILL_RIGHTSKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightskills");
 const SKILL_RIGHTCRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightcron");
@@ -41,9 +41,7 @@ pub fn install_builtin_skills(
 
     // Create-if-absent: preserve user-installed skill registry across restarts
     let installed_json_path = claude_skills_dir.join("installed.json");
-    if !installed_json_path.exists() {
-        write_regenerated(&installed_json_path, "{}")?;
-    }
+    write_agent_owned(&installed_json_path, "{}")?;
     Ok(())
 }
 
