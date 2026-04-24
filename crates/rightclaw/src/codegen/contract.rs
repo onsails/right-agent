@@ -378,4 +378,28 @@ mod tests {
             "AgentOwned file settings.local.json was overwritten by codegen",
         );
     }
+
+    #[test]
+    fn merged_rmw_preserves_unknown_fields_in_claude_json() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let agent = minimal_agent_fixture(&home, "t3");
+
+        let claude_json = agent.path.join(".claude.json");
+        std::fs::write(
+            &claude_json,
+            r#"{"customField":"preserve-me","hasCompletedOnboarding":false}"#,
+        )
+        .unwrap();
+
+        run_codegen_for(&home, &agent);
+
+        let content = std::fs::read_to_string(&claude_json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed["customField"], "preserve-me",
+            "MergedRMW must preserve unknown fields"
+        );
+        assert!(parsed["hasCompletedOnboarding"].is_boolean());
+    }
 }
