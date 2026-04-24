@@ -97,6 +97,19 @@ where
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
 
+/// The ONLY way to update policy for a running sandbox. Writes `content` to
+/// `path`, then applies it via `openshell policy set --wait`. Network-only
+/// policy changes hot-reload; filesystem changes require sandbox migration
+/// (handled separately by `maybe_migrate_sandbox`).
+pub async fn write_and_apply_sandbox_policy(
+    sandbox: &str,
+    path: &Path,
+    content: &str,
+) -> miette::Result<()> {
+    write_regenerated(path, content)?;
+    crate::openshell::apply_policy(sandbox, path).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
