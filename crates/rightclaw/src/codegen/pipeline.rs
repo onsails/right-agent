@@ -171,8 +171,7 @@ pub fn run_single_agent_codegen(
         .unwrap_or_default();
     let mcp_port = crate::runtime::MCP_HTTP_PORT;
     let policy_content = crate::codegen::policy::generate_policy(mcp_port, &network_policy, None);
-    std::fs::write(agent.path.join("policy.yaml"), &policy_content)
-        .map_err(|e| miette::miette!("failed to write policy.yaml for '{}': {e:#}", agent.name))?;
+    write_regenerated(&agent.path.join("policy.yaml"), &policy_content)?;
     tracing::debug!(agent = %agent.name, %network_policy, "wrote policy.yaml");
 
     // Generate mcp.json with right HTTP MCP server entry.
