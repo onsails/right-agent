@@ -381,13 +381,13 @@ impl ToolDispatcher {
         match split_prefix(tool_name) {
             None => {
                 // Unprefixed → check if it's a hindsight tool first, then RightBackend
-                if let Some(ref hs) = registry.hindsight {
-                    if matches!(
+                if let Some(ref hs) = registry.hindsight
+                    && matches!(
                         tool_name,
                         "memory_retain" | "memory_recall" | "memory_reflect"
-                    ) {
-                        return hs.tools_call(tool_name, args).await;
-                    }
+                    )
+                {
+                    return hs.tools_call(tool_name, args).await;
                 }
                 registry
                     .right
@@ -496,6 +496,9 @@ impl rmcp::ServerHandler for Aggregator {
             )
     }
 
+    // Matches rmcp trait signature `-> impl Future<..> + Send + '_`; rewriting
+    // as `async fn` changes the desugared `Send` bound placement.
+    #[allow(clippy::manual_async_fn)]
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
@@ -512,6 +515,9 @@ impl rmcp::ServerHandler for Aggregator {
         }
     }
 
+    // Matches rmcp trait signature `-> impl Future<..> + Send + '_`; rewriting
+    // as `async fn` changes the desugared `Send` bound placement.
+    #[allow(clippy::manual_async_fn)]
     fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -522,7 +528,7 @@ impl rmcp::ServerHandler for Aggregator {
             let tool_name = request.name.as_ref();
             let args = request
                 .arguments
-                .map(|m| serde_json::Value::Object(m))
+                .map(serde_json::Value::Object)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
             self.dispatcher

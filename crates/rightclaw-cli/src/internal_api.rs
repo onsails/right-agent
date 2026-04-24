@@ -228,16 +228,16 @@ async fn handle_mcp_add(
             return internal_error(format!("db_add_server: {e:#}")).into_response();
         }
         // Persist auth fields if provided
-        if let Some(ref auth_type_str) = req.auth_type {
-            if let Err(e) = credentials::db_set_auth(
+        if let Some(ref auth_type_str) = req.auth_type
+            && let Err(e) = credentials::db_set_auth(
                 &conn,
                 &req.name,
                 auth_type_str,
                 req.auth_header.as_deref(),
                 req.auth_token.as_deref(),
-            ) {
-                return internal_error(format!("db_set_auth: {e:#}")).into_response();
-            }
+            )
+        {
+            return internal_error(format!("db_set_auth: {e:#}")).into_response();
         }
     }
 

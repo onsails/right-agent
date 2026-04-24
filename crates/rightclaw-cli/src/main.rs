@@ -365,8 +365,7 @@ async fn main() -> miette::Result<()> {
         tracing_appender::non_blocking(file_appender)
     };
 
-    let _log_guard;
-    match &cli.command {
+    let _log_guard = match &cli.command {
         Commands::Bot { agent, .. } => {
             let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(filter));
@@ -380,7 +379,7 @@ async fn main() -> miette::Result<()> {
                         .with_ansi(false),
                 )
                 .init();
-            _log_guard = Some(guard);
+            Some(guard)
         }
         Commands::McpServer { .. } => {
             let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -395,7 +394,7 @@ async fn main() -> miette::Result<()> {
                         .with_ansi(false),
                 )
                 .init();
-            _log_guard = Some(guard);
+            Some(guard)
         }
         _ => {
             let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -404,7 +403,7 @@ async fn main() -> miette::Result<()> {
                 .with_writer(std::io::stderr)
                 .with_env_filter(env_filter)
                 .init();
-            _log_guard = None;
+            None
         }
     };
 
@@ -759,7 +758,7 @@ async fn main() -> miette::Result<()> {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new());
 
-            for (agent_name, _token) in &token_entries {
+            for agent_name in token_entries.keys() {
                 let agent_dir = agents_dir.join(agent_name);
                 let agent_config = rightclaw::agent::discovery::parse_agent_config(&agent_dir)
                     .ok()
@@ -1503,7 +1502,7 @@ fn cmd_agent_init(
     let overrides = if let Some(config) = saved_overrides {
         // Reuse saved config from old agent.yaml.
         rightclaw::init::InitOverrides {
-            sandbox_mode: config.sandbox_mode().clone(),
+            sandbox_mode: *config.sandbox_mode(),
             network_policy: config.network_policy,
             telegram_token: config.telegram_token,
             allowed_chat_ids: config.allowed_chat_ids,
@@ -1945,12 +1944,12 @@ async fn cmd_up(
     // `from_home` returns None with an isolated --home tempdir, skipping the
     // probe. `check_port_available` below still catches a PC started by
     // another home that happens to bind the port we need.
-    if let Some(client) = rightclaw::runtime::PcClient::from_home(home)? {
-        if client.health_check().await.is_ok() {
-            return Err(miette::miette!(
-                "rightclaw is already running. Use `rightclaw down` first or `rightclaw attach` to connect."
-            ));
-        }
+    if let Some(client) = rightclaw::runtime::PcClient::from_home(home)?
+        && client.health_check().await.is_ok()
+    {
+        return Err(miette::miette!(
+            "rightclaw is already running. Use `rightclaw down` first or `rightclaw attach` to connect."
+        ));
     }
     check_port_available(rightclaw::runtime::MCP_HTTP_PORT).await?;
 
@@ -2035,10 +2034,10 @@ async fn cmd_up(
 
         let mut models: HashSet<WhisperModel> = HashSet::new();
         for agent in &agents {
-            if let Some(cfg) = agent.config.as_ref() {
-                if cfg.stt.enabled {
-                    models.insert(cfg.stt.model);
-                }
+            if let Some(cfg) = agent.config.as_ref()
+                && cfg.stt.enabled
+            {
+                models.insert(cfg.stt.model);
             }
         }
         if !models.is_empty() {
@@ -2093,10 +2092,10 @@ async fn cmd_up(
     // as PC_API_TOKEN env var. process-compose then rejects any unauthenticated
     // REST API request — prevents stray HTTP callers from stopping production bots.
     let state_path = run_dir.join("state.json");
-    if let Ok(state) = rightclaw::runtime::read_state(&state_path) {
-        if let Some(token) = &state.pc_api_token {
-            cmd.env("PC_API_TOKEN", token);
-        }
+    if let Ok(state) = rightclaw::runtime::read_state(&state_path)
+        && let Some(token) = &state.pc_api_token
+    {
+        cmd.env("PC_API_TOKEN", token);
     }
 
     if detach {
@@ -2787,10 +2786,10 @@ async fn cmd_agent_destroy(
             println!("  Sandbox: none");
         }
         let db_path = agent_dir.join("data.db");
-        if db_path.exists() {
-            if let Ok(meta) = std::fs::metadata(&db_path) {
-                println!("  data.db: {}", format_bytes(meta.len()));
-            }
+        if db_path.exists()
+            && let Ok(meta) = std::fs::metadata(&db_path)
+        {
+            println!("  data.db: {}", format_bytes(meta.len()));
         }
 
         // Check if PC is running and agent is active. `from_home` returns
@@ -3809,7 +3808,7 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     let sandbox_mode = agent
         .config
         .as_ref()
-        .map(|c| c.sandbox_mode().clone())
+        .map(|c| *c.sandbox_mode())
         .unwrap_or_default();
     let base_prompt = rightclaw::codegen::generate_system_prompt(
         &agent.name,
@@ -4024,7 +4023,7 @@ async fn perform_migration(
         ));
     }
 
-    let old_ssh_host = rightclaw::openshell::ssh_host_for_sandbox(&old_sandbox);
+    let old_ssh_host = rightclaw::openshell::ssh_host_for_sandbox(old_sandbox);
     let backup_base = rightclaw::config::backups_dir(home, agent_name);
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir = backup_base.join(&timestamp);
@@ -4073,7 +4072,7 @@ async fn perform_migration(
     let mut child =
         rightclaw::openshell::spawn_sandbox(&new_sandbox, &policy_path, Some(&staging))?;
 
-    let mut grpc = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
+    let mut grpc = rightclaw::openshell::connect_grpc(mtls_dir).await?;
 
     // Wait for READY (race with child exit).
     tokio::select! {
@@ -4137,8 +4136,8 @@ async fn perform_migration(
 
     // Delete old sandbox (best-effort).
     println!("  Deleting old sandbox '{old_sandbox}'...");
-    rightclaw::openshell::delete_sandbox(&old_sandbox).await;
-    let _ = rightclaw::openshell::wait_for_deleted(&mut grpc, &old_sandbox, 60, 2).await;
+    rightclaw::openshell::delete_sandbox(old_sandbox).await;
+    let _ = rightclaw::openshell::wait_for_deleted(&mut grpc, old_sandbox, 60, 2).await;
 
     // Remove old SSH config (best-effort).
     let _ = std::fs::remove_file(&old_ssh_config);

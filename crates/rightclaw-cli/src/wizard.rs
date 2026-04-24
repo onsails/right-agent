@@ -956,7 +956,7 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
 
 /// Wizard step: ask enable/disable + model selection, run ffmpeg detection
 /// + install prompt as needed. Returns Some((enabled, model)) on completion,
-/// None if the user pressed Esc on either prompt (caller decides where to go back).
+///   None if the user pressed Esc on either prompt (caller decides where to go back).
 pub fn stt_setup() -> miette::Result<Option<(bool, rightclaw::agent::types::WhisperModel)>> {
     use rightclaw::agent::types::WhisperModel;
 

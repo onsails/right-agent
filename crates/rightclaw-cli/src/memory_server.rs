@@ -138,6 +138,7 @@ where
 /// When the field is present in JSON:
 ///   - `null`    → `Some(None)`  (clear the column)
 ///   - `7`       → `Some(Some(7))` (set to 7)
+///
 /// When the field is absent from JSON, serde's `default` kicks in → `None`.
 fn deserialize_double_option_i64<'de, D>(deserializer: D) -> Result<Option<Option<i64>>, D::Error>
 where
@@ -489,10 +490,10 @@ pub(crate) fn cron_run_to_json(
         val["summary"] = serde_json::Value::String(s.to_owned());
     }
     // Parse notify_json into a structured object so the agent sees content directly.
-    if let Some(nj) = notify_json {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(nj) {
-            val["notify"] = parsed;
-        }
+    if let Some(nj) = notify_json
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(nj)
+    {
+        val["notify"] = parsed;
     }
     val
 }
