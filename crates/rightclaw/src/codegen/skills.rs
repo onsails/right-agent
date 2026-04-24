@@ -49,10 +49,6 @@ pub fn install_builtin_skills(
 fn install_embedded_dir(dir: &Dir, target: &Path) -> miette::Result<()> {
     for file in dir.files() {
         let dest = target.join(file.path());
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| miette::miette!("create dir {}: {e:#}", parent.display()))?;
-        }
         write_regenerated_bytes(&dest, file.contents())?;
     }
     for subdir in dir.dirs() {

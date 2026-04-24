@@ -526,40 +526,42 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             &network_policy,
             host_ip,
         );
-        // Write policy.yaml unconditionally so future `rightclaw agent config`-
-        // triggered migrations see the fresh policy. Apply (hot-reload) only
-        // when the filesystem section is unchanged — `openshell policy set
-        // --wait` rejects landlock changes on a live sandbox with
-        // InvalidArgument, so applying a drifted policy crash-loops the bot.
-        rightclaw::codegen::contract::write_regenerated(&policy_path, &policy_content)?;
-
-        // Drift check: filesystem section changes need sandbox migration, which is
-        // NOT triggered by a plain bot restart. Degrade gracefully on diagnostic
-        // failures — assume no drift and let the hot-reload arm attempt apply,
-        // rather than crash the bot on a transient gRPC or parse hiccup.
-        let drifted = match rightclaw::openshell::get_active_policy(&mut grpc_client, &sandbox)
-            .await
-        {
-            Ok(Some(active)) => match rightclaw::openshell::parse_policy_yaml_filesystem(
-                &policy_content,
-            ) {
-                Ok(desired) => rightclaw::openshell::filesystem_policy_changed(&active, &desired),
+        // Drift check BEFORE write+apply: `openshell policy set --wait` rejects
+        // landlock changes on a live sandbox with InvalidArgument, so applying
+        // a drifted policy crash-loops the bot. Degrade gracefully on diagnostic
+        // failures — treat any unknown state as no-drift so the hot-reload arm
+        // still runs for a transient gRPC or parse hiccup.
+        let desired_filesystem =
+            match rightclaw::openshell::parse_policy_yaml_filesystem(&policy_content) {
+                Ok(d) => Some(d),
                 Err(e) => {
-                    tracing::warn!(agent = %args.agent, "could not parse on-disk policy.yaml for drift check: {e:#}");
-                    false
+                    tracing::warn!(agent = %args.agent, "could not parse generated policy.yaml for drift check: {e:#}");
+                    None
                 }
-            },
-            Ok(None) => {
-                tracing::warn!(agent = %args.agent, "active policy has no payload; skipping drift check");
-                false
+            };
+        let active_filesystem =
+            match rightclaw::openshell::get_active_policy(&mut grpc_client, &sandbox).await {
+                Ok(Some(a)) => Some(a),
+                Ok(None) => {
+                    tracing::warn!(agent = %args.agent, "active policy has no payload; skipping drift check");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(agent = %args.agent, "could not fetch active policy for drift check: {e:#}");
+                    None
+                }
+            };
+        let drifted = match (active_filesystem, desired_filesystem) {
+            (Some(active), Some(desired)) => {
+                rightclaw::openshell::filesystem_policy_changed(&active, &desired)
             }
-            Err(e) => {
-                tracing::warn!(agent = %args.agent, "could not fetch active policy for drift check: {e:#}");
-                false
-            }
+            _ => false,
         };
 
         if drifted {
+            // Still write so a later `rightclaw agent config`-triggered
+            // migration sees the fresh policy; skip apply to avoid crash-loop.
+            rightclaw::codegen::contract::write_regenerated(&policy_path, &policy_content)?;
             tracing::warn!(
                 agent = %args.agent,
                 "Filesystem policy drift detected for '{}'. Landlock rules in the running sandbox do not match policy.yaml. Run `rightclaw agent config {}` (accept defaults) to trigger sandbox migration, or `rightclaw agent backup {} --sandbox-only` first if you want a recovery point.",
@@ -567,7 +569,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             );
         } else {
             tracing::info!(agent = %args.agent, "reusing existing sandbox, applying policy with host_ip={:?}", host_ip);
-            rightclaw::openshell::apply_policy(&sandbox, &policy_path).await?;
+            rightclaw::codegen::contract::write_and_apply_sandbox_policy(
+                &sandbox,
+                &policy_path,
+                &policy_content,
+            )
+            .await?;
         }
 
         // Generate SSH config.
