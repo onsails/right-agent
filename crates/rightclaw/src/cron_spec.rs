@@ -460,10 +460,10 @@ pub fn delete_spec(
         .join("crons")
         .join(".locks")
         .join(format!("{job_name}.json"));
-    if lock_path.exists() {
-        if let Err(e) = std::fs::remove_file(&lock_path) {
-            tracing::warn!(job = %job_name, "failed to remove lock file: {e:#}");
-        }
+    if lock_path.exists()
+        && let Err(e) = std::fs::remove_file(&lock_path)
+    {
+        tracing::warn!(job = %job_name, "failed to remove lock file: {e:#}");
     }
 
     Ok(format!("Deleted cron job '{job_name}'."))

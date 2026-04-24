@@ -235,14 +235,14 @@ pub async fn handle_message(
     // Intercept pending MCP token: if /mcp add is waiting for a token, forward this message.
     if let Some(ref text_val) = text {
         let mut slot = intercept_slots.pending_token.lock().await;
-        if let Some(ref pending) = *slot {
-            if pending.chat_id == chat_id.0 && pending.thread_id == eff_thread_id {
-                if let Some(pending) = slot.take() {
-                    tracing::info!("handle_message: forwarding message as MCP token");
-                    let _ = pending.sender.send(text_val.clone());
-                    return Ok(());
-                }
-            }
+        if let Some(ref pending) = *slot
+            && pending.chat_id == chat_id.0
+            && pending.thread_id == eff_thread_id
+            && let Some(pending) = slot.take()
+        {
+            tracing::info!("handle_message: forwarding message as MCP token");
+            let _ = pending.sender.send(text_val.clone());
+            return Ok(());
         }
     }
     let key: SessionKey = (chat_id.0, eff_thread_id);
