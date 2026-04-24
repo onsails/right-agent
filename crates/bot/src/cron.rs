@@ -531,7 +531,7 @@ async fn execute_job(
                             for att in atts {
                                 let dest = outbox_dir.join(attachment_filename(&att.path));
                                 if let Err(e) =
-                                    rightclaw::openshell::download_file(&sandbox, &att.path, &dest)
+                                    rightclaw::openshell::download_file(sandbox, &att.path, &dest)
                                         .await
                                 {
                                     tracing::error!(
