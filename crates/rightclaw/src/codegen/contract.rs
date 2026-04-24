@@ -223,7 +223,7 @@ mod tests {
         use sha2::{Digest, Sha256};
         let bytes = std::fs::read(path).unwrap();
         let hash = Sha256::digest(&bytes);
-        format!("{hash:x}")
+        hash.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     #[test]

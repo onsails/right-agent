@@ -28,7 +28,7 @@ pub fn generate_agent_secret() -> String {
 /// Returns base64url-encoded HMAC digest (no padding), 43 characters.
 pub fn derive_token(secret_b64: &str, label: &str) -> miette::Result<String> {
     use base64::Engine as _;
-    use hmac::{Hmac, Mac as _};
+    use hmac::{Hmac, KeyInit as _, Mac as _};
     use sha2::Sha256;
 
     let secret_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD

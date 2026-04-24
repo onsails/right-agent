@@ -322,8 +322,6 @@ pub const MAX_CONCURRENT_SANDBOX_TESTS: u8 = 3;
 /// — it prevents `cargo test --workspace` from fork-bombing the host when
 /// multiple test binaries run in parallel, each starting Docker/k3s containers.
 pub fn acquire_sandbox_slot() -> SandboxTestSlot {
-    use fs4::fs_std::FileExt;
-
     loop {
         for slot in 1..=MAX_CONCURRENT_SANDBOX_TESTS {
             let path = std::env::temp_dir().join(format!("rightclaw-sandbox-slot-{slot}.lock"));
@@ -333,10 +331,12 @@ pub fn acquire_sandbox_slot() -> SandboxTestSlot {
                 .write(true)
                 .open(&path)
                 .expect("open sandbox-slot lock file");
-            match file.try_lock_exclusive() {
-                Ok(true) => return SandboxTestSlot { _file: file },
-                Ok(false) => continue, // another holder
-                Err(e) => panic!("sandbox-slot lock {}: {e:#}", path.display()),
+            match file.try_lock() {
+                Ok(()) => return SandboxTestSlot { _file: file },
+                Err(std::fs::TryLockError::WouldBlock) => continue, // another holder
+                Err(std::fs::TryLockError::Error(e)) => {
+                    panic!("sandbox-slot lock {}: {e:#}", path.display())
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
