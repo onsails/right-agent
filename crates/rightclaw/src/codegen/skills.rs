@@ -3,6 +3,7 @@ use std::path::Path;
 use include_dir::{Dir, include_dir};
 
 use crate::agent::types::MemoryProvider;
+use crate::codegen::contract::write_regenerated;
 
 const SKILL_RIGHTSKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightskills");
 const SKILL_RIGHTCRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightcron");
@@ -41,8 +42,7 @@ pub fn install_builtin_skills(
     // Create-if-absent: preserve user-installed skill registry across restarts
     let installed_json_path = claude_skills_dir.join("installed.json");
     if !installed_json_path.exists() {
-        std::fs::write(&installed_json_path, "{}")
-            .map_err(|e| miette::miette!("failed to write installed.json: {e:#}"))?;
+        write_regenerated(&installed_json_path, "{}")?;
     }
     Ok(())
 }
@@ -55,8 +55,9 @@ fn install_embedded_dir(dir: &Dir, target: &Path) -> miette::Result<()> {
             std::fs::create_dir_all(parent)
                 .map_err(|e| miette::miette!("create dir {}: {e:#}", parent.display()))?;
         }
-        std::fs::write(&dest, file.contents())
-            .map_err(|e| miette::miette!("write {}: {e:#}", dest.display()))?;
+        let content_str = std::str::from_utf8(file.contents())
+            .map_err(|e| miette::miette!("skill content is not UTF-8: {e:#}"))?;
+        write_regenerated(&dest, content_str)?;
     }
     for subdir in dir.dirs() {
         install_embedded_dir(subdir, target)?;
