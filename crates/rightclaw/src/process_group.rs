@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! `ProcessGroupChild` — a newtype around `tokio::process::Child` that
 //! spawns the child in a new process group and kills the entire group on
 //! Drop via `killpg(SIGKILL)`.

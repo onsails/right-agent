@@ -973,44 +973,38 @@ fn spawn_token_request(
         let timeout = tokio::time::sleep(Duration::from_secs(300));
         tokio::pin!(timeout);
 
-        loop {
-            tokio::select! {
-                event = event_rx.recv() => {
-                    match event {
-                        Some(crate::login::LoginEvent::Done) => {
-                            if let Err(e) = send_tg(
-                                &bot, tg_chat_id, eff_thread_id,
-                                "Token saved. You can continue chatting.",
-                            ).await {
-                                tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
-                            }
-                            break;
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Some(crate::login::LoginEvent::Done) => {
+                        if let Err(e) = send_tg(
+                            &bot, tg_chat_id, eff_thread_id,
+                            "Token saved. You can continue chatting.",
+                        ).await {
+                            tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
                         }
-                        Some(crate::login::LoginEvent::Error(msg)) => {
-                            tracing::error!(agent = %agent_name, "token request: {msg}");
-                            if let Err(e) = send_tg(
-                                &bot, tg_chat_id, eff_thread_id,
-                                &format!("Token setup failed: {msg}"),
-                            ).await {
-                                tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
-                            }
-                            break;
+                    }
+                    Some(crate::login::LoginEvent::Error(msg)) => {
+                        tracing::error!(agent = %agent_name, "token request: {msg}");
+                        if let Err(e) = send_tg(
+                            &bot, tg_chat_id, eff_thread_id,
+                            &format!("Token setup failed: {msg}"),
+                        ).await {
+                            tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
                         }
-                        None => {
-                            tracing::info!(agent = %agent_name, "token request: task exited");
-                            break;
-                        }
+                    }
+                    None => {
+                        tracing::info!(agent = %agent_name, "token request: task exited");
                     }
                 }
-                _ = &mut timeout => {
-                    tracing::warn!(agent = %agent_name, "token request: timed out after 5 min");
-                    if let Err(e) = send_tg(
-                        &bot, tg_chat_id, eff_thread_id,
-                        "Token request timed out after 5 minutes. Send another message to retry.",
-                    ).await {
-                        tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
-                    }
-                    break;
+            }
+            _ = &mut timeout => {
+                tracing::warn!(agent = %agent_name, "token request: timed out after 5 min");
+                if let Err(e) = send_tg(
+                    &bot, tg_chat_id, eff_thread_id,
+                    "Token request timed out after 5 minutes. Send another message to retry.",
+                ).await {
+                    tracing::warn!(agent = %agent_name, "token request: Telegram send failed: {e:#}");
                 }
             }
         }
