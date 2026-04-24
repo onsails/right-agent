@@ -231,12 +231,10 @@ pub fn run_agent_codegen(
         token_map_entries.insert(agent.name.clone(), serde_json::Value::String(token));
     }
     let token_map_path = run_dir.join("agent-tokens.json");
-    std::fs::write(
-        &token_map_path,
+    let token_map_json =
         serde_json::to_string_pretty(&serde_json::Value::Object(token_map_entries))
-            .map_err(|e| miette::miette!("failed to serialize token map: {e:#}"))?,
-    )
-    .map_err(|e| miette::miette!("failed to write agent-tokens.json: {e:#}"))?;
+            .map_err(|e| miette::miette!("failed to serialize token map: {e:#}"))?;
+    write_regenerated(&token_map_path, &token_map_json)?;
     tracing::debug!("wrote agent-tokens.json");
 
     // Validate policy files exist for all sandboxed agents.
@@ -283,8 +281,7 @@ pub fn run_agent_codegen(
             Some(&creds),
         )?;
         let cf_config_path = home.join("cloudflared-config.yml");
-        std::fs::write(&cf_config_path, &cf_config)
-            .map_err(|e| miette::miette!("write cloudflared config: {e:#}"))?;
+        write_regenerated(&cf_config_path, &cf_config)?;
         tracing::info!(path = %cf_config_path.display(), "cloudflared config written");
 
         // Write DNS routing wrapper script.
@@ -298,8 +295,7 @@ pub fn run_agent_codegen(
             "#!/bin/sh\ncloudflared tunnel route dns --overwrite-dns {uuid} {hostname} || true\nexec cloudflared tunnel --config {cf_config_path_str} run\n"
         );
         let script_path = scripts_dir.join("cloudflared-start.sh");
-        std::fs::write(&script_path, &script_content)
-            .map_err(|e| miette::miette!("write cloudflared-start.sh: {e:#}"))?;
+        write_regenerated(&script_path, &script_content)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -324,8 +320,7 @@ pub fn run_agent_codegen(
         },
     )?;
     let config_path = run_dir.join("process-compose.yaml");
-    std::fs::write(&config_path, &pc_config)
-        .map_err(|e| miette::miette!("failed to write process-compose.yaml: {e:#}"))?;
+    write_regenerated(&config_path, &pc_config)?;
     tracing::debug!("wrote process-compose config: {}", config_path.display());
 
     // Write runtime state.json, preserving started_at and pc_api_token from
