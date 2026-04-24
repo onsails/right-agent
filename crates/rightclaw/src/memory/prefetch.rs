@@ -7,16 +7,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PrefetchCache {
     inner: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl PrefetchCache {
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::default()
     }
 
     pub async fn put(&self, key: &str, content: String) {

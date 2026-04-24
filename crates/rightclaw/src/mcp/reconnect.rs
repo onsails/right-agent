@@ -58,7 +58,7 @@ pub async fn do_refresh_cancellable(
     let refresh_token = entry
         .refresh_token
         .as_deref()
-        .ok_or_else(|| ReconnectError::RefreshFailed(0))?;
+        .ok_or(ReconnectError::RefreshFailed(0))?;
 
     let mut last_connect_error: Option<String> = None;
 

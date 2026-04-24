@@ -88,11 +88,8 @@ mod tests {
             // In production: tracing::warn!(...) then continue.
         }
         // If git is present, ensure which::which("git") succeeds:
-        if git_result.is_ok() {
-            assert!(
-                git_result.unwrap().exists(),
-                "git path should exist if found"
-            );
+        if let Ok(git_path) = git_result {
+            assert!(git_path.exists(), "git path should exist if found");
         }
     }
 }

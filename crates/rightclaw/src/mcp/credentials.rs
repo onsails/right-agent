@@ -161,10 +161,7 @@ pub fn set_server_header(
 
 /// Map a `rusqlite::Error` into `CredentialError::Io`.
 fn map_db_err(e: rusqlite::Error) -> CredentialError {
-    CredentialError::Io(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("{e:#}"),
-    ))
+    CredentialError::Io(std::io::Error::other(format!("{e:#}")))
 }
 
 /// Validate an MCP server name.
