@@ -1,6 +1,7 @@
 pub mod agent_def;
 pub mod claude_json;
 pub mod cloudflared;
+pub mod contract;
 pub mod mcp_config;
 pub mod mcp_instructions;
 pub mod pipeline;
