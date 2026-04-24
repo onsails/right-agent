@@ -462,4 +462,76 @@ mod tests {
             uncovered,
         );
     }
+
+    /// Files that cross-agent codegen (or its side effects) may create under
+    /// `<home>/` but that are intentionally outside the codegen contract.
+    /// Keep tight — every entry is a gap in the upgrade story.
+    const CROSSAGENT_KNOWN_EXCEPTIONS: &[&str] = &[
+        // RuntimeState JSON — persisted runtime bookkeeping (pc_port, token,
+        // started_at), not a codegen output. Written by pipeline but not a
+        // file the upgrade model governs.
+        "run/state.json",
+    ];
+
+    fn walk_crossagent_files_rel(root: &Path, base: &Path, out: &mut Vec<PathBuf>) {
+        if !root.exists() {
+            return;
+        }
+        for entry in std::fs::read_dir(root).unwrap().flatten() {
+            let p = entry.path();
+            let rel = p.strip_prefix(base).unwrap().to_owned();
+            // Skip per-agent outputs — owned by the per-agent registry test.
+            if rel.starts_with("agents") {
+                continue;
+            }
+            if CROSSAGENT_KNOWN_EXCEPTIONS
+                .iter()
+                .any(|x| rel.starts_with(x))
+            {
+                continue;
+            }
+            if p.is_dir() {
+                walk_crossagent_files_rel(&p, base, out);
+            } else if p.is_file() || p.is_symlink() {
+                out.push(rel);
+            }
+        }
+    }
+
+    #[test]
+    fn registry_covers_all_crossagent_writes() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let agent = minimal_agent_fixture(&home, "t5");
+
+        // Snapshot pre-existing files under home (excluding agents/) — only
+        // files created by the codegen call count.
+        let mut before = Vec::new();
+        walk_crossagent_files_rel(&home, &home, &mut before);
+        let before: std::collections::HashSet<PathBuf> = before.into_iter().collect();
+
+        let self_exe = PathBuf::from("/usr/local/bin/rightclaw");
+        crate::codegen::run_agent_codegen(&home, std::slice::from_ref(&agent), &self_exe, false)
+            .unwrap();
+
+        let reg_paths: std::collections::HashSet<PathBuf> = crossagent_codegen_registry(&home)
+            .into_iter()
+            .map(|f| f.path.strip_prefix(&home).unwrap().to_owned())
+            .collect();
+
+        let mut found = Vec::new();
+        walk_crossagent_files_rel(&home, &home, &mut found);
+
+        let uncovered: Vec<_> = found
+            .into_iter()
+            .filter(|rel| !before.contains(rel))
+            .filter(|rel| !reg_paths.iter().any(|r| rel == r || rel.starts_with(r)))
+            .collect();
+
+        assert!(
+            uncovered.is_empty(),
+            "cross-agent files produced by codegen not in crossagent_codegen_registry or CROSSAGENT_KNOWN_EXCEPTIONS: {:#?}",
+            uncovered,
+        );
+    }
 }

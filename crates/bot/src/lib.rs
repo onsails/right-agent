@@ -528,9 +528,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         );
         // Drift check BEFORE write+apply: `openshell policy set --wait` rejects
         // landlock changes on a live sandbox with InvalidArgument, so applying
-        // a drifted policy crash-loops the bot. Degrade gracefully on diagnostic
-        // failures — treat any unknown state as no-drift so the hot-reload arm
-        // still runs for a transient gRPC or parse hiccup.
+        // a drifted policy crash-loops the bot. FAIL FAST: if drift status
+        // cannot be determined (parse failure, gRPC error, missing payload),
+        // behave as if drift IS present — skip apply and log WARN. A bot that
+        // runs with stale policy is better than one that crash-loops.
         let desired_filesystem =
             match rightclaw::openshell::parse_policy_yaml_filesystem(&policy_content) {
                 Ok(d) => Some(d),
@@ -555,7 +556,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             (Some(active), Some(desired)) => {
                 rightclaw::openshell::filesystem_policy_changed(&active, &desired)
             }
-            _ => false,
+            _ => true,
         };
 
         if drifted {
