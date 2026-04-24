@@ -303,13 +303,13 @@ pub fn read_file(agent_dir: &Path) -> Result<Option<AllowlistFile>, String> {
 /// Acquire an exclusive file lock on `agent_dir/allowlist.yaml.lock`, then run `f`,
 /// which may read, mutate, and call `write_file_inner` (below). Lock is released on drop.
 ///
-/// The lockfile is created if missing. Using `fs4::fs_std::FileExt::lock_exclusive`
+/// The lockfile is created if missing. Using `fs4::FileExt::lock`
 /// (advisory flock on Unix, LockFileEx on Windows).
 pub fn with_lock<R>(
     agent_dir: &Path,
     f: impl FnOnce(&Path) -> Result<R, String>,
 ) -> Result<R, String> {
-    use fs4::fs_std::FileExt;
+    use fs4::FileExt;
     let lock_p = lock_path(agent_dir);
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -318,7 +318,7 @@ pub fn with_lock<R>(
         .open(&lock_p)
         .map_err(|e| format!("open lockfile {}: {e:#}", lock_p.display()))?;
     lock_file
-        .lock_exclusive()
+        .lock()
         .map_err(|e| format!("lock {}: {e:#}", lock_p.display()))?;
     let result = f(agent_dir);
     if let Err(e) = FileExt::unlock(&lock_file) {
