@@ -183,9 +183,10 @@ pub fn crossagent_codegen_registry(home: &Path) -> Vec<CodegenFile> {
             kind: CodegenKind::Regenerated(HotReload::BotRestart),
             path: home.join("scripts").join("cloudflared-start.sh"),
         },
-        // cloudflared config path is added in Phase 4 Task 16 when the
-        // cross-agent refactor lands — leaving a stub here would become stale
-        // if the filename changes.
+        CodegenFile {
+            kind: CodegenKind::Regenerated(HotReload::BotRestart),
+            path: home.join("cloudflared-config.yml"),
+        },
     ]
 }
 
