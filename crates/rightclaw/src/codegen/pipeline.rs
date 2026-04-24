@@ -147,15 +147,7 @@ pub fn run_single_agent_codegen(
     crate::codegen::install_builtin_skills(&agent.path, memory_provider)?;
 
     // Write settings.local.json only if absent (CC may write runtime state here).
-    let settings_local = agent.path.join(".claude").join("settings.local.json");
-    if !settings_local.exists() {
-        std::fs::write(&settings_local, "{}").map_err(|e| {
-            miette::miette!(
-                "failed to write settings.local.json for '{}': {e:#}",
-                agent.name
-            )
-        })?;
-    }
+    write_agent_owned(&claude_dir.join("settings.local.json"), "{}")?;
 
     // Initialize per-agent memory database.
     crate::memory::open_db(&agent.path, false).map_err(|e| {
