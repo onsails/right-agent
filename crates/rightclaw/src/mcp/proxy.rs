@@ -77,20 +77,15 @@ impl std::fmt::Display for BackendStatus {
 }
 
 /// How a proxy backend authenticates with the upstream MCP server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum AuthMethod {
     /// `Authorization: Bearer <token>` header (default for OAuth and static bearer keys).
+    #[default]
     Bearer,
     /// Custom header, e.g. `X-Api-Key: <token>`.
     Header(String),
     /// Key is embedded in the URL query string. No header injection needed.
     QueryString,
-}
-
-impl Default for AuthMethod {
-    fn default() -> Self {
-        Self::Bearer
-    }
 }
 
 impl AuthMethod {

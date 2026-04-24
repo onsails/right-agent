@@ -403,22 +403,13 @@ impl WhisperModel {
 }
 
 /// Speech-to-text configuration for an agent.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SttConfig {
     #[serde(default)] // bool::default() == false
     pub enabled: bool,
     #[serde(default)]
     pub model: WhisperModel,
-}
-
-impl Default for SttConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            model: WhisperModel::default(),
-        }
-    }
 }
 
 /// A discovered agent definition from the filesystem.
