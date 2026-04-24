@@ -21,8 +21,7 @@ fn restrictive_endpoints() -> String {
                 r#"      - host: "{host}"
         port: 443
         protocol: rest
-        access: full
-        tls: terminate"#
+        access: full"#
             )
         })
         .collect::<Vec<_>>()
@@ -37,9 +36,12 @@ fn restrictive_endpoints() -> String {
 ///   When `Some`, uses the exact IP/32 in `allowed_ips`. When `None`, falls back
 ///   to common Docker network ranges (172.16.0.0/12 + 192.168.0.0/16).
 ///
-/// Network policy allows outbound HTTPS (port 443) with TLS termination
-/// so the OpenShell proxy can inspect traffic. The right MCP server on the host
-/// is accessed via plain HTTP through the Docker bridge network.
+/// Network policy allows outbound HTTPS (port 443). Since OpenShell v0.0.30
+/// the proxy auto-detects TLS via ClientHello peek and terminates unconditionally
+/// for credential injection — `tls: terminate` is no longer written (emits a
+/// per-request deprecation WARN in the sandbox supervisor log and is scheduled
+/// for removal). Omitting the field yields identical behaviour. The right MCP
+/// server on the host is accessed via plain HTTP through the Docker bridge.
 pub fn generate_policy(
     right_mcp_port: u16,
     network_policy: &NetworkPolicy,
@@ -52,7 +54,6 @@ pub fn generate_policy(
         port: 443
         protocol: rest
         access: full
-        tls: terminate
       - host: "**.*"
         port: 80
         protocol: rest
@@ -136,8 +137,23 @@ mod tests {
         assert!(policy.contains(r#"host: "**.*""#));
         assert!(policy.contains("port: 443"));
         assert!(policy.contains("port: 80"));
-        assert!(policy.contains("tls: terminate"));
         assert!(policy.contains("outbound:"));
+    }
+
+    /// Regression: OpenShell v0.0.30 deprecated the `tls:` field. Emitting
+    /// `tls: terminate` causes a per-request WARN in the sandbox supervisor
+    /// log ("'tls: terminate' is deprecated; TLS termination is now automatic")
+    /// and the field is slated for removal. Auto-detect does the right thing.
+    #[test]
+    fn does_not_emit_deprecated_tls_terminate() {
+        let permissive = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let restrictive = generate_policy(8100, &NetworkPolicy::Restrictive, None);
+        for (name, policy) in [("permissive", &permissive), ("restrictive", &restrictive)] {
+            assert!(
+                !policy.contains("tls:"),
+                "{name} policy must not emit tls: field (deprecated in OpenShell v0.0.30+)",
+            );
+        }
     }
 
     #[test]

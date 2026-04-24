@@ -168,7 +168,6 @@ network_policies:
         port: 443
         protocol: rest
         access: full
-        tls: terminate
     binaries:
       - path: \"**\"
 ",
