@@ -14,109 +14,46 @@ Three crates in a Cargo workspace:
 
 ### rightclaw (core)
 
-```
-src/
-├── agent/
-│   ├── discovery.rs    # Scan agents/ dir: agent presence detected by agent.yaml, validate names, parse config
-│   └── types.rs        # AgentDef, AgentConfig, RestartPolicy, SandboxOverrides
-├── config/
-│   └── config.rs       # GlobalConfig (tunnel), RIGHTCLAW_HOME resolution
-├── codegen/
-│   ├── agent_def.rs    # System prompt generation, compiled-in constants (OPERATING_INSTRUCTIONS, BOOTSTRAP_INSTRUCTIONS), JSON schemas
-│   ├── claude_json.rs  # .claude.json — trust (/sandbox + agent dir), onboarding, credential symlinks
-│   ├── settings.rs     # .claude/settings.json — behavioral flags
-│   ├── mcp_config.rs   # .mcp.json — only right entry; externals managed by Aggregator
-│   ├── policy.rs       # OpenShell policy.yaml — network/filesystem/TLS sandbox rules
-│   ├── process_compose.rs  # process-compose.yaml via minijinja
-│   ├── tools.rs        # Generate TOOLS.md per agent
-│   ├── mcp_instructions.rs  # Generate MCP instructions markdown from SQLite mcp_servers cache
-│   ├── skills.rs       # Install built-in skills to .claude/skills/
-│   ├── telegram.rs     # Telegram-specific codegen helpers
-│   └── cloudflared.rs  # Tunnel entry generation
-├── memory/
-│   ├── store.rs        # Legacy SQLite memory (unused — tables retained for migration compat)
-│   ├── hindsight.rs    # Hindsight Cloud API client: retain, recall, reflect, prefetch
-│   ├── composite.rs    # Composite memory: file mode (MEMORY.md) or Hindsight mode, prompt injection
-│   ├── migrations.rs   # Schema versioning (rusqlite_migration)
-│   ├── guard.rs        # Prompt injection detection
-│   └── error.rs        # MemoryError types
-├── runtime/
-│   ├── state.rs        # RuntimeState persistence (JSON)
-│   ├── pc_client.rs    # process-compose REST API client (port 18927)
-│   └── deps.rs         # Binary availability checks
-├── mcp/
-│   ├── credentials.rs  # OAuth token persistence + SQLite server registry
-│   ├── internal_client.rs  # Hyper UDS client for bot→aggregator IPC
-│   ├── oauth.rs        # OAuth flow initiation
-│   ├── proxy.rs        # ProxyBackend, DynamicAuthClient, BackendStatus
-│   └── refresh.rs      # Token refresh scheduler (runs in Aggregator process)
-├── openshell.rs        # gRPC mTLS — sandbox create/poll/exec, CLI wrappers for upload/download, staging dir, file verification
-├── stt.rs              # whisper model cache paths, ffmpeg check, download_model, ensure_models_cached
-├── doctor.rs           # Diagnostic checks (deps, structure, MCP, sandbox, tunnel)
-├── init.rs             # rightclaw init workflow + init_agent() for per-agent init
-└── error.rs            # AgentError (miette diagnostics)
-```
+- `agent/` — agent discovery (presence detected by `agent.yaml`) and types (`AgentDef`, `AgentConfig`, `RestartPolicy`).
+- `config/` — `GlobalConfig` (tunnel) and `RIGHTCLAW_HOME` resolution.
+- `codegen/` — per-agent and cross-agent code generation: settings, `.claude.json`, `.mcp.json`, policy, process-compose, TOOLS.md, MCP instructions, bundled skills, cloudflared. The helper API in `codegen/contract.rs` is the only sanctioned writer (see Upgrade & Migration Model).
+- `memory/` — Hindsight Cloud client (`hindsight.rs`), composite memory in file or Hindsight mode (`composite.rs`), schema migrations, prompt-injection guard. `store.rs` is legacy SQLite memory retained for migration compat.
+- `runtime/` — `RuntimeState` JSON persistence, process-compose REST client, dependency checks.
+- `mcp/` — OAuth credentials, internal UDS client (bot→aggregator), OAuth flow, proxy backend, token refresh scheduler.
+- Single-file modules: `openshell.rs` (gRPC mTLS + CLI wrappers), `stt.rs` (whisper model cache + ffmpeg), `doctor.rs`, `init.rs`, `error.rs`.
 
 ### rightclaw-cli
 
-```
-src/
-├── main.rs               # CLI dispatcher
-├── aggregator.rs         # MCP Aggregator: Aggregator + ToolDispatcher + BackendRegistry
-├── right_backend.rs      # RightBackend: 13 built-in tools (memory, cron, mcp_list, bootstrap)
-├── internal_api.rs       # Internal REST API on Unix socket (mcp-add, mcp-remove, set-token, mcp-instructions)
-└── memory_server.rs      # MCP stdio server (CLI-only, deprecated)
-```
+- `main.rs` — CLI dispatcher.
+- `aggregator.rs` — MCP Aggregator (Aggregator + ToolDispatcher + BackendRegistry).
+- `right_backend.rs` — built-in MCP tools (memory, cron, mcp_list, bootstrap).
+- `internal_api.rs` — internal REST API on Unix socket.
+- `memory_server.rs` — deprecated CLI-only MCP stdio server.
 
 ### rightclaw-bot
 
-```
-src/
-├── lib.rs              # Entry: resolve agent dir, open data.db, sandbox lifecycle, start teloxide
-├── telegram/
-│   ├── prompt.rs       # Shared prompt assembly: build_prompt_assembly_script, shell helpers
-│   ├── attachments.rs  # Attachment extraction, download/upload, send, cleanup, YAML formatting
-│   ├── mod.rs          # Token resolution (env > file > yaml)
-│   ├── bot.rs          # Bot adaptor: CacheMe<Throttle<Bot>>
-│   ├── dispatch.rs     # Long-polling dispatcher setup + dptree DI
-│   ├── handler.rs      # /start, /reset, /mcp, /doctor + text→worker routing + auth code interception
-│   ├── worker.rs       # Per-session CC invocation, auth error detection, reply parsing
-│   ├── session.rs      # telegram_sessions table (chat_id, thread_id, uuid)
-│   ├── filter.rs       # Allowed chat ID enforcement
-│   └── oauth_callback.rs  # Axum OAuth redirect server
-├── login.rs            # Token-based Claude login flow — setup-token request, DB persistence, env var injection
-├── sync.rs             # Background file sync: settings, schema, skills, .claude.json verification
-├── cron.rs             # Cron engine: load specs, lock check, invoke CC with system prompt, persist results
-├── cron_delivery.rs    # Delivery poll loop: idle detection, dedup, CC session delivery (haiku), cleanup. Resumes main session so cron results land in agent conversation context.
-├── stt/
-│   ├── mod.rs          # Transcriber, SttError, SttContext, transcribe_or_marker, combine_markers_with_text
-│   ├── decode.rs       # ffmpeg subprocess: file → Vec<f32> PCM 16k mono
-│   ├── whisper.rs      # WhisperEngine: lazy WhisperContext + serialized inference
-│   └── markers.rs      # Russian markers (voice/video_note × success/error)
-└── error.rs            # BotError types
-```
+- `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start teloxide.
+- `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, prompt assembly, attachments (with STT integration), `invocation.rs` (`ClaudeInvocation` builder — see Claude Invocation Contract).
+- `login.rs` — token-based Claude login flow (setup-token, env var injection).
+- `sync.rs` — background platform-store sync to `/sandbox/.platform/`.
+- `cron.rs`, `cron_delivery.rs` — cron engine and delivery loop (resumes main session so cron results land in agent context).
+- `reflection.rs` — `reflect_on_failure` primitive (see Reflection Primitive).
+- `stt/` — host-side voice/video_note transcription (ffmpeg + whisper-rs + Russian markers).
+- `error.rs` — `BotError` types.
 
 ## Data Flow
 
 ### Agent Lifecycle
 
 ```
-rightclaw init
+rightclaw init  /  rightclaw agent init <name>
+  ├─ `agent init` runs an interactive wizard (sandbox mode, network policy,
+  │   telegram, chat IDs, stt, memory) and writes sandbox config + policy.yaml
+  │   to the agent dir. `init` skips the wizard and also writes
+  │   ~/.rightclaw/config.yaml + detects Telegram token / cloudflared tunnel.
   ├─ Create ~/.rightclaw/agents/<name>/ with template files
   ├─ Write AGENTS.md, BOOTSTRAP.md, agent.yaml
   │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
-  ├─ Generate .claude/settings.json, .claude.json
-  ├─ Symlink credentials from ~/.claude/
-  ├─ Detect Telegram token, cloudflared tunnel
-  └─ Write ~/.rightclaw/config.yaml
-
-rightclaw agent init <name>
-  ├─ Interactive wizard: sandbox mode, network policy, telegram, chat IDs, stt, memory
-  ├─ Create ~/.rightclaw/agents/<name>/ with template files
-  ├─ Write AGENTS.md, BOOTSTRAP.md, agent.yaml
-  │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
-  ├─ Write sandbox config to agent.yaml (mode + policy_file)
-  ├─ If mode=openshell: generate policy.yaml in agent dir
   ├─ Generate .claude/settings.json, .claude.json
   └─ Symlink credentials from ~/.claude/
 
@@ -425,12 +362,10 @@ one bank per agent. Three MCP tools exposed via aggregator:
 `memory_retain`, `memory_recall`, `memory_reflect`. Prefetch cache is in-memory
 (lost on restart → blocking recall on first interaction).
 
-Auto-retain after each turn: content formatted as JSON array
-(`[{"role":"user","content":"...","timestamp":"..."},{"role":"assistant",...}]`),
-`document_id` = CC session UUID (same as `--resume`), `update_mode: "append"` for
-delta retain (only new content triggers LLM extraction — O(n) cost vs O(n²) for
+Auto-retain after each turn: content formatted as JSON role/content/timestamp
+array, `document_id` = CC session UUID (same as `--resume`), `update_mode:
+"append"` so only new content triggers LLM extraction (O(n) vs O(n²) for
 full-session replace). Tags: `["chat:<chat_id>"]` for per-chat scoping.
-Context: `"conversation between RightClaw Agent and the User"`.
 
 Auto-recall before each `claude -p`: query truncated to 800 chars, tags
 `["chat:<chat_id>"]` with `tags_match: "any"` (returns per-chat + global untagged
@@ -442,9 +377,9 @@ irrelevant and corrupt user memory representations (same approach as hermes-agen
 `skip_memory=True`). Crons can call `memory_recall` and `memory_retain` MCP tools
 explicitly when needed.
 
-Old tools (`store_record`, `query_records`, `search_records`, `delete_record`)
-are removed. Old SQLite tables (`memories`, `memories_fts`, `memory_events`)
-are retained in schema but unused.
+The legacy `store_record` / `query_records` / `search_records` / `delete_record`
+tools are removed from the surface; their backing tables (`memories`,
+`memories_fts`, `memory_events`) are retained for migration compat.
 
 ### Memory Resilience Layer
 
@@ -469,29 +404,10 @@ thresholds), and long-standing (>24h) alerts.
 
 ### Memory Schema (SQLite)
 
-```
-memories        (id, content, tags, stored_by, source_tool, created_at, deleted_at, importance)
-memory_events   (memory_id, event_type, actor, timestamp)
-memories_fts    (FTS5 virtual table — BM25 ranking)
-telegram_sessions (chat_id, effective_thread_id, session_uuid, created_at)
-cron_specs      (job_name, schedule, prompt, lock_ttl, max_budget_usd, created_at, updated_at)
-cron_runs       (id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at)
-mcp_servers     (name, url, instructions, auth_type, auth_header, auth_token, refresh_token, token_endpoint, client_id, client_secret, expires_at, created_at)
-auth_tokens     (token, created_at)
-```
-
-## Key Types
-
-```rust
-AgentDef        // Discovered agent: name, path, identity, config, optional files
-AgentConfig     // From agent.yaml: restart, model, telegram, SandboxConfig, env
-GlobalConfig    // From config.yaml: tunnel
-RuntimeState    // Persisted JSON: agents, socket_path, started_at
-MemoryEntry     // SQLite row: id, content, tags, stored_by, importance
-WorkerContext   // Per-session: chat_id, thread_id, agent_dir, bot, db, ssh config, pc_port, auth state
-ProcessInfo     // From process-compose API: name, status, pid, exit_code
-LoginEvent      // Token request→async: Done, Error
-```
+Tables in per-agent `data.db`: `memories` / `memory_events` / `memories_fts`
+(legacy, unused but retained for migration compat), `telegram_sessions`,
+`cron_specs`, `cron_runs`, `mcp_servers`, `auth_tokens`, `pending_retains`,
+`memory_alerts`. Run `sqlite3 data.db .schema` for column-level definitions.
 
 ## External Integrations
 
@@ -711,44 +627,14 @@ Rules:
 
 ## Directory Layout (Runtime)
 
-```
-~/.rightclaw/
-├── config.yaml
-├── agents/<name>/
-│   ├── AGENTS.md, BOOTSTRAP.md, agent.yaml
-│   ├── IDENTITY.md, SOUL.md, USER.md  # created by bootstrap CC session, not init
-│   ├── TOOLS.md                       # agent-owned (created empty on init, then agent-edited)
-│   ├── policy.yaml          # OpenShell sandbox policy (openshell agents only)
-│   ├── data.db            # SQLite: memories, sessions, cron, MCP servers + auth state
-│   ├── oauth-callback.sock
-│   ├── crons/*.yaml
-│   ├── inbox/          # Received Telegram attachments (no-sandbox mode)
-│   ├── outbox/         # CC-generated files for Telegram (no-sandbox mode)
-│   ├── tmp/inbox/      # Temporary download before sandbox upload
-│   ├── tmp/outbox/     # Temporary download from sandbox for sending
-│   ├── staging/           # Prepared on sandbox creation only
-│   └── .claude/
-│       ├── settings.json
-│       ├── .mcp.json
-│       ├── .credentials.json → ~/.claude/.credentials.json  (host-only, NOT uploaded to sandbox)
-│       ├── reply-schema.json
-│       ├── bootstrap-schema.json      # generated per agent by bot on startup
-│       └── skills/{rightskills,rightcron}/
-├── run/
-│   ├── process-compose.yaml
-│   ├── ssh/<agent>.ssh-config
-│   ├── internal.sock         # Unix socket for bot→aggregator IPC
-│   └── state.json            # RuntimeState (agents, pc_port, socket_path, started_at)
-├── backups/<agent>/<YYYYMMDD-HHMM>/
-│   ├── sandbox.tar.gz    # Sandbox files (tar czpf -p)
-│   ├── agent.yaml        # (full backup only)
-│   ├── data.db           # (full backup only, via VACUUM INTO)
-│   └── policy.yaml       # (full backup only)
-├── logs/
-│   └── <agent>.log.<date>   # Per-agent daily log rotation
-└── scripts/
-    └── cloudflared-start.sh
-```
+`~/.rightclaw/` is the runtime root (override with `--home`). Critical paths:
+
+- `config.yaml` — global config (tunnel).
+- `agents/<name>/` — per-agent state. Key files: `agent.yaml`, `policy.yaml`, `data.db`, `.claude/.credentials.json` (symlink to `~/.claude/.credentials.json`, host-only — NOT uploaded to sandbox). Subdirs include `crons/`, `inbox/`, `outbox/`, and `tmp/` for staging during attachment transfer.
+- `run/process-compose.yaml`, `run/state.json` (carries `pc_port` + `pc_api_token`), `run/internal.sock` (bot↔aggregator UDS), `run/ssh/<agent>.ssh-config`.
+- `backups/<agent>/<YYYYMMDD-HHMM>/` — `sandbox.tar.gz` plus optional `agent.yaml` + `data.db` + `policy.yaml` for full backups.
+- `logs/<agent>.log.<date>` — per-agent daily log rotation. `mcp-aggregator.log` for the shared aggregator.
+- `cache/whisper/ggml-<model>.bin` — STT models (downloaded at `rightclaw up`).
 
 ## Logging
 
