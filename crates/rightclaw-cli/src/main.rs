@@ -2440,7 +2440,7 @@ async fn cmd_agent_restore(
     if is_sandboxed {
         // 4. Sandboxed restore: create new sandbox, upload tar contents.
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-        let new_sandbox_name = format!("rightclaw-{agent_name}-{timestamp}");
+        let new_sandbox_name = format!("right-{agent_name}-{timestamp}");
 
         // We need codegen for staging dir. Create a minimal IDENTITY.md placeholder
         // so discover_single_agent succeeds (the real one is inside the tar).
@@ -4057,7 +4057,7 @@ async fn perform_migration(
     );
 
     // --- Step 2/6: Create new sandbox ---
-    let new_sandbox = format!("rightclaw-{agent_name}-{timestamp}");
+    let new_sandbox = format!("right-{agent_name}-{timestamp}");
     println!("Step 2/6: Creating new sandbox '{new_sandbox}'...");
 
     // Run codegen for staging dir.

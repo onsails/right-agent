@@ -17,7 +17,16 @@ const SANDBOX_PHASE_READY: i32 = 2;
 /// Path to `mcp.json` inside an OpenShell sandbox.
 pub const SANDBOX_MCP_JSON_PATH: &str = "/sandbox/mcp.json";
 
-/// Generate deterministic sandbox name from agent name.
+/// Generate deterministic fallback sandbox name from agent name.
+///
+/// This deliberately still returns `rightclaw-{agent_name}` after the
+/// `right-agent` rename to keep existing pre-rename agents working —
+/// their `agent.yaml` has no explicit `sandbox.name`, so this fallback
+/// is what their bot uses to find their existing sandbox.
+///
+/// New agents (created via `right agent init`) get an explicit
+/// `sandbox.name: right-{agent_name}` written into `agent.yaml` and
+/// never hit this fallback.
 pub fn sandbox_name(agent_name: &str) -> String {
     format!("rightclaw-{agent_name}")
 }

@@ -122,10 +122,12 @@ pub fn init_agent(
         // Sandbox config.
         match ov.sandbox_mode {
             SandboxMode::Openshell => {
-                yaml.push_str("\nsandbox:\n  mode: openshell\n  policy_file: policy.yaml\n");
+                yaml.push_str(&format!(
+                    "\nsandbox:\n  mode: openshell\n  policy_file: policy.yaml\n  name: right-{name}\n"
+                ));
             }
             SandboxMode::None => {
-                yaml.push_str("\nsandbox:\n  mode: none\n");
+                yaml.push_str(&format!("\nsandbox:\n  mode: none\n  name: right-{name}\n"));
             }
         }
 
@@ -1263,6 +1265,19 @@ mod tests {
         assert!(
             yaml.contains("FOO: \"bar\""),
             "agent.yaml must contain env FOO: bar, got:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn init_agent_writes_explicit_sandbox_name_with_right_prefix() {
+        let dir = tempdir().unwrap();
+        let agents_parent = dir.path();
+        let agent_dir = init_agent(agents_parent, "foo", None).unwrap();
+
+        let yaml = std::fs::read_to_string(agent_dir.join("agent.yaml")).unwrap();
+        assert!(
+            yaml.contains("name: right-foo"),
+            "agent.yaml must contain explicit sandbox.name 'right-foo'; got:\n{yaml}"
         );
     }
 }
