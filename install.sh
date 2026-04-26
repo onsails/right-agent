@@ -123,12 +123,12 @@ install_right() {
   fi
 
   # If we're inside a cloned repo, build from path
-  if [ -f "crates/right-agent/Cargo.toml" ]; then
+  if [ -f "crates/right/Cargo.toml" ]; then
     echo "  building from local source..."
-    cargo install --path crates/right-agent --root "$HOME/.local" --force
+    cargo install --path crates/right --root "$HOME/.local" --force
   else
     echo "  installing from crates.io..."
-    cargo install right-agent --root "$HOME/.local" --force
+    cargo install right --root "$HOME/.local" --force
   fi
 
   if [ -f "$INSTALL_DIR/right" ]; then
