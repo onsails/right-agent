@@ -6,13 +6,13 @@ Three crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
-| **rightclaw** | `crates/rightclaw/` | Core library — agent discovery, codegen, config, memory, runtime, MCP, OpenShell |
-| **rightclaw-cli** | `crates/rightclaw-cli/` | CLI binary (`rightclaw`) + MCP Aggregator (HTTP) |
-| **rightclaw-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
+| **right-agent** | `crates/right-agent/` | Core library — agent discovery, codegen, config, memory, runtime, MCP, OpenShell |
+| **right** | `crates/right/` | CLI binary (`right`) + MCP Aggregator (HTTP) |
+| **right-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
 
 ## Module Map
 
-### rightclaw (core)
+### right-agent (core)
 
 - `agent/` — agent discovery (presence detected by `agent.yaml`) and types (`AgentDef`, `AgentConfig`, `RestartPolicy`).
 - `config/` — `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
@@ -22,7 +22,7 @@ Three crates in a Cargo workspace:
 - `mcp/` — OAuth credentials, internal UDS client (bot→aggregator), OAuth flow, proxy backend, token refresh scheduler.
 - Single-file modules: `openshell.rs` (gRPC mTLS + CLI wrappers), `stt.rs` (whisper model cache + ffmpeg), `doctor.rs`, `init.rs`, `error.rs`.
 
-### rightclaw-cli
+### right (CLI)
 
 - `main.rs` — CLI dispatcher.
 - `aggregator.rs` — MCP Aggregator (Aggregator + ToolDispatcher + BackendRegistry).
@@ -30,7 +30,7 @@ Three crates in a Cargo workspace:
 - `internal_api.rs` — internal REST API on Unix socket.
 - `memory_server.rs` — deprecated CLI-only MCP stdio server.
 
-### rightclaw-bot
+### right-bot
 
 - `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start teloxide.
 - `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, prompt assembly, attachments (with STT integration), `invocation.rs` (`ClaudeInvocation` builder — see Claude Invocation Contract).
@@ -46,18 +46,18 @@ Three crates in a Cargo workspace:
 ### Agent Lifecycle
 
 ```
-rightclaw init  /  rightclaw agent init <name>
+right init  /  right agent init <name>
   ├─ `agent init` runs an interactive wizard (sandbox mode, network policy,
   │   telegram, chat IDs, stt, memory) and writes sandbox config + policy.yaml
   │   to the agent dir. `init` skips the wizard and also writes
-  │   ~/.rightclaw/config.yaml + detects Telegram token / cloudflared tunnel.
-  ├─ Create ~/.rightclaw/agents/<name>/ with template files
+  │   ~/.right/config.yaml + detects Telegram token / cloudflared tunnel.
+  ├─ Create ~/.right/agents/<name>/ with template files
   ├─ Write AGENTS.md, BOOTSTRAP.md, agent.yaml
   │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
   ├─ Generate .claude/settings.json, .claude.json
   └─ Symlink credentials from ~/.claude/
 
-rightclaw up [--agents x,y] [--detach] [--no-sandbox]
+right up [--agents x,y] [--detach] [--no-sandbox]
   ├─ Discover agents from agents/ directory
   ├─ Per agent: resolve secret for token map (generate if missing)
   ├─ Generate agent-tokens.json
@@ -65,7 +65,7 @@ rightclaw up [--agents x,y] [--detach] [--no-sandbox]
   ├─ Generate cloudflared config (if tunnel)
   └─ Launch process-compose (TUI or detached)
 
-rightclaw bot --agent <name>  (spawned by process-compose)
+right bot --agent <name>  (spawned by process-compose)
   ├─ Resolve token, open data.db
   ├─ Per-agent codegen:
   │   ├─ settings.json, schemas
@@ -97,7 +97,7 @@ Per message:
   ├─ Download outbound attachments from sandbox outbox → send to Telegram
   └─ Periodic cleanup: hourly, configurable retention (default 7 days)
 
-Config change (rightclaw agent config):
+Config change (right agent config):
   ├─ Writes agent.yaml
   ├─ Detects filesystem policy change via gRPC GetSandboxPolicyStatus
   │   ├─ Network-only change: config_watcher → bot restart → hot-reload
@@ -109,20 +109,20 @@ Config change (rightclaw agent config):
 
 Sandbox migration (filesystem policy change):
   ├─ Backup sandbox-only (SSH tar czpf)
-  ├─ Create new sandbox rightclaw-<agent>-<YYYYMMDD-HHMM> with new policy
+  ├─ Create new sandbox right-<agent>-<YYYYMMDD-HHMM> with new policy
   ├─ Wait for READY + SSH ready
   ├─ Restore files via SSH tar xzpf
   ├─ Write sandbox.name to agent.yaml
   ├─ Delete old sandbox (best-effort)
   └─ config_watcher restarts bot → picks up new sandbox
 
-rightclaw agent backup <name> [--sandbox-only]
+right agent backup <name> [--sandbox-only]
   ├─ Sandbox mode: SSH tar /sandbox/ → sandbox.tar.gz
   ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz
   ├─ Full mode: + agent.yaml, policy.yaml, VACUUM INTO data.db
-  └─ Stored at ~/.rightclaw/backups/<agent>/<YYYYMMDD-HHMM>/
+  └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
 
-rightclaw agent init <name> --from-backup <path>
+right agent init <name> --from-backup <path>
   ├─ Validate: agent must not exist, backup has sandbox.tar.gz + agent.yaml
   ├─ Restore config files to new agent dir
   ├─ Create new sandbox with timestamped name
@@ -130,7 +130,7 @@ rightclaw agent init <name> --from-backup <path>
   ├─ Write sandbox.name to agent.yaml
   └─ Run codegen + initial sync
 
-rightclaw down
+right down
   └─ POST /project/stop to process-compose REST API
 ```
 
@@ -143,8 +143,8 @@ ffmpeg is present. The transcript is wrapped in a Russian marker
 prepended to the user-message text. The original audio file is dropped on
 the host — it never reaches the sandbox.
 
-Models live at `~/.rightclaw/cache/whisper/ggml-<model>.bin` and are
-downloaded at `rightclaw up` (skipped if ffmpeg is missing). Default model
+Models live at `~/.right/cache/whisper/ggml-<model>.bin` and are
+downloaded at `right up` (skipped if ffmpeg is missing). Default model
 is `small`; per-agent override via `agent.yaml`:
 
     stt:
@@ -246,7 +246,7 @@ Tool routing:
   - `rightmeta__` prefix → Aggregator management (read-only: mcp_list)
   - `{server}__` prefix → ProxyBackend (forwarded to upstream MCP)
 
-Internal REST API on Unix socket (~/.rightclaw/run/internal.sock):
+Internal REST API on Unix socket (~/.right/run/internal.sock):
   - POST /mcp-add — register external MCP server
   - POST /mcp-remove — remove external MCP server
   - POST /set-token — deliver OAuth tokens after authentication
@@ -338,7 +338,7 @@ subagent branches. Process timeout (600s) is a safety net only.
 
 | Scope | File | Source of Truth | Category |
 |-------|------|-----------------|----------|
-| Global | `~/.rightclaw/config.yaml` | Tunnel config | `AgentOwned` (edited by user) |
+| Global | `~/.right/config.yaml` | Tunnel config | `AgentOwned` (edited by user) |
 | Per-agent | `agents/<name>/agent.yaml` | Restart, model, telegram, sandbox overrides, sandbox.name, env | `MergedRMW` |
 | Generated | `agents/<name>/.claude/settings.json` | CC behavioral flags (regenerated on bot startup) | `Regenerated(BotRestart)` |
 | Generated | `agents/<name>/.claude.json` | Trust, onboarding suppression (read-modify-write) | `MergedRMW` |
@@ -429,20 +429,20 @@ All interaction with the running `process-compose` instance MUST go through
 `PcClient::from_home(home)`. The `PcClient::new(port)` constructor is
 crate-private; external callers cannot construct a client without a `home`.
 
-This guarantees that `rightclaw --home <path>` is actually isolated: when a
+This guarantees that `right --home <path>` is actually isolated: when a
 command is run against a tempdir home with no `state.json`, `from_home`
 returns `None` and callers skip PC-touching logic. This property is what
 protects tests (which run with a `--home=<tempdir>`) from accidentally hitting
 the user's live PC on port 18927 and SIGTERM-ing a same-named process there.
 
 `<home>/run/state.json` carries the port and API token the running PC uses;
-it is written by `codegen::pipeline` during `rightclaw up` and read by every
+it is written by `codegen::pipeline` during `right up` and read by every
 subsequent command that needs to talk to PC. Older state files without the
 `pc_port` field deserialize to `PC_PORT` via `#[serde(default)]`.
 
 ### PC_API_TOKEN authentication
 
-`rightclaw up` generates a random bearer token (`pc_api_token` in
+`right up` generates a random bearer token (`pc_api_token` in
 `state.json`) and passes it to process-compose via `PC_API_TOKEN` env var.
 PcClient reads the token from state.json and includes it in every request as
 `Authorization: Bearer <token>`. Process-compose rejects unauthenticated
@@ -455,7 +455,7 @@ hitting `localhost:18927`.
 **When adding new CLI commands that touch PC, never import `PC_PORT` directly —
 always resolve through `from_home(home)`.** For "is PC running?" probes,
 treat `Ok(None)` as "no — skip or fail with a clear message pointing at
-`rightclaw up`". `PC_PORT` may still be referenced in two places: by
+`right up`". `PC_PORT` may still be referenced in two places: by
 `cmd_up` when passing `--port` to launch PC, and by `pipeline.rs` when
 writing the default into `state.json`. Both are the same constant by
 construction.
@@ -480,7 +480,7 @@ All migrations must be idempotent — safe to re-run if the schema already match
 
 Every change that touches codegen, sandbox config, or on-disk state must be
 deployable to already-running production agents. Manual migration steps,
-`rightclaw agent init`, or sandbox recreation are NEVER acceptable as upgrade
+`right agent init`, or sandbox recreation are NEVER acceptable as upgrade
 paths.
 
 ### Codegen categories
@@ -496,7 +496,7 @@ Every per-agent codegen output belongs to exactly one category:
 | `AgentOwned` | Created by init. Never touched again. | TOOLS.md, AGENTS.md, IDENTITY.md, SOUL.md, USER.md, MEMORY.md, settings.local.json |
 
 Cross-agent outputs (process-compose.yaml, agent-tokens.json, cloudflared
-config) are all `Regenerated(BotRestart)` — reread on `rightclaw up`.
+config) are all `Regenerated(BotRestart)` — reread on `right up`.
 
 `policy.yaml` mixes a hot-reloadable network section and a recreate-only
 filesystem section. It's registered as the stricter `Regenerated(SandboxRecreate)`;
@@ -504,7 +504,7 @@ runtime discriminates via `openshell::filesystem_policy_changed`.
 
 ### Helper API
 
-`crates/rightclaw/src/codegen/contract.rs` provides the only sanctioned writers:
+`crates/right-agent/src/codegen/contract.rs` provides the only sanctioned writers:
 
 - `write_regenerated(path, content)` — all `Regenerated` outputs except
   `SandboxPolicyApply`.
@@ -532,13 +532,13 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 5. If the new output is policy-related, apply via
    `write_and_apply_sandbox_policy` only. Adding a new network endpoint is
    fine; adding a new filesystem rule requires `SandboxRecreate` treatment.
-6. Never require `rightclaw agent init` for existing agents to adopt the
-   change. They upgrade via `rightclaw restart <agent>`.
+6. Never require `right agent init` for existing agents to adopt the
+   change. They upgrade via `right restart <agent>`.
 
 ### Upgrade flow for a typical codegen change
 
 1. Code change merged.
-2. User runs `rightclaw restart <agent>` (or the bot restarts naturally via
+2. User runs `right restart <agent>` (or the bot restarts naturally via
    process-compose `on_failure`).
 3. `run_single_agent_codegen` rewrites every `Regenerated` file.
 4. Hot-reload machinery applies per category:
@@ -547,7 +547,7 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
      `openshell policy set --wait`.
    - `SandboxRecreate`: bot startup compares active vs on-disk policy via
      `filesystem_policy_changed`. On drift, logs a WARN telling the operator
-     to run `rightclaw agent config <agent>`, which invokes
+     to run `right agent config <agent>`, which invokes
      `maybe_migrate_sandbox`. No automatic migration — it's disruptive and
      requires operator consent.
 5. For `BotRestart` / `SandboxPolicyApply`: zero manual steps.
@@ -570,24 +570,24 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 ## Integration Tests Using Live Sandboxes
 
 Any test that needs a live OpenShell sandbox MUST create it via
-`rightclaw::test_support::TestSandbox::create("<test-name>")`. The helper:
+`right_agent::test_support::TestSandbox::create("<test-name>")`. The helper:
 
-- Generates a unique `rightclaw-test-<name>` sandbox with a minimal permissive policy (wildcard `"**.*"` host on port 443, `binaries: "**"`).
+- Generates a unique `right-test-<name>` sandbox with a minimal permissive policy (wildcard `"**.*"` host on port 443, `binaries: "**"`).
 - Registers the sandbox in `test_cleanup` so sandboxes are deleted even under `panic = "abort"` (the panic hook drains the registry and calls `openshell sandbox delete`).
 - Cleans up leftovers from prior SIGKILLed runs via `pkill_test_orphans`.
 - Exposes `.exec(&[...])` which goes through gRPC — the project bans the `openshell sandbox exec` CLI from tests.
 - Exposes `.name()` for helpers like `upload_file` that take a sandbox name.
 
-Consumers outside `rightclaw`'s own unit tests depend on the `test-support` feature:
+Consumers outside `right-agent`'s own unit tests depend on the `test-support` feature:
 
 ```toml
 [dev-dependencies]
-rightclaw = { path = "...", features = ["test-support"] }
+right-agent = { path = "...", features = ["test-support"] }
 ```
 
 Rules:
 
-- Never hardcode sandbox names (no `rightclaw-foo-test-lifecycle` fixtures).
+- Never hardcode sandbox names (no `right-foo-test-lifecycle` fixtures).
 - Never invoke the `openshell` CLI from tests. Use `TestSandbox::exec` or the gRPC helpers in `crate::openshell`.
 - Never add `#[ignore]` to sandbox tests. Dev machines have OpenShell.
 - Parallel caps (`SandboxTestSlot` / `acquire_sandbox_slot`) are unchanged — tests that create multiple sandboxes should still acquire a slot.
@@ -627,15 +627,15 @@ Rules:
 
 ## Directory Layout (Runtime)
 
-`~/.rightclaw/` is the runtime root (override with `--home`). Critical paths:
+`~/.right/` is the runtime root (override with `--home`). Critical paths:
 
 - `config.yaml` — global config (tunnel).
 - `agents/<name>/` — per-agent state. Key files: `agent.yaml`, `policy.yaml`, `data.db`, `.claude/.credentials.json` (symlink to `~/.claude/.credentials.json`, host-only — NOT uploaded to sandbox). Subdirs include `crons/`, `inbox/`, `outbox/`, and `tmp/` for staging during attachment transfer.
 - `run/process-compose.yaml`, `run/state.json` (carries `pc_port` + `pc_api_token`), `run/internal.sock` (bot↔aggregator UDS), `run/ssh/<agent>.ssh-config`.
 - `backups/<agent>/<YYYYMMDD-HHMM>/` — `sandbox.tar.gz` plus optional `agent.yaml` + `data.db` + `policy.yaml` for full backups.
 - `logs/<agent>.log.<date>` — per-agent daily log rotation. `mcp-aggregator.log` for the shared aggregator.
-- `cache/whisper/ggml-<model>.bin` — STT models (downloaded at `rightclaw up`).
+- `cache/whisper/ggml-<model>.bin` — STT models (downloaded at `right up`).
 
 ## Logging
 
-Bot processes write to both stderr (process-compose TUI) and `~/.rightclaw/logs/<agent>.log` (daily rotation via `tracing-appender`). MCP Aggregator writes to both stdout (colored) and `~/.rightclaw/logs/mcp-aggregator.log` (daily rotation, no ANSI). Login flow has step-by-step INFO-level logging for debuggability.
+Bot processes write to both stderr (process-compose TUI) and `~/.right/logs/<agent>.log` (daily rotation via `tracing-appender`). MCP Aggregator writes to both stdout (colored) and `~/.right/logs/mcp-aggregator.log` (daily rotation, no ANSI). Login flow has step-by-step INFO-level logging for debuggability.
