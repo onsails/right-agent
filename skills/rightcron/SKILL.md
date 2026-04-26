@@ -1,7 +1,7 @@
 ---
 name: rightcron
 description: >-
-  Manages cron jobs for this RightClaw agent via MCP tools. Creates, updates,
+  Manages cron jobs for this Right Agent agent via MCP tools. Creates, updates,
   and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, reminders, one-shot tasks, or recurring tasks.

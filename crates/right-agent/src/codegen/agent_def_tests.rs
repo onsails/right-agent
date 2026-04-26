@@ -49,7 +49,7 @@ fn system_prompt_contains_right_description() {
         &crate::agent::types::SandboxMode::Openshell,
         "/sandbox",
     );
-    assert!(result.contains("RightClaw"));
+    assert!(result.contains("Right Agent"));
     assert!(result.contains("multi-agent runtime"));
 }
 
