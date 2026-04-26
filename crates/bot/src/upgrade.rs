@@ -17,8 +17,8 @@ const UPGRADE_TIMEOUT_SECS: u64 = 120;
 
 /// Run a single upgrade attempt at startup (blocking).
 /// Called before cron/telegram tasks exist — no lock needed.
-pub async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str) {
-    let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+pub async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str, sandbox: &str) {
+    let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sandbox);
     run_upgrade(ssh_config_path, &ssh_host, agent_name).await;
 }
 
@@ -32,21 +32,23 @@ pub async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str) {
 pub fn spawn_upgrade_task(
     ssh_config_path: PathBuf,
     agent_name: String,
+    sandbox: String,
     shutdown: CancellationToken,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run_upgrade_loop(&ssh_config_path, &agent_name, shutdown, &upgrade_lock).await;
+        run_upgrade_loop(&ssh_config_path, &agent_name, &sandbox, shutdown, &upgrade_lock).await;
     })
 }
 
 async fn run_upgrade_loop(
     ssh_config_path: &Path,
     agent_name: &str,
+    sandbox: &str,
     shutdown: CancellationToken,
     upgrade_lock: &tokio::sync::RwLock<()>,
 ) {
-    let ssh_host = rightclaw::openshell::ssh_host(agent_name);
+    let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sandbox);
     let mut interval = tokio::time::interval(UPGRADE_INTERVAL);
     // First tick fires immediately — consume it since startup upgrade already ran.
     interval.tick().await;
@@ -121,6 +123,28 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
+
+    /// Regression: upgrade.rs must use ssh_host_for_sandbox(resolved_sandbox), NOT
+    /// ssh_host(agent_name). New agents have explicit sandbox.name = right-{agent}
+    /// in agent.yaml; their SSH config carries Host openshell-right-{agent} and
+    /// targeting openshell-rightclaw-{agent} would fail.
+    #[test]
+    fn upgrade_uses_resolved_sandbox_not_agent_name() {
+        let src = include_str!("upgrade.rs");
+        // The bare ssh_host(agent_name) call would be the bug.
+        // Split the pattern so this test's own source text doesn't match.
+        let bad_pattern = concat!("openshell::ssh_host", "(agent_name)");
+        assert!(
+            !src.contains(bad_pattern),
+            "upgrade.rs must not call ssh_host(agent_name) — that bypasses agent.yaml \
+             sandbox.name. Use ssh_host_for_sandbox(sandbox) instead."
+        );
+        // Positive: confirm the right helper is used at least once.
+        assert!(
+            src.contains("ssh_host_for_sandbox"),
+            "upgrade.rs must use ssh_host_for_sandbox"
+        );
+    }
 
     #[tokio::test]
     async fn upgrade_skips_when_sessions_active() {
