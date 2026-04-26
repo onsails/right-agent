@@ -1,5 +1,5 @@
 ---
-summary: "First-run onboarding for RightClaw agent"
+summary: "First-run onboarding for a Right Agent"
 ---
 
 # Bootstrap — First-Time Setup

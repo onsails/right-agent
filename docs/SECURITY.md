@@ -1,6 +1,6 @@
 # Security Model
 
-RightClaw enforces security at the infrastructure level. Every agent runs inside an isolated container with declarative policies — not through permission prompts or trust-based configuration.
+Right Agent enforces security at the infrastructure level. Every agent runs inside an isolated container with declarative policies — not through permission prompts or trust-based configuration.
 
 ## Sandbox Architecture
 
@@ -35,7 +35,7 @@ Each agent gets a generated policy file controlling:
 - **Network rules** — allowed domains, allowed IPs, TLS termination settings
 - **Binary restrictions** — which executables the agent can run (`path: "**"` for full access, or locked down per-binary)
 
-Policies are regenerated on each `rightclaw up` from `agent.yaml` configuration and sandbox override settings.
+Policies are regenerated on each `right up` from `agent.yaml` configuration and sandbox override settings.
 
 ## Configuring Policies
 
@@ -48,10 +48,10 @@ With `network_policy: restrictive`, only Anthropic and Claude domains are allowe
 
 **Setting during init:**
 
-`rightclaw init` prompts for this choice interactively. You can also pass it directly:
+`right init` prompts for this choice interactively. You can also pass it directly:
 
 ```sh
-rightclaw init --network-policy restrictive
+right init --network-policy restrictive
 ```
 
 **Changing after init:**
@@ -62,14 +62,14 @@ Edit `network_policy` in your agent's `agent.yaml`:
 network_policy: restrictive   # or: permissive
 ```
 
-Then run `rightclaw up` to regenerate and apply the policy.
+Then run `right up` to regenerate and apply the policy.
 
 **Custom domain allowlists:**
 
 For fine-grained control beyond restrictive/permissive, edit the generated policy directly:
 
 ```
-~/.rightclaw/run/policies/<agent>.yaml
+~/.right/run/policies/<agent>.yaml
 ```
 
 Add endpoint entries under `network_policies` following OpenShell's format. For example, to allow an MCP server in restrictive mode:
@@ -86,7 +86,7 @@ Add endpoint entries under `network_policies` following OpenShell's format. For 
       - path: "**"
 ```
 
-> **Note:** `rightclaw up` regenerates policy files on every launch. Manual edits will be overwritten. Edit the policy after `rightclaw up` completes for each run.
+> **Note:** `right up` regenerates policy files on every launch. Manual edits will be overwritten. Edit the policy after `right up` completes for each run.
 
 ## Prompt Injection Guard
 
@@ -100,4 +100,4 @@ The memory store (SQLite) runs incoming content through pattern matching based o
 
 ## Compliance
 
-RightClaw calls `claude -p` directly, using your existing Claude subscription. There is no token arbitrage, no API key sharing, and no man-in-the-middle on Claude's authentication. This makes RightClaw fully compliant with Anthropic's Terms of Service.
+Right Agent calls `claude -p` directly, using your existing Claude subscription. There is no token arbitrage, no API key sharing, and no man-in-the-middle on Claude's authentication. This makes Right Agent fully compliant with Anthropic's Terms of Service.
