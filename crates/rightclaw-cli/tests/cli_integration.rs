@@ -729,7 +729,7 @@ async fn test_policy_validates_against_openshell() {
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
-    let sandbox_name = "rightclaw-test-policy-validate";
+    let sandbox_name = "right-test-policy-validate";
 
     rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
     rightclaw::test_cleanup::register_test_sandbox(sandbox_name);

@@ -19,9 +19,9 @@ pub struct TestSandbox {
 
 impl TestSandbox {
     /// Create an ephemeral sandbox for testing. Cleans up any leftover from
-    /// previous runs. The sandbox name is `rightclaw-test-<test_name>`.
+    /// previous runs. The sandbox name is `right-test-<test_name>`.
     pub async fn create(test_name: &str) -> Self {
-        let name = format!("rightclaw-test-{test_name}");
+        let name = format!("right-test-{test_name}");
 
         // Belt-and-suspenders cleanup of any orphan processes from a
         // previous SIGKILLed test run that Drop/hook could not handle.
@@ -86,7 +86,7 @@ network_policies:
         }
     }
 
-    /// Sandbox name (already prefixed with `rightclaw-test-`).
+    /// Sandbox name (already prefixed with `right-test-`).
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -116,5 +116,29 @@ impl Drop for TestSandbox {
     fn drop(&mut self) {
         test_cleanup::unregister_test_sandbox(&self.name);
         test_cleanup::delete_sandbox_sync(&self.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_sandbox_uses_right_test_prefix() {
+        // We don't actually call OpenShell — just inspect the format string.
+        let computed = format!("right-test-{}", "lifecycle");
+        assert_eq!(computed, "right-test-lifecycle");
+
+        // Smoke check: confirm test_support.rs source file was updated.
+        // The expected format string in the `create` function body:
+        let src = include_str!("test_support.rs");
+        let expected_fmt = concat!("right-test-{test", "_name}");
+        let old_fmt = concat!("rightclaw-test-{test", "_name}");
+        assert!(
+            src.contains(expected_fmt),
+            "test_support.rs must use 'right-test-' prefix in sandbox name format"
+        );
+        assert!(
+            !src.contains(old_fmt),
+            "test_support.rs must not still contain old 'rightclaw-test-' format"
+        );
     }
 }

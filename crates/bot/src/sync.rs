@@ -314,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn initial_sync_does_not_upload_agent_md_files() {
         let _slot = rightclaw::openshell::acquire_sandbox_slot();
-        let sandbox_name = "rightclaw-test-sync-upload";
+        let sandbox_name = "right-test-sync-upload";
 
         rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
         rightclaw::test_cleanup::register_test_sandbox(sandbox_name);
