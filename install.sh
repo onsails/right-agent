@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── RightClaw Installer ────────────────────────────────────────────
+# ── Right Agent Installer ──────────────────────────────────────────
 #
 # Installs:
-#   1. rightclaw        - Multi-agent runtime CLI
+#   1. right            - Multi-agent runtime CLI
 #   2. process-compose  - Process orchestrator with TUI
 #   3. NVIDIA OpenShell - Sandbox runtime for AI agents
 #
@@ -13,10 +13,10 @@ set -euo pipefail
 #   - cloudflared         https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 #
 # Usage:
-#   curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
+#   curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh
 #
 # Environment variables:
-#   RIGHTCLAW_VERSION  - Version to install (default: latest)
+#   RIGHT_VERSION      - Version to install (default: latest)
 #   INSTALL_DIR        - Binary install directory (default: ~/.local/bin)
 
 # ── Colors ─────────────────────────────────────────────────────────
@@ -77,40 +77,40 @@ setup_install_dir() {
   esac
 }
 
-# ── Step 1: Install RightClaw ──────────────────────────────────────
+# ── Step 1: Install Right Agent ────────────────────────────────────
 
-install_rightclaw() {
-  if command -v rightclaw >/dev/null 2>&1; then
-    info "Updating rightclaw..."
+install_right() {
+  if command -v right >/dev/null 2>&1; then
+    info "Updating right..."
   else
-    info "Installing rightclaw..."
+    info "Installing right..."
   fi
 
-  local version="${RIGHTCLAW_VERSION:-latest}"
+  local version="${RIGHT_VERSION:-latest}"
   local target
   local download_url
   local http_code=""
 
   case "${PLATFORM}-${ARCH}" in
-    linux-x86_64)   target="rightclaw-x86_64-unknown-linux-gnu" ;;
-    linux-aarch64)  target="rightclaw-aarch64-unknown-linux-gnu" ;;
-    darwin-aarch64) target="rightclaw-aarch64-apple-darwin" ;;
-    *)              die "Unsupported platform: ${PLATFORM}-${ARCH}. RightClaw ships for linux-x86_64, linux-aarch64, and darwin-aarch64 (Apple Silicon)." ;;
+    linux-x86_64)   target="right-x86_64-unknown-linux-gnu" ;;
+    linux-aarch64)  target="right-aarch64-unknown-linux-gnu" ;;
+    darwin-aarch64) target="right-aarch64-apple-darwin" ;;
+    *)              die "Unsupported platform: ${PLATFORM}-${ARCH}. Right Agent ships for linux-x86_64, linux-aarch64, and darwin-aarch64 (Apple Silicon)." ;;
   esac
 
   if [ "$version" = "latest" ]; then
-    download_url="https://github.com/onsails/rightclaw/releases/latest/download/${target}"
+    download_url="https://github.com/onsails/right-agent/releases/latest/download/${target}"
   else
-    download_url="https://github.com/onsails/rightclaw/releases/download/${version}/${target}"
+    download_url="https://github.com/onsails/right-agent/releases/download/${version}/${target}"
   fi
 
   echo "  downloading: $download_url"
 
-  http_code=$(curl -LsSf -w '%{http_code}' -o "$INSTALL_DIR/rightclaw" "$download_url" 2>/dev/null) || http_code="000"
+  http_code=$(curl -LsSf -w '%{http_code}' -o "$INSTALL_DIR/right" "$download_url" 2>/dev/null) || http_code="000"
 
   if [ "$http_code" = "200" ]; then
-    chmod +x "$INSTALL_DIR/rightclaw"
-    ok "rightclaw installed to $INSTALL_DIR/rightclaw"
+    chmod +x "$INSTALL_DIR/right"
+    ok "right installed to $INSTALL_DIR/right"
     return 0
   fi
 
@@ -118,23 +118,23 @@ install_rightclaw() {
   warn "GitHub release download failed (HTTP $http_code), trying cargo install..."
 
   if ! command -v cargo >/dev/null 2>&1; then
-    die "Cannot install rightclaw: no prebuilt binary available and cargo is not installed.
+    die "Cannot install right: no prebuilt binary available and cargo is not installed.
     Install Rust first: https://rustup.rs"
   fi
 
   # If we're inside a cloned repo, build from path
-  if [ -f "crates/rightclaw-cli/Cargo.toml" ]; then
+  if [ -f "crates/right-agent/Cargo.toml" ]; then
     echo "  building from local source..."
-    cargo install --path crates/rightclaw-cli --root "$HOME/.local" --force
+    cargo install --path crates/right-agent --root "$HOME/.local" --force
   else
     echo "  installing from crates.io..."
-    cargo install rightclaw-cli --root "$HOME/.local" --force
+    cargo install right-agent --root "$HOME/.local" --force
   fi
 
-  if [ -f "$INSTALL_DIR/rightclaw" ]; then
-    ok "rightclaw built and installed to $INSTALL_DIR/rightclaw"
+  if [ -f "$INSTALL_DIR/right" ]; then
+    ok "right built and installed to $INSTALL_DIR/right"
   else
-    die "Failed to install rightclaw via cargo"
+    die "Failed to install right via cargo"
   fi
 }
 
@@ -178,34 +178,34 @@ install_openshell() {
   fi
 }
 
-# ── Step 4: Run rightclaw init ─────────────────────────────────────
+# ── Step 4: Run right init ─────────────────────────────────────────
 
 run_init() {
-  if [ -d "$HOME/.rightclaw" ]; then
-    ok "~/.rightclaw already exists, skipping init"
+  if [ -d "$HOME/.right" ]; then
+    ok "~/.right already exists, skipping init"
     return 0
   fi
 
-  info "Running rightclaw init..."
+  info "Running right init..."
 
   # Use full path to avoid PATH resolution issues (Pitfall 6)
-  "$INSTALL_DIR/rightclaw" init
+  "$INSTALL_DIR/right" init
 }
 
-# ── Step 5: Run rightclaw doctor ───────────────────────────────────
+# ── Step 5: Run right doctor ───────────────────────────────────────
 
 run_doctor() {
-  info "Running rightclaw doctor..."
+  info "Running right doctor..."
 
   # Use full path to avoid PATH resolution issues (Pitfall 6)
-  "$INSTALL_DIR/rightclaw" doctor
+  "$INSTALL_DIR/right" doctor
 }
 
 # ── Main ───────────────────────────────────────────────────────────
 
 main() {
   echo ""
-  echo "${BOLD}  RightClaw Installer${RESET}"
+  echo "${BOLD}  Right Agent Installer${RESET}"
   echo "  Multi-agent runtime for Claude Code"
   echo ""
 
@@ -213,7 +213,7 @@ main() {
   setup_install_dir
 
   echo ""
-  install_rightclaw
+  install_right
   install_process_compose
   install_openshell
 
@@ -227,9 +227,9 @@ main() {
   echo "${GREEN}${BOLD}  Installation complete!${RESET}"
   echo ""
   echo "  Next steps:"
-  echo "    1. Start your agents:  ${CYAN}rightclaw up${RESET}"
-  echo "    2. View the TUI:       ${CYAN}rightclaw attach${RESET}"
-  echo "    3. Check status:       ${CYAN}rightclaw status${RESET}"
+  echo "    1. Start your agents:  ${CYAN}right up${RESET}"
+  echo "    2. View the TUI:       ${CYAN}right attach${RESET}"
+  echo "    3. Check status:       ${CYAN}right status${RESET}"
   echo ""
   echo "  Make sure ${CYAN}$INSTALL_DIR${RESET} is in your PATH."
   echo "  Add this to your shell profile if needed:"
