@@ -2762,7 +2762,43 @@ dependencies = [
 ]
 
 [[package]]
-name = "rightclaw"
+name = "right"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "axum",
+ "chrono",
+ "clap 4.6.1",
+ "dashmap",
+ "dirs",
+ "http",
+ "inquire",
+ "miette",
+ "predicates",
+ "reqwest 0.13.2",
+ "right-agent",
+ "right-bot",
+ "rmcp",
+ "rusqlite",
+ "schemars 1.2.1",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "walkdir",
+ "which",
+]
+
+[[package]]
+name = "right-agent"
 version = "0.2.3"
 dependencies = [
  "base64",
@@ -2815,7 +2851,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rightclaw-bot"
+name = "right-bot"
 version = "0.2.3"
 dependencies = [
  "axum",
@@ -2828,7 +2864,7 @@ dependencies = [
  "notify-debouncer-mini",
  "pulldown-cmark",
  "reqwest 0.13.2",
- "rightclaw",
+ "right-agent",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2843,42 +2879,6 @@ dependencies = [
  "uuid",
  "which",
  "whisper-rs",
-]
-
-[[package]]
-name = "rightclaw-cli"
-version = "0.2.3"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "axum",
- "chrono",
- "clap 4.6.1",
- "dashmap",
- "dirs",
- "http",
- "inquire",
- "miette",
- "predicates",
- "reqwest 0.13.2",
- "rightclaw",
- "rightclaw-bot",
- "rmcp",
- "rusqlite",
- "schemars 1.2.1",
- "serde",
- "serde-saphyr",
- "serde_json",
- "subtle",
- "tempfile",
- "tokio",
- "tokio-util",
- "tower",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "walkdir",
- "which",
 ]
 
 [[package]]

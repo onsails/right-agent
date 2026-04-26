@@ -1,0 +1,61 @@
+[package]
+name = "right-agent"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+miette = { workspace = true }
+minijinja = { workspace = true }
+include_dir = { workspace = true }
+walkdir = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+which = { workspace = true }
+rusqlite = { workspace = true }
+rusqlite_migration = { workspace = true }
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+subtle = { workspace = true }
+owo-colors = { workspace = true }
+inquire = { workspace = true }
+rmcp = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+sse-stream = { workspace = true }
+chrono = { workspace = true }
+cron = { workspace = true }
+cron-descriptor = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+url = { workspace = true }
+tokio-util = { workspace = true }
+fs4 = { workspace = true }
+nix = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
+fastrand = "2"
+
+[features]
+test-support = []
+
+[dev-dependencies]
+tokio-stream = { version = "0.1", features = ["net"] }
+wiremock = "0.6"
+tokio = { version = "1.52", features = ["test-util"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"

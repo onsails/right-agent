@@ -158,7 +158,7 @@ One-shot jobs (both `run_at` and `recurring: false`) auto-delete from `cron_spec
 
 ## Checking Run History
 
-Use the `rightclaw` MCP server tools to check cron job execution history.
+Use the `right` MCP server tools to check cron job execution history.
 
 ### mcp__right__cron_list_runs
 

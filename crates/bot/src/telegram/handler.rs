@@ -5,7 +5,7 @@
 //! handle_list: shows all sessions for the current chat+thread.
 //! handle_switch: switches to a different session by partial UUID match.
 //! handle_mcp: MCP server management (list/auth/add/remove).
-//! handle_doctor: runs rightclaw doctor and returns results.
+//! handle_doctor: runs right doctor and returns results.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use super::session::{
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
-/// Distinct from RightclawHome to prevent TypeId collision in dptree.
+/// Distinct from RightHome to prevent TypeId collision in dptree.
 #[derive(Clone)]
 pub struct AgentDir(pub PathBuf);
 
@@ -34,10 +34,10 @@ pub struct AgentDir(pub PathBuf);
 #[derive(Clone)]
 pub struct SshConfigPath(pub Option<PathBuf>);
 
-/// Newtype wrapper for the rightclaw home directory passed via dptree dependencies.
+/// Newtype wrapper for the right home directory passed via dptree dependencies.
 /// Distinct from AgentDir to prevent TypeId collision in dptree.
 #[derive(Clone)]
-pub struct RightclawHome(pub PathBuf);
+pub struct RightHome(pub PathBuf);
 
 /// Shared slot for pending MCP token requests. When /mcp add needs a token,
 /// a oneshot::Sender is placed here. Message handler checks before routing to worker.
@@ -63,7 +63,7 @@ pub struct InterceptSlots {
 
 /// Newtype wrapper for the InternalClient used to communicate with the MCP aggregator.
 #[derive(Clone)]
-pub struct InternalApi(pub Arc<rightclaw::mcp::internal_client::InternalClient>);
+pub struct InternalApi(pub Arc<right_agent::mcp::internal_client::InternalClient>);
 
 /// Shared timestamp of last interaction (unix seconds).
 /// Updated by handler on incoming messages and by worker after sending replies.
@@ -79,9 +79,9 @@ pub struct AgentSettings {
     /// Resolved sandbox name (None when running without sandbox).
     pub resolved_sandbox: Option<String>,
     /// Hindsight memory client (None when using file-based memory).
-    pub hindsight: Option<std::sync::Arc<rightclaw::memory::ResilientHindsight>>,
+    pub hindsight: Option<std::sync::Arc<right_agent::memory::ResilientHindsight>>,
     /// Prefetch cache for Hindsight recall results.
-    pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
+    pub prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
     /// RwLock gate — upgrade takes write (exclusive), CC invocations take read (shared).
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// When true, CC subprocesses run with --verbose and stderr is logged at debug level.
@@ -394,7 +394,7 @@ pub async fn handle_new(
     let eff_thread_id = effective_thread_id(&msg);
     let key: SessionKey = (chat_id.0, eff_thread_id);
 
-    let conn = rightclaw::memory::open_connection(&agent_dir.0, false)
+    let conn = right_agent::memory::open_connection(&agent_dir.0, false)
         .map_err(|e| to_request_err(format!("new: open DB: {:#}", e)))?;
 
     let prev_uuid = deactivate_current(&conn, chat_id.0, eff_thread_id)
@@ -445,7 +445,7 @@ pub async fn handle_list(
     let chat_id = msg.chat.id;
     let eff_thread_id = effective_thread_id(&msg);
 
-    let conn = rightclaw::memory::open_connection(&agent_dir.0, false)
+    let conn = right_agent::memory::open_connection(&agent_dir.0, false)
         .map_err(|e| to_request_err(format!("list: open DB: {:#}", e)))?;
 
     let sessions = list_sessions(&conn, chat_id.0, eff_thread_id)
@@ -534,7 +534,7 @@ pub async fn handle_switch(
         return Ok(());
     }
 
-    let conn = rightclaw::memory::open_connection(&agent_dir.0, false)
+    let conn = right_agent::memory::open_connection(&agent_dir.0, false)
         .map_err(|e| to_request_err(format!("switch: open DB: {:#}", e)))?;
 
     let matches = find_sessions_by_uuid(&conn, chat_id.0, eff_thread_id, &uuid)
@@ -607,7 +607,7 @@ pub async fn handle_mcp(
     args: String,
     agent_dir: Arc<AgentDir>,
     pending_auth: PendingAuthMap,
-    home: Arc<RightclawHome>,
+    home: Arc<RightHome>,
     internal: Arc<InternalApi>,
     pending_token_slot: Arc<PendingTokenSlot>,
     ssh_config: Arc<SshConfigPath>,
@@ -689,7 +689,7 @@ async fn handle_mcp_list(
     bot: &BotType,
     msg: &Message,
     agent_name: &str,
-    internal: &rightclaw::mcp::internal_client::InternalClient,
+    internal: &right_agent::mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
     tracing::info!(agent = %agent_name, "mcp list");
 
@@ -737,7 +737,7 @@ async fn handle_mcp_auth(
     agent_dir: &Path,
     pending_auth: PendingAuthMap,
     home: &Path,
-    internal: &rightclaw::mcp::internal_client::InternalClient,
+    internal: &right_agent::mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp auth");
 
@@ -779,7 +779,7 @@ async fn handle_mcp_auth(
     };
 
     // 2. Read tunnel config
-    let global_config = match rightclaw::config::read_global_config(home) {
+    let global_config = match right_agent::config::read_global_config(home) {
         Ok(c) => c,
         Err(e) => {
             bot.send_message(msg.chat.id, format!("Cannot read config.yaml: {e:#}"))
@@ -792,7 +792,7 @@ async fn handle_mcp_auth(
         None => {
             bot.send_message(
                 msg.chat.id,
-                "Tunnel not configured. Run:\n  rightclaw init --tunnel-token TOKEN",
+                "Tunnel not configured. Run:\n  right init --tunnel-token TOKEN",
             )
             .await?;
             return Ok(());
@@ -820,7 +820,7 @@ async fn handle_mcp_auth(
     )
     .await?;
 
-    let metadata = match rightclaw::mcp::oauth::discover_as(&http_client, &server_url).await {
+    let metadata = match right_agent::mcp::oauth::discover_as(&http_client, &server_url).await {
         Ok(m) => m,
         Err(e) => {
             bot.send_message(
@@ -841,13 +841,13 @@ async fn handle_mcp_auth(
     if tunnel.hostname.is_empty() {
         bot.send_message(
             msg.chat.id,
-            "Tunnel hostname not configured -- run `rightclaw init --tunnel-hostname HOSTNAME`",
+            "Tunnel hostname not configured -- run `right init --tunnel-hostname HOSTNAME`",
         )
         .await?;
         return Ok(());
     }
     let redirect_uri = format!("https://{}/oauth/{agent_name}/callback", tunnel.hostname);
-    let (client_id, client_secret) = match rightclaw::mcp::oauth::register_client_or_fallback(
+    let (client_id, client_secret) = match right_agent::mcp::oauth::register_client_or_fallback(
         &http_client,
         &metadata,
         None, // no static clientId from .claude.json -- DCR only
@@ -864,8 +864,8 @@ async fn handle_mcp_auth(
     };
 
     // 6. Generate PKCE + state
-    let (code_verifier, code_challenge) = rightclaw::mcp::oauth::generate_pkce();
-    let state = rightclaw::mcp::oauth::generate_state();
+    let (code_verifier, code_challenge) = right_agent::mcp::oauth::generate_pkce();
+    let state = right_agent::mcp::oauth::generate_state();
 
     // 7. Tunnel healthcheck -- hit tunnel root to verify cloudflared is running
     let healthcheck_url = format!("https://{}/", tunnel.hostname);
@@ -898,7 +898,7 @@ async fn handle_mcp_auth(
     }
 
     // 8. Store PendingAuth
-    let pending = rightclaw::mcp::oauth::PendingAuth {
+    let pending = right_agent::mcp::oauth::PendingAuth {
         server_name: server_name.to_string(),
         server_url: server_url.clone(),
         code_verifier,
@@ -912,7 +912,7 @@ async fn handle_mcp_auth(
     pending_auth.lock().await.insert(state.clone(), pending);
 
     // 9. Build and send auth URL
-    let auth_url = rightclaw::mcp::oauth::build_auth_url(
+    let auth_url = right_agent::mcp::oauth::build_auth_url(
         &metadata,
         &client_id,
         &redirect_uri,
@@ -943,7 +943,7 @@ async fn handle_mcp_add(
     msg: &Message,
     config_str: &str,
     agent_dir: &Path,
-    internal: &rightclaw::mcp::internal_client::InternalClient,
+    internal: &right_agent::mcp::internal_client::InternalClient,
     pending_token_slot: &PendingTokenSlot,
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
@@ -991,7 +991,7 @@ async fn handle_mcp_add(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    let oauth_result = rightclaw::mcp::oauth::discover_as(&http_client, &bare_url).await;
+    let oauth_result = right_agent::mcp::oauth::discover_as(&http_client, &bare_url).await;
     let oauth_discovered = oauth_result.is_ok();
     tracing::info!(url = %bare_url, oauth_discovered, err = ?oauth_result.err(), "mcp add: OAuth AS discovery complete");
 
@@ -1033,7 +1033,7 @@ async fn handle_mcp_add(
 
     // Step 2: Determine auth type for non-OAuth servers
     tracing::info!(url = %bare_url, "mcp add: determining auth type (non-OAuth path)");
-    let is_public = rightclaw::mcp::credentials::is_public_url(&bare_url);
+    let is_public = right_agent::mcp::credentials::is_public_url(&bare_url);
 
     let (auth_type, auth_header): (String, Option<String>) = if has_query {
         ("query_string".into(), None)
@@ -1133,7 +1133,7 @@ async fn handle_mcp_add(
     // Spawn background task for token wait + registration.
     // Extract owned values — the spawned future must be 'static.
     let bot = bot.clone();
-    let internal = rightclaw::mcp::internal_client::InternalClient::new(internal.socket_path());
+    let internal = right_agent::mcp::internal_client::InternalClient::new(internal.socket_path());
     let chat_id = msg.chat.id;
     let bare_url = bare_url.to_string();
     let name = name.to_string();
@@ -1271,7 +1271,7 @@ async fn detect_auth_type_via_haiku(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
 
     let output = tokio::time::timeout(
@@ -1329,11 +1329,11 @@ async fn handle_mcp_remove(
     msg: &Message,
     server_name: &str,
     agent_dir: &Path,
-    internal: &rightclaw::mcp::internal_client::InternalClient,
+    internal: &right_agent::mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp remove");
 
-    if server_name == rightclaw::mcp::PROTECTED_MCP_SERVER {
+    if server_name == right_agent::mcp::PROTECTED_MCP_SERVER {
         bot.send_message(
             msg.chat.id,
             format!("Cannot remove '{server_name}' — required for core functionality."),
@@ -1397,10 +1397,10 @@ async fn handle_cron_list(
     msg: &Message,
     agent_dir: &Path,
 ) -> Result<(), RequestError> {
-    let conn = rightclaw::memory::open_connection(agent_dir, false)
+    let conn = right_agent::memory::open_connection(agent_dir, false)
         .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
 
-    let specs = rightclaw::cron_spec::load_specs_from_db(&conn)
+    let specs = right_agent::cron_spec::load_specs_from_db(&conn)
         .map_err(|e| to_request_err(format!("load specs failed: {e:#}")))?;
 
     if specs.is_empty() {
@@ -1416,15 +1416,15 @@ async fn handle_cron_list(
     for name in names {
         let spec = &specs[name];
         let desc = match &spec.schedule_kind {
-            rightclaw::cron_spec::ScheduleKind::RunAt(dt) => super::markdown::html_escape(
+            right_agent::cron_spec::ScheduleKind::RunAt(dt) => super::markdown::html_escape(
                 &format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")),
             ),
-            _ => super::markdown::html_escape(&rightclaw::cron_spec::describe_schedule(
+            _ => super::markdown::html_escape(&right_agent::cron_spec::describe_schedule(
                 spec.schedule_kind.cron_schedule().unwrap_or(""),
             )),
         };
 
-        let last_run = rightclaw::cron_spec::get_recent_runs(&conn, name, 1)
+        let last_run = right_agent::cron_spec::get_recent_runs(&conn, name, 1)
             .map_err(|e| to_request_err(format!("get runs failed: {e:#}")))?;
 
         let status_str = match last_run.first() {
@@ -1453,10 +1453,10 @@ async fn handle_cron_detail(
     job_name: &str,
     agent_dir: &Path,
 ) -> Result<(), RequestError> {
-    let conn = rightclaw::memory::open_connection(agent_dir, false)
+    let conn = right_agent::memory::open_connection(agent_dir, false)
         .map_err(|e| to_request_err(format!("DB open failed: {e:#}")))?;
 
-    let detail = rightclaw::cron_spec::get_spec_detail(&conn, job_name)
+    let detail = right_agent::cron_spec::get_spec_detail(&conn, job_name)
         .map_err(|e| to_request_err(format!("query failed: {e:#}")))?;
 
     let Some(detail) = detail else {
@@ -1466,7 +1466,7 @@ async fn handle_cron_detail(
     };
 
     let desc =
-        super::markdown::html_escape(&rightclaw::cron_spec::describe_schedule(&detail.schedule));
+        super::markdown::html_escape(&right_agent::cron_spec::describe_schedule(&detail.schedule));
     let schedule_escaped = super::markdown::html_escape(&detail.schedule);
     let mut text = format!(
         "<b>{}</b>\nSchedule: {} (<code>{}</code>)\nBudget: ${:.2}",
@@ -1480,7 +1480,7 @@ async fn handle_cron_detail(
         text.push_str("\n\u{26a1} Trigger pending");
     }
 
-    let runs = rightclaw::cron_spec::get_recent_runs(&conn, job_name, 5)
+    let runs = right_agent::cron_spec::get_recent_runs(&conn, job_name, 5)
         .map_err(|e| to_request_err(format!("get runs failed: {e:#}")))?;
 
     if runs.is_empty() {
@@ -1531,21 +1531,21 @@ fn format_duration(start_iso: &str, end_iso: &str) -> String {
 pub async fn handle_doctor(
     bot: BotType,
     msg: Message,
-    home: Arc<RightclawHome>,
+    home: Arc<RightHome>,
 ) -> ResponseResult<()> {
     if !is_private_chat(&msg.chat.kind) {
         tracing::debug!(cmd = "doctor", "ignoring command in group chat (DM-only)");
         return Ok(());
     }
     tracing::info!("handle_doctor: running diagnostics");
-    let checks = rightclaw::doctor::run_doctor(&home.0);
+    let checks = right_agent::doctor::run_doctor(&home.0);
     let mut body = String::new();
     for check in &checks {
         body.push_str(&format!("{check}\n"));
     }
     let pass_count = checks
         .iter()
-        .filter(|c| matches!(c.status, rightclaw::doctor::CheckStatus::Pass))
+        .filter(|c| matches!(c.status, right_agent::doctor::CheckStatus::Pass))
         .count();
     body.push_str(&format!("\n{pass_count}/{} checks passed", checks.len()));
     // HTML-escape body before wrapping in <pre> -- doctor output may contain <, >, &
@@ -1596,10 +1596,10 @@ pub async fn handle_usage(
 
 async fn build_usage_summary(agent_dir: &Path, detail: bool) -> Result<String, miette::Report> {
     use chrono::{Duration, Utc};
-    use rightclaw::usage::aggregate::aggregate;
-    use rightclaw::usage::format::{AllWindows, format_summary_message};
+    use right_agent::usage::aggregate::aggregate;
+    use right_agent::usage::format::{AllWindows, format_summary_message};
 
-    let conn = rightclaw::memory::open_connection(agent_dir, false)
+    let conn = right_agent::memory::open_connection(agent_dir, false)
         .map_err(|e| miette::miette!("open_connection: {e:#}"))?;
 
     let now = Utc::now();
@@ -1707,26 +1707,27 @@ mod tests {
         assert!(!is_private_chat(&make_group_chat_kind()));
     }
 
-    /// Regression test: AgentDir and RightclawHome must have distinct TypeIds.
+    /// Regression test: AgentDir and RightHome must have distinct TypeIds.
     /// If they shared the same type (e.g., both Arc<PathBuf>), dptree would overwrite
     /// the first registration with the second, causing all handlers to receive the
     /// wrong path for one of the two parameters.
     #[test]
-    fn agent_dir_and_rightclaw_home_have_distinct_type_ids() {
+    fn agent_dir_and_right_home_have_distinct_type_ids() {
         assert_ne!(
             TypeId::of::<AgentDir>(),
-            TypeId::of::<RightclawHome>(),
-            "AgentDir and RightclawHome must be distinct types to avoid dptree TypeId collision"
+            TypeId::of::<RightHome>(),
+            "AgentDir and RightHome must be distinct types to avoid dptree TypeId collision"
+
         );
     }
 
     #[test]
-    fn agent_dir_and_rightclaw_home_hold_independent_paths() {
+    fn agent_dir_and_right_home_hold_independent_paths() {
         let agent = AgentDir(PathBuf::from("/agents/myagent"));
-        let home = RightclawHome(PathBuf::from("/home/user/.rightclaw"));
+        let home = RightHome(PathBuf::from("/home/user/.right"));
 
         assert_eq!(agent.0, PathBuf::from("/agents/myagent"));
-        assert_eq!(home.0, PathBuf::from("/home/user/.rightclaw"));
+        assert_eq!(home.0, PathBuf::from("/home/user/.right"));
         assert_ne!(agent.0, home.0);
     }
 
@@ -1777,9 +1778,9 @@ mod tests {
     }
 
     #[test]
-    fn agent_dir_and_rightclaw_home_clone_independently() {
+    fn agent_dir_and_right_home_clone_independently() {
         let agent = AgentDir(PathBuf::from("/agents/myagent"));
-        let home = RightclawHome(PathBuf::from("/home/user/.rightclaw"));
+        let home = RightHome(PathBuf::from("/home/user/.right"));
 
         let agent2 = agent.clone();
         let home2 = home.clone();

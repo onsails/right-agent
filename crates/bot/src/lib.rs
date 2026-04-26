@@ -12,7 +12,7 @@ mod upgrade;
 
 pub use error::BotError;
 
-use rightclaw::agent::allowlist::{self, AllowlistHandle, AllowlistState};
+use right_agent::agent::allowlist::{self, AllowlistHandle, AllowlistState};
 
 /// Load `allowlist.yaml` for this agent, migrating from the legacy
 /// `agent.yaml::allowed_chat_ids` field on first boot. Returns a shareable
@@ -52,7 +52,7 @@ fn load_or_migrate_allowlist(
 /// process-compose's `on_failure` policy will restart the bot.
 pub const CONFIG_RESTART_EXIT_CODE: i32 = 2;
 
-/// Arguments passed from the CLI `rightclaw bot` subcommand.
+/// Arguments passed from the CLI `right bot` subcommand.
 #[derive(Debug, Clone)]
 pub struct BotArgs {
     /// Agent name (directory name under $RIGHT_HOME/agents/).
@@ -63,12 +63,12 @@ pub struct BotArgs {
     pub debug: bool,
 }
 
-/// Entry point called from rightclaw-cli.
+/// Entry point called from the right CLI.
 ///
 /// Resolves agent directory, opens data.db, resolves token, and starts
 /// the teloxide long-polling dispatcher with graceful shutdown wiring.
 ///
-/// This is an async function. The caller (rightclaw-cli) runs inside a
+/// This is an async function. The caller (right CLI) runs inside a
 /// `#[tokio::main]` runtime and simply `.await`s this call. No nested
 /// runtime construction needed.
 /// Returns `true` when the bot exited due to a config change and should be
@@ -78,7 +78,7 @@ pub async fn run(args: BotArgs) -> miette::Result<bool> {
 }
 
 async fn run_async(args: BotArgs) -> miette::Result<bool> {
-    use rightclaw::{
+    use right_agent::{
         agent::discovery::{parse_agent_config, validate_agent_name},
         config::resolve_home,
         memory::open_connection,
@@ -98,7 +98,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let agent_dir: PathBuf = if let Ok(dir) = std::env::var("RC_AGENT_DIR") {
         PathBuf::from(dir)
     } else {
-        let dir = rightclaw::config::agents_dir(&home).join(&args.agent);
+        let dir = right_agent::config::agents_dir(&home).join(&args.agent);
         if !dir.exists() {
             return Err(miette::miette!(
                 "agent directory not found: {}",
@@ -119,14 +119,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // This ensures policy.yaml, settings.json, mcp.json, etc. reflect the current config
     // even after a config change triggered restart.
     let self_exe =
-        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rightclaw"));
-    let agent_def = rightclaw::agent::discover_single_agent(&agent_dir)?;
-    rightclaw::codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("right"));
+    let agent_def = right_agent::agent::discover_single_agent(&agent_dir)?;
+    right_agent::codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
     tracing::info!(agent = %args.agent, "per-agent codegen complete");
 
     // Parse config after codegen (secret may have been generated in agent.yaml).
     let config =
-        parse_agent_config(&agent_dir)?.unwrap_or_else(|| rightclaw::agent::types::AgentConfig {
+        parse_agent_config(&agent_dir)?.unwrap_or_else(|| right_agent::agent::types::AgentConfig {
             allowed_chat_ids: vec![],
             telegram_token: None,
             restart: Default::default(),
@@ -159,10 +159,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .unwrap_or_default();
 
     let (hindsight_wrapper, prefetch_cache): (
-        Option<Arc<rightclaw::memory::ResilientHindsight>>,
-        Option<rightclaw::memory::prefetch::PrefetchCache>,
+        Option<Arc<right_agent::memory::ResilientHindsight>>,
+        Option<right_agent::memory::prefetch::PrefetchCache>,
     ) = match &memory_provider {
-        rightclaw::agent::types::MemoryProvider::Hindsight => {
+        right_agent::agent::types::MemoryProvider::Hindsight => {
             let mem_config = config.memory.as_ref().unwrap();
             let api_key = std::env::var("HINDSIGHT_API_KEY")
                 .ok()
@@ -179,7 +179,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 .unwrap_or(&args.agent)
                 .to_string();
             let budget = mem_config.recall_budget.to_string();
-            let client = rightclaw::memory::hindsight::HindsightClient::new(
+            let client = right_agent::memory::hindsight::HindsightClient::new(
                 &api_key,
                 &bank_id,
                 &budget,
@@ -187,14 +187,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 None,
             );
 
-            let wrapper = Arc::new(rightclaw::memory::ResilientHindsight::new(
+            let wrapper = Arc::new(right_agent::memory::ResilientHindsight::new(
                 client,
                 agent_dir.clone(),
                 "bot",
             ));
 
             match wrapper
-                .get_or_create_bank(rightclaw::memory::resilient::POLICY_STARTUP_BANK)
+                .get_or_create_bank(right_agent::memory::resilient::POLICY_STARTUP_BANK)
                 .await
             {
                 Ok(profile) => tracing::info!(
@@ -202,12 +202,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     bank_id = %profile.bank_id,
                     "Hindsight bank ready"
                 ),
-                Err(rightclaw::memory::ResilientError::Upstream(e)) => match e.classify() {
-                    rightclaw::memory::ErrorKind::Auth => tracing::error!(
+                Err(right_agent::memory::ResilientError::Upstream(e)) => match e.classify() {
+                    right_agent::memory::ErrorKind::Auth => tracing::error!(
                         agent = %args.agent,
                         "Hindsight AUTH failed at startup: {e:#} — booting in degraded mode"
                     ),
-                    rightclaw::memory::ErrorKind::Client => tracing::error!(
+                    right_agent::memory::ErrorKind::Client => tracing::error!(
                         agent = %args.agent,
                         "Hindsight 4xx at startup: {e:#} — payload or API-drift bug"
                     ),
@@ -222,7 +222,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                                 match w_bg
                                     .get_or_create_bank(
-                                        rightclaw::memory::resilient::POLICY_STARTUP_BANK,
+                                        right_agent::memory::resilient::POLICY_STARTUP_BANK,
                                     )
                                     .await
                                 {
@@ -239,15 +239,15 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         });
                     }
                 },
-                Err(rightclaw::memory::ResilientError::CircuitOpen { .. }) => {
+                Err(right_agent::memory::ResilientError::CircuitOpen { .. }) => {
                     tracing::warn!("unexpected CircuitOpen at startup");
                 }
             }
 
-            let cache = rightclaw::memory::prefetch::PrefetchCache::new();
+            let cache = right_agent::memory::prefetch::PrefetchCache::new();
             (Some(wrapper), Some(cache))
         }
-        rightclaw::agent::types::MemoryProvider::File => (None, None),
+        right_agent::agent::types::MemoryProvider::File => (None, None),
     };
 
     // Spawn background drain task if wrapper is present.
@@ -271,10 +271,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 interval.tick().await; // first tick is immediate
                 loop {
                     interval.tick().await;
-                    if !matches!(w.status(), rightclaw::memory::MemoryStatus::Healthy) {
+                    if !matches!(w.status(), right_agent::memory::MemoryStatus::Healthy) {
                         continue;
                     }
-                    let conn = match rightclaw::memory::open_connection(&agent_db, false) {
+                    let conn = match right_agent::memory::open_connection(&agent_db, false) {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::warn!("drain: open_connection failed: {e:#}");
@@ -282,10 +282,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         }
                     };
                     let w_call = w.clone();
-                    let report = rightclaw::memory::retain_queue::drain_tick(&conn, |items| {
+                    let report = right_agent::memory::retain_queue::drain_tick(&conn, |items| {
                         let w = w_call.clone();
                         async move {
-                            let item = rightclaw::memory::hindsight::RetainItem {
+                            let item = right_agent::memory::hindsight::RetainItem {
                                 content: items[0].content.clone(),
                                 context: items[0].context.clone(),
                                 document_id: items[0].document_id.clone(),
@@ -310,11 +310,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     }
 
     // Re-install skills with correct memory variant.
-    rightclaw::codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
+    right_agent::codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
 
     let is_sandboxed = matches!(
         config.sandbox_mode(),
-        rightclaw::agent::types::SandboxMode::Openshell
+        right_agent::agent::types::SandboxMode::Openshell
     );
 
     let bootstrap_pending = agent_dir.join("BOOTSTRAP.md").exists();
@@ -365,9 +365,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Log registered MCP servers at startup.
     {
-        let conn = rightclaw::memory::open_connection(&agent_dir, false)
+        let conn = right_agent::memory::open_connection(&agent_dir, false)
             .map_err(|e| miette::miette!("failed to open data.db for MCP check: {e:#}"))?;
-        match rightclaw::mcp::credentials::db_list_servers(&conn) {
+        match right_agent::mcp::credentials::db_list_servers(&conn) {
             Ok(servers) => {
                 for s in &servers {
                     tracing::info!(
@@ -388,7 +388,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         if r.users().is_empty() {
             tracing::warn!(
                 agent = %args.agent,
-                "allowlist.yaml has no trusted users — DMs will be silently dropped until you add one via `rightclaw agent allow` or a first-run wizard",
+                "allowlist.yaml has no trusted users — DMs will be silently dropped until you add one via `right agent allow` or a first-run wizard",
             );
         }
     }
@@ -419,7 +419,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Internal API client for bot→aggregator IPC (MCP add/remove/set-token)
     let internal_socket = home.join("run/internal.sock");
-    let internal_client = Arc::new(rightclaw::mcp::internal_client::InternalClient::new(
+    let internal_client = Arc::new(right_agent::mcp::internal_client::InternalClient::new(
         internal_socket,
     ));
 
@@ -450,7 +450,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Resolve sandbox name once — used throughout the bot lifetime.
     // None when running without sandbox (mode: none).
     let resolved_sandbox: Option<String> = if is_sandboxed {
-        Some(rightclaw::openshell::resolve_sandbox_name(
+        Some(right_agent::openshell::resolve_sandbox_name(
             &args.agent,
             &config,
         ))
@@ -473,22 +473,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let sandbox = resolved_sandbox.clone().unwrap();
 
         // Verify OpenShell is ready before attempting gRPC connection.
-        let mtls_dir = match rightclaw::openshell::preflight_check() {
-            rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
-            rightclaw::openshell::OpenShellStatus::NotInstalled => {
+        let mtls_dir = match right_agent::openshell::preflight_check() {
+            right_agent::openshell::OpenShellStatus::Ready(dir) => dir,
+            right_agent::openshell::OpenShellStatus::NotInstalled => {
                 return Err(miette::miette!(
                     help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
                     "OpenShell is not installed"
                 ));
             }
-            rightclaw::openshell::OpenShellStatus::NoGateway(_) => {
+            right_agent::openshell::OpenShellStatus::NoGateway(_) => {
                 return Err(miette::miette!(
                     help =
                         "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
                     "OpenShell gateway is not running"
                 ));
             }
-            rightclaw::openshell::OpenShellStatus::BrokenGateway(dir) => {
+            right_agent::openshell::OpenShellStatus::BrokenGateway(dir) => {
                 return Err(miette::miette!(
                     help = "Try `openshell gateway destroy && openshell gateway start`,\n  \
                             or set `sandbox: mode: none` in agent.yaml",
@@ -499,14 +499,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         };
 
         // Check if sandbox already exists and is READY.
-        let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir).await?;
+        let mut grpc_client = right_agent::openshell::connect_grpc(&mtls_dir).await?;
         let sandbox_exists =
-            rightclaw::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
+            right_agent::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
 
         if !sandbox_exists {
             return Err(miette::miette!(
                 help = format!(
-                    "Run `rightclaw init` or `rightclaw agent init {}` to create the sandbox",
+                    "Run `right init` or `right agent init {}` to create the sandbox",
                     args.agent
                 ),
                 "Sandbox '{}' not found",
@@ -516,13 +516,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         // Resolve host IP from inside sandbox for policy allowed_ips.
         let sandbox_id =
-            rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
-        let host_ip = rightclaw::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
+            right_agent::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
+        let host_ip = right_agent::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
 
         // Regenerate policy with resolved host IP and apply.
         let network_policy = config.network_policy;
-        let policy_content = rightclaw::codegen::policy::generate_policy(
-            rightclaw::runtime::MCP_HTTP_PORT,
+        let policy_content = right_agent::codegen::policy::generate_policy(
+            right_agent::runtime::MCP_HTTP_PORT,
             &network_policy,
             host_ip,
         );
@@ -533,7 +533,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         // behave as if drift IS present — skip apply and log WARN. A bot that
         // runs with stale policy is better than one that crash-loops.
         let desired_filesystem =
-            match rightclaw::openshell::parse_policy_yaml_filesystem(&policy_content) {
+            match right_agent::openshell::parse_policy_yaml_filesystem(&policy_content) {
                 Ok(d) => Some(d),
                 Err(e) => {
                     tracing::warn!(agent = %args.agent, "could not parse generated policy.yaml for drift check: {e:#}");
@@ -541,7 +541,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 }
             };
         let active_filesystem =
-            match rightclaw::openshell::get_active_policy(&mut grpc_client, &sandbox).await {
+            match right_agent::openshell::get_active_policy(&mut grpc_client, &sandbox).await {
                 Ok(Some(a)) => Some(a),
                 Ok(None) => {
                     tracing::warn!(agent = %args.agent, "active policy has no payload; skipping drift check");
@@ -554,23 +554,23 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             };
         let drifted = match (active_filesystem, desired_filesystem) {
             (Some(active), Some(desired)) => {
-                rightclaw::openshell::filesystem_policy_changed(&active, &desired)
+                right_agent::openshell::filesystem_policy_changed(&active, &desired)
             }
             _ => true,
         };
 
         if drifted {
-            // Still write so a later `rightclaw agent config`-triggered
+            // Still write so a later `right agent config`-triggered
             // migration sees the fresh policy; skip apply to avoid crash-loop.
-            rightclaw::codegen::contract::write_regenerated(&policy_path, &policy_content)?;
+            right_agent::codegen::contract::write_regenerated(&policy_path, &policy_content)?;
             tracing::warn!(
                 agent = %args.agent,
-                "Filesystem policy drift detected for '{}'. Landlock rules in the running sandbox do not match policy.yaml. Run `rightclaw agent config {}` (accept defaults) to trigger sandbox migration, or `rightclaw agent backup {} --sandbox-only` first if you want a recovery point.",
+                "Filesystem policy drift detected for '{}'. Landlock rules in the running sandbox do not match policy.yaml. Run `right agent config {}` (accept defaults) to trigger sandbox migration, or `right agent backup {} --sandbox-only` first if you want a recovery point.",
                 args.agent, args.agent, args.agent,
             );
         } else {
             tracing::info!(agent = %args.agent, "reusing existing sandbox, applying policy with host_ip={:?}", host_ip);
-            rightclaw::codegen::contract::write_and_apply_sandbox_policy(
+            right_agent::codegen::contract::write_and_apply_sandbox_policy(
                 &sandbox,
                 &policy_path,
                 &policy_content,
@@ -583,7 +583,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         std::fs::create_dir_all(&ssh_config_dir)
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
         let config_path =
-            rightclaw::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
+            right_agent::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
         tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
 
         (Some(config_path), Some((mtls_dir, sandbox_id)))
@@ -594,8 +594,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Create inbox/outbox inside sandbox for attachment handling
     if is_sandboxed && let Some(ref cfg_path) = ssh_config_path {
         let ssh_host =
-            rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
-        rightclaw::openshell::ssh_exec(
+            right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
+        right_agent::openshell::ssh_exec(
             cfg_path,
             &ssh_host,
             &["mkdir", "-p", "/sandbox/inbox", "/sandbox/outbox"],
@@ -610,7 +610,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // settings.json, etc. before any claude -p invocations.
     let sync_handle = if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
         let sandbox = resolved_sandbox.clone().unwrap();
-        let sbox = rightclaw::sandbox_exec::SandboxExec::new(
+        let sbox = right_agent::sandbox_exec::SandboxExec::new(
             mtls_dir.clone(),
             sandbox,
             sandbox_id.clone(),
@@ -733,9 +733,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Build STT context once at startup — shared across all worker sessions via Arc.
     let stt: Option<Arc<crate::stt::SttContext>> = if config.stt.enabled {
-        let model_path = rightclaw::stt::model_cache_path(&home, config.stt.model);
+        let model_path = right_agent::stt::model_cache_path(&home, config.stt.model);
         let transcriber = crate::stt::Transcriber::new(model_path);
-        let ffmpeg_available = rightclaw::stt::ffmpeg_available();
+        let ffmpeg_available = right_agent::stt::ffmpeg_available();
         if !ffmpeg_available {
             tracing::warn!(
                 "ffmpeg not found in PATH — voice messages will be answered with an error marker. \
@@ -829,7 +829,7 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
         }
     };
 
-    let conn = match rightclaw::memory::open_connection(agent_dir, false) {
+    let conn = match right_agent::memory::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("failed to open DB for oauth-state migration: {e:#}");
@@ -855,7 +855,7 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            if let Err(e) = rightclaw::mcp::credentials::db_set_oauth_state(
+            if let Err(e) = right_agent::mcp::credentials::db_set_oauth_state(
                 &conn,
                 name,
                 "",

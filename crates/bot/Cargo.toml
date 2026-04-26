@@ -1,10 +1,10 @@
 [package]
-name = "rightclaw-bot"
+name = "right-bot"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rightclaw = { path = "../rightclaw", version = "*" }
+right-agent = { path = "../right-agent", version = "*" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -34,4 +34,4 @@ whisper-rs = { version = "0.16", default-features = false }
 whisper-rs = { version = "0.16", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
-rightclaw = { path = "../rightclaw", version = "*", features = ["test-support"] }
+right-agent = { path = "../right-agent", version = "*", features = ["test-support"] }

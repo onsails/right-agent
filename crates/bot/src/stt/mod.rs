@@ -130,8 +130,8 @@ pub async fn transcribe_or_marker(
 #[cfg(test)]
 mod transcribe_or_marker_tests {
     use super::*;
-    use rightclaw::agent::types::WhisperModel;
-    use rightclaw::stt::model_cache_path;
+    use right_agent::agent::types::WhisperModel;
+    use right_agent::stt::model_cache_path;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -146,7 +146,7 @@ mod transcribe_or_marker_tests {
             .unwrap_or_else(|| dirs::home_dir().unwrap().join(".right"));
         let p = model_cache_path(&home, WhisperModel::Tiny);
         if !p.exists() {
-            rightclaw::stt::download_model(WhisperModel::Tiny, &p)
+            right_agent::stt::download_model(WhisperModel::Tiny, &p)
                 .await
                 .unwrap();
         }
@@ -178,7 +178,7 @@ mod transcribe_or_marker_tests {
             ffmpeg_available: true,
         };
         let m = transcribe_or_marker(&ctx, markers::VoiceKind::Voice, &fixture("hello.oga")).await;
-        assert!(m.contains("rightclaw up"));
+        assert!(m.contains("right up"));
     }
 }
 
@@ -224,8 +224,8 @@ mod combine_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rightclaw::agent::types::WhisperModel;
-    use rightclaw::stt::model_cache_path;
+    use right_agent::agent::types::WhisperModel;
+    use right_agent::stt::model_cache_path;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -240,7 +240,7 @@ mod tests {
             .unwrap_or_else(|| dirs::home_dir().unwrap().join(".right"));
         let p = model_cache_path(&home, WhisperModel::Tiny);
         if !p.exists() {
-            rightclaw::stt::download_model(WhisperModel::Tiny, &p)
+            right_agent::stt::download_model(WhisperModel::Tiny, &p)
                 .await
                 .unwrap();
         }

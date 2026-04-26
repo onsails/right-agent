@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use rightclaw::usage::UsageBreakdown;
+use right_agent::usage::UsageBreakdown;
 
 /// A parsed stream event from CC's stream-json output.
 #[derive(Debug, Clone)]

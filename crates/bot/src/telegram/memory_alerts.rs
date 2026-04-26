@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use rightclaw::agent::allowlist::AllowlistHandle;
-use rightclaw::memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
-use rightclaw::memory::{MemoryStatus, ResilientHindsight};
+use right_agent::agent::allowlist::AllowlistHandle;
+use right_agent::memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
+use right_agent::memory::{MemoryStatus, ResilientHindsight};
 
 use super::{BotType, broadcast_to_chats};
 
@@ -34,7 +34,7 @@ pub fn spawn_watcher(
     allowlist: AllowlistHandle,
 ) {
     // Startup cleanup: delete alerts older than 1h so crash-loops re-notify.
-    match rightclaw::memory::open_connection(&agent_dir, false) {
+    match right_agent::memory::open_connection(&agent_dir, false) {
         Ok(conn) => {
             if let Err(e) = conn.execute(
                 "DELETE FROM memory_alerts WHERE datetime(first_sent_at) < datetime('now', '-1 hour')",
@@ -81,13 +81,13 @@ pub fn spawn_watcher(
             loop {
                 t.tick().await;
                 let drops_1h = wrapper.client_drops_1h().await;
-                if drops_1h > rightclaw::memory::resilient::CLIENT_FLOOD_THRESHOLD
+                if drops_1h > right_agent::memory::resilient::CLIENT_FLOOD_THRESHOLD
                     && should_fire(&db, CLIENT_FLOOD)
                 {
                     let msg = format!(
                         "\u{26a0} Memory retains persistently rejected (HTTP 4xx) — \
                          possible Hindsight API drift or payload bug. {drops_1h} drops \
-                         in the last hour. Check ~/.rightclaw/logs/ for details."
+                         in the last hour. Check ~/.right/logs/ for details."
                     );
                     // Resolve recipients at broadcast time so /allow / /deny
                     // changes after startup are honored.
@@ -120,7 +120,7 @@ async fn handle_status_change(
         }
     } else if matches!(status, MemoryStatus::Healthy) {
         // Clear dedup on recovery.
-        match rightclaw::memory::open_connection(db, false) {
+        match right_agent::memory::open_connection(db, false) {
             Ok(conn) => {
                 if let Err(e) = conn.execute(
                     "DELETE FROM memory_alerts WHERE alert_type = ?1",
@@ -135,7 +135,7 @@ async fn handle_status_change(
 }
 
 fn should_fire(db: &std::path::Path, alert_type: &str) -> bool {
-    let conn = match rightclaw::memory::open_connection(db, false) {
+    let conn = match right_agent::memory::open_connection(db, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("should_fire open failed: {e:#}");
@@ -166,7 +166,7 @@ fn should_fire(db: &std::path::Path, alert_type: &str) -> bool {
 }
 
 fn record_fire(db: &std::path::Path, alert_type: &str) {
-    match rightclaw::memory::open_connection(db, false) {
+    match right_agent::memory::open_connection(db, false) {
         Ok(conn) => {
             let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             if let Err(e) = conn.execute(

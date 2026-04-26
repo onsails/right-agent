@@ -105,7 +105,7 @@ cat .claude/settings.json
 
 - If `skills.sh` is absent from `allowedDomains`: warn and stop.
   > Warning: `skills.sh` is not in your sandbox `allowedDomains`. Add it to your `agent.yaml` sandbox overrides: `allowed_domains: [skills.sh, registry.npmjs.org]`
-  > After updating `agent.yaml`, run `rightclaw up` to regenerate `settings.json`, then retry.
+  > After updating `agent.yaml`, run `right up` to regenerate `settings.json`, then retry.
 - If `registry.npmjs.org` (or `npmjs.org`) is absent: add the same warning.
 - If both are present: proceed with `npx skills add`.
 
@@ -159,7 +159,7 @@ Display the full audit result as a table before deciding to proceed or block:
 | Filesystem: read-write | Yes | OK |
 
 **If any BLOCK condition is present:**
-> Installation blocked. The skill requires network or filesystem access that your agent's sandbox does not allow. Add the missing domains or write paths to your `agent.yaml` sandbox section, then run `rightclaw up` to regenerate `settings.json`, and retry the installation.
+> Installation blocked. The skill requires network or filesystem access that your agent's sandbox does not allow. Add the missing domains or write paths to your `agent.yaml` sandbox section, then run `right up` to regenerate `settings.json`, and retry the installation.
 
 Do NOT auto-expand the agent's sandbox config. The user must explicitly update `agent.yaml`.
 
@@ -313,7 +313,7 @@ Status rules:
 - **BLOCK**: one or more required network domains absent from `allowedDomains`, or required write path absent from `allowWrite`
 
 After the table, summarize any actionable items:
-- For each BLOCK: name the missing domain or write path and remind the user to update `agent.yaml` sandbox overrides and run `rightclaw up`.
+- For each BLOCK: name the missing domain or write path and remind the user to update `agent.yaml` sandbox overrides and run `right up`.
 - For each WARN: name the missing binary or env var and suggest installing/setting it.
 
 ## Error Handling

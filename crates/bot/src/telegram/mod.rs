@@ -47,7 +47,7 @@ use tokio_util::sync::CancellationToken;
 /// Key: (chat_id, eff_thread_id). Value: CancellationToken to kill the CC process.
 pub(crate) type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
 
-use rightclaw::agent::types::AgentConfig;
+use right_agent::agent::types::AgentConfig;
 
 /// Resolve Telegram token from agent.yaml config.
 ///
@@ -67,7 +67,7 @@ pub fn resolve_token(config: &AgentConfig) -> miette::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rightclaw::agent::types::AgentConfig;
+    use right_agent::agent::types::AgentConfig;
     use std::collections::HashMap;
 
     fn minimal_config() -> AgentConfig {

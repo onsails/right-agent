@@ -36,7 +36,7 @@ pub fn marker_for_error(kind: VoiceKind, err: &SttError) -> String {
             format!("[{subject}, но расшифровка недоступна — на хосте не установлен ffmpeg.]")
         }
         SttError::ModelMissing(_) => format!(
-            "[{subject}, но модель распознавания речи не загружена. Запусти 'rightclaw up' заново.]"
+            "[{subject}, но модель распознавания речи не загружена. Запусти 'right up' заново.]"
         ),
         SttError::FileTooLarge { size_mb, .. } => {
             format!("[{subject}, но {gendered_too_large} для расшифровки ({size_mb} MB).]")
@@ -88,7 +88,7 @@ mod tests {
             VoiceKind::Voice,
             &SttError::ModelMissing(PathBuf::from("/x")),
         );
-        assert!(m.contains("rightclaw up"));
+        assert!(m.contains("right up"));
     }
 
     #[test]

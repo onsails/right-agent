@@ -13,7 +13,7 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 /// ensuring sandbox has correct config before any `claude -p` invocations.
 pub async fn initial_sync(
     agent_dir: &Path,
-    sbox: &rightclaw::sandbox_exec::SandboxExec,
+    sbox: &right_agent::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     tracing::info!(
         sandbox = sbox.sandbox_name(),
@@ -30,7 +30,7 @@ pub async fn initial_sync(
 /// Run the periodic sync loop (spawned as background task after initial_sync).
 pub async fn run_sync_task(
     agent_dir: PathBuf,
-    sbox: rightclaw::sandbox_exec::SandboxExec,
+    sbox: right_agent::sandbox_exec::SandboxExec,
     shutdown: CancellationToken,
 ) {
     let mut tick = interval(SYNC_INTERVAL);
@@ -55,13 +55,13 @@ pub async fn run_sync_task(
 
 async fn sync_cycle(
     agent_dir: &Path,
-    sbox: &rightclaw::sandbox_exec::SandboxExec,
+    sbox: &right_agent::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     // Build manifest of platform-managed files
-    let manifest = rightclaw::platform_store::build_manifest(agent_dir)?;
+    let manifest = right_agent::platform_store::build_manifest(agent_dir)?;
 
     // Deploy to /platform/ with content-addressed names + symlinks
-    rightclaw::platform_store::deploy_manifest(sbox, &manifest).await?;
+    right_agent::platform_store::deploy_manifest(sbox, &manifest).await?;
 
     // Verify .claude.json (separate flow — not content-addressed)
     verify_claude_json(agent_dir, sbox.sandbox_name()).await?;
@@ -92,7 +92,7 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
         let sandbox_path = format!("/sandbox/{filename}");
         join_set.spawn(async move {
             let result =
-                rightclaw::openshell::download_file(&sandbox, &sandbox_path, &dl_path).await;
+                right_agent::openshell::download_file(&sandbox, &sandbox_path, &dl_path).await;
             (filename, dl_path, result)
         });
     }
@@ -194,7 +194,7 @@ fn atomic_write_bytes(path: &Path, content: &[u8]) -> miette::Result<()> {
     Ok(())
 }
 
-/// Download .claude.json from sandbox, verify rightclaw-managed keys are intact.
+/// Download .claude.json from sandbox, verify right-agent-managed keys are intact.
 /// CC may overwrite hasCompletedOnboarding or trust settings during its lifecycle.
 async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<()> {
     let tmp_dir =
@@ -203,13 +203,13 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
 
     // Download .claude.json from sandbox
     if let Err(e) =
-        rightclaw::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded).await
+        right_agent::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded).await
     {
         tracing::warn!("sync: failed to download .claude.json (may not exist yet): {e:#}");
         // Upload host version as baseline
         let host_claude_json = agent_dir.join(".claude.json");
         if host_claude_json.exists() {
-            rightclaw::openshell::upload_file(sandbox, &host_claude_json, "/sandbox/")
+            right_agent::openshell::upload_file(sandbox, &host_claude_json, "/sandbox/")
                 .await
                 .map_err(|e| miette::miette!("sync: upload .claude.json baseline: {e:#}"))?;
         }
@@ -265,10 +265,10 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
         let fixed_path = tmp_dir.path().join(".claude.json");
         std::fs::write(&fixed_path, &fixed)
             .map_err(|e| miette::miette!("failed to write fixed .claude.json: {e:#}"))?;
-        rightclaw::openshell::upload_file(sandbox, &fixed_path, "/sandbox/")
+        right_agent::openshell::upload_file(sandbox, &fixed_path, "/sandbox/")
             .await
             .map_err(|e| miette::miette!("sync: re-upload fixed .claude.json: {e:#}"))?;
-        tracing::info!("sync: fixed and re-uploaded .claude.json (rightclaw keys were modified)");
+        tracing::info!("sync: fixed and re-uploaded .claude.json (right-agent keys were modified)");
     }
 
     Ok(())
@@ -279,7 +279,7 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
 /// Agents install CLI tools (gh extensions, etc.) to `$HOME/.local/bin` which maps
 /// to `/sandbox/.local/bin`. This is already writable, but not in PATH by default.
 async fn ensure_local_bin_in_path(
-    sbox: &rightclaw::sandbox_exec::SandboxExec,
+    sbox: &right_agent::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     let (bashrc, code) = sbox.exec(&["cat", "/sandbox/.bashrc"]).await?;
 
@@ -313,27 +313,27 @@ mod tests {
     /// Requires: running OpenShell gateway.
     #[tokio::test]
     async fn initial_sync_does_not_upload_agent_md_files() {
-        let _slot = rightclaw::openshell::acquire_sandbox_slot();
+        let _slot = right_agent::openshell::acquire_sandbox_slot();
         let sandbox_name = "right-test-sync-upload";
 
-        rightclaw::test_cleanup::pkill_test_orphans(sandbox_name);
-        rightclaw::test_cleanup::register_test_sandbox(sandbox_name);
+        right_agent::test_cleanup::pkill_test_orphans(sandbox_name);
+        right_agent::test_cleanup::register_test_sandbox(sandbox_name);
 
-        let mtls_dir = match rightclaw::openshell::preflight_check() {
-            rightclaw::openshell::OpenShellStatus::Ready(dir) => dir,
+        let mtls_dir = match right_agent::openshell::preflight_check() {
+            right_agent::openshell::OpenShellStatus::Ready(dir) => dir,
             other => panic!("OpenShell not ready: {other:?}"),
         };
 
         // Clean up leftover from a previous failed run.
-        let mut grpc_client = rightclaw::openshell::connect_grpc(&mtls_dir)
+        let mut grpc_client = right_agent::openshell::connect_grpc(&mtls_dir)
             .await
             .expect("gRPC connect");
-        if rightclaw::openshell::sandbox_exists(&mut grpc_client, sandbox_name)
+        if right_agent::openshell::sandbox_exists(&mut grpc_client, sandbox_name)
             .await
             .unwrap()
         {
-            rightclaw::openshell::delete_sandbox(sandbox_name).await;
-            rightclaw::openshell::wait_for_deleted(&mut grpc_client, sandbox_name, 60, 2)
+            right_agent::openshell::delete_sandbox(sandbox_name).await;
+            right_agent::openshell::wait_for_deleted(&mut grpc_client, sandbox_name, 60, 2)
                 .await
                 .expect("cleanup of leftover sandbox failed");
         }
@@ -367,19 +367,19 @@ network_policies:
         )
         .unwrap();
 
-        let mut child = rightclaw::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+        let mut child = right_agent::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
             .expect("failed to spawn sandbox");
-        rightclaw::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
+        right_agent::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
             .await
             .expect("sandbox did not become READY");
         let _ = child.kill().await;
 
-        let sandbox_id = rightclaw::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
+        let sandbox_id = right_agent::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
             .await
             .expect("resolve sandbox_id");
 
         // Poll exec until it succeeds — OpenShell reports READY before exec transport is available.
-        let sbox = rightclaw::sandbox_exec::SandboxExec::new(
+        let sbox = right_agent::sandbox_exec::SandboxExec::new(
             mtls_dir,
             sandbox_name.to_owned(),
             sandbox_id,
@@ -435,7 +435,7 @@ network_policies:
         }
 
         // Clean up.
-        rightclaw::openshell::delete_sandbox(sandbox_name).await;
-        rightclaw::test_cleanup::unregister_test_sandbox(sandbox_name);
+        right_agent::openshell::delete_sandbox(sandbox_name).await;
+        right_agent::test_cleanup::unregister_test_sandbox(sandbox_name);
     }
 }
