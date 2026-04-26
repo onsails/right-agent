@@ -18,8 +18,8 @@ set -euo pipefail
 # Argument parsing
 # ---------------------------------------------------------------------------
 AGENT_NAME="${1:?Usage: verify-sandbox.sh <agent-name>}"
-RIGHTCLAW_HOME="${RIGHTCLAW_HOME:-$HOME/.rightclaw}"
-AGENT_DIR="$RIGHTCLAW_HOME/agents/$AGENT_NAME"
+RIGHT_HOME="${RIGHT_HOME:-$HOME/.right}"
+AGENT_DIR="$RIGHT_HOME/agents/$AGENT_NAME"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="$SCRIPT_DIR/last-run.log"
 

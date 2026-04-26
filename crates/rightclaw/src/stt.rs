@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::agent::types::WhisperModel;
 
-/// Returns the cache path for a whisper model under the given RIGHTCLAW_HOME.
+/// Returns the cache path for a whisper model under the given RIGHT_HOME.
 /// Layout: `<home>/cache/whisper/ggml-<model>.bin`.
 pub fn model_cache_path(home: &Path, model: WhisperModel) -> PathBuf {
     home.join("cache").join("whisper").join(model.filename())

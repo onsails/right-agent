@@ -15,7 +15,7 @@ Three crates in a Cargo workspace:
 ### rightclaw (core)
 
 - `agent/` — agent discovery (presence detected by `agent.yaml`) and types (`AgentDef`, `AgentConfig`, `RestartPolicy`).
-- `config/` — `GlobalConfig` (tunnel) and `RIGHTCLAW_HOME` resolution.
+- `config/` — `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
 - `codegen/` — per-agent and cross-agent code generation: settings, `.claude.json`, `.mcp.json`, policy, process-compose, TOOLS.md, MCP instructions, bundled skills, cloudflared. The helper API in `codegen/contract.rs` is the only sanctioned writer (see Upgrade & Migration Model).
 - `memory/` — Hindsight Cloud client (`hindsight.rs`), composite memory in file or Hindsight mode (`composite.rs`), schema migrations, prompt-injection guard. `store.rs` is legacy SQLite memory retained for migration compat.
 - `runtime/` — `RuntimeState` JSON persistence, process-compose REST client, dependency checks.

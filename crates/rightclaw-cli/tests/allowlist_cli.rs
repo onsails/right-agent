@@ -4,7 +4,7 @@ use tempfile::TempDir;
 
 fn run(home: &std::path::Path) -> Command {
     let mut cmd = Command::cargo_bin("rightclaw").unwrap();
-    cmd.env("RIGHTCLAW_HOME", home);
+    cmd.env("RIGHT_HOME", home);
     cmd
 }
 
