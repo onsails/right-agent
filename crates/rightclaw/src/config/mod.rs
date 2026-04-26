@@ -23,14 +23,26 @@ fn migrate_old_home(old: &Path, new: &Path) -> miette::Result<()> {
     // PC-running probe: if state.json carries a port and that port is
     // accepting connections, a process-compose instance is alive. Refuse
     // migration to avoid breaking open file handles.
+    const MAX_STATE_JSON_BYTES: u64 = 64 * 1024;
+
     let state_path = old.join("run").join("state.json");
     if state_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&state_path) {
+        // Bounded read — state.json is normally <1KB; cap to defend against
+        // pathological / corrupted files.
+        let content = std::fs::metadata(&state_path)
+            .ok()
+            .filter(|m| m.len() <= MAX_STATE_JSON_BYTES)
+            .and_then(|_| std::fs::read_to_string(&state_path).ok());
+        if let Some(content) = content {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(port) = json.get("pc_port").and_then(|v| v.as_u64()) {
-                    let addr = format!("127.0.0.1:{port}");
+                if let Some(port) = json
+                    .get("pc_port")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|p| u16::try_from(p).ok())
+                {
+                    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
                     if std::net::TcpStream::connect_timeout(
-                        &addr.parse().expect("loopback addr always parses"),
+                        &addr,
                         std::time::Duration::from_millis(500),
                     )
                     .is_ok()
@@ -450,5 +462,41 @@ mod tests {
         );
         assert!(old.exists(), "no rename on refusal");
         assert!(!new.exists());
+    }
+
+    #[test]
+    fn migrate_old_home_handles_bad_port_in_state_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join(".rightclaw");
+        let new = tmp.path().join(".right");
+        std::fs::create_dir_all(old.join("run")).unwrap();
+        // pc_port out of u16 range — must NOT panic.
+        std::fs::write(
+            old.join("run").join("state.json"),
+            r#"{"agents":[],"socket_path":"","started_at":"x","pc_port":99999,"pc_api_token":null}"#,
+        )
+        .unwrap();
+
+        // Should not panic; should fall through to rename (no PC running on a parseable port).
+        let result = migrate_old_home(&old, &new);
+        assert!(result.is_ok(), "must not panic on bad port: {result:?}");
+        assert!(!old.exists(), "rename should have happened");
+        assert!(new.exists());
+    }
+
+    #[test]
+    fn migrate_old_home_handles_giant_state_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join(".rightclaw");
+        let new = tmp.path().join(".right");
+        std::fs::create_dir_all(old.join("run")).unwrap();
+        // Write a >64KB file with no valid pc_port — must not OOM or hang.
+        let giant = "x".repeat(128 * 1024);
+        std::fs::write(old.join("run").join("state.json"), &giant).unwrap();
+
+        let result = migrate_old_home(&old, &new);
+        assert!(result.is_ok(), "must handle oversized state.json: {result:?}");
+        assert!(!old.exists());
+        assert!(new.exists());
     }
 }
