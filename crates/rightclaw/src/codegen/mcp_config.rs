@@ -44,7 +44,7 @@ pub fn generate_mcp_config(
                 "args": ["memory-server"],
                 "env": {
                     "RC_AGENT_NAME": agent_name,
-                    "RC_RIGHTCLAW_HOME": rightclaw_home.to_string_lossy().as_ref()
+                    "RC_RIGHT_HOME": rightclaw_home.to_string_lossy().as_ref()
                 }
             }),
         );
@@ -308,8 +308,8 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("mcp.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
-            parsed["mcpServers"]["right"]["env"]["RC_RIGHTCLAW_HOME"], "/home/user/.rightclaw",
-            "RC_RIGHTCLAW_HOME must be injected into env"
+            parsed["mcpServers"]["right"]["env"]["RC_RIGHT_HOME"], "/home/user/.rightclaw",
+            "RC_RIGHT_HOME must be injected into env"
         );
     }
 

@@ -107,11 +107,11 @@ mod tests {
     use std::path::PathBuf;
 
     /// Returns a path to a cached ggml-tiny.bin under the user's
-    /// RIGHTCLAW_HOME or `~/.rightclaw`. Downloads if missing.
+    /// RIGHT_HOME or `~/.right`. Downloads if missing.
     async fn ensure_tiny_model() -> PathBuf {
-        let home = std::env::var_os("RIGHTCLAW_HOME")
+        let home = std::env::var_os("RIGHT_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".rightclaw"));
+            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".right"));
         let p = model_cache_path(&home, WhisperModel::Tiny);
         if !p.exists() {
             download_model(WhisperModel::Tiny, &p)

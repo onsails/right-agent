@@ -529,11 +529,11 @@ pub async fn run_memory_server() -> miette::Result<()> {
 
     let agent_dir = home.clone();
 
-    let rightclaw_home = match std::env::var("RC_RIGHTCLAW_HOME") {
+    let rightclaw_home = match std::env::var("RC_RIGHT_HOME") {
         Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => {
             tracing::warn!(
-                "RC_RIGHTCLAW_HOME not set — mcp_auth tunnel commands will be unavailable"
+                "RC_RIGHT_HOME not set — mcp_auth tunnel commands will be unavailable"
             );
             std::path::PathBuf::from(".")
         }

@@ -55,9 +55,9 @@ pub const CONFIG_RESTART_EXIT_CODE: i32 = 2;
 /// Arguments passed from the CLI `rightclaw bot` subcommand.
 #[derive(Debug, Clone)]
 pub struct BotArgs {
-    /// Agent name (directory name under $RIGHTCLAW_HOME/agents/).
+    /// Agent name (directory name under $RIGHT_HOME/agents/).
     pub agent: String,
-    /// Override for RIGHTCLAW_HOME (from --home flag).
+    /// Override for RIGHT_HOME (from --home flag).
     pub home: Option<String>,
     /// Pass --verbose to CC subprocess and log CC stderr at debug level.
     pub debug: bool,
@@ -85,10 +85,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     };
     use std::path::PathBuf;
 
-    // Resolve RIGHTCLAW_HOME
+    // Resolve RIGHT_HOME
     let home = resolve_home(
         args.home.as_deref(),
-        std::env::var("RIGHTCLAW_HOME").ok().as_deref(),
+        std::env::var("RIGHT_HOME").ok().as_deref(),
     )?;
 
     // Validate agent name

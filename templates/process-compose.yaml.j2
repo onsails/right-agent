@@ -7,7 +7,7 @@ processes:
   right-mcp-server:
     command: "{{ right_mcp_server.exe_path }} mcp-server --port {{ right_mcp_server.port }} --token-map {{ right_mcp_server.token_map_path }}"
     environment:
-      - RC_RIGHTCLAW_HOME={{ right_mcp_server.home_dir }}
+      - RC_RIGHT_HOME={{ right_mcp_server.home_dir }}
     availability:
       restart: "always"
       backoff_seconds: 3

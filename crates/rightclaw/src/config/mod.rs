@@ -76,7 +76,12 @@ fn migrate_old_home(old: &Path, new: &Path) -> miette::Result<()> {
     Ok(())
 }
 
-/// Resolve RIGHTCLAW_HOME: cli_home > env_home > ~/.rightclaw
+/// Resolve the runtime home directory: cli_home > env_home > ~/.right
+///
+/// When falling through to the default path, also triggers
+/// `migrate_old_home` to rename a leftover `~/.rightclaw/` from a
+/// pre-rename install. The migration is idempotent and fast (single
+/// existence check + rename or noop).
 pub fn resolve_home(cli_home: Option<&str>, env_home: Option<&str>) -> miette::Result<PathBuf> {
     if let Some(home) = cli_home {
         return Ok(PathBuf::from(home));
@@ -84,9 +89,18 @@ pub fn resolve_home(cli_home: Option<&str>, env_home: Option<&str>) -> miette::R
     if let Some(home) = env_home {
         return Ok(PathBuf::from(home));
     }
-    let home =
+    let home_dir =
         dirs::home_dir().ok_or_else(|| miette::miette!("Could not determine home directory"))?;
-    Ok(home.join(".rightclaw"))
+    resolve_home_with_base(&home_dir)
+}
+
+/// Inner resolve with an explicit user home directory — used by tests to avoid
+/// touching the real `~/` (which may have a running process-compose on `~/.rightclaw`).
+fn resolve_home_with_base(home_dir: &Path) -> miette::Result<PathBuf> {
+    let new = home_dir.join(".right");
+    let old = home_dir.join(".rightclaw");
+    migrate_old_home(&old, &new)?;
+    Ok(new)
 }
 
 /// Global RightClaw configuration stored at `~/.rightclaw/config.yaml`.
@@ -259,9 +273,21 @@ mod tests {
 
     #[test]
     fn resolve_home_returns_default_when_both_none() {
-        let result = resolve_home(None, None).unwrap();
-        let expected = dirs::home_dir().unwrap().join(".rightclaw");
+        // Use a tempdir as the "user home" so we don't touch the real ~/
+        // (which may have ~/.rightclaw with a running process-compose).
+        let tmp = tempfile::tempdir().unwrap();
+        let result = resolve_home_with_base(tmp.path()).unwrap();
+        let expected = tmp.path().join(".right");
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn resolve_home_returns_dot_right_default() {
+        // Same isolation strategy: inject a tempdir as the user home base.
+        let tmp = tempfile::tempdir().unwrap();
+        let result = resolve_home_with_base(tmp.path()).unwrap();
+        let expected = tmp.path().join(".right");
+        assert_eq!(result, expected, "default home must be ~/.right after rename");
     }
 
     #[test]

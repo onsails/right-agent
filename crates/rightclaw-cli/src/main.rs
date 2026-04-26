@@ -16,7 +16,7 @@ mod wizard;
 )]
 pub struct Cli {
     /// Path to RightClaw home directory
-    #[arg(long, env = "RIGHTCLAW_HOME")]
+    #[arg(long, env = "RIGHT_HOME")]
     pub home: Option<String>,
 
     /// Enable verbose logging
@@ -261,7 +261,7 @@ pub enum Commands {
         /// Launch in background with TUI server
         #[arg(short, long)]
         detach: bool,
-        /// Enable debug logging (writes to $RIGHTCLAW_HOME/run/<agent>-debug.log)
+        /// Enable debug logging (writes to $RIGHT_HOME/run/<agent>-debug.log)
         #[arg(long)]
         debug: bool,
     },
@@ -321,7 +321,7 @@ pub enum Commands {
     },
     /// Run the per-agent Telegram bot (long-polling, teloxide)
     Bot {
-        /// Agent name (resolves to $RIGHTCLAW_HOME/agents/<name>/)
+        /// Agent name (resolves to $RIGHT_HOME/agents/<name>/)
         #[arg(long)]
         agent: String,
         /// Pass --verbose to CC subprocess and log CC stderr at debug level
@@ -409,7 +409,7 @@ async fn main() -> miette::Result<()> {
 
     let home = rightclaw::config::resolve_home(
         cli.home.as_deref(),
-        std::env::var("RIGHTCLAW_HOME").ok().as_deref(),
+        std::env::var("RIGHT_HOME").ok().as_deref(),
     )?;
 
     match cli.command {

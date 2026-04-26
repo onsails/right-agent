@@ -141,9 +141,9 @@ mod transcribe_or_marker_tests {
     }
 
     async fn tiny_ctx(ffmpeg_available: bool) -> SttContext {
-        let home = std::env::var_os("RIGHTCLAW_HOME")
+        let home = std::env::var_os("RIGHT_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".rightclaw"));
+            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".right"));
         let p = model_cache_path(&home, WhisperModel::Tiny);
         if !p.exists() {
             rightclaw::stt::download_model(WhisperModel::Tiny, &p)
@@ -235,9 +235,9 @@ mod tests {
     }
 
     async fn tiny_path() -> PathBuf {
-        let home = std::env::var_os("RIGHTCLAW_HOME")
+        let home = std::env::var_os("RIGHT_HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".rightclaw"));
+            .unwrap_or_else(|| dirs::home_dir().unwrap().join(".right"));
         let p = model_cache_path(&home, WhisperModel::Tiny);
         if !p.exists() {
             rightclaw::stt::download_model(WhisperModel::Tiny, &p)
