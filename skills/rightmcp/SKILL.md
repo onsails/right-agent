@@ -1,7 +1,7 @@
 ---
 name: rightmcp
 description: >-
-  Finds and adds MCP servers for this RightClaw agent. Searches for OAuth-capable
+  Finds and adds MCP servers for this Right Agent agent. Searches for OAuth-capable
   endpoints first (Claude Code / Codex integration docs), falls back to API-key
   endpoints. All management goes through the user's Telegram commands — the agent
   never handles credentials directly. Use when the user asks to add, connect,
@@ -25,7 +25,7 @@ Activate this skill when:
 You have NO direct MCP management access. All management goes through the user's
 Telegram commands. Here's what happens behind the scenes:
 
-- The **RightClaw MCP Aggregator** proxies all MCP traffic, stores tokens, and
+- The **Right Agent MCP Aggregator** proxies all MCP traffic, stores tokens, and
   refreshes OAuth automatically. You never see or handle credentials.
 - `/mcp add <name> <url>` auto-detects authentication:
   1. Tries OAuth AS discovery on the URL — if found, registers and tells user to `/mcp auth`

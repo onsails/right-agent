@@ -15,7 +15,7 @@
   languages.rust.enable = true;
 
   enterShell = ''
-    echo "RightClaw dev environment"
+    echo "Right Agent dev environment"
   '';
 
   enterTest = ''

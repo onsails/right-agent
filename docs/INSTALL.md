@@ -11,7 +11,7 @@ npm install -g @anthropic-ai/claude-code
 claude  # authenticate
 ```
 
-Requires an active Claude subscription. RightClaw calls `claude -p` directly — no API key needed.
+Requires an active Claude subscription. Right Agent calls `claude -p` directly — no API key needed.
 
 ### Telegram bot token
 
@@ -37,13 +37,13 @@ If you don't have a Cloudflare account yet, sign up at https://dash.cloudflare.c
 
 ## Quick Install
 
-One command installs `rightclaw`, `process-compose`, and NVIDIA OpenShell:
+One command installs `right`, `process-compose`, and NVIDIA OpenShell:
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh
 ```
 
-The installer then runs the interactive `rightclaw init` wizard (asks for the Telegram bot token, sandbox mode, network policy) and `rightclaw doctor` to verify the setup.
+The installer then runs the interactive `right init` wizard (asks for the Telegram bot token, sandbox mode, network policy) and `right doctor` to verify the setup.
 
 Supported platforms: linux x86_64, linux aarch64, darwin aarch64 (Apple Silicon).
 
@@ -52,11 +52,11 @@ Supported platforms: linux x86_64, linux aarch64, darwin aarch64 (Apple Silicon)
 For platforms without a prebuilt binary, or when you want to run from a checkout:
 
 ```sh
-git clone https://github.com/onsails/rightclaw.git
-cd rightclaw
-cargo install --path crates/rightclaw-cli
-rightclaw init
-rightclaw doctor
+git clone https://github.com/onsails/right-agent.git
+cd right-agent
+cargo install --path crates/right
+right init
+right doctor
 ```
 
 This path requires a Rust toolchain (edition 2024).
@@ -64,9 +64,9 @@ This path requires a Rust toolchain (edition 2024).
 ## After install
 
 ```sh
-rightclaw up
+right up
 ```
 
-`rightclaw up` launches your agents via process-compose. Message your Telegram bot from your account — the agent replies.
+`right up` launches your agents via process-compose. Message your Telegram bot from your account — the agent replies.
 
-Re-run `rightclaw doctor` whenever something seems off. It checks dependencies, agent configuration, sandbox connectivity, MCP status, and tunnel health.
+Re-run `right doctor` whenever something seems off. It checks dependencies, agent configuration, sandbox connectivity, MCP status, and tunnel health.

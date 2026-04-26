@@ -315,7 +315,7 @@ pub async fn register_client(
     redirect_uri: &str,
 ) -> Result<DcrResponse, OAuthError> {
     let body = DcrRequest {
-        client_name: "RightClaw",
+        client_name: "Right Agent",
         redirect_uris: vec![redirect_uri],
         grant_types: vec!["authorization_code"],
         response_types: vec!["code"],
@@ -782,10 +782,10 @@ mod tests {
             let mut buf = [0u8; 8192];
             let n = stream.read(&mut buf).await.unwrap();
             let request = String::from_utf8_lossy(&buf[..n]);
-            // Verify RightClaw client_name is in body
+            // Verify Right Agent client_name is in body
             assert!(
-                request.contains("RightClaw"),
-                "DCR body must contain RightClaw"
+                request.contains("Right Agent"),
+                "DCR body must contain Right Agent"
             );
             assert!(
                 request.contains("authorization_code"),

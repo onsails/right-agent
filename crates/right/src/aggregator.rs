@@ -487,7 +487,7 @@ impl rmcp::ServerHandler for Aggregator {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("right", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "RightClaw MCP Aggregator — routes tool calls to built-in RightClaw tools \
+                "Right Agent MCP Aggregator — routes tool calls to built-in Right Agent tools \
                  and connected external MCP servers via prefix-based dispatch.\n\n\
                  Memory tools (when Hindsight is configured):\n\
                  - memory_retain: Store facts to long-term memory\n\

@@ -52,9 +52,9 @@ pub fn generate_system_prompt(
 
     let mut prompt = format!(
         "\
-You are {agent_name}, a RightClaw agent.
+You are {agent_name}, an agent running on Right Agent.
 
-RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs \
+Right Agent is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs \
 as an independent Claude Code session inside its own sandbox with declarative YAML policies. \
 Agents have persistent memory, scheduled tasks (cron), and tool management via MCP.
 

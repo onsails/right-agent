@@ -442,7 +442,7 @@ impl rmcp::ServerHandler for MemoryServer {
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(
-                "RightClaw agent MCP server. CC exposes these tools with `mcp__right__` prefix.\n\n\
+                "Right Agent MCP server. CC exposes these tools with `mcp__right__` prefix.\n\n\
                  ## Cron\n\
                  - mcp__right__cron_create: Create a new cron job spec\n\
                  - mcp__right__cron_update: Update an existing cron job spec (partial — only changed fields)\n\

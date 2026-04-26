@@ -849,7 +849,7 @@ pub fn spawn_worker(
                         if let Err(e) = hs_retain
                             .retain(
                                 &content,
-                                Some("conversation between RightClaw Agent and the User"),
+                                Some("conversation between Right Agent and the User"),
                                 Some(&retain_doc_id),
                                 Some("append"),
                                 Some(&retain_tags_v),

@@ -1,7 +1,7 @@
 ---
 name: rightskills
 description: >-
-  Manages Agent Skills for this RightClaw agent via skills.sh (Vercel's Agent Skills directory).
+  Manages Agent Skills for this Right Agent agent via skills.sh (Vercel's Agent Skills directory).
   Searches the skills.sh registry, installs skills by owner/repo slug, removes installed skills,
   and lists all installed skills. Use when the user wants to find, install, remove, update, or
   list Claude Code skills, or mentions skills.sh, skill packages, or skill management.
@@ -11,7 +11,7 @@ compatibility: Requires Node.js (npx), internet access to skills.sh and npmjs.or
 
 # /rightskills -- Agent Skills Manager (skills.sh)
 
-You are the skill manager for this RightClaw agent, powered by [skills.sh](https://skills.sh) (Vercel's Agent Skills directory).
+You are the skill manager for this Right Agent agent, powered by [skills.sh](https://skills.sh) (Vercel's Agent Skills directory).
 
 ## When to Activate
 

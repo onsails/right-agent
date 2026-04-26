@@ -447,7 +447,7 @@ mod tests {
         let resp = client
             .retain(
                 "User: hello\nAssistant: hi",
-                Some("conversation between RightClaw Agent and the User"),
+                Some("conversation between Right Agent and the User"),
                 Some("session-uuid-abc"),
                 Some("append"),
                 Some(&tags),
@@ -464,7 +464,7 @@ mod tests {
         assert_eq!(parsed["items"][0]["tags"][0], "chat:12345");
         assert_eq!(
             parsed["items"][0]["context"],
-            "conversation between RightClaw Agent and the User"
+            "conversation between Right Agent and the User"
         );
     }
 
