@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use rightclaw::usage::insert::{insert_reflection_cron, insert_reflection_worker};
+use right_agent::usage::insert::{insert_reflection_cron, insert_reflection_worker};
 
 use crate::telegram::invocation::{ClaudeInvocation, OutputFormat};
 use crate::telegram::stream::{StreamEvent, parse_stream_event};
@@ -224,24 +224,24 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     // 5. System-prompt assembly (match worker's pattern; no MCP refresh, no memory).
     let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
         (
-            rightclaw::agent::types::SandboxMode::Openshell,
+            right_agent::agent::types::SandboxMode::Openshell,
             "/sandbox".to_owned(),
         )
     } else {
         (
-            rightclaw::agent::types::SandboxMode::None,
+            right_agent::agent::types::SandboxMode::None,
             ctx.agent_dir.to_string_lossy().into_owned(),
         )
     };
     let base_prompt =
-        rightclaw::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+        right_agent::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
             ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())
         })?;
-        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sandbox_name);
-        let prompt_path = format!("/tmp/rightclaw-reflection-prompt-{}.md", ctx.session_uuid);
+        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(sandbox_name);
+        let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
         let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
             &base_prompt,
             false, // not bootstrap mode
@@ -295,7 +295,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
 
-    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
 
     // Pipe the prompt, then drop stdin to signal EOF.
@@ -356,7 +356,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
 
     // Account usage (best-effort — log but don't fail reflection on usage insert error).
     if let Some(breakdown) = crate::telegram::stream::parse_usage_full(&result_line) {
-        match rightclaw::memory::open_connection(&ctx.agent_dir, false) {
+        match right_agent::memory::open_connection(&ctx.agent_dir, false) {
             Ok(conn) => {
                 let res = match &ctx.parent_source {
                     ParentSource::Worker { chat_id, thread_id } => {

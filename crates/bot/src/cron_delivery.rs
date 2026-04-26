@@ -221,7 +221,7 @@ pub(crate) enum TargetClassification {
 /// Classify a pending cron result. Pure function; no side effects.
 pub(crate) fn classify_pending_target(
     pending: &PendingCronResult,
-    allowlist: &rightclaw::agent::allowlist::AllowlistState,
+    allowlist: &right_agent::agent::allowlist::AllowlistState,
 ) -> TargetClassification {
     match pending.target_chat_id {
         None => TargetClassification::NoTarget,
@@ -239,17 +239,17 @@ pub async fn run_delivery_loop(
     agent_dir: PathBuf,
     agent_name: String,
     bot: crate::telegram::BotType,
-    allowlist: rightclaw::agent::allowlist::AllowlistHandle,
+    allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
     ssh_config_path: Option<PathBuf>,
-    internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
+    internal_client: std::sync::Arc<right_agent::mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
-    let conn = match rightclaw::memory::open_connection(&agent_dir, false) {
+    let conn = match right_agent::memory::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("cron delivery: DB open failed: {e:#}");
@@ -450,7 +450,7 @@ async fn deliver_through_session(
     target_thread_id: Option<i64>,
     ssh_config_path: Option<&Path>,
     session_id: Option<String>,
-    internal_client: &rightclaw::mcp::internal_client::InternalClient,
+    internal_client: &right_agent::mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
     upgrade_lock: &tokio::sync::RwLock<()>,
 ) -> Result<(), String> {
@@ -487,24 +487,24 @@ async fn deliver_through_session(
     // Derive sandbox_mode and home_dir from ssh_config_path.
     let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
         (
-            rightclaw::agent::types::SandboxMode::Openshell,
+            right_agent::agent::types::SandboxMode::Openshell,
             "/sandbox".to_owned(),
         )
     } else {
         (
-            rightclaw::agent::types::SandboxMode::None,
+            right_agent::agent::types::SandboxMode::None,
             agent_dir.to_string_lossy().into_owned(),
         )
     };
     let base_prompt =
-        rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+        right_agent::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
     {
         Ok(resp) => {
             if resp.instructions.trim().len()
-                > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                > right_agent::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
                     .trim()
                     .len()
             {
@@ -527,7 +527,7 @@ async fn deliver_through_session(
             &base_prompt,
             false,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &claude_args,
             mcp_instructions.as_deref(),
@@ -538,7 +538,7 @@ async fn deliver_through_session(
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
-        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
@@ -578,7 +578,7 @@ async fn deliver_through_session(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn failed: {e:#}"))?;
 
     if let Some(mut stdin) = child.stdin() {
@@ -676,7 +676,7 @@ mod tests {
 
     fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
-        let conn = rightclaw::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
         (dir, conn)
     }
 
@@ -996,8 +996,8 @@ mod tests {
     fn fake_allowlist(
         users: &[i64],
         groups: &[i64],
-    ) -> rightclaw::agent::allowlist::AllowlistState {
-        use rightclaw::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistState};
+    ) -> right_agent::agent::allowlist::AllowlistState {
+        use right_agent::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistState};
         let now = chrono::Utc::now();
         let mut state = AllowlistState::default();
         for &id in users {

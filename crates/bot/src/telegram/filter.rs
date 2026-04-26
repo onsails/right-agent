@@ -1,4 +1,4 @@
-use rightclaw::agent::allowlist::AllowlistHandle;
+use right_agent::agent::allowlist::AllowlistHandle;
 use teloxide::types::{ChatKind, Message};
 
 use super::mention::{AddressKind, BotIdentity, is_bot_addressed};

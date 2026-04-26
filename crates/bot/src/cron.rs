@@ -5,7 +5,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use rightclaw::cron_spec::CronSpec;
+use right_agent::cron_spec::CronSpec;
 
 /// Lock file JSON: {"heartbeat": "2026-...Z"}
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -25,7 +25,7 @@ pub enum CronError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("db error: {0:#}")]
-    Db(#[from] rightclaw::memory::MemoryError),
+    Db(#[from] right_agent::memory::MemoryError),
 }
 
 /// Structured output from a cron CC invocation.
@@ -117,7 +117,7 @@ async fn cleanup_old_logs(
         return;
     }
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         // List matching files sorted newest-first, skip `keep`, delete the rest.
         // Using find+stat avoids ls parsing pitfalls with special characters in filenames.
         let cleanup_cmd = format!(
@@ -132,7 +132,7 @@ async fn cleanup_old_logs(
             .arg(&cleanup_cmd);
         c.stdout(std::process::Stdio::piped());
         c.stderr(std::process::Stdio::piped());
-        let output = match rightclaw::process_group::ProcessGroupChild::spawn(c) {
+        let output = match right_agent::process_group::ProcessGroupChild::spawn(c) {
             Ok(mut child) => child.wait_with_output().await,
             Err(e) => Err(e),
         };
@@ -215,7 +215,7 @@ async fn execute_job(
     agent_name: &str,
     model: Option<&str>,
     ssh_config_path: Option<&std::path::Path>,
-    internal_client: &rightclaw::mcp::internal_client::InternalClient,
+    internal_client: &right_agent::mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
@@ -265,7 +265,7 @@ async fn execute_job(
 
     // DB insert: status='running' (D-04)
     // Open connection per-job — rusqlite::Connection is !Send
-    let conn = match rightclaw::memory::open_connection(agent_dir, false) {
+    let conn = match right_agent::memory::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(job = %job_name, "DB open failed: {e:#}");
@@ -307,7 +307,7 @@ async fn execute_job(
 
     let invocation = crate::telegram::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
-        json_schema: Some(rightclaw::codegen::CRON_SCHEMA_JSON.into()),
+        json_schema: Some(right_agent::codegen::CRON_SCHEMA_JSON.into()),
         output_format: crate::telegram::invocation::OutputFormat::StreamJson,
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
@@ -325,24 +325,24 @@ async fn execute_job(
     // Derive sandbox_mode and home_dir from ssh_config_path (same as worker).
     let (sandbox_mode, home_dir) = if ssh_config_path.is_some() {
         (
-            rightclaw::agent::types::SandboxMode::Openshell,
+            right_agent::agent::types::SandboxMode::Openshell,
             "/sandbox".to_owned(),
         )
     } else {
         (
-            rightclaw::agent::types::SandboxMode::None,
+            right_agent::agent::types::SandboxMode::None,
             agent_dir.to_string_lossy().into_owned(),
         )
     };
     let base_prompt =
-        rightclaw::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+        right_agent::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
     {
         Ok(resp) => {
             if resp.instructions.trim().len()
-                > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                > right_agent::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
                     .trim()
                     .len()
             {
@@ -368,7 +368,7 @@ async fn execute_job(
             &base_prompt,
             false,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &claude_args,
             mcp_instructions.as_deref(),
@@ -382,7 +382,7 @@ async fn execute_job(
         assembly_script = format!(
             "set -o pipefail\nmkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
         );
-        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
@@ -440,7 +440,7 @@ async fn execute_job(
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
-    let mut child = match rightclaw::process_group::ProcessGroupChild::spawn(cmd) {
+    let mut child = match right_agent::process_group::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
             update_run_record(&conn, &run_id, None, "failed");
@@ -533,7 +533,7 @@ async fn execute_job(
                             for att in atts {
                                 let dest = outbox_dir.join(attachment_filename(&att.path));
                                 if let Err(e) =
-                                    rightclaw::openshell::download_file(sandbox, &att.path, &dest)
+                                    right_agent::openshell::download_file(sandbox, &att.path, &dest)
                                         .await
                                 {
                                     tracing::error!(
@@ -693,7 +693,7 @@ async fn execute_job(
                     .iter()
                     .find_map(|l| crate::telegram::stream::parse_api_key_source(l))
                     .unwrap_or_else(|| "none".into());
-                if let Err(e) = rightclaw::usage::insert::insert_cron(&conn, &breakdown, job_name) {
+                if let Err(e) = right_agent::usage::insert::insert_cron(&conn, &breakdown, job_name) {
                     tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
                 }
             }
@@ -784,14 +784,14 @@ pub async fn run_cron_task(
     agent_name: String,
     model: Option<String>,
     ssh_config_path: Option<std::path::PathBuf>,
-    internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
+    internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
-    let conn = match rightclaw::memory::open_connection(&agent_dir, false) {
+    let conn = match right_agent::memory::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(agent = %agent_name, "cron task: DB open failed: {e:#}");
@@ -894,14 +894,14 @@ pub async fn run_cron_task(
 /// Delete a one-shot spec after it has fired. Opens a fresh DB connection
 /// (callers are inside `tokio::spawn` and cannot share the reconciler's connection).
 fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
-    let conn = match rightclaw::memory::open_connection(agent_dir, false) {
+    let conn = match right_agent::memory::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(job = %job_name, "failed to open DB for post-fire delete: {e:#}");
             return;
         }
     };
-    if let Err(e) = rightclaw::cron_spec::delete_spec(&conn, job_name, agent_dir) {
+    if let Err(e) = right_agent::cron_spec::delete_spec(&conn, job_name, agent_dir) {
         tracing::error!(job = %job_name, "failed to delete one-shot spec after fire: {e}");
     } else {
         tracing::info!(job = %job_name, "one-shot spec auto-deleted after fire");
@@ -918,14 +918,14 @@ fn reconcile_jobs(
     agent_name: &str,
     model: &Option<String>,
     ssh_config_path: &Option<std::path::PathBuf>,
-    internal_client: &Arc<rightclaw::mcp::internal_client::InternalClient>,
+    internal_client: &Arc<right_agent::mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
-    let new_specs = match rightclaw::cron_spec::load_specs_from_db(conn) {
+    let new_specs = match right_agent::cron_spec::load_specs_from_db(conn) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("failed to load cron specs from DB: {e}");
@@ -937,7 +937,7 @@ fn reconcile_jobs(
     let now = chrono::Utc::now();
     let overdue_run_at: Vec<(String, CronSpec)> = new_specs
         .iter()
-        .filter(|(_, spec)| matches!(&spec.schedule_kind, rightclaw::cron_spec::ScheduleKind::RunAt(dt) if *dt <= now))
+        .filter(|(_, spec)| matches!(&spec.schedule_kind, right_agent::cron_spec::ScheduleKind::RunAt(dt) if *dt <= now))
         .map(|(name, spec)| (name.clone(), spec.clone()))
         .collect();
 
@@ -999,7 +999,7 @@ fn reconcile_jobs(
         // Skip RunAt specs — they are handled above via reconcile tick, not run_job_loop
         if matches!(
             spec.schedule_kind,
-            rightclaw::cron_spec::ScheduleKind::RunAt(_)
+            right_agent::cron_spec::ScheduleKind::RunAt(_)
         ) {
             continue;
         }
@@ -1041,7 +1041,7 @@ fn reconcile_jobs(
     for (name, spec) in &new_specs {
         if spec.triggered_at.is_some() {
             // Clear trigger immediately to prevent re-firing on next tick
-            if let Err(e) = rightclaw::cron_spec::clear_triggered_at(conn, name) {
+            if let Err(e) = right_agent::cron_spec::clear_triggered_at(conn, name) {
                 tracing::error!(job = %name, "failed to clear triggered_at: {e}");
                 continue;
             }
@@ -1100,7 +1100,7 @@ async fn run_job_loop(
     agent_name: String,
     model: Option<String>,
     ssh_config_path: Option<std::path::PathBuf>,
-    internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
+    internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -1137,7 +1137,7 @@ async fn run_job_loop(
 
         tokio::time::sleep(delay).await;
 
-        if let Ok(Some(warning)) = rightclaw::cron_spec::validate_schedule(cron_expr) {
+        if let Ok(Some(warning)) = right_agent::cron_spec::validate_schedule(cron_expr) {
             tracing::warn!(job = %job_name, "{warning}");
         }
 
@@ -1390,9 +1390,9 @@ mod tests {
     #[test]
     fn test_triggered_at_loaded_from_db() {
         let dir = tempdir().unwrap();
-        let conn = rightclaw::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
 
-        rightclaw::cron_spec::create_spec(
+        right_agent::cron_spec::create_spec(
             &conn,
             "trig-test",
             "*/5 * * * *",
@@ -1401,9 +1401,9 @@ mod tests {
             None,
         )
         .unwrap();
-        rightclaw::cron_spec::trigger_spec(&conn, "trig-test").unwrap();
+        right_agent::cron_spec::trigger_spec(&conn, "trig-test").unwrap();
 
-        let specs = rightclaw::cron_spec::load_specs_from_db(&conn).unwrap();
+        let specs = right_agent::cron_spec::load_specs_from_db(&conn).unwrap();
         assert!(
             specs["trig-test"].triggered_at.is_some(),
             "triggered_at should be loaded"
@@ -1413,14 +1413,14 @@ mod tests {
     #[test]
     fn test_clear_triggered_at_works() {
         let dir = tempdir().unwrap();
-        let conn = rightclaw::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
 
-        rightclaw::cron_spec::create_spec(&conn, "clr-test", "*/5 * * * *", "test", None, None)
+        right_agent::cron_spec::create_spec(&conn, "clr-test", "*/5 * * * *", "test", None, None)
             .unwrap();
-        rightclaw::cron_spec::trigger_spec(&conn, "clr-test").unwrap();
-        rightclaw::cron_spec::clear_triggered_at(&conn, "clr-test").unwrap();
+        right_agent::cron_spec::trigger_spec(&conn, "clr-test").unwrap();
+        right_agent::cron_spec::clear_triggered_at(&conn, "clr-test").unwrap();
 
-        let specs = rightclaw::cron_spec::load_specs_from_db(&conn).unwrap();
+        let specs = right_agent::cron_spec::load_specs_from_db(&conn).unwrap();
         assert!(
             specs["clr-test"].triggered_at.is_none(),
             "triggered_at should be cleared"
@@ -1438,8 +1438,8 @@ mod tests {
         let agent_dir = dir.path().to_path_buf();
 
         // Create DB and register a job with a far-future schedule (once per year)
-        let conn = rightclaw::memory::open_connection(&agent_dir, true).unwrap();
-        rightclaw::cron_spec::create_spec(
+        let conn = right_agent::memory::open_connection(&agent_dir, true).unwrap();
+        right_agent::cron_spec::create_spec(
             &conn,
             "slow-job",
             "0 0 1 1 *", // Jan 1st at midnight — won't fire during test
@@ -1453,7 +1453,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();
 
-        let ic = Arc::new(rightclaw::mcp::internal_client::InternalClient::new(
+        let ic = Arc::new(right_agent::mcp::internal_client::InternalClient::new(
             "/nonexistent.sock",
         ));
         let cron_handle = tokio::spawn(run_cron_task(

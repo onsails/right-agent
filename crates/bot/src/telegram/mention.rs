@@ -132,11 +132,11 @@ mod tests {
     #[test]
     fn strip_removes_bot_mention() {
         assert_eq!(
-            strip_bot_mentions("@rightclaw_bot hello", "rightclaw_bot"),
+            strip_bot_mentions("@right_bot hello", "right_bot"),
             "hello"
         );
         assert_eq!(
-            strip_bot_mentions("hey @rightclaw_bot how are you", "rightclaw_bot"),
+            strip_bot_mentions("hey @right_bot how are you", "right_bot"),
             "hey how are you"
         );
     }
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn strip_leaves_other_mentions() {
         assert_eq!(
-            strip_bot_mentions("@alice says hi to @rightclaw_bot", "rightclaw_bot"),
+            strip_bot_mentions("@alice says hi to @right_bot", "right_bot"),
             "@alice says hi to"
         );
     }
@@ -152,16 +152,16 @@ mod tests {
     #[test]
     fn strip_is_case_insensitive() {
         assert_eq!(
-            strip_bot_mentions("@RightClaw_Bot hi", "rightclaw_bot"),
+            strip_bot_mentions("@Right_Bot hi", "right_bot"),
             "hi"
         );
     }
 
     #[test]
     fn strip_preserves_newlines() {
-        let input = "@rightclaw_bot hello\nline two\nline three";
+        let input = "@right_bot hello\nline two\nline three";
         assert_eq!(
-            strip_bot_mentions(input, "rightclaw_bot"),
+            strip_bot_mentions(input, "right_bot"),
             "hello\nline two\nline three"
         );
     }
@@ -177,7 +177,7 @@ mod tests {
         }))
         .unwrap();
         let identity = BotIdentity {
-            username: "rightclaw_bot".into(),
+            username: "right_bot".into(),
             user_id: 999,
         };
         assert_eq!(
@@ -197,7 +197,7 @@ mod tests {
         }))
         .unwrap();
         let identity = BotIdentity {
-            username: "rightclaw_bot".into(),
+            username: "right_bot".into(),
             user_id: 999,
         };
         assert_eq!(is_bot_addressed(&msg, &identity), None);

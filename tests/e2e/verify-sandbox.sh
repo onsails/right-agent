@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# verify-sandbox.sh — Verify rightclaw CC sandbox engagement for a live agent.
+# verify-sandbox.sh — Verify right CC sandbox engagement for a live agent.
 #
 # Usage:
 #   tests/e2e/verify-sandbox.sh <agent-name>
 #
 # Requires:
-#   - rightclaw up has been run for <agent-name>
-#   - rightclaw, claude, rg, socat, bwrap in PATH
+#   - right up has been run for <agent-name>
+#   - right, claude, rg, socat, bwrap in PATH
 #
 # Exit codes:
 #   0 = all stages passed (sandbox confirmed engaged)
@@ -56,19 +56,19 @@ warn() {
 }
 
 # ---------------------------------------------------------------------------
-# Stage 1: rightclaw doctor pre-flight
+# Stage 1: right doctor pre-flight
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 1: Doctor pre-flight ==="
 
 DOCTOR_OUTPUT=""
 DOCTOR_EXIT=0
-DOCTOR_OUTPUT=$(rightclaw doctor 2>&1) || DOCTOR_EXIT=$?
+DOCTOR_OUTPUT=$(right doctor 2>&1) || DOCTOR_EXIT=$?
 
 echo "$DOCTOR_OUTPUT"
 
 if [ $DOCTOR_EXIT -ne 0 ]; then
-  fail "rightclaw doctor exited non-zero ($DOCTOR_EXIT) — aborting before CC smoke test"
+  fail "right doctor exited non-zero ($DOCTOR_EXIT) — aborting before CC smoke test"
   echo ""
   echo "=== Summary ==="
   echo -e "${RED}FAILED${NC}: doctor pre-flight failed. Fix issues above, then re-run."
@@ -76,14 +76,14 @@ if [ $DOCTOR_EXIT -ne 0 ]; then
 fi
 
 if echo "$DOCTOR_OUTPUT" | grep -q ' FAIL '; then
-  fail "rightclaw doctor output contains FAIL checks — aborting before CC smoke test"
+  fail "right doctor output contains FAIL checks — aborting before CC smoke test"
   echo ""
   echo "=== Summary ==="
   echo -e "${RED}FAILED${NC}: doctor reported failures. Fix issues above, then re-run."
   exit 1
 fi
 
-pass "rightclaw doctor: all checks passed (no FAIL)"
+pass "right doctor: all checks passed (no FAIL)"
 
 # ---------------------------------------------------------------------------
 # Stage 2: Dependency availability in PATH
@@ -120,20 +120,20 @@ REPLY_SCHEMA_FILE="$AGENT_DIR/.claude/reply-schema.json"
 
 if [ ! -f "$SETTINGS_FILE" ]; then
   fail "settings.json not found at $SETTINGS_FILE"
-  echo "  run 'rightclaw up' first to generate agent settings"
+  echo "  run 'right up' first to generate agent settings"
   echo ""
   echo "=== Summary ==="
-  echo -e "${RED}FAILED${NC}: agent not initialized. Run 'rightclaw up' then re-run this script."
+  echo -e "${RED}FAILED${NC}: agent not initialized. Run 'right up' then re-run this script."
   exit 1
 fi
 pass "settings.json exists"
 
 if [ ! -f "$REPLY_SCHEMA_FILE" ]; then
   fail "reply-schema.json not found at $REPLY_SCHEMA_FILE"
-  echo "  run 'rightclaw up' first to generate agent files"
+  echo "  run 'right up' first to generate agent files"
   echo ""
   echo "=== Summary ==="
-  echo -e "${RED}FAILED${NC}: agent not initialized. Run 'rightclaw up' then re-run this script."
+  echo -e "${RED}FAILED${NC}: agent not initialized. Run 'right up' then re-run this script."
   exit 1
 fi
 pass "reply-schema.json exists"
@@ -196,7 +196,7 @@ if [ $CC_EXIT -ne 0 ]; then
   echo "  - Sandbox failed to start (check bwrap AppArmor restrictions on Ubuntu 24.04+)"
   echo "  - failIfUnavailable:true in settings.json caused fatal sandbox error"
   echo "  - CC binary not found or license not accepted"
-  echo "  - settings.json misconfigured (run 'rightclaw up' to regenerate)"
+  echo "  - settings.json misconfigured (run 'right up' to regenerate)"
   echo ""
   echo "=== Summary ==="
   echo -e "${RED}FAILED${NC}: CC smoke test failed (exit $CC_EXIT). See log at $LOG_FILE"

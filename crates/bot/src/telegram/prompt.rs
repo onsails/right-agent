@@ -70,10 +70,10 @@ pub(crate) fn build_prompt_assembly_script(
     let claude_cmd = escaped_args.join(" ");
 
     let file_sections = if bootstrap_mode {
-        let escaped_bootstrap = rightclaw::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
+        let escaped_bootstrap = right_agent::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
         format!("\nprintf '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'")
     } else {
-        let escaped_ops = rightclaw::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
+        let escaped_ops = right_agent::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
         let mut sections =
             format!("\nprintf '\\n## Operating Instructions\\n'\nprintf '%s\\n' '{escaped_ops}'");
         for s in PROMPT_SECTIONS {
@@ -151,7 +151,7 @@ pub(crate) async fn deploy_composite_memory(
         .await
         .map_err(DeployError::Write)?;
     if let Some(sandbox) = resolved_sandbox {
-        rightclaw::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
+        right_agent::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
             .await
             .map_err(|e| DeployError::Upload(format!("{e:#}")))?;
     }
@@ -194,7 +194,7 @@ pub(crate) async fn remove_composite_memory(
         return;
     };
 
-    let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(sb.sandbox_name);
+    let ssh_host = right_agent::openshell::ssh_host_for_sandbox(sb.sandbox_name);
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.arg("-F").arg(sb.ssh_config);
     cmd.arg(&ssh_host);
@@ -235,7 +235,7 @@ mod tests {
             base,
             bootstrap,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             args,
             mcp,
@@ -316,8 +316,8 @@ mod tests {
     #[test]
     fn script_writes_to_prompt_file_and_uses_system_prompt_file() {
         let script = test_script("X", false, &["claude".into()], None);
-        assert!(script.contains("/tmp/rightclaw-system-prompt.md"));
-        assert!(script.contains("--system-prompt-file /tmp/rightclaw-system-prompt.md"));
+        assert!(script.contains("/tmp/right-system-prompt.md"));
+        assert!(script.contains("--system-prompt-file /tmp/right-system-prompt.md"));
     }
 
     #[test]
@@ -444,7 +444,7 @@ mod tests {
             "Base",
             false,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &["claude".into()],
             None,
@@ -470,7 +470,7 @@ mod tests {
             "Base",
             false,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &["claude".into()],
             None,
@@ -489,7 +489,7 @@ mod tests {
             "Base",
             false,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &["claude".into()],
             None,
@@ -505,7 +505,7 @@ mod tests {
             "Base",
             false,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &["claude".into()],
             Some("# MCP Instructions\n\n## composio\n"),
@@ -525,7 +525,7 @@ mod tests {
             "Base",
             true,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &["claude".into()],
             None,

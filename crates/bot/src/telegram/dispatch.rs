@@ -25,7 +25,7 @@ use super::bot::build_bot;
 use super::filter::make_routing_filter;
 use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
-    RightclawHome, SshConfigPath, handle_cron, handle_doctor, handle_list, handle_mcp,
+    RightHome, SshConfigPath, handle_cron, handle_doctor, handle_list, handle_mcp,
     handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, handle_usage,
 };
 use super::mention::BotIdentity;
@@ -81,7 +81,7 @@ enum BotCommand {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_telegram(
     token: String,
-    allowlist: rightclaw::agent::allowlist::AllowlistHandle,
+    allowlist: right_agent::agent::allowlist::AllowlistHandle,
     agent_dir: PathBuf,
     debug: bool,
     pending_auth: PendingAuthMap,
@@ -91,10 +91,10 @@ pub async fn run_telegram(
     model: Option<String>,
     shutdown: CancellationToken,
     idle_ts: Arc<IdleTimestamp>,
-    internal_client: Arc<rightclaw::mcp::internal_client::InternalClient>,
+    internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
     resolved_sandbox: Option<String>,
-    hindsight_wrapper: Option<std::sync::Arc<rightclaw::memory::ResilientHindsight>>,
-    prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
+    hindsight_wrapper: Option<std::sync::Arc<right_agent::memory::ResilientHindsight>>,
+    prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
 ) -> miette::Result<()> {
@@ -120,7 +120,7 @@ pub async fn run_telegram(
     let agent_dir_arc: Arc<AgentDir> = Arc::new(AgentDir(agent_dir));
     let ssh_config_arc: Arc<SshConfigPath> = Arc::new(SshConfigPath(ssh_config_path));
     let pending_auth_arc: PendingAuthMap = pending_auth;
-    let home_arc: Arc<RightclawHome> = Arc::new(RightclawHome(home));
+    let home_arc: Arc<RightHome> = Arc::new(RightHome(home));
     let auth_watcher_arc: Arc<std::sync::atomic::AtomicBool> =
         Arc::new(std::sync::atomic::AtomicBool::new(false));
     let auth_code_arc = Arc::new(tokio::sync::Mutex::new(None));
@@ -184,7 +184,7 @@ pub async fn run_telegram(
     let signal_cancel = CancellationToken::new();
     let signal_cancel_thread = signal_cancel.clone();
     std::thread::Builder::new()
-        .name("rightclaw-signal-listener".to_string())
+        .name("right-signal-listener".to_string())
         .spawn(move || {
             use signal_hook::consts::signal::{SIGINT, SIGTERM};
             use signal_hook::iterator::SignalsInfo;
@@ -336,12 +336,12 @@ fn lookup_sender_cmd(pid: i32) -> String {
 #[allow(clippy::too_many_arguments)]
 fn build_dispatcher(
     bot: BotType,
-    allowlist: rightclaw::agent::allowlist::AllowlistHandle,
+    allowlist: right_agent::agent::allowlist::AllowlistHandle,
     identity_arc: Arc<BotIdentity>,
     worker_map: Arc<DashMap<SessionKey, mpsc::Sender<DebounceMsg>>>,
     agent_dir_arc: Arc<AgentDir>,
     pending_auth_arc: PendingAuthMap,
-    home_arc: Arc<RightclawHome>,
+    home_arc: Arc<RightHome>,
     ssh_config_arc: Arc<SshConfigPath>,
     intercept_slots_arc: Arc<InterceptSlots>,
     pending_token_slot_arc: Arc<PendingTokenSlot>,
@@ -444,9 +444,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicI64};
 
-    use rightclaw::agent::allowlist::{AllowlistHandle, AllowlistState};
-    use rightclaw::mcp::internal_client::InternalClient;
-    use rightclaw::memory::prefetch::PrefetchCache;
+    use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
+    use right_agent::mcp::internal_client::InternalClient;
+    use right_agent::memory::prefetch::PrefetchCache;
     use tokio::sync::{Mutex, RwLock};
 
     /// Smoke test: construct the real dispatcher with dummy deps. If a handler
@@ -474,7 +474,7 @@ mod tests {
             Arc::new(DashMap::new());
         let agent_dir = Arc::new(AgentDir(PathBuf::from("/tmp/smoke")));
         let pending_auth: PendingAuthMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let home = Arc::new(RightclawHome(PathBuf::from("/tmp/smoke")));
+        let home = Arc::new(RightHome(PathBuf::from("/tmp/smoke")));
         let ssh_config = Arc::new(SshConfigPath(None));
         let intercept_slots = Arc::new(InterceptSlots {
             auth_code: Arc::new(Mutex::new(None)),

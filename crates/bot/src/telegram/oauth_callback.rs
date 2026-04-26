@@ -21,8 +21,8 @@ use serde::Deserialize;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
-use rightclaw::mcp::internal_client::{InternalClient, SetTokenRequest};
-use rightclaw::mcp::oauth::{PendingAuth, exchange_token, verify_state};
+use right_agent::mcp::internal_client::{InternalClient, SetTokenRequest};
+use right_agent::mcp::oauth::{PendingAuth, exchange_token, verify_state};
 
 /// Shared in-memory map of OAuth state -> pending auth session.
 /// Key is the PKCE state parameter (random, one-shot).
@@ -46,7 +46,7 @@ pub struct OAuthCallbackState {
     /// Telegram Bot for sending notifications
     pub bot: teloxide::Bot,
     /// Live allowlist — DM users are notified after OAuth completes
-    pub allowlist: rightclaw::agent::allowlist::AllowlistHandle,
+    pub allowlist: right_agent::agent::allowlist::AllowlistHandle,
     /// Internal API client for delivering OAuth tokens to the aggregator
     pub internal_client: Arc<InternalClient>,
 }
@@ -336,7 +336,7 @@ mod tests {
 
     /// Build a minimal OAuthCallbackState for tests (no real bot/credentials)
     fn dummy_state(map: PendingAuthMap) -> OAuthCallbackState {
-        use rightclaw::agent::allowlist::{AllowlistHandle, AllowlistState};
+        use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
         OAuthCallbackState {
             pending_auth: map,
             agent_name: "test-agent".to_string(),
@@ -464,7 +464,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth_callback_state_uses_allowlist_users() {
-        use rightclaw::agent::allowlist::{AllowedUser, AllowlistHandle, AllowlistState};
+        use right_agent::agent::allowlist::{AllowedUser, AllowlistHandle, AllowlistState};
 
         let now = chrono::Utc::now();
         let mut state = AllowlistState::default();

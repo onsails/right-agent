@@ -94,11 +94,11 @@ pub struct WorkerContext {
     /// Shared idle timestamp — worker updates after each reply sent.
     pub idle_timestamp: Arc<std::sync::atomic::AtomicI64>,
     /// Internal API client for aggregator IPC (Unix socket).
-    pub internal_client: std::sync::Arc<rightclaw::mcp::internal_client::InternalClient>,
+    pub internal_client: std::sync::Arc<right_agent::mcp::internal_client::InternalClient>,
     /// Hindsight client for auto-retain/recall (None when memory.provider=file).
-    pub hindsight: Option<std::sync::Arc<rightclaw::memory::ResilientHindsight>>,
+    pub hindsight: Option<std::sync::Arc<right_agent::memory::ResilientHindsight>>,
     /// Prefetch cache for auto-recall results (None when memory.provider=file).
-    pub prefetch_cache: Option<rightclaw::memory::prefetch::PrefetchCache>,
+    pub prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
     /// RwLock gate — worker acquires read lock before invoke_cc to block during upgrades.
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// STT context — None when stt.enabled=false or whisper model not yet cached.
@@ -304,10 +304,10 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
 /// Returns `None` when memory is healthy and no retain-side drops have
 /// accumulated in the last 24h — no marker is injected in that case.
 fn build_memory_marker(
-    status: rightclaw::memory::MemoryStatus,
+    status: right_agent::memory::MemoryStatus,
     client_drops_24h: usize,
 ) -> Option<String> {
-    use rightclaw::memory::MemoryStatus as S;
+    use right_agent::memory::MemoryStatus as S;
     match status {
         S::AuthFailed { .. } => Some(
             "<memory-status>unavailable — memory provider authentication failed, \
@@ -532,7 +532,7 @@ pub fn spawn_worker(
                     "bootstrap complete — identity files present after sync"
                 );
                 // Open a short-lived connection to deactivate the session.
-                if let Ok(conn) = rightclaw::memory::open_connection(&ctx.agent_dir, false) {
+                if let Ok(conn) = right_agent::memory::open_connection(&ctx.agent_dir, false) {
                     deactivate_current(&conn, chat_id, eff_thread_id)
                         .map_err(|e| {
                             tracing::error!(
@@ -853,7 +853,7 @@ pub fn spawn_worker(
                                 Some(&retain_doc_id),
                                 Some("append"),
                                 Some(&retain_tags_v),
-                                rightclaw::memory::resilient::POLICY_AUTO_RETAIN,
+                                right_agent::memory::resilient::POLICY_AUTO_RETAIN,
                             )
                             .await
                         {
@@ -874,21 +874,21 @@ pub fn spawn_worker(
                             &recall_query,
                             Some(&recall_tags_v),
                             Some("any"),
-                            rightclaw::memory::resilient::POLICY_PREFETCH,
+                            right_agent::memory::resilient::POLICY_PREFETCH,
                         )
                         .await
                     {
                         Ok(results) if !results.is_empty() => {
-                            let content = rightclaw::memory::hindsight::join_recall_texts(&results);
+                            let content = right_agent::memory::hindsight::join_recall_texts(&results);
                             if let Some(ref c) = cache {
                                 c.put(&cache_key, content).await;
                             }
                         }
                         Ok(_) => {}
-                        Err(rightclaw::memory::ResilientError::CircuitOpen { .. }) => {
+                        Err(right_agent::memory::ResilientError::CircuitOpen { .. }) => {
                             tracing::warn!("prefetch recall skipped: circuit open");
                         }
-                        Err(rightclaw::memory::ResilientError::Upstream(e)) => {
+                        Err(right_agent::memory::ResilientError::Upstream(e)) => {
                             tracing::warn!("prefetch recall failed: {e:#}");
                         }
                     }
@@ -1057,7 +1057,7 @@ async fn invoke_cc(
     ctx: &WorkerContext,
 ) -> Result<(Option<ReplyOutput>, String), InvokeCcFailure> {
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
-    let conn = rightclaw::memory::open_connection(&ctx.agent_dir, false)
+    let conn = right_agent::memory::open_connection(&ctx.agent_dir, false)
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
 
     // Session lookup / create (SES-02, SES-03)
@@ -1151,7 +1151,7 @@ async fn invoke_cc(
             Ok(resp) => {
                 // Only include if there's actual content beyond the header
                 if resp.instructions.trim().len()
-                    > rightclaw::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                    > right_agent::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
                         .trim()
                         .len()
                 {
@@ -1170,17 +1170,17 @@ async fn invoke_cc(
     // contradicting IDENTITY.md which the agent may have customized).
     let (sandbox_mode, home_dir) = if ctx.ssh_config_path.is_some() {
         (
-            rightclaw::agent::types::SandboxMode::Openshell,
+            right_agent::agent::types::SandboxMode::Openshell,
             "/sandbox".to_owned(),
         )
     } else {
         (
-            rightclaw::agent::types::SandboxMode::None,
+            right_agent::agent::types::SandboxMode::None,
             ctx.agent_dir.to_string_lossy().into_owned(),
         )
     };
     let base_prompt =
-        rightclaw::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+        right_agent::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let memory_mode = if ctx.hindsight.is_some() {
         let sandbox_path = if ctx.ssh_config_path.is_some() {
@@ -1211,23 +1211,23 @@ async fn invoke_cc(
                     truncated_query,
                     Some(&recall_tags_v),
                     Some("any"),
-                    rightclaw::memory::resilient::POLICY_BLOCKING_RECALL,
+                    right_agent::memory::resilient::POLICY_BLOCKING_RECALL,
                 )
                 .await
             {
                 Ok(results) if !results.is_empty() => {
-                    let content = rightclaw::memory::hindsight::join_recall_texts(&results);
+                    let content = right_agent::memory::hindsight::join_recall_texts(&results);
                     if let Some(ref cache) = ctx.prefetch_cache {
                         cache.put(&cache_key, content.clone()).await;
                     }
                     Some(content)
                 }
                 Ok(_) => None,
-                Err(rightclaw::memory::ResilientError::CircuitOpen { .. }) => {
+                Err(right_agent::memory::ResilientError::CircuitOpen { .. }) => {
                     tracing::warn!(?chat_id, "blocking recall skipped: circuit open");
                     None
                 }
-                Err(rightclaw::memory::ResilientError::Upstream(e)) => {
+                Err(right_agent::memory::ResilientError::Upstream(e)) => {
                     tracing::warn!(?chat_id, "blocking recall failed: {e:#}");
                     None
                 }
@@ -1240,7 +1240,7 @@ async fn invoke_cc(
             .hindsight
             .as_ref()
             .map(|h| h.status())
-            .unwrap_or(rightclaw::memory::MemoryStatus::Healthy);
+            .unwrap_or(right_agent::memory::MemoryStatus::Healthy);
         let client_drops_24h = if let Some(ref h) = ctx.hindsight {
             h.client_drops_24h().await
         } else {
@@ -1290,12 +1290,12 @@ async fn invoke_cc(
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.
         let ssh_host =
-            rightclaw::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
+            right_agent::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
         let mut assembly_script = super::prompt::build_prompt_assembly_script(
             &base_prompt,
             bootstrap_mode,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &claude_args,
             mcp_instructions.as_deref(),
@@ -1356,7 +1356,7 @@ async fn invoke_cc(
         "invoking claude -p"
     );
 
-    let mut child = rightclaw::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
 
     // Write input to stdin, then drop to signal EOF.
@@ -1446,7 +1446,7 @@ async fn invoke_cc(
                                             .clone()
                                             .unwrap_or_else(|| "none".into());
                                         if let Err(e) =
-                                            rightclaw::usage::insert::insert_interactive(
+                                            right_agent::usage::insert::insert_interactive(
                                                 &conn,
                                                 &breakdown,
                                                 chat_id,
@@ -2151,7 +2151,7 @@ mod tests {
             "Base prompt",
             false,
             "/sandbox",
-            "/tmp/rightclaw-system-prompt.md",
+            "/tmp/right-system-prompt.md",
             "/sandbox",
             &["claude".into()],
             None,

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use rightclaw::agent::allowlist::{
+use right_agent::agent::allowlist::{
     self, AddOutcome, AllowedGroup, AllowedUser, AllowlistHandle, AllowlistState, RemoveOutcome,
 };
 use teloxide::RequestError;

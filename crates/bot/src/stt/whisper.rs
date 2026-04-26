@@ -102,8 +102,8 @@ impl WhisperEngine {
 mod tests {
     use super::*;
     use crate::stt::decode::decode_to_pcm_f32;
-    use rightclaw::agent::types::WhisperModel;
-    use rightclaw::stt::{download_model, model_cache_path};
+    use right_agent::agent::types::WhisperModel;
+    use right_agent::stt::{download_model, model_cache_path};
     use std::path::PathBuf;
 
     /// Returns a path to a cached ggml-tiny.bin under the user's

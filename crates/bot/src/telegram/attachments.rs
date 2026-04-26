@@ -774,7 +774,7 @@ pub async fn download_attachments(
         let final_path = if sandboxed {
             // Upload to sandbox, then clean up host temp file
             let sandbox = resolved_sandbox.unwrap();
-            rightclaw::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
+            right_agent::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
             if let Err(e) = tokio::fs::remove_file(&host_path).await {
                 tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
             }
@@ -914,7 +914,7 @@ impl SendError {
             Self::Skip(msg) => format!("skipped {label}: {msg}"),
             Self::Api(e) => format!(
                 "failed to send {label}: {}",
-                rightclaw::error::display_error_chain(&e),
+                right_agent::error::display_error_chain(&e),
             ),
         }
     }
@@ -957,7 +957,7 @@ async fn resolve_host_path(
             .into_owned();
         let dest = tmp_dir.join(&file_name);
         let sandbox = ctx.resolved_sandbox.unwrap();
-        if let Err(e) = rightclaw::openshell::download_file(sandbox, &att.path, &dest).await {
+        if let Err(e) = right_agent::openshell::download_file(sandbox, &att.path, &dest).await {
             let msg = format!(
                 "download_file failed for {}: {:#} — {log_suffix}",
                 att.path, e
@@ -1280,10 +1280,10 @@ async fn run_cleanup(
     retention_days: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = rightclaw::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mtime_arg = format!("+{retention_days}");
         // Use find to delete files older than retention_days in sandbox inbox/outbox
-        rightclaw::openshell::ssh_exec(
+        right_agent::openshell::ssh_exec(
             ssh_config,
             &ssh_host,
             &[
