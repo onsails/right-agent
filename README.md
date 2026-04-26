@@ -1,8 +1,8 @@
-# RightClaw
+# Right Agent
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
-  <a href="https://github.com/onsails/rightclaw/actions"><img src="https://github.com/onsails/rightclaw/actions/workflows/build.yml/badge.svg" alt="build"></a>
+  <a href="https://github.com/onsails/right-agent/actions"><img src="https://github.com/onsails/right-agent/actions/workflows/build.yml/badge.svg" alt="build"></a>
   <a href="https://t.me/rightclaww"><img src="https://img.shields.io/badge/Telegram-chat-blue?logo=telegram" alt="telegram"></a>
 </p>
 
@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="images/screenshot.png" alt="RightClaw in Telegram" width="720"/>
+  <img src="images/screenshot.png" alt="Right Agent in Telegram" width="720"/>
 </p>
 
 ## Quick Start
@@ -26,9 +26,9 @@ Prerequisites:
 - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) authenticated with a [Cloudflare account](https://dash.cloudflare.com/sign-up) (for Telegram webhook ingress)
 
 ```sh
-curl -LsSf https://raw.githubusercontent.com/onsails/rightclaw/master/install.sh | sh
-rightclaw init
-rightclaw up
+curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh
+right init
+right up
 ```
 
 Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
@@ -48,7 +48,7 @@ Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
 **Right with your data.** MCP tokens, OAuth refresh tokens, Claude auth — all live on the host, outside every sandbox. Agents call tools; they never see the credentials. Network egress goes through a policy engine with TLS inspection. Compromised agent? Worst case it misuses a tool. It cannot exfiltrate the key.
 
-**Right with Anthropic.** Everything — including the login flow — goes through the official `claude` binary. No private API calls, no scraped endpoints, no OAuth key juggling. Your Claude subscription, used the way Anthropic intends. One `rightclaw up` in the terminal; every other step, Claude login included, happens in Telegram.
+**Right with Anthropic.** Everything — including the login flow — goes through the official `claude` binary. No private API calls, no scraped endpoints, no OAuth key juggling. Your Claude subscription, used the way Anthropic intends. One `right up` in the terminal; every other step, Claude login included, happens in Telegram.
 
 ## What you get out of the box
 
@@ -66,7 +66,7 @@ Every MCP server is a credential. Your Linear token. Your Notion OAuth. Your Gma
 
 In most agent setups, those secrets are directly reachable to the agent — on disk, in environment variables, in its config files. No sandbox, no credential provider. One prompt injection — one compromised webpage the agent reads, one malicious memory, one leaky skill — and the attacker walks away with your workspace, your mailbox, your customer data. Possibly worse.
 
-RightClaw runs a single MCP aggregator on the host, outside every sandbox. Your secrets live there. Agents talk to the aggregator, the aggregator talks to the MCP server. The agent never sees the token.
+Right Agent runs a single MCP aggregator on the host, outside every sandbox. Your secrets live there. Agents talk to the aggregator, the aggregator talks to the MCP server. The agent never sees the token.
 
 - OAuth, bearer, custom header, query-string — all four auth patterns, auto-detected
 - Tokens refresh automatically, silently
@@ -74,7 +74,7 @@ RightClaw runs a single MCP aggregator on the host, outside every sandbox. Your 
 
 ### Everything in Telegram
 
-Claude login, MCP OAuth, file attachments in both directions, cron notifications, `/doctor`, `/reset` — one thread. The terminal is needed exactly once: to run `rightclaw up`.
+Claude login, MCP OAuth, file attachments in both directions, cron notifications, `/doctor`, `/reset` — one thread. The terminal is needed exactly once: to run `right up`.
 
 ## Self-evolving by design
 
@@ -89,11 +89,11 @@ Two modes, one switch in `agent.yaml`.
 - **Hindsight** — managed semantic memory cloud. Append-only: every turn auto-retains a delta, next turn auto-recalls what matters. Per-chat tagging, prefetch cache. The agent remembers who it is talking to, what it was working on yesterday, and which stack the user runs — without replaying the whole transcript.
 - **`MEMORY.md`** — local file, curated by the agent itself via Claude Code's Edit/Write tools. For anyone who does not want a cloud dependency.
 
-Either way, memory survives restarts. Nothing resets when you `rightclaw up` again.
+Either way, memory survives restarts. Nothing resets when you `right up` again.
 
 ### One channel, one memory, one identity
 
-Most agent runtimes give you fifty knobs and call configuration a feature. RightClaw gives you one well-worn path — Telegram chat, memory that compounds, evolving identity — and polishes it end-to-end.
+Most agent runtimes give you fifty knobs and call configuration a feature. Right Agent gives you one well-worn path — Telegram chat, memory that compounds, evolving identity — and polishes it end-to-end.
 
 No pluggable memory engines. No matrix of chat backends. No twelve ways to configure a personality. No opt-in sandbox (it's on by default).
 
@@ -139,7 +139,7 @@ flowchart LR
 
 The agent reads a poisoned webpage. A skill turns out to be hostile. An MCP returns a prompt injection. These things happen.
 
-In RightClaw, those scenarios break one sandbox — not your machine, not your files, not another agent. The agent can read and write only inside its own sandbox workspace. There is no way out of the sandbox for it.
+In Right Agent, those scenarios break one sandbox — not your machine, not your files, not another agent. The agent can read and write only inside its own sandbox workspace. There is no way out of the sandbox for it.
 
 ### You see what leaves — and you decide
 
@@ -151,11 +151,11 @@ The network policy is permissive by default. One line in `agent.yaml` flips to r
 
 MCP tokens and OAuth refresh tokens live on the host, inside the aggregator. In the sandbox: only proxy endpoints, never the raw credential. Claude auth is handled by the bot and injected per invocation — there is no persistent credential file sitting inside the sandbox.
 
-OpenShell can go further still: a credential provider layer that replaces tokens with opaque placeholders inside the sandbox and substitutes the real secrets only at egress — so that `gh`, `gcloud`, `aws`, `kubectl` work normally while `echo $GITHUB_TOKEN` returns a useless string. Wiring this into RightClaw is the next roadmap item; the infrastructure is already in OpenShell.
+OpenShell can go further still: a credential provider layer that replaces tokens with opaque placeholders inside the sandbox and substitutes the real secrets only at egress — so that `gh`, `gcloud`, `aws`, `kubectl` work normally while `echo $GITHUB_TOKEN` returns a useless string. Wiring this into Right Agent is the next roadmap item; the infrastructure is already in OpenShell.
 
 ### One control plane
 
-After `rightclaw up`, the terminal is done. Claude login, MCP authorisation, file exchange, cron notifications — one Telegram thread.
+After `right up`, the terminal is done. Claude login, MCP authorisation, file exchange, cron notifications — one Telegram thread.
 
 ---
 
@@ -165,7 +165,7 @@ Without it, an agent lives in a plain container with no rules on it. For a demo,
 
 ## How it compares
 
-| | Typical multi-agent runtime | RightClaw |
+| | Typical multi-agent runtime | Right Agent |
 |---|---|---|
 | **Sandbox** | plain container, no built-in rules | OpenShell: policy engine, TLS inspection |
 | **Credential exposure** | tokens live inside agent env and files | tokens held by host-side aggregator, agents never touch them |
@@ -176,7 +176,7 @@ Without it, an agent lives in a plain container with no rules on it. For a demo,
 | **Claude billing** | requires API key per agent | one Claude subscription, any number of agents |
 | **Scope** | configurable everything | one opinionated path, polished end-to-end |
 
-Other runtimes optimise for flexibility and breadth — you can wire anything to anything. RightClaw optimises for a single well-worn path: Telegram in, sandboxed Claude Code out, with memory and identity that outlive restarts.
+Other runtimes optimise for flexibility and breadth — you can wire anything to anything. Right Agent optimises for a single well-worn path: Telegram in, sandboxed Claude Code out, with memory and identity that outlive restarts.
 
 ## Roadmap
 
@@ -189,8 +189,8 @@ Other runtimes optimise for flexibility and breadth — you can wire anything to
 - [x] Telegram group chats and thread routing
 - [x] Media groups (albums, mixed attachments) in both directions
 - [x] Declarative cron with Telegram notifications
-- [x] Agent backup & restore (`rightclaw agent backup` / `--from-backup`)
-- [x] `rightclaw doctor` end-to-end diagnostics
+- [x] Agent backup & restore (`right agent backup` / `--from-backup`)
+- [x] `right doctor` end-to-end diagnostics
 
 **Next**
 - [ ] OpenShell credential providers for `gh`, `gcloud`, `aws`, `kubectl` — zero-token CLIs inside sandboxes
@@ -199,7 +199,7 @@ Other runtimes optimise for flexibility and breadth — you can wire anything to
 - [ ] Per-turn budget caps for chat messages (currently cron-only)
 - [ ] Agent-to-agent communication
 
-Full project tracker on [GitHub Issues](https://github.com/onsails/rightclaw/issues).
+Full project tracker on [GitHub Issues](https://github.com/onsails/right-agent/issues).
 
 ## Docs
 
