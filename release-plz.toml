@@ -9,23 +9,23 @@ publish = false
 semver_check = false
 
 [[package]]
-name = "rightclaw"
+name = "right-agent"
 version_group = "workspace"
 git_tag_enable = true
-git_tag_name = "rightclaw-v{{ version }}"
+git_tag_name = "right-agent-v{{ version }}"
 
 [[package]]
-name = "rightclaw-bot"
+name = "right-bot"
 version_group = "workspace"
 git_tag_enable = true
-git_tag_name = "rightclaw-bot-v{{ version }}"
+git_tag_name = "right-bot-v{{ version }}"
 
 [[package]]
-name = "rightclaw-cli"
+name = "right"
 version_group = "workspace"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
-changelog_include = ["rightclaw", "rightclaw-bot"]
+changelog_include = ["right-agent", "right-bot"]
 git_release_enable = true
 git_release_name = "v{{ version }}"
 git_tag_enable = true
