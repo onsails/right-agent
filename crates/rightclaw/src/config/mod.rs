@@ -2,6 +2,68 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+/// Migrate `~/.rightclaw/` to `~/.right/` if needed.
+///
+/// Returns `Ok(())` when:
+/// - The old dir doesn't exist (fresh install or already migrated).
+/// - Both dirs exist (already migrated; old dir left alone — operator can decide).
+/// - The old dir was successfully renamed.
+///
+/// Returns `Err` when:
+/// - process-compose is running against the old `state.json` port.
+/// - The atomic rename failed (cross-filesystem `EXDEV`, permissions).
+fn migrate_old_home(old: &Path, new: &Path) -> miette::Result<()> {
+    if !old.exists() {
+        return Ok(());
+    }
+    if new.exists() {
+        return Ok(());
+    }
+
+    // PC-running probe: if state.json carries a port and that port is
+    // accepting connections, a process-compose instance is alive. Refuse
+    // migration to avoid breaking open file handles.
+    let state_path = old.join("run").join("state.json");
+    if state_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&state_path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(port) = json.get("pc_port").and_then(|v| v.as_u64()) {
+                    let addr = format!("127.0.0.1:{port}");
+                    if std::net::TcpStream::connect_timeout(
+                        &addr.parse().expect("loopback addr always parses"),
+                        std::time::Duration::from_millis(500),
+                    )
+                    .is_ok()
+                    {
+                        return Err(miette::miette!(
+                            "Detected {} with a running process-compose on port {}. \
+                             Stop it before upgrading — run the old `rightclaw down` (or kill \
+                             the process-compose process), then re-run.",
+                            old.display(),
+                            port,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    std::fs::rename(old, new).map_err(|e| {
+        miette::miette!(
+            "Failed to rename {} → {}: {}. \
+             If the dirs are on different filesystems, run `mv {} {}` manually and re-run.",
+            old.display(),
+            new.display(),
+            e,
+            old.display(),
+            new.display(),
+        )
+    })?;
+
+    tracing::info!("Migrated {} → {}", old.display(), new.display());
+    Ok(())
+}
+
 /// Resolve RIGHTCLAW_HOME: cli_home > env_home > ~/.rightclaw
 pub fn resolve_home(cli_home: Option<&str>, env_home: Option<&str>) -> miette::Result<PathBuf> {
     if let Some(home) = cli_home {
@@ -313,5 +375,80 @@ mod tests {
             !content.contains("aggregator:"),
             "default (empty allowed_hosts) must not emit aggregator block, got: {content}"
         );
+    }
+
+    #[test]
+    fn migrate_old_home_renames_when_only_old_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join(".rightclaw");
+        let new = tmp.path().join(".right");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("marker"), b"hello").unwrap();
+
+        let result = migrate_old_home(&old, &new);
+        assert!(result.is_ok(), "migrate_old_home failed: {:?}", result);
+        assert!(!old.exists(), "old dir must be gone after migration");
+        assert!(new.exists(), "new dir must exist after migration");
+        assert_eq!(
+            std::fs::read(new.join("marker")).unwrap(),
+            b"hello",
+            "contents must be preserved"
+        );
+    }
+
+    #[test]
+    fn migrate_old_home_noop_when_new_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join(".rightclaw");
+        let new = tmp.path().join(".right");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+
+        let result = migrate_old_home(&old, &new);
+        assert!(result.is_ok(), "must noop when new dir exists");
+        assert!(old.exists(), "old dir must still exist (no rename)");
+        assert!(new.exists(), "new dir must still exist");
+    }
+
+    #[test]
+    fn migrate_old_home_noop_when_old_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join(".rightclaw");
+        let new = tmp.path().join(".right");
+
+        let result = migrate_old_home(&old, &new);
+        assert!(result.is_ok(), "must noop when old dir absent");
+        assert!(!old.exists());
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn migrate_old_home_refuses_when_pc_running() {
+        use std::net::TcpListener;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join(".rightclaw");
+        let new = tmp.path().join(".right");
+        std::fs::create_dir_all(old.join("run")).unwrap();
+
+        // Bind a local TCP listener and write its port into state.json.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            old.join("run").join("state.json"),
+            format!(
+                r#"{{"agents":[],"socket_path":"","started_at":"x","pc_port":{port},"pc_api_token":null}}"#
+            ),
+        )
+        .unwrap();
+
+        let err = migrate_old_home(&old, &new).expect_err("must refuse migration");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("running") || msg.contains("process-compose") || msg.contains("rightclaw"),
+            "error must mention PC running; got: {msg}"
+        );
+        assert!(old.exists(), "no rename on refusal");
+        assert!(!new.exists());
     }
 }
