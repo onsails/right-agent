@@ -194,6 +194,7 @@ Other runtimes optimise for flexibility and breadth — you can wire anything to
 
 **Next**
 - [ ] OpenShell credential providers for `gh`, `gcloud`, `aws`, `kubectl` — zero-token CLIs inside sandboxes
+- [ ] Native browser automation
 - [ ] Agent templates — shareable configs with MCPs, skills, identity presets
 - [ ] Auto-skills — agent writes its own skills from repeated tasks
 - [ ] Per-turn budget caps for chat messages (currently cron-only)
