@@ -4,9 +4,9 @@ This is a Rust project. Follow conventions in CLAUDE.rust.md.
 
 ## Project
 
-**RightClaw**
+**Right Agent**
 
-RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs as an independent Claude Code session inside its own OpenShell sandbox with declarative YAML policies. The Rust CLI orchestrates agent lifecycles via process-compose. Drop-in compatible with the OpenClaw/ClawHub ecosystem — same file conventions, same skill format, same registry — but with security-first enforcement instead of "grant all, pray it works."
+Right Agent is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs as an independent Claude Code session inside its own OpenShell sandbox with declarative YAML policies. The Rust CLI orchestrates agent lifecycles via process-compose. Drop-in compatible with the OpenClaw/ClawHub ecosystem — same file conventions, same skill format, same registry — but with security-first enforcement instead of "grant all, pray it works."
 
 **Core Value:** Run multiple autonomous Claude Code agents safely — each sandboxed by OpenShell policies, each with its own identity and memory, orchestrated by a single CLI command.
 
@@ -25,7 +25,7 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 ### Core Framework
 | Technology | Version | Purpose | Why | Confidence |
 |------------|---------|---------|-----|------------|
-| clap | 4.6.0 | CLI argument parsing | Industry standard. Derive API is ergonomic. Powers ripgrep, fd, bat. Subcommand model maps perfectly to `rightclaw up/down/status/attach/restart`. | HIGH |
+| clap | 4.6.0 | CLI argument parsing | Industry standard. Derive API is ergonomic. Powers ripgrep, fd, bat. Subcommand model maps perfectly to `right up/down/status/attach/restart`. | HIGH |
 | tokio | 1.50.0 | Async runtime | Required by reqwest. Process monitoring and HTTP calls benefit from async. Use `features = ["full"]` for process spawning + signal handling. | HIGH |
 | serde | 1.0.228 | Serialization framework | Non-negotiable for any Rust project touching structured data. | HIGH |
 ### YAML Parsing
@@ -59,21 +59,21 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 ### Testing
 | Technology | Version | Purpose | Why | Confidence |
 |------------|---------|---------|-----|------------|
-| assert_cmd | 2.2.0 | CLI integration testing | Run `rightclaw` binary, assert on stdout/stderr/exit codes. The standard for Rust CLI testing. | HIGH |
+| assert_cmd | 2.2.0 | CLI integration testing | Run `right` binary, assert on stdout/stderr/exit codes. The standard for Rust CLI testing. | HIGH |
 | predicates | 3.1.4 | Assertion helpers | Pairs with assert_cmd. `predicate::str::contains("agent started")` style assertions. | HIGH |
 | tempfile | (latest) | Temp directories for test agent layouts | Create isolated agent directory structures per test. | HIGH |
 ### Supporting Libraries
 | Library | Version | Purpose | When to Use | Confidence |
 |---------|---------|---------|-------------|------------|
-| dirs | latest | XDG/platform directories | Locate config dirs, cache dirs for RightClaw state. | HIGH |
-| which | latest | Find executables in PATH | Verify `process-compose`, `openshell`, `claude` are installed before `rightclaw up`. | HIGH |
+| dirs | latest | XDG/platform directories | Locate config dirs, cache dirs for Right Agent state. | HIGH |
+| which | latest | Find executables in PATH | Verify `process-compose`, `openshell`, `claude` are installed before `right up`. | HIGH |
 | walkdir | latest | Directory traversal | Scan `agents/` directory to discover agent subdirectories. | HIGH |
 ## External Dependencies (Not Rust Crates)
 | Technology | Version | Purpose | Integration Pattern |
 |------------|---------|---------|---------------------|
-| process-compose | v1.100.0+ | Process orchestration + TUI | RightClaw generates `process-compose.yaml`, launches `process-compose up`. Controls via REST API on `localhost:8080` (or UDS). Auth via `PC_API_TOKEN`. |
+| process-compose | v1.100.0+ | Process orchestration + TUI | Right Agent generates `process-compose.yaml`, launches `process-compose up`. Controls via REST API on `localhost:8080` (or UDS). Auth via `PC_API_TOKEN`. |
 | OpenShell | latest (alpha) | Sandbox enforcement | CLI invocation: `openshell sandbox create --policy <path> -- claude`. Each agent process in process-compose.yaml wraps its command with openshell. |
-| Claude Code CLI | latest | AI agent sessions | Launched inside OpenShell sandboxes. Not directly managed by RightClaw -- process-compose handles lifecycle. |
+| Claude Code CLI | latest | AI agent sessions | Launched inside OpenShell sandboxes. Not directly managed by Right Agent -- process-compose handles lifecycle. |
 ## Integration Patterns
 ### process-compose Integration
 ### OpenShell Integration
@@ -120,8 +120,8 @@ RightClaw is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Ea
 - **Domain research before implementation**: Always verify external tool APIs by reading source code or running `--help` before writing integration code. Never rely solely on web documentation — it may be outdated or wrong.
 - **PROMPT_SYSTEM.md**: Always keep PROMPT_SYSTEM.md in sync with the actual prompting system. When changing system prompt generation, agent definitions, JSON schemas, or MCP instructions, update PROMPT_SYSTEM.md to match.
 - **MCP with_instructions()**: When adding, removing, or renaming MCP tools, always update `with_instructions()` in both `memory_server.rs` and `aggregator.rs` to reflect the current tool set and descriptions.
-- **MCP tool names in agent-facing text**: CC prefixes MCP tools as `mcp__{server}__{tool}`. The RightClaw server is `"right"`, so agents see `mcp__right__<tool>`. All skills, templates, prompts, and codegen that reference tool names for agents must use the full prefixed form. When adding, removing, or renaming tools, update references in: `skills/`, `templates/right/`, `crates/rightclaw/src/codegen/agent_def.rs`, `PROMPT_SYSTEM.md`.
-- **Debugging agent sessions**: In development, bots run with `--debug`. Three log sources: (1) CC debug logs at `~/.claude/logs/` inside sandbox (`/sandbox/.claude/logs/`) or on host for `--no-sandbox`; (2) stream NDJSON logs at `~/.rightclaw/logs/streams/<session-uuid>.ndjson` on host; (3) process-compose per-process logs via REST API: `curl -s "http://localhost:18927/process/logs/{process-name}/0/50"` (e.g. `right-mcp-server`, `right-bot`). Bot and aggregator are separate processes — always check both when debugging MCP issues.
+- **MCP tool names in agent-facing text**: CC prefixes MCP tools as `mcp__{server}__{tool}`. The Right Agent server is `"right"`, so agents see `mcp__right__<tool>`. All skills, templates, prompts, and codegen that reference tool names for agents must use the full prefixed form. When adding, removing, or renaming tools, update references in: `skills/`, `templates/right/`, `crates/right-agent/src/codegen/agent_def.rs`, `PROMPT_SYSTEM.md`.
+- **Debugging agent sessions**: In development, bots run with `--debug`. Three log sources: (1) CC debug logs at `~/.claude/logs/` inside sandbox (`/sandbox/.claude/logs/`) or on host for `--no-sandbox`; (2) stream NDJSON logs at `~/.right/logs/streams/<session-uuid>.ndjson` on host; (3) process-compose per-process logs via REST API: `curl -s "http://localhost:18927/process/logs/{process-name}/0/50"` (e.g. `right-mcp-server`, `right-bot`). Bot and aggregator are separate processes — always check both when debugging MCP issues.
 - **Self-healing platform**: Never manually fix agent sandboxes, configs, or state. If a platform change breaks an agent, the platform code must detect and recover automatically (re-upload if files are missing, adjust policy, etc.). Manual fixes mask bugs and prevent proper testing.
 - **Never delete sandboxes for recovery**: Sandboxes contain agent data (credentials, installed tools, agent-created files). Deleting a sandbox destroys this data. Platform changes must be designed to work with existing sandboxes — never require sandbox recreation as a migration path.
 - **Upgrade-friendly design**: Every new feature must be adoptable by already-deployed agents without recreation. New config fields default to the previous behavior (backward-compatible defaults). `agent config` must expose all user-facing settings — if a feature exists but can't be toggled via CLI, it's incomplete. Think in terms of upgrades, not fresh installs.
