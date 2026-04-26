@@ -646,7 +646,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Startup upgrade: runs before cron/telegram — no lock contention.
     if let Some(ref cfg_path) = ssh_config_path {
-        upgrade::run_startup_upgrade(cfg_path, &args.agent).await;
+        // SAFETY: ssh_config_path is Some only when is_sandboxed is true, and
+        // resolved_sandbox is always Some when is_sandboxed is true.
+        let sandbox = resolved_sandbox.as_deref().unwrap();
+        upgrade::run_startup_upgrade(cfg_path, &args.agent, sandbox).await;
     }
 
     // CRON-01: spawn cron task alongside Telegram dispatcher.
@@ -708,9 +711,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Spawn periodic claude upgrade task (sandbox-only).
     let upgrade_handle = ssh_config_path.as_ref().map(|cfg_path| {
+        // SAFETY: ssh_config_path is Some only when is_sandboxed is true, and
+        // resolved_sandbox is always Some when is_sandboxed is true.
+        let sandbox = resolved_sandbox.clone().unwrap();
         upgrade::spawn_upgrade_task(
             cfg_path.clone(),
             args.agent.clone(),
+            sandbox,
             shutdown.clone(),
             Arc::clone(&upgrade_lock),
         )
