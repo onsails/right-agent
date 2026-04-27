@@ -32,25 +32,31 @@ pub fn make_routing_filter(
         let group_open = state.is_group_open(chat_id);
         drop(state);
 
-        match is_bot_addressed(&msg, &identity) {
-            None => None, // group non-mention dropped
-            Some(AddressKind::DirectMessage) => {
+        let addressed = is_bot_addressed(&msg, &identity);
+
+        match &msg.chat.kind {
+            ChatKind::Private(_) => {
                 if !sender_trusted {
                     return None;
-                } // DM from non-trusted → drop
+                }
                 Some(RoutingDecision {
                     address: Some(AddressKind::DirectMessage),
                     sender_trusted: true,
                     group_open: false,
                 })
             }
-            Some(addr) => {
-                debug_assert!(!matches!(msg.chat.kind, ChatKind::Private(_)));
+            _ => {
                 if !sender_trusted && !group_open {
                     return None;
                 }
+                // Non-album group messages still require an explicit address.
+                // Album siblings are admitted unaddressed; the worker aggregates
+                // them and applies a final addressed-batch gate before invoking CC.
+                if addressed.is_none() && msg.media_group_id().is_none() {
+                    return None;
+                }
                 Some(RoutingDecision {
-                    address: Some(addr),
+                    address: addressed,
                     sender_trusted,
                     group_open,
                 })
@@ -62,6 +68,72 @@ pub fn make_routing_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use right_agent::agent::allowlist::{AllowedGroup, AllowedUser, AllowlistFile, AllowlistState};
+    use std::sync::Arc;
+
+    fn allowlist_with(users: Vec<i64>, groups: Vec<i64>) -> AllowlistHandle {
+        let now = Utc::now();
+        let users = users
+            .into_iter()
+            .map(|id| AllowedUser {
+                id,
+                label: None,
+                added_by: None,
+                added_at: now,
+            })
+            .collect();
+        let groups = groups
+            .into_iter()
+            .map(|id| AllowedGroup {
+                id,
+                label: None,
+                opened_by: None,
+                opened_at: now,
+            })
+            .collect();
+        let file = AllowlistFile {
+            version: right_agent::agent::allowlist::CURRENT_VERSION,
+            users,
+            groups,
+        };
+        AllowlistHandle(Arc::new(std::sync::RwLock::new(
+            AllowlistState::from_file(file),
+        )))
+    }
+
+    fn group_msg_with_media_group(
+        chat_id: i64,
+        sender_id: i64,
+        media_group_id: Option<&str>,
+        caption_with_mention: bool,
+        bot_username: &str,
+    ) -> teloxide::types::Message {
+        let mut payload = serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "U"},
+            "photo": [{
+                "file_id": "AgAD",
+                "file_unique_id": "u",
+                "width": 1, "height": 1
+            }],
+        });
+        if let Some(mgid) = media_group_id {
+            payload["media_group_id"] = serde_json::Value::String(mgid.to_string());
+        }
+        if caption_with_mention {
+            let cap = format!("@{bot_username} hi");
+            payload["caption"] = serde_json::Value::String(cap.clone());
+            payload["caption_entities"] = serde_json::json!([{
+                "type": "mention",
+                "offset": 0,
+                "length": bot_username.len() as i64 + 1
+            }]);
+        }
+        serde_json::from_value(payload).unwrap()
+    }
 
     #[test]
     fn routing_decision_constructs() {
@@ -72,5 +144,102 @@ mod tests {
         };
         assert!(d.sender_trusted);
         assert!(!d.group_open);
+    }
+
+    #[test]
+    fn media_group_sibling_without_mention_passes_for_open_group() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        let allowlist = allowlist_with(vec![], vec![chat_id]);
+
+        let msg = group_msg_with_media_group(
+            chat_id,
+            sender_id,
+            Some("alb"),
+            /*caption_with_mention=*/ false,
+            &identity.username,
+        );
+
+        let f = make_routing_filter(allowlist, identity);
+        let d = f(msg).expect("media-group sibling should pass in open group");
+        assert!(d.address.is_none());
+        assert!(d.group_open);
+    }
+
+    #[test]
+    fn ordinary_group_message_without_mention_still_dropped() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        let allowlist = allowlist_with(vec![], vec![chat_id]);
+
+        // No media_group_id, no caption mention — a plain text post.
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "U"},
+            "text": "hello there"
+        }))
+        .unwrap();
+
+        let f = make_routing_filter(allowlist, identity);
+        assert!(f(msg).is_none());
+    }
+
+    #[test]
+    fn media_group_sibling_without_mention_dropped_for_untrusted_sender() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        // No trusted users, no open groups → sender is neither trusted nor in an open group.
+        let allowlist = allowlist_with(vec![], vec![]);
+
+        let msg = group_msg_with_media_group(
+            chat_id,
+            sender_id,
+            Some("alb"),
+            /*caption_with_mention=*/ false,
+            &identity.username,
+        );
+
+        let f = make_routing_filter(allowlist, identity);
+        assert!(f(msg).is_none());
+    }
+
+    #[test]
+    fn media_group_sibling_with_mention_passes_with_some_address() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        let allowlist = allowlist_with(vec![], vec![chat_id]);
+
+        let msg = group_msg_with_media_group(
+            chat_id,
+            sender_id,
+            Some("alb"),
+            /*caption_with_mention=*/ true,
+            &identity.username,
+        );
+
+        let f = make_routing_filter(allowlist, identity);
+        let d = f(msg).expect("captioned sibling must pass");
+        assert!(matches!(
+            d.address,
+            Some(AddressKind::GroupMentionText)
+        ));
     }
 }
