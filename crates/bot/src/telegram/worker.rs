@@ -61,6 +61,9 @@ pub struct DebounceMsg {
     pub group_open: bool,
     pub chat: super::attachments::ChatContext,
     pub reply_to_body: Option<super::attachments::ReplyToBody>,
+    /// `Some(id)` when this message is part of a Telegram album (media group);
+    /// shared by all siblings of the album.
+    pub media_group_id: Option<String>,
 }
 
 /// Context passed to each worker task when it is spawned.

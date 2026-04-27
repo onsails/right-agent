@@ -302,6 +302,7 @@ pub async fn handle_message(
         group_open: decision.group_open,
         chat: chat_ctx,
         reply_to_body,
+        media_group_id: msg.media_group_id().map(|m| m.0.clone()),
     };
 
     // Check for existing worker or spawn a new one.
