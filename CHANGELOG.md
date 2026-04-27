@@ -1,4 +1,11 @@
 # Changelog
+## [0.2.4] - 2026-04-27
+
+
+### Miscellaneous
+
+- Update Cargo.lock dependencies
+
 ## [0.2.3] - 2026-04-24
 
 
