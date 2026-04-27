@@ -105,35 +105,62 @@ Auto-skills — where an agent writes its own skills from repeated tasks — is 
 The sandbox layer is [**NVIDIA OpenShell**](https://github.com/NVIDIA/OpenShell) — purpose-built for AI agents, not a container runtime stretched to fit.
 
 ```mermaid
-flowchart LR
-  U[You] --> TG[(Telegram)]
+flowchart TB
+  U[You]
 
-  TG <--> B1[Bot · agent one · host]
-  TG <--> B2[Bot · agent two · host]
-  B1 --> A1
-  B2 --> A2
+  subgraph CLOUD["Cloud"]
+    direction LR
+    TG[Telegram API]
+    CF[Cloudflare]
+    ANT[Anthropic API]
+    HS[(Hindsight Cloud)]
+    EXT[(Linear · Notion · Gmail · …)]
+  end
+
+  subgraph HOST["Host"]
+    direction LR
+    B1[Bot · agent one]
+    B2[Bot · agent two]
+    AGG[MCP Aggregator]
+    CFD[cloudflared]
+    OS[OpenShell gateway]
+  end
 
   subgraph SANDBOX_1["Sandbox · agent one"]
     A1[Claude Code]
     I1[(Identity)]
-    A1 <--> I1
   end
 
   subgraph SANDBOX_2["Sandbox · agent two"]
     A2[Claude Code]
     I2[(Identity)]
-    A2 <--> I2
   end
 
-  A1 -.MCP calls.-> AGG
-  A2 -.MCP calls.-> AGG
-  AGG[MCP Aggregator · host] -->|holds tokens| EXT[(Linear · Notion · Gmail · …)]
-  AGG -->|memory tools| HS[(Hindsight Cloud)]
+  U --> TG
+  TG <--> B1
+  TG <--> B2
+  CF <--> CFD
+  CFD --> B1
+  CFD --> B2
 
+  B1 --> A1
+  B2 --> A2
+
+  A1 <--> I1
+  A2 <--> I2
+
+  A1 --> OS
+  A2 --> OS
+  OS --> ANT
+  OS -.MCP.-> AGG
+
+  AGG --> HS
+  AGG --> EXT
+
+  style CLOUD fill:#0f0f0f,stroke:#6b8fbf,color:#ddd
+  style HOST fill:#0f0f0f,stroke:#6bbf59,color:#ddd
   style SANDBOX_1 fill:#161616,stroke:#E8632A,color:#ddd
   style SANDBOX_2 fill:#161616,stroke:#E8632A,color:#ddd
-  style AGG fill:#0f0f0f,stroke:#6bbf59,color:#ddd
-  style HS fill:#0f0f0f,stroke:#6b8fbf,color:#ddd
 ```
 
 ### Blast radius, contained
