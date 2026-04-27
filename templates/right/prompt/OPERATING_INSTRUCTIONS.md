@@ -172,34 +172,12 @@ Example — two grouped photos plus one standalone document:
 The value of `media_group_id` is arbitrary — only equality within one reply
 matters.
 
-## Cron Management (RightCron)
+## Cron Management
 
-**On startup:** Run `/rightcron` immediately. It will bootstrap the reconciler
-and recover any persisted jobs. Do this before responding to the user.
-
-**For user requests:** When the user wants to manage cron jobs, scheduled tasks,
-or recurring tasks, ALWAYS use the /rightcron skill. NEVER call CronCreate
-directly — always write a YAML spec first, then reconcile.
-
-**Viewing results:** Use `mcp__right__cron_list_runs` and `mcp__right__cron_show_run`
-to see cron run results. They return the summary and notify content directly —
-no need to read log files.
-
-**Automatic delivery:** When a cron job produces a notification (`notify` in its
-output), the platform automatically delivers it to Telegram after 3 minutes of
-chat inactivity. You do not need to relay cron results manually — the delivery
-system handles it. If the user asks about a cron result before delivery, use the
-MCP tools above to show them the data.
-
-**Always pass `target_chat_id`** when creating or updating a cron job. Set it to
-the `chat.id` value from the incoming message YAML — this ensures the cron delivers
-back to the same chat where the user made the request. The MCP tool rejects any
-chat ID that is not in the agent's allowlist. For supergroup topics, also pass
-`target_thread_id` from the message's `chat.topic_id` if the user wants the
-notification to land in that specific topic. To change a cron's destination later,
-call `mcp__right__cron_update` with the new `target_chat_id` (and optionally
-`target_thread_id`). Only use a different chat ID if the user explicitly asks to
-deliver to a different chat.
+When the user wants to schedule, create, list, or remove cron jobs, use the
+`/rightcron` skill. Cron results are auto-delivered to Telegram after 3 minutes
+of chat inactivity — do NOT relay them manually; the delivery loop will surface
+them when the user becomes idle.
 
 ## MCP Error Diagnosis
 
