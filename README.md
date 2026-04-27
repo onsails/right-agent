@@ -118,22 +118,21 @@ flowchart TB
   end
 
   subgraph HOST["Host"]
-    direction LR
     B1[Bot · agent one]
     B2[Bot · agent two]
     AGG[MCP Aggregator]
     CFD[cloudflared]
     OS[OpenShell gateway]
-  end
 
-  subgraph SANDBOX_1["Sandbox · agent one"]
-    A1[Claude Code]
-    I1[(Identity)]
-  end
+    subgraph SANDBOX_1["Sandbox · agent one"]
+      A1[Claude Code]
+      I1[(Identity)]
+    end
 
-  subgraph SANDBOX_2["Sandbox · agent two"]
-    A2[Claude Code]
-    I2[(Identity)]
+    subgraph SANDBOX_2["Sandbox · agent two"]
+      A2[Claude Code]
+      I2[(Identity)]
+    end
   end
 
   U --> TG
@@ -152,15 +151,15 @@ flowchart TB
   A1 --> OS
   A2 --> OS
   OS --> ANT
-  OS -.MCP.-> AGG
+  OS -->|MCP| AGG
 
   AGG --> HS
   AGG --> EXT
 
-  style CLOUD fill:#0f0f0f,stroke:#6b8fbf,color:#ddd
-  style HOST fill:#0f0f0f,stroke:#6bbf59,color:#ddd
-  style SANDBOX_1 fill:#161616,stroke:#E8632A,color:#ddd
-  style SANDBOX_2 fill:#161616,stroke:#E8632A,color:#ddd
+  style CLOUD stroke:#6b8fbf,stroke-width:2px
+  style HOST stroke:#6bbf59,stroke-width:2px
+  style SANDBOX_1 stroke:#E8632A,stroke-width:2px
+  style SANDBOX_2 stroke:#E8632A,stroke-width:2px
 ```
 
 ### Blast radius, contained
