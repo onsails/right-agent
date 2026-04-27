@@ -401,6 +401,15 @@ async fn collect_batch(
     batch
 }
 
+/// Post-debounce addressedness gate. Returns `true` if at least one message
+/// in the batch was addressed to the bot. In groups this is the predicate
+/// the worker uses to decide whether to invoke CC; if `false`, the batch is
+/// dropped silently. DM batches always have `address: Some(DirectMessage)`
+/// so the predicate trivially holds for them.
+fn batch_is_addressed(batch: &[DebounceMsg]) -> bool {
+    batch.iter().any(|m| m.address.is_some())
+}
+
 /// Spawn a per-session worker task.
 ///
 /// Called by the message handler when no sender exists for the session key.
@@ -449,6 +458,14 @@ pub fn spawn_worker(
                 batch.first().map(|m| &m.chat),
                 Some(super::attachments::ChatContext::Group { .. })
             );
+            if is_group && !batch_is_addressed(&batch) {
+                tracing::debug!(
+                    ?key,
+                    batch_size = batch.len(),
+                    "media-group batch had no addressed sibling — dropping without CC"
+                );
+                continue;
+            }
             if is_group && ctx.show_thinking {
                 tracing::debug!(?key, "show_thinking suppressed in group");
             }
@@ -2424,6 +2441,20 @@ mod tests {
         // No more arrivals — idle 1000 ms from msg 3 closes via auto-advance.
         let batch = task.await.unwrap();
         assert_eq!(batch.len(), 3);
+    }
+
+    #[test]
+    fn batch_is_addressed_drops_all_none_group_batch() {
+        let batch = vec![debug_msg(1, Some("alb")), debug_msg(2, Some("alb"))];
+        assert!(!batch_is_addressed(&batch));
+    }
+
+    #[test]
+    fn batch_is_addressed_passes_when_one_sibling_addressed() {
+        let mut a = debug_msg(1, Some("alb"));
+        a.address = Some(super::super::mention::AddressKind::GroupMentionText);
+        let batch = vec![a, debug_msg(2, Some("alb"))];
+        assert!(batch_is_addressed(&batch));
     }
 }
 
