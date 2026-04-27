@@ -57,7 +57,7 @@ pub struct DebounceMsg {
     pub author: super::attachments::MessageAuthor,
     pub forward_info: Option<super::attachments::ForwardInfo>,
     pub reply_to_id: Option<i32>,
-    pub address: super::mention::AddressKind,
+    pub address: Option<super::mention::AddressKind>,
     pub group_open: bool,
     pub chat: super::attachments::ChatContext,
     pub reply_to_body: Option<super::attachments::ReplyToBody>,

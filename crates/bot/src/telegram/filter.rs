@@ -5,7 +5,7 @@ use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
 
 #[derive(Debug, Clone)]
 pub struct RoutingDecision {
-    pub address: AddressKind,
+    pub address: Option<AddressKind>,
     /// True iff the sender is in the global trusted-users list.
     pub sender_trusted: bool,
     /// Set to `true` for group messages when the group is opened. `false` for DM.
@@ -39,7 +39,7 @@ pub fn make_routing_filter(
                     return None;
                 } // DM from non-trusted → drop
                 Some(RoutingDecision {
-                    address: AddressKind::DirectMessage,
+                    address: Some(AddressKind::DirectMessage),
                     sender_trusted: true,
                     group_open: false,
                 })
@@ -50,7 +50,7 @@ pub fn make_routing_filter(
                     return None;
                 }
                 Some(RoutingDecision {
-                    address: addr,
+                    address: Some(addr),
                     sender_trusted,
                     group_open,
                 })
@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn routing_decision_constructs() {
         let d = RoutingDecision {
-            address: AddressKind::DirectMessage,
+            address: Some(AddressKind::DirectMessage),
             sender_trusted: true,
             group_open: false,
         };
