@@ -58,7 +58,7 @@ Each agent is a separate Claude Code session inside its own sandbox. Separate id
 
 ### Memory and evolving identity
 
-Managed with Hindsight Cloud for semantic recall (append-only), or as a plain `MEMORY.md` file the agent curates itself. Either way, memory survives restarts and compounds over time. Each agent also writes its own identity and personality on first launch. Details below.
+Hindsight Cloud is the primary backend — semantic recall, append-only, per-chat scoped. A local `MEMORY.md` fallback is available for users who do not want a cloud dependency. Either way, memory survives restarts and compounds over time. Each agent also writes its own identity and personality on first launch. Details below.
 
 ### MCP without the breach
 
@@ -84,10 +84,9 @@ The first session with a fresh agent is not a chat — it's a bootstrap. The age
 
 ### Memory
 
-Two modes, one switch in `agent.yaml`.
+The primary path is **Hindsight Cloud** — a managed semantic memory service. Append-only: every turn auto-retains a delta, next turn auto-recalls what matters. Per-chat tagging, prefetch cache. The agent remembers who it is talking to, what it was working on yesterday, and which stack the user runs — without replaying the whole transcript.
 
-- **Hindsight** — managed semantic memory cloud. Append-only: every turn auto-retains a delta, next turn auto-recalls what matters. Per-chat tagging, prefetch cache. The agent remembers who it is talking to, what it was working on yesterday, and which stack the user runs — without replaying the whole transcript.
-- **`MEMORY.md`** — local file, curated by the agent itself via Claude Code's Edit/Write tools. For anyone who does not want a cloud dependency.
+A fallback is available — **`MEMORY.md`** — a local file the agent curates itself via Claude Code's Edit/Write tools. No semantic recall, no per-chat tagging; just a markdown file the agent maintains. For anyone who does not want a cloud dependency.
 
 Either way, memory survives restarts. Nothing resets when you `right up` again.
 
@@ -116,23 +115,25 @@ flowchart LR
 
   subgraph SANDBOX_1["Sandbox · agent one"]
     A1[Claude Code]
-    M1[(Memory · identity)]
-    A1 <--> M1
+    I1[(Identity)]
+    A1 <--> I1
   end
 
   subgraph SANDBOX_2["Sandbox · agent two"]
     A2[Claude Code]
-    M2[(Memory · identity)]
-    A2 <--> M2
+    I2[(Identity)]
+    A2 <--> I2
   end
 
   A1 -.MCP calls.-> AGG
   A2 -.MCP calls.-> AGG
   AGG[MCP Aggregator · host] -->|holds tokens| EXT[(Linear · Notion · Gmail · …)]
+  AGG -->|memory tools| HS[(Hindsight Cloud)]
 
   style SANDBOX_1 fill:#161616,stroke:#E8632A,color:#ddd
   style SANDBOX_2 fill:#161616,stroke:#E8632A,color:#ddd
   style AGG fill:#0f0f0f,stroke:#6bbf59,color:#ddd
+  style HS fill:#0f0f0f,stroke:#6b8fbf,color:#ddd
 ```
 
 ### Blast radius, contained
