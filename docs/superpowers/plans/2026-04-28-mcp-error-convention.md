@@ -281,7 +281,7 @@ Add this helper at the top of `mod tests` (immediately after `use super::*;`), i
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p right --lib aggregator::tests::dispatch_unknown_proxy_returns_error`
+Run: `cargo test -p right --bin right aggregator::tests::dispatch_unknown_proxy_returns_error`
 Expected: FAIL — current `dispatch_to_proxy` returns `Err`, test now expects `Ok` with `is_error`.
 
 - [ ] **Step 3: Migrate `dispatch_to_proxy`**
@@ -329,10 +329,10 @@ Replace with:
 
 - [ ] **Step 4: Run dispatch tests**
 
-Run: `cargo test -p right --lib aggregator::tests::dispatch_unknown_proxy_returns_error`
+Run: `cargo test -p right --bin right aggregator::tests::dispatch_unknown_proxy_returns_error`
 Expected: PASS.
 
-Run: `cargo test -p right --lib aggregator::tests::`
+Run: `cargo test -p right --bin right aggregator::tests::`
 Expected: all aggregator tests pass.
 
 - [ ] **Step 5: Commit**
@@ -470,7 +470,7 @@ Expected: clean.
 
 - [ ] **Step 3: Run existing aggregator tests**
 
-Run: `cargo test -p right --lib aggregator::tests::`
+Run: `cargo test -p right --bin right aggregator::tests::`
 Expected: all pass — no behavioral test exists for the migrated paths yet (added in Task 5b below).
 
 - [ ] **Step 4: Commit**
@@ -640,7 +640,7 @@ Expected: clean.
 
 - [ ] **Step 4: Run existing tests**
 
-Run: `cargo test -p right --lib aggregator::`
+Run: `cargo test -p right --bin right aggregator::`
 Expected: all pass.
 
 - [ ] **Step 5: Commit**
@@ -801,12 +801,12 @@ async fn bootstrap_done_returns_tool_error_when_files_missing() {
 
 - [ ] **Step 3: Run the new test**
 
-Run: `cargo test -p right --lib right_backend::tests::bootstrap_done_returns_tool_error_when_files_missing`
+Run: `cargo test -p right --bin right right_backend::tests::bootstrap_done_returns_tool_error_when_files_missing`
 Expected: PASS.
 
 - [ ] **Step 4: Run the full right_backend test module**
 
-Run: `cargo test -p right --lib right_backend::tests::`
+Run: `cargo test -p right --bin right right_backend::tests::`
 Expected: all pass.
 
 - [ ] **Step 5: Commit**
@@ -981,12 +981,12 @@ Append:
 
 - [ ] **Step 7: Run the new tests**
 
-Run: `cargo test -p right --lib aggregator::tests::memory_`
+Run: `cargo test -p right --bin right aggregator::tests::memory_`
 Expected: all pass.
 
 - [ ] **Step 8: Run the full aggregator suite**
 
-Run: `cargo test -p right --lib aggregator::`
+Run: `cargo test -p right --bin right aggregator::`
 Expected: all pass.
 
 - [ ] **Step 9: Commit**
@@ -1139,7 +1139,7 @@ Expected: clean.
 
 - [ ] **Step 5: Run the full aggregator and right_backend test suites**
 
-Run: `cargo test -p right --lib aggregator:: right_backend::`
+Run: `cargo test -p right --bin right aggregator:: right_backend::`
 Expected: all pass.
 
 - [ ] **Step 6: Commit**
@@ -1172,7 +1172,7 @@ Expected: clean.
 
 - [ ] **Step 4: Spot-check the agent-facing instructions block**
 
-Run: `cargo test -p right --lib aggregator::tests::tools_list_includes_right_and_meta`
+Run: `cargo test -p right --bin right aggregator::tests::tools_list_includes_right_and_meta`
 Expected: PASS — no regression in the basic tool surface.
 
 If everything is green, the implementation matches the spec. Done.
