@@ -2280,6 +2280,151 @@ mod tests {
         assert_eq!(truncated.chars().count(), 500);
         assert_eq!(truncated, s);
     }
+
+    // ── collect_batch / adaptive debounce window ──────────────────────────────
+    //
+    // These tests run under `#[tokio::test(start_paused = true)]`. Time is
+    // virtual; `sleep` parks the test task and lets the paused runtime
+    // auto-advance to the next pending timer when no task is ready, which
+    // deterministically interleaves test main and the spawned `collect_batch`
+    // task. We avoid `tokio::time::advance` because it bumps the clock without
+    // running pending wakers — our `tx.send()` calls land in the channel before
+    // the spawned task observes a freshly-elapsed timer, so the biased select
+    // inside `collect_batch` would grab the message ahead of the timer.
+
+    fn debug_msg(message_id: i32, media_group_id: Option<&str>) -> DebounceMsg {
+        DebounceMsg {
+            message_id,
+            text: None,
+            timestamp: Utc::now(),
+            attachments: vec![],
+            author: super::super::attachments::MessageAuthor {
+                name: "u".into(),
+                username: None,
+                user_id: None,
+            },
+            forward_info: None,
+            reply_to_id: None,
+            address: None,
+            group_open: true,
+            chat: super::super::attachments::ChatContext::Group {
+                id: -1001,
+                title: None,
+                topic_id: None,
+            },
+            reply_to_body: None,
+            media_group_id: media_group_id.map(|s| s.to_string()),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_album_closes_after_idle_window() {
+        let (tx, mut rx) = mpsc::channel::<DebounceMsg>(8);
+        let first = debug_msg(1, Some("alb"));
+
+        let task = tokio::spawn(async move { collect_batch(first, &mut rx).await });
+
+        // Push siblings 2 and 3 with simulated 200 ms gaps.
+        sleep(Duration::from_millis(200)).await;
+        tx.send(debug_msg(2, Some("alb"))).await.unwrap();
+        sleep(Duration::from_millis(200)).await;
+        tx.send(debug_msg(3, Some("alb"))).await.unwrap();
+
+        // No more arrivals — idle 1000 ms from msg 3 closes the window. The
+        // batch returns once auto-advance reaches the deadline.
+        let batch = task.await.unwrap();
+        assert_eq!(batch.len(), 3);
+        assert_eq!(
+            batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_album_idle_reset_keeps_batch_open() {
+        let (tx, mut rx) = mpsc::channel::<DebounceMsg>(8);
+        let first = debug_msg(1, Some("alb"));
+
+        let task = tokio::spawn(async move { collect_batch(first, &mut rx).await });
+
+        // 600 ms — past the 500 ms non-media window, but in media-group mode the
+        // idle window is 1000 ms from last arrival, so this still falls in.
+        sleep(Duration::from_millis(600)).await;
+        tx.send(debug_msg(2, Some("alb"))).await.unwrap();
+        sleep(Duration::from_millis(900)).await;
+        tx.send(debug_msg(3, Some("alb"))).await.unwrap();
+
+        // Idle 1000 ms from msg 3 closes the batch via auto-advance.
+        let batch = task.await.unwrap();
+        assert_eq!(batch.len(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn album_hits_hard_cap_at_2500ms() {
+        let (tx, mut rx) = mpsc::channel::<DebounceMsg>(8);
+        let first = debug_msg(1, Some("alb"));
+
+        let task = tokio::spawn(async move { collect_batch(first, &mut rx).await });
+
+        // Drip-feed siblings every 700 ms. Idle alone never closes; hard cap at
+        // 2500 ms from first arrival must terminate the batch. After msg4 the
+        // deadline is min(last+1000=3100, first+2500=2500) = 2500. We then
+        // sleep 600 ms — auto-advance fires the cap timer first, the task
+        // closes and drops the receiver, so the follow-up send returns Err.
+        sleep(Duration::from_millis(700)).await;
+        tx.send(debug_msg(2, Some("alb"))).await.unwrap();
+        sleep(Duration::from_millis(700)).await;
+        tx.send(debug_msg(3, Some("alb"))).await.unwrap();
+        sleep(Duration::from_millis(700)).await;
+        tx.send(debug_msg(4, Some("alb"))).await.unwrap();
+        sleep(Duration::from_millis(600)).await;
+        let _ = tx.send(debug_msg(5, Some("alb"))).await;
+
+        let batch = task.await.unwrap();
+        assert_eq!(
+            batch.iter().map(|m| m.message_id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4],
+            "hard cap must close at 2500 ms, leaving msg 5 outside the batch"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_album_keeps_500ms_window() {
+        let (tx, mut rx) = mpsc::channel::<DebounceMsg>(8);
+        let first = debug_msg(1, None);
+
+        let task = tokio::spawn(async move { collect_batch(first, &mut rx).await });
+
+        // sleep 600 ms — past the 500 ms idle window from first arrival.
+        // Auto-advance fires the spawned task's 500 ms deadline first, so the
+        // task closes and drops the receiver before main sends msg2. The
+        // follow-up send returns Err; .ok() swallows.
+        sleep(Duration::from_millis(600)).await;
+        let _ = tx.send(debug_msg(2, None)).await;
+
+        let batch = task.await.unwrap();
+        assert_eq!(batch.len(), 1, "non-album message must use 500 ms window");
+        assert_eq!(batch[0].message_id, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn text_widens_window_when_album_joins() {
+        let (tx, mut rx) = mpsc::channel::<DebounceMsg>(8);
+        let first = debug_msg(1, None); // plain text
+
+        let task = tokio::spawn(async move { collect_batch(first, &mut rx).await });
+
+        // Album sibling joins at 200 ms — flips the batch into media-group mode.
+        sleep(Duration::from_millis(200)).await;
+        tx.send(debug_msg(2, Some("alb"))).await.unwrap();
+        // Another sibling 700 ms later — still inside the new 1000 ms idle window.
+        sleep(Duration::from_millis(700)).await;
+        tx.send(debug_msg(3, Some("alb"))).await.unwrap();
+
+        // No more arrivals — idle 1000 ms from msg 3 closes via auto-advance.
+        let batch = task.await.unwrap();
+        assert_eq!(batch.len(), 3);
+    }
 }
 
 #[cfg(test)]
