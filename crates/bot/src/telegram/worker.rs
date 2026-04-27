@@ -28,7 +28,8 @@ use super::session::{
 /// Session key: `(chat_id, effective_thread_id)`.
 pub type SessionKey = (i64, i64);
 
-/// Fixed 500ms debounce window for non-media-group batches (D-01).
+/// Idle debounce window in milliseconds — every new message resets the
+/// timer; the batch closes after this much silence (D-01).
 const DEBOUNCE_MS: u64 = 500;
 
 /// While the current batch contains any media-group sibling, close the window
@@ -348,11 +349,15 @@ fn build_memory_marker(
 /// Collect a single debounce batch starting from `first`, draining additional
 /// messages from `rx` according to the windowing rules:
 ///
-/// - If no message in the batch carries a `media_group_id`, the window is a
-///   fixed `DEBOUNCE_MS` measured from the first arrival.
+/// - If no message in the batch carries a `media_group_id`, the window is
+///   "idle `DEBOUNCE_MS` from the latest arrival" — every new message resets
+///   the timer.
 /// - Once any message in the batch carries a `media_group_id`, the window
 ///   becomes "idle `MEDIA_GROUP_IDLE_MS` from the latest arrival, capped at
-///   `MEDIA_GROUP_HARD_CAP_MS` from the first arrival".
+///   `MEDIA_GROUP_HARD_CAP_MS` from the first arrival". The flip from the
+///   first regime to the second can happen mid-batch when a media-group
+///   sibling arrives during a non-media batch; the deadline is recomputed
+///   on every iteration so the regime change takes effect immediately.
 ///
 /// Returns when the window closes or `rx` is closed (whichever happens first).
 async fn collect_batch(
@@ -373,7 +378,7 @@ async fn collect_batch(
                 first_arrival + Duration::from_millis(MEDIA_GROUP_HARD_CAP_MS),
             )
         } else {
-            first_arrival + Duration::from_millis(DEBOUNCE_MS)
+            last_arrival + Duration::from_millis(DEBOUNCE_MS)
         };
 
         tokio::select! {
@@ -401,7 +406,8 @@ async fn collect_batch(
 /// Called by the message handler when no sender exists for the session key.
 /// Returns the `Sender` to store in the DashMap. The worker task:
 ///   1. Waits for the first message.
-///   2. Collects additional messages within the 500ms debounce window (D-01).
+///   2. Collects additional messages via `collect_batch` (idle-timeout
+///      window — see `collect_batch` docs).
 ///   3. Batches them as XML (D-02).
 ///   4. Invokes `claude -p` (D-13, D-14).
 ///   5. Parses the `reply` tool call (D-03, D-04, D-05).
