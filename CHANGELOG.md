@@ -1,4 +1,31 @@
 # Changelog
+## [0.2.5] - 2026-04-27
+
+
+### Bug Fixes
+
+- **bot/worker**: Collect_batch keeps debounce idle-timeout semantics
+
+### Features
+
+- **bot/filter**: Admit Telegram media-group siblings without per-message mention
+- **bot/worker**: Carry media_group_id on DebounceMsg
+- **bot/worker**: Drop unaddressed group batches before invoking CC
+
+### Miscellaneous
+
+- **bot**: Clippy fixups for media-group changes
+
+### Refactor
+
+- **bot/filter**: RoutingDecision.address becomes Option<AddressKind>
+- **bot/worker**: Extract debounce loop into collect_batch helper
+
+### Testing
+
+- **bot/worker**: Adaptive debounce window for media-group batches
+- **bot/filter**: Regression for lost media-group siblings
+
 ## [0.2.4] - 2026-04-27
 
 
