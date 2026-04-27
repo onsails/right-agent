@@ -28,8 +28,16 @@ use super::session::{
 /// Session key: `(chat_id, effective_thread_id)`.
 pub type SessionKey = (i64, i64);
 
-/// Fixed 500ms debounce window (D-01).
+/// Fixed 500ms debounce window for non-media-group batches (D-01).
 const DEBOUNCE_MS: u64 = 500;
+
+/// While the current batch contains any media-group sibling, close the window
+/// after this many milliseconds of inactivity from the latest arrival.
+const MEDIA_GROUP_IDLE_MS: u64 = 1000;
+
+/// Hard cap on the total time spent collecting a batch that contains
+/// media-group siblings, measured from the first arrival.
+const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
@@ -337,6 +345,57 @@ fn build_memory_marker(
 
 // ── Async worker ─────────────────────────────────────────────────────────────
 
+/// Collect a single debounce batch starting from `first`, draining additional
+/// messages from `rx` according to the windowing rules:
+///
+/// - If no message in the batch carries a `media_group_id`, the window is a
+///   fixed `DEBOUNCE_MS` measured from the first arrival.
+/// - Once any message in the batch carries a `media_group_id`, the window
+///   becomes "idle `MEDIA_GROUP_IDLE_MS` from the latest arrival, capped at
+///   `MEDIA_GROUP_HARD_CAP_MS` from the first arrival".
+///
+/// Returns when the window closes or `rx` is closed (whichever happens first).
+async fn collect_batch(
+    first: DebounceMsg,
+    rx: &mut mpsc::Receiver<DebounceMsg>,
+) -> Vec<DebounceMsg> {
+    use tokio::time::{Instant, sleep_until};
+
+    let first_arrival = Instant::now();
+    let mut last_arrival = first_arrival;
+    let mut media_group_seen = first.media_group_id.is_some();
+    let mut batch = vec![first];
+
+    loop {
+        let deadline = if media_group_seen {
+            std::cmp::min(
+                last_arrival + Duration::from_millis(MEDIA_GROUP_IDLE_MS),
+                first_arrival + Duration::from_millis(MEDIA_GROUP_HARD_CAP_MS),
+            )
+        } else {
+            first_arrival + Duration::from_millis(DEBOUNCE_MS)
+        };
+
+        tokio::select! {
+            biased;
+            msg = rx.recv() => {
+                match msg {
+                    Some(m) => {
+                        if m.media_group_id.is_some() {
+                            media_group_seen = true;
+                        }
+                        last_arrival = Instant::now();
+                        batch.push(m);
+                    }
+                    None => break,
+                }
+            }
+            _ = sleep_until(deadline) => break,
+        }
+    }
+    batch
+}
+
 /// Spawn a per-session worker task.
 ///
 /// Called by the message handler when no sender exists for the session key.
@@ -361,7 +420,6 @@ pub fn spawn_worker(
 
     let tx_for_map = tx.clone();
     tokio::spawn(async move {
-        let window = Duration::from_millis(DEBOUNCE_MS);
         let (chat_id, eff_thread_id) = key;
         let tg_chat_id = ctx.chat_id;
 
@@ -377,21 +435,7 @@ pub fn spawn_worker(
                 batch_size = 1,
                 "worker received message, starting debounce"
             );
-            let mut batch = vec![first];
-
-            // Collect additional messages within debounce window (D-01)
-            loop {
-                tokio::select! {
-                    biased;
-                    msg = rx.recv() => {
-                        match msg {
-                            Some(m) => batch.push(m),
-                            None => break,
-                        }
-                    }
-                    _ = sleep(window) => break,
-                }
-            }
+            let batch = collect_batch(first, &mut rx).await;
 
             // Group vs DM detection: used for tag derivation, live-thinking
             // suppression, and reply-to behavior across the batch.
