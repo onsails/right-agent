@@ -353,11 +353,7 @@ See [Upgrade & Migration Model](#upgrade--migration-model) for category definiti
 
 Two modes, configured per-agent via `memory.provider` in agent.yaml:
 
-**File mode (default):** Agent manages `MEMORY.md` via CC Edit/Write.
-Bot injects file contents into system prompt (truncated to 200 lines).
-No MCP memory tools.
-
-**Hindsight mode (optional):** Hindsight Cloud API (`api.hindsight.vectorize.io`),
+**Hindsight mode (primary):** Hindsight Cloud API (`api.hindsight.vectorize.io`),
 one bank per agent. Three MCP tools exposed via aggregator:
 `memory_retain`, `memory_recall`, `memory_reflect`. Prefetch cache is in-memory
 (lost on restart → blocking recall on first interaction).
@@ -376,6 +372,10 @@ or auto-retain. Cron prompts are static instructions — recall results would be
 irrelevant and corrupt user memory representations (same approach as hermes-agent
 `skip_memory=True`). Crons can call `memory_recall` and `memory_retain` MCP tools
 explicitly when needed.
+
+**File mode (fallback):** Agent manages `MEMORY.md` via CC Edit/Write.
+Bot injects file contents into system prompt (truncated to 200 lines).
+No MCP memory tools.
 
 The legacy `store_record` / `query_records` / `search_records` / `delete_record`
 tools are removed from the surface; their backing tables (`memories`,
