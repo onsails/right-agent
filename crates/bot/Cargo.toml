@@ -35,3 +35,4 @@ whisper-rs = { version = "0.16", default-features = false, features = ["metal"] 
 
 [dev-dependencies]
 right-agent = { path = "../right-agent", version = "*", features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
