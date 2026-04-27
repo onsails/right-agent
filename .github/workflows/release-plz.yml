@@ -41,22 +41,6 @@ jobs:
       group: release-plz-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - name: Auto-rebase open release-plz PR on master
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: |
-          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
-            --search "head:release-plz-" \
-            --json number --jq '.[0].number // empty')
-          if [ -z "$PR" ]; then
-            echo "No open release-plz PR — skipping auto-rebase"
-            exit 0
-          fi
-          echo "Rebasing PR #$PR on master so release tags include latest master content"
-          gh api -X PUT "/repos/$GITHUB_REPOSITORY/pulls/$PR/update-branch" \
-            --input - <<<'{"method":"rebase"}' \
-            || echo "::warning::Auto-rebase of PR #$PR failed; release tag may point to outdated content"
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
