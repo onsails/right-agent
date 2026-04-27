@@ -33,29 +33,27 @@ fn migrate_old_home(old: &Path, new: &Path) -> miette::Result<()> {
             .ok()
             .filter(|m| m.len() <= MAX_STATE_JSON_BYTES)
             .and_then(|_| std::fs::read_to_string(&state_path).ok());
-        if let Some(content) = content {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(port) = json
-                    .get("pc_port")
-                    .and_then(|v| v.as_u64())
-                    .and_then(|p| u16::try_from(p).ok())
-                {
-                    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
-                    if std::net::TcpStream::connect_timeout(
-                        &addr,
-                        std::time::Duration::from_millis(500),
-                    )
-                    .is_ok()
-                    {
-                        return Err(miette::miette!(
-                            "Detected {} with a running process-compose on port {}. \
-                             Stop it before upgrading — run the old `right down` (or kill \
-                             the process-compose process), then re-run.",
-                            old.display(),
-                            port,
-                        ));
-                    }
-                }
+        if let Some(content) = content
+            && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(port) = json
+                .get("pc_port")
+                .and_then(|v| v.as_u64())
+                .and_then(|p| u16::try_from(p).ok())
+        {
+            let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+            if std::net::TcpStream::connect_timeout(
+                &addr,
+                std::time::Duration::from_millis(500),
+            )
+            .is_ok()
+            {
+                return Err(miette::miette!(
+                    "Detected {} with a running process-compose on port {}. \
+                     Stop it before upgrading — run the old `right down` (or kill \
+                     the process-compose process), then re-run.",
+                    old.display(),
+                    port,
+                ));
             }
         }
     }
