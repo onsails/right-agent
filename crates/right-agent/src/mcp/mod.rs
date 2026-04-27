@@ -4,6 +4,7 @@ pub mod oauth;
 pub mod proxy;
 pub mod reconnect;
 pub mod refresh;
+pub mod tool_error;
 
 /// Name of the built-in MCP server that right-agent manages.
 /// Protected from `/mcp remove` — required for core functionality.
