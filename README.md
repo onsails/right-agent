@@ -48,7 +48,7 @@ Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
 **Right with your data.** MCP tokens, OAuth refresh tokens, Claude auth — all live on the host, outside every sandbox. Agents call tools; they never see the credentials. Network egress goes through a policy engine with TLS inspection. Compromised agent? Worst case it misuses a tool. It cannot exfiltrate the key.
 
-**Right with Anthropic.** Everything — including the login flow — goes through the official `claude` binary. No private API calls, no scraped endpoints, no OAuth key juggling. Your Claude subscription, used the way Anthropic intends. One `right up` in the terminal; every other step, Claude login included, happens in Telegram.
+**Right with Anthropic.** Everything — including the login flow — goes through the official `claude` binary. No private API calls, no scraped endpoints, no OAuth key juggling. Your Claude subscription, used the way Anthropic intends: `claude -p`. One `right up` in the terminal; every other step, Claude login included, happens in Telegram.
 
 ## What you get out of the box
 
