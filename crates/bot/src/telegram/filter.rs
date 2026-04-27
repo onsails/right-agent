@@ -242,4 +242,46 @@ mod tests {
             Some(AddressKind::GroupMentionText)
         ));
     }
+
+    #[test]
+    fn vonder_repro_three_album_siblings_all_routed() {
+        // Reproduces the bug from ~/.right/logs/agent-b.log.2026-04-27 lines 137-152:
+        // three messages sharing media_group_id, only the third carries the @mention.
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -4996137249;
+        let sender_id = 42;
+        let allowlist = allowlist_with(vec![], vec![chat_id]);
+
+        let f = make_routing_filter(allowlist, identity.clone());
+
+        let s1 = group_msg_with_media_group(
+            chat_id,
+            sender_id,
+            Some("vonder-album"),
+            /*caption_with_mention=*/ false,
+            &identity.username,
+        );
+        let s2 = group_msg_with_media_group(
+            chat_id,
+            sender_id,
+            Some("vonder-album"),
+            /*caption_with_mention=*/ false,
+            &identity.username,
+        );
+        let s3 = group_msg_with_media_group(
+            chat_id,
+            sender_id,
+            Some("vonder-album"),
+            /*caption_with_mention=*/ true,
+            &identity.username,
+        );
+
+        assert!(f(s1).is_some(), "sibling 1 must reach handle_message");
+        assert!(f(s2).is_some(), "sibling 2 must reach handle_message");
+        let d3 = f(s3).expect("captioned sibling must reach handle_message");
+        assert!(d3.address.is_some());
+    }
 }
