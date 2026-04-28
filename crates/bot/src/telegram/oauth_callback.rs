@@ -1,6 +1,6 @@
 //! Axum Unix-domain-socket callback server for MCP OAuth redirects.
 //!
-//! Each bot process binds a Unix socket at `<agent_dir>/oauth-callback.sock` and
+//! Each bot process binds a Unix socket at `<agent_dir>/bot.sock` and
 //! exposes `GET /oauth/{agent_name}/callback?code=...&state=...`.
 //!
 //! PendingAuth lifecycle (D-05, D-06):

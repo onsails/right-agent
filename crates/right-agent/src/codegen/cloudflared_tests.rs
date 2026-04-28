@@ -57,7 +57,7 @@ fn ingress_service_is_unix_socket_in_agent_dir() {
     )];
     let yaml = generate_cloudflared_config(&agents, "t.example.com", None).unwrap();
     assert!(
-        yaml.contains("unix:/home/user/.right/agents/myagent/oauth-callback.sock"),
+        yaml.contains("unix:/home/user/.right/agents/myagent/bot.sock"),
         "wrong socket service: {yaml}"
     );
 }
@@ -67,9 +67,7 @@ fn catch_all_is_always_last_entry() {
     let agents = vec![("agent1".to_string(), PathBuf::from("/tmp/agents/agent1"))];
     let yaml = generate_cloudflared_config(&agents, "t.example.com", None).unwrap();
     let catch_all_pos = yaml.rfind("http_status:404").expect("catch-all not found");
-    let agent_rule_pos = yaml
-        .rfind("oauth-callback.sock")
-        .expect("agent rule not found");
+    let agent_rule_pos = yaml.rfind("bot.sock").expect("agent rule not found");
     assert!(
         catch_all_pos > agent_rule_pos,
         "catch-all must be after all agent rules. yaml:\n{yaml}"

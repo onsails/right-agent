@@ -402,7 +402,7 @@ mod tests {
         "data.db",
         "data.db-shm",
         "data.db-wal",
-        "oauth-callback.sock",
+        "bot.sock",
         ".claude/shell-snapshots",
         ".claude/.credentials.json", // symlink, target owned by host
         "inbox",

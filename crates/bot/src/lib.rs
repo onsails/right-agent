@@ -435,7 +435,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     tokio::spawn(run_pending_auth_cleanup(Arc::clone(&pending_auth)));
 
     // Spawn axum OAuth callback server and wait for it to bind before starting teloxide
-    let socket_path = agent_dir.join("oauth-callback.sock");
+    let socket_path = agent_dir.join("bot.sock");
     let (axum_ready_tx, axum_ready_rx) = tokio::sync::oneshot::channel::<()>();
     let axum_socket = socket_path.clone();
     let axum_handle = tokio::spawn(async move {

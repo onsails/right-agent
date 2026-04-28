@@ -44,7 +44,7 @@ pub fn generate_cloudflared_config(
         .map(|(name, dir)| CloudflaredAgent {
             name: name.clone(),
             socket_path: dir
-                .join("oauth-callback.sock")
+                .join("bot.sock")
                 .to_string_lossy()
                 .to_string(),
         })
