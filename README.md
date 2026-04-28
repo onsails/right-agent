@@ -19,25 +19,25 @@
 
 ## the problem
 
-on most setups, a claude code agent you leave running long-term ends up in one of two bad places.
+in most agent setups, the agent you leave running long-term has two problems baked in.
 
-the simple way: one config file with plaintext tokens, no real sandbox, a context that resets every restart. it's enough for a demo. it isn't enough for an agent you depend on.
+tokens sit in a plaintext config file. the sandbox is missing or fake. context resets on restart. enough for a demo, not for what you depend on.
 
-the elaborate way: pick a chat backend, a memory store, a tunnel, a model provider, a sandbox layer, then wire them together over a weekend. the agent works on monday. it didn't have to take a weekend.
+and getting even that far costs a weekend: a chat backend, a memory store, a tunnel, a sandbox layer — pick them, wire them. the agent works on monday. it didn't have to take a weekend.
 
-right agent does neither. the pieces are picked, the wiring is done, you get one telegram thread per agent.
+right agent fixes both. the pieces are picked, the wiring is done, telegram is your only console.
 
 ## what we picked for you
 
-security first. usability never sacrificed for it. nothing else gets a vote.
+every agent inside its own sandbox. security first; usability never sacrificed for it. nothing else gets a vote.
 
 we make the choices for you and polish what we ship. the box is closed:
 
-- **chat surface.** telegram. one polished thread per agent, with attachments both ways, media groups, voice notes, group/topic routing. not a matrix of telegram + slack + discord + web ui.
+- **chat surface.** telegram. dm, groups, topics — polished, with attachments both ways, media groups, voice notes. not a matrix of telegram + slack + discord + web ui.
 - **memory.** hindsight cloud (semantic recall, recommended) or local `MEMORY.md` (no cloud dependency). picked at agent init.
 - **model provider.** your claude subscription. `claude -p`, no api keys per agent.
 - **tunnel.** cloudflared. free, secure, production-grade.
-- **sandbox.** on by default. the only opt-out is for agents that need host access (e.g. computer-use, browser automation), and that's set explicitly per-agent.
+- **sandbox.** [nvidia openshell](https://github.com/NVIDIA/OpenShell), on by default. the only opt-out is for agents that need host access (e.g. computer-use, browser automation), and that's set explicitly per-agent.
 
 the consequence: features arrive slowly. we polish what's here before adding what's next. if a knob isn't exposed, we haven't found a way to add it without making the product worse for everyone already using it.
 
@@ -83,7 +83,7 @@ after `right up`, the terminal is done. claude login, mcp authorization, file at
 
 an agent you leave running long-term will eventually fetch a poisoned webpage, install a hostile skill, or accept a malicious memory through an mcp tool. the design assumes this. what matters is what the agent can reach when it does.
 
-on a typical claude code setup, the agent has direct access to:
+on a typical agent setup, the agent has direct access to:
 
 - every mcp token in `.mcp.json`: linear, notion, gmail, sentry, github
 - your claude oauth refresh token
