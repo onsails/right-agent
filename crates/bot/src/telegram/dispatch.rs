@@ -79,7 +79,7 @@ enum BotCommand {
 /// Rationale: Arc<Mutex<Vec<Child>>> was rejected because invoke_cc never added children
 /// to the registry, making the kill loop dead code. kill_on_drop is sufficient.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_telegram(
+pub async fn run_telegram<L>(
     token: String,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     agent_dir: PathBuf,
@@ -97,7 +97,13 @@ pub async fn run_telegram(
     prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
-) -> miette::Result<()> {
+    update_listener: L,
+) -> miette::Result<()>
+where
+    L: teloxide::update_listeners::UpdateListener<Err = std::convert::Infallible>
+        + Send
+        + 'static,
+{
     let bot = build_bot(token);
 
     // Resolve bot identity (username + user_id) via getMe — required for group mention detection.
@@ -294,8 +300,13 @@ pub async fn run_telegram(
         tracing::warn!("delete_my_commands (all_chat_administrators): {e:#}");
     }
 
-    tracing::info!("teloxide dispatcher starting (long-polling)");
-    dispatcher.dispatch().await;
+    tracing::info!("teloxide dispatcher starting (webhook)");
+    dispatcher
+        .dispatch_with_listener(
+            update_listener,
+            teloxide::error_handlers::LoggingErrorHandler::new(),
+        )
+        .await;
     tracing::info!("dispatcher exited cleanly");
     Ok(())
 }

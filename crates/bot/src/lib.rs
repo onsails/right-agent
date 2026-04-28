@@ -454,10 +454,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .ok_or_else(|| miette::miette!("agent.yaml missing required `secret:` field"))?;
     let webhook_secret = right_agent::mcp::derive_token(&agent_secret, "tg-webhook")?;
 
-    // Build the webhook listener + router. The listener is consumed by Task 9
-    // (dispatcher.dispatch_with_listener); for Task 8 we hold it in a variable
-    // to be passed to run_telegram once Task 9 wires it through.
-    let (_update_listener, _webhook_stop, webhook_router) =
+    // Build the webhook listener + router. The listener is consumed by
+    // run_telegram → dispatcher.dispatch_with_listener; the router is mounted
+    // on the bot.sock UDS axum app so cloudflared can POST updates.
+    let (update_listener, _webhook_stop, webhook_router) =
         telegram::webhook::build_webhook_router(webhook_secret.clone(), webhook_url.clone());
 
     // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
@@ -807,6 +807,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             prefetch_cache,
             upgrade_lock,
             stt,
+            update_listener,
         ) => result,
         result = axum_handle => result
             .map_err(|e| miette::miette!("axum task panicked: {e:#}"))?,
