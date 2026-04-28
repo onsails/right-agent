@@ -3,18 +3,28 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-E8632A.svg" alt="license"></a>
   <a href="https://github.com/onsails/right-agent/actions"><img src="https://github.com/onsails/right-agent/actions/workflows/build.yml/badge.svg" alt="build"></a>
-  <a href="https://t.me/rightclaw"><img src="https://img.shields.io/badge/Telegram-chat-blue?logo=telegram" alt="telegram"></a>
+  <a href="https://t.me/rightclaw"><img src="https://img.shields.io/badge/Telegram-chat-E8632A?logo=telegram" alt="telegram"></a>
 </p>
 
 <p align="center">
   <b>the proper claude code runtime</b><br/>
-  sandboxed multi-agent runtime. lives in telegram. runs on your $20 claude subscription.
+  telegram-native · sandboxed by default · runs on your $20 claude subscription
 </p>
 
 <p align="center">
   <img src="images/screenshot.png" alt="Right Agent in Telegram" width="720"/>
+</p>
+
+<p align="center">
+  <a href="#the-problem">the problem</a> ·
+  <a href="#what-we-picked-for-you">what we picked for you</a> ·
+  <a href="#quick-start">quick start</a> ·
+  <a href="#what-you-get">what you get</a> ·
+  <a href="#how-it-stays-safe">how it stays safe</a> ·
+  <a href="#how-it-compares">how it compares</a> ·
+  <a href="#roadmap">roadmap</a>
 </p>
 
 ## the problem
@@ -110,6 +120,9 @@ worst case for a compromised agent: it misuses a tool while it's running. it can
 
 ### the topology
 
+<details>
+<summary>show diagram</summary>
+
 ```mermaid
 flowchart TB
   U[You]
@@ -168,6 +181,8 @@ flowchart TB
   style SANDBOX_1 stroke:#E8632A,stroke-width:2px
   style SANDBOX_2 stroke:#E8632A,stroke-width:2px
 ```
+
+</details>
 
 ### what egress looks like
 
