@@ -14,18 +14,57 @@ fn isolated_home() -> tempfile::TempDir {
 }
 
 #[test]
-fn doctor_renders_brand_block_in_mono() {
+fn doctor_renders_brand_block_ascii() {
     let home = isolated_home();
-    // The test process is non-TTY so detect() returns Ascii (| rail, - dashes).
-    // We assert on the structural markers present under all theme tiers:
-    // - a rail-prefixed "diagnostics" section header
-    // - a "checks passed" summary line
+    // assert_cmd runs the binary non-TTY, which forces Theme::Ascii
+    // (`|` rail, `-` dashes, `[ok]/[warn]/[err]` glyphs).
     right()
-        .env("NO_COLOR", "1")
-        .env("TERM", "xterm-256color")
+        .env_remove("NO_COLOR")
         .args(["--home", home.path().to_str().unwrap(), "doctor"])
         .assert()
-        // doctor exits nonzero whenever any check fails — accept either outcome
+        // doctor may exit nonzero on a fresh tempdir (missing deps) — that's fine.
         .stdout(predicate::str::contains("| diagnostics"))
         .stdout(predicate::str::contains("checks passed"));
+}
+
+#[test]
+fn doctor_ascii_no_unicode_atoms_and_no_ansi() {
+    let home = isolated_home();
+    let assert = right()
+        .args(["--home", home.path().to_str().unwrap(), "doctor"])
+        .assert();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    // No Unicode brand atoms in Ascii mode.
+    for ch in ['▐', '✓', '✗', '…'] {
+        assert!(
+            !stdout.contains(ch),
+            "ascii output must not contain {ch:?}, full stdout:\n{stdout}"
+        );
+    }
+    // The bare ASCII '!' may appear in shell instructions — only exclude bracketed glyphs.
+    // Verify no ANSI escapes.
+    assert!(
+        !stdout.contains('\x1b'),
+        "ascii output must not contain ANSI escapes, full stdout:\n{stdout}"
+    );
+    // Verify the bracketed Ascii glyph at least once (any of [ok]/[warn]/[err]).
+    assert!(
+        stdout.contains("[ok]") || stdout.contains("[warn]") || stdout.contains("[err]"),
+        "ascii output should contain at least one bracketed glyph, full stdout:\n{stdout}"
+    );
+}
+
+#[test]
+fn doctor_dumb_term_still_ascii() {
+    // Even with TERM=dumb explicitly set, output stays Ascii (already the default for non-TTY).
+    let home = isolated_home();
+    let assert = right()
+        .env("TERM", "dumb")
+        .args(["--home", home.path().to_str().unwrap(), "doctor"])
+        .assert();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("| diagnostics") || stdout.contains("|  ["),
+        "TERM=dumb should still produce Ascii rail+glyphs, full stdout:\n{stdout}"
+    );
 }
