@@ -698,9 +698,9 @@ async fn main() -> miette::Result<()> {
         } => {
             let agents_dir = right_agent::config::agents_dir(&home);
             let token_map_path = token_map.clone();
-            let allowed_hosts = right_agent::config::read_global_config(&home)
-                .map(|c| c.aggregator.allowed_hosts)
-                .unwrap_or_default();
+            let allowed_hosts = right_agent::config::read_global_config(&home)?
+                .aggregator
+                .allowed_hosts;
             let token_map_content = std::fs::read_to_string(token_map)
                 .map_err(|e| miette::miette!("failed to read token map: {e:#}"))?;
             let token_entries: std::collections::HashMap<String, String> =

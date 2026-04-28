@@ -599,8 +599,9 @@ fn check_cloudflared_binary() -> DoctorCheck {
 
 /// Check whether a cloudflare tunnel is configured in `<home>/config.yaml`. (D-03)
 ///
-/// Warn severity — tunnel is optional for bots that don't use MCP OAuth.
-/// When tunnel is absent, `/mcp auth` will fail at runtime but other commands work.
+/// Tunnel is mandatory — Telegram webhooks require it. If `read_global_config`
+/// fails (missing/invalid tunnel block), this surfaces a Warn check with the
+/// underlying error so `right doctor` shows the operator what to fix.
 /// Unified tunnel config + credentials check.
 fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
     let config = match crate::config::read_global_config(home) {
