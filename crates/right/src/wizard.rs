@@ -350,7 +350,6 @@ fn handle_existing_tunnel(
             }
 
             delete_tunnel(cf_bin, &existing.name)?;
-            let theme = right_agent::ui::detect();
             println!(
                 "{}",
                 right_agent::ui::status(right_agent::ui::Glyph::Ok)
@@ -361,7 +360,6 @@ fn handle_existing_tunnel(
             );
 
             let entry = create_tunnel(cf_bin, original_name)?;
-            let theme = right_agent::ui::detect();
             println!(
                 "{}",
                 right_agent::ui::status(right_agent::ui::Glyph::Ok)
