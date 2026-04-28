@@ -27,9 +27,9 @@
   <a href="#roadmap">roadmap</a>
 </p>
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## the problem
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 in most agent setups, the agent you leave running long-term has two problems baked in.
 
@@ -39,9 +39,9 @@ and getting even that far costs a weekend: a chat backend, a memory store, a tun
 
 right agent fixes both. the pieces are picked, the wiring is done, telegram is your only console.
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## what we picked for you
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 every agent inside its own sandbox. security first; usability never sacrificed for it. nothing else gets a vote.
 
@@ -55,9 +55,9 @@ we make the choices for you and polish what we ship. the box is closed:
 
 the consequence: features arrive slowly. we polish what's here before adding what's next. if a knob isn't exposed, we haven't found a way to add it without making the product worse for everyone already using it.
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## quick start
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 prerequisites:
 
@@ -74,9 +74,9 @@ right up
 
 full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## what you get
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 ### multiple agents on one subscription
 
@@ -98,9 +98,9 @@ the first session with a fresh agent is a bootstrap, not a chat. the agent answe
 
 after `right up`, the terminal is done. claude login, mcp authorization, file attachments, cron notifications, `/doctor`, `/reset`. all in telegram.
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## how it stays safe
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 an agent you leave running long-term will eventually fetch a poisoned webpage, install a hostile skill, or accept a malicious memory through an mcp tool. the design assumes this. what matters is what the agent can reach when it does.
 
@@ -200,9 +200,9 @@ outbound traffic from the sandbox goes through openshell's policy engine. tls is
 
 the default policy is permissive. one line in `agent.yaml` switches to restrictive: anthropic and claude endpoints only.
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## how it compares
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 | | typical multi-agent runtime | right agent |
 |---|---|---|
@@ -217,9 +217,9 @@ the default policy is permissive. one line in `agent.yaml` switches to restricti
 
 other runtimes ship breadth and leave the wiring to you. right agent ships one path and does the wiring itself.
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## roadmap
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 shipped:
 - multi-agent orchestration, sandboxed by default
@@ -242,23 +242,23 @@ next:
 
 full tracker on [github issues](https://github.com/onsails/right-agent/issues).
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## docs
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 - [installation](docs/INSTALL.md) — full prerequisites
 - [security model](docs/SECURITY.md) — policies, credential isolation, threat model
 - [architecture](ARCHITECTURE.md) — internal topology, sqlite schema, invocation contract
 - [prompting system](PROMPT_SYSTEM.md) — how agent system prompts are assembled
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## license
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 apache-2.0.
 
-<img src="assets/section-mark.svg" height="20" alt="">
-
 ## credits
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 built on [claude code](https://docs.anthropic.com/en/docs/claude-code), [nvidia openshell](https://github.com/NVIDIA/OpenShell), and [process-compose](https://github.com/F1bonacc1/process-compose).
