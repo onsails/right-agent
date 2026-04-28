@@ -244,27 +244,24 @@ pub fn run_agent_codegen(
         }
     }
 
-    // Generate cloudflared config and wrapper script when tunnel is configured.
-    if let Some(ref tunnel_cfg) = global_cfg.tunnel {
-        which::which("cloudflared").map_err(|_| {
-            miette::miette!(
-                "TunnelConfig is present but `cloudflared` is not in PATH -- install cloudflared first"
-            )
-        })?;
-        if !tunnel_cfg.credentials_file.exists() {
-            return Err(miette::miette!(
-                help = "Run `right config set` and select Tunnel -- choose \"Delete and recreate\" to generate new credentials on this machine",
-                "Tunnel credentials file not found: {}\n\n  \
-                 This usually means the tunnel was created on a different machine,\n  \
-                 or `right init` was re-run after the credentials file was removed.",
-                tunnel_cfg.credentials_file.display()
-            ));
-        }
+    // Generate cloudflared config and wrapper script. Tunnel is always configured.
+    let tunnel_cfg = &global_cfg.tunnel;
+    which::which("cloudflared").map_err(|_| {
+        miette::miette!(
+            "TunnelConfig is present but `cloudflared` is not in PATH -- install cloudflared first"
+        )
+    })?;
+    if !tunnel_cfg.credentials_file.exists() {
+        return Err(miette::miette!(
+            help = "Run `right config set` and select Tunnel -- choose \"Delete and recreate\" to generate new credentials on this machine",
+            "Tunnel credentials file not found: {}\n\n  \
+             This usually means the tunnel was created on a different machine,\n  \
+             or `right init` was re-run after the credentials file was removed.",
+            tunnel_cfg.credentials_file.display()
+        ));
     }
 
-    let cloudflared_script_path: Option<std::path::PathBuf> = if let Some(ref tunnel_cfg) =
-        global_cfg.tunnel
-    {
+    let cloudflared_script_path: Option<std::path::PathBuf> = {
         let agent_pairs: Vec<(String, std::path::PathBuf)> = all_agents
             .iter()
             .map(|a| (a.name.clone(), a.path.clone()))
@@ -304,8 +301,6 @@ pub fn run_agent_codegen(
         }
         tracing::info!(path = %script_path.display(), "cloudflared wrapper script written");
         Some(script_path)
-    } else {
-        None
     };
 
     // Generate process-compose.yaml.

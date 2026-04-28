@@ -64,10 +64,7 @@ pub async fn check_tunnel(home: &Path) -> TunnelState {
         Err(_) => return TunnelState::NotConfigured,
     };
 
-    let tunnel = match config.tunnel {
-        Some(t) => t,
-        None => return TunnelState::NotConfigured,
-    };
+    let tunnel = config.tunnel;
 
     // Step 2: check process-compose for cloudflared
     let pc = match PcClient::from_home(home) {

@@ -788,17 +788,7 @@ async fn handle_mcp_auth(
             return Ok(());
         }
     };
-    let tunnel = match global_config.tunnel.as_ref() {
-        Some(t) => t.clone(),
-        None => {
-            bot.send_message(
-                msg.chat.id,
-                "Tunnel not configured. Run:\n  right init --tunnel-token TOKEN",
-            )
-            .await?;
-            return Ok(());
-        }
-    };
+    let tunnel = global_config.tunnel.clone();
 
     // 3. Check cloudflared binary
     if which::which("cloudflared").is_err() {

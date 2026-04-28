@@ -102,9 +102,9 @@ fn resolve_home_with_base(home_dir: &Path) -> miette::Result<PathBuf> {
 }
 
 /// Global Right Agent configuration stored at `~/.right/config.yaml`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GlobalConfig {
-    pub tunnel: Option<TunnelConfig>,
+    pub tunnel: TunnelConfig,
     pub aggregator: AggregatorConfig,
 }
 
@@ -184,34 +184,40 @@ pub fn backups_dir(home: &Path, agent_name: &str) -> PathBuf {
 
 /// Read global config from `<home>/config.yaml`.
 ///
-/// Returns `Ok(GlobalConfig::default())` if the file does not exist.
+/// Returns `Err` if the file does not exist or has no `tunnel:` block —
+/// Cloudflare Tunnel is mandatory (Telegram webhooks require it).
 /// Returns `Err` with a migration hint if the config uses the old `token:` format.
 pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
     let path = home.join("config.yaml");
     if !path.exists() {
-        return Ok(GlobalConfig::default());
+        return Err(miette::miette!(
+            help = "run: right init --tunnel-name NAME --tunnel-hostname HOSTNAME",
+            "global config not found at {} — tunnel configuration is required (run `right init`)",
+            path.display()
+        ));
     }
     let content =
         std::fs::read_to_string(&path).map_err(|e| miette::miette!("read config.yaml: {e:#}"))?;
     let raw: RawGlobalConfig = serde_saphyr::from_str(&content)
         .map_err(|e| miette::miette!("parse config.yaml: {e:#}"))?;
+    let raw_tunnel = raw.tunnel.ok_or_else(|| {
+        miette::miette!(
+            help = "run: right init --tunnel-name NAME --tunnel-hostname HOSTNAME",
+            "config.yaml has no `tunnel:` block — Cloudflare Tunnel is required (re-run `right init`)"
+        )
+    })?;
+    if raw_tunnel.credentials_file.is_empty() || raw_tunnel.tunnel_uuid.is_empty() {
+        return Err(miette::miette!(
+            help = "run: right init --tunnel-name NAME --tunnel-hostname HOSTNAME",
+            "Tunnel config is outdated (uses token-based format) — re-run `right init` to migrate"
+        ));
+    }
     Ok(GlobalConfig {
-        tunnel: raw
-            .tunnel
-            .map(|t| -> miette::Result<TunnelConfig> {
-                if t.credentials_file.is_empty() || t.tunnel_uuid.is_empty() {
-                    return Err(miette::miette!(
-                        help = "run: right init --tunnel-name NAME --tunnel-hostname HOSTNAME",
-                        "Tunnel config is outdated (uses token-based format) — re-run `right init` to migrate"
-                    ));
-                }
-                Ok(TunnelConfig {
-                    tunnel_uuid: t.tunnel_uuid,
-                    credentials_file: PathBuf::from(&t.credentials_file),
-                    hostname: t.hostname,
-                })
-            })
-            .transpose()?,
+        tunnel: TunnelConfig {
+            tunnel_uuid: raw_tunnel.tunnel_uuid,
+            credentials_file: PathBuf::from(&raw_tunnel.credentials_file),
+            hostname: raw_tunnel.hostname,
+        },
         aggregator: raw
             .aggregator
             .map(|a| AggregatorConfig {
@@ -227,19 +233,18 @@ pub fn read_global_config(home: &Path) -> miette::Result<GlobalConfig> {
 pub fn write_global_config(home: &Path, config: &GlobalConfig) -> miette::Result<()> {
     let path = home.join("config.yaml");
     let mut content = String::new();
-    if let Some(ref tunnel) = config.tunnel {
-        content.push_str("tunnel:\n");
-        let uuid = tunnel.tunnel_uuid.replace('"', "\\\"");
-        let creds = tunnel
-            .credentials_file
-            .display()
-            .to_string()
-            .replace('"', "\\\"");
-        let hostname = tunnel.hostname.replace('"', "\\\"");
-        content.push_str(&format!("  tunnel_uuid: \"{uuid}\"\n"));
-        content.push_str(&format!("  credentials_file: \"{creds}\"\n"));
-        content.push_str(&format!("  hostname: \"{hostname}\"\n"));
-    }
+    content.push_str("tunnel:\n");
+    let uuid = config.tunnel.tunnel_uuid.replace('"', "\\\"");
+    let creds = config
+        .tunnel
+        .credentials_file
+        .display()
+        .to_string()
+        .replace('"', "\\\"");
+    let hostname = config.tunnel.hostname.replace('"', "\\\"");
+    content.push_str(&format!("  tunnel_uuid: \"{uuid}\"\n"));
+    content.push_str(&format!("  credentials_file: \"{creds}\"\n"));
+    content.push_str(&format!("  hostname: \"{hostname}\"\n"));
     if !config.aggregator.allowed_hosts.is_empty() {
         content.push_str("aggregator:\n");
         content.push_str("  allowed_hosts:\n");
@@ -292,30 +297,32 @@ mod tests {
     fn write_then_read_roundtrips_new_fields() {
         let dir = TempDir::new().unwrap();
         let written = GlobalConfig {
-            tunnel: Some(TunnelConfig {
+            tunnel: TunnelConfig {
                 tunnel_uuid: "abc-123".to_string(),
                 credentials_file: PathBuf::from("/tmp/abc-123.json"),
                 hostname: "test.example.com".to_string(),
-            }),
+            },
             aggregator: AggregatorConfig::default(),
         };
         write_global_config(dir.path(), &written).unwrap();
         let read = read_global_config(dir.path()).unwrap();
-        let tunnel = read.tunnel.expect("tunnel should be present after write");
-        assert_eq!(tunnel.tunnel_uuid, "abc-123");
-        assert_eq!(tunnel.credentials_file, PathBuf::from("/tmp/abc-123.json"));
-        assert_eq!(tunnel.hostname, "test.example.com");
+        assert_eq!(read.tunnel.tunnel_uuid, "abc-123");
+        assert_eq!(
+            read.tunnel.credentials_file,
+            PathBuf::from("/tmp/abc-123.json")
+        );
+        assert_eq!(read.tunnel.hostname, "test.example.com");
     }
 
     #[test]
     fn write_global_config_emits_tunnel_uuid_not_token() {
         let dir = TempDir::new().unwrap();
         let config = GlobalConfig {
-            tunnel: Some(TunnelConfig {
+            tunnel: TunnelConfig {
                 tunnel_uuid: "abc-123".to_string(),
                 credentials_file: PathBuf::from("/tmp/abc-123.json"),
                 hostname: "test.example.com".to_string(),
-            }),
+            },
             aggregator: AggregatorConfig::default(),
         };
         write_global_config(dir.path(), &config).unwrap();
@@ -355,13 +362,33 @@ mod tests {
     }
 
     #[test]
-    fn read_global_config_returns_default_when_file_missing() {
+    fn read_global_config_errors_when_file_missing() {
         let dir = TempDir::new().unwrap();
-        let config = read_global_config(dir.path()).unwrap();
-        assert!(config.tunnel.is_none(), "no tunnel config when file absent");
+        let err = read_global_config(dir.path()).unwrap_err();
+        let msg = format!("{err:#}");
         assert!(
-            config.aggregator.allowed_hosts.is_empty(),
-            "aggregator.allowed_hosts defaults to empty (host check disabled)"
+            msg.contains("not found") || msg.contains("tunnel"),
+            "error should mention missing config or tunnel, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn read_global_config_errors_when_tunnel_block_missing() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            "aggregator:\n  allowed_hosts:\n    - example.com\n",
+        )
+        .unwrap();
+        let err = read_global_config(dir.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("tunnel"),
+            "error must mention tunnel, got: {msg}"
+        );
+        assert!(
+            msg.contains("right init"),
+            "error must hint at right init, got: {msg}"
         );
     }
 
@@ -382,7 +409,11 @@ mod tests {
     fn aggregator_allowed_hosts_roundtrip() {
         let dir = TempDir::new().unwrap();
         let written = GlobalConfig {
-            tunnel: None,
+            tunnel: TunnelConfig {
+                tunnel_uuid: "abc-123".to_string(),
+                credentials_file: PathBuf::from("/tmp/abc-123.json"),
+                hostname: "test.example.com".to_string(),
+            },
             aggregator: AggregatorConfig {
                 allowed_hosts: vec![
                     "mcp.example.com".to_string(),
@@ -399,17 +430,25 @@ mod tests {
                 "mcp.example.com:8100".to_string(),
             ]
         );
+        assert_eq!(read.tunnel.tunnel_uuid, "abc-123");
     }
 
     #[test]
     fn write_skips_aggregator_block_when_allowed_hosts_empty() {
         let dir = TempDir::new().unwrap();
-        let config = GlobalConfig::default();
+        let config = GlobalConfig {
+            tunnel: TunnelConfig {
+                tunnel_uuid: "abc-123".to_string(),
+                credentials_file: PathBuf::from("/tmp/abc-123.json"),
+                hostname: "test.example.com".to_string(),
+            },
+            aggregator: AggregatorConfig::default(),
+        };
         write_global_config(dir.path(), &config).unwrap();
         let content = std::fs::read_to_string(dir.path().join("config.yaml")).unwrap();
         assert!(
             !content.contains("aggregator:"),
-            "default (empty allowed_hosts) must not emit aggregator block, got: {content}"
+            "empty allowed_hosts must not emit aggregator block, got: {content}"
         );
     }
 

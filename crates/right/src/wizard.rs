@@ -463,14 +463,11 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
     loop {
         let config = read_global_config(home)?;
 
-        let tunnel_label = match &config.tunnel {
-            Some(t) => format!(
-                "Tunnel: {} ({})",
-                t.hostname,
-                &t.tunnel_uuid[..8.min(t.tunnel_uuid.len())]
-            ),
-            None => "Tunnel: (not configured)".to_string(),
-        };
+        let tunnel_label = format!(
+            "Tunnel: {} ({})",
+            config.tunnel.hostname,
+            &config.tunnel.tunnel_uuid[..8.min(config.tunnel.tunnel_uuid.len())]
+        );
 
         let agents_dir = right_agent::config::agents_dir(home);
         let agents = if agents_dir.exists() {
@@ -497,7 +494,12 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
                     .prompt()
                     .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
-                let result = tunnel_setup(tunnel_name.trim(), None, true)?;
+                let result = tunnel_setup(tunnel_name.trim(), None, true)?.ok_or_else(|| {
+                    miette::miette!(
+                        help = "run: cloudflared tunnel login, then re-run `right config`",
+                        "Cloudflare Tunnel is required — setup was skipped or no cloudflared cert"
+                    )
+                })?;
 
                 let mut new_config = read_global_config(home)?;
                 new_config.tunnel = result;

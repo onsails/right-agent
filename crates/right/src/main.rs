@@ -455,30 +455,11 @@ async fn main() -> miette::Result<()> {
             Some(ConfigCommands::Get { key }) => {
                 let config = right_agent::config::read_global_config(&home)?;
                 match key.as_str() {
-                    "tunnel.hostname" => println!(
-                        "{}",
-                        config
-                            .tunnel
-                            .as_ref()
-                            .map(|t| t.hostname.as_str())
-                            .unwrap_or("(not set)")
-                    ),
-                    "tunnel.uuid" => println!(
-                        "{}",
-                        config
-                            .tunnel
-                            .as_ref()
-                            .map(|t| t.tunnel_uuid.as_str())
-                            .unwrap_or("(not set)")
-                    ),
-                    "tunnel.credentials-file" => println!(
-                        "{}",
-                        config
-                            .tunnel
-                            .as_ref()
-                            .map(|t| t.credentials_file.display().to_string())
-                            .unwrap_or("(not set)".to_string())
-                    ),
+                    "tunnel.hostname" => println!("{}", config.tunnel.hostname),
+                    "tunnel.uuid" => println!("{}", config.tunnel.tunnel_uuid),
+                    "tunnel.credentials-file" => {
+                        println!("{}", config.tunnel.credentials_file.display())
+                    }
                     other => return Err(miette::miette!("Unknown config key: {other}")),
                 }
                 Ok(())
@@ -1366,10 +1347,30 @@ fn cmd_init(
     println!("Network policy: {network_policy_val}");
 
     // Tunnel setup via wizard.
-    let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
+    let tunnel_cfg =
+        crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?.ok_or_else(
+            || {
+                miette::miette!(
+                    help = "run: cloudflared tunnel login, then re-run `right init`",
+                    "Cloudflare Tunnel is required — setup was skipped or no cloudflared cert"
+                )
+            },
+        )?;
 
-    let mut config = right_agent::config::read_global_config(home).unwrap_or_default();
-    config.tunnel = tunnel_cfg;
+    // Preserve existing aggregator settings if config.yaml already exists, otherwise
+    // start fresh. We don't call read_global_config here unconditionally because it
+    // now errors when the tunnel block is missing — which is the case on first init.
+    let aggregator = if home.join("config.yaml").exists() {
+        right_agent::config::read_global_config(home)
+            .map(|c| c.aggregator)
+            .unwrap_or_default()
+    } else {
+        right_agent::config::AggregatorConfig::default()
+    };
+    let config = right_agent::config::GlobalConfig {
+        tunnel: tunnel_cfg,
+        aggregator,
+    };
     right_agent::config::write_global_config(home, &config)?;
 
     println!();
