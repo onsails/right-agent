@@ -551,9 +551,11 @@ pub fn spawn_worker(
             // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
-            let (reply_result, session_uuid) =
+            let (reply_result, session_uuid, is_first_call) =
                 match invoke_cc(&input, first_text, chat_id, eff_thread_id, is_group, &ctx).await {
-                    Ok((output, uuid)) => (Ok(output), uuid),
+                    Ok(CcReply { output, session_uuid, is_first_call }) => {
+                        (Ok(output), session_uuid, is_first_call)
+                    }
                     Err(failure) => {
                         let uuid = match &failure {
                             InvokeCcFailure::Reflectable { session_uuid, .. } => {
@@ -561,9 +563,11 @@ pub fn spawn_worker(
                             }
                             InvokeCcFailure::NonReflectable { .. } => String::new(),
                         };
-                        (Err(failure), uuid)
+                        (Err(failure), uuid, false)
                     }
                 };
+            // consumed by Task 5; placeholder to satisfy clippy
+            let _ = is_first_call;
 
             // Reverse sync .md changes from sandbox.
             // Bootstrap mode: BLOCK so files are on host for completion check.
@@ -1114,9 +1118,20 @@ impl From<String> for InvokeCcFailure {
     }
 }
 
+/// Successful payload returned by [`invoke_cc`].
+pub(crate) struct CcReply {
+    /// Parsed agent reply, or `None` when CC produced an empty/no-reply result.
+    pub output: Option<ReplyOutput>,
+    /// CC session UUID for this invocation (new or resumed).
+    pub session_uuid: String,
+    /// `true` if this invocation created a brand-new CC session
+    /// (i.e. the worker's first turn in this chat/thread).
+    pub is_first_call: bool,
+}
+
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
 ///
-/// Returns `Ok((Some(ReplyOutput), session_uuid))` on success,
+/// Returns `Ok(CcReply { output, session_uuid, is_first_call })` on success,
 /// `Err(InvokeCcFailure)` on subprocess failure or missing reply tool.
 async fn invoke_cc(
     input: &str,
@@ -1125,7 +1140,7 @@ async fn invoke_cc(
     eff_thread_id: i64,
     is_group: bool,
     ctx: &WorkerContext,
-) -> Result<(Option<ReplyOutput>, String), InvokeCcFailure> {
+) -> Result<CcReply, InvokeCcFailure> {
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
     let conn = right_agent::memory::open_connection(&ctx.agent_dir, false)
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
@@ -1698,7 +1713,12 @@ async fn invoke_cc(
     // Handle user-initiated stop.
     if stopped {
         tracing::info!(?chat_id, "CC session stopped by user");
-        return Ok((None, session_uuid)); // No reply to send — thinking message already updated.
+        // No reply to send — thinking message already updated.
+        return Ok(CcReply {
+            output: None,
+            session_uuid,
+            is_first_call,
+        });
     }
 
     // Handle timeout.
@@ -1760,10 +1780,18 @@ async fn invoke_cc(
                     spawn_token_request(ctx, tg_chat_id, ctx.effective_thread_id);
                     // Return Ok(None) — the initial message above is sufficient,
                     // don't send a second error message before instructions arrive.
-                    return Ok((None, session_uuid));
+                    return Ok(CcReply {
+                        output: None,
+                        session_uuid,
+                        is_first_call,
+                    });
                 } else {
                     // Token request already running — silent, don't spam.
-                    return Ok((None, session_uuid));
+                    return Ok(CcReply {
+                        output: None,
+                        session_uuid,
+                        is_first_call,
+                    });
                 }
             } else {
                 // No-sandbox: also use token request flow.
@@ -1780,9 +1808,17 @@ async fn invoke_cc(
                         tracing::warn!(?chat_id, "failed to send auth error notification: {e:#}");
                     }
                     spawn_token_request(ctx, tg_chat_id, ctx.effective_thread_id);
-                    return Ok((None, session_uuid));
+                    return Ok(CcReply {
+                        output: None,
+                        session_uuid,
+                        is_first_call,
+                    });
                 } else {
-                    return Ok((None, session_uuid));
+                    return Ok(CcReply {
+                        output: None,
+                        session_uuid,
+                        is_first_call,
+                    });
                 }
             }
         }
@@ -1846,7 +1882,11 @@ async fn invoke_cc(
             // Bootstrap completion is now detected by file presence after
             // reverse_sync in spawn_worker — no bootstrap_complete field needed.
 
-            Ok((Some(reply_output), session_uuid))
+            Ok(CcReply {
+                output: Some(reply_output),
+                session_uuid,
+                is_first_call,
+            })
         }
         Err(reason) => {
             // D-05: parse failure → error reply (HTML; html-escaped stdout in <pre>)
