@@ -81,3 +81,60 @@ fn status_no_pc_running_renders_err_with_fix() {
         .stdout(predicate::str::contains("not running"))
         .stdout(predicate::str::contains("right up"));
 }
+
+// --- right init brand tests ---
+// assert_cmd runs the binary non-TTY, so Theme::Ascii is always active.
+// Rail::mark(Ascii) = "|*", Rail::blank(Ascii) = "|", section(Ascii, "x") starts with "| x ".
+
+#[test]
+fn init_first_run_splash_and_recap() {
+    let home = isolated_home();
+    right()
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "init",
+            "-y",
+            "--sandbox-mode",
+            "none",
+            "--tunnel-hostname",
+            "test.example.com",
+        ])
+        .assert()
+        .success()
+        // splash: first line is "|* right agent v<version>"
+        .stdout(predicate::str::contains("|* right agent v"))
+        // dependency section header
+        .stdout(predicate::str::contains("| dependencies "))
+        // recap section header
+        .stdout(predicate::str::contains("| ready "))
+        // next-step pointer
+        .stdout(predicate::str::contains("|  next: right up"));
+}
+
+#[test]
+fn init_rerun_writes_recap_again() {
+    let home = isolated_home();
+    let args = [
+        "--home",
+        home.path().to_str().unwrap(),
+        "init",
+        "-y",
+        "--sandbox-mode",
+        "none",
+        "--tunnel-hostname",
+        "test.example.com",
+    ];
+    // First run
+    right()
+        .args(args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("| ready "));
+    // Second run — same home, re-init
+    right()
+        .args(args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("| ready "));
+}

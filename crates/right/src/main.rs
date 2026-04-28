@@ -1097,6 +1097,92 @@ fn cmd_init(
 ) -> miette::Result<()> {
     let interactive = !yes;
 
+    // Brand: splash + dependency probe.
+    {
+        let theme = right_agent::ui::detect();
+        let version = env!("CARGO_PKG_VERSION");
+        println!(
+            "{}",
+            right_agent::ui::splash(theme, version, "sandboxed multi-agent runtime")
+        );
+        println!("{}", right_agent::ui::section(theme, "dependencies"));
+        println!("{}", right_agent::ui::Rail::blank(theme));
+
+        let mut block = right_agent::ui::Block::new();
+        let mut fatal = false;
+
+        // process-compose (fatal)
+        match which::which("process-compose") {
+            Ok(_) => block.push(
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("process-compose")
+                    .verb("in PATH"),
+            ),
+            Err(_) => {
+                fatal = true;
+                block.push(
+                    right_agent::ui::status(right_agent::ui::Glyph::Err)
+                        .noun("process-compose")
+                        .verb("not in PATH")
+                        .fix("https://f1bonacc1.github.io/process-compose/installation/"),
+                );
+            }
+        }
+
+        // claude (fatal)
+        match which::which("claude") {
+            Ok(_) => block.push(
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("claude")
+                    .verb("in PATH"),
+            ),
+            Err(_) => {
+                fatal = true;
+                block.push(
+                    right_agent::ui::status(right_agent::ui::Glyph::Err)
+                        .noun("claude")
+                        .verb("not in PATH")
+                        .fix("https://docs.anthropic.com/en/docs/claude-code"),
+                );
+            }
+        }
+
+        // openshell (warn)
+        match which::which("openshell") {
+            Ok(_) => block.push(
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("openshell")
+                    .verb("in PATH"),
+            ),
+            Err(_) => block.push(
+                right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    .noun("openshell")
+                    .verb("not in PATH (optional, sandbox mode)"),
+            ),
+        }
+
+        // cloudflared (warn)
+        match which::which("cloudflared") {
+            Ok(_) => block.push(
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("cloudflared")
+                    .verb("in PATH"),
+            ),
+            Err(_) => block.push(
+                right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    .noun("cloudflared")
+                    .verb("not in PATH (optional, tunnel)"),
+            ),
+        }
+
+        println!("{}", block.render(theme));
+        println!("{}", right_agent::ui::Rail::blank(theme));
+
+        if fatal {
+            return Err(right_agent::ui::BlockAlreadyRendered.into());
+        }
+    }
+
     // Validate CLI-passed token up front so we fail fast before any prompt —
     // both in interactive and non-interactive mode.
     if let Some(t) = telegram_token {
