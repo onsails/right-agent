@@ -160,7 +160,11 @@ impl RightBackend {
         let params: CronCreateParams =
             serde_json::from_value(args.clone()).context("invalid cron_create params")?;
         if let Err(msg) = validate_target_against_allowlist(agent_dir, params.target_chat_id) {
-            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            return Ok(right_agent::mcp::tool_error::tool_error(
+                "chat_id_not_in_allowlist",
+                msg,
+                None,
+            ));
         }
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
@@ -193,7 +197,11 @@ impl RightBackend {
         if let Some(chat) = params.target_chat_id
             && let Err(msg) = validate_target_against_allowlist(agent_dir, chat)
         {
-            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+            return Ok(right_agent::mcp::tool_error::tool_error(
+                "chat_id_not_in_allowlist",
+                msg,
+                None,
+            ));
         }
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
@@ -414,11 +422,16 @@ impl RightBackend {
                  Your identity files are now active.",
             )]))
         } else {
-            Ok(CallToolResult::error(vec![Content::text(format!(
+            let message = format!(
                 "Cannot complete bootstrap — missing files: {}. \
                  Create them first, then call bootstrap_done again.",
                 missing.join(", ")
-            ))]))
+            );
+            Ok(right_agent::mcp::tool_error::tool_error(
+                "bootstrap_files_missing",
+                message,
+                Some(serde_json::json!({ "missing": missing })),
+            ))
         }
     }
 }
