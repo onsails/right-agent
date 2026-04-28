@@ -6,6 +6,7 @@
 //! 3. Otherwise → `Color`
 //!
 //! Tests inject `EnvGet` + `IsTty` stubs to avoid `std::env::set_var`.
+//! `IsTty` is a thin wrapper for `std::io::IsTerminal` (which is sealed and cannot be implemented outside std).
 
 use std::sync::OnceLock;
 
@@ -17,7 +18,7 @@ pub enum Theme {
 }
 
 /// Pluggable env reader. Production uses `RealEnv`; tests use stubs.
-pub trait EnvGet {
+pub(crate) trait EnvGet {
     fn get(&self, key: &str) -> Option<String>;
 }
 
@@ -25,11 +26,11 @@ pub trait EnvGet {
 ///
 /// `std::io::IsTerminal` is sealed and cannot be implemented outside std.
 /// We wrap it here so tests can inject a stub without touching global state.
-pub trait IsTty {
+pub(crate) trait IsTty {
     fn is_tty(&self) -> bool;
 }
 
-pub struct RealEnv;
+pub(crate) struct RealEnv;
 impl EnvGet for RealEnv {
     fn get(&self, key: &str) -> Option<String> {
         // `.ok()` is intentional: VarError carries no useful info beyond presence/absence.
@@ -37,7 +38,7 @@ impl EnvGet for RealEnv {
     }
 }
 
-pub struct RealTty;
+pub(crate) struct RealTty;
 impl IsTty for RealTty {
     fn is_tty(&self) -> bool {
         use std::io::IsTerminal as _;
@@ -54,7 +55,7 @@ pub fn detect() -> Theme {
 
 /// Pure detection — no caching, no globals. Used by tests and by callers
 /// that want to override (e.g. `--no-color` flag passed in Step 6).
-pub fn detect_with(tty: &impl IsTty, env: &impl EnvGet) -> Theme {
+pub(crate) fn detect_with(tty: &impl IsTty, env: &impl EnvGet) -> Theme {
     if env.get("TERM").as_deref() == Some("dumb") || !tty.is_tty() {
         return Theme::Ascii;
     }
