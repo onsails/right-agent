@@ -13,6 +13,7 @@ pub mod oauth_callback;
 pub(crate) mod prompt;
 pub mod session;
 pub mod stream;
+pub mod webhook;
 pub mod worker;
 
 pub use dispatch::run_telegram;
