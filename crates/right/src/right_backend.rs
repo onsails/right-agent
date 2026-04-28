@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
+use right_agent::mcp::tool_error::tool_error;
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{CallToolResult, Content, Tool};
 
@@ -160,7 +161,7 @@ impl RightBackend {
         let params: CronCreateParams =
             serde_json::from_value(args.clone()).context("invalid cron_create params")?;
         if let Err(msg) = validate_target_against_allowlist(agent_dir, params.target_chat_id) {
-            return Ok(right_agent::mcp::tool_error::tool_error(
+            return Ok(tool_error(
                 "chat_id_not_in_allowlist",
                 msg,
                 None,
@@ -197,7 +198,7 @@ impl RightBackend {
         if let Some(chat) = params.target_chat_id
             && let Err(msg) = validate_target_against_allowlist(agent_dir, chat)
         {
-            return Ok(right_agent::mcp::tool_error::tool_error(
+            return Ok(tool_error(
                 "chat_id_not_in_allowlist",
                 msg,
                 None,
@@ -427,7 +428,7 @@ impl RightBackend {
                  Create them first, then call bootstrap_done again.",
                 missing.join(", ")
             );
-            Ok(right_agent::mcp::tool_error::tool_error(
+            Ok(tool_error(
                 "bootstrap_files_missing",
                 message,
                 Some(serde_json::json!({ "missing": missing })),

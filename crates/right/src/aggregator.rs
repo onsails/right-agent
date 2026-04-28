@@ -14,6 +14,7 @@ use anyhow::{Context, bail};
 use dashmap::DashMap;
 use right_agent::mcp::proxy::ProxyBackend;
 use right_agent::mcp::refresh::RefreshMessage;
+use right_agent::mcp::tool_error::tool_error;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
@@ -224,7 +225,7 @@ impl HindsightBackend {
                                 )]))
                             }
                             right_agent::memory::ErrorKind::Auth => Ok(
-                                right_agent::mcp::tool_error::tool_error(
+                                tool_error(
                                     "upstream_auth",
                                     format!("{e:#}"),
                                     None,
@@ -232,7 +233,7 @@ impl HindsightBackend {
                             ),
                             right_agent::memory::ErrorKind::Client
                             | right_agent::memory::ErrorKind::Malformed => Ok(
-                                right_agent::mcp::tool_error::tool_error(
+                                tool_error(
                                     "upstream_invalid",
                                     format!("{e:#}"),
                                     None,
@@ -241,13 +242,14 @@ impl HindsightBackend {
                         }
                     }
                     Err(right_agent::memory::ResilientError::CircuitOpen { retry_after }) => {
-                        // retain() only enqueues on CircuitOpen when status is
-                        // NOT AuthFailed. Mirror that distinction here.
+                        // AuthFailed circuits won't recover without user action — queueing
+                        // would grow the backlog indefinitely, so return a hard auth error
+                        // rather than a silent queue. retain() honors the same distinction.
                         if matches!(
                             self.client.status(),
                             right_agent::memory::MemoryStatus::AuthFailed { .. }
                         ) {
-                            Ok(right_agent::mcp::tool_error::tool_error(
+                            Ok(tool_error(
                                 "upstream_auth",
                                 "memory auth failed; retain rejected",
                                 None,
@@ -321,20 +323,20 @@ impl HindsightBackend {
             right_agent::memory::ResilientError::Upstream(ref inner) => match inner.classify() {
                 right_agent::memory::ErrorKind::Transient
                 | right_agent::memory::ErrorKind::RateLimited => {
-                    right_agent::mcp::tool_error::tool_error(
+                    tool_error(
                         "upstream_unreachable",
                         format!("{e:#}"),
                         None,
                     )
                 }
-                right_agent::memory::ErrorKind::Auth => right_agent::mcp::tool_error::tool_error(
+                right_agent::memory::ErrorKind::Auth => tool_error(
                     "upstream_auth",
                     format!("{e:#}"),
                     None,
                 ),
                 right_agent::memory::ErrorKind::Client
                 | right_agent::memory::ErrorKind::Malformed => {
-                    right_agent::mcp::tool_error::tool_error(
+                    tool_error(
                         "upstream_invalid",
                         format!("{e:#}"),
                         None,
@@ -346,7 +348,7 @@ impl HindsightBackend {
                     self.client.status(),
                     right_agent::memory::MemoryStatus::AuthFailed { .. }
                 ) {
-                    right_agent::mcp::tool_error::tool_error(
+                    tool_error(
                         "upstream_auth",
                         format!("{e:#}"),
                         None,
@@ -354,7 +356,7 @@ impl HindsightBackend {
                 } else {
                     let details = retry_after
                         .map(|d| serde_json::json!({ "retry_after_secs": d.as_secs() }));
-                    right_agent::mcp::tool_error::tool_error(
+                    tool_error(
                         "circuit_open",
                         format!("{e:#}"),
                         details,
@@ -396,7 +398,7 @@ impl BackendRegistry {
     ) -> Result<CallToolResult, anyhow::Error> {
         let proxies = self.proxies.read().await;
         let Some(proxy) = proxies.get(proxy_name) else {
-            return Ok(right_agent::mcp::tool_error::tool_error(
+            return Ok(tool_error(
                 "server_not_found",
                 format!("Server '{proxy_name}' not found. It may have been removed."),
                 None,
@@ -987,20 +989,23 @@ mod tests {
         (handle, url)
     }
 
-    fn make_hindsight_backend(url: &str) -> std::sync::Arc<HindsightBackend> {
-        use right_agent::memory::hindsight::HindsightClient;
+    fn make_hindsight_backend(
+        url: &str,
+    ) -> (tempfile::TempDir, std::sync::Arc<HindsightBackend>) {
         use right_agent::memory::ResilientHindsight;
-        let dir = tempfile::tempdir().unwrap().keep();
+        use right_agent::memory::hindsight::HindsightClient;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let _ = right_agent::memory::open_connection(&dir, true).unwrap();
         let client = HindsightClient::new("hs_x", "bank-1", "high", 1024, Some(url));
         let resilient = std::sync::Arc::new(ResilientHindsight::new(client, dir, "test"));
-        std::sync::Arc::new(HindsightBackend::new(resilient))
+        (tmp, std::sync::Arc::new(HindsightBackend::new(resilient)))
     }
 
     #[tokio::test]
     async fn memory_retain_auth_returns_upstream_auth() {
         let (_h, url) = mock_hindsight(r#"{"error": "unauthorized"}"#, 401).await;
-        let backend = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
             .tools_call(
                 "memory_retain",
@@ -1016,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn memory_retain_client_returns_upstream_invalid() {
         let (_h, url) = mock_hindsight(r#"{"error": "bad request"}"#, 400).await;
-        let backend = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
             .tools_call(
                 "memory_retain",
@@ -1031,7 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn memory_retain_transient_remains_queued_success() {
         let (_h, url) = mock_hindsight(r#"{"error": "bad gateway"}"#, 502).await;
-        let backend = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
             .tools_call(
                 "memory_retain",
@@ -1048,7 +1053,7 @@ mod tests {
     #[tokio::test]
     async fn memory_recall_auth_returns_upstream_auth() {
         let (_h, url) = mock_hindsight(r#"{"error": "unauthorized"}"#, 401).await;
-        let backend = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
             .tools_call(
                 "memory_recall",
@@ -1063,7 +1068,7 @@ mod tests {
     #[tokio::test]
     async fn memory_recall_transient_returns_upstream_unreachable() {
         let (_h, url) = mock_hindsight(r#"{"error": "bad gateway"}"#, 502).await;
-        let backend = make_hindsight_backend(&url);
+        let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
             .tools_call(
                 "memory_recall",
