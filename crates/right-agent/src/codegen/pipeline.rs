@@ -354,8 +354,23 @@ pub fn run_agent_codegen(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Write a minimal valid `config.yaml` (with tunnel block) into the given
+    /// home directory. Required because Tasks 1+2 made tunnel config mandatory:
+    /// `read_global_config` errors on a missing file, and `run_agent_codegen`
+    /// also checks that `tunnel.credentials_file` exists on disk.
+    pub(crate) fn write_minimal_global_config(home: &std::path::Path) {
+        use std::fs;
+        let creds_path = home.join("test-creds.json");
+        fs::write(&creds_path, "{}").unwrap();
+        let yaml = format!(
+            "tunnel:\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
+            creds_path.display()
+        );
+        fs::write(home.join("config.yaml"), yaml).unwrap();
+    }
 
     #[test]
     fn run_single_agent_codegen_generates_all_files() {
@@ -419,6 +434,7 @@ mod tests {
     fn run_agent_codegen_with_empty_agents() {
         let dir = tempfile::TempDir::new().unwrap();
         let home = dir.path();
+        write_minimal_global_config(home);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
         let result = run_agent_codegen(home, &[], &self_exe, false);
         assert!(result.is_ok(), "empty agents should succeed: {result:?}");

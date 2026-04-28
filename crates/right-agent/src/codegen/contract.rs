@@ -504,6 +504,9 @@ mod tests {
         let home = dir.path().to_owned();
         let agent = minimal_agent_fixture(&home, "t5");
 
+        // Tunnel config is mandatory — write a minimal one before codegen.
+        crate::codegen::pipeline::tests::write_minimal_global_config(&home);
+
         // Snapshot pre-existing files under home (excluding agents/) — only
         // files created by the codegen call count.
         let mut before = Vec::new();
