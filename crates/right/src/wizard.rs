@@ -521,8 +521,8 @@ impl fmt::Display for CombinedMenuItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tunnel(display) => write!(f, "{display}"),
-            Self::Agent(name) => write!(f, "Agent: {name}"),
-            Self::Done => write!(f, "Done"),
+            Self::Agent(name) => write!(f, "agent: {name}"),
+            Self::Done => write!(f, "done"),
         }
     }
 }
@@ -535,7 +535,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
         let config = read_global_config(home)?;
 
         let tunnel_label = format!(
-            "Tunnel: {} ({})",
+            "tunnel: {} ({})",
             config.tunnel.hostname,
             &config.tunnel.tunnel_uuid[..8.min(config.tunnel.tunnel_uuid.len())]
         );
@@ -553,7 +553,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
         }
         options.push(CombinedMenuItem::Done);
 
-        let selection = inquire::Select::new("Settings:", options)
+        let selection = inquire::Select::new("settings:", options)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
@@ -570,7 +570,14 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
                 let mut new_config = read_global_config(home)?;
                 new_config.tunnel = result;
                 write_global_config(home, &new_config)?;
-                println!("Global config saved.");
+                let theme = right_agent::ui::detect();
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                        .noun("tunnel")
+                        .verb("saved")
+                        .render(theme)
+                );
             }
             CombinedMenuItem::Agent(name) => {
                 let _ = agent_setting_menu(home, Some(&name)).await?;
@@ -598,12 +605,12 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             let agents = discover_agents(&agents_dir)?;
             if agents.is_empty() {
                 return Err(miette::miette!(
-                    "No agents found in {}",
+                    "no agents found in {}",
                     agents_dir.display()
                 ));
             }
             let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
-            inquire::Select::new("Select agent:", names)
+            inquire::Select::new("select agent:", names)
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?
         }
@@ -644,19 +651,19 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         let network_policy_display = format!("{}", config.network_policy);
         let memory_display = format_memory_display(&config.memory, &chosen_name);
 
-        let opt_token = format!("Telegram token: {token_display}");
-        let opt_model = format!("Model: {model_display}");
-        let opt_chat_ids = format!("Allowed chat IDs: {chat_ids_display}");
-        let opt_sandbox = format!("Sandbox mode: {sandbox_display}");
-        let opt_network_policy = format!("Network policy: {network_policy_display}");
-        let opt_memory = format!("Memory: {memory_display}");
+        let opt_token = format!("telegram token: {token_display}");
+        let opt_model = format!("model: {model_display}");
+        let opt_chat_ids = format!("allowed chat ids: {chat_ids_display}");
+        let opt_sandbox = format!("sandbox mode: {sandbox_display}");
+        let opt_network_policy = format!("network policy: {network_policy_display}");
+        let opt_memory = format!("memory: {memory_display}");
         let stt_display = if config.stt.enabled {
             format!("on ({})", config.stt.model.yaml_str())
         } else {
             "off".to_string()
         };
-        let opt_stt = format!("STT: {stt_display}");
-        let opt_done = "Done".to_string();
+        let opt_stt = format!("stt: {stt_display}");
+        let opt_done = "done".to_string();
 
         let mut options = vec![
             opt_token.clone(),
@@ -675,8 +682,11 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         options.push(opt_memory.clone());
         options.push(opt_done.clone());
 
-        let selection =
-            inquire::Select::new(&format!("Agent '{}' settings:", chosen_name), options)
+        let theme = right_agent::ui::detect();
+        println!("{}", right_agent::ui::section(theme, &format!("agent: {chosen_name}")));
+        println!("{}", right_agent::ui::Rail::blank(theme));
+
+        let selection = inquire::Select::new("settings:", options)
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
@@ -684,7 +694,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             break;
         }
 
-        if selection == opt_token {
+        let saved_noun: Option<&str> = if selection == opt_token {
             match telegram_setup(config.telegram_token.as_deref(), true, false)? {
                 TelegramSetupOutcome::Token(token) => {
                     update_agent_yaml_field(
@@ -692,13 +702,15 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                         "telegram_token",
                         &format!("\"{token}\""),
                     )?;
+                    Some("telegram token")
                 }
                 TelegramSetupOutcome::Skipped | TelegramSetupOutcome::Back => {
                     // Enter on empty (keep existing) or Esc — no change.
+                    None
                 }
             }
         } else if selection == opt_model {
-            let input = inquire::Text::new("Model (e.g. sonnet, opus, haiku — empty to clear):")
+            let input = inquire::Text::new("model (e.g. sonnet, opus, haiku — empty to clear):")
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             let trimmed = input.trim();
@@ -707,10 +719,12 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             } else {
                 update_agent_yaml_field(&agent_yaml_path, "model", &format!("\"{trimmed}\""))?;
             }
+            Some("model")
         } else if selection == opt_chat_ids {
-            let input = inquire::Text::new("Allowed chat IDs (comma-separated, empty to clear):")
-                .prompt()
-                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let input =
+                inquire::Text::new("allowed chat ids (comma-separated, empty to clear):")
+                    .prompt()
+                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 update_agent_yaml_chat_ids(&agent_yaml_path, &[])?;
@@ -725,34 +739,37 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                     .collect::<miette::Result<Vec<_>>>()?;
                 update_agent_yaml_chat_ids(&agent_yaml_path, &ids)?;
             }
+            Some("allowed chat ids")
         } else if selection == opt_sandbox {
             let options = vec![
-                "OpenShell — run in isolated container (recommended)",
-                "None — run directly on host (for computer-use, Chrome, etc.)",
+                "openshell — isolated container (recommended)",
+                "none — direct host access (computer-use, chrome)",
             ];
-            let choice = inquire::Select::new("Sandbox mode:", options)
+            let choice = inquire::Select::new("sandbox mode:", options)
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-            let mode = if choice.starts_with("OpenShell") {
+            let mode = if choice.starts_with("openshell") {
                 "openshell"
             } else {
                 "none"
             };
             update_agent_yaml_sandbox_mode(&agent_yaml_path, mode)?;
+            Some("sandbox mode")
         } else if selection == opt_network_policy {
             let options = vec![
-                "Restrictive — Anthropic/Claude domains only (recommended)",
-                "Permissive — all HTTPS domains allowed (needed for external MCP servers)",
+                "restrictive — anthropic/claude domains only (recommended)",
+                "permissive — all https domains (needed for external mcp servers)",
             ];
-            let choice = inquire::Select::new("Network policy for sandbox:", options)
+            let choice = inquire::Select::new("network policy:", options)
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-            let policy = if choice.starts_with("Restrictive") {
+            let policy = if choice.starts_with("restrictive") {
                 "restrictive"
             } else {
                 "permissive"
             };
             update_agent_yaml_field(&agent_yaml_path, "network_policy", policy)?;
+            Some("network policy")
         } else if selection == opt_memory {
             match memory_setup(config.memory.as_ref(), &chosen_name).await? {
                 Some(new_cfg) => {
@@ -764,9 +781,11 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                     } else {
                         update_agent_yaml_memory(&agent_yaml_path, &new_cfg)?;
                     }
+                    Some("memory")
                 }
                 None => {
                     // User cancelled — no change.
+                    None
                 }
             }
         } else if selection == opt_stt {
@@ -774,14 +793,26 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                 Some((enabled, model)) => {
                     let stt = right_agent::agent::types::SttConfig { enabled, model };
                     update_agent_yaml_stt(&agent_yaml_path, &stt)?;
+                    Some("stt")
                 }
                 None => {
                     // User cancelled — no change.
+                    None
                 }
             }
-        }
+        } else {
+            unreachable!("selection variable already filtered to known options");
+        };
 
-        println!("Saved.");
+        if let Some(noun) = saved_noun {
+            println!(
+                "{}",
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun(noun)
+                    .verb("saved")
+                    .render(theme)
+            );
+        }
     }
 
     Ok(chosen_name)
