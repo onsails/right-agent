@@ -129,7 +129,7 @@ pub struct BotArgs {
 /// Entry point called from the right CLI.
 ///
 /// Resolves agent directory, opens data.db, resolves token, and starts
-/// the teloxide long-polling dispatcher with graceful shutdown wiring.
+/// the teloxide webhook dispatcher with graceful shutdown wiring.
 ///
 /// This is an async function. The caller (right CLI) runs inside a
 /// `#[tokio::main]` runtime and simply `.await`s this call. No nested
@@ -399,30 +399,23 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Resolve Telegram token
     let token = telegram::resolve_token(&config)?;
 
-    // PC-04: Clear any prior Telegram webhook before starting long-polling.
-    // Fatal if this fails -- competing with an active webhook causes silent message drops.
+    // Log bot identity at startup -- helps detect token conflicts with other
+    // running CC sessions. Webhook registration happens later via the register
+    // loop (after the UDS bind), not here.
     {
         use teloxide::requests::Requester as _;
-        let webhook_bot = teloxide::Bot::new(token.clone());
-        webhook_bot.delete_webhook().await.map_err(|e| {
-            miette::miette!(
-                "deleteWebhook failed -- long polling would compete with active webhook: {e:#}"
-            )
-        })?;
-
-        // Log bot identity -- helps detect token conflicts with other running CC sessions
-        match webhook_bot.get_me().await {
+        let probe_bot = teloxide::Bot::new(token.clone());
+        match probe_bot.get_me().await {
             Ok(me) => tracing::info!(
                 agent = %args.agent,
                 bot_id = me.id.0,
                 bot_username = %me.username(),
-                "deleteWebhook succeeded -- bot identity confirmed"
+                "bot identity confirmed"
             ),
-            // getMe is diagnostic-only; a transient API failure here does not block operation.
-            // Intentional FAIL FAST exception -- deleteWebhook already confirmed connectivity.
-            Err(e) => {
-                tracing::warn!(agent = %args.agent, "getMe failed (non-fatal, bot identity unknown): {e:#}")
-            }
+            Err(e) => tracing::warn!(
+                agent = %args.agent,
+                "getMe failed (non-fatal, bot identity unknown): {e:#}"
+            ),
         }
     }
 
