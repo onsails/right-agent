@@ -330,6 +330,18 @@ pub enum Commands {
     },
 }
 
+/// Intercept `BlockAlreadyRendered`: exit code 1, no miette formatting.
+/// Used when a command has already rendered a brand-conformant rail block
+/// explaining the failure.
+fn handle_dispatch(result: miette::Result<()>) -> miette::Result<()> {
+    if let Err(ref e) = result
+        && e.downcast_ref::<right_agent::ui::BlockAlreadyRendered>().is_some()
+    {
+        std::process::exit(1);
+    }
+    result
+}
+
 #[tokio::main]
 async fn main() -> miette::Result<()> {
     miette::set_hook(Box::new(|_| {
@@ -412,7 +424,7 @@ async fn main() -> miette::Result<()> {
         std::env::var("RIGHT_HOME").ok().as_deref(),
     )?;
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Init {
             telegram_token,
             telegram_allowed_chat_ids,
@@ -1040,7 +1052,8 @@ async fn main() -> miette::Result<()> {
             }
             Ok(())
         }
-    }
+    };
+    handle_dispatch(result)
 }
 
 /// Filter agents by name, or clone all if no filter provided.
@@ -2334,31 +2347,82 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
 }
 
 async fn cmd_status(home: &Path) -> miette::Result<()> {
-    let client = right_agent::runtime::PcClient::from_home(home)?.ok_or_else(|| {
-        miette::miette!(
-            help = "Start right first with `right up`",
-            "No running instance found. Is right running?"
-        )
-    })?;
+    let theme = right_agent::ui::detect();
 
-    client
-        .health_check()
-        .await
-        .map_err(|_| miette::miette!("No running instance found. Is right running?"))?;
+    println!("{}", right_agent::ui::section(theme, "status"));
+    println!("{}", right_agent::ui::Rail::blank(theme));
+
+    let Some(client) = right_agent::runtime::PcClient::from_home(home)? else {
+        let line = right_agent::ui::status(right_agent::ui::Glyph::Err)
+            .noun("right agent")
+            .verb("not running")
+            .fix("right up")
+            .render(theme);
+        println!("{line}");
+        return Err(right_agent::ui::BlockAlreadyRendered.into());
+    };
+
+    if client.health_check().await.is_err() {
+        let line = right_agent::ui::status(right_agent::ui::Glyph::Err)
+            .noun("right agent")
+            .verb("not running")
+            .fix("right up")
+            .render(theme);
+        println!("{line}");
+        return Err(right_agent::ui::BlockAlreadyRendered.into());
+    }
 
     let processes = client.list_processes().await?;
 
     if processes.is_empty() {
-        println!("No processes running.");
-    } else {
-        println!("{:<20} {:<12} {:<10} UPTIME", "NAME", "STATUS", "PID");
-        for p in &processes {
-            println!(
-                "{:<20} {:<12} {:<10} {}",
-                p.name, p.status, p.pid, p.system_time
-            );
-        }
+        let line = right_agent::ui::status(right_agent::ui::Glyph::Err)
+            .noun("right agent")
+            .verb("no processes")
+            .fix("right up")
+            .render(theme);
+        println!("{line}");
+        return Err(right_agent::ui::BlockAlreadyRendered.into());
     }
+
+    let mut block = right_agent::ui::Block::new();
+    for p in &processes {
+        let glyph = match p.status.as_str() {
+            "Running" => right_agent::ui::Glyph::Ok,
+            "Restarting" | "Pending" => right_agent::ui::Glyph::Warn,
+            _ => right_agent::ui::Glyph::Err,
+        };
+        let verb = format!("{:<6} {}", p.pid, p.system_time);
+        block.push(
+            right_agent::ui::status(glyph)
+                .noun(&p.name)
+                .verb(verb),
+        );
+    }
+    println!("{}", block.render(theme));
+    println!("{}", right_agent::ui::Rail::blank(theme));
+
+    let warn = processes
+        .iter()
+        .filter(|p| matches!(p.status.as_str(), "Restarting" | "Pending"))
+        .count();
+    let fail = processes
+        .iter()
+        .filter(|p| !matches!(p.status.as_str(), "Running" | "Restarting" | "Pending"))
+        .count();
+    let total = processes.len();
+    let summary = if warn == 0 && fail == 0 {
+        format!("{total} processes")
+    } else {
+        let mut parts = Vec::new();
+        if warn > 0 {
+            parts.push(format!("{warn} warn"));
+        }
+        if fail > 0 {
+            parts.push(format!("{fail} fail"));
+        }
+        format!("{total} processes ({})", parts.join(", "))
+    };
+    println!("{}{}", right_agent::ui::Rail::prefix(theme), summary);
 
     Ok(())
 }

@@ -17,7 +17,7 @@ use std::fmt;
 /// stdout/stderr explaining the failure, and miette should NOT add its own
 /// "Error: ..." formatting on top. The CLI dispatcher catches this variant
 /// and exits with code 1 silently.
-#[derive(Debug)]
+#[derive(Debug, miette::Diagnostic)]
 pub struct BlockAlreadyRendered;
 
 impl fmt::Display for BlockAlreadyRendered {

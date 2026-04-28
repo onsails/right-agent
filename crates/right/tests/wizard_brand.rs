@@ -68,3 +68,16 @@ fn doctor_dumb_term_still_ascii() {
         "TERM=dumb should still produce Ascii rail+glyphs, full stdout:\n{stdout}"
     );
 }
+
+#[test]
+fn status_no_pc_running_renders_err_with_fix() {
+    let home = isolated_home();
+    // No `right up` was called → no run/state.json
+    right()
+        .args(["--home", home.path().to_str().unwrap(), "status"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("| status"))
+        .stdout(predicate::str::contains("not running"))
+        .stdout(predicate::str::contains("right up"));
+}
