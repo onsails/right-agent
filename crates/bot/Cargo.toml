@@ -29,6 +29,7 @@ notify-debouncer-mini = { workspace = true }
 pulldown-cmark = { workspace = true }
 signal-hook = { workspace = true }
 url = { workspace = true }
+rand = { workspace = true }
 whisper-rs = { version = "0.16", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]

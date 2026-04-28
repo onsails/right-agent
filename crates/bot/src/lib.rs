@@ -48,6 +48,69 @@ fn load_or_migrate_allowlist(
     Ok(AllowlistHandle::new(AllowlistState::from_file(file)))
 }
 
+/// Register the Telegram webhook with retry-and-backoff.
+///
+/// Calls `setWebhook` with the derived URL, secret, and allowed updates.
+/// Retries with capped exponential backoff (2s → 60s, jittered) on transient
+/// errors. Exits with code 2 on `ApiError::InvalidToken` (invalid bot token).
+/// Cancels on shutdown.
+async fn webhook_register_loop(
+    bot: telegram::BotType,
+    url: url::Url,
+    secret: String,
+    webhook_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    use std::sync::atomic::Ordering;
+    use teloxide::ApiError;
+    use teloxide::RequestError;
+    use teloxide::payloads::SetWebhookSetters as _;
+    use teloxide::requests::Requester as _;
+    use tokio::time::Duration;
+
+    let allowed = telegram::webhook::webhook_allowed_updates();
+    let mut delay = Duration::from_secs(2);
+
+    loop {
+        if shutdown.is_cancelled() {
+            return;
+        }
+
+        let req = bot
+            .set_webhook(url.clone())
+            .secret_token(secret.clone())
+            .allowed_updates(allowed.clone())
+            .max_connections(40);
+
+        match req.await {
+            Ok(_) => {
+                webhook_set.store(true, Ordering::Relaxed);
+                tracing::info!(target: "bot::webhook", url = %url, "webhook registered");
+                return;
+            }
+            Err(e) => {
+                if matches!(&e, RequestError::Api(ApiError::InvalidToken)) {
+                    tracing::error!(target: "bot::webhook", "bot token invalid; exiting");
+                    std::process::exit(2);
+                }
+                let jitter_ms = (rand::random::<u64>() % 1000) as i64 - 500;
+                let with_jitter_ms = (delay.as_millis() as i64 + jitter_ms).max(500) as u64;
+                tracing::warn!(
+                    target: "bot::webhook",
+                    error = %format!("{e:#}"),
+                    retry_in_ms = with_jitter_ms,
+                    "setWebhook failed",
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(with_jitter_ms)) => {}
+                    _ = shutdown.cancelled() => return,
+                }
+                delay = (delay * 2).min(Duration::from_secs(60));
+            }
+        }
+    }
+}
+
 /// Exit code returned when bot shuts down due to config change.
 /// process-compose's `on_failure` policy will restart the bot.
 pub const CONFIG_RESTART_EXIT_CODE: i32 = 2;
@@ -481,6 +544,24 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     });
     // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
     let _ = axum_ready_rx.await;
+
+    // Register Telegram webhook in the background. Retries with backoff;
+    // flips webhook_set_flag (visible via /healthz) on first success.
+    let webhook_url_for_loop = webhook_url.clone();
+    let webhook_secret_for_loop = webhook_secret.clone();
+    let bot_for_webhook = telegram::bot::build_bot(token.clone());
+    let shutdown_for_webhook = shutdown.clone();
+    let webhook_set_for_loop = webhook_set_flag.clone();
+    let _webhook_register_handle = tokio::spawn(async move {
+        webhook_register_loop(
+            bot_for_webhook,
+            webhook_url_for_loop,
+            webhook_secret_for_loop,
+            webhook_set_for_loop,
+            shutdown_for_webhook,
+        )
+        .await
+    });
 
     // One-time migration: oauth-state.json → SQLite
     migrate_oauth_state_to_db(&agent_dir);
