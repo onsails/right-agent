@@ -324,27 +324,54 @@ pub fn validate_telegram_token(token: &str) -> miette::Result<()> {
     Ok(())
 }
 
-/// Helper: convert inquire error. Returns `Ok(None)` on Esc (back), propagates real errors.
-fn inquire_back<T>(result: Result<T, inquire::InquireError>) -> miette::Result<Option<T>> {
-    match result {
-        Ok(v) => Ok(Some(v)),
-        Err(
-            inquire::InquireError::OperationCanceled | inquire::InquireError::OperationInterrupted,
-        ) => Ok(None),
-        Err(e) => Err(miette::miette!("prompt failed: {e:#}")),
+/// Run an inquire prompt, handling cancel/interrupt:
+/// - `Ok(v)` → `Ok(Some(v))`
+/// - Esc (`OperationCanceled`) → `Ok(None)` — caller's "go back" signal.
+/// - Ctrl+C (`OperationInterrupted`) → "Cancel setup?" confirm prompt.
+///   Yes (or Ctrl+C on confirm) → `Err`; No (or Esc on confirm) → re-run prompt.
+/// - Other err → `Err`.
+///
+/// The closure rebuilds the prompt each retry so it can be re-run after a
+/// declined cancel. inquire prompts consume their builder, hence the closure.
+pub fn inquire_back<T, F>(mut prompt: F) -> miette::Result<Option<T>>
+where
+    F: FnMut() -> Result<T, inquire::InquireError>,
+{
+    loop {
+        match prompt() {
+            Ok(v) => return Ok(Some(v)),
+            Err(inquire::InquireError::OperationCanceled) => return Ok(None),
+            Err(inquire::InquireError::OperationInterrupted) => match inquire::Confirm::new(
+                "Cancel setup?",
+            )
+            .with_default(false)
+            .with_help_message("y = exit setup, n = return to current question")
+            .prompt()
+            {
+                Ok(true) | Err(inquire::InquireError::OperationInterrupted) => {
+                    return Err(miette::miette!("Setup cancelled by user."));
+                }
+                Ok(false) | Err(_) => continue,
+            },
+            Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
+        }
     }
 }
 
 /// Prompt for sandbox mode. Returns `None` on Esc.
 pub fn prompt_sandbox_mode() -> miette::Result<Option<SandboxMode>> {
-    let options = vec![
-        "OpenShell — run in isolated container (recommended)",
-        "None — run directly on host (for computer-use, Chrome, etc.)",
-    ];
-    let result = inquire::Select::new("Sandbox mode:", options)
+    let Some(choice) = inquire_back(|| {
+        inquire::Select::new(
+            "Sandbox mode:",
+            vec![
+                "OpenShell — run in isolated container (recommended)",
+                "None — run directly on host (for computer-use, Chrome, etc.)",
+            ],
+        )
         .with_starting_cursor(0)
-        .prompt();
-    let Some(choice) = inquire_back(result)? else {
+        .prompt()
+    })?
+    else {
         return Ok(None);
     };
     Ok(Some(if choice.starts_with("OpenShell") {
@@ -356,14 +383,18 @@ pub fn prompt_sandbox_mode() -> miette::Result<Option<SandboxMode>> {
 
 /// Prompt for network policy. Returns `None` on Esc.
 pub fn prompt_network_policy() -> miette::Result<Option<NetworkPolicy>> {
-    let options = vec![
-        "Permissive — all HTTPS domains allowed (recommended)",
-        "Restrictive — Anthropic/Claude domains only",
-    ];
-    let result = inquire::Select::new("Network policy for sandbox:", options)
+    let Some(choice) = inquire_back(|| {
+        inquire::Select::new(
+            "Network policy for sandbox:",
+            vec![
+                "Permissive — all HTTPS domains allowed (recommended)",
+                "Restrictive — Anthropic/Claude domains only",
+            ],
+        )
         .with_starting_cursor(0)
-        .prompt();
-    let Some(choice) = inquire_back(result)? else {
+        .prompt()
+    })?
+    else {
         return Ok(None);
     };
     Ok(Some(if choice.starts_with("Permissive") {
@@ -375,14 +406,18 @@ pub fn prompt_network_policy() -> miette::Result<Option<NetworkPolicy>> {
 
 /// Prompt for memory provider. Returns `None` on Esc.
 pub fn prompt_memory_provider() -> miette::Result<Option<MemoryProvider>> {
-    let options = vec![
-        "Hindsight — Hindsight Cloud API (recommended)",
-        "File — agent manages MEMORY.md",
-    ];
-    let result = inquire::Select::new("Memory provider:", options)
+    let Some(choice) = inquire_back(|| {
+        inquire::Select::new(
+            "Memory provider:",
+            vec![
+                "Hindsight — Hindsight Cloud API (recommended)",
+                "File — agent manages MEMORY.md",
+            ],
+        )
         .with_starting_cursor(0)
-        .prompt();
-    let Some(choice) = inquire_back(result)? else {
+        .prompt()
+    })?
+    else {
         return Ok(None);
     };
     Ok(Some(if choice.starts_with("Hindsight") {
@@ -395,9 +430,10 @@ pub fn prompt_memory_provider() -> miette::Result<Option<MemoryProvider>> {
 /// Prompt for Hindsight API key. Returns `Ok(None)` on Esc (back).
 /// Empty input means "use HINDSIGHT_API_KEY env var at runtime".
 pub fn prompt_hindsight_api_key() -> miette::Result<Option<Option<String>>> {
-    let result =
-        inquire::Text::new("Hindsight API key (Enter to use HINDSIGHT_API_KEY env var):").prompt();
-    let Some(input) = inquire_back(result)? else {
+    let Some(input) = inquire_back(|| {
+        inquire::Text::new("Hindsight API key (Enter to use HINDSIGHT_API_KEY env var):").prompt()
+    })?
+    else {
         return Ok(None);
     };
     let trimmed = input.trim();
@@ -411,9 +447,8 @@ pub fn prompt_hindsight_api_key() -> miette::Result<Option<Option<String>>> {
 /// Prompt for Hindsight bank ID. Returns `Ok(None)` on Esc (back).
 /// Empty input means "use agent name as default".
 pub fn prompt_hindsight_bank_id(agent_name: &str) -> miette::Result<Option<Option<String>>> {
-    let result =
-        inquire::Text::new(&format!("Hindsight bank ID (default: {agent_name}):")).prompt();
-    let Some(input) = inquire_back(result)? else {
+    let prompt_text = format!("Hindsight bank ID (default: {agent_name}):");
+    let Some(input) = inquire_back(|| inquire::Text::new(&prompt_text).prompt())? else {
         return Ok(None);
     };
     let trimmed = input.trim();
@@ -426,15 +461,19 @@ pub fn prompt_hindsight_bank_id(agent_name: &str) -> miette::Result<Option<Optio
 
 /// Prompt for Hindsight recall budget. Returns `Ok(None)` on Esc (back).
 pub fn prompt_recall_budget() -> miette::Result<Option<RecallBudget>> {
-    let options = vec![
-        "Mid — balanced (default)",
-        "Low — smaller context, cheaper",
-        "High — more context, higher cost",
-    ];
-    let result = inquire::Select::new("Recall budget:", options)
+    let Some(choice) = inquire_back(|| {
+        inquire::Select::new(
+            "Recall budget:",
+            vec![
+                "Mid — balanced (default)",
+                "Low — smaller context, cheaper",
+                "High — more context, higher cost",
+            ],
+        )
         .with_starting_cursor(0)
-        .prompt();
-    let Some(choice) = inquire_back(result)? else {
+        .prompt()
+    })?
+    else {
         return Ok(None);
     };
     Ok(Some(if choice.starts_with("Low") {
@@ -449,11 +488,8 @@ pub fn prompt_recall_budget() -> miette::Result<Option<RecallBudget>> {
 /// Prompt for recall max tokens. Returns `Ok(None)` on Esc (back).
 /// Empty input means "use default".
 pub fn prompt_recall_max_tokens() -> miette::Result<Option<u32>> {
-    let result = inquire::Text::new(&format!(
-        "Recall max tokens (default: {DEFAULT_RECALL_MAX_TOKENS}):"
-    ))
-    .prompt();
-    let Some(input) = inquire_back(result)? else {
+    let prompt_text = format!("Recall max tokens (default: {DEFAULT_RECALL_MAX_TOKENS}):");
+    let Some(input) = inquire_back(|| inquire::Text::new(&prompt_text).prompt())? else {
         return Ok(None);
     };
     let trimmed = input.trim();
