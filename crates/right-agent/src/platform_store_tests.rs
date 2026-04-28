@@ -99,6 +99,44 @@ fn build_manifest_from_files() {
 }
 
 #[test]
+fn build_manifest_excludes_agent_owned_md_files() {
+    let dir = tempdir().unwrap();
+    let claude_dir = dir.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+
+    // Platform-managed files (allowlisted — should appear in manifest).
+    std::fs::write(claude_dir.join("settings.json"), "{}").unwrap();
+    std::fs::write(dir.path().join("mcp.json"), "{}").unwrap();
+
+    // Agent-owned files at root and inside .claude/. None of these are in the
+    // platform allowlist, so build_manifest must not include them.
+    let agent_owned: &[&str] = &[
+        "IDENTITY.md",
+        "SOUL.md",
+        "USER.md",
+        "AGENTS.md",
+        "TOOLS.md",
+    ];
+    for &name in agent_owned {
+        std::fs::write(dir.path().join(name), format!("# {name}\n")).unwrap();
+        std::fs::write(claude_dir.join(name), format!("# claude/{name}\n")).unwrap();
+    }
+
+    let manifest = build_manifest(dir.path()).unwrap();
+
+    for &name in agent_owned {
+        assert!(
+            !manifest.entries.iter().any(|e| e.name == name),
+            "manifest must not include agent-owned file: {name}"
+        );
+    }
+
+    // Sanity check: the platform-managed files are still picked up.
+    assert!(manifest.entries.iter().any(|e| e.name == "settings.json"));
+    assert!(manifest.entries.iter().any(|e| e.name == "mcp.json"));
+}
+
+#[test]
 fn build_manifest_caches_file_content() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");

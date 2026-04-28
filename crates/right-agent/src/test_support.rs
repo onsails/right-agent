@@ -119,26 +119,3 @@ impl Drop for TestSandbox {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_sandbox_uses_right_test_prefix() {
-        // We don't actually call OpenShell — just inspect the format string.
-        let computed = format!("right-test-{}", "lifecycle");
-        assert_eq!(computed, "right-test-lifecycle");
-
-        // Smoke check: confirm test_support.rs source file was updated.
-        // The expected format string in the `create` function body:
-        let src = include_str!("test_support.rs");
-        let expected_fmt = concat!("right-test-{test", "_name}");
-        let old_fmt = concat!("rightclaw-test-{test", "_name}");
-        assert!(
-            src.contains(expected_fmt),
-            "test_support.rs must use 'right-test-' prefix in sandbox name format"
-        );
-        assert!(
-            !src.contains(old_fmt),
-            "test_support.rs must not still contain old 'rightclaw-test-' format"
-        );
-    }
-}

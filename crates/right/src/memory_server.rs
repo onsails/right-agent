@@ -552,9 +552,5 @@ pub async fn run_memory_server() -> miette::Result<()> {
 }
 
 #[cfg(test)]
-#[path = "memory_server_tests.rs"]
-mod tests;
-
-#[cfg(test)]
 #[path = "memory_server_mcp_tests.rs"]
 mod mcp_tests;

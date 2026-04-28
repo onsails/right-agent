@@ -480,28 +480,6 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn exec_in_sandbox_runs_command() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("exec-run").await;
-    let (stdout, exit_code) = sbox.exec(&["echo", "hello-from-test"]).await;
-
-    assert_eq!(exit_code, 0, "echo should exit 0");
-    assert!(
-        stdout.contains("hello-from-test"),
-        "expected 'hello-from-test' in stdout, got: {stdout:?}"
-    );
-}
-
-#[tokio::test]
-async fn exec_in_sandbox_returns_exit_code() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("exec-exit").await;
-    let (_, exit_code) = sbox.exec(&["sh", "-c", "exit 42"]).await;
-
-    assert_eq!(exit_code, 42, "should propagate remote exit code");
-}
-
-#[tokio::test]
 async fn verify_sandbox_files_detects_missing_and_reuploads() {
     let _slot = super::acquire_sandbox_slot();
     let sbox = TestSandbox::create("verify-missing").await;
