@@ -138,11 +138,12 @@ flowchart TB
   end
 
   U --> TG
-  TG <--> B1
-  TG <--> B2
-  CF <--> CFD
+  TG --> CF
+  CF --> CFD
   CFD --> B1
   CFD --> B2
+  B1 --> TG
+  B2 --> TG
 
   B1 --> A1
   B2 --> A2
