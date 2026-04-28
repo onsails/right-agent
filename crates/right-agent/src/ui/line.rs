@@ -1,5 +1,6 @@
 use crate::ui::{Glyph, Theme};
 
+#[allow(clippy::default_constructed_unit_structs)]
 pub fn status(_glyph: Glyph) -> Line { Line::default() }
 
 #[derive(Default)]
