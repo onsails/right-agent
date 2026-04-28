@@ -1,5 +1,6 @@
 pub mod allowlist_commands;
 pub mod attachments;
+pub(crate) mod bootstrap_photo;
 pub mod bot;
 pub mod dispatch;
 pub mod filter;
