@@ -48,6 +48,7 @@ prerequisites:
 - [claude code cli](https://docs.anthropic.com/en/docs/claude-code)
 - telegram bot token from [@BotFather](https://t.me/BotFather)
 - [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) authenticated with a [cloudflare account](https://dash.cloudflare.com/sign-up) (for telegram webhook ingress)
+- [hindsight cloud](https://hindsight.vectorize.io) api key (optional, for semantic memory)
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh
