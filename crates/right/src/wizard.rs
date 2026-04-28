@@ -22,9 +22,9 @@ enum TunnelExistingAction {
 impl fmt::Display for TunnelExistingAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Reuse => write!(f, "Reuse existing tunnel"),
-            Self::Rename => write!(f, "Create a new tunnel with a different name"),
-            Self::DeleteAndRecreate => write!(f, "Delete and recreate the tunnel"),
+            Self::Reuse => write!(f, "reuse"),
+            Self::Rename => write!(f, "rename"),
+            Self::DeleteAndRecreate => write!(f, "delete and recreate"),
         }
     }
 }
@@ -194,13 +194,29 @@ pub fn tunnel_setup(
                 );
                 delete_tunnel(&cf_bin, &entry.name)?;
                 let fresh = create_tunnel(&cf_bin, tunnel_name)?;
-                println!("Recreated tunnel '{}' (UUID: {})", fresh.name, fresh.id);
+                let theme = right_agent::ui::detect();
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                        .noun("tunnel")
+                        .verb("recreated")
+                        .detail(fresh.name.as_str())
+                        .render(theme)
+                );
                 fresh.id
             }
         }
         None => {
             let entry = create_tunnel(&cf_bin, tunnel_name)?;
-            println!("Created tunnel '{}' (UUID: {})", entry.name, entry.id);
+            let theme = right_agent::ui::detect();
+            println!(
+                "{}",
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("tunnel")
+                    .verb("created")
+                    .detail(entry.name.as_str())
+                    .render(theme)
+            );
             entry.id
         }
     };
@@ -209,7 +225,7 @@ pub fn tunnel_setup(
     let hostname = if let Some(h) = tunnel_hostname {
         h.to_string()
     } else if interactive {
-        let input = inquire::Text::new("Tunnel hostname (e.g. right.example.com):")
+        let input = inquire::Text::new("tunnel hostname (e.g. right.example.com):")
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
         input.trim().to_string()
@@ -222,8 +238,8 @@ pub fn tunnel_setup(
     // Validate: must be a bare domain, not a URL.
     if hostname.starts_with("https://") || hostname.starts_with("http://") {
         return Err(miette::miette!(
-            help = "Use just the domain, e.g. right.example.com",
-            "Tunnel hostname must be a bare domain, not a URL"
+            help = "use just the domain, e.g. right.example.com",
+            "hostname must be a bare domain, not a url"
         ));
     }
 
@@ -240,7 +256,7 @@ pub fn tunnel_setup(
     if !credentials_file.exists() {
         return Err(miette::miette!(
             help = "Run `right config set` and select Tunnel to reconfigure",
-            "Tunnel credentials file not found at {} — cloudflared cannot start without it",
+            "tunnel credentials missing at {} — cloudflared cannot start",
             credentials_file.display()
         ));
     }
@@ -268,16 +284,20 @@ fn handle_existing_tunnel(
     } else {
         &existing.id
     };
+    let theme = right_agent::ui::detect();
     println!(
-        "Found tunnel '{}' in your Cloudflare account (UUID: {short_uuid}...)",
-        existing.name
+        "{}",
+        right_agent::ui::status(right_agent::ui::Glyph::Warn)
+            .noun("tunnel")
+            .verb(format!("found \"{}\"", existing.name))
+            .detail(format!("{}…", short_uuid))
+            .render(theme)
     );
 
     if !has_local_creds {
         println!(
-            "⚠ Credentials file for this tunnel is missing locally.\n  \
-             The tunnel may have been created on another machine.\n  \
-             Choose \"Delete and recreate\" to generate new credentials on this machine."
+            "{}    note: credentials file missing on this machine. choose \"delete and recreate\" to regenerate.",
+            right_agent::ui::Rail::blank(theme)
         );
     }
 
@@ -288,7 +308,7 @@ fn handle_existing_tunnel(
     options.push(TunnelExistingAction::DeleteAndRecreate);
     options.push(TunnelExistingAction::Rename);
 
-    let selection = inquire::Select::new("What would you like to do?", options)
+    let selection = inquire::Select::new("existing tunnel — choose:", options)
         .prompt()
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
@@ -296,7 +316,7 @@ fn handle_existing_tunnel(
         TunnelExistingAction::Reuse => Ok(existing.id.clone()),
 
         TunnelExistingAction::Rename => {
-            let new_name = inquire::Text::new("New tunnel name:")
+            let new_name = inquire::Text::new("new tunnel name:")
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             let new_name = new_name.trim();
@@ -304,13 +324,21 @@ fn handle_existing_tunnel(
                 return Err(miette::miette!("tunnel name cannot be empty"));
             }
             let entry = create_tunnel(cf_bin, new_name)?;
-            println!("Created tunnel '{}' (UUID: {})", entry.name, entry.id);
+            let theme = right_agent::ui::detect();
+            println!(
+                "{}",
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("tunnel")
+                    .verb("created")
+                    .detail(entry.name.as_str())
+                    .render(theme)
+            );
             Ok(entry.id)
         }
 
         TunnelExistingAction::DeleteAndRecreate => {
             let confirmed = inquire::Confirm::new(&format!(
-                "This will permanently delete tunnel '{}'. Continue?",
+                "delete tunnel \"{}\" permanently?",
                 existing.name
             ))
             .with_default(false)
@@ -318,14 +346,30 @@ fn handle_existing_tunnel(
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
             if !confirmed {
-                return Err(miette::miette!("tunnel deletion cancelled"));
+                return Err(miette::miette!("cancelled"));
             }
 
             delete_tunnel(cf_bin, &existing.name)?;
-            println!("Deleted tunnel '{}'", existing.name);
+            let theme = right_agent::ui::detect();
+            println!(
+                "{}",
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("tunnel")
+                    .verb("deleted")
+                    .detail(existing.name.as_str())
+                    .render(theme)
+            );
 
             let entry = create_tunnel(cf_bin, original_name)?;
-            println!("Created tunnel '{}' (UUID: {})", entry.name, entry.id);
+            let theme = right_agent::ui::detect();
+            println!(
+                "{}",
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("tunnel")
+                    .verb("created")
+                    .detail(entry.name.as_str())
+                    .render(theme)
+            );
             Ok(entry.id)
         }
     }
@@ -369,11 +413,11 @@ pub fn telegram_setup(
         } else {
             "****".to_string()
         };
-        format!("Telegram bot token (current: {masked}, press Enter to keep):")
+        format!("telegram bot token (keeping {masked} — enter new or press enter to keep):")
     } else if required {
-        "Telegram bot token (required — get one from @BotFather):".to_string()
+        "telegram bot token (required — get one from @BotFather):".to_string()
     } else {
-        "Telegram bot token (press Enter to skip):".to_string()
+        "telegram bot token (enter to skip):".to_string()
     };
 
     loop {
@@ -388,9 +432,7 @@ pub fn telegram_setup(
         if trimmed.is_empty() {
             if required && existing_token.is_none() {
                 eprintln!(
-                    "  A Telegram bot token is required. Talk to @BotFather \
-                     to create a bot and get its token, then paste it here. \
-                     Press Esc to go back."
+                    "  a token is required. create a bot via @BotFather, paste the token here. esc to go back."
                 );
                 continue;
             }
@@ -423,9 +465,9 @@ pub fn telegram_setup(
 /// navigates back (Esc); `Err` on confirmed cancel (Ctrl+C).
 pub fn chat_ids_setup(required: bool) -> miette::Result<Option<Vec<i64>>> {
     let prompt_text = if required {
-        "Your Telegram user ID (required — send /start to @userinfobot to find it):"
+        "your telegram user id (required — /start @userinfobot to find it):"
     } else {
-        "Your Telegram user ID (send /start to @userinfobot to find it, empty to skip):"
+        "your telegram user id (/start @userinfobot to find it, empty to skip):"
     };
 
     loop {
@@ -439,10 +481,7 @@ pub fn chat_ids_setup(required: bool) -> miette::Result<Option<Vec<i64>>> {
         if trimmed.is_empty() {
             if required {
                 eprintln!(
-                    "  At least one Telegram chat/user ID is required so the bot \
-                     knows who is allowed to talk to it. Send /start to \
-                     @userinfobot to find your numeric ID, then paste it here. \
-                     Press Esc to go back."
+                    "  at least one chat id is required so the bot knows who can talk to it. /start @userinfobot for your numeric id. esc to go back."
                 );
                 continue;
             }
@@ -454,7 +493,7 @@ pub fn chat_ids_setup(required: bool) -> miette::Result<Option<Vec<i64>>> {
             .map(|s| {
                 s.trim()
                     .parse::<i64>()
-                    .map_err(|e| miette::miette!("invalid chat ID '{}': {e}", s.trim()))
+                    .map_err(|e| miette::miette!("invalid chat id \"{}\": {e}", s.trim()))
             })
             .collect();
 
@@ -523,7 +562,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
         match selection {
             CombinedMenuItem::Done => break,
             CombinedMenuItem::Tunnel(_) => {
-                let tunnel_name = inquire::Text::new("Tunnel name:")
+                let tunnel_name = inquire::Text::new("tunnel name:")
                     .with_default("right")
                     .prompt()
                     .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
@@ -683,7 +722,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                     .map(|s| {
                         s.trim()
                             .parse::<i64>()
-                            .map_err(|e| miette::miette!("invalid chat ID '{}': {e}", s.trim()))
+                            .map_err(|e| miette::miette!("invalid chat id \"{}\": {e}", s.trim()))
                     })
                     .collect::<miette::Result<Vec<_>>>()?;
                 update_agent_yaml_chat_ids(&agent_yaml_path, &ids)?;
