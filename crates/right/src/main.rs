@@ -1935,7 +1935,6 @@ fn cmd_agent_init(
         })?;
     }
 
-    let theme = right_agent::ui::detect();
     let cfg = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
         .ok_or_else(|| miette::miette!("agent.yaml missing after init"))?;
 
