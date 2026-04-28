@@ -229,9 +229,13 @@ where
         })
         .expect("failed to spawn signal listener thread");
 
-    // Shutdown driver task: waits for either a signal (via signal_cancel) or a
-    // config-change cancellation, then drives dispatcher shutdown. Worker tasks drain
-    // their mpsc channels and exit; in-flight CC subprocesses are killed by
+    // Shutdown driver task: converts any shutdown trigger (SIGTERM/SIGINT or
+    // config change) into a single cancellation on `signal_cancel`, then
+    // drives dispatcher shutdown. The wrapped listener observes the same
+    // token (see `ShutdownAware` below) and ends its update stream so
+    // `dispatch_with_listener` returns even when no inbound webhook arrives
+    // to close the underlying mpsc channel. Worker tasks drain their mpsc
+    // channels and exit; in-flight CC subprocesses are killed by
     // kill_on_drop(true) when workers are dropped.
     let signal_cancel_task = signal_cancel.clone();
     tokio::spawn(async move {
@@ -241,6 +245,7 @@ where
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("config change detected -- initiating graceful shutdown");
+                signal_cancel_task.cancel();
             }
         }
 
@@ -299,6 +304,15 @@ where
     {
         tracing::warn!("delete_my_commands (all_chat_administrators): {e:#}");
     }
+
+    // Wrap the listener so its update stream ends as soon as `signal_cancel`
+    // is fired. Without this wrapper, teloxide 0.17's `axum_no_setup`
+    // listener feeds updates from an `UnboundedReceiverStream` whose sender
+    // is only closed by an incoming HTTP request observing a stop flag —
+    // during shutdown no such request arrives, so the dispatcher would hang
+    // in `stream.next()` until process-compose's `timeout_seconds` SIGKILL.
+    let update_listener =
+        super::shutdown_listener::ShutdownAware::new(update_listener, signal_cancel.clone());
 
     tracing::info!("teloxide dispatcher starting (webhook)");
     dispatcher

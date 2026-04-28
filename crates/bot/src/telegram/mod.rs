@@ -12,6 +12,7 @@ pub mod mention;
 pub mod oauth_callback;
 pub(crate) mod prompt;
 pub mod session;
+pub mod shutdown_listener;
 pub mod stream;
 pub mod webhook;
 pub mod worker;
