@@ -1,13 +1,14 @@
 //! Integration test: `right up` must error out when the global config has no
 //! tunnel block (post-mandatory-tunnel cutover).
 //!
-//! Both tests need at least one discoverable agent so `right up` reaches the
-//! pipeline that reads `config.yaml` (rather than failing earlier with
-//! "no agents found").
+//! Both tests run `right up`, which probes a fixed TCP port (MCP_HTTP_PORT)
+//! before reading config. To avoid races on that bind probe — within this
+//! binary AND across parallel `cargo test` runs in different worktrees — we
+//! serialize via acquire_test_name_lock on a shared logical name.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use serial_test::serial;
+use right_agent::openshell::acquire_test_name_lock;
 use tempfile::TempDir;
 
 fn write_minimal_agent(home: &std::path::Path) {
@@ -21,8 +22,8 @@ fn write_minimal_agent(home: &std::path::Path) {
 }
 
 #[test]
-#[serial]
 fn right_up_errors_when_global_config_missing() {
+    let _lock = acquire_test_name_lock("right-up-fixed-port");
     let home = TempDir::new().unwrap();
     write_minimal_agent(home.path());
 
@@ -35,8 +36,8 @@ fn right_up_errors_when_global_config_missing() {
 }
 
 #[test]
-#[serial]
 fn right_up_errors_when_tunnel_block_missing_from_config() {
+    let _lock = acquire_test_name_lock("right-up-fixed-port");
     let home = TempDir::new().unwrap();
     write_minimal_agent(home.path());
     std::fs::write(
