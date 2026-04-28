@@ -19,6 +19,7 @@ pub mod test_cleanup;
 #[cfg(all(unix, any(test, feature = "test-support")))]
 pub mod test_support;
 pub mod tunnel;
+pub mod ui;
 pub mod usage;
 
 /// Generated protobuf types for the OpenShell gRPC API.
