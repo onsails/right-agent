@@ -233,3 +233,71 @@ fn no_color_flag_matches_env_var() {
     assert!(stdout_flag.contains('|'), "--no-color must produce ascii rail");
     assert!(stdout_env.contains('|'), "NO_COLOR=1 must produce ascii rail");
 }
+
+fn capture_stdout(env: &[(&str, &str)], args: &[&str]) -> String {
+    let home = isolated_home();
+    let mut cmd = right();
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let assert = cmd
+        .arg("--home")
+        .arg(home.path().to_str().unwrap())
+        .args(args)
+        .assert();
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
+#[test]
+fn brand_conformance_doctor_ascii() {
+    // assert_cmd forces non-TTY → Theme::Ascii (rail = `|`).
+    // Every line of doctor's brand block must start with the rail.
+    let stdout = capture_stdout(&[], &["doctor"]);
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        assert!(
+            line.starts_with('|'),
+            "line should start with ascii rail: {line:?}"
+        );
+        assert!(
+            !line.contains("Successfully")
+                && !line.contains("Successful")
+                && !line.contains("successfully"),
+            "marketing-speak forbidden: {line:?}"
+        );
+        if !line.contains('(') {
+            assert!(
+                !line.trim_end().ends_with('.'),
+                "status line should not end with '.': {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn brand_conformance_status_not_running_ascii() {
+    let stdout = capture_stdout(&[], &["status"]);
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        assert!(
+            line.starts_with('|'),
+            "line should start with ascii rail: {line:?}"
+        );
+        assert!(
+            !line.contains("Successfully")
+                && !line.contains("Successful")
+                && !line.contains("successfully"),
+            "marketing-speak forbidden: {line:?}"
+        );
+        if !line.contains('(') {
+            assert!(
+                !line.trim_end().ends_with('.'),
+                "status line should not end with '.': {line:?}"
+            );
+        }
+    }
+}
