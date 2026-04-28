@@ -269,7 +269,7 @@ impl HindsightBackend {
                 let query = args["query"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing required param: query"))?;
-                let results = self
+                let res = self
                     .client
                     .recall(
                         query,
@@ -277,28 +277,90 @@ impl HindsightBackend {
                         None,
                         right_agent::memory::resilient::POLICY_MCP_RECALL,
                     )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-                let json = serde_json::json!({ "results": results });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json)?,
-                )]))
+                    .await;
+                match res {
+                    Ok(results) => {
+                        let json = serde_json::json!({ "results": results });
+                        Ok(CallToolResult::success(vec![Content::text(
+                            serde_json::to_string_pretty(&json)?,
+                        )]))
+                    }
+                    Err(e) => Ok(self.classify_resilient_error(e)),
+                }
             }
             "memory_reflect" => {
                 let query = args["query"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing required param: query"))?;
-                let result = self
+                let res = self
                     .client
                     .reflect(query, right_agent::memory::resilient::POLICY_MCP_REFLECT)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
-                let json = serde_json::json!({ "text": result.text });
-                Ok(CallToolResult::success(vec![Content::text(
-                    serde_json::to_string_pretty(&json)?,
-                )]))
+                    .await;
+                match res {
+                    Ok(result) => {
+                        let json = serde_json::json!({ "text": result.text });
+                        Ok(CallToolResult::success(vec![Content::text(
+                            serde_json::to_string_pretty(&json)?,
+                        )]))
+                    }
+                    Err(e) => Ok(self.classify_resilient_error(e)),
+                }
             }
             other => bail!("unknown hindsight tool: {other}"),
+        }
+    }
+
+    /// Map a `ResilientError` from `recall` / `reflect` to a structured
+    /// operation error. The `retain` path has its own queueing semantics and
+    /// does not use this helper.
+    fn classify_resilient_error(
+        &self,
+        e: right_agent::memory::ResilientError,
+    ) -> CallToolResult {
+        match e {
+            right_agent::memory::ResilientError::Upstream(ref inner) => match inner.classify() {
+                right_agent::memory::ErrorKind::Transient
+                | right_agent::memory::ErrorKind::RateLimited => {
+                    right_agent::mcp::tool_error::tool_error(
+                        "upstream_unreachable",
+                        format!("{e:#}"),
+                        None,
+                    )
+                }
+                right_agent::memory::ErrorKind::Auth => right_agent::mcp::tool_error::tool_error(
+                    "upstream_auth",
+                    format!("{e:#}"),
+                    None,
+                ),
+                right_agent::memory::ErrorKind::Client
+                | right_agent::memory::ErrorKind::Malformed => {
+                    right_agent::mcp::tool_error::tool_error(
+                        "upstream_invalid",
+                        format!("{e:#}"),
+                        None,
+                    )
+                }
+            },
+            right_agent::memory::ResilientError::CircuitOpen { retry_after } => {
+                if matches!(
+                    self.client.status(),
+                    right_agent::memory::MemoryStatus::AuthFailed { .. }
+                ) {
+                    right_agent::mcp::tool_error::tool_error(
+                        "upstream_auth",
+                        format!("{e:#}"),
+                        None,
+                    )
+                } else {
+                    let details = retry_after
+                        .map(|d| serde_json::json!({ "retry_after_secs": d.as_secs() }));
+                    right_agent::mcp::tool_error::tool_error(
+                        "circuit_open",
+                        format!("{e:#}"),
+                        details,
+                    )
+                }
+            }
         }
     }
 }
