@@ -207,6 +207,37 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         }
     }
 
+    // Best-effort deleteWebhook before sandbox/dir cleanup so Telegram stops
+    // attempting deliveries. Failures (network, invalid token) log a warning
+    // and continue — a stale webhook URL is a soft leak, not worth blocking
+    // destroy on.
+    if let Some(cfg) = config.as_ref()
+        && let Some(token) = cfg.telegram_token.as_deref()
+    {
+        let url = format!("https://api.telegram.org/bot{token}/deleteWebhook");
+        match reqwest::Client::new()
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => tracing::info!(
+                agent = %options.agent_name,
+                "deleted Telegram webhook"
+            ),
+            Ok(resp) => tracing::warn!(
+                agent = %options.agent_name,
+                status = %resp.status(),
+                "deleteWebhook returned non-success (continuing)"
+            ),
+            Err(e) => tracing::warn!(
+                agent = %options.agent_name,
+                error = %format!("{e:#}"),
+                "deleteWebhook failed (continuing)"
+            ),
+        }
+    }
+
     if options.backup {
         let backup_path =
             run_backup(home, &options.agent_name, &agent_dir, &config, is_sandboxed).await?;
