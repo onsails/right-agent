@@ -8,6 +8,45 @@ use right_agent::agent::discover_agents;
 use right_agent::config::{TunnelConfig, read_global_config, write_global_config};
 use right_agent::init::validate_telegram_token;
 
+/// Every prompt label string used by the wizard. See `init.rs::PROMPT_LABELS`.
+/// Dynamic-format prompts contribute their static prefix only.
+#[allow(dead_code)]
+pub(crate) const PROMPT_LABELS: &[&str] = &[
+    // tunnel_setup: hostname
+    "tunnel hostname (e.g. right.example.com):",
+    // handle_existing_tunnel
+    "existing tunnel — choose:",
+    "new tunnel name:",
+    "delete tunnel \"", // dynamic prefix
+    // telegram_setup
+    "telegram bot token (keeping ", // dynamic prefix
+    "telegram bot token (required — get one from @BotFather):",
+    "telegram bot token (enter to skip):",
+    // chat_ids_setup
+    "your telegram user id (required — /start @userinfobot to find it):",
+    "your telegram user id (/start @userinfobot to find it, empty to skip):",
+    // config_setup / agent_setting_menu top-level
+    "settings:",
+    "tunnel name:",
+    "select agent:",
+    // agent_setting_menu sub-prompts
+    "model (e.g. sonnet, opus, haiku — empty to clear):",
+    "allowed chat ids (comma-separated, empty to clear):",
+    "sandbox mode:",
+    "network policy:",
+    // memory_setup
+    "switching memory provider does not migrate existing memory. continue?",
+    "hindsight api key source:",
+    "hindsight api key:",
+    "hindsight api key (empty to rely on HINDSIGHT_API_KEY at runtime):",
+    "hindsight rejected the key (http ", // dynamic prefix
+    "save anyway?",
+    // stt / ffmpeg
+    "ffmpeg required for voice transcription. install via brew?",
+    "enable voice transcription?",
+    "whisper model:",
+];
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1689,5 +1728,37 @@ mod stt_yaml_tests {
         assert!(content.contains("enabled: false"));
         assert!(content.contains("model: small"));
         assert!(!content.contains("model: tiny"));
+    }
+}
+
+#[cfg(test)]
+mod voice_pass {
+    use super::PROMPT_LABELS;
+
+    const ALLOWED_PROPER_NOUNS: &[&str] = &[
+        "HINDSIGHT_API_KEY",
+        "RIGHT_TG_TOKEN",
+        "MEMORY.md",
+        "@BotFather",
+        "@userinfobot",
+    ];
+
+    #[test]
+    fn labels_are_lowercase_first() {
+        for label in PROMPT_LABELS {
+            let first = label.chars().next().unwrap();
+            assert!(
+                !first.is_uppercase()
+                    || ALLOWED_PROPER_NOUNS.iter().any(|p| label.starts_with(p)),
+                "prompt has uppercase first letter: {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn labels_have_no_exclamation_marks() {
+        for label in PROMPT_LABELS {
+            assert!(!label.contains('!'), "prompt contains '!': {label:?}");
+        }
     }
 }

@@ -586,6 +586,28 @@ pub fn prompt_memory_config(
     }
 }
 
+/// Every prompt label string used by `right-agent::init`. Source-of-truth list
+/// for the brand voice regression tests (`tests/voice_pass.rs`). When you add
+/// or change a prompt, update this array — failing to do so is caught by tests.
+pub const PROMPT_LABELS: &[&str] = &[
+    // inquire_back: ctrl+c confirm
+    "cancel?",
+    // prompt_sandbox_mode
+    "sandbox mode:",
+    // prompt_network_policy
+    "network policy:",
+    // prompt_memory_provider
+    "memory provider:",
+    // prompt_hindsight_api_key
+    "hindsight api key (enter to use HINDSIGHT_API_KEY env var):",
+    // prompt_hindsight_bank_id — dynamic; static prefix used for voice check
+    "hindsight bank id (default: ",
+    // prompt_recall_budget
+    "recall budget:",
+    // prompt_recall_max_tokens — dynamic; static prefix used for voice check
+    "recall max tokens (default: ",
+];
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
