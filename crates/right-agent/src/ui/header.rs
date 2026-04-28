@@ -8,6 +8,9 @@ use crate::ui::theme::Theme;
 
 const TARGET_COL: usize = 48;
 
+/// One-line `▐ <name> ─────` section header, filled to 48 visible cells.
+/// `─` (`-` in Ascii) is appended via [`saturating_sub`] so overflow yields
+/// zero dashes rather than a panic.
 pub fn section(theme: Theme, name: &str) -> String {
     let dash = match theme {
         Theme::Color | Theme::Mono => '─',

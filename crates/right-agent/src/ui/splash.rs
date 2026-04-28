@@ -3,6 +3,8 @@
 use crate::ui::atoms::Rail;
 use crate::ui::theme::Theme;
 
+/// Three-line splash: `▐✓ right agent v<version>` / `▐  <tagline>` / `▐`.
+/// No trailing newline after the third line. Reserved for `right init`.
 pub fn splash(theme: Theme, version: &str, tagline: &str) -> String {
     let mut out = String::new();
     // Line 1: ▐✓ right agent v0.10.2
