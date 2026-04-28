@@ -319,7 +319,7 @@ pub struct SandboxTestSlot {
 
 /// Maximum number of live OpenShell sandbox tests allowed to run in parallel.
 /// See [`acquire_sandbox_slot`].
-pub const MAX_CONCURRENT_SANDBOX_TESTS: u8 = 3;
+pub const MAX_CONCURRENT_SANDBOX_TESTS: u8 = 30;
 
 /// Acquire one of [`MAX_CONCURRENT_SANDBOX_TESTS`] parallel-sandbox-test slots.
 ///
