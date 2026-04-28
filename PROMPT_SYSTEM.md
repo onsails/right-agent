@@ -203,6 +203,22 @@ cron (list/show runs), MCP management (add/remove/list/auth), and bootstrap
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
 whenever tools change.
 
+### Error Convention
+
+Tool failures return `is_error: true` with a JSON body of shape
+
+    { "error": { "code": "<code>", "message": "<human readable>", "details"?: {...} } }
+
+Operation errors are normal and recoverable; the agent reads `error.code` to
+decide whether to retry, surface to the user, or take a different path.
+Protocol errors (JSON-RPC errors) indicate a bug in the agent's tool call
+itself (unknown tool, missing/malformed argument).
+
+Cross-cutting codes any tool may emit: `upstream_unreachable`, `upstream_auth`,
+`upstream_invalid`, `circuit_open`, `invalid_argument`, `tool_failed`,
+`server_not_found`. Tool-specific codes are listed in each tool's
+description.
+
 ## Upstream MCP Server Instructions
 
 When external MCP servers are registered (via `/mcp add`), their usage instructions are

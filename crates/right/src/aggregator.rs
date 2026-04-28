@@ -575,7 +575,20 @@ impl rmcp::ServerHandler for Aggregator {
                  Memory tools (when Hindsight is configured):\n\
                  - memory_retain: Store facts to long-term memory\n\
                  - memory_recall: Search memory by relevance\n\
-                 - memory_reflect: Synthesize reasoned answers from memory",
+                 - memory_reflect: Synthesize reasoned answers from memory\n\
+                 (Errors follow the aggregator-level error convention; see below.)\n\n\
+                 Error convention (operation errors):\n\
+                 On operation failure, tools return is_error: true with content\n  \
+                 { \"error\": { \"code\": \"<code>\", \"message\": \"<human readable>\", \"details\"?: {...} } }\n\
+                 Cross-cutting codes any tool may emit:\n  \
+                 upstream_unreachable — backend service unreachable / transport failure\n  \
+                 upstream_auth        — backend authentication required or rejected\n  \
+                 upstream_invalid     — backend rejected the request (4xx, malformed)\n  \
+                 circuit_open         — local circuit breaker open; retry later\n  \
+                 invalid_argument     — semantic argument validation failed\n  \
+                 tool_failed          — upstream tool returned its own error (see details)\n  \
+                 server_not_found     — referenced MCP server is not registered\n\
+                 Tool-specific codes are documented in each tool's description.",
             )
     }
 

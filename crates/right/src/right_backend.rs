@@ -45,12 +45,12 @@ impl RightBackend {
             // Cron tools
             Tool::new(
                 "cron_create",
-                "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false). The job will be picked up by the cron engine on its next reload cycle.",
+                "Create a new cron job spec. Supports recurring schedules and one-shot jobs (via run_at or recurring=false). The job will be picked up by the cron engine on its next reload cycle. Errors: chat_id_not_in_allowlist (the target chat must first be approved via /allow or /allow_all).",
                 schema_for_type::<CronCreateParams>(),
             ),
             Tool::new(
                 "cron_update",
-                "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values. Setting schedule clears run_at; setting run_at clears schedule.",
+                "Update an existing cron job spec. Only pass fields you want to change — unspecified fields keep their current values. Setting schedule clears run_at; setting run_at clears schedule. Errors: chat_id_not_in_allowlist (when updating target_chat_id to a chat not in the allowlist).",
                 schema_for_type::<CronUpdateParams>(),
             ),
             Tool::new(
@@ -87,7 +87,7 @@ impl RightBackend {
             // Bootstrap
             Tool::new(
                 "bootstrap_done",
-                "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist.",
+                "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist. Errors: bootstrap_files_missing (one or more identity files not yet created — see details.missing).",
                 schema_for_type::<CronListParams>(), // empty schema — no params
             ),
         ]).clone()
