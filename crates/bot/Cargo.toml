@@ -39,3 +39,4 @@ whisper-rs = { version = "0.16", default-features = false, features = ["metal"] 
 right-agent = { path = "../right-agent", version = "*", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"
+futures = { workspace = true }

@@ -2875,6 +2875,7 @@ dependencies = [
  "cron",
  "dashmap",
  "dirs",
+ "futures",
  "miette",
  "notify",
  "notify-debouncer-mini",
