@@ -275,7 +275,7 @@ pub fn run_agent_codegen(
         let cf_config = crate::codegen::cloudflared::generate_cloudflared_config(
             &agent_pairs,
             &tunnel_cfg.hostname,
-            Some(&creds),
+            &creds,
         )?;
         let cf_config_path = home.join("cloudflared-config.yml");
         write_regenerated(&cf_config_path, &cf_config)?;

@@ -14,30 +14,33 @@ struct CloudflaredAgent {
 
 /// Cloudflared credentials for local ingress mode.
 ///
-/// When provided, the generated config includes `tunnel:` and `credentials-file:`
-/// fields so cloudflared honours local ingress rules instead of fetching remote
-/// configuration from the Cloudflare dashboard (which is the behaviour with
-/// `--token` alone).
+/// The generated config always includes `tunnel:` and `credentials-file:`
+/// fields so cloudflared honours local ingress rules instead of fetching
+/// remote configuration from the Cloudflare dashboard (which is the
+/// behaviour with `--token` alone).
 pub struct CloudflaredCredentials {
     pub tunnel_uuid: String,
     pub credentials_file: PathBuf,
 }
 
-/// Generate cloudflared ingress config YAML for OAuth callback routing.
+/// Generate cloudflared ingress config YAML for Telegram webhook and
+/// OAuth callback routing.
 ///
-/// Per cloudflared requirements, the config always ends with a
-/// catch-all `service: http_status:404` rule.
+/// Per agent the template emits two ingress rules — a `/tg/<agent>/.*`
+/// webhook rule and an `/oauth/<agent>/callback` rule — followed by a
+/// catch-all `service: http_status:404`. First match wins, so the
+/// webhook rule comes before the OAuth rule for the same agent.
 ///
 /// # Arguments
 ///
 /// * `agents` — slice of `(name, agent_dir)` pairs
 /// * `tunnel_hostname` — public hostname for the named tunnel (e.g. `right.example.com`)
-/// * `credentials` — when `Some`, embeds `tunnel:` + `credentials-file:` in the config so
-///   cloudflared uses local ingress instead of remote config. Always `Some` after Phase 38.
+/// * `credentials` — tunnel credentials embedded as `tunnel:` + `credentials-file:`.
+///   Mandatory: cloudflared runs in local-ingress mode unconditionally.
 pub fn generate_cloudflared_config(
     agents: &[(String, PathBuf)],
     tunnel_hostname: &str,
-    credentials: Option<&CloudflaredCredentials>,
+    credentials: &CloudflaredCredentials,
 ) -> miette::Result<String> {
     let cf_agents: Vec<CloudflaredAgent> = agents
         .iter()
@@ -56,10 +59,8 @@ pub fn generate_cloudflared_config(
         .or_else(|| tunnel_hostname.strip_prefix("http://"))
         .unwrap_or(tunnel_hostname);
 
-    let tunnel_uuid = credentials.map(|c| c.tunnel_uuid.as_str()).unwrap_or("");
-    let credentials_file = credentials
-        .map(|c| c.credentials_file.display().to_string())
-        .unwrap_or_default();
+    let tunnel_uuid = credentials.tunnel_uuid.as_str();
+    let credentials_file = credentials.credentials_file.display().to_string();
 
     let mut env = Environment::new();
     env.add_template("cloudflared", CF_TEMPLATE)
