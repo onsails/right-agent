@@ -85,6 +85,18 @@ network_policies:
             .await
             .expect("sandbox did not become READY");
 
+        // gRPC READY doesn't guarantee SSH transport is accepting connections —
+        // the first gRPC `ExecSandbox` after creation can return "Connection
+        // reset by peer". `exec_in_sandbox`'s 5-retry loop covers most cases
+        // but exhausts when SSH takes > ~7s to come up. Match what
+        // `ensure_sandbox` does in production (openshell.rs:1038).
+        let sandbox_id = openshell::resolve_sandbox_id(&mut client, &name)
+            .await
+            .expect("resolve sandbox id");
+        openshell::wait_for_ssh(&mut client, &sandbox_id, 60, 2)
+            .await
+            .expect("SSH transport did not become ready");
+
         // Kill the create process — it doesn't exit on its own after READY.
         let _ = child.kill().await;
 

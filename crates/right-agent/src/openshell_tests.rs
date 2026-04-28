@@ -56,6 +56,36 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::test_support::TestSandbox;
 
+/// Shared sandbox for upload / download / verify tests that need a generic
+/// working sandbox but don't care about its initial state. Booted once per
+/// test process via `tokio::sync::OnceCell`. Each test must use a distinct
+/// sandbox-side path to avoid stepping on its peers; all current users do.
+///
+/// Replaces N × ~5–7s sandbox boots with a single boot, dropping the
+/// upload/download/verify suite from ~50s to ~10s. The shared sandbox
+/// persists at process exit (statics never drop) — the next run cleans
+/// the leftover at `TestSandbox::create("shared").await` time.
+///
+/// The acquire_sandbox_slot guard is held for the lifetime of the process,
+/// counting against MAX_CONCURRENT_SANDBOX_TESTS as one slot total for this
+/// binary's shared sandbox (not one per test).
+async fn shared_test_sandbox() -> &'static TestSandbox {
+    use tokio::sync::OnceCell;
+    struct Shared {
+        sandbox: TestSandbox,
+        _slot: super::SandboxTestSlot,
+    }
+    static SHARED: OnceCell<Shared> = OnceCell::const_new();
+    let shared = SHARED
+        .get_or_init(|| async {
+            let _slot = super::acquire_sandbox_slot();
+            let sandbox = TestSandbox::create("shared").await;
+            Shared { sandbox, _slot }
+        })
+        .await;
+    &shared.sandbox
+}
+
 /// Minimal mock — only `get_sandbox` is meaningful; all other RPCs return Unimplemented.
 ///
 /// `get_sandbox_phase` controls the sandbox phase returned.
@@ -481,8 +511,7 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 
 #[tokio::test]
 async fn verify_sandbox_files_detects_missing_and_reuploads() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("verify-missing").await;
+    let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let host_dir = tmp.path();
@@ -581,8 +610,7 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
 
 #[tokio::test]
 async fn verify_sandbox_files_passes_when_all_present() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("verify-present").await;
+    let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let host_dir = tmp.path();
@@ -603,8 +631,7 @@ async fn verify_sandbox_files_passes_when_all_present() {
 
 #[tokio::test]
 async fn upload_file_to_directory() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("upload-dir").await;
+    let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("hello.txt"), "hello sandbox\n").unwrap();
@@ -620,8 +647,7 @@ async fn upload_file_to_directory() {
 
 #[tokio::test]
 async fn upload_file_overwrites_existing() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("upload-overwrite").await;
+    let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("data.txt");
@@ -644,8 +670,7 @@ async fn upload_file_overwrites_existing() {
 
 #[tokio::test]
 async fn upload_file_to_nested_dir() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("upload-nested").await;
+    let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("nested.txt"), "deep\n").unwrap();
@@ -696,8 +721,7 @@ async fn upload_file_rejects_non_directory_dest() {
 /// Also tests overwrite: sync runs every 5 min, so repeated uploads must work.
 #[tokio::test]
 async fn upload_directory_preserves_files_and_overwrites() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("upload-dir-tree").await;
+    let sbox = shared_test_sandbox().await;
 
     // Create a directory tree mimicking a skill: rightmcp/SKILL.md
     let tmp = tempfile::tempdir().unwrap();
@@ -738,8 +762,7 @@ async fn upload_directory_preserves_files_and_overwrites() {
 /// the file at exactly the caller's `host_dest` path.
 #[tokio::test]
 async fn download_file_writes_to_exact_dest_path() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("download-file-path").await;
+    let sbox = shared_test_sandbox().await;
 
     // Put a known file in the sandbox.
     let (_, code) = sbox
@@ -773,8 +796,7 @@ async fn download_file_writes_to_exact_dest_path() {
 
 #[tokio::test]
 async fn download_file_overwrites_existing_file() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("download-overwrite").await;
+    let sbox = shared_test_sandbox().await;
 
     let (_, code) = sbox
         .exec(&["sh", "-c", "printf 'new\\n' > /sandbox/overwrite_test.txt"])
@@ -801,8 +823,7 @@ async fn download_file_overwrites_existing_file() {
 /// the same dest path must not be blocked by that stale state.
 #[tokio::test]
 async fn download_file_replaces_stale_directory_at_dest() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("download-stale-dir").await;
+    let sbox = shared_test_sandbox().await;
 
     let (_, code) = sbox
         .exec(&["sh", "-c", "printf 'fresh\\n' > /sandbox/stale_test.txt"])
@@ -829,8 +850,7 @@ async fn download_file_replaces_stale_directory_at_dest() {
 
 #[tokio::test]
 async fn download_file_creates_parent_directory() {
-    let _slot = super::acquire_sandbox_slot();
-    let sbox = TestSandbox::create("download-mkparent").await;
+    let sbox = shared_test_sandbox().await;
 
     let (_, code) = sbox
         .exec(&["sh", "-c", "printf 'deep\\n' > /sandbox/parent_test.txt"])
