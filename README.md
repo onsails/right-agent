@@ -18,13 +18,13 @@
 </p>
 
 <p align="center">
-  <a href="#the-problem">the problem</a> ·
-  <a href="#what-we-picked-for-you">what we picked for you</a> ·
-  <a href="#quick-start">quick start</a> ·
-  <a href="#what-you-get">what you get</a> ·
-  <a href="#how-it-stays-safe">how it stays safe</a> ·
-  <a href="#how-it-compares">how it compares</a> ·
-  <a href="#roadmap">roadmap</a>
+  <a href="#-the-problem">the problem</a> ·
+  <a href="#-what-we-picked-for-you">what we picked for you</a> ·
+  <a href="#-quick-start">quick start</a> ·
+  <a href="#-what-you-get">what you get</a> ·
+  <a href="#-how-it-stays-safe">how it stays safe</a> ·
+  <a href="#-how-it-compares">how it compares</a> ·
+  <a href="#-roadmap">roadmap</a>
 </p>
 
 ## <img src="assets/section-mark.svg" height="20" alt=""> the problem
