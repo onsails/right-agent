@@ -6,9 +6,9 @@ This is a Rust project. Follow conventions in CLAUDE.rust.md.
 
 **Right Agent**
 
-Right Agent is a multi-agent runtime for Claude Code built on NVIDIA OpenShell. Each agent runs as an independent Claude Code session inside its own OpenShell sandbox with declarative YAML policies. The Rust CLI orchestrates agent lifecycles via process-compose. Drop-in compatible with the OpenClaw/ClawHub ecosystem — same file conventions, same skill format, same registry — but with security-first enforcement instead of "grant all, pray it works."
+Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw and Hermes in category. Every choice is made for you, security is the default, and we polish what ships before adding more. Built on Claude Code running inside NVIDIA OpenShell sandboxes, orchestrated by process-compose. Drop-in compatible with the OpenClaw/ClawHub ecosystem at the file level (same conventions, same skill format, same registry) — but with security-first enforcement instead of "grant all, pray it works."
 
-**Core Value:** Run multiple autonomous Claude Code agents safely — each sandboxed by OpenShell policies, each with its own identity and memory, orchestrated by a single CLI command.
+**Core Value:** One Telegram thread per agent, every agent in its own sandbox, every credential outside it. The box is closed; you just use it.
 
 ### Constraints
 
