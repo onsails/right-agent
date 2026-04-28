@@ -861,7 +861,7 @@ async fn memory_setup(
 
     if new_provider != current_provider {
         let confirm = inquire::Confirm::new(
-            "Switching memory provider will not migrate existing memory. Continue?",
+            "switching memory provider does not migrate existing memory. continue?",
         )
         .with_default(false)
         .prompt()
@@ -888,15 +888,15 @@ async fn memory_setup(
     let api_key: Option<String> = if env_key.is_some() {
         let opts = vec![
             "Use HINDSIGHT_API_KEY env var (recommended)",
-            "Enter a key to save in agent.yaml",
+            "enter a key to save in agent.yaml",
         ];
-        let choice = inquire::Select::new("Hindsight API key source:", opts)
+        let choice = inquire::Select::new("hindsight api key source:", opts)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
         if choice.starts_with("Use HINDSIGHT_API_KEY") {
             None
         } else {
-            let input = inquire::Text::new("Hindsight API key:")
+            let input = inquire::Text::new("hindsight api key:")
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             let trimmed = input.trim();
@@ -907,7 +907,7 @@ async fn memory_setup(
         }
     } else {
         let input = inquire::Text::new(
-            "Hindsight API key (empty to rely on HINDSIGHT_API_KEY env var at runtime):",
+            "hindsight api key (empty to rely on HINDSIGHT_API_KEY at runtime):",
         )
         .prompt()
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
@@ -943,14 +943,27 @@ async fn memory_setup(
     });
 
     if let Some(k) = resolved_key.as_deref() {
-        println!("Validating key against Hindsight...");
+        let theme = right_agent::ui::detect();
+        println!(
+            "{}",
+            right_agent::ui::status(right_agent::ui::Glyph::Info)
+                .noun("hindsight")
+                .verb("validating key")
+                .render(theme)
+        );
         match right_agent::init::validate_hindsight_key(k).await {
             ValidationResult::Valid { banks } => {
-                println!("\u{2713} Key valid — {banks} bank(s) accessible.");
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                        .noun("hindsight")
+                        .verb(format!("{banks} bank(s) accessible"))
+                        .render(theme)
+                );
             }
             ValidationResult::Invalid { status } => {
                 let proceed = inquire::Confirm::new(&format!(
-                    "Hindsight rejected the key (HTTP {status}). Save anyway?"
+                    "hindsight rejected the key (http {status}). save anyway?"
                 ))
                 .with_default(false)
                 .prompt()
@@ -960,8 +973,14 @@ async fn memory_setup(
                 }
             }
             ValidationResult::Unreachable { detail } => {
-                println!("\u{26a0} Could not validate (Hindsight unreachable): {detail}");
-                let proceed = inquire::Confirm::new("Save config anyway?")
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                        .noun("hindsight")
+                        .verb(format!("unreachable ({detail})"))
+                        .render(theme)
+                );
+                let proceed = inquire::Confirm::new("save anyway?")
                     .with_default(true)
                     .prompt()
                     .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
@@ -971,8 +990,13 @@ async fn memory_setup(
             }
         }
     } else {
+        let theme = right_agent::ui::detect();
         println!(
-            "\u{26a0} No key available to validate (none entered, HINDSIGHT_API_KEY unset). Saving without validation."
+            "{}",
+            right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                .noun("hindsight")
+                .verb("no key — saving without validation")
+                .render(theme)
         );
     }
 
@@ -1006,13 +1030,20 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 return Ok(false);
             }
             let install = inquire::Confirm::new(
-                "ffmpeg required for voice transcription. Install via 'brew install ffmpeg'?",
+                "ffmpeg required for voice transcription. install via brew?",
             )
             .with_default(true)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             if !install {
-                println!("STT will be disabled. Install ffmpeg later: brew install ffmpeg");
+                let theme = right_agent::ui::detect();
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                        .noun("stt")
+                        .verb("disabled (install ffmpeg: brew install ffmpeg)")
+                        .render(theme)
+                );
                 return Ok(false);
             }
             // Spawn brew install with stdout/stderr inherited so user sees output.
@@ -1021,12 +1052,38 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 .status()
                 .map_err(|e| miette::miette!("spawn brew: {e:#}"))?;
             if !status.success() {
-                println!("brew install ffmpeg exited with {status}; STT disabled.");
+                let theme = right_agent::ui::detect();
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Err)
+                        .noun("ffmpeg")
+                        .verb(format!("install failed ({status})"))
+                        .render(theme)
+                );
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                        .noun("stt")
+                        .verb("disabled")
+                        .render(theme)
+                );
                 return Ok(false);
             }
             if !right_agent::stt::ffmpeg_available() {
+                let theme = right_agent::ui::detect();
                 println!(
-                    "brew completed but ffmpeg not yet in PATH — restart shell or check PATH; STT disabled."
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                        .noun("ffmpeg")
+                        .verb("not in PATH yet — restart shell")
+                        .render(theme)
+                );
+                println!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                        .noun("stt")
+                        .verb("disabled")
+                        .render(theme)
                 );
                 return Ok(false);
             }
@@ -1034,10 +1091,10 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
             Ok(true)
         }
         "linux" => {
-            println!("ffmpeg required for voice transcription. Install:");
+            println!("ffmpeg required for voice transcription. install:");
             println!("  Debian/Ubuntu:  sudo apt install ffmpeg");
             println!("  NixOS / devenv: add 'pkgs.ffmpeg' to your packages");
-            println!("Then re-run this command.");
+            println!("then re-run this command.");
             Ok(false)
         }
         other => {
@@ -1056,10 +1113,10 @@ pub fn stt_setup() -> miette::Result<Option<(bool, right_agent::agent::types::Wh
 
     // Step 1: enable y/n
     let Some(enable) = right_agent::init::inquire_back(|| {
-        inquire::Confirm::new("Enable voice transcription?")
+        inquire::Confirm::new("enable voice transcription?")
             .with_default(true)
             .with_help_message(
-                "Telegram voice messages and video notes will be transcribed locally via whisper.cpp.",
+                "telegram voice + video notes are transcribed locally via whisper.cpp.",
             )
             .prompt()
     })?
@@ -1074,7 +1131,7 @@ pub fn stt_setup() -> miette::Result<Option<(bool, right_agent::agent::types::Wh
     // Step 2: model select
     let Some(picked) = right_agent::init::inquire_back(|| {
         inquire::Select::new(
-            "Choose whisper model:",
+            "whisper model:",
             vec![
                 "tiny     — ~75 MB,   fastest, OK for short commands",
                 "base     — ~150 MB,  decent",
