@@ -2855,6 +2855,7 @@ name = "right-bot"
 version = "0.2.5"
 dependencies = [
  "axum",
+ "bytes",
  "chrono",
  "cron",
  "dashmap",
