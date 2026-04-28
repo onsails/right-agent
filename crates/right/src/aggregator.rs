@@ -223,11 +223,21 @@ impl HindsightBackend {
                                     serde_json::to_string_pretty(&json)?,
                                 )]))
                             }
-                            right_agent::memory::ErrorKind::Auth
-                            | right_agent::memory::ErrorKind::Client
-                            | right_agent::memory::ErrorKind::Malformed => {
-                                Err(anyhow::anyhow!("{e:#}"))
-                            }
+                            right_agent::memory::ErrorKind::Auth => Ok(
+                                right_agent::mcp::tool_error::tool_error(
+                                    "upstream_auth",
+                                    format!("{e:#}"),
+                                    None,
+                                ),
+                            ),
+                            right_agent::memory::ErrorKind::Client
+                            | right_agent::memory::ErrorKind::Malformed => Ok(
+                                right_agent::mcp::tool_error::tool_error(
+                                    "upstream_invalid",
+                                    format!("{e:#}"),
+                                    None,
+                                ),
+                            ),
                         }
                     }
                     Err(right_agent::memory::ResilientError::CircuitOpen { retry_after }) => {
@@ -237,7 +247,11 @@ impl HindsightBackend {
                             self.client.status(),
                             right_agent::memory::MemoryStatus::AuthFailed { .. }
                         ) {
-                            Err(anyhow::anyhow!("memory auth failed; retain rejected"))
+                            Ok(right_agent::mcp::tool_error::tool_error(
+                                "upstream_auth",
+                                "memory auth failed; retain rejected",
+                                None,
+                            ))
                         } else {
                             let json = serde_json::json!({
                                 "status": "queued",
