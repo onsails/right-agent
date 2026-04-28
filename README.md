@@ -70,11 +70,11 @@ full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## <img src="assets/section-mark.svg" height="20" alt=""> what you get
 
-### multiple agents on one subscription
+### <img src="assets/subsection-mark.svg" height="14" alt=""> multiple agents on one subscription
 
 each agent is a separate claude code session in its own sandbox: separate identity, separate memory, separate telegram thread. no per-agent api key. all of them run on your one claude subscription.
 
-### memory that survives restarts
+### <img src="assets/subsection-mark.svg" height="14" alt=""> memory that survives restarts
 
 two memory backends, picked at agent init.
 
@@ -82,11 +82,11 @@ two memory backends, picked at agent init.
 
 **`MEMORY.md`** is a local file the agent maintains itself. no cloud, no semantic recall, simpler.
 
-### identity that writes itself
+### <img src="assets/subsection-mark.svg" height="14" alt=""> identity that writes itself
 
 the first session with a fresh agent is a bootstrap, not a chat. the agent answers questions about who it wants to be (name, tone, boundaries, relationship with you) and writes `IDENTITY.md`, `SOUL.md`, `USER.md` itself. those files load into every system prompt afterwards. on restart, on model swap, on upgrade, the agent stays itself.
 
-### one place to run it from
+### <img src="assets/subsection-mark.svg" height="14" alt=""> one place to run it from
 
 after `right up`, the terminal is done. claude login, mcp authorization, file attachments, cron notifications, `/doctor`, `/reset`. all in telegram.
 
@@ -106,19 +106,19 @@ on a typical agent setup, the agent has direct access to:
 
 one compromised turn, the attacker walks out with all of it.
 
-### the sandbox boundary
+### <img src="assets/subsection-mark.svg" height="14" alt=""> the sandbox boundary
 
 every claude code session runs inside an [nvidia openshell](https://github.com/NVIDIA/OpenShell) sandbox. the agent reads and writes only inside its own workspace. nothing in `~/.ssh`, `~/.aws`, `~/.config/gcloud`, or your source tree is reachable. no other agent's files are reachable. no escape route.
 
 openshell is purpose-built for ai agents, not a container runtime stretched to fit. tls inspection, domain allowlists, and request logging are per-sandbox primitives.
 
-### credentials live outside the sandbox
+### <img src="assets/subsection-mark.svg" height="14" alt=""> credentials live outside the sandbox
 
 mcp tokens, oauth refresh tokens, and claude auth live on the host inside a single aggregator process. the sandbox sees a proxy endpoint, never the raw token. four auth patterns are detected and refreshed automatically: oauth, bearer, custom header, query string.
 
 worst case for a compromised agent: it misuses a tool while it's running. it cannot exfiltrate the credential.
 
-### the topology
+### <img src="assets/subsection-mark.svg" height="14" alt=""> the topology
 
 <details>
 <summary>show diagram</summary>
@@ -184,7 +184,7 @@ flowchart TB
 
 </details>
 
-### what egress looks like
+### <img src="assets/subsection-mark.svg" height="14" alt=""> what egress looks like
 
 outbound traffic from the sandbox goes through openshell's policy engine. tls is terminated per-request. the destination is matched against the domain allowlist, and the request is logged. nothing leaves silently.
 
