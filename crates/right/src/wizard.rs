@@ -801,7 +801,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
                 }
             }
         } else {
-            unreachable!("selection variable already filtered to known options");
+            unreachable!("agent_setting_menu: unknown selection {selection:?}");
         };
 
         if let Some(noun) = saved_noun {
@@ -1035,8 +1035,8 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
             .with_default(true)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let theme = right_agent::ui::detect();
             if !install {
-                let theme = right_agent::ui::detect();
                 println!(
                     "{}",
                     right_agent::ui::status(right_agent::ui::Glyph::Warn)
@@ -1052,7 +1052,6 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 .status()
                 .map_err(|e| miette::miette!("spawn brew: {e:#}"))?;
             if !status.success() {
-                let theme = right_agent::ui::detect();
                 println!(
                     "{}",
                     right_agent::ui::status(right_agent::ui::Glyph::Err)
@@ -1070,7 +1069,6 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 return Ok(false);
             }
             if !right_agent::stt::ffmpeg_available() {
-                let theme = right_agent::ui::detect();
                 println!(
                     "{}",
                     right_agent::ui::status(right_agent::ui::Glyph::Warn)
