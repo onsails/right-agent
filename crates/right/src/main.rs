@@ -1226,6 +1226,10 @@ fn cmd_init(
             Done,
         }
 
+        let theme = right_agent::ui::detect();
+        println!("{}", right_agent::ui::section(theme, "agent"));
+        println!("{}", right_agent::ui::Rail::blank(theme));
+
         let mut step = if sandbox_mode.is_some() {
             Step::Network
         } else {
@@ -1359,6 +1363,11 @@ fn cmd_init(
 
     // Tunnel setup BEFORE codegen — codegen reads config.yaml (mandatory tunnel),
     // so we must write it first.
+    {
+        let theme = right_agent::ui::detect();
+        println!("{}", right_agent::ui::section(theme, "tunnel"));
+        println!("{}", right_agent::ui::Rail::blank(theme));
+    }
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
     let aggregator = if home.join("config.yaml").exists() {
         right_agent::config::read_global_config(home)?.aggregator
@@ -1418,7 +1427,14 @@ fn cmd_init(
             } else {
                 prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
             };
-            println!("Creating OpenShell sandbox...");
+            let theme = right_agent::ui::detect();
+            println!(
+                "{}",
+                right_agent::ui::status(right_agent::ui::Glyph::Info)
+                    .noun("sandbox")
+                    .verb("creating")
+                    .render(theme)
+            );
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     right_agent::openshell::ensure_sandbox(
@@ -1430,7 +1446,14 @@ fn cmd_init(
                     .await
                 })
             })?;
-            println!("  Sandbox '{sb_name}' ready");
+            println!(
+                "{}",
+                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    .noun("sandbox")
+                    .verb("ready")
+                    .detail(&sb_name)
+                    .render(theme)
+            );
 
             let run_dir = home.join("run");
             std::fs::create_dir_all(run_dir.join("ssh"))
