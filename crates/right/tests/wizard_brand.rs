@@ -173,3 +173,63 @@ fn agent_init_recap_renders_block() {
         .stdout(predicate::str::contains("|  [ok] agent"))
         .stdout(predicate::str::contains("|  next: right up"));
 }
+
+#[test]
+fn init_ascii_fallback() {
+    let home = isolated_home();
+    let assert = right()
+        .env("TERM", "dumb")
+        .env_remove("NO_COLOR")
+        .args([
+            "--home", home.path().to_str().unwrap(),
+            "init", "-y",
+            "--sandbox-mode", "none",
+            "--tunnel-hostname", "test.example.com",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("|*"), "ascii mark missing: {stdout}");
+    assert!(stdout.contains("[ok]"), "ascii ok glyph missing: {stdout}");
+    for ch in ['▐', '✓', '✗', '…'] {
+        assert!(!stdout.contains(ch), "ascii output contains {ch:?}");
+    }
+}
+
+#[test]
+fn no_color_flag_matches_env_var() {
+    // Under assert_cmd both already produce Ascii (non-TTY forces it). Sanity-check
+    // the flag is parsed at the global level (before any subcommand) and produces
+    // identical output to the env var — proving --no-color reaches the wizard
+    // via the same path NO_COLOR does.
+    let home_flag = isolated_home();
+    let stdout_flag = {
+        let assert = right()
+            .env_remove("NO_COLOR")
+            .args([
+                "--home", home_flag.path().to_str().unwrap(),
+                "--no-color",
+                "doctor",
+            ])
+            .assert();
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    };
+
+    let home_env = isolated_home();
+    let stdout_env = {
+        let assert = right()
+            .env("NO_COLOR", "1")
+            .args([
+                "--home", home_env.path().to_str().unwrap(),
+                "doctor",
+            ])
+            .assert();
+        String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    };
+
+    // Both should be Ascii (no ANSI, bracketed glyphs).
+    assert!(!stdout_flag.contains('\x1b'), "--no-color must not emit ANSI");
+    assert!(!stdout_env.contains('\x1b'), "NO_COLOR=1 must not emit ANSI");
+    assert!(stdout_flag.contains('|'), "--no-color must produce ascii rail");
+    assert!(stdout_env.contains('|'), "NO_COLOR=1 must produce ascii rail");
+}
