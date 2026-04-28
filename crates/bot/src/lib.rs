@@ -409,7 +409,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     use std::collections::HashMap;
     use std::sync::Arc;
     use telegram::oauth_callback::{
-        OAuthCallbackState, PendingAuthMap, run_oauth_callback_server, run_pending_auth_cleanup,
+        OAuthCallbackState, PendingAuthMap, run_bot_uds_server, run_pending_auth_cleanup,
     };
 
     let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -434,12 +434,50 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Spawn cleanup task
     tokio::spawn(run_pending_auth_cleanup(Arc::clone(&pending_auth)));
 
-    // Spawn axum OAuth callback server and wait for it to bind before starting teloxide
+    // Spawn axum bot UDS server and wait for it to bind before starting teloxide
     let socket_path = agent_dir.join("bot.sock");
+    let started_at = std::time::Instant::now();
+
+    // Build webhook URL from global tunnel hostname.
+    let global_cfg = right_agent::config::read_global_config(&home)?;
+    let webhook_url = url::Url::parse(&format!(
+        "https://{}/tg/{}/",
+        global_cfg.tunnel.hostname.trim_end_matches('/'),
+        args.agent
+    ))
+    .map_err(|e| miette::miette!("invalid webhook URL: {e:#}"))?;
+
+    // Derive webhook secret from the agent secret.
+    let agent_secret = config
+        .secret
+        .clone()
+        .ok_or_else(|| miette::miette!("agent.yaml missing required `secret:` field"))?;
+    let webhook_secret = right_agent::mcp::derive_token(&agent_secret, "tg-webhook")?;
+
+    // Build the webhook listener + router. The listener is consumed by Task 9
+    // (dispatcher.dispatch_with_listener); for Task 8 we hold it in a variable
+    // to be passed to run_telegram once Task 9 wires it through.
+    let (_update_listener, _webhook_stop, webhook_router) =
+        telegram::webhook::build_webhook_router(webhook_secret.clone(), webhook_url.clone());
+
+    // Shared flag for healthz "webhook_set"; flipped by Task 10's register loop.
+    let webhook_set_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let (axum_ready_tx, axum_ready_rx) = tokio::sync::oneshot::channel::<()>();
     let axum_socket = socket_path.clone();
+    let agent_name_for_uds = args.agent.clone();
+    let webhook_set_for_axum = webhook_set_flag.clone();
     let axum_handle = tokio::spawn(async move {
-        run_oauth_callback_server(axum_socket, oauth_state, Some(axum_ready_tx)).await
+        run_bot_uds_server(
+            axum_socket,
+            oauth_state,
+            webhook_router,
+            agent_name_for_uds,
+            started_at,
+            webhook_set_for_axum,
+            Some(axum_ready_tx),
+        )
+        .await
     });
     // Wait for axum to bind before starting teloxide (ensures callback socket is ready)
     let _ = axum_ready_rx.await;

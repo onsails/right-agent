@@ -51,11 +51,54 @@ pub struct OAuthCallbackState {
     pub internal_client: Arc<InternalClient>,
 }
 
-/// Build the axum router for the OAuth callback server.
-fn build_router(state: OAuthCallbackState) -> Router {
-    Router::new()
+/// Build the axum router for the bot UDS server.
+///
+/// Composes three sub-routers (each carrying its own state):
+/// - `/oauth/{agent_name}/callback` — OAuth callback handler.
+/// - `/tg/{agent_name}/...` — Telegram webhook (nested at `/`).
+/// - `/healthz` — bot-status JSON.
+fn build_router(
+    state: OAuthCallbackState,
+    webhook_router: Router,
+    agent_name: String,
+    started_at: std::time::Instant,
+    webhook_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Router {
+    let oauth_router = Router::new()
         .route("/oauth/{agent_name}/callback", get(handle_oauth_callback))
-        .with_state(state)
+        .with_state(state);
+
+    let healthz_state = HealthzState {
+        agent_name: agent_name.clone(),
+        started_at,
+        webhook_set,
+    };
+    let healthz_router = Router::new()
+        .route("/healthz", get(handle_healthz))
+        .with_state(healthz_state);
+
+    Router::new()
+        .merge(oauth_router)
+        .merge(healthz_router)
+        .nest(&format!("/tg/{}", agent_name), webhook_router)
+}
+
+#[derive(Clone)]
+struct HealthzState {
+    agent_name: String,
+    started_at: std::time::Instant,
+    webhook_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+async fn handle_healthz(
+    State(state): State<HealthzState>,
+) -> axum::Json<serde_json::Value> {
+    use std::sync::atomic::Ordering;
+    axum::Json(serde_json::json!({
+        "agent": state.agent_name,
+        "webhook_set": state.webhook_set.load(Ordering::Relaxed),
+        "uptime_secs": state.started_at.elapsed().as_secs(),
+    }))
 }
 
 /// GET /oauth/{agent_name}/callback?code=...&state=...
@@ -268,37 +311,39 @@ async fn complete_oauth_flow(
 
 use super::broadcast_to_chats as notify_telegram;
 
-/// Bind axum to a Unix socket at `socket_path` and serve the OAuth callback router.
+/// Bind axum to a Unix socket at `socket_path` and serve the bot's UDS app.
 ///
-/// - Removes stale socket if it exists
-/// - Signals `ready_tx` after bind succeeds (caller can start teloxide)
-/// - Serves until tokio runtime exits
-pub async fn run_oauth_callback_server(
+/// The app combines:
+/// - OAuth callback at `/oauth/{agent_name}/callback`
+/// - Telegram webhook at `/tg/{agent_name}/` (caller's `webhook_router`)
+/// - `/healthz` JSON
+///
+/// Removes any stale socket first; signals `ready_tx` after bind.
+pub async fn run_bot_uds_server(
     socket_path: PathBuf,
     state: OAuthCallbackState,
+    webhook_router: Router,
+    agent_name: String,
+    started_at: std::time::Instant,
+    webhook_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> miette::Result<()> {
-    // Remove stale socket
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)
-            .map_err(|e| miette::miette!("remove stale OAuth socket: {e:#}"))?;
+            .map_err(|e| miette::miette!("remove stale UDS socket: {e:#}"))?;
     }
 
     let listener = UnixListener::bind(&socket_path).map_err(|e| {
-        miette::miette!(
-            "bind OAuth callback socket {}: {e:#}",
-            socket_path.display()
-        )
+        miette::miette!("bind bot UDS socket {}: {e:#}", socket_path.display())
     })?;
 
-    tracing::info!(path = %socket_path.display(), "OAuth callback server listening");
+    tracing::info!(path = %socket_path.display(), "bot UDS server listening");
 
-    // Signal ready (before accepting connections)
     if let Some(tx) = ready_tx {
         let _ = tx.send(());
     }
 
-    let router = build_router(state);
+    let router = build_router(state, webhook_router, agent_name, started_at, webhook_set);
     axum::serve(listener, router)
         .await
         .map_err(|e| miette::miette!("axum serve error: {e:#}"))
