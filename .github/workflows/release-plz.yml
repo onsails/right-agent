@@ -9,6 +9,7 @@ jobs:
   release-plz-release:
     name: Release-plz release
     runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore: release') }}
     permissions:
       contents: write
       pull-requests: read
@@ -20,6 +21,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -34,6 +37,7 @@ jobs:
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore: release') }}
     permissions:
       contents: write
       pull-requests: write
@@ -48,6 +52,8 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
