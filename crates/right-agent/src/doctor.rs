@@ -82,8 +82,9 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     // Agent structure checks
     checks.extend(check_agent_structure(home));
 
-    // Telegram webhook checks — warn when active webhook would conflict with long-polling (PC-05).
+    // Telegram webhook checks — Fail when no webhook registered or URL mismatch (Webhooks Phase 1).
     checks.extend(check_webhook_info_for_agents(home));
+    checks.extend(check_bot_healthz_for_agents(home));
 
     // sqlite3 binary check — Warn (non-fatal): bundled SQLite in right binary makes
     // sqlite3 optional. Present on all standard macOS/Linux installs. (Phase 16, DOCTOR-01).
@@ -460,11 +461,11 @@ fn check_managed_settings(path: &str) -> Option<DoctorCheck> {
 
 /// Check Telegram webhook status for all agents that have a configured token.
 ///
-/// For each agent with a telegram_token configured, calls the
-/// Telegram getWebhookInfo API. Emits:
-/// - Pass when no webhook is active (result.url is empty)
-/// - Warn when an active webhook is found (would compete with long-polling)
-/// - Warn when the HTTP check fails (skipped gracefully)
+/// For each agent with a telegram_token configured, calls Telegram
+/// getWebhookInfo. Pass when registered URL matches the expected
+/// `https://<tunnel.hostname>/tg/<agent>/`. Fail when no webhook is set or
+/// URL mismatch. Warn on pending_update_count > 100 or last_error_message
+/// present. Warn (skip) on HTTP failure.
 ///
 /// Agents without a telegram token produce no check (silent skip, PC-05).
 fn check_webhook_info_for_agents(home: &Path) -> Vec<DoctorCheck> {
@@ -472,6 +473,11 @@ fn check_webhook_info_for_agents(home: &Path) -> Vec<DoctorCheck> {
     if !agents_dir.exists() {
         return vec![];
     }
+
+    let global_cfg = match crate::config::read_global_config(home) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
 
     let entries = match std::fs::read_dir(&agents_dir) {
         Ok(e) => e,
@@ -491,22 +497,22 @@ fn check_webhook_info_for_agents(home: &Path) -> Vec<DoctorCheck> {
             None => continue,
         };
 
-        // Parse agent.yaml — skip agents we can't read
         let config = match crate::agent::discovery::parse_agent_config(&path) {
             Ok(Some(c)) => c,
             Ok(None) | Err(_) => continue,
         };
 
-        // Resolve telegram token inline.
-        // TODO: use crate::codegen::telegram::resolve_telegram_token after Plan 01 merges
-        // (resolve_telegram_token will be pub(crate) after Plan 01).
-        let token = resolve_token_from_config(&path, &config);
-        let token = match token {
+        let token = match resolve_token_from_config(&path, &config) {
             Some(t) => t,
-            None => continue, // No telegram token configured — skip silently
+            None => continue,
         };
 
-        checks.push(make_webhook_check(&name, fetch_webhook_url(&token)));
+        let expected_url = format!("https://{}/tg/{}/", global_cfg.tunnel.hostname, name);
+        checks.push(make_webhook_check(
+            &name,
+            &expected_url,
+            fetch_webhook_info(&token),
+        ));
     }
 
     checks
@@ -520,26 +526,66 @@ fn resolve_token_from_config(
     config.telegram_token.clone()
 }
 
-/// Build a DoctorCheck from a webhook URL fetch result.
+/// Build a DoctorCheck from a webhook info fetch result.
 ///
 /// Extracted for testability — callers can pass any Ok/Err result
 /// to verify the check construction logic without network calls.
-fn make_webhook_check(agent_name: &str, webhook_url_result: Result<String, String>) -> DoctorCheck {
-    match webhook_url_result {
-        Ok(url) if url.is_empty() => DoctorCheck {
+fn make_webhook_check(
+    agent_name: &str,
+    expected_url: &str,
+    info: Result<WebhookInfo, String>,
+) -> DoctorCheck {
+    match info {
+        Ok(info) if info.url.is_empty() => DoctorCheck {
             name: format!("telegram-webhook/{agent_name}"),
-            status: CheckStatus::Pass,
-            detail: "no active webhook".to_string(),
-            fix: None,
-        },
-        Ok(url) => DoctorCheck {
-            name: format!("telegram-webhook/{agent_name}"),
-            status: CheckStatus::Warn,
-            detail: format!("active webhook found: {url}"),
+            status: CheckStatus::Fail,
+            detail: "no webhook registered (expected to be set by bot)".to_string(),
             fix: Some(format!(
-                "Run right bot --agent {agent_name} to clear the webhook, or call deleteWebhook manually"
+                "Run right restart {agent_name} — bot's setWebhook loop will register it"
             )),
         },
+        Ok(info) if info.url != expected_url => DoctorCheck {
+            name: format!("telegram-webhook/{agent_name}"),
+            status: CheckStatus::Fail,
+            detail: format!(
+                "webhook URL mismatch — registered: {}, expected: {}",
+                info.url, expected_url
+            ),
+            fix: Some(format!(
+                "Run right restart {agent_name} to re-register the webhook"
+            )),
+        },
+        Ok(info) => {
+            let mut detail = format!("webhook registered: {}", info.url);
+            if let Some(msg) = info.last_error_message.as_ref() {
+                detail.push_str(&format!(" (last error: {msg})"));
+            }
+            if info.pending_update_count > 100 {
+                return DoctorCheck {
+                    name: format!("telegram-webhook/{agent_name}"),
+                    status: CheckStatus::Warn,
+                    detail: format!(
+                        "{detail}; pending_update_count={} (>100)",
+                        info.pending_update_count
+                    ),
+                    fix: Some("Investigate bot health — updates are queueing".to_string()),
+                };
+            }
+            if info.last_error_message.is_some() {
+                return DoctorCheck {
+                    name: format!("telegram-webhook/{agent_name}"),
+                    status: CheckStatus::Warn,
+                    detail,
+                    fix: None,
+                };
+            }
+            DoctorCheck {
+                name: format!("telegram-webhook/{agent_name}"),
+                status: CheckStatus::Pass,
+                detail,
+                fix: None,
+            }
+        }
         Err(e) => DoctorCheck {
             name: format!("telegram-webhook/{agent_name}"),
             status: CheckStatus::Warn,
@@ -549,11 +595,17 @@ fn make_webhook_check(agent_name: &str, webhook_url_result: Result<String, Strin
     }
 }
 
-/// Fetch the active webhook URL for a Telegram bot token.
+#[derive(Debug)]
+struct WebhookInfo {
+    url: String,
+    pending_update_count: u64,
+    last_error_message: Option<String>,
+}
+
+/// Fetch webhook info for a Telegram bot token.
 ///
-/// Returns Ok("") when no webhook is active, Ok(url) when one is set,
-/// Err(description) when the HTTP call fails.
-fn fetch_webhook_url(token: &str) -> Result<String, String> {
+/// Returns Ok(WebhookInfo) on success, Err(description) when the HTTP call fails.
+fn fetch_webhook_info(token: &str) -> Result<WebhookInfo, String> {
     tokio::task::block_in_place(|| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -571,15 +623,92 @@ fn fetch_webhook_url(token: &str) -> Result<String, String> {
                 .json()
                 .await
                 .map_err(|e| format!("JSON parse error: {e}"))?;
-            Ok(body["result"]["url"].as_str().unwrap_or("").to_string())
+            let result = &body["result"];
+            Ok(WebhookInfo {
+                url: result["url"].as_str().unwrap_or("").to_string(),
+                pending_update_count: result["pending_update_count"].as_u64().unwrap_or(0),
+                last_error_message: result["last_error_message"]
+                    .as_str()
+                    .map(|s| s.to_string()),
+            })
         })
     })
 }
 
+/// Check the bot's UDS `/healthz` endpoint for each agent. (Webhooks Phase 1)
+///
+/// Connects to `<agent>/bot.sock` over a Unix socket and issues a minimal HTTP
+/// request to `/healthz`. Pass on 200, Warn on connect/read failure or non-200.
+/// Skipped silently when the socket file doesn't exist (bot not running).
+fn check_bot_healthz_for_agents(home: &Path) -> Vec<DoctorCheck> {
+    let agents_dir = crate::config::agents_dir(home);
+    if !agents_dir.exists() {
+        return vec![];
+    }
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    let mut checks = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let socket = path.join("bot.sock");
+        if !socket.exists() {
+            continue;
+        }
+        match probe_healthz(&socket) {
+            Ok(()) => checks.push(DoctorCheck {
+                name: format!("bot-healthz/{name}"),
+                status: CheckStatus::Pass,
+                detail: "healthz OK".to_string(),
+                fix: None,
+            }),
+            Err(e) => checks.push(DoctorCheck {
+                name: format!("bot-healthz/{name}"),
+                status: CheckStatus::Warn,
+                detail: format!("healthz failed: {e}"),
+                fix: Some(format!("Run right restart {name}")),
+            }),
+        }
+    }
+    checks
+}
+
+fn probe_healthz(socket: &Path) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut stream = UnixStream::connect(socket).map_err(|e| format!("connect: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: bot\r\nConnection: close\r\n\r\n")
+        .map_err(|e| format!("write: {e}"))?;
+    let mut buf = String::new();
+    stream
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("read: {e}"))?;
+    if buf.starts_with("HTTP/1.1 200") {
+        Ok(())
+    } else {
+        Err(format!(
+            "non-200 response: {}",
+            buf.lines().next().unwrap_or("(empty)")
+        ))
+    }
+}
+
 /// Check if `cloudflared` binary is available in PATH. (D-03, OAUTH-04)
 ///
-/// Warn severity — cloudflared is optional for non-OAuth deployments.
-/// Absence only becomes critical when OAuth callbacks via named tunnel are needed.
+/// Fail severity — cloudflared is required for the mandatory tunnel.
 fn check_cloudflared_binary() -> DoctorCheck {
     let raw = check_binary(
         "cloudflared",
@@ -591,7 +720,7 @@ fn check_cloudflared_binary() -> DoctorCheck {
         status: if raw.status == CheckStatus::Pass {
             CheckStatus::Pass
         } else {
-            CheckStatus::Warn
+            CheckStatus::Fail
         },
         ..raw
     }
@@ -600,8 +729,9 @@ fn check_cloudflared_binary() -> DoctorCheck {
 /// Check whether a cloudflare tunnel is configured in `<home>/config.yaml`. (D-03)
 ///
 /// Tunnel is mandatory — Telegram webhooks require it. If `read_global_config`
-/// fails (missing/invalid tunnel block), this surfaces a Warn check with the
-/// underlying error so `right doctor` shows the operator what to fix.
+/// fails (missing/invalid tunnel block) or the credentials file is absent,
+/// this surfaces a Fail check with the underlying error so `right doctor`
+/// shows the operator what to fix.
 /// Unified tunnel config + credentials check.
 fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
     let config = match crate::config::read_global_config(home) {
@@ -609,9 +739,9 @@ fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
         Err(e) => {
             return vec![DoctorCheck {
                 name: "tunnel-config".to_string(),
-                status: CheckStatus::Warn,
-                detail: format!("failed to read config.yaml: {e:#}"),
-                fix: None,
+                status: CheckStatus::Fail,
+                detail: format!("failed to read config.yaml (tunnel is mandatory): {e:#}"),
+                fix: Some("run `right config set` to configure the tunnel".to_string()),
             }];
         }
     };
@@ -638,7 +768,7 @@ fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
     } else {
         checks.push(DoctorCheck {
             name: "tunnel-credentials".to_string(),
-            status: CheckStatus::Warn,
+            status: CheckStatus::Fail,
             detail: format!(
                 "credentials file missing: {}",
                 tunnel_cfg.credentials_file.display()

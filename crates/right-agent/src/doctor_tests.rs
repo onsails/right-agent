@@ -390,34 +390,27 @@ fn sqlite3_check_is_warn_not_fail_when_absent() {
 
 // ---- make_webhook_check tests ----
 
-#[test]
-fn make_webhook_check_pass_when_url_empty() {
-    let check = make_webhook_check("mybot", Ok(String::new()));
-    assert_eq!(check.name, "telegram-webhook/mybot");
-    assert_eq!(check.status, CheckStatus::Pass);
-    assert!(
-        check.detail.contains("no active webhook"),
-        "expected 'no active webhook', got: {}",
-        check.detail
-    );
-    assert!(check.fix.is_none());
+const EXPECTED_URL: &str = "https://example.com/tg/mybot/";
+
+fn webhook_info(url: &str) -> WebhookInfo {
+    WebhookInfo {
+        url: url.to_string(),
+        pending_update_count: 0,
+        last_error_message: None,
+    }
 }
 
 #[test]
-fn make_webhook_check_warn_when_url_nonempty() {
-    let check = make_webhook_check("mybot", Ok("https://example.com/webhook".to_string()));
+fn make_webhook_check_fail_when_url_empty() {
+    let check = make_webhook_check("mybot", EXPECTED_URL, Ok(webhook_info("")));
     assert_eq!(check.name, "telegram-webhook/mybot");
-    assert_eq!(check.status, CheckStatus::Warn);
+    assert_eq!(check.status, CheckStatus::Fail);
     assert!(
-        check.detail.contains("active webhook found"),
-        "expected 'active webhook found', got: {}",
+        check.detail.contains("no webhook registered"),
+        "expected 'no webhook registered', got: {}",
         check.detail
     );
-    assert!(
-        check.detail.contains("https://example.com/webhook"),
-        "detail must include the webhook URL"
-    );
-    let fix = check.fix.expect("Warn with URL must have fix hint");
+    let fix = check.fix.expect("Fail must have fix hint");
     assert!(
         fix.contains("mybot"),
         "fix must mention the agent name, got: {fix}"
@@ -425,8 +418,86 @@ fn make_webhook_check_warn_when_url_nonempty() {
 }
 
 #[test]
+fn make_webhook_check_fail_when_url_mismatch() {
+    let check = make_webhook_check(
+        "mybot",
+        EXPECTED_URL,
+        Ok(webhook_info("https://other.com/tg/mybot/")),
+    );
+    assert_eq!(check.name, "telegram-webhook/mybot");
+    assert_eq!(check.status, CheckStatus::Fail);
+    assert!(
+        check.detail.contains("webhook URL mismatch"),
+        "expected 'webhook URL mismatch', got: {}",
+        check.detail
+    );
+    assert!(
+        check.detail.contains("https://other.com/tg/mybot/"),
+        "detail must include the registered URL"
+    );
+    assert!(
+        check.detail.contains(EXPECTED_URL),
+        "detail must include the expected URL"
+    );
+    let fix = check.fix.expect("Fail must have fix hint");
+    assert!(
+        fix.contains("mybot"),
+        "fix must mention the agent name, got: {fix}"
+    );
+}
+
+#[test]
+fn make_webhook_check_pass_when_url_matches() {
+    let check = make_webhook_check("mybot", EXPECTED_URL, Ok(webhook_info(EXPECTED_URL)));
+    assert_eq!(check.name, "telegram-webhook/mybot");
+    assert_eq!(check.status, CheckStatus::Pass);
+    assert!(
+        check.detail.contains("webhook registered"),
+        "expected 'webhook registered', got: {}",
+        check.detail
+    );
+    assert!(check.fix.is_none());
+}
+
+#[test]
+fn make_webhook_check_warn_when_pending_high() {
+    let info = WebhookInfo {
+        url: EXPECTED_URL.to_string(),
+        pending_update_count: 250,
+        last_error_message: None,
+    };
+    let check = make_webhook_check("mybot", EXPECTED_URL, Ok(info));
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains("pending_update_count=250"),
+        "expected pending_update_count detail, got: {}",
+        check.detail
+    );
+}
+
+#[test]
+fn make_webhook_check_warn_when_last_error_present() {
+    let info = WebhookInfo {
+        url: EXPECTED_URL.to_string(),
+        pending_update_count: 0,
+        last_error_message: Some("Connection timed out".to_string()),
+    };
+    let check = make_webhook_check("mybot", EXPECTED_URL, Ok(info));
+    assert_eq!(check.status, CheckStatus::Warn);
+    assert!(
+        check.detail.contains("Connection timed out"),
+        "expected last error in detail, got: {}",
+        check.detail
+    );
+}
+
+#[test]
 fn make_webhook_check_warn_when_http_error() {
-    let check = make_webhook_check("mybot", Err("HTTP error: connection refused".to_string()));
+    let check = make_webhook_check(
+        "mybot",
+        EXPECTED_URL,
+        Err("HTTP error: connection refused".to_string()),
+    );
     assert_eq!(check.name, "telegram-webhook/mybot");
     assert_eq!(check.status, CheckStatus::Warn);
     assert!(
@@ -437,24 +508,16 @@ fn make_webhook_check_warn_when_http_error() {
     assert!(check.fix.is_none());
 }
 
-/// Regression test: fetch_webhook_url must not panic when called from within
+/// Regression test: fetch_webhook_info must not panic when called from within
 /// an existing tokio multi-thread runtime context (UAT-FIX-02).
 ///
 /// Before the fix: Runtime::new().block_on() panics with
 /// "Cannot start a runtime from within a runtime".
-/// After the fix: returns a Result (Ok or Err) without panicking — the
-/// Telegram API returns 200 with empty result for invalid tokens, so Ok("")
-/// is a valid non-panic outcome.
+/// After the fix: returns a Result without panicking.
 #[tokio::test(flavor = "multi_thread")]
-async fn fetch_webhook_url_does_not_panic_in_async_context() {
-    // An invalid token is used — the exact result depends on network and
-    // Telegram API behavior. The critical invariant is: no panic.
-    // Before the fix this test PANICKED with "Cannot start a runtime from
-    // within a runtime". After the fix it returns Ok("") or Err(...).
-    let _result = fetch_webhook_url("invalid-token-for-test");
+async fn fetch_webhook_info_does_not_panic_in_async_context() {
+    let _result = fetch_webhook_info("invalid-token-for-test");
     // If we reach here without panicking, the fix works.
-    // The Telegram API returns 200 OK with empty result for invalid tokens,
-    // so we cannot assert is_err() — Ok("") is also a valid outcome.
 }
 
 #[test]
@@ -564,7 +627,7 @@ fn tunnel_state_credentials_present_passes() {
 }
 
 #[test]
-fn tunnel_state_credentials_missing_warns() {
+fn tunnel_state_credentials_missing_fails() {
     let dir = tempdir().unwrap();
     let config = crate::config::GlobalConfig {
         tunnel: crate::config::TunnelConfig {
@@ -580,7 +643,7 @@ fn tunnel_state_credentials_missing_warns() {
         .iter()
         .find(|c| c.name == "tunnel-credentials")
         .unwrap();
-    assert_eq!(creds_check.status, CheckStatus::Warn);
+    assert_eq!(creds_check.status, CheckStatus::Fail);
     assert!(
         creds_check.detail.contains("credentials file missing"),
         "detail: {}",
