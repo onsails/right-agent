@@ -97,9 +97,9 @@ Detection order (first match wins):
 ```rust
 pub struct Rail;
 impl Rail {
-    pub fn prefix(theme: Theme) -> &'static str;   // "▐  " (Color/Mono) | "|  " (Ascii)
-    pub fn mark(theme: Theme)   -> &'static str;   // "▐✓"  | "|*"
-    pub fn blank(theme: Theme)  -> &'static str;   // "▐"   | "|"
+    pub fn prefix(theme: Theme) -> String;   // "▐  " (Color/Mono, ANSI-wrapped on Color) | "|  " (Ascii)
+    pub fn mark(theme: Theme)   -> String;   // "▐✓"  | "|*"
+    pub fn blank(theme: Theme)  -> String;   // "▐"   | "|"
 }
 
 pub enum Glyph { Ok, Warn, Err, Info }
