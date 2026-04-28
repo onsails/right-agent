@@ -4,7 +4,6 @@
 //! dependency on the asset. Anchoring on `CARGO_MANIFEST_DIR` keeps the path
 //! correct regardless of which file inside the crate references this module.
 
-use bytes::Bytes;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, MessageId, ThreadId};
 
@@ -33,7 +32,7 @@ pub(crate) async fn send_if_needed(
     if !should_send(bootstrap_mode, first_turn_in_chat) {
         return;
     }
-    let file = InputFile::memory(Bytes::from_static(WELCOME_PNG)).file_name("welcome.png");
+    let file = InputFile::memory(WELCOME_PNG).file_name("welcome.png");
     let mut req = bot.send_photo(chat_id, file);
     if eff_thread_id != 0 {
         req = req.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));

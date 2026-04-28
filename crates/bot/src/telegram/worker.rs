@@ -1133,15 +1133,14 @@ impl From<String> for InvokeCcFailure {
 }
 
 /// Successful payload returned by [`invoke_cc`].
-#[derive(Debug)]
 pub(crate) struct CcReply {
     /// Parsed agent reply, or `None` when CC produced an empty/no-reply result.
-    pub output: Option<ReplyOutput>,
+    pub(crate) output: Option<ReplyOutput>,
     /// CC session UUID for this invocation (new or resumed).
-    pub session_uuid: String,
+    pub(crate) session_uuid: String,
     /// `true` if this invocation created a brand-new CC session
     /// (i.e. the worker's first turn in this chat/thread).
-    pub is_first_call: bool,
+    pub(crate) is_first_call: bool,
 }
 
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
