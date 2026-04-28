@@ -319,10 +319,17 @@ impl BackendRegistry {
         args: serde_json::Value,
     ) -> Result<CallToolResult, anyhow::Error> {
         let proxies = self.proxies.read().await;
-        let proxy = proxies.get(proxy_name).ok_or_else(|| {
-            anyhow::anyhow!("Server '{proxy_name}' not found. It may have been removed.")
-        })?;
-        Ok(proxy.tools_call(tool, args).await?)
+        let Some(proxy) = proxies.get(proxy_name) else {
+            return Ok(right_agent::mcp::tool_error::tool_error(
+                "server_not_found",
+                format!("Server '{proxy_name}' not found. It may have been removed."),
+                None,
+            ));
+        };
+        match proxy.tools_call(tool, args).await {
+            Ok(result) => Ok(result),
+            Err(e) => Ok(CallToolResult::from(e)),
+        }
     }
 
     /// List all registered proxy backends with status info.
@@ -664,6 +671,13 @@ pub(crate) async fn run_aggregator_http(
 mod tests {
     use super::*;
 
+    fn aggregator_test_body(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+        let rmcp::model::RawContent::Text(t) = &result.content[0].raw else {
+            panic!("expected text content, got {:?}", result.content[0].raw);
+        };
+        serde_json::from_str(&t.text).expect("body must be valid JSON")
+    }
+
     fn make_test_registry(tmp: &std::path::Path) -> BackendRegistry {
         let agents_dir = tmp.join("agents");
         let agent_dir = agents_dir.join("test-agent");
@@ -753,13 +767,17 @@ mod tests {
 
         let result = dispatcher
             .dispatch("test-agent", "notion__search", serde_json::json!({}))
-            .await;
-
-        let err = result.unwrap_err();
-        let msg = format!("{err:#}");
+            .await
+            .expect("dispatch should return Ok with operation error");
+        assert_eq!(result.is_error, Some(true));
+        let body = aggregator_test_body(&result);
+        assert_eq!(body["error"]["code"], "server_not_found");
         assert!(
-            msg.contains("Server 'notion' not found"),
-            "unexpected error: {msg}"
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Server 'notion' not found"),
+            "unexpected message: {body:?}"
         );
     }
 
