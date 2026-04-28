@@ -15,8 +15,6 @@ const WELCOME_PNG: &[u8] = include_bytes!(concat!(
 
 /// Pure predicate. The welcome photo goes out on the *first* CC invocation in
 /// a chat **only when** that invocation is happening in bootstrap mode.
-// TODO(task-5): remove `allow(dead_code)` once worker.rs calls `send_if_needed`.
-#[allow(dead_code)]
 fn should_send(bootstrap_mode: bool, first_turn_in_chat: bool) -> bool {
     bootstrap_mode && first_turn_in_chat
 }
@@ -25,10 +23,8 @@ fn should_send(bootstrap_mode: bool, first_turn_in_chat: bool) -> bool {
 ///
 /// Fire-and-forget: errors are logged at WARN and do not propagate. The text
 /// reply is the contract; the photo is presentation.
-// TODO(task-5): remove `allow(dead_code)` once worker.rs calls this.
-#[allow(dead_code)]
 pub(crate) async fn send_if_needed(
-    bot: &teloxide::Bot,
+    bot: &super::BotType,
     chat_id: ChatId,
     eff_thread_id: i64,
     bootstrap_mode: bool,

@@ -563,11 +563,13 @@ pub fn spawn_worker(
                             }
                             InvokeCcFailure::NonReflectable { .. } => String::new(),
                         };
+                        // is_first_call=false: failures don't produce a normal
+                        // reply, so the bootstrap welcome photo should not fire.
+                        // Auth-error recovery deactivates the session, so a
+                        // subsequent retry sees is_first_call=true again.
                         (Err(failure), uuid, false)
                     }
                 };
-            // consumed by Task 5; placeholder to satisfy clippy
-            let _ = is_first_call;
 
             // Reverse sync .md changes from sandbox.
             // Bootstrap mode: BLOCK so files are on host for completion check.
@@ -656,6 +658,18 @@ pub fn spawn_worker(
                     } else {
                         output.reply_to_message_id
                     };
+
+                    // Bootstrap welcome photo — first agent reply only, in
+                    // bootstrap mode only. Fire-and-forget: errors logged at
+                    // WARN, never block the text reply.
+                    super::bootstrap_photo::send_if_needed(
+                        &ctx.bot,
+                        tg_chat_id,
+                        eff_thread_id,
+                        bootstrap_mode,
+                        is_first_call,
+                    )
+                    .await;
 
                     if let Some(content) = output.content {
                         reply_text_for_retain = Some(content.clone());
@@ -1119,6 +1133,7 @@ impl From<String> for InvokeCcFailure {
 }
 
 /// Successful payload returned by [`invoke_cc`].
+#[derive(Debug)]
 pub(crate) struct CcReply {
     /// Parsed agent reply, or `None` when CC produced an empty/no-reply result.
     pub output: Option<ReplyOutput>,
@@ -1131,8 +1146,12 @@ pub(crate) struct CcReply {
 
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
 ///
-/// Returns `Ok(CcReply { output, session_uuid, is_first_call })` on success,
-/// `Err(InvokeCcFailure)` on subprocess failure or missing reply tool.
+/// Returns `Ok(CcReply { output, session_uuid, is_first_call })` whenever no
+/// failure needs to be surfaced to the user. `output` is `Some(ReplyOutput)`
+/// for a normal agent reply and `None` for paths that produced no user-visible
+/// reply (user-triggered stop, auth-token-flow handoff). Returns
+/// `Err(InvokeCcFailure)` for subprocess failures, parse failures, or other
+/// conditions that require an error reply.
 async fn invoke_cc(
     input: &str,
     first_text: Option<&str>,
