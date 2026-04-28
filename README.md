@@ -34,7 +34,7 @@ every agent inside its own sandbox. security first; usability never sacrificed f
 we make the choices for you and polish what we ship. the box is closed:
 
 - **chat surface.** telegram. dm, groups, topics — polished, with attachments both ways, media groups, voice notes. not a matrix of telegram + slack + discord + web ui.
-- **memory.** hindsight cloud (semantic recall, recommended) or local `MEMORY.md` (no cloud dependency). picked at agent init.
+- **memory.** [hindsight cloud](https://hindsight.vectorize.io) (semantic recall, recommended) or local `MEMORY.md` (no cloud dependency). picked at agent init.
 - **model provider.** your claude subscription. `claude -p`, no api keys per agent.
 - **tunnel.** cloudflared. free, secure, production-grade.
 - **sandbox.** [nvidia openshell](https://github.com/NVIDIA/OpenShell), on by default. the only opt-out is for agents that need host access (e.g. computer-use, browser automation), and that's set explicitly per-agent.
@@ -67,7 +67,7 @@ each agent is a separate claude code session in its own sandbox: separate identi
 
 two memory backends, picked at agent init.
 
-**hindsight cloud** stores every turn append-only and recalls what's relevant on the next turn, scoped per-chat. the agent remembers who you are, what you were working on yesterday, and which stack you run, without replaying the whole transcript.
+**[hindsight cloud](https://hindsight.vectorize.io)** stores every turn append-only and recalls what's relevant on the next turn, scoped per-chat. the agent remembers who you are, what you were working on yesterday, and which stack you run, without replaying the whole transcript.
 
 **`MEMORY.md`** is a local file the agent maintains itself. no cloud, no semantic recall, simpler.
 
