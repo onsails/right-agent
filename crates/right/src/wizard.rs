@@ -335,19 +335,32 @@ fn handle_existing_tunnel(
 // Telegram setup (public)
 // ---------------------------------------------------------------------------
 
+/// Outcome of `telegram_setup`. Distinguishes "back" (Esc) from "skip"
+/// (Enter on empty when `!required`) so the caller can route navigation
+/// vs. value separately.
+#[derive(Debug, Clone)]
+pub enum TelegramSetupOutcome {
+    /// User entered a valid token.
+    Token(String),
+    /// User pressed Enter on empty (only possible when `!required`).
+    Skipped,
+    /// User pressed Esc — caller should navigate back.
+    Back,
+}
+
 /// Run the interactive Telegram bot token setup flow.
 ///
-/// Returns `Some(token)` if a token was entered (or kept), `None` if skipped.
 /// When `required` is true and there is no existing token, an empty input
-/// is rejected and the prompt re-runs until a valid token is entered (or
-/// the user cancels with Esc, which propagates as `Err`).
+/// is rejected and the prompt re-runs until a valid token is entered. Esc
+/// always navigates back; Ctrl+C triggers a "Cancel setup?" confirm via
+/// `inquire_back` and propagates as `Err` if confirmed.
 pub fn telegram_setup(
     existing_token: Option<&str>,
     interactive: bool,
     required: bool,
-) -> miette::Result<Option<String>> {
+) -> miette::Result<TelegramSetupOutcome> {
     if !interactive {
-        return Ok(None);
+        return Ok(TelegramSetupOutcome::Skipped);
     }
 
     let prompt_msg = if let Some(token) = existing_token {
@@ -364,9 +377,11 @@ pub fn telegram_setup(
     };
 
     loop {
-        let input = inquire::Text::new(&prompt_msg)
-            .prompt()
-            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+        let Some(input) =
+            right_agent::init::inquire_back(|| inquire::Text::new(&prompt_msg).prompt())?
+        else {
+            return Ok(TelegramSetupOutcome::Back);
+        };
 
         let trimmed = input.trim();
 
@@ -379,12 +394,14 @@ pub fn telegram_setup(
                 );
                 continue;
             }
-            // Keep current or skip.
-            return Ok(existing_token.map(|t| t.to_string()));
+            return Ok(match existing_token {
+                Some(t) => TelegramSetupOutcome::Token(t.to_string()),
+                None => TelegramSetupOutcome::Skipped,
+            });
         }
 
         match validate_telegram_token(trimmed) {
-            Ok(()) => return Ok(Some(trimmed.to_string())),
+            Ok(()) => return Ok(TelegramSetupOutcome::Token(trimmed.to_string())),
             Err(e) if required => {
                 eprintln!("  {e:#}");
                 continue;
@@ -400,29 +417,56 @@ pub fn telegram_setup(
 
 /// Prompt for Telegram chat IDs during init.
 ///
-/// Returns parsed IDs, or empty vec if the user skips.
-pub fn chat_ids_setup() -> miette::Result<Vec<i64>> {
-    let input = inquire::Text::new(
-        "Your Telegram user ID (send /start to @userinfobot to find it, empty to skip):",
-    )
-    .prompt()
-    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+/// When `required` is true, an empty input is rejected and an unparseable
+/// entry re-prompts (instead of erroring out). Returns `Ok(Some(ids))`
+/// (possibly empty when `!required`) on submit; `Ok(None)` when the user
+/// navigates back (Esc); `Err` on confirmed cancel (Ctrl+C).
+pub fn chat_ids_setup(required: bool) -> miette::Result<Option<Vec<i64>>> {
+    let prompt_text = if required {
+        "Your Telegram user ID (required — send /start to @userinfobot to find it):"
+    } else {
+        "Your Telegram user ID (send /start to @userinfobot to find it, empty to skip):"
+    };
 
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Ok(vec![]);
+    loop {
+        let Some(input) =
+            right_agent::init::inquire_back(|| inquire::Text::new(prompt_text).prompt())?
+        else {
+            return Ok(None);
+        };
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            if required {
+                eprintln!(
+                    "  At least one Telegram chat/user ID is required so the bot \
+                     knows who is allowed to talk to it. Send /start to \
+                     @userinfobot to find your numeric ID, then paste it here. \
+                     Press Esc to go back."
+                );
+                continue;
+            }
+            return Ok(Some(vec![]));
+        }
+
+        let parsed: Result<Vec<i64>, _> = trimmed
+            .split(',')
+            .map(|s| {
+                s.trim()
+                    .parse::<i64>()
+                    .map_err(|e| miette::miette!("invalid chat ID '{}': {e}", s.trim()))
+            })
+            .collect();
+
+        match parsed {
+            Ok(ids) => return Ok(Some(ids)),
+            Err(e) if required => {
+                eprintln!("  {e:#}");
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
     }
-
-    let ids: Vec<i64> = trimmed
-        .split(',')
-        .map(|s| {
-            s.trim()
-                .parse::<i64>()
-                .map_err(|e| miette::miette!("invalid chat ID '{}': {e}", s.trim()))
-        })
-        .collect::<miette::Result<Vec<_>>>()?;
-
-    Ok(ids)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,21 +648,16 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         }
 
         if selection == opt_token {
-            let new_token = telegram_setup(config.telegram_token.as_deref(), true, false)?;
-            match new_token {
-                Some(token) => {
+            match telegram_setup(config.telegram_token.as_deref(), true, false)? {
+                TelegramSetupOutcome::Token(token) => {
                     update_agent_yaml_field(
                         &agent_yaml_path,
                         "telegram_token",
                         &format!("\"{token}\""),
                     )?;
                 }
-                None if config.telegram_token.is_some() => {
-                    // User cleared the token.
-                    remove_agent_yaml_field(&agent_yaml_path, "telegram_token")?;
-                }
-                None => {
-                    // No change.
+                TelegramSetupOutcome::Skipped | TelegramSetupOutcome::Back => {
+                    // Enter on empty (keep existing) or Esc — no change.
                 }
             }
         } else if selection == opt_model {
@@ -948,17 +987,16 @@ pub fn stt_setup() -> miette::Result<Option<(bool, right_agent::agent::types::Wh
     use right_agent::agent::types::WhisperModel;
 
     // Step 1: enable y/n
-    let enable = match inquire::Confirm::new("Enable voice transcription?")
-        .with_default(true)
-        .with_help_message(
-            "Telegram voice messages and video notes will be transcribed locally via whisper.cpp.",
-        )
-        .prompt()
-    {
-        Ok(v) => v,
-        Err(inquire::InquireError::OperationCanceled)
-        | Err(inquire::InquireError::OperationInterrupted) => return Ok(None),
-        Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
+    let Some(enable) = right_agent::init::inquire_back(|| {
+        inquire::Confirm::new("Enable voice transcription?")
+            .with_default(true)
+            .with_help_message(
+                "Telegram voice messages and video notes will be transcribed locally via whisper.cpp.",
+            )
+            .prompt()
+    })?
+    else {
+        return Ok(None);
     };
 
     if !enable {
@@ -966,24 +1004,23 @@ pub fn stt_setup() -> miette::Result<Option<(bool, right_agent::agent::types::Wh
     }
 
     // Step 2: model select
-    let options = vec![
-        "tiny     — ~75 MB,   fastest, OK for short commands",
-        "base     — ~150 MB,  decent",
-        "small    — ~470 MB,  recommended (default)",
-        "medium   — ~1.5 GB,  very good",
-        "large-v3 — ~3.0 GB,  best quality, slow",
-    ];
-    let picked = match inquire::Select::new("Choose whisper model:", options)
+    let Some(picked) = right_agent::init::inquire_back(|| {
+        inquire::Select::new(
+            "Choose whisper model:",
+            vec![
+                "tiny     — ~75 MB,   fastest, OK for short commands",
+                "base     — ~150 MB,  decent",
+                "small    — ~470 MB,  recommended (default)",
+                "medium   — ~1.5 GB,  very good",
+                "large-v3 — ~3.0 GB,  best quality, slow",
+            ],
+        )
         .with_starting_cursor(2) // small
         .prompt()
-    {
-        Ok(v) => v,
-        Err(inquire::InquireError::OperationCanceled)
-        | Err(inquire::InquireError::OperationInterrupted) => {
-            // Caller routes the back navigation (skips two steps from the user's perspective).
-            return Ok(None);
-        }
-        Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
+    })?
+    else {
+        // Caller routes the back navigation (skips two steps from the user's perspective).
+        return Ok(None);
     };
     let model = if picked.starts_with("tiny") {
         WhisperModel::Tiny

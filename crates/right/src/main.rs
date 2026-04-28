@@ -1185,18 +1185,19 @@ fn cmd_init(
                             Step::Memory
                         };
                     } else {
-                        match crate::wizard::telegram_setup(None, true, false) {
-                            Ok(t) => {
-                                w_token = t;
-                                step = if w_token.is_some() {
-                                    Step::ChatIds
-                                } else {
-                                    Step::Memory
-                                };
+                        use crate::wizard::TelegramSetupOutcome;
+                        match crate::wizard::telegram_setup(None, true, false)? {
+                            TelegramSetupOutcome::Token(t) => {
+                                w_token = Some(t);
+                                step = Step::ChatIds;
                             }
-                            Err(_) => {
+                            TelegramSetupOutcome::Skipped => {
+                                w_token = None;
+                                step = Step::Memory;
+                            }
+                            TelegramSetupOutcome::Back => {
                                 step = Step::Network;
-                            } // back
+                            }
                         }
                     }
                 }
@@ -1205,12 +1206,12 @@ fn cmd_init(
                         w_chat_ids = telegram_allowed_chat_ids.to_vec();
                         step = Step::Memory;
                     } else {
-                        match crate::wizard::chat_ids_setup() {
-                            Ok(ids) => {
+                        match crate::wizard::chat_ids_setup(false)? {
+                            Some(ids) => {
                                 w_chat_ids = ids;
                                 step = Step::Memory;
                             }
-                            Err(_) => {
+                            None => {
                                 step = Step::Telegram;
                             } // back
                         }
@@ -1636,22 +1637,27 @@ fn cmd_agent_init(
                             step = Step::Telegram;
                         }
                     }
-                    Step::Telegram => match crate::wizard::telegram_setup(None, true, true) {
-                        Ok(t) => {
-                            w_token = t;
-                            // Required mode guarantees Some — proceed to chat IDs.
-                            step = Step::ChatIds;
+                    Step::Telegram => {
+                        use crate::wizard::TelegramSetupOutcome;
+                        match crate::wizard::telegram_setup(None, true, true)? {
+                            TelegramSetupOutcome::Token(t) => {
+                                w_token = Some(t);
+                                step = Step::ChatIds;
+                            }
+                            TelegramSetupOutcome::Skipped => {
+                                unreachable!("required=true, telegram_setup never skips")
+                            }
+                            TelegramSetupOutcome::Back => {
+                                step = Step::Network;
+                            }
                         }
-                        Err(_) => {
-                            step = Step::Network;
-                        }
-                    },
-                    Step::ChatIds => match crate::wizard::chat_ids_setup() {
-                        Ok(ids) => {
+                    }
+                    Step::ChatIds => match crate::wizard::chat_ids_setup(true)? {
+                        Some(ids) => {
                             w_chat_ids = ids;
                             step = Step::Stt;
                         }
-                        Err(_) => {
+                        None => {
                             step = Step::Telegram;
                         }
                     },
