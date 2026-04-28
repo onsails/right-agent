@@ -3,7 +3,7 @@ credentials-file: {{ credentials_file }}
 ingress:
 {% for agent in agents %}
   - hostname: {{ tunnel_hostname }}
-    path: /tg/{{ agent.name }}/.*
+    path: ^/tg/{{ agent.name }}$
     service: unix:{{ agent.socket_path }}
   - hostname: {{ tunnel_hostname }}
     path: /oauth/{{ agent.name }}/callback
