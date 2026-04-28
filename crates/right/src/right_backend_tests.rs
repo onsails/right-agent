@@ -5,6 +5,13 @@ use tempfile::TempDir;
 
 use super::RightBackend;
 
+fn extract_error_body(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+    let rmcp::model::RawContent::Text(t) = &result.content[0].raw else {
+        panic!("expected text content, got {:?}", result.content[0].raw);
+    };
+    serde_json::from_str(&t.text).expect("body must be valid JSON")
+}
+
 /// Create a [`RightBackend`] with a temp dir as agents_dir and right_home.
 /// Returns `(backend, agents_dir_path, _temp_dir_guard)`.
 fn make_backend() -> (RightBackend, PathBuf, TempDir) {
@@ -573,4 +580,29 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
         )
         .unwrap();
     assert!(thread.is_none(), "explicit null must clear the column");
+}
+
+#[tokio::test]
+async fn bootstrap_done_returns_tool_error_when_files_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agents_dir = tmp.path().join("agents");
+    let agent_dir = agents_dir.join("test-agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+
+    let backend = RightBackend::new(agents_dir, None);
+    let result = backend
+        .tools_call("test-agent", &agent_dir, "bootstrap_done", serde_json::json!({}))
+        .await
+        .expect("dispatch should be Ok with operation error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "bootstrap_files_missing");
+    let missing = body["error"]["details"]["missing"]
+        .as_array()
+        .expect("details.missing must be an array");
+    let names: Vec<&str> = missing.iter().filter_map(|v| v.as_str()).collect();
+    assert!(names.contains(&"IDENTITY.md"), "missing IDENTITY.md: {names:?}");
+    assert!(names.contains(&"SOUL.md"));
+    assert!(names.contains(&"USER.md"));
 }
