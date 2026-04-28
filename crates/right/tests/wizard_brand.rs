@@ -135,3 +135,41 @@ fn init_rerun_writes_recap_again() {
             .stdout(predicate::str::contains("| ready "));
     }
 }
+
+#[test]
+fn agent_init_recap_renders_block() {
+    let home = isolated_home();
+
+    // Bootstrap a global config first so agent init has somewhere to land.
+    right()
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "init",
+            "-y",
+            "--sandbox-mode",
+            "none",
+            "--tunnel-hostname",
+            "test.example.com",
+        ])
+        .assert()
+        .success();
+
+    right()
+        .args([
+            "--home",
+            home.path().to_str().unwrap(),
+            "agent",
+            "init",
+            "finance",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("| agent init: finance "))
+        .stdout(predicate::str::contains("| ready "))
+        .stdout(predicate::str::contains("|  [ok] agent"))
+        .stdout(predicate::str::contains("|  next: right up"));
+}
