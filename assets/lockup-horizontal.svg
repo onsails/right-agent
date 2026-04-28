@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 281 80" width="281" height="80" role="img" aria-label="right agent">
   <g transform="translate(0,10) scale(0.6)">
+    <circle cx="50" cy="50" r="50" fill="#0f0f0f"/>
     <path d="M14 42 L48 22 Q56 18 62 22 L84 36" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
     <path d="M14 58 L48 78 Q56 82 62 78 L84 64" stroke="#E8632A" stroke-width="8.5" stroke-linecap="round" fill="none"/>
     <rect x="8" y="38" width="11" height="24" rx="5.5" fill="#E8632A"/>
