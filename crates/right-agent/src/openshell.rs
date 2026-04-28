@@ -352,6 +352,62 @@ pub fn acquire_sandbox_slot() -> SandboxTestSlot {
     }
 }
 
+/// Test-only mutex for any test resource keyed by a logical name.
+///
+/// Held across process boundaries (including different git worktrees and
+/// different `cargo test` binaries) via an advisory file lock at
+/// `$TMPDIR/right-test-name-<sanitized>.lock`. Drop releases the lock; the
+/// kernel also releases on process death.
+///
+/// Acquire via [`acquire_test_name_lock`].
+pub struct TestNameLock {
+    _file: std::fs::File,
+}
+
+/// Acquire an exclusive cross-process lock on `name`.
+///
+/// Two callers — in the same process or different processes, including
+/// different worktrees running the same test — that pass the same `name`
+/// will serialize. Different names do not contend with each other.
+///
+/// Blocks (polling every 100ms) until the lock is free. Drop the returned
+/// [`TestNameLock`] to release.
+///
+/// Use this to wrap any test that owns a non-discriminated shared resource:
+/// a sandbox name, a fixed TCP port, etc. The 30-slot cap from
+/// [`acquire_sandbox_slot`] is orthogonal and still applies for sandbox
+/// tests.
+pub fn acquire_test_name_lock(name: &str) -> TestNameLock {
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let path = std::env::temp_dir().join(format!("right-test-name-{safe}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .unwrap_or_else(|e| panic!("open test-name lock {}: {e:#}", path.display()));
+    loop {
+        match file.try_lock() {
+            Ok(()) => return TestNameLock { _file: file },
+            Err(std::fs::TryLockError::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                panic!("lock test-name file {}: {e:#}", path.display())
+            }
+        }
+    }
+}
+
 /// Run `openshell sandbox ssh-config NAME` and write the output to
 /// `config_dir/{name}.ssh-config`. Returns the path of the written file.
 pub async fn generate_ssh_config(name: &str, config_dir: &Path) -> miette::Result<PathBuf> {

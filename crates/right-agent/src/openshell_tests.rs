@@ -936,3 +936,51 @@ network_policies:
     let ll = policy.landlock.unwrap();
     assert_eq!(ll.compatibility, "best_effort");
 }
+
+#[test]
+fn test_name_lock_acquire_and_release() {
+    let lock = super::acquire_test_name_lock("unit-test-acquire-release");
+    drop(lock);
+    // Re-acquiring after drop must succeed — same process, lock was released.
+    let _lock2 = super::acquire_test_name_lock("unit-test-acquire-release");
+}
+
+#[test]
+fn test_name_lock_blocks_when_held() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    let name = "unit-test-blocks-when-held";
+    let held = super::acquire_test_name_lock(name);
+
+    let acquired = Arc::new(AtomicBool::new(false));
+    let acquired_clone = Arc::clone(&acquired);
+    let handle = thread::spawn(move || {
+        let _lock = super::acquire_test_name_lock("unit-test-blocks-when-held");
+        acquired_clone.store(true, Ordering::SeqCst);
+    });
+
+    // Give the thread time to attempt acquisition; it must still be blocked.
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        !acquired.load(Ordering::SeqCst),
+        "second acquire returned while first lock still held"
+    );
+
+    drop(held);
+    handle.join().unwrap();
+    assert!(
+        acquired.load(Ordering::SeqCst),
+        "second acquire never completed after first lock released"
+    );
+}
+
+#[test]
+fn test_name_lock_sanitizes_name() {
+    // Names with path separators or other unsafe chars must not crash and
+    // must round-trip — two distinct unsafe names are still distinct locks.
+    let _a = super::acquire_test_name_lock("foo/bar:baz");
+    let _b = super::acquire_test_name_lock("foo_bar_baz_other");
+}
