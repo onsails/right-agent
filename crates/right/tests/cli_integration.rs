@@ -489,7 +489,7 @@ fn reload_fails_when_not_running() {
 }
 
 #[test]
-fn agent_init_suggests_reload() {
+fn agent_init_recap_suggests_right_up() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
