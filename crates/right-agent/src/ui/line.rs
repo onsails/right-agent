@@ -14,6 +14,8 @@ pub fn status(glyph: Glyph) -> Line {
     }
 }
 
+/// A single status line. Construct via [`status`] and chain builder methods
+/// (`noun`, `verb`, `detail`, `fix`) before calling [`Line::render`].
 #[derive(Clone)]
 pub struct Line {
     glyph: Glyph,
