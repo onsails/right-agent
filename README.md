@@ -27,6 +27,8 @@
   <a href="#roadmap">roadmap</a>
 </p>
 
+<img src="assets/section-mark.svg" height="20" alt="">
+
 ## the problem
 
 in most agent setups, the agent you leave running long-term has two problems baked in.
@@ -36,6 +38,10 @@ tokens sit in a plaintext config file. the sandbox is missing or fake. context r
 and getting even that far costs a weekend: a chat backend, a memory store, a tunnel, a sandbox layer — pick them, wire them. the agent works on monday. it didn't have to take a weekend.
 
 right agent fixes both. the pieces are picked, the wiring is done, telegram is your only console.
+
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 ## what we picked for you
 
@@ -50,6 +56,10 @@ we make the choices for you and polish what we ship. the box is closed:
 - **sandbox.** [nvidia openshell](https://github.com/NVIDIA/OpenShell), on by default. the only opt-out is for agents that need host access (e.g. computer-use, browser automation), and that's set explicitly per-agent.
 
 the consequence: features arrive slowly. we polish what's here before adding what's next. if a knob isn't exposed, we haven't found a way to add it without making the product worse for everyone already using it.
+
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 ## quick start
 
@@ -67,6 +77,10 @@ right up
 ```
 
 full install guide: [docs/INSTALL.md](docs/INSTALL.md).
+
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 ## what you get
 
@@ -89,6 +103,10 @@ the first session with a fresh agent is a bootstrap, not a chat. the agent answe
 ### one place to run it from
 
 after `right up`, the terminal is done. claude login, mcp authorization, file attachments, cron notifications, `/doctor`, `/reset`. all in telegram.
+
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 ## how it stays safe
 
@@ -190,6 +208,10 @@ outbound traffic from the sandbox goes through openshell's policy engine. tls is
 
 the default policy is permissive. one line in `agent.yaml` switches to restrictive: anthropic and claude endpoints only.
 
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
+
 ## how it compares
 
 | | typical multi-agent runtime | right agent |
@@ -204,6 +226,10 @@ the default policy is permissive. one line in `agent.yaml` switches to restricti
 | scope | configurable everything | one opinionated path |
 
 other runtimes ship breadth and leave the wiring to you. right agent ships one path and does the wiring itself.
+
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 ## roadmap
 
@@ -228,6 +254,10 @@ next:
 
 full tracker on [github issues](https://github.com/onsails/right-agent/issues).
 
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
+
 ## docs
 
 - [installation](docs/INSTALL.md) — full prerequisites
@@ -235,9 +265,17 @@ full tracker on [github issues](https://github.com/onsails/right-agent/issues).
 - [architecture](ARCHITECTURE.md) — internal topology, sqlite schema, invocation contract
 - [prompting system](PROMPT_SYSTEM.md) — how agent system prompts are assembled
 
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
+
 ## license
 
 apache-2.0.
+
+<p align="center"><img src="assets/section-divider.svg" width="80" height="2" alt=""></p>
+
+<img src="assets/section-mark.svg" height="20" alt="">
 
 ## credits
 
