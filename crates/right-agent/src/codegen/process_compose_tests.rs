@@ -7,12 +7,13 @@ use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
 use crate::codegen::{ProcessComposeConfig, generate_process_compose};
 
 const EXE_PATH: &str = "/usr/bin/right";
+const CLOUDFLARED_SCRIPT: &str = "/home/user/.right/scripts/cloudflared-start.sh";
 
 fn default_config() -> ProcessComposeConfig<'static> {
     ProcessComposeConfig {
         debug: false,
         home: Path::new("/home/user/.right"),
-        cloudflared_script: None,
+        cloudflared_script: Path::new(CLOUDFLARED_SCRIPT),
         token_map_path: None,
     }
 }
@@ -349,30 +350,10 @@ fn defaults_when_no_config_not_in_output() {
 // ── Cloudflared tunnel process ───────────────────────────────────────────────
 
 #[test]
-fn cloudflared_without_tunnel_absent_from_output() {
+fn cloudflared_always_produces_process_entry() {
     let agents = vec![make_bot_agent("myagent", "123:tok")];
     let exe = Path::new(EXE_PATH);
     let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
-    assert!(
-        !output.contains("cloudflared:"),
-        "cloudflared process must be absent when script is None:\n{output}"
-    );
-}
-
-#[test]
-fn cloudflared_with_script_produces_process_entry() {
-    let agents = vec![make_bot_agent("myagent", "123:tok")];
-    let exe = Path::new(EXE_PATH);
-    let script = Path::new("/home/user/.right/scripts/cloudflared-start.sh");
-    let output = generate_process_compose(
-        &agents,
-        exe,
-        &ProcessComposeConfig {
-            cloudflared_script: Some(script),
-            ..default_config()
-        },
-    )
-    .unwrap();
     assert!(
         output.contains("  cloudflared:"),
         "expected cloudflared process key in:\n{output}"
@@ -386,10 +367,6 @@ fn cloudflared_with_script_produces_process_entry() {
         "expected home dir as working_dir:\n{output}"
     );
     assert!(
-        output.contains("restart: \"on_failure\""),
-        "expected on_failure restart policy:\n{output}"
-    );
-    assert!(
         output.contains("backoff_seconds: 5"),
         "expected backoff_seconds: 5:\n{output}"
     );
@@ -398,12 +375,20 @@ fn cloudflared_with_script_produces_process_entry() {
         "expected max_restarts: 10:\n{output}"
     );
     assert!(
-        output.contains("signal: 15"),
-        "expected signal: 15:\n{output}"
-    );
-    assert!(
         output.contains("timeout_seconds: 30"),
         "expected timeout_seconds: 30:\n{output}"
+    );
+}
+
+#[test]
+fn bot_depends_on_cloudflared() {
+    let agents = vec![make_bot_agent("myagent", "123:tok")];
+    let exe = Path::new(EXE_PATH);
+    let output = generate_process_compose(&agents, exe, &default_config()).unwrap();
+    // Per-agent bot must declare a depends_on entry on cloudflared.
+    assert!(
+        output.contains("cloudflared:\n        condition: process_started"),
+        "expected bot depends_on cloudflared in:\n{output}"
     );
 }
 

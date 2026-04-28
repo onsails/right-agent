@@ -261,7 +261,7 @@ pub fn run_agent_codegen(
         ));
     }
 
-    let cloudflared_script_path: Option<std::path::PathBuf> = {
+    let cloudflared_script_path: std::path::PathBuf = {
         let agent_pairs: Vec<(String, std::path::PathBuf)> = all_agents
             .iter()
             .map(|a| (a.name.clone(), a.path.clone()))
@@ -300,7 +300,7 @@ pub fn run_agent_codegen(
                 .map_err(|e| miette::miette!("chmod cloudflared-start.sh: {e:#}"))?;
         }
         tracing::info!(path = %script_path.display(), "cloudflared wrapper script written");
-        Some(script_path)
+        script_path
     };
 
     // Generate process-compose.yaml.
@@ -310,7 +310,7 @@ pub fn run_agent_codegen(
         &crate::codegen::ProcessComposeConfig {
             debug,
             home,
-            cloudflared_script: cloudflared_script_path.as_deref(),
+            cloudflared_script: &cloudflared_script_path,
             token_map_path: Some(&token_map_path),
         },
     )?;

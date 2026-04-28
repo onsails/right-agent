@@ -63,7 +63,7 @@ fn restart_policy_str(policy: &RestartPolicy) -> &'static str {
 pub struct ProcessComposeConfig<'a> {
     pub debug: bool,
     pub home: &'a Path,
-    pub cloudflared_script: Option<&'a Path>,
+    pub cloudflared_script: &'a Path,
     pub token_map_path: Option<&'a Path>,
 }
 
@@ -85,20 +85,20 @@ pub fn generate_process_compose(
         cloudflared_script,
         token_map_path,
     } = config;
-    // Build cloudflared template context when tunnel script is provided.
+    // Build cloudflared template context. The tunnel is mandatory.
     // working_dir = parent of scripts/ dir (i.e., right home).
-    let cf_entry: Option<CloudflaredEntry> = cloudflared_script.map(|script| {
-        let working_dir = script
+    let cf_entry = {
+        let working_dir = cloudflared_script
             .parent() // scripts/
             .and_then(|p| p.parent()) // home/
-            .unwrap_or(script)
+            .unwrap_or(cloudflared_script)
             .display()
             .to_string();
         CloudflaredEntry {
-            command: script.display().to_string(),
+            command: cloudflared_script.display().to_string(),
             working_dir,
         }
-    });
+    };
 
     let right_mcp_server: Option<RightMcpServer> = token_map_path.map(|p| RightMcpServer {
         exe_path: exe_path.display().to_string(),
