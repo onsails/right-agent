@@ -63,6 +63,40 @@ async fn webhook_router_401_on_wrong_secret() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+/// Regression: the bot UDS server nests the webhook router under
+/// `/tg/<agent>`. The cloudflared ingress and the URL we register with
+/// Telegram both target the no-trailing-slash form (`/tg/<agent>`) — that
+/// is what axum's `nest(prefix, router_at_/)` actually matches. A trailing
+/// slash here returns 404 because axum 0.8 does not rewrite `/tg/<agent>/`
+/// to `/` against the inner router. Locks in the contract.
+#[tokio::test]
+async fn nested_webhook_router_routes_no_trailing_slash() {
+    use axum::Router;
+
+    let (_listener, _stop, webhook_router) =
+        build_webhook_router("the-secret".to_string(), dummy_url());
+    let outer: Router = Router::new().nest("/tg/test", webhook_router);
+
+    // POST /tg/test (no trailing slash): should reach inner handler → 401
+    // (secret mismatch). Returning 404 means the nest no longer matches.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tg/test")
+        .header("Content-Type", "application/json")
+        .header(
+            "X-Telegram-Bot-Api-Secret-Token",
+            HeaderValue::from_static("wrong"),
+        )
+        .body(Body::from(fake_update().to_string()))
+        .unwrap();
+    let resp = outer.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "expected nested router to reach inner handler at /tg/<agent>"
+    );
+}
+
 #[tokio::test]
 async fn webhook_router_200_on_correct_secret_emits_update() {
     use futures::StreamExt as _;

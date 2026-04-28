@@ -495,9 +495,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let started_at = std::time::Instant::now();
 
     // Build webhook URL from global tunnel hostname.
+    //
+    // No trailing slash: axum's `nest("/tg/<agent>", router)` matches
+    // `/tg/<agent>` exactly (inner sees `/`) but does NOT rewrite
+    // `/tg/<agent>/` to `/`, so a trailing slash here would yield 404.
+    // The cloudflared ingress rule is anchored to match this exact path.
     let global_cfg = right_agent::config::read_global_config(&home)?;
     let webhook_url = url::Url::parse(&format!(
-        "https://{}/tg/{}/",
+        "https://{}/tg/{}",
         global_cfg.tunnel.hostname.trim_end_matches('/'),
         args.agent
     ))

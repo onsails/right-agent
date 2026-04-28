@@ -144,11 +144,11 @@ fn webhook_ingress_rule_per_agent() {
     ];
     let yaml = generate_cloudflared_config(&agents, "t.example.com", &creds).unwrap();
     assert!(
-        yaml.contains("path: /tg/alpha/.*"),
+        yaml.contains("path: ^/tg/alpha$"),
         "missing alpha webhook ingress: {yaml}"
     );
     assert!(
-        yaml.contains("path: /tg/beta/.*"),
+        yaml.contains("path: ^/tg/beta$"),
         "missing beta webhook ingress: {yaml}"
     );
 }
@@ -158,7 +158,7 @@ fn webhook_ingress_appears_before_oauth_for_same_agent() {
     let creds = fixture_creds();
     let agents = vec![("alpha".to_string(), PathBuf::from("/tmp/agents/alpha"))];
     let yaml = generate_cloudflared_config(&agents, "t.example.com", &creds).unwrap();
-    let tg_pos = yaml.find("/tg/alpha/.*").expect("missing /tg rule");
+    let tg_pos = yaml.find("^/tg/alpha$").expect("missing /tg rule");
     let oauth_pos = yaml.find("/oauth/alpha/callback").expect("missing /oauth rule");
     assert!(
         tg_pos < oauth_pos,
