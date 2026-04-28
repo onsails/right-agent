@@ -510,7 +510,7 @@ fn agent_init_suggests_reload() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("right reload"));
+        .stdout(predicate::str::contains("right up"));
 }
 
 // --- Task 2: --force and --fresh flag tests ---

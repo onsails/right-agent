@@ -1625,6 +1625,10 @@ fn cmd_agent_init(
         None
     };
 
+    let theme = right_agent::ui::detect();
+    println!("{}", right_agent::ui::section(theme, &format!("agent init: {name}")));
+    println!("{}", right_agent::ui::Rail::blank(theme));
+
     // --- Build overrides ---
     let overrides = if let Some(config) = saved_overrides {
         // Reuse saved config from old agent.yaml.
@@ -1931,16 +1935,46 @@ fn cmd_agent_init(
         })?;
     }
 
-    println!("Agent '{name}' created at {}", agent_dir.display());
-    if overrides.telegram_token.is_some() {
-        println!("Telegram channel configured.");
-    }
-    if !overrides.allowed_chat_ids.is_empty() {
-        println!("Telegram chat ID allowlist configured.");
-    }
-    println!();
-    println!("If right is running, apply changes with:");
-    println!("  right reload");
+    let theme = right_agent::ui::detect();
+    let cfg = right_agent::agent::discovery::parse_agent_config(&agent_dir)?
+        .ok_or_else(|| miette::miette!("agent.yaml missing after init"))?;
+
+    let sandbox_str = format!("{}", cfg.sandbox_mode());
+    let sandbox_with_policy = if matches!(
+        cfg.sandbox_mode(),
+        right_agent::agent::types::SandboxMode::Openshell
+    ) {
+        format!("{} ({})", sandbox_str, cfg.network_policy)
+    } else {
+        sandbox_str
+    };
+
+    let chat_ids_detail = if cfg.allowed_chat_ids.is_empty() {
+        "0 allowed (blocks all)".to_string()
+    } else {
+        format!("{} allowed", cfg.allowed_chat_ids.len())
+    };
+
+    let stt_detail = if cfg.stt.enabled {
+        cfg.stt.model.yaml_str().to_string()
+    } else {
+        "off".to_string()
+    };
+
+    let memory_detail = match cfg.memory.as_ref().map(|m| &m.provider) {
+        Some(right_agent::agent::types::MemoryProvider::Hindsight) => "hindsight",
+        _ => "file",
+    };
+
+    let recap = right_agent::ui::Recap::new("ready")
+        .ok("agent", &format!("{name} created"))
+        .ok("sandbox", &sandbox_with_policy)
+        .ok("telegram", if cfg.telegram_token.is_some() { "configured" } else { "not configured" })
+        .ok("chat ids", &chat_ids_detail)
+        .ok("stt", &stt_detail)
+        .ok("memory", memory_detail)
+        .next("right up");
+    println!("{}", recap.render(theme));
 
     Ok(())
 }
