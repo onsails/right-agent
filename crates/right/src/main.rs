@@ -1259,7 +1259,7 @@ fn cmd_init(
                         step = Step::Network;
                     } else {
                         // Esc on first step — abort.
-                        return Err(miette::miette!("Setup cancelled."));
+                        return Err(miette::miette!("cancelled"));
                     }
                 }
                 Step::Network => {
@@ -1347,6 +1347,12 @@ fn cmd_init(
         memory_recall_budget = w_mem.3;
         memory_recall_max_tokens = w_mem.4;
     }
+
+    // Compute memory_detail before init_right_home consumes memory_provider.
+    let memory_detail = match memory_provider {
+        right_agent::agent::types::MemoryProvider::Hindsight => "hindsight".to_string(),
+        right_agent::agent::types::MemoryProvider::File => "file".to_string(),
+    };
 
     right_agent::init::init_right_home(
         home,
@@ -1470,24 +1476,32 @@ fn cmd_init(
         }
     }
 
-    println!("Initialized Right Agent at {}", home.display());
-    println!(
-        "Default agent 'right' created at {}/agents/right/",
-        home.display()
-    );
-    if token.is_some() {
-        println!("Telegram channel configured.");
-    }
-    if !chat_ids.is_empty() {
-        println!("Telegram chat ID allowlist configured.");
-    }
-    println!("Network policy: {network_policy_val}");
+    let theme = right_agent::ui::detect();
+    let mode = format!("{} ({})", sandbox, network_policy_val);
+    let chat_ids_detail = if chat_ids.is_empty() {
+        "0 allowed (blocks all)".to_string()
+    } else {
+        format!("{} allowed", chat_ids.len())
+    };
+    let telegram_detail = if token.is_some() {
+        "configured".to_string()
+    } else {
+        "not configured".to_string()
+    };
 
-    println!();
-    println!("Setup complete. Next steps:");
-    println!("  right up        Launch agents");
-    println!("  right config    Change global settings");
-    println!("  right doctor    Check configuration");
+    let mut recap = right_agent::ui::Recap::new("ready")
+        .ok("agent", &format!("right ({mode})"))
+        .ok("tunnel", &global_config.tunnel.hostname);
+    recap = if token.is_some() {
+        recap.ok("telegram", &telegram_detail)
+    } else {
+        recap.warn("telegram", &telegram_detail)
+    };
+    recap = recap
+        .ok("chat ids", &chat_ids_detail)
+        .ok("memory", &memory_detail)
+        .next("right up");
+    println!("{}", recap.render(theme));
 
     Ok(())
 }
