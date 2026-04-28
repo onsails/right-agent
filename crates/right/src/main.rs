@@ -1347,15 +1347,7 @@ fn cmd_init(
     println!("Network policy: {network_policy_val}");
 
     // Tunnel setup via wizard.
-    let tunnel_cfg =
-        crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?.ok_or_else(
-            || {
-                miette::miette!(
-                    help = "run: cloudflared tunnel login, then re-run `right init`",
-                    "Cloudflare Tunnel is required — setup was skipped or no cloudflared cert"
-                )
-            },
-        )?;
+    let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
 
     // Preserve existing aggregator settings if config.yaml already exists, otherwise
     // start fresh. We don't call read_global_config here unconditionally because it

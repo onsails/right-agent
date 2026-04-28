@@ -17,7 +17,6 @@ enum TunnelExistingAction {
     Reuse,
     Rename,
     DeleteAndRecreate,
-    Skip,
 }
 
 impl fmt::Display for TunnelExistingAction {
@@ -26,10 +25,6 @@ impl fmt::Display for TunnelExistingAction {
             Self::Reuse => write!(f, "Reuse existing tunnel"),
             Self::Rename => write!(f, "Create a new tunnel with a different name"),
             Self::DeleteAndRecreate => write!(f, "Delete and recreate the tunnel"),
-            Self::Skip => write!(
-                f,
-                "Skip tunnel setup \x1b[33m(warning: MCP OAuth callbacks will not work)\x1b[0m"
-            ),
         }
     }
 }
@@ -44,14 +39,6 @@ struct TunnelListEntry {
 // ---------------------------------------------------------------------------
 // Cloudflared CLI helpers (private)
 // ---------------------------------------------------------------------------
-
-/// Outcome of handling an existing tunnel interactively.
-enum TunnelOutcome {
-    /// Use this tunnel UUID.
-    Uuid(String),
-    /// User chose to skip tunnel setup entirely.
-    Skipped,
-}
 
 /// Find an existing tunnel by name via cloudflared CLI.
 fn find_tunnel_by_name(cf_bin: &Path, name: &str) -> miette::Result<Option<TunnelListEntry>> {
@@ -168,17 +155,18 @@ fn cloudflared_credentials_path(uuid: &str) -> miette::Result<PathBuf> {
 
 /// Run the interactive (or non-interactive) tunnel setup flow.
 ///
-/// Returns `Some(TunnelConfig)` on success, `None` if tunnel setup was skipped
-/// (no cert, or user chose Skip).
+/// Returns the configured `TunnelConfig`. Cloudflare Tunnel is mandatory; this
+/// function errors if no cloudflared certificate is available.
 pub fn tunnel_setup(
     tunnel_name: &str,
     tunnel_hostname: Option<&str>,
     interactive: bool,
-) -> miette::Result<Option<TunnelConfig>> {
+) -> miette::Result<TunnelConfig> {
     if !detect_cloudflared_cert() {
-        println!("No cloudflared certificate found (~/.cloudflared/cert.pem).");
-        println!("Run `cloudflared tunnel login` first, then re-run this command.");
-        return Ok(None);
+        return Err(miette::miette!(
+            help = "run: cloudflared tunnel login",
+            "no cloudflared certificate found at ~/.cloudflared/cert.pem"
+        ));
     }
 
     let cf_bin = which::which("cloudflared")
@@ -193,10 +181,7 @@ pub fn tunnel_setup(
                 .unwrap_or(false);
 
             if interactive {
-                match handle_existing_tunnel(&cf_bin, &entry, tunnel_name, has_local_creds)? {
-                    TunnelOutcome::Uuid(id) => id,
-                    TunnelOutcome::Skipped => return Ok(None),
-                }
+                handle_existing_tunnel(&cf_bin, &entry, tunnel_name, has_local_creds)?
             } else if has_local_creds {
                 // Non-interactive: silently reuse when credentials are present.
                 entry.id
@@ -260,11 +245,11 @@ pub fn tunnel_setup(
         ));
     }
 
-    Ok(Some(TunnelConfig {
+    Ok(TunnelConfig {
         tunnel_uuid: uuid,
         credentials_file,
         hostname,
-    }))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +262,7 @@ fn handle_existing_tunnel(
     existing: &TunnelListEntry,
     original_name: &str,
     has_local_creds: bool,
-) -> miette::Result<TunnelOutcome> {
+) -> miette::Result<String> {
     let short_uuid = if existing.id.len() > 8 {
         &existing.id[..8]
     } else {
@@ -302,14 +287,13 @@ fn handle_existing_tunnel(
     }
     options.push(TunnelExistingAction::DeleteAndRecreate);
     options.push(TunnelExistingAction::Rename);
-    options.push(TunnelExistingAction::Skip);
 
     let selection = inquire::Select::new("What would you like to do?", options)
         .prompt()
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
     match selection {
-        TunnelExistingAction::Reuse => Ok(TunnelOutcome::Uuid(existing.id.clone())),
+        TunnelExistingAction::Reuse => Ok(existing.id.clone()),
 
         TunnelExistingAction::Rename => {
             let new_name = inquire::Text::new("New tunnel name:")
@@ -321,7 +305,7 @@ fn handle_existing_tunnel(
             }
             let entry = create_tunnel(cf_bin, new_name)?;
             println!("Created tunnel '{}' (UUID: {})", entry.name, entry.id);
-            Ok(TunnelOutcome::Uuid(entry.id))
+            Ok(entry.id)
         }
 
         TunnelExistingAction::DeleteAndRecreate => {
@@ -342,23 +326,7 @@ fn handle_existing_tunnel(
 
             let entry = create_tunnel(cf_bin, original_name)?;
             println!("Created tunnel '{}' (UUID: {})", entry.name, entry.id);
-            Ok(TunnelOutcome::Uuid(entry.id))
-        }
-
-        TunnelExistingAction::Skip => {
-            let confirmed = inquire::Confirm::new(
-                "Skip tunnel setup? MCP OAuth callbacks will not work without a tunnel.",
-            )
-            .with_default(false)
-            .prompt()
-            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-
-            if confirmed {
-                Ok(TunnelOutcome::Skipped)
-            } else {
-                // User declined skip — re-prompt.
-                handle_existing_tunnel(cf_bin, existing, original_name, has_local_creds)
-            }
+            Ok(entry.id)
         }
     }
 }
@@ -494,12 +462,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
                     .prompt()
                     .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
-                let result = tunnel_setup(tunnel_name.trim(), None, true)?.ok_or_else(|| {
-                    miette::miette!(
-                        help = "run: cloudflared tunnel login, then re-run `right config`",
-                        "Cloudflare Tunnel is required — setup was skipped or no cloudflared cert"
-                    )
-                })?;
+                let result = tunnel_setup(tunnel_name.trim(), None, true)?;
 
                 let mut new_config = read_global_config(home)?;
                 new_config.tunnel = result;
