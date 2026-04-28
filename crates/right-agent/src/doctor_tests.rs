@@ -542,11 +542,11 @@ fn tunnel_state_credentials_present_passes() {
     let creds_file = dir.path().join("creds.json");
     std::fs::write(&creds_file, "{}").unwrap();
     let config = crate::config::GlobalConfig {
-        tunnel: Some(crate::config::TunnelConfig {
+        tunnel: crate::config::TunnelConfig {
             tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
             credentials_file: creds_file,
             hostname: "example.com".to_string(),
-        }),
+        },
         aggregator: crate::config::AggregatorConfig::default(),
     };
     crate::config::write_global_config(dir.path(), &config).unwrap();
@@ -567,11 +567,11 @@ fn tunnel_state_credentials_present_passes() {
 fn tunnel_state_credentials_missing_warns() {
     let dir = tempdir().unwrap();
     let config = crate::config::GlobalConfig {
-        tunnel: Some(crate::config::TunnelConfig {
+        tunnel: crate::config::TunnelConfig {
             tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
             credentials_file: std::path::PathBuf::from("/nonexistent/creds.json"),
             hostname: "example.com".to_string(),
-        }),
+        },
         aggregator: crate::config::AggregatorConfig::default(),
     };
     crate::config::write_global_config(dir.path(), &config).unwrap();

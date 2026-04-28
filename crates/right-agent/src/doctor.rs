@@ -112,9 +112,7 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     checks.extend(check_tunnel_state(home));
 
     // Tunnel health check — only when tunnel is configured.
-    if let Ok(cfg) = crate::config::read_global_config(home)
-        && cfg.tunnel.is_some()
-    {
+    if crate::config::read_global_config(home).is_ok() {
         checks.push(check_tunnel_health(home));
     }
 
@@ -617,17 +615,7 @@ fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
         }
     };
 
-    let tunnel_cfg = match &config.tunnel {
-        Some(t) => t,
-        None => {
-            return vec![DoctorCheck {
-                name: "tunnel-config".to_string(),
-                status: CheckStatus::Warn,
-                detail: "no tunnel configured".to_string(),
-                fix: Some("run `right config set` to configure tunnel".to_string()),
-            }];
-        }
-    };
+    let tunnel_cfg = &config.tunnel;
 
     let mut checks = vec![DoctorCheck {
         name: "tunnel-config".to_string(),

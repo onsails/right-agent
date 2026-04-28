@@ -88,4 +88,21 @@ mod tests {
         let result = derive_token("not!valid!base64", "right-mcp");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn derive_token_for_tg_webhook_matches_telegram_secret_format() {
+        let secret = generate_agent_secret();
+        let webhook_secret = derive_token(&secret, "tg-webhook").unwrap();
+        assert!(
+            !webhook_secret.is_empty() && webhook_secret.len() <= 256,
+            "len out of Telegram's 1-256 range: {}",
+            webhook_secret.len()
+        );
+        assert!(
+            webhook_secret
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "char outside Telegram's [A-Za-z0-9_-]: {webhook_secret}"
+        );
+    }
 }
