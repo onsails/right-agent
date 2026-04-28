@@ -1530,15 +1530,33 @@ pub async fn handle_doctor(
     }
     tracing::info!("handle_doctor: running diagnostics");
     let checks = right_agent::doctor::run_doctor(&home.0);
-    let mut body = String::new();
+    let theme = right_agent::ui::Theme::Mono;
+    let mut block = right_agent::ui::Block::new();
     for check in &checks {
-        body.push_str(&format!("{check}\n"));
+        block.push(check.to_ui_line());
     }
     let pass_count = checks
         .iter()
         .filter(|c| matches!(c.status, right_agent::doctor::CheckStatus::Pass))
         .count();
-    body.push_str(&format!("\n{pass_count}/{} checks passed", checks.len()));
+    let fail_count = checks
+        .iter()
+        .filter(|c| matches!(c.status, right_agent::doctor::CheckStatus::Fail))
+        .count();
+    let warn_count = checks
+        .iter()
+        .filter(|c| matches!(c.status, right_agent::doctor::CheckStatus::Warn))
+        .count();
+    let total = checks.len();
+    let summary = if warn_count == 0 && fail_count == 0 {
+        format!("{pass_count}/{total} checks passed")
+    } else {
+        let mut parts = Vec::new();
+        if warn_count > 0 { parts.push(format!("{warn_count} warn")); }
+        if fail_count > 0 { parts.push(format!("{fail_count} fail")); }
+        format!("{pass_count}/{total} checks passed ({})", parts.join(", "))
+    };
+    let body = format!("{}\n\n{}", block.render(theme), summary);
     // HTML-escape body before wrapping in <pre> -- doctor output may contain <, >, &
     let escaped = body
         .replace('&', "&amp;")

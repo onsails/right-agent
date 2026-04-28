@@ -1,7 +1,6 @@
-use std::fmt;
 use std::path::Path;
 
-use owo_colors::OwoColorize;
+use crate::ui::{self, Glyph};
 
 const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 const MCP_ISSUES_PREFIX: &str = "missing: ";
@@ -23,18 +22,20 @@ pub struct DoctorCheck {
     pub fix: Option<String>,
 }
 
-impl fmt::Display for DoctorCheck {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status_str = match self.status {
-            CheckStatus::Pass => format!("{}", "ok".green()),
-            CheckStatus::Fail => format!("{}", "FAIL".red().bold()),
-            CheckStatus::Warn => format!("{}", "warn".yellow()),
+impl DoctorCheck {
+    /// Render this check as a `ui::Line`. Caller pushes into a `ui::Block`
+    /// for column alignment.
+    pub fn to_ui_line(&self) -> ui::Line {
+        let glyph = match self.status {
+            CheckStatus::Pass => Glyph::Ok,
+            CheckStatus::Warn => Glyph::Warn,
+            CheckStatus::Fail => Glyph::Err,
         };
-        write!(f, "  {:<24} {:<6} {}", self.name, status_str, self.detail)?;
-        if let Some(ref fix) = self.fix {
-            write!(f, "\n{:>32}{fix}", "fix: ".dimmed())?;
+        let mut line = ui::status(glyph).noun(self.name.clone()).verb(self.detail.clone());
+        if let Some(ref f) = self.fix {
+            line = line.fix(f.clone());
         }
-        Ok(())
+        line
     }
 }
 

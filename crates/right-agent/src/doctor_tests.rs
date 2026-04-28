@@ -124,30 +124,32 @@ fn run_doctor_reports_missing_identity() {
 }
 
 #[test]
-fn doctor_check_display_shows_name_status_detail() {
+fn doctor_check_to_ui_line_shows_name_status_detail() {
+    use crate::ui::Theme;
     let check = DoctorCheck {
         name: "test-binary".to_string(),
         status: CheckStatus::Pass,
         detail: "/usr/bin/test-binary".to_string(),
         fix: None,
     };
-    let display = format!("{check}");
-    assert!(display.contains("test-binary"));
-    assert!(display.contains("ok"));
-    assert!(display.contains("/usr/bin/test-binary"));
+    let rendered = check.to_ui_line().render(Theme::Mono);
+    assert!(rendered.contains("test-binary"));
+    assert!(rendered.contains("✓"));
+    assert!(rendered.contains("/usr/bin/test-binary"));
 }
 
 #[test]
-fn doctor_check_display_shows_fix_on_failure() {
+fn doctor_check_to_ui_line_shows_fix_on_failure() {
+    use crate::ui::Theme;
     let check = DoctorCheck {
         name: "missing".to_string(),
         status: CheckStatus::Fail,
         detail: "not found".to_string(),
         fix: Some("install it".to_string()),
     };
-    let display = format!("{check}");
-    assert!(display.contains("FAIL"));
-    assert!(display.contains("install it"));
+    let rendered = check.to_ui_line().render(Theme::Mono);
+    assert!(rendered.contains("✗"));
+    assert!(rendered.contains("install it"));
 }
 
 #[test]

@@ -1866,27 +1866,53 @@ fn prompt_sandbox_recreate_if_exists(
 }
 
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
+    let theme = right_agent::ui::detect();
     let checks = right_agent::doctor::run_doctor(home);
-    let mut has_failure = false;
 
+    println!("{}", right_agent::ui::section(theme, "diagnostics"));
+    println!("{}", right_agent::ui::Rail::blank(theme));
+
+    let mut block = right_agent::ui::Block::new();
     for check in &checks {
-        if matches!(check.status, right_agent::doctor::CheckStatus::Fail) {
-            has_failure = true;
-        }
-        println!("{check}");
+        block.push(check.to_ui_line());
     }
+    println!("{}", block.render(theme));
+    println!("{}", right_agent::ui::Rail::blank(theme));
 
-    let pass_count = checks
+    let pass = checks
         .iter()
         .filter(|c| matches!(c.status, right_agent::doctor::CheckStatus::Pass))
         .count();
+    let warn = checks
+        .iter()
+        .filter(|c| matches!(c.status, right_agent::doctor::CheckStatus::Warn))
+        .count();
+    let fail = checks
+        .iter()
+        .filter(|c| matches!(c.status, right_agent::doctor::CheckStatus::Fail))
+        .count();
     let total = checks.len();
-    println!("\n  {pass_count}/{total} checks passed");
 
-    if has_failure {
-        return Err(miette::miette!(
-            "Some checks failed. See above for fix instructions."
-        ));
+    let summary = if warn == 0 && fail == 0 {
+        format!("{pass}/{total} checks passed")
+    } else {
+        let mut parts = Vec::new();
+        if warn > 0 {
+            parts.push(format!("{warn} warn"));
+        }
+        if fail > 0 {
+            parts.push(format!("{fail} fail"));
+        }
+        format!("{pass}/{total} checks passed ({})", parts.join(", "))
+    };
+    println!(
+        "{}{}",
+        right_agent::ui::Rail::prefix(theme),
+        summary
+    );
+
+    if fail > 0 {
+        return Err(miette::miette!("checks failed — see above for fixes"));
     }
     Ok(())
 }
