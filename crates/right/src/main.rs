@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Disable color output. Equivalent to setting NO_COLOR=1 for this run.
+    #[arg(long, global = true)]
+    pub no_color: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -349,6 +353,11 @@ async fn main() -> miette::Result<()> {
     }))?;
 
     let cli = Cli::parse();
+
+    if cli.no_color {
+        // SAFETY: main is still single-threaded at this point — no readers of NO_COLOR yet.
+        unsafe { std::env::set_var("NO_COLOR", "1"); }
+    }
 
     // memory-server manages its own tracing (stderr-only for MCP compatibility).
     // Dispatch BEFORE the default tracing_subscriber init which writes to stdout.
