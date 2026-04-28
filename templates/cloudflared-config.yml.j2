@@ -1,8 +1,10 @@
-{% if tunnel_uuid %}tunnel: {{ tunnel_uuid }}
+tunnel: {{ tunnel_uuid }}
 credentials-file: {{ credentials_file }}
-{% endif %}
 ingress:
 {% for agent in agents %}
+  - hostname: {{ tunnel_hostname }}
+    path: /tg/{{ agent.name }}/.*
+    service: unix:{{ agent.socket_path }}
   - hostname: {{ tunnel_hostname }}
     path: /oauth/{{ agent.name }}/callback
     service: unix:{{ agent.socket_path }}
