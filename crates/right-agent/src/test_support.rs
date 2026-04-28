@@ -15,6 +15,7 @@ pub struct TestSandbox {
     name: String,
     mtls_dir: PathBuf,
     _tmp: tempfile::TempDir, // keeps policy file alive
+    _name_lock: openshell::TestNameLock,
 }
 
 impl TestSandbox {
@@ -23,8 +24,16 @@ impl TestSandbox {
     pub async fn create(test_name: &str) -> Self {
         let name = format!("right-test-{test_name}");
 
+        // Acquire the per-name lock FIRST. Blocks until any other process
+        // (including a different worktree's test binary) holding the same
+        // name has finished and released. Held for the lifetime of `Self`
+        // — released only after Drop completes, by which point the sandbox
+        // is already destroyed.
+        let name_lock = openshell::acquire_test_name_lock(&name);
+
         // Belt-and-suspenders cleanup of any orphan processes from a
         // previous SIGKILLed test run that Drop/hook could not handle.
+        // Safe under the name lock: we are the unique owner of this name.
         test_cleanup::pkill_test_orphans(&name);
 
         // Register in the panic-hook registry so abort-on-panic still
@@ -83,6 +92,7 @@ network_policies:
             name,
             mtls_dir,
             _tmp: tmp,
+            _name_lock: name_lock,
         }
     }
 

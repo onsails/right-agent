@@ -984,3 +984,32 @@ fn test_name_lock_sanitizes_name() {
     let _a = super::acquire_test_name_lock("foo/bar:baz");
     let _b = super::acquire_test_name_lock("foo_bar_baz_other");
 }
+
+#[tokio::test]
+async fn test_sandbox_holds_name_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let _slot = super::acquire_sandbox_slot();
+    let sandbox = TestSandbox::create("name-lock-holds").await;
+
+    // While `sandbox` is alive, acquire_test_name_lock with the same logical
+    // name (the full sandbox name `right-test-name-lock-holds`) MUST block.
+    let acquired = Arc::new(AtomicBool::new(false));
+    let acquired_clone = Arc::clone(&acquired);
+    let handle = std::thread::spawn(move || {
+        let _lock = super::acquire_test_name_lock("right-test-name-lock-holds");
+        acquired_clone.store(true, Ordering::SeqCst);
+    });
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !acquired.load(Ordering::SeqCst),
+        "name lock not held by live TestSandbox"
+    );
+
+    drop(sandbox);
+    handle.join().unwrap();
+    assert!(acquired.load(Ordering::SeqCst));
+}
