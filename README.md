@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <b>the proper claude code runtime</b><br/>
-  telegram-native · sandboxed by default · runs on your $20 claude subscription
+  <b>an agent that ships as a product</b><br/>
+  the choices are made. sandboxed by default. lives in telegram. runs on your $20 claude subscription.
 </p>
 
 <p align="center">
@@ -192,7 +192,7 @@ the default policy is permissive. one line in `agent.yaml` switches to restricti
 
 ## <img src="assets/section-mark.svg" height="20" alt=""> how it compares
 
-| | typical multi-agent runtime | right agent |
+| | typical agent setup | right agent |
 |---|---|---|
 | sandbox | container, no built-in rules | openshell: policy engine, tls inspection |
 | credentials | tokens live next to the agent | host-side aggregator; agents never see them |
@@ -203,7 +203,7 @@ the default policy is permissive. one line in `agent.yaml` switches to restricti
 | claude billing | api key per agent | one claude subscription |
 | scope | configurable everything | one opinionated path |
 
-other runtimes ship breadth and leave the wiring to you. right agent ships one path and does the wiring itself.
+other agents ship breadth and leave the wiring to you. right agent ships one path and does the wiring itself.
 
 ## <img src="assets/section-mark.svg" height="20" alt=""> roadmap
 
