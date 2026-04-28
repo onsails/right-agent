@@ -338,9 +338,13 @@ fn handle_existing_tunnel(
 /// Run the interactive Telegram bot token setup flow.
 ///
 /// Returns `Some(token)` if a token was entered (or kept), `None` if skipped.
+/// When `required` is true and there is no existing token, an empty input
+/// is rejected and the prompt re-runs until a valid token is entered (or
+/// the user cancels with Esc, which propagates as `Err`).
 pub fn telegram_setup(
     existing_token: Option<&str>,
     interactive: bool,
+    required: bool,
 ) -> miette::Result<Option<String>> {
     if !interactive {
         return Ok(None);
@@ -353,23 +357,41 @@ pub fn telegram_setup(
             "****".to_string()
         };
         format!("Telegram bot token (current: {masked}, press Enter to keep):")
+    } else if required {
+        "Telegram bot token (required — get one from @BotFather):".to_string()
     } else {
         "Telegram bot token (press Enter to skip):".to_string()
     };
 
-    let input = inquire::Text::new(&prompt_msg)
-        .prompt()
-        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+    loop {
+        let input = inquire::Text::new(&prompt_msg)
+            .prompt()
+            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
-    let trimmed = input.trim();
+        let trimmed = input.trim();
 
-    if trimmed.is_empty() {
-        // Keep current or skip.
-        return Ok(existing_token.map(|t| t.to_string()));
+        if trimmed.is_empty() {
+            if required && existing_token.is_none() {
+                eprintln!(
+                    "  A Telegram bot token is required. Talk to @BotFather \
+                     to create a bot and get its token, then paste it here. \
+                     Press Esc to go back."
+                );
+                continue;
+            }
+            // Keep current or skip.
+            return Ok(existing_token.map(|t| t.to_string()));
+        }
+
+        match validate_telegram_token(trimmed) {
+            Ok(()) => return Ok(Some(trimmed.to_string())),
+            Err(e) if required => {
+                eprintln!("  {e:#}");
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
     }
-
-    validate_telegram_token(trimmed)?;
-    Ok(Some(trimmed.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -582,7 +604,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         }
 
         if selection == opt_token {
-            let new_token = telegram_setup(config.telegram_token.as_deref(), true)?;
+            let new_token = telegram_setup(config.telegram_token.as_deref(), true, false)?;
             match new_token {
                 Some(token) => {
                     update_agent_yaml_field(

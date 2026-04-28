@@ -1185,7 +1185,7 @@ fn cmd_init(
                             Step::Memory
                         };
                     } else {
-                        match crate::wizard::telegram_setup(None, true) {
+                        match crate::wizard::telegram_setup(None, true, false) {
                             Ok(t) => {
                                 w_token = t;
                                 step = if w_token.is_some() {
@@ -1636,14 +1636,11 @@ fn cmd_agent_init(
                             step = Step::Telegram;
                         }
                     }
-                    Step::Telegram => match crate::wizard::telegram_setup(None, true) {
+                    Step::Telegram => match crate::wizard::telegram_setup(None, true, true) {
                         Ok(t) => {
                             w_token = t;
-                            step = if w_token.is_some() {
-                                Step::ChatIds
-                            } else {
-                                Step::Stt
-                            };
+                            // Required mode guarantees Some — proceed to chat IDs.
+                            step = Step::ChatIds;
                         }
                         Err(_) => {
                             step = Step::Network;
