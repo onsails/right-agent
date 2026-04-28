@@ -443,7 +443,14 @@ pub fn telegram_setup(
         match validate_telegram_token(trimmed) {
             Ok(()) => return Ok(TelegramSetupOutcome::Token(trimmed.to_string())),
             Err(e) if required => {
-                eprintln!("  {e:#}");
+                let theme = right_agent::ui::detect();
+                eprintln!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                        .noun("invalid")
+                        .verb(format!("{e:#}"))
+                        .render(theme)
+                );
                 continue;
             }
             Err(e) => return Err(e),
@@ -498,7 +505,14 @@ pub fn chat_ids_setup(required: bool) -> miette::Result<Option<Vec<i64>>> {
         match parsed {
             Ok(ids) => return Ok(Some(ids)),
             Err(e) if required => {
-                eprintln!("  {e:#}");
+                let theme = right_agent::ui::detect();
+                eprintln!(
+                    "{}",
+                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                        .noun("invalid")
+                        .verb(format!("{e:#}"))
+                        .render(theme)
+                );
                 continue;
             }
             Err(e) => return Err(e),
