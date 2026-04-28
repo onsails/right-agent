@@ -10,22 +10,44 @@
 
 <p align="center">
   <b>the proper claude code runtime</b><br/>
-  a fleet of claude code agents — one telegram thread each,
-  sandboxed, with memory that survives restarts.<br/>
-  runs on your $20 claude subscription.
+  sandboxed multi-agent runtime. lives in telegram. runs on your $20 claude subscription.
 </p>
 
 <p align="center">
   <img src="images/screenshot.png" alt="Right Agent in Telegram" width="720"/>
 </p>
 
-## Quick Start
+## the problem
 
-Prerequisites:
+on most setups, a claude code agent you leave running long-term ends up in one of two bad places.
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)
-- Telegram bot token from [@BotFather](https://t.me/BotFather)
-- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) authenticated with a [Cloudflare account](https://dash.cloudflare.com/sign-up) (for Telegram webhook ingress)
+the simple way: one config file with plaintext tokens, no real sandbox, a context that resets every restart. it's enough for a demo. it isn't enough for an agent you depend on.
+
+the elaborate way: pick a chat backend, a memory store, a tunnel, a model provider, a sandbox layer, then wire them together over a weekend. the agent works on monday. it didn't have to take a weekend.
+
+right agent does neither. the pieces are picked, the wiring is done, you get one telegram thread per agent.
+
+## what we picked for you
+
+security first. usability never sacrificed for it. nothing else gets a vote.
+
+we make the choices for you and polish what we ship. the box is closed:
+
+- **chat surface.** telegram. one polished thread per agent, with attachments both ways, media groups, voice notes, group/topic routing. not a matrix of telegram + slack + discord + web ui.
+- **memory.** hindsight cloud (semantic recall, recommended) or local `MEMORY.md` (no cloud dependency). picked at agent init.
+- **model provider.** your claude subscription. `claude -p`, no api keys per agent.
+- **tunnel.** cloudflared. free, secure, production-grade.
+- **sandbox.** on by default. the only opt-out is for agents that need host access (e.g. computer-use, browser automation), and that's set explicitly per-agent.
+
+the consequence: features arrive slowly. we polish what's here before adding what's next. if a knob isn't exposed, we haven't found a way to add it without making the product worse for everyone already using it.
+
+## quick start
+
+prerequisites:
+
+- [claude code cli](https://docs.anthropic.com/en/docs/claude-code)
+- telegram bot token from [@BotFather](https://t.me/BotFather)
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) authenticated with a [cloudflare account](https://dash.cloudflare.com/sign-up) (for telegram webhook ingress)
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/onsails/right-agent/master/install.sh | sh
@@ -33,78 +55,59 @@ right init
 right up
 ```
 
-Full install guide: [docs/INSTALL.md](docs/INSTALL.md).
+full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
-<p align="center">
-  <a href="#why-right">why right</a> ·
-  <a href="#what-you-get-out-of-the-box">features</a> ·
-  <a href="#self-evolving-by-design">personality</a> ·
-  <a href="#architecture">architecture</a> ·
-  <a href="#how-it-compares">comparison</a> ·
-  <a href="#roadmap">roadmap</a>
-</p>
+## what you get
 
-## Why "Right"
+### multiple agents on one subscription
 
-"Right" is two promises.
+each agent is a separate claude code session in its own sandbox: separate identity, separate memory, separate telegram thread. no per-agent api key. all of them run on your one claude subscription.
 
-**Right with your data.** MCP tokens, OAuth refresh tokens, Claude auth — all live on the host, outside every sandbox. Agents call tools; they never see the credentials. Network egress goes through a policy engine with TLS inspection. Compromised agent? Worst case it misuses a tool. It cannot exfiltrate the key.
+### memory that survives restarts
 
-**Right with Anthropic.** Everything — including the login flow — goes through the official `claude` binary. No private API calls, no scraped endpoints, no OAuth key juggling. Your Claude subscription, used the way Anthropic intends: `claude -p`. One `right up` in the terminal; every other step, Claude login included, happens in Telegram.
+two memory backends, picked at agent init.
 
-## What you get out of the box
+**hindsight cloud** stores every turn append-only and recalls what's relevant on the next turn, scoped per-chat. the agent remembers who you are, what you were working on yesterday, and which stack you run, without replaying the whole transcript.
 
-### A fleet of Claude Code agents
+**`MEMORY.md`** is a local file the agent maintains itself. no cloud, no semantic recall, simpler.
 
-Each agent is a separate Claude Code session inside its own sandbox. Separate identity, separate memory, separate Telegram thread. All of them run on your Claude subscription — no API keys, no per-agent billing.
+### identity that writes itself
 
-### Memory and evolving identity
+the first session with a fresh agent is a bootstrap, not a chat. the agent answers questions about who it wants to be (name, tone, boundaries, relationship with you) and writes `IDENTITY.md`, `SOUL.md`, `USER.md` itself. those files load into every system prompt afterwards. on restart, on model swap, on upgrade, the agent stays itself.
 
-Hindsight Cloud is the primary backend — semantic recall, append-only, per-chat scoped. A local `MEMORY.md` fallback is available for users who do not want a cloud dependency. Either way, memory survives restarts and compounds over time. Each agent also writes its own identity and personality on first launch. Details below.
+### one place to run it from
 
-### MCP without the breach
+after `right up`, the terminal is done. claude login, mcp authorization, file attachments, cron notifications, `/doctor`, `/reset`. all in telegram.
 
-Every MCP server is a credential. Your Linear token. Your Notion OAuth. Your Gmail. Your production Sentry.
+## how it stays safe
 
-In most agent setups, those secrets are directly reachable to the agent — on disk, in environment variables, in its config files. No sandbox, no credential provider. One prompt injection — one compromised webpage the agent reads, one malicious memory, one leaky skill — and the attacker walks away with your workspace, your mailbox, your customer data. Possibly worse.
+an agent you leave running long-term will eventually fetch a poisoned webpage, install a hostile skill, or accept a malicious memory through an mcp tool. the design assumes this. what matters is what the agent can reach when it does.
 
-Right Agent runs a single MCP aggregator on the host, outside every sandbox. Your secrets live there. Agents talk to the aggregator, the aggregator talks to the MCP server. The agent never sees the token.
+on a typical claude code setup, the agent has direct access to:
 
-- OAuth, bearer, custom header, query-string — all four auth patterns, auto-detected
-- Tokens refresh automatically, silently
-- Compromised agent? Worst case it misuses the MCP. It can never exfiltrate the key.
+- every mcp token in `.mcp.json`: linear, notion, gmail, sentry, github
+- your claude oauth refresh token
+- your `~/.ssh` and dotfiles
+- your source tree
+- your `~/.aws`, `~/.config/gcloud`, kubectl configs
+- any `.env` file under your home directory
+- the workspace and memory of every other agent on the host
 
-### Everything in Telegram
+one compromised turn, the attacker walks out with all of it.
 
-Claude login, MCP OAuth, file attachments in both directions, cron notifications, `/doctor`, `/reset` — one thread. The terminal is needed exactly once: to run `right up`.
+### the sandbox boundary
 
-## Self-evolving by design
+every claude code session runs inside an [nvidia openshell](https://github.com/NVIDIA/OpenShell) sandbox. the agent reads and writes only inside its own workspace. nothing in `~/.ssh`, `~/.aws`, `~/.config/gcloud`, or your source tree is reachable. no other agent's files are reachable. no escape route.
 
-### Identity that writes itself
+openshell is purpose-built for ai agents, not a container runtime stretched to fit. tls inspection, domain allowlists, and request logging are per-sandbox primitives.
 
-The first session with a fresh agent is not a chat — it's a bootstrap. The agent answers questions about who it wants to be: name, tone, boundaries, relationship with the user. It writes `IDENTITY.md`, `SOUL.md`, `USER.md` in its own hand. From then on, those files ride along in every system prompt — on every restart, on every model swap, on every upgrade. The agent is the author of its own persona, and that authorship sticks.
+### credentials live outside the sandbox
 
-### Memory
+mcp tokens, oauth refresh tokens, and claude auth live on the host inside a single aggregator process. the sandbox sees a proxy endpoint, never the raw token. four auth patterns are detected and refreshed automatically: oauth, bearer, custom header, query string.
 
-The primary path is **Hindsight Cloud** — a managed semantic memory service. Append-only: every turn auto-retains a delta, next turn auto-recalls what matters. Per-chat tagging, prefetch cache. The agent remembers who it is talking to, what it was working on yesterday, and which stack the user runs — without replaying the whole transcript.
+worst case for a compromised agent: it misuses a tool while it's running. it cannot exfiltrate the credential.
 
-A fallback is available — **`MEMORY.md`** — a local file the agent curates itself via Claude Code's Edit/Write tools. No semantic recall, no per-chat tagging; just a markdown file the agent maintains. For anyone who does not want a cloud dependency.
-
-Either way, memory survives restarts. Nothing resets when you `right up` again.
-
-### One channel, one memory, one identity
-
-Most agent runtimes give you fifty knobs and call configuration a feature. Right Agent gives you one well-worn path — Telegram chat, memory that compounds, evolving identity — and polishes it end-to-end.
-
-No pluggable memory engines. No matrix of chat backends. No twelve ways to configure a personality. No opt-in sandbox (it's on by default).
-
-### What is not here yet
-
-Auto-skills — where an agent writes its own skills from repeated tasks — is not shipped. Skills today are hand-written or installed from third-party sources. The skill format is compatible with [skills.sh](https://skills.sh).
-
-## Architecture
-
-The sandbox layer is [**NVIDIA OpenShell**](https://github.com/NVIDIA/OpenShell) — purpose-built for AI agents, not a container runtime stretched to fit.
+### the topology
 
 ```mermaid
 flowchart TB
@@ -165,84 +168,61 @@ flowchart TB
   style SANDBOX_2 stroke:#E8632A,stroke-width:2px
 ```
 
-### Blast radius, contained
+### what egress looks like
 
-The agent reads a poisoned webpage. A skill turns out to be hostile. An MCP returns a prompt injection. These things happen.
+outbound traffic from the sandbox goes through openshell's policy engine. tls is terminated per-request. the destination is matched against the domain allowlist, and the request is logged. nothing leaves silently.
 
-In Right Agent, those scenarios break one sandbox — not your machine, not your files, not another agent. The agent can read and write only inside its own sandbox workspace. There is no way out of the sandbox for it.
+the default policy is permissive. one line in `agent.yaml` switches to restrictive: anthropic and claude endpoints only.
 
-### You see what leaves — and you decide
+## how it compares
 
-Every outbound request passes through OpenShell's policy engine, which terminates TLS and enforces a domain allowlist. Full request logging — nothing leaves the sandbox without a record.
-
-The network policy is permissive by default. One line in `agent.yaml` flips to restrictive: the agent can reach Anthropic and Claude endpoints, and nothing else.
-
-### Your secrets stay yours
-
-MCP tokens and OAuth refresh tokens live on the host, inside the aggregator. In the sandbox: only proxy endpoints, never the raw credential. Claude auth is handled by the bot and injected per invocation — there is no persistent credential file sitting inside the sandbox.
-
-OpenShell can go further still: a credential provider layer that replaces tokens with opaque placeholders inside the sandbox and substitutes the real secrets only at egress — so that `gh`, `gcloud`, `aws`, `kubectl` work normally while `echo $GITHUB_TOKEN` returns a useless string. Wiring this into Right Agent is the next roadmap item; the infrastructure is already in OpenShell.
-
-### One control plane
-
-After `right up`, the terminal is done. Claude login, MCP authorisation, file exchange, cron notifications — one Telegram thread.
-
----
-
-Sandboxing for appearance's sake is a dead formality. A sandbox in which an agent actually lives — for months, across restarts, upgrading, talking to the outside world through a policy engine — is infrastructure work. NVIDIA did that work in OpenShell. We use it.
-
-Without it, an agent lives in a plain container with no rules on it. For a demo, that is enough. To leave agents running while you sleep — it is not.
-
-## How it compares
-
-| | Typical multi-agent runtime | Right Agent |
+| | typical multi-agent runtime | right agent |
 |---|---|---|
-| **Sandbox** | plain container, no built-in rules | OpenShell: policy engine, TLS inspection |
-| **Credential exposure** | tokens live inside agent env and files | tokens held by host-side aggregator, agents never touch them |
-| **MCP secrets** | copied into every agent | single aggregator; agents never see them |
-| **Memory** | replay full history each turn | append-only; Hindsight or local file |
-| **Identity** | system prompt in a config file | agent writes its own IDENTITY.md / SOUL.md |
-| **Control surface** | CLI + config files + dashboards | one Telegram thread |
-| **Claude billing** | requires API key per agent | one Claude subscription, any number of agents |
-| **Scope** | configurable everything | one opinionated path, polished end-to-end |
+| sandbox | container, no built-in rules | openshell: policy engine, tls inspection |
+| credentials | tokens live next to the agent | host-side aggregator; agents never see them |
+| mcp secrets | copied into every agent | one aggregator, one location |
+| memory | replay full history each turn | append-only; hindsight or local file |
+| identity | system prompt in a config file | agent writes its own identity files |
+| control surface | cli + config + dashboards | one telegram thread |
+| claude billing | api key per agent | one claude subscription |
+| scope | configurable everything | one opinionated path |
 
-Other runtimes optimise for flexibility and breadth — you can wire anything to anything. Right Agent optimises for a single well-worn path: Telegram in, sandboxed Claude Code out, with memory and identity that outlive restarts.
+other runtimes ship breadth and leave the wiring to you. right agent ships one path and does the wiring itself.
 
-## Roadmap
+## roadmap
 
-**Shipped**
-- [x] Multi-agent orchestration, sandboxed by default
-- [x] MCP aggregator — OAuth, bearer, header, query-string
-- [x] Evolving identity: agent writes its own IDENTITY.md / SOUL.md / USER.md
-- [x] Append-only memory: Hindsight Cloud or local MEMORY.md
-- [x] Telegram as single control plane: login, MCP auth, files, cron
-- [x] Telegram group chats and thread routing
-- [x] Media groups (albums, mixed attachments) in both directions
-- [x] Declarative cron with Telegram notifications
-- [x] Agent backup & restore (`right agent backup` / `--from-backup`)
-- [x] `right doctor` end-to-end diagnostics
+shipped:
+- multi-agent orchestration, sandboxed by default
+- mcp aggregator with auto-detected oauth, bearer, header, query-string auth
+- evolving identity: agent writes its own `IDENTITY.md` / `SOUL.md` / `USER.md`
+- append-only memory: hindsight cloud or local `MEMORY.md`
+- telegram as single control plane: login, mcp auth, files, cron
+- group chats, topic routing, media groups in both directions
+- declarative cron with telegram notifications
+- agent backup & restore
+- `right doctor` end-to-end diagnostics
 
-**Next**
-- [ ] OpenShell credential providers for `gh`, `gcloud`, `aws`, `kubectl` — zero-token CLIs inside sandboxes
-- [ ] Native browser automation
-- [ ] Agent templates — shareable configs with MCPs, skills, identity presets
-- [ ] Auto-skills — agent writes its own skills from repeated tasks
-- [ ] Per-turn budget caps for chat messages (currently cron-only)
-- [ ] Agent-to-agent communication
+next:
+- credential providers for `gh`, `gcloud`, `aws`, `kubectl`: zero-token clis inside sandboxes
+- native browser automation
+- agent templates: shareable configs with mcps, skills, identity presets
+- auto-skills: agent writes its own skills from repeated tasks
+- per-turn budget caps for chat (currently cron-only)
+- agent-to-agent communication
 
-Full project tracker on [GitHub Issues](https://github.com/onsails/right-agent/issues).
+full tracker on [github issues](https://github.com/onsails/right-agent/issues).
 
-## Docs
+## docs
 
-- [Installation](docs/INSTALL.md) — full prerequisites
-- [Security model](docs/SECURITY.md) — policies, credential isolation, threat model
-- [Architecture](ARCHITECTURE.md) — internal topology, SQLite schema, invocation contract
-- [Prompting system](PROMPT_SYSTEM.md) — how agent system prompts are assembled
+- [installation](docs/INSTALL.md) — full prerequisites
+- [security model](docs/SECURITY.md) — policies, credential isolation, threat model
+- [architecture](ARCHITECTURE.md) — internal topology, sqlite schema, invocation contract
+- [prompting system](PROMPT_SYSTEM.md) — how agent system prompts are assembled
 
-## License
+## license
 
-Apache-2.0. Use it, fork it, ship it.
+apache-2.0.
 
-## Credits
+## credits
 
-Built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell), and [process-compose](https://github.com/F1bonacc1/process-compose).
+built on [claude code](https://docs.anthropic.com/en/docs/claude-code), [nvidia openshell](https://github.com/NVIDIA/OpenShell), and [process-compose](https://github.com/F1bonacc1/process-compose).
