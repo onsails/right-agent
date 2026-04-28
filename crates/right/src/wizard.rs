@@ -8,14 +8,20 @@ use right_agent::agent::discover_agents;
 use right_agent::config::{TunnelConfig, read_global_config, write_global_config};
 use right_agent::init::validate_telegram_token;
 
-/// Every prompt label string used by the wizard. See `init.rs::PROMPT_LABELS`.
-/// Dynamic-format prompts contribute their static prefix only.
+/// Every user-visible string from every prompt in the wizard — labels, Select
+/// options, and static prefixes of dynamic-format prompts. This is the
+/// source-of-truth list for the brand voice regression tests
+/// (`wizard.rs::voice_pass`). When you add or change a prompt or option, update
+/// this array — failing to do so is caught by tests.
 #[allow(dead_code)]
 pub(crate) const PROMPT_LABELS: &[&str] = &[
     // tunnel_setup: hostname
     "tunnel hostname (e.g. right.example.com):",
-    // handle_existing_tunnel
+    // handle_existing_tunnel — label + TunnelExistingAction::Display options
     "existing tunnel — choose:",
+    "reuse",
+    "rename",
+    "delete and recreate",
     "new tunnel name:",
     "delete tunnel \"", // dynamic prefix
     // telegram_setup
@@ -25,18 +31,29 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     // chat_ids_setup
     "your telegram user id (required — /start @userinfobot to find it):",
     "your telegram user id (/start @userinfobot to find it, empty to skip):",
-    // config_setup / agent_setting_menu top-level
+    // config_setup / agent_setting_menu top-level — label + CombinedMenuItem::Display prefixes
     "settings:",
     "tunnel name:",
     "select agent:",
+    "agent: ",  // dynamic prefix (CombinedMenuItem::Agent)
+    "done",
     // agent_setting_menu sub-prompts
     "model (e.g. sonnet, opus, haiku — empty to clear):",
     "allowed chat ids (comma-separated, empty to clear):",
+    // sandbox mode — label + options (shared with init.rs)
     "sandbox mode:",
+    "openshell — isolated container (recommended)",
+    "none — direct host access (computer-use, chrome)",
+    // network policy — label + options
     "network policy:",
+    "restrictive — anthropic/claude domains only (recommended)",
+    "permissive — all https domains (needed for external mcp servers)",
     // memory_setup
     "switching memory provider does not migrate existing memory. continue?",
+    // hindsight api key source — label + options
     "hindsight api key source:",
+    "use HINDSIGHT_API_KEY env var (recommended)",
+    "enter a key to save in agent.yaml",
     "hindsight api key:",
     "hindsight api key (empty to rely on HINDSIGHT_API_KEY at runtime):",
     "hindsight rejected the key (http ", // dynamic prefix
@@ -44,7 +61,13 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     // stt / ffmpeg
     "ffmpeg required for voice transcription. install via brew?",
     "enable voice transcription?",
+    // whisper model — label + options
     "whisper model:",
+    "tiny     — ~75 MB,   fastest, OK for short commands",
+    "base     — ~150 MB,  decent",
+    "small    — ~470 MB,  recommended (default)",
+    "medium   — ~1.5 GB,  very good",
+    "large-v3 — ~3.0 GB,  best quality, slow",
 ];
 
 // ---------------------------------------------------------------------------
@@ -940,13 +963,13 @@ async fn memory_setup(
         .filter(|s| !s.is_empty());
     let api_key: Option<String> = if env_key.is_some() {
         let opts = vec![
-            "Use HINDSIGHT_API_KEY env var (recommended)",
+            "use HINDSIGHT_API_KEY env var (recommended)",
             "enter a key to save in agent.yaml",
         ];
         let choice = inquire::Select::new("hindsight api key source:", opts)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-        if choice.starts_with("Use HINDSIGHT_API_KEY") {
+        if choice.starts_with("use HINDSIGHT_API_KEY") {
             None
         } else {
             let input = inquire::Text::new("hindsight api key:")

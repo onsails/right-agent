@@ -586,24 +586,35 @@ pub fn prompt_memory_config(
     }
 }
 
-/// Every prompt label string used by `right-agent::init`. Source-of-truth list
-/// for the brand voice regression tests (`tests/voice_pass.rs`). When you add
-/// or change a prompt, update this array — failing to do so is caught by tests.
+/// Every user-visible string from every prompt in `right-agent::init` — labels,
+/// Select options, and static prefixes of dynamic-format prompts. This is the
+/// source-of-truth list for the brand voice regression tests
+/// (`tests/voice_pass.rs`). When you add or change a prompt or option, update
+/// this array — failing to do so is caught by tests.
 pub const PROMPT_LABELS: &[&str] = &[
     // inquire_back: ctrl+c confirm
     "cancel?",
-    // prompt_sandbox_mode
+    // prompt_sandbox_mode — label + options
     "sandbox mode:",
-    // prompt_network_policy
+    "openshell — isolated container (recommended)",
+    "none — direct host access (computer-use, chrome)",
+    // prompt_network_policy — label + options
     "network policy:",
-    // prompt_memory_provider
+    "permissive — all https domains (recommended)",
+    "restrictive — anthropic/claude domains only",
+    // prompt_memory_provider — label + options
     "memory provider:",
+    "hindsight — hindsight cloud api (recommended)",
+    "file — agent manages MEMORY.md",
     // prompt_hindsight_api_key
     "hindsight api key (enter to use HINDSIGHT_API_KEY env var):",
     // prompt_hindsight_bank_id — dynamic; static prefix used for voice check
     "hindsight bank id (default: ",
-    // prompt_recall_budget
+    // prompt_recall_budget — label + options
     "recall budget:",
+    "mid — balanced (default)",
+    "low — smaller context, cheaper",
+    "high — more context, higher cost",
     // prompt_recall_max_tokens — dynamic; static prefix used for voice check
     "recall max tokens (default: ",
 ];
