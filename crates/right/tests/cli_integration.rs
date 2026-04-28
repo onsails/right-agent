@@ -8,6 +8,18 @@ fn right() -> Command {
     Command::cargo_bin("right").unwrap()
 }
 
+/// Minimal valid global config — tunnel is mandatory after the webhooks cutover,
+/// so any test that creates a home + config.yaml manually must include a tunnel
+/// block. Used by tests that don't go through `right init`.
+fn minimal_config_yaml(home: &std::path::Path) -> String {
+    let creds = home.join("test-creds.json");
+    fs::write(&creds, "{}").unwrap();
+    format!(
+        "tunnel:\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
+        creds.display()
+    )
+}
+
 #[test]
 fn test_help_output() {
     right()
@@ -483,7 +495,7 @@ fn agent_init_suggests_reload() {
 
     // Create minimal home structure.
     std::fs::create_dir_all(dir.path().join("agents")).unwrap();
-    std::fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+    std::fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
 
     right()
         .args([
@@ -510,7 +522,7 @@ fn test_agent_init_force_recreates_agent() {
 
     // Create minimal home structure.
     fs::create_dir_all(dir.path().join("agents")).unwrap();
-    fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
 
     // Create agent.
     right()
@@ -578,7 +590,7 @@ fn test_agent_init_force_preserves_config() {
 
     // Create minimal home structure.
     fs::create_dir_all(dir.path().join("agents")).unwrap();
-    fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
 
     // Create agent with specific config.
     right()
@@ -625,7 +637,7 @@ fn test_agent_init_force_on_nonexistent_agent() {
 
     // Create minimal home structure.
     fs::create_dir_all(dir.path().join("agents")).unwrap();
-    fs::write(dir.path().join("config.yaml"), "{}").unwrap();
+    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
 
     // --force on non-existent agent should just create it.
     right()
@@ -838,7 +850,7 @@ fn test_agent_backup_and_restore_no_sandbox() {
 
     // Restore to new agent name via agent init --from-backup.
     // Needs agents dir and config.yaml to exist (home structure).
-    fs::write(home.path().join("config.yaml"), "{}").unwrap();
+    fs::write(home.path().join("config.yaml"), minimal_config_yaml(home.path())).unwrap();
 
     right()
         .args([

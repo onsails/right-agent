@@ -1257,6 +1257,20 @@ fn cmd_init(
         memory_recall_max_tokens,
     )?;
 
+    // Tunnel setup BEFORE codegen — codegen reads config.yaml (mandatory tunnel),
+    // so we must write it first.
+    let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
+    let aggregator = if home.join("config.yaml").exists() {
+        right_agent::config::read_global_config(home)?.aggregator
+    } else {
+        right_agent::config::AggregatorConfig::default()
+    };
+    let global_config = right_agent::config::GlobalConfig {
+        tunnel: tunnel_cfg,
+        aggregator,
+    };
+    right_agent::config::write_global_config(home, &global_config)?;
+
     // Run codegen for the default "right" agent.
     // Per-agent codegen was moved to bot startup (59243d0) but init needs it
     // for schemas and settings before sandbox staging upload.
@@ -1345,25 +1359,6 @@ fn cmd_init(
         println!("Telegram chat ID allowlist configured.");
     }
     println!("Network policy: {network_policy_val}");
-
-    // Tunnel setup via wizard.
-    let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
-
-    // Preserve existing aggregator settings if config.yaml already exists, otherwise
-    // start fresh. We don't call read_global_config here unconditionally because it
-    // now errors when the tunnel block is missing — which is the case on first init.
-    let aggregator = if home.join("config.yaml").exists() {
-        right_agent::config::read_global_config(home)
-            .map(|c| c.aggregator)
-            .unwrap_or_default()
-    } else {
-        right_agent::config::AggregatorConfig::default()
-    };
-    let config = right_agent::config::GlobalConfig {
-        tunnel: tunnel_cfg,
-        aggregator,
-    };
-    right_agent::config::write_global_config(home, &config)?;
 
     println!();
     println!("Setup complete. Next steps:");
