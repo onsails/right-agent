@@ -15,7 +15,10 @@
 
 use std::path::{Path, PathBuf};
 
+use tonic::transport::Channel;
+
 use crate::agent::types::{AgentConfig, SandboxMode};
+use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 
 /// Identity files that bootstrap (re)creates and that this command rewinds.
 pub const IDENTITY_FILES: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md"];
@@ -97,13 +100,14 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
     })?;
 
     let host_backed_up = backup_host_files(&plan.agent_dir, &plan.backup_dir)?;
-    let sandbox_backed_up =
-        backup_sandbox_files(plan.sandbox_name.as_deref(), &plan.backup_dir).await?;
 
-    // Once backup succeeds, delete from sandbox first — failure here would
-    // otherwise let reverse_sync re-populate the host on the next message.
-    delete_identity_from_sandbox(plan.sandbox_name.as_deref()).await?;
-    delete_identity_from_host(&plan.agent_dir);
+    let mut session = open_sandbox_session(plan.sandbox_name.as_deref()).await?;
+    let sandbox_backed_up = backup_sandbox_files(session.as_mut(), &plan.backup_dir).await?;
+
+    // Delete from sandbox first — failure here would otherwise let
+    // reverse_sync re-populate the host on the next message.
+    delete_identity_from_sandbox(session.as_mut()).await?;
+    delete_identity_from_host(&plan.agent_dir)?;
 
     write_bootstrap_md(&plan.agent_dir)?;
     let sessions_deactivated = deactivate_active_sessions(&plan.agent_dir)?;
@@ -145,17 +149,26 @@ fn backup_host_files(
     Ok(copied)
 }
 
-/// Download identity files from sandbox into `<backup_dir>/sandbox/`.
-/// Skipped entirely when `sandbox_name` is `None` (none-mode).
+/// Live gRPC handle to a sandbox we've already verified exists.
 ///
-/// Returns the list of files that were actually downloaded. A missing
-/// sandbox file is not an error; a download failure on a present file is.
-async fn backup_sandbox_files(
+/// Reused across `backup_sandbox_files` and `delete_identity_from_sandbox` so
+/// `execute()` only pays for one preflight + connect + existence probe.
+struct SandboxSession {
+    name: String,
+    id: String,
+    client: OpenShellClient<Channel>,
+}
+
+/// Resolve `sandbox_name` to a connected gRPC client + sandbox id.
+///
+/// Returns `Ok(None)` for none-mode (`sandbox_name == None`), when OpenShell
+/// is not ready, or when the sandbox doesn't exist yet — these are
+/// "skip sandbox-side work" signals, not errors.
+async fn open_sandbox_session(
     sandbox_name: Option<&str>,
-    backup_dir: &Path,
-) -> miette::Result<Vec<&'static str>> {
+) -> miette::Result<Option<SandboxSession>> {
     let Some(sandbox) = sandbox_name else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
 
     let mtls_dir = match crate::openshell::preflight_check() {
@@ -163,21 +176,38 @@ async fn backup_sandbox_files(
         other => {
             tracing::info!(
                 ?other,
-                "rebootstrap: openshell not ready, skipping sandbox-side backup"
+                "rebootstrap: openshell not ready, skipping sandbox-side ops"
             );
-            return Ok(Vec::new());
+            return Ok(None);
         }
     };
 
     let mut client = crate::openshell::connect_grpc(&mtls_dir).await?;
-
-    // If the sandbox doesn't exist yet (never created), skip cleanly.
     if !crate::openshell::sandbox_exists(&mut client, sandbox).await? {
-        tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping sandbox-side backup");
-        return Ok(Vec::new());
+        tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping sandbox-side ops");
+        return Ok(None);
     }
+    let id = crate::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+    Ok(Some(SandboxSession {
+        name: sandbox.to_string(),
+        id,
+        client,
+    }))
+}
 
-    let sandbox_id = crate::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+/// Download identity files from sandbox into `<backup_dir>/sandbox/`.
+/// Skipped entirely when `session` is `None`.
+///
+/// Returns the list of files that were actually downloaded. A missing
+/// sandbox file is not an error; a download failure on a present file is.
+async fn backup_sandbox_files(
+    session: Option<&mut SandboxSession>,
+    backup_dir: &Path,
+) -> miette::Result<Vec<&'static str>> {
+    let Some(session) = session else {
+        return Ok(Vec::new());
+    };
+
     let sandbox_backup_dir = backup_dir.join("sandbox");
     std::fs::create_dir_all(&sandbox_backup_dir).map_err(|e| {
         miette::miette!(
@@ -189,10 +219,9 @@ async fn backup_sandbox_files(
     let mut copied = Vec::new();
     for &name in IDENTITY_FILES {
         let sandbox_path = format!("/sandbox/{name}");
-        // Probe — exit 0 if present, 1 if absent.
         let (_stdout, exit) = crate::openshell::exec_in_sandbox(
-            &mut client,
-            &sandbox_id,
+            &mut session.client,
+            &session.id,
             &["test", "-f", &sandbox_path],
             crate::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
         )
@@ -202,7 +231,7 @@ async fn backup_sandbox_files(
             continue;
         }
         let dst = sandbox_backup_dir.join(name);
-        crate::openshell::download_file(sandbox, &sandbox_path, &dst).await?;
+        crate::openshell::download_file(&session.name, &sandbox_path, &dst).await?;
         copied.push(name);
     }
     Ok(copied)
@@ -233,61 +262,47 @@ fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
     Ok(n)
 }
 
-/// Remove identity files from `agent_dir`. Infallible — "not found" and
-/// I/O errors are logged at DEBUG/WARN respectively but never returned.
-fn delete_identity_from_host(agent_dir: &Path) {
+/// Remove identity files from `agent_dir`. NotFound is silenced (idempotent);
+/// any other I/O error propagates — leaving stale identity files on disk
+/// while `BOOTSTRAP.md` is rewritten would defeat the whole command.
+fn delete_identity_from_host(agent_dir: &Path) -> miette::Result<()> {
     for &name in IDENTITY_FILES {
         let p = agent_dir.join(name);
         match std::fs::remove_file(&p) {
             Ok(()) => tracing::debug!(file = name, "rebootstrap: removed host file"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!(
-                file = name,
-                "rebootstrap: failed to remove host file: {e:#}"
-            ),
+            Err(e) => {
+                return Err(miette::miette!(
+                    "failed to remove host {}: {e:#}",
+                    p.display()
+                ));
+            }
         }
     }
+    Ok(())
 }
 
 /// Delete identity files from the sandbox via gRPC `exec_in_sandbox`.
 ///
-/// Skipped (returns `Ok`) when `sandbox_name` is `None` (none-mode) or when
-/// OpenShell is not ready / the sandbox doesn't exist.
-async fn delete_identity_from_sandbox(sandbox_name: Option<&str>) -> miette::Result<()> {
-    let Some(sandbox) = sandbox_name else {
+/// Skipped (returns `Ok`) when `session` is `None`. `rm -f` makes missing
+/// files non-fatal, so this is naturally idempotent.
+async fn delete_identity_from_sandbox(
+    session: Option<&mut SandboxSession>,
+) -> miette::Result<()> {
+    let Some(session) = session else {
         return Ok(());
     };
 
-    let mtls_dir = match crate::openshell::preflight_check() {
-        crate::openshell::OpenShellStatus::Ready(d) => d,
-        other => {
-            tracing::info!(
-                ?other,
-                "rebootstrap: openshell not ready, skipping sandbox-side delete"
-            );
-            return Ok(());
-        }
-    };
+    let paths: Vec<String> = IDENTITY_FILES
+        .iter()
+        .map(|n| format!("/sandbox/{n}"))
+        .collect();
+    let mut cmd: Vec<&str> = vec!["rm", "-f"];
+    cmd.extend(paths.iter().map(|s| s.as_str()));
 
-    let mut client = crate::openshell::connect_grpc(&mtls_dir).await?;
-    if !crate::openshell::sandbox_exists(&mut client, sandbox).await? {
-        tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping delete");
-        return Ok(());
-    }
-    let sandbox_id = crate::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
-
-    // Single rm -f covering all three. -f makes missing files non-fatal,
-    // so this is naturally idempotent.
-    let cmd = [
-        "rm",
-        "-f",
-        "/sandbox/IDENTITY.md",
-        "/sandbox/SOUL.md",
-        "/sandbox/USER.md",
-    ];
     let (stdout, exit) = crate::openshell::exec_in_sandbox(
-        &mut client,
-        &sandbox_id,
+        &mut session.client,
+        &session.id,
         &cmd,
         crate::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
     )
@@ -401,7 +416,7 @@ mod tests {
         std::fs::write(agent_dir.join("SOUL.md"), "x").unwrap();
         // USER.md absent on purpose
 
-        delete_identity_from_host(&agent_dir);
+        delete_identity_from_host(&agent_dir).unwrap();
 
         for &f in IDENTITY_FILES {
             assert!(
@@ -417,9 +432,8 @@ mod tests {
         let agent_dir = home.path().join("agents").join("f");
         std::fs::create_dir_all(&agent_dir).unwrap();
         // No identity files at all
-        delete_identity_from_host(&agent_dir);
-        delete_identity_from_host(&agent_dir);
-        // No panic, no assertion — just don't error.
+        delete_identity_from_host(&agent_dir).unwrap();
+        delete_identity_from_host(&agent_dir).unwrap();
     }
 
     #[test]

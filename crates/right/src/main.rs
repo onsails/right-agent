@@ -3236,7 +3236,6 @@ async fn cmd_agent_rebootstrap(
 ) -> miette::Result<()> {
     let plan = right_agent::rebootstrap::plan(home, agent_name)?;
 
-    // Confirmation
     if !yes {
         println!("Agent: {agent_name}");
         println!("  Directory: {}", plan.agent_dir.display());
@@ -3271,42 +3270,34 @@ async fn cmd_agent_rebootstrap(
         }
     }
 
-    // Stop the bot (best-effort)
     let pc_process = format!("{agent_name}-bot");
-    let pc_client_opt = right_agent::runtime::PcClient::from_home(home)?;
-    let pc_running = match &pc_client_opt {
-        Some(pc) => pc.health_check().await.is_ok(),
-        None => false,
-    };
-    let bot_was_stopped = if pc_running {
-        let pc = pc_client_opt.as_ref().unwrap();
-        match pc.stop_process(&pc_process).await {
-            Ok(()) => {
-                println!("✓ Stopped {pc_process}");
-                true
-            }
-            Err(e) => {
-                return Err(miette::miette!(
+    // `Some(pc)` only when we successfully stopped the bot via `pc` and need to
+    // restart it. `None` covers (a) no state.json, (b) PC not healthy, (c) we
+    // failed to stop — folding the three correlated booleans into one Option
+    // makes the restart branch unwrap-free.
+    let stopped_pc = match right_agent::runtime::PcClient::from_home(home)? {
+        Some(pc) if pc.health_check().await.is_ok() => {
+            pc.stop_process(&pc_process).await.map_err(|e| {
+                miette::miette!(
                     "failed to stop {pc_process} (not safe to proceed with bot up): {e:#}"
-                ));
-            }
+                )
+            })?;
+            println!("✓ Stopped {pc_process}");
+            Some(pc)
         }
-    } else {
-        println!("(process-compose not running — skipping bot stop)");
-        false
+        _ => {
+            println!("(process-compose not running — skipping bot stop)");
+            None
+        }
     };
 
-    // Run the state mutations
     let report = right_agent::rebootstrap::execute(&plan).await?;
 
-    // Restart the bot if we stopped it
-    if bot_was_stopped {
-        let pc = pc_client_opt.as_ref().unwrap();
+    if let Some(pc) = &stopped_pc {
         pc.start_process(&pc_process).await?;
         println!("✓ Started {pc_process}");
     }
 
-    // Final summary
     println!();
     println!("Rebootstrapped agent '{agent_name}':");
     println!("  Backup: {}", report.backup_dir.display());
@@ -3325,7 +3316,7 @@ async fn cmd_agent_rebootstrap(
         );
     }
     println!("  Sessions deactivated: {}", report.sessions_deactivated);
-    if !pc_running {
+    if stopped_pc.is_none() {
         println!();
         println!("process-compose was not running. Run `right up` to relaunch the bot.");
     }
