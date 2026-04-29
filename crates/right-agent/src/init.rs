@@ -8,7 +8,7 @@ pub const DEFAULT_RECALL_BUDGET: RecallBudget = RecallBudget::Mid;
 /// Default recall max tokens used when the user doesn't override it.
 pub const DEFAULT_RECALL_MAX_TOKENS: u32 = 4096;
 
-/// Preserved config from a previous agent, used during `--force` re-init.
+/// Preserved config from a previous agent, used during `--force-recreate` re-init.
 pub struct InitOverrides {
     pub sandbox_mode: SandboxMode,
     pub network_policy: NetworkPolicy,
@@ -198,7 +198,7 @@ pub fn init_agent(
     }
 
     // Seed allowlist.yaml from the user-provided first trusted user.
-    // Idempotent — skipped when allowlist.yaml already exists (wizard re-run, --force, etc.).
+    // Idempotent — skipped when allowlist.yaml already exists (wizard re-run, --force-recreate, etc.).
     if let Some(ov) = overrides
         && !ov.allowed_chat_ids.is_empty()
     {
