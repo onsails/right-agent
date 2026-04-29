@@ -93,10 +93,142 @@ pub async fn execute(_plan: &RebootstrapPlan) -> miette::Result<RebootstrapRepor
     miette::bail!("rebootstrap::execute not yet implemented")
 }
 
+/// Copy any present identity files from `agent_dir` into `backup_dir`.
+/// Returns the list of files that were actually copied.
+///
+/// `backup_dir` must already exist. Missing source files are skipped at
+/// DEBUG level (not errors).
+#[allow(dead_code)] // called by execute() in Task 7
+fn backup_host_files(
+    agent_dir: &Path,
+    backup_dir: &Path,
+) -> miette::Result<Vec<&'static str>> {
+    let mut copied = Vec::new();
+    for &name in IDENTITY_FILES {
+        let src = agent_dir.join(name);
+        if !src.exists() {
+            tracing::debug!(file = name, "rebootstrap: host file absent, skipping backup");
+            continue;
+        }
+        let dst = backup_dir.join(name);
+        std::fs::copy(&src, &dst).map_err(|e| {
+            miette::miette!(
+                "failed to back up host {} to {}: {e:#}",
+                name,
+                dst.display()
+            )
+        })?;
+        copied.push(name);
+    }
+    Ok(copied)
+}
+
+/// Download identity files from sandbox into `<backup_dir>/sandbox/`.
+/// Skipped entirely when `sandbox_name` is `None` (none-mode).
+///
+/// Returns the list of files that were actually downloaded. A missing
+/// sandbox file is not an error; a download failure on a present file is.
+#[allow(dead_code)] // called by execute() in Task 7
+async fn backup_sandbox_files(
+    sandbox_name: Option<&str>,
+    backup_dir: &Path,
+) -> miette::Result<Vec<&'static str>> {
+    let Some(sandbox) = sandbox_name else {
+        return Ok(Vec::new());
+    };
+
+    let mtls_dir = match crate::openshell::preflight_check() {
+        crate::openshell::OpenShellStatus::Ready(d) => d,
+        other => {
+            tracing::info!(
+                ?other,
+                "rebootstrap: openshell not ready, skipping sandbox-side backup"
+            );
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut client = crate::openshell::connect_grpc(&mtls_dir).await?;
+
+    // If the sandbox doesn't exist yet (never created), skip cleanly.
+    if !crate::openshell::sandbox_exists(&mut client, sandbox).await? {
+        tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping sandbox-side backup");
+        return Ok(Vec::new());
+    }
+
+    let sandbox_id = crate::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+    let sandbox_backup_dir = backup_dir.join("sandbox");
+    std::fs::create_dir_all(&sandbox_backup_dir).map_err(|e| {
+        miette::miette!(
+            "failed to create sandbox backup dir {}: {e:#}",
+            sandbox_backup_dir.display()
+        )
+    })?;
+
+    let mut copied = Vec::new();
+    for &name in IDENTITY_FILES {
+        let sandbox_path = format!("/sandbox/{name}");
+        // Probe — exit 0 if present, 1 if absent.
+        let (_stdout, exit) = crate::openshell::exec_in_sandbox(
+            &mut client,
+            &sandbox_id,
+            &["test", "-f", &sandbox_path],
+            crate::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+        )
+        .await?;
+        if exit != 0 {
+            tracing::debug!(file = name, "rebootstrap: sandbox file absent, skipping backup");
+            continue;
+        }
+        let dst = sandbox_backup_dir.join(name);
+        crate::openshell::download_file(sandbox, &sandbox_path, &dst).await?;
+        copied.push(name);
+    }
+    Ok(copied)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn backup_host_files_copies_present_files() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join("agents").join("c");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // Two of three identity files present on host
+        std::fs::write(agent_dir.join("IDENTITY.md"), "id\n").unwrap();
+        std::fs::write(agent_dir.join("USER.md"), "user\n").unwrap();
+        // SOUL.md intentionally missing
+
+        let backup_dir = home.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+
+        let copied = backup_host_files(&agent_dir, &backup_dir).unwrap();
+
+        assert_eq!(copied, vec!["IDENTITY.md", "USER.md"]);
+        assert_eq!(
+            std::fs::read_to_string(backup_dir.join("IDENTITY.md")).unwrap(),
+            "id\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup_dir.join("USER.md")).unwrap(),
+            "user\n"
+        );
+        assert!(!backup_dir.join("SOUL.md").exists());
+    }
+
+    #[test]
+    fn backup_host_files_no_files_returns_empty() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join("agents").join("d");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let backup_dir = home.path().join("backup");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let copied = backup_host_files(&agent_dir, &backup_dir).unwrap();
+        assert!(copied.is_empty());
+    }
 
     fn make_home_with_agent(name: &str, agent_yaml: Option<&str>) -> TempDir {
         let home = tempfile::tempdir().unwrap();
