@@ -20,7 +20,7 @@ Use Claude Code's built-in `Edit` and `Write` tools to manage MEMORY.md:
 ## What belongs in MEMORY.md
 
 Things that don't have a home in your other files (`TOOLS.md`,
-`AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`):
+`IDENTITY.md`, `SOUL.md`, `USER.md`):
 
 - Granular or time-stamped observations too narrow for `USER.md`
 - Session-specific corrections worth carrying to the next turn
@@ -33,7 +33,6 @@ Route these to the correct file instead of writing to MEMORY.md:
 - "Use tool X for task Y" → `TOOLS.md`
 - Stable user preferences → `USER.md`
 - Your identity / values / tone → `IDENTITY.md` / `SOUL.md`
-- Subagent routing → `AGENTS.md`
 - Reusable procedures → save as a skill
 - Task progress, TODO state, completed-work logs — transcripts cover these
 

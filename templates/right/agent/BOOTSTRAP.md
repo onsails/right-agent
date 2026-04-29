@@ -40,7 +40,6 @@ Name, creature type, vibe, emoji. Use this structure:
 | User says | Edit |
 |---|---|
 | Change tone, personality, style, language | `SOUL.md` |
-| Add/remove capabilities, subagents, tools, skills | `AGENTS.md` |
 | Change core principles, security model, constraints | `IDENTITY.md` |
 
 ### SOUL.md

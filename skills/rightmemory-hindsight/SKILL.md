@@ -32,7 +32,7 @@ for this to work.
 ## What belongs in memory
 
 Memory is for facts that don't have a home in your files
-(`TOOLS.md`, `AGENTS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`):
+(`TOOLS.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`):
 
 - Granular or time-stamped observations too narrow for `USER.md`
 - Corrections specific to one session's context
@@ -46,7 +46,6 @@ Route these to the correct file instead of calling `memory_retain`:
   semantic recall may miss it when the query doesn't name the tool)
 - Stable user preferences → `USER.md`
 - Your identity / values / tone → `IDENTITY.md` / `SOUL.md`
-- Subagent routing → `AGENTS.md`
 - Reusable procedures → save as a skill
 - Task progress or completed-work logs → session transcripts already
   cover these
@@ -65,7 +64,6 @@ user's current request.
 ## Red flags — route elsewhere instead of retaining
 
 - User says "remember to use …" about a tool → `TOOLS.md`
-- You just learned a subagent's responsibility → `AGENTS.md`
 - You discovered a user's stable preference → `USER.md`
 
 If the fact is a rule ("when X, do Y"), it belongs in a file that's

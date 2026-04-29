@@ -18,7 +18,6 @@ later turns and can override the user's current request.
   Update whenever the user teaches you a tool preference or you discover
   a non-obvious behavior — this is the first thing you should reach for
   when the user says "remember to use X for Y".
-- `AGENTS.md` — your subagents, task routing, installed skills.
 
 ### Where things go
 
@@ -28,7 +27,6 @@ later turns and can override the user's current request.
 | "API foo expects `arguments`, not `input`" | `TOOLS.md` |
 | "User prefers terse answers, no preamble" | `USER.md` or `SOUL.md` |
 | "User's GitHub handle is @alice" | `USER.md` |
-| "Subagent `reviewer` handles code review" | `AGENTS.md` |
 | Ephemeral "just fixed this, don't repeat" | memory (see below) |
 
 ## Memory
@@ -48,7 +46,6 @@ Do NOT save to memory:
 - Tool-selection rules or integration quirks → `TOOLS.md`
   (static, always in prompt — recall may miss them when the query doesn't
   name the tool)
-- Subagent / task-routing rules → `AGENTS.md`
 - Your identity, values, style → `IDENTITY.md` / `SOUL.md`
 - Stable user preferences → `USER.md`
 - Task progress, TODO state, completed-work logs — those live in transcripts
