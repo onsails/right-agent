@@ -1,4 +1,141 @@
 # Changelog
+## [0.2.6] - 2026-04-29
+
+
+### Bug Fixes
+
+- **bot**: Tighten bootstrap_photo visibility and avoid PNG clone
+- **bot**: End webhook stream on signal so dispatcher exits cleanly
+- **bot**: Drain task panicked when run_async returned Err early
+- **bot**: Bootstrap welcome photo as caption + square coal frame
+- **webhook**: Drop trailing slash so axum nest matches Telegram POSTs
+- **brand**: Drop DarkGrey from inquire chrome — render as pastel blue on macOS Terminal
+- **brand**: Orange '>' cursor in inquire prompts
+- **policy**: Include /var/log in read_only to silence false drift WARN
+- **doctor**: Drop trailing slash from expected webhook URL
+- **config**: Propagate read_global_config error from McpServer; doctor doc
+- **init**: Write config.yaml before per-agent codegen
+- **brand**: Lowercase main.rs prompts + monochrome inquire RenderConfig
+- **init**: New agents created sandbox 'rightclaw-{name}' but agent.yaml said 'right-{name}'
+- **rebootstrap**: Correct misleading --yes doc (it's yes/no, not typed-name)
+- **runtime**: Use X-PC-Token-Key for process-compose API auth
+- **cron**: Single-source delivery timings; drop misleading trigger Confirm:
+
+### Documentation
+
+- **ui**: Doc comment on Line struct
+- **ui**: Add doc comments on splash and section pub fns
+- **init**: Update stale --force references to --force-recreate
+- **rebootstrap**: Document migrate:false assumption in deactivate_active_sessions
+- **mcp**: Document operation-error convention and per-tool codes
+
+### Features
+
+- **bot**: Add bootstrap_photo module with predicate and PNG asset
+- **bot**: Send bootstrap welcome photo with first agent reply
+- **bot**: Webhook router module with secret-token enforcement
+- **bot**: Mount webhook router on bot.sock UDS server
+- **bot**: Dispatch via webhook UpdateListener instead of long-poll
+- **bot**: SetWebhook register loop with retry/backoff
+- **sync**: Drop AGENTS.md from reverse-sync allowlist
+- **codegen**: Cloudflared is unconditional in pipeline & process-compose
+- **bot**: Rename UDS to bot.sock
+- **codegen**: /tg/<agent>/.* ingress rule per agent
+- **doctor**: Expect webhook to be set; healthz check; FAIL on missing tunnel
+- **agent**: Best-effort deleteWebhook on destroy
+- **mcp**: Add tool_error helper and From<ProxyError> for CallToolResult
+- **ui**: Scaffold right-agent::ui module skeleton
+- **ui**: Theme detection (color/mono/ascii)
+- **ui**: Rail + semantic glyphs with three theme tiers
+- **ui**: Status line + block builder with column alignment
+- **ui**: Splash + section header
+- **ui**: Recap builder with column-aligned status block
+- **ui**: Writers + BlockAlreadyRendered sentinel docs
+- **register**: Skeleton + no-PC path
+- **register**: PC-alive happy path with optional restart
+- **init**: Stop emitting AGENTS.md template on agent init
+- **rebootstrap**: Add module skeleton with plan() and tests
+- **rebootstrap**: Add backup_host_files and backup_sandbox_files
+- **rebootstrap**: Add delete_identity_from_host
+- **rebootstrap**: Add write_bootstrap_md
+- **rebootstrap**: Add deactivate_active_sessions
+- **rebootstrap**: Add delete_identity_from_sandbox
+- **rebootstrap**: Implement execute() orchestrator
+- **config**: Make Cloudflare Tunnel mandatory
+- **wizard**: Drop Skip option from tunnel setup
+- **aggregator**: Translate ProxyError at dispatch boundary
+- **aggregator**: Memory_retain operation errors return is_error
+- **aggregator**: Memory_recall/reflect operation errors return is_error
+- **right_backend**: Allowlist and bootstrap_done emit structured tool_error
+- **wizard**: Require Telegram bot token in `right agent init`
+- **wizard**: Confirm on Ctrl+C, require chat ID in `right agent init`
+- **doctor**: Render diagnostics as brand-conformant block
+- **status**: Brand-conformant rail+glyph block
+- **init**: Splash + dependency probe block
+- **init**: Section headers + sandbox-creation status lines
+- **init**: Recap block replaces footer
+- **agent-init**: Section header + recap
+- **cli**: --no-color global flag
+- **cli**: Hot-add new agent to running process-compose
+- **prompt**: Drop AGENTS.md section from composite system prompt
+- **rebootstrap**: Wire CLI subcommand right agent rebootstrap
+- **rebootstrap**: Surface sandbox-cleanup-skipped to operator
+
+### Miscellaneous
+
+- **bot**: Use bytes = "1.0" per project versioning rule
+- **bot**: Simplify bootstrap_photo and CcReply
+
+### Refactor
+
+- **bot**: Expose is_first_call from invoke_cc via CcReply struct
+- **bot**: Drop obsolete pre-startup deleteWebhook
+- **ui**: Tighten theme detection visibility to pub(crate)
+- **init**: Lowercase-first prompt copy per brand
+- **register**: Single warn on reload failure
+- **mcp**: Simplify pass — shorten tool_error paths, fix tempdir leak
+- **wizard**: Lowercase tunnel/telegram/chat-id copy + rail status
+- **wizard**: Drop duplicate theme rebinds in DeleteAndRecreate
+- **agent-init**: Drop duplicate theme rebind; rename test
+- **wizard**: Lowercase settings menu copy + rail saved lines
+- **wizard**: Lowercase memory/stt/sandbox copy + rail status
+- **wizard**: Consolidate theme rebinds + diagnostic unreachable msg
+- **wizard**: Brand warn lines on validation re-prompt
+- **cli**: Rename agent init --force to --force-recreate
+- **agent-def**: Drop agents_path field
+- **rebootstrap**: Simplify sandbox preamble + propagate host delete errors
+- **rebootstrap**: Brand-conformant CLI output via ui:: helpers
+
+### Testing
+
+- **bot**: Webhook router integration tests
+- **right-bot**: #[ignore] claude_upgrade_lifecycle as slow
+- **codegen**: Write minimal config.yaml in tempdir-based tests
+- Raise MAX_CONCURRENT_SANDBOX_TESTS to 30
+- Add acquire_test_name_lock for cross-worktree resource locks
+- TestSandbox holds per-name lock across worktrees
+- Shared sandbox for upload/download/verify + wait_for_ssh
+- **register**: Cover stale and malformed state.json
+- **ui**: Recap rendering for init's three end states
+- Drop AGENTS.md from doctor/platform_store/destroy fixtures
+- **rebootstrap**: Add live-sandbox integration test
+- **right**: Right up rejects missing/incomplete tunnel config
+- **right**: Ignore init_warns_when_host_creds_missing post-mandatory-tunnel
+- **right_backend**: Cover bootstrap_done structured error path
+- **aggregator**: Cover Hindsight operation-error mappings
+- Drop slow/duplicate tests, replace sandbox check with manifest unit test
+- **right**: Cross-worktree lock for right up tunnel tests
+- **doctor**: Rename + ascii-fallback assertions
+- **agent-init**: Assert recap block on completion
+- **voice**: Lowercase + no-exclamation regression for prompt labels
+- **voice**: Cover Select options + lowercase 'use HINDSIGHT_API_KEY'
+- **brand**: Ascii fallback + --no-color flag coverage
+- **brand**: Conformance lint — rail + no-marketing + no-period
+- **cli**: Update agent init tests for --force-recreate rename
+- **cli**: Clarify --force comment in negative test
+- **cli**: Drop AGENTS.md from cli_integration fixtures and assertions
+- **rebootstrap**: Add CLI surface tests
+
 ## [0.2.5] - 2026-04-27
 
 
