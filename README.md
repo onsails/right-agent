@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/tagline-banner.svg" alt="an agent that ships as a product" width="540">
+  <img src="assets/section-mark.svg" height="20" alt=""> <b>an agent that ships as a product</b>
 </p>
 
 <p align="center">
