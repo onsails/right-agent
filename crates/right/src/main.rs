@@ -3234,43 +3234,93 @@ async fn cmd_agent_rebootstrap(
     agent_name: &str,
     yes: bool,
 ) -> miette::Result<()> {
+    use right_agent::ui::{Block, Glyph, Rail, detect, section, status};
+
     let plan = right_agent::rebootstrap::plan(home, agent_name)?;
+    let theme = detect();
+    let pc_process = format!("{agent_name}-bot");
 
     if !yes {
-        println!("Agent: {agent_name}");
-        println!("  Directory: {}", plan.agent_dir.display());
-        println!("  Sandbox mode: {}", plan.sandbox_mode);
-        if let Some(ref sb) = plan.sandbox_name {
-            println!("  Sandbox: {sb}");
-        }
-        println!("  Backup dir: {}", plan.backup_dir.display());
-        println!();
-        println!("This will:");
-        println!("  - Back up IDENTITY.md / SOUL.md / USER.md (host + sandbox copies)");
-        println!("  - Delete those files from host and sandbox");
-        println!("  - Recreate BOOTSTRAP.md on host");
-        println!("  - Deactivate all active sessions in data.db");
-        println!("  - Bounce the bot if it is running");
-        println!();
         println!(
-            "Sandbox, credentials, Hindsight memory, and data.db rows are preserved."
+            "{}",
+            section(theme, &format!("rebootstrap: {agent_name}"))
         );
-        println!();
+        println!("{}", Rail::blank(theme));
+
+        let sandbox_detail = match &plan.sandbox_name {
+            Some(name) => format!("{} ({name})", plan.sandbox_mode),
+            None => plan.sandbox_mode.to_string(),
+        };
+        let mut plan_block = Block::new();
+        plan_block.push(
+            status(Glyph::Info)
+                .noun("directory")
+                .verb(plan.agent_dir.display().to_string()),
+        );
+        plan_block.push(status(Glyph::Info).noun("sandbox").verb(sandbox_detail));
+        plan_block.push(
+            status(Glyph::Info)
+                .noun("backup")
+                .verb(plan.backup_dir.display().to_string()),
+        );
+        println!("{}", plan_block.render(theme));
+        println!("{}", Rail::blank(theme));
+
+        println!("{}", section(theme, "effects"));
+        println!("{}", Rail::blank(theme));
+        let mut effects = Block::new();
+        effects.push(
+            status(Glyph::Info)
+                .noun("back up")
+                .verb("IDENTITY.md, SOUL.md, USER.md (host + sandbox)"),
+        );
+        effects.push(
+            status(Glyph::Info)
+                .noun("remove")
+                .verb("same files from host and sandbox"),
+        );
+        effects.push(
+            status(Glyph::Info)
+                .noun("recreate")
+                .verb("BOOTSTRAP.md on host"),
+        );
+        effects.push(
+            status(Glyph::Info)
+                .noun("deactivate")
+                .verb("active sessions in data.db"),
+        );
+        effects.push(
+            status(Glyph::Info)
+                .noun("bounce")
+                .verb(format!("{pc_process} if running")),
+        );
+        println!("{}", effects.render(theme));
+        println!("{}", Rail::blank(theme));
+        println!(
+            "{}preserved: sandbox, credentials, hindsight memory, data.db rows",
+            Rail::prefix(theme)
+        );
+        println!("{}", Rail::blank(theme));
 
         let confirmed = inquire::Confirm::new(&format!(
-            "rebootstrap agent '{agent_name}'? this rewinds onboarding state."
+            "rebootstrap '{agent_name}'? this rewinds onboarding state"
         ))
         .with_default(false)
         .prompt()
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
         if !confirmed {
-            println!("Aborted.");
+            println!(
+                "{}",
+                status(Glyph::Warn)
+                    .noun("aborted")
+                    .verb("no changes made")
+                    .render(theme)
+            );
             return Ok(());
         }
     }
 
-    let pc_process = format!("{agent_name}-bot");
     // Three states, NOT two — we must not silently skip the bot bounce when
     // state.json is present but PC's API is unreachable. That's how the
     // 2026-04-29 incident ("rebootstrap ran but my bot kept serving the old
@@ -3286,7 +3336,13 @@ async fn cmd_agent_rebootstrap(
     //                       the old persona.
     let stopped_pc = match right_agent::runtime::PcClient::from_home(home)? {
         None => {
-            println!("(process-compose not running — skipping bot stop)");
+            println!(
+                "{}",
+                status(Glyph::Info)
+                    .noun(pc_process.as_str())
+                    .verb("not running, skipping bot stop")
+                    .render(theme)
+            );
             None
         }
         Some(pc) => {
@@ -3303,7 +3359,13 @@ async fn cmd_agent_rebootstrap(
                     "failed to stop {pc_process} (not safe to proceed with bot up): {e:#}"
                 )
             })?;
-            println!("✓ Stopped {pc_process}");
+            println!(
+                "{}",
+                status(Glyph::Ok)
+                    .noun(pc_process.as_str())
+                    .verb("stopped")
+                    .render(theme)
+            );
             Some(pc)
         }
     };
@@ -3312,38 +3374,59 @@ async fn cmd_agent_rebootstrap(
 
     if let Some(pc) = &stopped_pc {
         pc.start_process(&pc_process).await?;
-        println!("✓ Started {pc_process}");
+        println!(
+            "{}",
+            status(Glyph::Ok)
+                .noun(pc_process.as_str())
+                .verb("started")
+                .render(theme)
+        );
     }
 
-    println!();
-    println!("Rebootstrapped agent '{agent_name}':");
-    println!("  Backup: {}", report.backup_dir.display());
-    if report.host_backed_up.is_empty() {
-        println!("  Host files backed up: (none — agent had not bootstrapped)");
+    println!(
+        "{}",
+        section(theme, &format!("rebootstrapped: {agent_name}"))
+    );
+    println!("{}", Rail::blank(theme));
+    let mut recap_block = Block::new();
+    recap_block.push(
+        status(Glyph::Ok)
+            .noun("backup")
+            .verb(report.backup_dir.display().to_string()),
+    );
+    let host_detail = if report.host_backed_up.is_empty() {
+        "none (agent had not bootstrapped)".to_string()
     } else {
-        println!(
-            "  Host files backed up: {}",
-            report.host_backed_up.join(", ")
-        );
-    }
+        report.host_backed_up.join(", ")
+    };
+    recap_block.push(status(Glyph::Ok).noun("host").verb(host_detail));
     if !report.sandbox_backed_up.is_empty() {
-        println!(
-            "  Sandbox files backed up: {}",
-            report.sandbox_backed_up.join(", ")
+        recap_block.push(
+            status(Glyph::Ok)
+                .noun("sandbox")
+                .verb(report.sandbox_backed_up.join(", ")),
         );
     }
-    println!("  Sessions deactivated: {}", report.sessions_deactivated);
-
+    recap_block.push(
+        status(Glyph::Ok)
+            .noun("sessions")
+            .verb(format!("{} deactivated", report.sessions_deactivated)),
+    );
     if let right_agent::rebootstrap::SandboxStatus::Skipped(reason) = &report.sandbox_status {
-        println!();
-        println!("⚠ Sandbox-side cleanup was skipped: {reason}");
-        println!("  Identity files inside /sandbox/ were NOT removed.");
-        println!("  Re-run `right agent rebootstrap {agent_name}` when openshell is healthy.");
+        recap_block.push(
+            status(Glyph::Warn)
+                .noun("sandbox cleanup")
+                .verb(format!("skipped ({reason})"))
+                .fix(format!(
+                    "re-run `right agent rebootstrap {agent_name}` once openshell is healthy"
+                )),
+        );
     }
+    println!("{}", recap_block.render(theme));
+    println!("{}", Rail::blank(theme));
 
     if stopped_pc.is_none() {
-        println!();
-        println!("process-compose was not running. Run `right up` to relaunch the bot.");
+        println!("{}next: right up", Rail::prefix(theme));
     }
 
     Ok(())
