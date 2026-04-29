@@ -75,4 +75,56 @@ mod tests {
         .unwrap();
         assert_eq!(result, RegisterResult { pc_running: false });
     }
+
+    #[tokio::test]
+    async fn returns_pc_running_false_when_state_json_points_at_closed_port() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        // Write a state.json that points at a port nothing is listening on.
+        // Port 1 is reserved and unbound on developer machines; if it ever
+        // is bound, the test will be flaky — pick another low port.
+        std::fs::write(
+            run.join("state.json"),
+            r#"{"agents":[],"socket_path":"/tmp/test.sock","started_at":"2026-01-01T00:00:00Z","pc_port":1,"pc_api_token":"x"}"#,
+        )
+        .unwrap();
+
+        let result = register_with_running_pc(
+            dir.path(),
+            RegisterOptions {
+                agent_name: "test".to_string(),
+                recreated: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, RegisterResult { pc_running: false });
+    }
+
+    #[tokio::test]
+    async fn propagates_error_when_state_json_is_malformed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let run = dir.path().join("run");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("state.json"), "{not valid json").unwrap();
+
+        let err = register_with_running_pc(
+            dir.path(),
+            RegisterOptions {
+                agent_name: "test".to_string(),
+                recreated: false,
+            },
+        )
+        .await
+        .expect_err("malformed state.json must be a parse error");
+        // Just confirm the error chain reaches us — exact wording is from_home's.
+        let msg = format!("{err:#}");
+        assert!(
+            msg.to_lowercase().contains("state.json")
+                || msg.to_lowercase().contains("parse")
+                || msg.to_lowercase().contains("json"),
+            "expected error to mention state.json/parse/json, got: {msg}"
+        );
+    }
 }
