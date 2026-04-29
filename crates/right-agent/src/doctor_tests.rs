@@ -390,7 +390,7 @@ fn sqlite3_check_is_warn_not_fail_when_absent() {
 
 // ---- make_webhook_check tests ----
 
-const EXPECTED_URL: &str = "https://example.com/tg/mybot/";
+const EXPECTED_URL: &str = "https://example.com/tg/mybot";
 
 fn webhook_info(url: &str) -> WebhookInfo {
     WebhookInfo {
@@ -422,7 +422,7 @@ fn make_webhook_check_fail_when_url_mismatch() {
     let check = make_webhook_check(
         "mybot",
         EXPECTED_URL,
-        Ok(webhook_info("https://other.com/tg/mybot/")),
+        Ok(webhook_info("https://other.com/tg/mybot")),
     );
     assert_eq!(check.name, "telegram-webhook/mybot");
     assert_eq!(check.status, CheckStatus::Fail);
@@ -432,7 +432,7 @@ fn make_webhook_check_fail_when_url_mismatch() {
         check.detail
     );
     assert!(
-        check.detail.contains("https://other.com/tg/mybot/"),
+        check.detail.contains("https://other.com/tg/mybot"),
         "detail must include the registered URL"
     );
     assert!(
