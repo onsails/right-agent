@@ -50,3 +50,42 @@ fn recap_ascii_uses_pipe() {
     assert!(s.contains("|  [ok] tunnel"));
     assert!(s.contains("|  next: right up"));
 }
+
+#[test]
+fn recap_init_pc_not_running() {
+    let s = Recap::new("ready")
+        .ok("agent", "test created")
+        .next("right up")
+        .render(Theme::Mono);
+    assert!(s.contains("✓ agent"));
+    assert!(s.contains("next: right up"));
+    assert!(!s.contains("send /start"));
+    assert!(!s.contains("⚠ reload"));
+    assert!(!s.contains("! reload"));
+}
+
+#[test]
+fn recap_init_pc_running_ok() {
+    let s = Recap::new("ready")
+        .ok("agent", "test created")
+        .next("send /start to your bot in Telegram")
+        .render(Theme::Mono);
+    assert!(s.contains("✓ agent"));
+    assert!(s.contains("next: send /start to your bot in Telegram"));
+    assert!(!s.contains("right up"));
+    assert!(!s.contains("⚠ reload"));
+}
+
+#[test]
+fn recap_init_pc_reload_failed() {
+    let s = Recap::new("ready")
+        .ok("agent", "test created")
+        .warn("reload", "failed to add to running right")
+        .next("right restart")
+        .render(Theme::Mono);
+    assert!(s.contains("✓ agent"));
+    // The warn glyph rendering is theme-dependent; check for the noun/detail pair.
+    assert!(s.contains("reload"));
+    assert!(s.contains("failed to add to running right"));
+    assert!(s.contains("next: right restart"));
+}
