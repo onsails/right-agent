@@ -74,6 +74,9 @@ pub fn generate_policy(
         None => "          - \"172.16.0.0/12\"\n          - \"192.168.0.0/16\"".to_owned(),
     };
 
+    // `/var/log` is in `read_only` because the OpenShell server appends it to
+    // every stored policy. Omitting it makes `filesystem_policy_changed` flag
+    // every fresh sandbox as drifted at bot startup.
     format!(
         r#"version: 1
 
@@ -86,6 +89,7 @@ filesystem_policy:
     - /etc
     - /proc
     - /dev/urandom
+    - /var/log
   read_write:
     - /dev/null
     - /tmp
