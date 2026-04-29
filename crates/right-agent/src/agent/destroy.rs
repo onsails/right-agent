@@ -380,7 +380,7 @@ mod tests {
         let agents_dir = home.join("agents").join("backup-test");
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
-        std::fs::write(agents_dir.join("AGENTS.md"), "# Test agent").unwrap();
+        std::fs::write(agents_dir.join("IDENTITY.md"), "# Test agent").unwrap();
 
         let options = DestroyOptions {
             agent_name: "backup-test".into(),

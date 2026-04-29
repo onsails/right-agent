@@ -74,7 +74,7 @@ pub struct Manifest {
 pub const PLATFORM_DIR: &str = "/sandbox/.platform";
 
 /// Scan agent directory, build manifest of platform-managed files.
-/// Excludes agent-owned files (IDENTITY.md, SOUL.md, USER.md, AGENTS.md, TOOLS.md).
+/// Excludes agent-owned files (IDENTITY.md, SOUL.md, USER.md, TOOLS.md).
 /// File content is cached in the manifest to avoid double-reads during deploy.
 pub fn build_manifest(agent_dir: &Path) -> miette::Result<Manifest> {
     let claude_dir = agent_dir.join(".claude");
