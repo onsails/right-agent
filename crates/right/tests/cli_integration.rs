@@ -1070,7 +1070,8 @@ fn test_help_lists_destroy() {
 #[test]
 fn test_agent_init_bare_force_rejected() {
     // Agent init no longer accepts --force; only --force-recreate.
-    // (`agent destroy --force` and `init --force` are unchanged.)
+    // (`agent destroy --force` and `right init --force` are unchanged —
+    // separate commands with separate semantics.)
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
     fs::create_dir_all(dir.path().join("agents")).unwrap();
