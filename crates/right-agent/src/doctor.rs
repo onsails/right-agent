@@ -508,7 +508,10 @@ fn check_webhook_info_for_agents(home: &Path) -> Vec<DoctorCheck> {
             None => continue,
         };
 
-        let expected_url = format!("https://{}/tg/{}/", global_cfg.tunnel.hostname, name);
+        // No trailing slash — see crates/bot/src/lib.rs webhook URL construction:
+        // axum 0.8's `nest("/tg/<agent>", router)` 404s on `/tg/<agent>/`, so the
+        // bot registers (and cloudflared ingress matches) the no-slash form.
+        let expected_url = format!("https://{}/tg/{}", global_cfg.tunnel.hostname, name);
         checks.push(make_webhook_check(
             &name,
             &expected_url,
