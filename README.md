@@ -1,11 +1,11 @@
 <p align="center">
-  <img src="assets/lockup-horizontal.svg" alt="Right Agent" width="320">
-</p>
-
-<p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-E8632A.svg" alt="license"></a>
   <a href="https://github.com/onsails/right-agent/actions"><img src="https://github.com/onsails/right-agent/actions/workflows/build.yml/badge.svg" alt="build"></a>
   <a href="https://t.me/rightclaw"><img src="https://img.shields.io/badge/Telegram-chat-E8632A?logo=telegram" alt="telegram"></a>
+</p>
+
+<p align="center">
+  <img src="assets/lockup-horizontal.svg" alt="Right Agent" width="320">
 </p>
 
 <p align="center">
