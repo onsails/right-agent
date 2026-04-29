@@ -3271,12 +3271,33 @@ async fn cmd_agent_rebootstrap(
     }
 
     let pc_process = format!("{agent_name}-bot");
-    // `Some(pc)` only when we successfully stopped the bot via `pc` and need to
-    // restart it. `None` covers (a) no state.json, (b) PC not healthy, (c) we
-    // failed to stop — folding the three correlated booleans into one Option
-    // makes the restart branch unwrap-free.
+    // Three states, NOT two — we must not silently skip the bot bounce when
+    // state.json is present but PC's API is unreachable. That's how the
+    // 2026-04-29 incident ("rebootstrap ran but my bot kept serving the old
+    // persona") happened: the previous code treated 401-on-/live as
+    // equivalent to "PC not running", continued with the file-side rewind,
+    // and left the still-running bot serving stale identity.
+    //
+    //   None              — no state.json: PC was never started from this
+    //                       home. No live bot to bounce; file ops are safe.
+    //   Some(Some(pc))    — state.json + healthy PC. Stop now, restart later.
+    //   error             — state.json present but PC unreachable. We REFUSE
+    //                       to do file ops because the bot would keep serving
+    //                       the old persona.
     let stopped_pc = match right_agent::runtime::PcClient::from_home(home)? {
-        Some(pc) if pc.health_check().await.is_ok() => {
+        None => {
+            println!("(process-compose not running — skipping bot stop)");
+            None
+        }
+        Some(pc) => {
+            pc.health_check().await.map_err(|e| {
+                miette::miette!(
+                    "process-compose API unreachable: {e:#}\n\
+                     Refusing to rebootstrap: cannot bounce {pc_process}, and proceeding \
+                     would leave the running bot serving the old identity.\n\
+                     Verify `right up` is healthy (or stop it cleanly) and retry."
+                )
+            })?;
             pc.stop_process(&pc_process).await.map_err(|e| {
                 miette::miette!(
                     "failed to stop {pc_process} (not safe to proceed with bot up): {e:#}"
@@ -3284,10 +3305,6 @@ async fn cmd_agent_rebootstrap(
             })?;
             println!("✓ Stopped {pc_process}");
             Some(pc)
-        }
-        _ => {
-            println!("(process-compose not running — skipping bot stop)");
-            None
         }
     };
 
