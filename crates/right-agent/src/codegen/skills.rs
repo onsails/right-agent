@@ -1,9 +1,13 @@
 use std::path::Path;
 
 use include_dir::{Dir, include_dir};
+use miette::{IntoDiagnostic as _, WrapErr as _};
+use minijinja::Environment;
+use minijinja::value::Value as JinjaValue;
 
 use crate::agent::types::MemoryProvider;
 use crate::codegen::contract::{write_agent_owned, write_regenerated_bytes};
+use crate::cron_spec::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
 
 const SKILL_RIGHTSKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightskills");
 const SKILL_RIGHTCRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightcron");
@@ -46,15 +50,52 @@ pub fn install_builtin_skills(
 }
 
 /// Recursively write all files from an embedded directory to `target`.
+///
+/// Markdown files are rendered through minijinja so platform timings (e.g.
+/// `idle_threshold_min`) interpolate from the single source of truth in
+/// `cron_spec`. Files without `{{ }}` syntax pass through unchanged.
 fn install_embedded_dir(dir: &Dir, target: &Path) -> miette::Result<()> {
+    let env = skill_template_env();
+    let ctx = skill_template_context();
     for file in dir.files() {
         let dest = target.join(file.path());
-        write_regenerated_bytes(&dest, file.contents())?;
+        let is_markdown = file
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+        if is_markdown {
+            let raw = std::str::from_utf8(file.contents()).into_diagnostic()?;
+            let rendered = env
+                .render_str(raw, &ctx)
+                .into_diagnostic()
+                .wrap_err_with(|| {
+                    format!("rendering skill template {}", file.path().display())
+                })?;
+            write_regenerated_bytes(&dest, rendered.as_bytes())?;
+        } else {
+            write_regenerated_bytes(&dest, file.contents())?;
+        }
     }
     for subdir in dir.dirs() {
         install_embedded_dir(subdir, target)?;
     }
     Ok(())
+}
+
+/// Minijinja environment used for skill markdown rendering. No filters or
+/// templates are pre-loaded — callers pass raw template strings to `render_str`.
+fn skill_template_env() -> Environment<'static> {
+    Environment::new()
+}
+
+/// Variables exposed to skill markdown templates. Keep this list small and
+/// only add values that are user-meaningful (numbers users see in UX text).
+fn skill_template_context() -> JinjaValue {
+    JinjaValue::from_serialize(serde_json::json!({
+        "idle_threshold_secs": IDLE_THRESHOLD_SECS,
+        "idle_threshold_min": IDLE_THRESHOLD_MIN,
+    }))
 }
 
 #[cfg(test)]
@@ -83,6 +124,36 @@ mod tests {
                 .join(".claude/skills/rightcron/SKILL.md")
                 .exists(),
             "rightcron/SKILL.md should exist"
+        );
+    }
+
+    #[test]
+    fn rightcron_skill_interpolates_idle_threshold() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/skills/rightcron/SKILL.md"))
+                .unwrap();
+        // Template tokens must be fully rendered.
+        assert!(
+            !content.contains("{{"),
+            "rendered SKILL.md still contains template tokens"
+        );
+        // The idle-threshold value must come from the central constant.
+        let needle = format!("{IDLE_THRESHOLD_MIN} minutes");
+        assert!(
+            content.contains(&needle),
+            "rendered SKILL.md should mention {needle}"
+        );
+        // The buggy "Confirm:" directives must be gone.
+        assert!(
+            !content.contains("Confirm:"),
+            "Confirm: directives should be removed from rightcron SKILL.md"
+        );
+        // The stale ~60-second claim must be gone.
+        assert!(
+            !content.contains("~60 seconds") && !content.contains("60-second"),
+            "stale 60-second references must be removed"
         );
     }
 

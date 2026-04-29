@@ -76,7 +76,7 @@ impl RightBackend {
             ),
             Tool::new(
                 "cron_trigger",
-                "Trigger a cron job for immediate execution. The job is queued and will run on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped.",
+                right_agent::cron_spec::TRIGGER_TOOL_DESC,
                 schema_for_type::<CronTriggerParams>(),
             ),
             // MCP management tools (read-only — write ops are user-only via Telegram /mcp)

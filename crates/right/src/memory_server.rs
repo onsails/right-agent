@@ -359,8 +359,13 @@ impl MemoryServer {
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
+    // NOTE: rmcp's `#[tool]` macro parses `description` as a string literal only
+    // (darling FromMeta on `Option<String>`), so the description here cannot be
+    // a path to `right_agent::cron_spec::TRIGGER_TOOL_DESC`. The literal below
+    // must stay byte-for-byte equal to that constant — the
+    // `cron_trigger_description_matches_const` test in this file enforces it.
     #[tool(
-        description = "Trigger a cron job for immediate execution. The job is queued and will run on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped."
+        description = "Trigger a cron job for immediate execution. Lock check applies — if the job is currently running, the trigger is skipped. Delivery is conditional: the cron itself decides whether to notify (sets `notify` in its structured output), and any notification is held until the chat has been idle for 3 minutes. Use `cron_list_runs` to inspect `delivery_status` and `no_notify_reason`."
     )]
     async fn cron_trigger(
         &self,
@@ -554,3 +559,35 @@ pub async fn run_memory_server() -> miette::Result<()> {
 #[cfg(test)]
 #[path = "memory_server_mcp_tests.rs"]
 mod mcp_tests;
+
+#[cfg(test)]
+mod tests {
+    /// rmcp's `#[tool]` macro accepts only string literals for `description`,
+    /// so we mirror `TRIGGER_TOOL_DESC` as a literal in this file. This test
+    /// pins the literal to the central constant so they cannot drift.
+    #[test]
+    fn cron_trigger_description_matches_const() {
+        // The literal must match exactly — find it by its unique opening phrase.
+        let source = include_str!("memory_server.rs");
+        let needle_start = "description = \"Trigger a cron job for immediate execution.";
+        let lit_start = source
+            .find(needle_start)
+            .expect("cron_trigger description literal not found in source");
+        let lit_open = lit_start
+            + source[lit_start..]
+                .find('"')
+                .expect("missing opening quote");
+        let after_open = lit_open + 1;
+        let lit_close = source[after_open..]
+            .find('"')
+            .expect("missing closing quote")
+            + after_open;
+        let literal = &source[after_open..lit_close];
+        assert_eq!(
+            literal,
+            right_agent::cron_spec::TRIGGER_TOOL_DESC,
+            "cron_trigger #[tool(description = ...)] literal must equal \
+             right_agent::cron_spec::TRIGGER_TOOL_DESC verbatim"
+        );
+    }
+}

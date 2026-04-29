@@ -20,7 +20,7 @@ Activate this skill when:
 
 ## How It Works
 
-Cron specs are stored in the agent database. The Rust runtime polls specs every 60 seconds and schedules jobs automatically. Use MCP tools to manage specs — no file creation needed.
+Cron specs are stored in the agent database. The Rust runtime reconciles specs continuously and schedules jobs automatically. Use MCP tools to manage specs — no file creation needed.
 
 ## Creating a Cron Job
 
@@ -59,8 +59,6 @@ mcp__right__cron_create(
 )
 ```
 
-Confirm to the user: "Job created. The runtime picks up new specs within ~60 seconds."
-
 ## Editing a Cron Job
 
 Use the `mcp__right__cron_update` MCP tool. Only pass the fields you want to change — unspecified fields keep their current values.
@@ -78,8 +76,6 @@ mcp__right__cron_update(job_name: "health-check", run_at: "2026-04-16T10:00:00Z"
 
 Setting `schedule` clears `run_at`. Setting `run_at` clears `schedule` and forces `recurring=false`.
 
-Confirm: "Job updated. Changes take effect within ~60 seconds."
-
 ## Removing a Cron Job
 
 Use the `mcp__right__cron_delete` MCP tool:
@@ -87,8 +83,6 @@ Use the `mcp__right__cron_delete` MCP tool:
 ```
 mcp__right__cron_delete(job_name: "health-check")
 ```
-
-Confirm: "Job removed. The runtime drops it within ~60 seconds."
 
 ## Triggering a Cron Job Manually
 
@@ -98,9 +92,20 @@ Use the `mcp__right__cron_trigger` MCP tool to run a job immediately:
 mcp__right__cron_trigger(job_name: "health-check")
 ```
 
-The job is queued and executes on the next engine tick (≤60s). Lock check still applies — if the job is currently running, the trigger is skipped. The result is delivered through the normal delivery loop.
+The job is queued for the cron engine. Lock check still applies — if the job is currently running, the trigger is skipped.
 
-Confirm: "Job triggered. Execution starts within ~60 seconds."
+**Triggering ≠ delivery.** Be honest with the user about two things:
+
+1. The cron itself decides whether to notify. If its structured output sets
+   `notify` to `null`, no message is sent and the run records a
+   `no_notify_reason` instead. Don't promise the user a message will arrive.
+2. If the cron does produce a notification, delivery is held until the chat
+   has been idle for **{{ idle_threshold_min }} minutes** (within CC's prompt
+   cache TTL). While the user is actively chatting, results queue up.
+
+If the user wants the result without waiting, suggest they call
+`mcp__right__cron_list_runs` after the job finishes — `delivery_status` and
+`no_notify_reason` tell the full story.
 
 ## Listing Current Cron Jobs
 
@@ -213,7 +218,7 @@ When the user asks "why wasn't I notified?", check `delivery_status` and `no_not
 1. mcp__right__cron_list_runs(job_name="github-tracker", limit=5)
    -> Check delivery_status for each run:
       - "silent" + no_notify_reason → CC decided nothing to report, reason explains why
-      - "pending" → notification waiting for chat idle (3 min threshold)
+      - "pending" → notification waiting for chat idle ({{ idle_threshold_min }} min threshold)
       - "superseded" → newer run replaced this one before delivery
       - "failed" → delivery failed after 3 attempts, check logs
       - "delivered" → was sent to Telegram successfully
@@ -242,5 +247,6 @@ The log is NDJSON (one JSON event per line) — look for `"type": "assistant"` e
 ## Constraints
 
 1. **UTC schedules**: Cron expressions are evaluated in UTC by the Rust runtime.
-2. **60-second polling**: The runtime re-reads specs every 60 seconds. After creating, editing, or deleting a spec, changes take effect within ~1 minute.
-3. **Manual triggers**: `mcp__right__cron_trigger` queues the job; it runs on the next 60-second engine tick. If the job is locked (still running from a previous invocation), the trigger is skipped.
+2. **Continuous reconciliation**: The runtime reconciles specs continuously; create/update/delete take effect promptly. Don't quote a specific number of seconds to the user — the polling interval is an internal detail.
+3. **Manual triggers**: `mcp__right__cron_trigger` queues the job for the next reconciliation pass. If the job is locked (still running from a previous invocation), the trigger is skipped.
+4. **Conditional delivery**: A successful run does not guarantee a Telegram message. The cron's structured output decides via `notify` (set ⇒ deliver, null ⇒ silent + `no_notify_reason`). Pending notifications wait for {{ idle_threshold_min }} minutes of chat idle before they are sent.

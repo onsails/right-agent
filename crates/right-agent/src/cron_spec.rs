@@ -7,6 +7,32 @@ use chrono::{DateTime, Utc};
 /// Default budget cap per cron invocation (USD).
 pub const DEFAULT_CRON_BUDGET_USD: f64 = 2.0;
 
+/// Single source of truth for cron timings shown to users and the agent.
+///
+/// Engine tick interval is intentionally omitted from this surface — it is an
+/// implementation detail that feels real-time and should never appear in user-
+/// facing copy or tool descriptions.
+///
+/// `IDLE_THRESHOLD_SECS` is user-meaningful: it answers "why didn't the cron
+/// notification arrive yet?" — we hold pending notifications until the chat has
+/// been idle for this long (within CC's 5-min prompt cache TTL).
+pub const IDLE_THRESHOLD_SECS: i64 = 180;
+
+/// Human-readable form for prose ("3 min" reads better than "180 s").
+pub const IDLE_THRESHOLD_MIN: i64 = IDLE_THRESHOLD_SECS / 60;
+
+/// Description string for the `cron_trigger` MCP tool. Built at compile time
+/// from `IDLE_THRESHOLD_MIN` so the number cannot drift from the runtime.
+pub const TRIGGER_TOOL_DESC: &str = const_format::formatcp!(
+    "Trigger a cron job for immediate execution. Lock check applies — if the \
+     job is currently running, the trigger is skipped. Delivery is conditional: \
+     the cron itself decides whether to notify (sets `notify` in its structured \
+     output), and any notification is held until the chat has been idle for {} \
+     minutes. Use `cron_list_runs` to inspect `delivery_status` and \
+     `no_notify_reason`.",
+    IDLE_THRESHOLD_MIN,
+);
+
 /// How a cron job is scheduled.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScheduleKind {
@@ -597,9 +623,7 @@ pub fn trigger_spec(conn: &rusqlite::Connection, job_name: &str) -> Result<Strin
     if rows == 0 {
         return Err(format!("job '{job_name}' not found"));
     }
-    Ok(format!(
-        "Triggered job '{job_name}'. Will execute on next engine tick (≤60s)."
-    ))
+    Ok(format!("Triggered job '{job_name}'."))
 }
 
 /// Clear the `triggered_at` timestamp after a triggered run completes.

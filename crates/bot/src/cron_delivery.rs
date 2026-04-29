@@ -204,7 +204,8 @@ pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
     output
 }
 
-const IDLE_THRESHOLD_SECS: i64 = 180; // 3 minutes — within CC's 5-min prompt cache TTL
+use right_agent::cron_spec::IDLE_THRESHOLD_SECS;
+
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 
 /// Outcome of resolving a pending cron's delivery target against the live allowlist.
