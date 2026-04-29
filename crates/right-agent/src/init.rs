@@ -225,7 +225,6 @@ pub fn init_agent(
         config: None,
         soul_path: None,
         user_path: None,
-        agents_path: None,
         tools_path: None,
         bootstrap_path: None,
         heartbeat_path: None,

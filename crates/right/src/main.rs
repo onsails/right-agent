@@ -1491,11 +1491,6 @@ fn cmd_init(
             config: right_agent::agent::discovery::parse_agent_config(&agent_dir)?,
             soul_path: None,
             user_path: None,
-            agents_path: if agent_dir.join("AGENTS.md").exists() {
-                Some(agent_dir.join("AGENTS.md"))
-            } else {
-                None
-            },
             tools_path: None,
             bootstrap_path: if agent_dir.join("BOOTSTRAP.md").exists() {
                 Some(agent_dir.join("BOOTSTRAP.md"))
@@ -1950,11 +1945,6 @@ fn cmd_agent_init(
             config: right_agent::agent::discovery::parse_agent_config(&agent_dir)?,
             soul_path: None,
             user_path: None,
-            agents_path: if agent_dir.join("AGENTS.md").exists() {
-                Some(agent_dir.join("AGENTS.md"))
-            } else {
-                None
-            },
             tools_path: None,
             bootstrap_path: if agent_dir.join("BOOTSTRAP.md").exists() {
                 Some(agent_dir.join("BOOTSTRAP.md"))
