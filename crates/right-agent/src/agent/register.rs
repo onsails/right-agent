@@ -53,8 +53,41 @@ pub async fn register_with_running_pc(
         return Ok(RegisterResult { pc_running: false });
     }
 
-    // PC is alive. Implementation continues in subsequent tasks.
-    miette::bail!("PC-alive path not yet implemented")
+    // PC is alive. Mirrors `crate::agent::destroy::destroy_agent` after the
+    // dir-removal step: rediscover all agents, regenerate cross-agent codegen
+    // (process-compose.yaml, agent-tokens.json, cloudflared config), then ask
+    // PC to diff its running config against the new file via POST
+    // /project/configuration. PC adds the new agent's processes live.
+    let agents_dir = crate::config::agents_dir(home);
+    let all_agents = crate::agent::discover_agents(&agents_dir)?;
+    let self_exe = std::env::current_exe()
+        .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
+    crate::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
+
+    client.reload_configuration().await.map_err(|e| {
+        tracing::warn!(
+            agent = %options.agent_name,
+            error = format!("{e:#}"),
+            "process-compose reload failed"
+        );
+        e
+    })?;
+    tracing::info!(agent = %options.agent_name, "reloaded process-compose configuration");
+
+    if options.recreated {
+        let process_name = format!("{}-bot", options.agent_name);
+        if let Err(e) = client.restart_process(&process_name).await {
+            // Non-fatal: config is correct on disk and in PC; only the live
+            // process didn't bounce. Surface to the log file, not the recap.
+            tracing::warn!(
+                process = %process_name,
+                error = format!("{e:#}"),
+                "failed to restart bot process after recreate (non-fatal)"
+            );
+        }
+    }
+
+    Ok(RegisterResult { pc_running: true })
 }
 
 #[cfg(test)]
