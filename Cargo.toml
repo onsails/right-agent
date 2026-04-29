@@ -61,7 +61,7 @@ owo-colors = { version = "4.2", features = ["supports-colors"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 url = "2.5"
 anyhow = "1.0"
-fs4 = { version = "1.0", features = ["sync"] }
+fs4 = { version = "1.1", features = ["sync"] }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 signal-hook = { version = "0.4", features = ["extended-siginfo"] }
 
