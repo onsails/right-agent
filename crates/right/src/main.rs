@@ -3316,6 +3316,14 @@ async fn cmd_agent_rebootstrap(
         );
     }
     println!("  Sessions deactivated: {}", report.sessions_deactivated);
+
+    if let right_agent::rebootstrap::SandboxStatus::Skipped(reason) = &report.sandbox_status {
+        println!();
+        println!("⚠ Sandbox-side cleanup was skipped: {reason}");
+        println!("  Identity files inside /sandbox/ were NOT removed.");
+        println!("  Re-run `right agent rebootstrap {agent_name}` when openshell is healthy.");
+    }
+
     if stopped_pc.is_none() {
         println!();
         println!("process-compose was not running. Run `right up` to relaunch the bot.");

@@ -112,4 +112,8 @@ async fn execute_against_live_sandbox() {
     assert_eq!(report.sessions_deactivated, 1);
     assert_eq!(report.host_backed_up.to_vec(), IDENTITY_FILES.to_vec());
     assert_eq!(report.sandbox_backed_up.to_vec(), IDENTITY_FILES.to_vec());
+    assert_eq!(
+        report.sandbox_status,
+        right_agent::rebootstrap::SandboxStatus::Cleaned
+    );
 }

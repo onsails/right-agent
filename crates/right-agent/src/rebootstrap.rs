@@ -36,12 +36,31 @@ pub struct RebootstrapPlan {
 }
 
 /// Outcome summary returned to the CLI for the final printed report.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RebootstrapReport {
     pub backup_dir: PathBuf,
     pub host_backed_up: Vec<&'static str>,
     pub sandbox_backed_up: Vec<&'static str>,
     pub sessions_deactivated: usize,
+    pub sandbox_status: SandboxStatus,
+}
+
+/// Disposition of the sandbox-side cleanup half of `execute()`.
+///
+/// Distinguishes "the agent has no sandbox by design" (`NoneMode`) from
+/// "we successfully cleaned the sandbox" (`Cleaned`) from "we punted because
+/// openshell was unhealthy or the sandbox was missing" (`Skipped`). The CLI
+/// surfaces `Skipped` as a warning so the operator knows identity files
+/// inside `/sandbox/` were NOT removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxStatus {
+    /// Agent uses sandbox.mode = none — no sandbox to clean.
+    NoneMode,
+    /// Sandbox-side cleanup completed.
+    Cleaned,
+    /// Skipped because openshell was unhealthy or sandbox didn't exist.
+    /// `reason` is a short, operator-readable string.
+    Skipped(&'static str),
 }
 
 /// Build a `RebootstrapPlan` for `agent_name` under `home`.
@@ -101,7 +120,8 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
 
     let host_backed_up = backup_host_files(&plan.agent_dir, &plan.backup_dir)?;
 
-    let mut session = open_sandbox_session(plan.sandbox_name.as_deref()).await?;
+    let (mut session, sandbox_status) =
+        open_sandbox_session(plan.sandbox_name.as_deref()).await?;
     let sandbox_backed_up = backup_sandbox_files(session.as_mut(), &plan.backup_dir).await?;
 
     // Delete from sandbox first — failure here would otherwise let
@@ -117,6 +137,7 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
         host_backed_up,
         sandbox_backed_up,
         sessions_deactivated,
+        sandbox_status,
     })
 }
 
@@ -161,14 +182,15 @@ struct SandboxSession {
 
 /// Resolve `sandbox_name` to a connected gRPC client + sandbox id.
 ///
-/// Returns `Ok(None)` for none-mode (`sandbox_name == None`), when OpenShell
-/// is not ready, or when the sandbox doesn't exist yet — these are
-/// "skip sandbox-side work" signals, not errors.
+/// Returns a `(session, status)` pair so callers can both skip sandbox-side
+/// work (`session.is_none()`) and surface *why* it was skipped to the
+/// operator. None-mode, openshell unhealthy, and sandbox-absent are all
+/// non-errors — the caller decides how to report each.
 async fn open_sandbox_session(
     sandbox_name: Option<&str>,
-) -> miette::Result<Option<SandboxSession>> {
+) -> miette::Result<(Option<SandboxSession>, SandboxStatus)> {
     let Some(sandbox) = sandbox_name else {
-        return Ok(None);
+        return Ok((None, SandboxStatus::NoneMode));
     };
 
     let mtls_dir = match crate::openshell::preflight_check() {
@@ -178,21 +200,24 @@ async fn open_sandbox_session(
                 ?other,
                 "rebootstrap: openshell not ready, skipping sandbox-side ops"
             );
-            return Ok(None);
+            return Ok((None, SandboxStatus::Skipped("openshell not ready")));
         }
     };
 
     let mut client = crate::openshell::connect_grpc(&mtls_dir).await?;
     if !crate::openshell::sandbox_exists(&mut client, sandbox).await? {
         tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping sandbox-side ops");
-        return Ok(None);
+        return Ok((None, SandboxStatus::Skipped("sandbox absent")));
     }
     let id = crate::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
-    Ok(Some(SandboxSession {
-        name: sandbox.to_string(),
-        id,
-        client,
-    }))
+    Ok((
+        Some(SandboxSession {
+            name: sandbox.to_string(),
+            id,
+            client,
+        }),
+        SandboxStatus::Cleaned,
+    ))
 }
 
 /// Download identity files from sandbox into `<backup_dir>/sandbox/`.
@@ -574,6 +599,7 @@ mod tests {
             report.sandbox_backed_up.is_empty(),
             "none-mode = no sandbox backup"
         );
+        assert_eq!(report.sandbox_status, SandboxStatus::NoneMode);
 
         // BOOTSTRAP.md recreated.
         assert_eq!(
