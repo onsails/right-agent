@@ -249,6 +249,17 @@ fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
 /// Mark all active `sessions` rows in the agent's `data.db` as inactive.
 /// Returns the number of rows updated. Skipped (returns 0) if `data.db`
 /// is missing.
+///
+/// Opens the connection with `migrate: false`. This is safe in production
+/// because the bot and MCP aggregator processes own schema migrations on
+/// per-agent `data.db` (see ARCHITECTURE.md "SQLite Rules > Migration
+/// Ownership") — by the time any rebootstrap call lands, those processes
+/// have already created the `sessions` table. The assumption is invisible
+/// at the call site: if this function were ever invoked against a `data.db`
+/// whose schema predates the `sessions` table, the `UPDATE` would surface
+/// an opaque "no such table: sessions" error. That state is unreachable in
+/// production, so we accept the opacity rather than migrate defensively
+/// here.
 fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
     if !agent_dir.join("data.db").exists() {
         tracing::debug!("rebootstrap: data.db absent, skipping session deactivation");
