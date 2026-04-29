@@ -231,6 +231,58 @@ fn delete_identity_from_host(agent_dir: &Path) {
     }
 }
 
+/// Delete identity files from the sandbox via gRPC `exec_in_sandbox`.
+///
+/// Skipped (returns `Ok`) when `sandbox_name` is `None` (none-mode) or when
+/// OpenShell is not ready / the sandbox doesn't exist.
+#[allow(dead_code)] // called by execute() in Task 7
+async fn delete_identity_from_sandbox(sandbox_name: Option<&str>) -> miette::Result<()> {
+    let Some(sandbox) = sandbox_name else {
+        return Ok(());
+    };
+
+    let mtls_dir = match crate::openshell::preflight_check() {
+        crate::openshell::OpenShellStatus::Ready(d) => d,
+        other => {
+            tracing::info!(
+                ?other,
+                "rebootstrap: openshell not ready, skipping sandbox-side delete"
+            );
+            return Ok(());
+        }
+    };
+
+    let mut client = crate::openshell::connect_grpc(&mtls_dir).await?;
+    if !crate::openshell::sandbox_exists(&mut client, sandbox).await? {
+        tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping delete");
+        return Ok(());
+    }
+    let sandbox_id = crate::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+
+    // Single rm -f covering all three. -f makes missing files non-fatal,
+    // so this is naturally idempotent.
+    let cmd = [
+        "rm",
+        "-f",
+        "/sandbox/IDENTITY.md",
+        "/sandbox/SOUL.md",
+        "/sandbox/USER.md",
+    ];
+    let (stdout, exit) = crate::openshell::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &cmd,
+        crate::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await?;
+    if exit != 0 {
+        return Err(miette::miette!(
+            "rm in sandbox returned exit {exit}: {stdout}"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
