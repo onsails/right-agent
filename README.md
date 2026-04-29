@@ -4,13 +4,7 @@
   <a href="https://t.me/rightclaw"><img src="https://img.shields.io/badge/Telegram-chat-E8632A?logo=telegram" alt="telegram"></a>
 </p>
 
-<p align="center">
-  <img src="assets/lockup-horizontal.svg" alt="Right Agent" width="320">
-</p>
-
-<p align="center">
-  <img src="assets/section-mark.svg" height="20" alt=""> <b>an agent that ships as a product</b>
-</p>
+# <img src="assets/section-mark.svg" height="20" alt=""> an agent that ships as a product
 
 <p align="center">
   the choices are made. sandboxed by default. lives in telegram. runs on your $20 claude subscription.
