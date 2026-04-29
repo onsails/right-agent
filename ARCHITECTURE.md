@@ -615,6 +615,19 @@ Rules:
 - **MCP tool restriction**: Agents cannot register/remove external MCP servers — `mcp_add`, `mcp_remove`, `mcp_auth` are not exposed as MCP tools. Only the user can manage servers via Telegram `/mcp` commands routed through the internal Unix socket API. This prevents sandbox escape via data exfiltration to attacker-controlled MCP endpoints.
 - **OAuth CSRF**: Token matching in callback server
 
+## Brand-conformant CLI output
+
+Every user-facing TUI surface in `right` and `right-bot` MUST go through
+`right_agent::ui::*` (see `crates/right-agent/src/ui/`). Raw `println!` /
+`eprintln!` of user-facing text is a review-blocking defect. Visual
+contract, atoms, and theme rules: `docs/brand-guidelines.html` and the
+redesign spec at
+`docs/superpowers/specs/2026-04-28-init-wizard-brand-redesign-design.md`.
+
+Past miss: `cmd_agent_rebootstrap` (`crates/right/src/main.rs`) shipped
+with raw `println!` and bare `✓`/`⚠` literals, bypassing the rail and
+theme detection. Do not repeat; migrate existing offenders when touched.
+
 ## OpenShell Integration Conventions
 
 - **Prefer gRPC over CLI**: Use the OpenShell gRPC API (mTLS on :8080) for sandbox operations wherever possible. gRPC is faster, more reliable, and provides structured responses. The CLI (`openshell sandbox upload/download`) is only used for file transfer — no gRPC file transfer API exists yet.
