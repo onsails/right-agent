@@ -53,7 +53,6 @@ fn test_init_creates_structure() {
     // Identity files are NOT created by init — bootstrap creates them.
     assert!(!dir.path().join("agents/right/IDENTITY.md").exists());
     assert!(!dir.path().join("agents/right/SOUL.md").exists());
-    assert!(dir.path().join("agents/right/AGENTS.md").exists());
     assert!(dir.path().join("agents/right/BOOTSTRAP.md").exists());
 }
 
@@ -81,11 +80,7 @@ fn test_init_generates_per_agent_codegen() {
 
     let claude_dir = dir.path().join("agents/right/.claude");
 
-    // AGENTS.md and TOOLS.md live at agent root
-    assert!(
-        dir.path().join("agents/right/AGENTS.md").exists(),
-        "missing AGENTS.md at agent root"
-    );
+    // TOOLS.md lives at agent root
     assert!(
         dir.path().join("agents/right/TOOLS.md").exists(),
         "missing TOOLS.md at agent root"
@@ -804,7 +799,7 @@ fn test_agent_backup_and_restore_no_sandbox() {
         "# Test Agent\nI am a test agent.\n",
     )
     .unwrap();
-    fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
+    fs::write(agent_dir.join("TOOLS.md"), "# Tools\n").unwrap();
     fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
     fs::write(agent_dir.join("test-file.txt"), "hello world\n").unwrap();
 
@@ -904,7 +899,7 @@ fn test_agent_backup_sandbox_only() {
     fs::create_dir_all(agent_dir.join(".claude")).unwrap();
     fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
     fs::write(agent_dir.join("IDENTITY.md"), "# Test\n").unwrap();
-    fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
+    fs::write(agent_dir.join("TOOLS.md"), "# Tools\n").unwrap();
 
     right()
         .args([
