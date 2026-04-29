@@ -1518,7 +1518,8 @@ fn cmd_init(
             right_agent::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
             let policy_path = agent_dir.join("policy.yaml");
-            let sb_name = right_agent::openshell::sandbox_name("right");
+            // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
+            let sb_name = format!("right-{}", "right");
             let force_recreate = if force {
                 true
             } else {
@@ -1535,7 +1536,7 @@ fn cmd_init(
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
                     right_agent::openshell::ensure_sandbox(
-                        "right",
+                        &sb_name,
                         &policy_path,
                         Some(&staging),
                         force_recreate,
@@ -1556,13 +1557,11 @@ fn cmd_init(
             std::fs::create_dir_all(run_dir.join("ssh"))
                 .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    right_agent::openshell::generate_ssh_config(
-                        &right_agent::openshell::sandbox_name("right"),
+                tokio::runtime::Handle::current()
+                    .block_on(right_agent::openshell::generate_ssh_config(
+                        &sb_name,
                         &run_dir.join("ssh"),
-                    )
-                    .await
-                })
+                    ))
             })?;
         }
     }
@@ -1982,7 +1981,8 @@ fn cmd_agent_init(
         right_agent::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
         let policy_path = agent_dir.join("policy.yaml");
-        let sb_name = right_agent::openshell::sandbox_name(name);
+        // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
+        let sb_name = format!("right-{name}");
         // --force always recreates; fresh agent (didn't exist before) always creates;
         // otherwise prompt if stale sandbox exists.
         let force_recreate = if force || !agent_existed {
@@ -2000,7 +2000,7 @@ fn cmd_agent_init(
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 right_agent::openshell::ensure_sandbox(
-                    name,
+                    &sb_name,
                     &policy_path,
                     Some(&staging),
                     force_recreate,
@@ -2016,13 +2016,11 @@ fn cmd_agent_init(
         std::fs::create_dir_all(run_dir.join("ssh"))
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                right_agent::openshell::generate_ssh_config(
-                    &right_agent::openshell::sandbox_name(name),
+            tokio::runtime::Handle::current()
+                .block_on(right_agent::openshell::generate_ssh_config(
+                    &sb_name,
                     &run_dir.join("ssh"),
-                )
-                .await
-            })
+                ))
         })?;
     }
 

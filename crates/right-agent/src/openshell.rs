@@ -959,14 +959,16 @@ pub enum SandboxOutcome {
 /// - If no sandbox exists: create it, wait for READY, return `Created`.
 /// - If sandbox exists and `force_recreate`: delete + create, return `Recreated`.
 /// - If sandbox exists and not force: return error.
+///
+/// `sandbox` is the literal OpenShell sandbox name (e.g. `right-foo`). Callers
+/// must pass the same name they will write into `agent.yaml::sandbox.name`,
+/// otherwise the bot won't be able to find the sandbox at startup.
 pub async fn ensure_sandbox(
-    agent_name: &str,
+    sandbox: &str,
     policy_path: &Path,
     staging_dir: Option<&Path>,
     force_recreate: bool,
 ) -> miette::Result<SandboxOutcome> {
-    let sandbox = sandbox_name(agent_name);
-
     let mtls_dir = match preflight_check() {
         OpenShellStatus::Ready(dir) => dir,
         OpenShellStatus::NotInstalled => {
@@ -997,7 +999,7 @@ pub async fn ensure_sandbox(
     // Use sandbox_exists (not is_sandbox_ready) to detect sandboxes in ANY phase,
     // including DELETING — otherwise we'd skip wait_for_deleted and create would
     // conflict with a sandbox still being torn down.
-    let exists = sandbox_exists(&mut grpc_client, &sandbox).await?;
+    let exists = sandbox_exists(&mut grpc_client, sandbox).await?;
 
     if exists && !force_recreate {
         return Err(miette::miette!(
@@ -1009,15 +1011,15 @@ pub async fn ensure_sandbox(
 
     if exists {
         tracing::info!(sandbox = %sandbox, "deleting existing sandbox for recreate");
-        delete_sandbox(&sandbox).await;
-        wait_for_deleted(&mut grpc_client, &sandbox, 60, 2).await?;
+        delete_sandbox(sandbox).await;
+        wait_for_deleted(&mut grpc_client, sandbox, 60, 2).await?;
     }
 
     tracing::info!(sandbox = %sandbox, "creating sandbox");
-    let mut child = spawn_sandbox(&sandbox, policy_path, staging_dir)?;
+    let mut child = spawn_sandbox(sandbox, policy_path, staging_dir)?;
 
     tokio::select! {
-        result = wait_for_ready(&mut grpc_client, &sandbox, 120, 2) => {
+        result = wait_for_ready(&mut grpc_client, sandbox, 120, 2) => {
             result?;
             drop(child);
         }
@@ -1025,8 +1027,7 @@ pub async fn ensure_sandbox(
             let status = status.map_err(|e| miette::miette!("sandbox create child wait failed: {e:#}"))?;
             if !status.success() {
                 return Err(miette::miette!(
-                    "openshell sandbox create for '{}' exited with {status} before reaching READY",
-                    agent_name
+                    "openshell sandbox create for '{sandbox}' exited with {status} before reaching READY"
                 ));
             }
         }
@@ -1034,7 +1035,7 @@ pub async fn ensure_sandbox(
 
     // SSH readiness probe — gRPC READY doesn't guarantee SSH transport is up.
     // 60s timeout: sandboxes with TLS termination + proxy can take 30-50s after READY.
-    let sandbox_id = resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
+    let sandbox_id = resolve_sandbox_id(&mut grpc_client, sandbox).await?;
     wait_for_ssh(&mut grpc_client, &sandbox_id, 60, 2).await?;
 
     let outcome = if exists {

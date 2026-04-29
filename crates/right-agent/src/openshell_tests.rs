@@ -538,7 +538,9 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
 #[tokio::test]
 async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     let _slot = super::acquire_sandbox_slot();
-    // ensure_sandbox takes agent name and prepends "rightclaw-" via sandbox_name() (compat shim).
+    // ensure_sandbox takes the explicit sandbox name. Use the same legacy
+    // `sandbox_name()` helper here so the test asserts against a stable prefix
+    // even if the production `right init` flow chooses a different one.
     const AGENT: &str = "test-lifecycle";
     let sandbox = super::sandbox_name(AGENT);
 
@@ -574,7 +576,7 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     std::fs::write(staging.join(".claude/settings.json"), "{}").unwrap();
 
     // Create sandbox — returns when gRPC says READY.
-    super::ensure_sandbox(AGENT, &policy_path, Some(&staging), false)
+    super::ensure_sandbox(&sandbox, &policy_path, Some(&staging), false)
         .await
         .expect("sandbox creation should succeed");
 
