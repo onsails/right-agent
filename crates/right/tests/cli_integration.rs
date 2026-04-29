@@ -544,7 +544,7 @@ fn test_agent_init_force_recreates_agent() {
     fs::write(&marker, "canary").unwrap();
     assert!(marker.exists());
 
-    // Re-init with --force.
+    // Re-init with --force-recreate.
     right()
         .args([
             "--home",
@@ -552,7 +552,7 @@ fn test_agent_init_force_recreates_agent() {
             "agent",
             "init",
             "test-agent",
-            "--force",
+            "--force-recreate",
             "-y",
             "--sandbox-mode",
             "none",
@@ -562,12 +562,15 @@ fn test_agent_init_force_recreates_agent() {
 
     // Agent dir exists, MARKER.txt is gone, agent.yaml exists.
     assert!(dir.path().join("agents/test-agent").exists());
-    assert!(!marker.exists(), "MARKER.txt should be wiped by --force");
+    assert!(
+        !marker.exists(),
+        "MARKER.txt should be wiped by --force-recreate"
+    );
     assert!(dir.path().join("agents/test-agent/agent.yaml").exists());
 }
 
 #[test]
-fn test_agent_init_fresh_without_force_errors() {
+fn test_agent_init_fresh_without_force_recreate_errors() {
     right()
         .args([
             "--home",
@@ -580,11 +583,11 @@ fn test_agent_init_fresh_without_force_errors() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--force"));
+        .stderr(predicate::str::contains("--force-recreate"));
 }
 
 #[test]
-fn test_agent_init_force_preserves_config() {
+fn test_agent_init_force_recreate_preserves_config() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -609,7 +612,7 @@ fn test_agent_init_force_preserves_config() {
         .assert()
         .success();
 
-    // Re-init with --force (no --fresh) — should preserve config.
+    // Re-init with --force-recreate (no --fresh) — should preserve config.
     right()
         .args([
             "--home",
@@ -617,7 +620,7 @@ fn test_agent_init_force_preserves_config() {
             "agent",
             "init",
             "preserve-test",
-            "--force",
+            "--force-recreate",
             "-y",
         ])
         .assert()
@@ -626,12 +629,12 @@ fn test_agent_init_force_preserves_config() {
     let yaml = fs::read_to_string(dir.path().join("agents/preserve-test/agent.yaml")).unwrap();
     assert!(
         yaml.contains("mode: none"),
-        "agent.yaml should preserve sandbox mode: none after --force, got:\n{yaml}"
+        "agent.yaml should preserve sandbox mode: none after --force-recreate, got:\n{yaml}"
     );
 }
 
 #[test]
-fn test_agent_init_force_on_nonexistent_agent() {
+fn test_agent_init_force_recreate_on_nonexistent_agent() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -639,7 +642,7 @@ fn test_agent_init_force_on_nonexistent_agent() {
     fs::create_dir_all(dir.path().join("agents")).unwrap();
     fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
 
-    // --force on non-existent agent should just create it.
+    // --force-recreate on non-existent agent should just create it.
     right()
         .args([
             "--home",
@@ -647,7 +650,7 @@ fn test_agent_init_force_on_nonexistent_agent() {
             "agent",
             "init",
             "new-agent",
-            "--force",
+            "--force-recreate",
             "-y",
             "--sandbox-mode",
             "none",
@@ -1062,4 +1065,30 @@ fn test_help_lists_destroy() {
         .assert()
         .success()
         .stdout(predicate::str::contains("destroy"));
+}
+
+#[test]
+fn test_agent_init_bare_force_rejected() {
+    // Agent init no longer accepts --force; only --force-recreate.
+    // (`agent destroy --force` and `init --force` are unchanged.)
+    let dir = tempdir().unwrap();
+    let home = dir.path().to_str().unwrap();
+    fs::create_dir_all(dir.path().join("agents")).unwrap();
+    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
+
+    right()
+        .args([
+            "--home",
+            home,
+            "agent",
+            "init",
+            "test-agent",
+            "--force",
+            "-y",
+            "--sandbox-mode",
+            "none",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unexpected argument"));
 }
