@@ -29,6 +29,8 @@ pub(crate) const MAIN_PROMPT_LABELS: &[&str] = &[
     "create backup before destroying?",
     // cmd_agent_destroy: dynamic confirm — agent_name varies, prefix is the static portion
     "permanently destroy agent '",
+    // cmd_agent_rebootstrap: dynamic confirm — agent_name varies, prefix is the static portion
+    "rebootstrap agent '",
     // cmd_agent_config: sandbox migration confirm
     "migrate sandbox now? (backup old, create new, restore data)",
 ];
@@ -190,6 +192,17 @@ pub enum AgentCommands {
         /// Skip interactive prompts
         #[arg(long)]
         force: bool,
+    },
+    /// Re-enter bootstrap mode (debug only). Backs up identity files,
+    /// deletes them from host and sandbox, recreates BOOTSTRAP.md, and
+    /// deactivates active sessions. Sandbox, credentials, memory bank,
+    /// and data.db rows are preserved.
+    Rebootstrap {
+        /// Agent name
+        name: String,
+        /// Skip the typed-name confirmation prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
     /// Add a trusted user to this agent's allowlist
     Allow {
@@ -623,6 +636,9 @@ async fn main() -> miette::Result<()> {
                 backup,
                 force,
             } => cmd_agent_destroy(&home, &name, backup, force).await,
+            AgentCommands::Rebootstrap { name, yes } => {
+                cmd_agent_rebootstrap(&home, &name, yes).await
+            }
             AgentCommands::Allow {
                 name,
                 user_id,
@@ -3208,6 +3224,110 @@ async fn cmd_agent_destroy(
     }
     if result.pc_reloaded {
         println!("  ✓ Reloaded process-compose");
+    }
+
+    Ok(())
+}
+
+async fn cmd_agent_rebootstrap(
+    home: &Path,
+    agent_name: &str,
+    yes: bool,
+) -> miette::Result<()> {
+    let plan = right_agent::rebootstrap::plan(home, agent_name)?;
+
+    // Confirmation
+    if !yes {
+        println!("Agent: {agent_name}");
+        println!("  Directory: {}", plan.agent_dir.display());
+        println!("  Sandbox mode: {}", plan.sandbox_mode);
+        if let Some(ref sb) = plan.sandbox_name {
+            println!("  Sandbox: {sb}");
+        }
+        println!("  Backup dir: {}", plan.backup_dir.display());
+        println!();
+        println!("This will:");
+        println!("  - Back up IDENTITY.md / SOUL.md / USER.md (host + sandbox copies)");
+        println!("  - Delete those files from host and sandbox");
+        println!("  - Recreate BOOTSTRAP.md on host");
+        println!("  - Deactivate all active sessions in data.db");
+        println!("  - Bounce the bot if it is running");
+        println!();
+        println!(
+            "Sandbox, credentials, Hindsight memory, and data.db rows are preserved."
+        );
+        println!();
+
+        let confirmed = inquire::Confirm::new(&format!(
+            "rebootstrap agent '{agent_name}'? this rewinds onboarding state."
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+
+        if !confirmed {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Stop the bot (best-effort)
+    let pc_process = format!("{agent_name}-bot");
+    let pc_client_opt = right_agent::runtime::PcClient::from_home(home)?;
+    let pc_running = match &pc_client_opt {
+        Some(pc) => pc.health_check().await.is_ok(),
+        None => false,
+    };
+    let bot_was_stopped = if pc_running {
+        let pc = pc_client_opt.as_ref().unwrap();
+        match pc.stop_process(&pc_process).await {
+            Ok(()) => {
+                println!("✓ Stopped {pc_process}");
+                true
+            }
+            Err(e) => {
+                return Err(miette::miette!(
+                    "failed to stop {pc_process} (not safe to proceed with bot up): {e:#}"
+                ));
+            }
+        }
+    } else {
+        println!("(process-compose not running — skipping bot stop)");
+        false
+    };
+
+    // Run the state mutations
+    let report = right_agent::rebootstrap::execute(&plan).await?;
+
+    // Restart the bot if we stopped it
+    if bot_was_stopped {
+        let pc = pc_client_opt.as_ref().unwrap();
+        pc.start_process(&pc_process).await?;
+        println!("✓ Started {pc_process}");
+    }
+
+    // Final summary
+    println!();
+    println!("Rebootstrapped agent '{agent_name}':");
+    println!("  Backup: {}", report.backup_dir.display());
+    if report.host_backed_up.is_empty() {
+        println!("  Host files backed up: (none — agent had not bootstrapped)");
+    } else {
+        println!(
+            "  Host files backed up: {}",
+            report.host_backed_up.join(", ")
+        );
+    }
+    if !report.sandbox_backed_up.is_empty() {
+        println!(
+            "  Sandbox files backed up: {}",
+            report.sandbox_backed_up.join(", ")
+        );
+    }
+    println!("  Sessions deactivated: {}", report.sessions_deactivated);
+    if !pc_running {
+        println!();
+        println!("process-compose was not running. Run `right up` to relaunch the bot.");
     }
 
     Ok(())
