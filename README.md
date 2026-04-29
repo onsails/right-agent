@@ -6,13 +6,9 @@
 
 # <img src="assets/section-mark.svg" height="20" alt=""> an agent that ships as a product
 
-<p align="center">
-  the choices are made. sandboxed by default. lives in telegram. runs on your $20 claude subscription.
-</p>
+the choices are made. sandboxed by default. lives in telegram. runs on your $20 claude subscription.
 
-<p align="center">
-  <img src="images/screenshot.png" alt="Right Agent in Telegram" width="720"/>
-</p>
+<img src="images/screenshot.png" alt="Right Agent in Telegram" width="720"/>
 
 <p align="center">
   <a href="#-the-problem">the problem</a> ·
