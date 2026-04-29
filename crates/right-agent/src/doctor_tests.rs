@@ -56,7 +56,6 @@ fn run_doctor_with_valid_agent_reports_pass() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("right");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents").unwrap();
     std::fs::write(agent_dir.join("IDENTITY.md"), "# Right").unwrap();
     std::fs::write(agent_dir.join("SOUL.md"), "# Soul").unwrap();
     std::fs::write(agent_dir.join("USER.md"), "# User").unwrap();
@@ -90,7 +89,6 @@ fn run_doctor_reports_bootstrap_pending() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("right");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents").unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "# Onboarding").unwrap();
 
     let checks = run_doctor(dir.path());
@@ -108,8 +106,8 @@ fn run_doctor_reports_missing_identity() {
     let dir = tempdir().unwrap();
     let agent_dir = dir.path().join("agents").join("broken");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    // No IDENTITY.md — only AGENTS.md present
-    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents").unwrap();
+    // No IDENTITY.md — only TOOLS.md present
+    std::fs::write(agent_dir.join("TOOLS.md"), "# Tools").unwrap();
     std::fs::write(agent_dir.join("agent.yaml"), "{}").unwrap();
 
     let checks = run_doctor(dir.path());
@@ -529,7 +527,6 @@ fn check_webhook_info_for_agents_skips_agents_without_token() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     // Write agent.yaml with no telegram token
     std::fs::write(agent_dir.join("agent.yaml"), "restart: never\n").unwrap();
-    std::fs::write(agent_dir.join("AGENTS.md"), "# Agents\n").unwrap();
     std::fs::write(agent_dir.join("IDENTITY.md"), "# MyBot\n").unwrap();
 
     let checks = check_webhook_info_for_agents(dir.path());
@@ -729,7 +726,7 @@ fn doctor_warns_missing_identity_files_no_bootstrap() {
     let home = dir.path();
     let agent_dir = home.join("agents").join("test");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("AGENTS.md"), "# Agent").unwrap();
+    std::fs::write(agent_dir.join("TOOLS.md"), "# Tools").unwrap();
 
     let checks = check_agent_structure(home);
     assert!(
@@ -755,7 +752,6 @@ fn doctor_passes_with_all_identity_files() {
     let home = dir.path();
     let agent_dir = home.join("agents").join("test");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("AGENTS.md"), "# Agent").unwrap();
     std::fs::write(agent_dir.join("IDENTITY.md"), "# Identity").unwrap();
     std::fs::write(agent_dir.join("SOUL.md"), "# Soul").unwrap();
     std::fs::write(agent_dir.join("USER.md"), "# User").unwrap();
@@ -774,7 +770,6 @@ fn doctor_bootstrap_pending_skips_identity_checks() {
     let home = dir.path();
     let agent_dir = home.join("agents").join("test");
     std::fs::create_dir_all(&agent_dir).unwrap();
-    std::fs::write(agent_dir.join("AGENTS.md"), "# Agent").unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "# Bootstrap").unwrap();
 
     let checks = check_agent_structure(home);

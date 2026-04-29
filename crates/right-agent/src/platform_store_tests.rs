@@ -114,7 +114,6 @@ fn build_manifest_excludes_agent_owned_md_files() {
         "IDENTITY.md",
         "SOUL.md",
         "USER.md",
-        "AGENTS.md",
         "TOOLS.md",
     ];
     for &name in agent_owned {
