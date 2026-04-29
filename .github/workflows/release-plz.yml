@@ -9,7 +9,7 @@ jobs:
   release-plz-release:
     name: Release-plz release
     runs-on: ubuntu-latest
-    if: ${{ !startsWith(github.event.head_commit.message, 'chore: release') }}
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore: release') }}"
     permissions:
       contents: write
       pull-requests: read
@@ -37,7 +37,7 @@ jobs:
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
-    if: ${{ !startsWith(github.event.head_commit.message, 'chore: release') }}
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore: release') }}"
     permissions:
       contents: write
       pull-requests: write
