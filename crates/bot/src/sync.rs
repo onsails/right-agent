@@ -73,7 +73,7 @@ async fn sync_cycle(
 /// Files that CC creates/modifies inside the sandbox and should be synced back to host.
 /// Excludes codegen-only files (BOOTSTRAP.md) — those are uploaded by
 /// forward sync and never modified by CC.
-const REVERSE_SYNC_FILES: &[&str] = &["AGENTS.md", "TOOLS.md", "IDENTITY.md", "SOUL.md", "USER.md"];
+const REVERSE_SYNC_FILES: &[&str] = &["TOOLS.md", "IDENTITY.md", "SOUL.md", "USER.md"];
 
 /// Sync .md files from sandbox back to host after a `claude -p` invocation.
 ///
