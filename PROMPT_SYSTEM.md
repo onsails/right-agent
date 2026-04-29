@@ -59,9 +59,6 @@ All three CC invocation paths use `build_prompt_assembly_script()`:
 ## Your User
 {USER.md — user name, timezone, preferences}
 
-## Agent Configuration
-{AGENTS.md — per-agent: subagents, task routing, installed skills}
-
 ## Environment and Tools
 {TOOLS.md — agent-owned tools and environment notes}
 
@@ -158,7 +155,6 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 | IDENTITY.md | `/sandbox/IDENTITY.md` | Agent (bootstrap) |
 | SOUL.md | `/sandbox/SOUL.md` | Agent (bootstrap) |
 | USER.md | `/sandbox/USER.md` | Agent (bootstrap) |
-| AGENTS.md | `/sandbox/AGENTS.md` | Agent (editable) |
 | TOOLS.md | `/sandbox/TOOLS.md` | Agent (editable) |
 | settings.json | `/sandbox/.claude/settings.json` → `/platform/settings.json.<hash>` | Platform (symlink) |
 | reply-schema.json | `/sandbox/.claude/reply-schema.json` → `/platform/...` | Platform (symlink) |
@@ -172,7 +168,6 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 | IDENTITY.md | `agent_dir/IDENTITY.md` | reverse_sync |
 | SOUL.md | `agent_dir/SOUL.md` | reverse_sync |
 | USER.md | `agent_dir/USER.md` | reverse_sync |
-| AGENTS.md | `agent_dir/AGENTS.md` | reverse_sync |
 | TOOLS.md | `agent_dir/TOOLS.md` | reverse_sync |
 | BOOTSTRAP.md | `agent_dir/BOOTSTRAP.md` | template (deleted after bootstrap) |
 
