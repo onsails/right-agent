@@ -64,14 +64,7 @@ pub async fn register_with_running_pc(
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
     crate::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
-    client.reload_configuration().await.map_err(|e| {
-        tracing::warn!(
-            agent = %options.agent_name,
-            error = format!("{e:#}"),
-            "process-compose reload failed"
-        );
-        e
-    })?;
+    client.reload_configuration().await?;
     tracing::info!(agent = %options.agent_name, "reloaded process-compose configuration");
 
     if options.recreated {
