@@ -200,7 +200,7 @@ pub enum AgentCommands {
     Rebootstrap {
         /// Agent name
         name: String,
-        /// Skip the typed-name confirmation prompt
+        /// Skip the confirmation prompt
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
