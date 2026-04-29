@@ -8,6 +8,83 @@ mod memory_server;
 pub(crate) mod right_backend;
 mod wizard;
 
+/// Source-of-truth list for every interactive prompt label rendered from
+/// `crates/right/src/main.rs`. Mirrors `wizard::PROMPT_LABELS` /
+/// `right_agent::init::PROMPT_LABELS` — the brand voice regression test
+/// (`voice_pass_main`) walks this list and the `voice_pass.rs` integration
+/// test on `right-agent` does the same for those crates. When you add or
+/// edit an `inquire` prompt in this file, update this array — failure to do
+/// so is caught by the test.
+#[allow(dead_code)]
+pub(crate) const MAIN_PROMPT_LABELS: &[&str] = &[
+    // cmd_agent_init: existing-agent override path
+    "how to initialize this agent?",
+    "create fresh",
+    "restore from backup",
+    "backup directory path:",
+    // prompt_dependencies: missing-binary install confirms
+    "install openshell now?",
+    "start openshell gateway now?",
+    // cmd_agent_destroy
+    "create backup before destroying?",
+    // cmd_agent_destroy: dynamic confirm — agent_name varies, prefix is the static portion
+    "permanently destroy agent '",
+    // cmd_agent_config: sandbox migration confirm
+    "migrate sandbox now? (backup old, create new, restore data)",
+];
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod voice_pass_main {
+    //! Brand voice regression for `MAIN_PROMPT_LABELS`. Mirrors the inline
+    //! `wizard::voice_pass` block and the integration test
+    //! `crates/right-agent/tests/voice_pass.rs`.
+
+    use super::MAIN_PROMPT_LABELS;
+
+    const ALLOWED_PROPER_NOUNS: &[&str] = &[
+        "HINDSIGHT_API_KEY",
+        "RIGHT_TG_TOKEN",
+        "MEMORY.md",
+        "@BotFather",
+        "@userinfobot",
+    ];
+
+    #[test]
+    fn main_prompt_labels_are_lowercase_first() {
+        for label in MAIN_PROMPT_LABELS {
+            let trimmed = label.trim_start();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let first = trimmed.chars().next().unwrap();
+            if !first.is_alphabetic() {
+                continue;
+            }
+            let starts_with_proper = ALLOWED_PROPER_NOUNS
+                .iter()
+                .any(|noun| trimmed.starts_with(noun));
+            if starts_with_proper {
+                continue;
+            }
+            assert!(
+                first.is_lowercase(),
+                "prompt label must be lowercase-first (or start with an allowed proper noun): {label:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn main_prompt_labels_have_no_exclamation_marks() {
+        for label in MAIN_PROMPT_LABELS {
+            assert!(
+                !label.contains('!'),
+                "prompt label must not contain '!': {label:?}"
+            );
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "right",
@@ -358,6 +435,11 @@ async fn main() -> miette::Result<()> {
         // SAFETY: main is still single-threaded at this point — no readers of NO_COLOR yet.
         unsafe { std::env::set_var("NO_COLOR", "1"); }
     }
+
+    // Brand-conformant inquire prompt chrome — replaces the default
+    // LightGreen `?` and LightCyan answers/highlighted-options with subtle
+    // DarkGrey (or no styling at all on Mono/Ascii themes).
+    right_agent::ui::install_prompt_render_config();
 
     // memory-server manages its own tracing (stderr-only for MCP compatibility).
     // Dispatch BEFORE the default tracing_subscriber init which writes to stdout.
@@ -1670,13 +1752,13 @@ fn cmd_agent_init(
     } else {
         // Fresh init: optionally restore from backup or run wizard.
         if interactive && !force {
-            let options = vec!["Create fresh", "Restore from backup"];
-            let choice = inquire::Select::new("How to initialize this agent?", options)
+            let options = vec!["create fresh", "restore from backup"];
+            let choice = inquire::Select::new("how to initialize this agent?", options)
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
-            if choice == "Restore from backup" {
-                let backup_path_str = inquire::Text::new("Backup directory path:")
+            if choice == "restore from backup" {
+                let backup_path_str = inquire::Text::new("backup directory path:")
                     .prompt()
                     .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
                 let backup_path = std::path::PathBuf::from(backup_path_str.trim());
@@ -2183,7 +2265,7 @@ async fn cmd_up(
             right_agent::openshell::OpenShellStatus::NotInstalled => {
                 println!("OpenShell is not installed. Sandbox mode requires OpenShell.");
                 println!();
-                let install = inquire::Confirm::new("Install OpenShell now?")
+                let install = inquire::Confirm::new("install openshell now?")
                     .with_default(true)
                     .prompt()
                     .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
@@ -2342,7 +2424,7 @@ fn start_openshell_gateway() -> miette::Result<()> {
     println!("OpenShell gateway is not running. Sandbox mode requires a running gateway.");
     println!("Note: OpenShell requires Docker to be installed and running.");
     println!();
-    let start = inquire::Confirm::new("Start OpenShell gateway now?")
+    let start = inquire::Confirm::new("start openshell gateway now?")
         .with_default(true)
         .prompt()
         .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
@@ -3059,7 +3141,7 @@ async fn cmd_agent_destroy(
         let do_backup = if backup_flag {
             true
         } else {
-            inquire::Confirm::new("Create backup before destroying?")
+            inquire::Confirm::new("create backup before destroying?")
                 .with_default(false)
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?
@@ -3070,7 +3152,7 @@ async fn cmd_agent_destroy(
             RenderConfig::default().with_prompt_prefix(Styled::new("⚠").with_fg(Color::LightRed));
 
         let confirmed = inquire::Confirm::new(&format!(
-            "Permanently destroy agent '{agent_name}'? This cannot be undone."
+            "permanently destroy agent '{agent_name}'? this cannot be undone."
         ))
         .with_default(false)
         .with_render_config(red_config)
@@ -4229,7 +4311,7 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
     if right_agent::openshell::filesystem_policy_changed(&active_policy, &new_policy) {
         println!("\nFilesystem policy changed — sandbox migration required.");
         let confirmed =
-            inquire::Confirm::new("Migrate sandbox now? (backup old, create new, restore data)")
+            inquire::Confirm::new("migrate sandbox now? (backup old, create new, restore data)")
                 .with_default(true)
                 .prompt()
                 .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
