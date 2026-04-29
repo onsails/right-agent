@@ -187,6 +187,16 @@ async fn backup_sandbox_files(
     Ok(copied)
 }
 
+/// Recreate `BOOTSTRAP.md` on host with the canonical bootstrap instructions.
+/// Overwrites any existing file.
+#[allow(dead_code)] // called by execute() in Task 7
+fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
+    let path = agent_dir.join("BOOTSTRAP.md");
+    std::fs::write(&path, crate::codegen::BOOTSTRAP_INSTRUCTIONS).map_err(|e| {
+        miette::miette!("failed to write BOOTSTRAP.md at {}: {e:#}", path.display())
+    })
+}
+
 /// Remove identity files from `agent_dir`. Infallible — "not found" and
 /// I/O errors are logged at DEBUG/WARN respectively but never returned.
 #[allow(dead_code)] // called by execute() in Task 7
@@ -324,5 +334,33 @@ mod tests {
         delete_identity_from_host(&agent_dir);
         delete_identity_from_host(&agent_dir);
         // No panic, no assertion — just don't error.
+    }
+
+    #[test]
+    fn write_bootstrap_md_writes_canonical_content() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join("agents").join("g");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+
+        write_bootstrap_md(&agent_dir).unwrap();
+
+        let path = agent_dir.join("BOOTSTRAP.md");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, crate::codegen::BOOTSTRAP_INSTRUCTIONS);
+    }
+
+    #[test]
+    fn write_bootstrap_md_overwrites_existing() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join("agents").join("h");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("BOOTSTRAP.md"), "stale").unwrap();
+
+        write_bootstrap_md(&agent_dir).unwrap();
+
+        let content = std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap();
+        assert_eq!(content, crate::codegen::BOOTSTRAP_INSTRUCTIONS);
+        assert_ne!(content, "stale");
     }
 }
