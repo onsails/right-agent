@@ -313,6 +313,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         right_agent::agent::types::MemoryProvider::File => (None, None),
     };
 
+    // Graceful shutdown token, created before any long-lived background task is
+    // spawned. The drop_guard ensures `shutdown.cancel()` runs on every exit
+    // path of `run_async` (early `?` errors, panics, normal return). Without
+    // this, an early Err leaves the drain task polling `tokio::time::interval`
+    // when the runtime begins to drop, which panics with
+    // "A Tokio 1.x context was found, but it is being shutdown."
+    use tokio_util::sync::CancellationToken;
+    let shutdown = CancellationToken::new();
+    let _shutdown_guard = shutdown.clone().drop_guard();
+
     // Spawn background drain task if wrapper is present.
     // Periodically drains pending_retains from SQLite, calling drain_retain_item
     // on each row. Skips when wrapper is non-Healthy (breaker open or auth failed).
@@ -325,50 +335,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     if let Some(ref w) = hindsight_wrapper {
         let w = w.clone();
         let agent_db = agent_dir.clone();
+        let drain_shutdown = shutdown.clone();
         tokio::task::spawn_blocking(move || {
             let handle = tokio::runtime::Handle::current();
             let local = tokio::task::LocalSet::new();
-            handle.block_on(local.run_until(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                interval.tick().await; // first tick is immediate
-                loop {
-                    interval.tick().await;
-                    if !matches!(w.status(), right_agent::memory::MemoryStatus::Healthy) {
-                        continue;
-                    }
-                    let conn = match right_agent::memory::open_connection(&agent_db, false) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::warn!("drain: open_connection failed: {e:#}");
-                            continue;
-                        }
-                    };
-                    let w_call = w.clone();
-                    let report = right_agent::memory::retain_queue::drain_tick(&conn, |items| {
-                        let w = w_call.clone();
-                        async move {
-                            let item = right_agent::memory::hindsight::RetainItem {
-                                content: items[0].content.clone(),
-                                context: items[0].context.clone(),
-                                document_id: items[0].document_id.clone(),
-                                update_mode: items[0].update_mode.clone(),
-                                tags: items[0].tags.clone(),
-                            };
-                            w.drain_retain_item(&item).await
-                        }
-                    })
-                    .await;
-                    if report.deleted
-                        + report.dropped_age
-                        + report.dropped_client
-                        + report.bumped_attempts
-                        > 0
-                    {
-                        tracing::debug!(?report, "drain tick");
-                    }
-                }
-            }));
+            handle.block_on(local.run_until(run_drain_loop(w, agent_db, drain_shutdown)));
         });
     }
 
@@ -449,10 +420,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         }
     }
 
-    // Graceful restart: config watcher cancels this token when agent.yaml changes.
+    // Graceful restart: config watcher cancels the shutdown token (created
+    // earlier, alongside the memory-drain task) when agent.yaml changes.
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio_util::sync::CancellationToken;
-    let shutdown = CancellationToken::new();
     let config_changed = Arc::new(AtomicBool::new(false));
     let agent_yaml_path = agent_dir.join("agent.yaml");
     config_watcher::spawn_config_watcher(
@@ -924,6 +894,65 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     Ok(false)
 }
 
+/// Memory drain loop. Periodically flushes `pending_retains` to Hindsight,
+/// skipping ticks when the resilient wrapper is in a non-Healthy state.
+///
+/// Holds `&rusqlite::Connection` across `.await`, so the returned future is
+/// `!Send` and must be driven from a `LocalSet`. Honours `shutdown` so the
+/// loop exits cleanly before the runtime starts tearing down its time driver.
+async fn run_drain_loop(
+    wrapper: std::sync::Arc<right_agent::memory::ResilientHindsight>,
+    agent_db: std::path::PathBuf,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval.tick().await; // first tick is immediate
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = shutdown.cancelled() => return,
+        }
+        if !matches!(
+            wrapper.status(),
+            right_agent::memory::MemoryStatus::Healthy
+        ) {
+            continue;
+        }
+        let conn = match right_agent::memory::open_connection(&agent_db, false) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("drain: open_connection failed: {e:#}");
+                continue;
+            }
+        };
+        let w_call = wrapper.clone();
+        let report = right_agent::memory::retain_queue::drain_tick(&conn, |items| {
+            let w = w_call.clone();
+            async move {
+                let item = right_agent::memory::hindsight::RetainItem {
+                    content: items[0].content.clone(),
+                    context: items[0].context.clone(),
+                    document_id: items[0].document_id.clone(),
+                    update_mode: items[0].update_mode.clone(),
+                    tags: items[0].tags.clone(),
+                };
+                w.drain_retain_item(&item).await
+            }
+        })
+        .await;
+        if report.deleted
+            + report.dropped_age
+            + report.dropped_client
+            + report.bumped_attempts
+            > 0
+        {
+            tracing::debug!(?report, "drain tick");
+        }
+    }
+}
+
 /// Migrate OAuth state from oauth-state.json to SQLite (one-time).
 /// Non-fatal — logs warnings and continues on error.
 fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
@@ -998,5 +1027,55 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
         tracing::warn!("failed to remove oauth-state.json after migration: {e:#}");
     } else {
         tracing::info!("migrated oauth-state.json to SQLite and removed file");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression test for the drain-loop shutdown pattern.
+    //!
+    //! Before the fix, the drain task ran a `tokio::time::interval` inside
+    //! `Handle::block_on(LocalSet::run_until(...))` on a `spawn_blocking`
+    //! thread with no shutdown branch. When `run_async` returned an early
+    //! `Err` (e.g. sandbox-not-found), the runtime began to drop, the time
+    //! driver shut down, and the still-polling `interval.tick()` tripped
+    //! `RUNTIME_SHUTTING_DOWN_ERROR` in tokio.
+    //!
+    //! The fix wraps the tick in `tokio::select!` against
+    //! `shutdown.cancelled()`, and a `DropGuard` in `run_async` cancels the
+    //! token on every exit path. This test verifies the structural pattern:
+    //! a cancellation must cause the blocking task to return cleanly.
+    //! Without the `select!` branch, the loop would never exit and the test
+    //! would hang to timeout.
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn drain_loop_pattern_exits_on_shutdown() {
+        let shutdown = CancellationToken::new();
+        let s = shutdown.clone();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            let local = tokio::task::LocalSet::new();
+            let h = tokio::runtime::Handle::current();
+            h.block_on(local.run_until(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(20));
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = s.cancelled() => return,
+                    }
+                }
+            }));
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("drain loop must exit when shutdown is cancelled")
+            .expect("blocking thread must not panic on shutdown");
     }
 }
