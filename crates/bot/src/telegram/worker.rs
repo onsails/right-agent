@@ -659,18 +659,6 @@ pub fn spawn_worker(
                         output.reply_to_message_id
                     };
 
-                    // Bootstrap welcome photo — first agent reply only, in
-                    // bootstrap mode only. Fire-and-forget: errors logged at
-                    // WARN, never block the text reply.
-                    super::bootstrap_photo::send_if_needed(
-                        &ctx.bot,
-                        tg_chat_id,
-                        eff_thread_id,
-                        bootstrap_mode,
-                        is_first_call,
-                    )
-                    .await;
-
                     if let Some(content) = output.content {
                         reply_text_for_retain = Some(content.clone());
                         let html = super::markdown::md_to_telegram_html(&content);
@@ -683,7 +671,24 @@ pub fn spawn_worker(
                             ?reply_to,
                             "sending reply to Telegram"
                         );
-                        for part in &parts {
+
+                        // Bootstrap welcome photo — first agent reply only, in
+                        // bootstrap mode only. When caption fits, the first text
+                        // part rides as the photo caption (single Telegram
+                        // message); we then skip it in the text loop below.
+                        let caption_consumed = super::bootstrap_photo::send_if_needed(
+                            &ctx.bot,
+                            tg_chat_id,
+                            eff_thread_id,
+                            bootstrap_mode,
+                            is_first_call,
+                            parts.first().map(|s| s.as_str()),
+                            reply_to,
+                        )
+                        .await;
+
+                        let start = if caption_consumed { 1 } else { 0 };
+                        for part in &parts[start..] {
                             let mut send = ctx.bot.send_message(tg_chat_id, part);
                             send = send.parse_mode(teloxide::types::ParseMode::Html);
                             if eff_thread_id != 0 {
