@@ -2279,28 +2279,6 @@ mod tests {
     }
 
     #[test]
-    fn script_normal_has_agent_configuration_section() {
-        let script = crate::telegram::prompt::build_prompt_assembly_script(
-            "Base prompt",
-            false,
-            "/sandbox",
-            "/tmp/right-system-prompt.md",
-            "/sandbox",
-            &["claude".into()],
-            None,
-            None,
-        );
-        assert!(
-            script.contains("Agent Configuration"),
-            "must have Agent Configuration section for per-agent AGENTS.md"
-        );
-        assert!(
-            script.contains("cat /sandbox/AGENTS.md"),
-            "must cat AGENTS.md from sandbox root"
-        );
-    }
-
-    #[test]
     fn stop_keyboard_format() {
         let kb = stop_keyboard(12345, 678);
         let buttons = &kb.inline_keyboard;

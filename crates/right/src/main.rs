@@ -4187,7 +4187,6 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
         ("IDENTITY.md", "## Your Identity"),
         ("SOUL.md", "## Your Personality and Values"),
         ("USER.md", "## Your User"),
-        ("AGENTS.md", "## Agent Configuration"),
         ("TOOLS.md", "## Environment and Tools"),
     ] {
         if let Ok(content) = std::fs::read_to_string(agent.path.join(file)) {

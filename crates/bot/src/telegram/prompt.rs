@@ -36,10 +36,6 @@ const PROMPT_SECTIONS: &[PromptSection] = &[
         header: "## Your User",
     },
     PromptSection {
-        filename: "AGENTS.md",
-        header: "## Agent Configuration",
-    },
-    PromptSection {
         filename: "TOOLS.md",
         header: "## Environment and Tools",
     },
@@ -275,7 +271,6 @@ mod tests {
         assert!(script.contains("IDENTITY.md"));
         assert!(script.contains("SOUL.md"));
         assert!(script.contains("USER.md"));
-        assert!(script.contains("AGENTS.md"));
         assert!(script.contains("TOOLS.md"));
         assert!(
             script.contains("Operating Instructions"),
