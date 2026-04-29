@@ -1,5 +1,60 @@
 use super::*;
 
+/// Regression: process-compose v1.94+ reads the API token from header
+/// `X-PC-Token-Key`. Sending `Authorization: Bearer …` (the previous
+/// implementation) caused every REST call to 401 silently — see the
+/// rebootstrap-skipped-the-bot incident.
+#[tokio::test]
+async fn health_check_sends_x_pc_token_key_header() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/live"))
+        .and(header("X-PC-Token-Key", "the-token"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    // Default 404 for any request missing the header — proves the matcher
+    // above is what makes `health_check` succeed, not a permissive default.
+
+    let port = server.address().port();
+    let client = PcClient::new(port, Some("the-token".to_string())).unwrap();
+    client
+        .health_check()
+        .await
+        .expect("health check must succeed when X-PC-Token-Key matches");
+}
+
+#[tokio::test]
+async fn health_check_fails_when_token_missing() {
+    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    // Only respond 200 if the token header is present.
+    Mock::given(method("GET"))
+        .and(path("/live"))
+        .and(header_exists("X-PC-Token-Key"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/live"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let port = server.address().port();
+    let client = PcClient::new(port, None).unwrap();
+    let result = client.health_check().await;
+    assert!(
+        result.is_err(),
+        "health check must fail when no token is configured but PC requires one",
+    );
+}
+
 #[test]
 fn pc_client_constructs_with_port() {
     let client = PcClient::new(PC_PORT, None);

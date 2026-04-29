@@ -28,16 +28,25 @@ pub struct LogsResponse {
     pub logs: Vec<String>,
 }
 
+/// HTTP header process-compose uses to carry the API token.
+///
+/// Constant lifted from upstream
+/// (`src/config/config.go::TokenHeader = "X-PC-Token-Key"`). Stable from at
+/// least v1.94 through v1.103. Process-compose does NOT honor
+/// `Authorization: Bearer …`; using that yields silent 401s on every
+/// REST call.
+const PC_TOKEN_HEADER: &str = "X-PC-Token-Key";
+
 /// Async client for the process-compose REST API.
 ///
-/// Optionally carries a `PC_API_TOKEN` bearer token. When the token is set,
-/// process-compose rejects unauthenticated requests — this prevents any
-/// stray HTTP caller (tests, debugging tools) from accidentally stopping
-/// production bots.
+/// Optionally carries the `PC_API_TOKEN` value, sent in the `X-PC-Token-Key`
+/// request header. When the token is set, process-compose rejects
+/// unauthenticated requests — this prevents any stray HTTP caller (tests,
+/// debugging tools) from accidentally stopping production bots.
 pub struct PcClient {
     client: reqwest::Client,
     pub(crate) base_url: String,
-    /// Optional Bearer token for PC_API_TOKEN authentication.
+    /// Optional API token (matches PC's `PC_API_TOKEN` env var).
     api_token: Option<String>,
 }
 
@@ -81,7 +90,7 @@ impl PcClient {
     /// Apply authentication to a request builder if a token is configured.
     fn auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.api_token {
-            Some(token) => builder.bearer_auth(token),
+            Some(token) => builder.header(PC_TOKEN_HEADER, token),
             None => builder,
         }
     }

@@ -451,11 +451,12 @@ subsequent command that needs to talk to PC. Older state files without the
 
 ### PC_API_TOKEN authentication
 
-`right up` generates a random bearer token (`pc_api_token` in
+`right up` generates a random API token (`pc_api_token` in
 `state.json`) and passes it to process-compose via `PC_API_TOKEN` env var.
 PcClient reads the token from state.json and includes it in every request as
-`Authorization: Bearer <token>`. Process-compose rejects unauthenticated
-requests when this env var is set.
+the `X-PC-Token-Key` header (process-compose's only supported scheme — it
+does NOT honor `Authorization: Bearer`). Process-compose rejects
+unauthenticated requests when this env var is set.
 
 This prevents any stray HTTP caller (tests, debugging tools, browser
 extensions) from accidentally stopping or restarting production bots by
