@@ -187,6 +187,23 @@ async fn backup_sandbox_files(
     Ok(copied)
 }
 
+/// Remove identity files from `agent_dir`. Infallible — "not found" and
+/// I/O errors are logged at DEBUG/WARN respectively but never returned.
+#[allow(dead_code)] // called by execute() in Task 7
+fn delete_identity_from_host(agent_dir: &Path) {
+    for &name in IDENTITY_FILES {
+        let p = agent_dir.join(name);
+        match std::fs::remove_file(&p) {
+            Ok(()) => tracing::debug!(file = name, "rebootstrap: removed host file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(
+                file = name,
+                "rebootstrap: failed to remove host file: {e:#}"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +294,35 @@ mod tests {
         let p = plan(home.path(), "bob").unwrap();
         assert_eq!(p.sandbox_mode, SandboxMode::None);
         assert!(p.sandbox_name.is_none());
+    }
+
+    #[test]
+    fn delete_identity_from_host_removes_present_files() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join("agents").join("e");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "x").unwrap();
+        std::fs::write(agent_dir.join("SOUL.md"), "x").unwrap();
+        // USER.md absent on purpose
+
+        delete_identity_from_host(&agent_dir);
+
+        for &f in IDENTITY_FILES {
+            assert!(
+                !agent_dir.join(f).exists(),
+                "{f} should be gone after delete_identity_from_host"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_identity_from_host_idempotent() {
+        let home = tempfile::tempdir().unwrap();
+        let agent_dir = home.path().join("agents").join("f");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // No identity files at all
+        delete_identity_from_host(&agent_dir);
+        delete_identity_from_host(&agent_dir);
+        // No panic, no assertion — just don't error.
     }
 }
