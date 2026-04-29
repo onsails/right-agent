@@ -139,9 +139,9 @@ pub enum AgentCommands {
         yes: bool,
         /// If agent exists, wipe and re-create (confirms unless -y)
         #[arg(long)]
-        force: bool,
-        /// With --force: re-run wizard instead of reusing existing config
-        #[arg(long, requires = "force")]
+        force_recreate: bool,
+        /// With --force-recreate: re-run wizard instead of reusing existing config
+        #[arg(long, requires = "force_recreate")]
         fresh: bool,
         /// Network policy: restrictive or permissive
         #[arg(long)]
@@ -575,7 +575,7 @@ async fn main() -> miette::Result<()> {
             AgentCommands::Init {
                 name,
                 yes,
-                force,
+                force_recreate,
                 fresh,
                 network_policy,
                 sandbox_mode,
@@ -588,7 +588,7 @@ async fn main() -> miette::Result<()> {
                         &home,
                         &name,
                         yes,
-                        force,
+                        force_recreate,
                         fresh,
                         network_policy,
                         sandbox_mode,
@@ -1600,7 +1600,7 @@ fn cmd_agent_init(
     home: &Path,
     name: &str,
     yes: bool,
-    force: bool,
+    force_recreate: bool,
     fresh: bool,
     network_policy: Option<right_agent::agent::types::NetworkPolicy>,
     sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
@@ -1610,18 +1610,18 @@ fn cmd_agent_init(
     let agent_dir = agents_parent.join(name);
     let agent_existed = agent_dir.exists();
 
-    // Reject if exists and --force not given.
-    if agent_dir.exists() && !force {
+    // Reject if exists and --force-recreate not given.
+    if agent_dir.exists() && !force_recreate {
         return Err(miette::miette!(
             help =
-                "Use --force to wipe and re-create, or `right agent config` to change settings",
+                "Use --force-recreate to wipe and re-create, or `right agent config` to change settings",
             "Agent directory already exists at {}",
             agent_dir.display()
         ));
     }
 
     // --- Force wipe logic ---
-    let saved_overrides = if force && agent_dir.exists() {
+    let saved_overrides = if force_recreate && agent_dir.exists() {
         // Read existing config before deletion (unless --fresh).
         let saved = if fresh {
             None
@@ -1750,7 +1750,7 @@ fn cmd_agent_init(
         }
     } else {
         // Fresh init: optionally restore from backup or run wizard.
-        if interactive && !force {
+        if interactive && !force_recreate {
             let options = vec!["create fresh", "restore from backup"];
             let choice = inquire::Select::new("how to initialize this agent?", options)
                 .prompt()
@@ -1983,9 +1983,9 @@ fn cmd_agent_init(
         let policy_path = agent_dir.join("policy.yaml");
         // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
         let sb_name = format!("right-{name}");
-        // --force always recreates; fresh agent (didn't exist before) always creates;
+        // --force-recreate always recreates; fresh agent (didn't exist before) always creates;
         // otherwise prompt if stale sandbox exists.
-        let force_recreate = if force || !agent_existed {
+        let recreate_sandbox = if force_recreate || !agent_existed {
             // Check if sandbox exists — if so, we need to recreate. If not, false is fine
             // (ensure_sandbox will create fresh).
             let exists = tokio::task::block_in_place(|| {
@@ -2003,7 +2003,7 @@ fn cmd_agent_init(
                     &sb_name,
                     &policy_path,
                     Some(&staging),
-                    force_recreate,
+                    recreate_sandbox,
                 )
                 .await
             })
@@ -2096,7 +2096,7 @@ fn prompt_sandbox_recreate_if_exists(
     if !interactive {
         // Non-interactive (-y): refuse to silently destroy a sandbox.
         return Err(miette::miette!(
-            help = "Run interactively to confirm, or use `--force`",
+            help = "Run interactively to confirm, or pass --force-recreate (agent init) / --force (init)",
             "Sandbox '{sandbox_name}' already exists"
         ));
     }
