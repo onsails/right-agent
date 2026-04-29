@@ -9,7 +9,6 @@ WORKSPACE="${1:-$HOME}"
 PROMPT=$(cat \
   "$IDENTITY_DIR/IDENTITY.md" \
   "$IDENTITY_DIR/SOUL.md" \
-  "$IDENTITY_DIR/AGENTS.md" \
 )
 
 if [ -z "$PROMPT" ]; then
