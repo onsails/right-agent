@@ -24,14 +24,13 @@ pub struct InitOverrides {
     pub stt: SttConfig,
 }
 
-const DEFAULT_AGENTS: &str = include_str!("../templates/right/agent/AGENTS.md");
 const DEFAULT_BOOTSTRAP: &str = include_str!("../templates/right/agent/BOOTSTRAP.md");
 const DEFAULT_TOOLS: &str = include_str!("../templates/right/agent/TOOLS.md");
 const DEFAULT_AGENT_YAML: &str = include_str!("../templates/right/agent/agent.yaml");
 
 /// Initialize a single agent under `agents_parent_dir/<name>/`.
 ///
-/// Creates the agent directory with template files (AGENTS.md, BOOTSTRAP.md,
+/// Creates the agent directory with template files (BOOTSTRAP.md, TOOLS.md,
 /// agent.yaml), installs built-in skills, generates
 /// .claude/settings.json, writes network and sandbox config to agent.yaml,
 /// optionally generates policy.yaml for openshell mode, and sets up trust entries.
@@ -72,7 +71,6 @@ pub fn init_agent(
         .map_err(|e| miette::miette!("Failed to create staging dir: {e}"))?;
 
     let files: &[(&str, &str)] = &[
-        ("AGENTS.md", DEFAULT_AGENTS),
         ("BOOTSTRAP.md", DEFAULT_BOOTSTRAP),
         ("TOOLS.md", DEFAULT_TOOLS),
         ("agent.yaml", DEFAULT_AGENT_YAML),
@@ -284,7 +282,6 @@ pub fn init_right_home(
     let _agents_dir = init_agent(&agents_parent, "right", Some(&overrides))?;
 
     println!("Created Right Agent home at {}", home.display());
-    println!("  agents/right/AGENTS.md");
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/TOOLS.md");
     println!("  agents/right/agent.yaml");
@@ -662,7 +659,6 @@ mod tests {
             agents_dir.join("staging").is_dir(),
             "staging/ dir should be created"
         );
-        assert!(agents_dir.join("AGENTS.md").exists());
         assert!(
             agents_dir.join("TOOLS.md").exists(),
             "TOOLS.md must be created by init"
