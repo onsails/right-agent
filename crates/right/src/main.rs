@@ -2054,14 +2054,43 @@ fn cmd_agent_init(
         _ => "file",
     };
 
-    let recap = right_agent::ui::Recap::new("ready")
+    // If PC is already running, hot-add the new agent's bot via reload.
+    // No PC ⇒ pc_running: false ⇒ recap ends with `next: right up`.
+    let register_outcome = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            right_agent::agent::register_with_running_pc(
+                home,
+                right_agent::agent::RegisterOptions {
+                    agent_name: name.to_string(),
+                    recreated: agent_existed && force_recreate,
+                },
+            )
+            .await
+        })
+    });
+
+    let mut recap = right_agent::ui::Recap::new("ready")
         .ok("agent", &format!("{name} created"))
         .ok("sandbox", &sandbox_with_policy)
         .ok("telegram", if cfg.telegram_token.is_some() { "configured" } else { "not configured" })
         .ok("chat ids", &chat_ids_detail)
         .ok("stt", &stt_detail)
-        .ok("memory", memory_detail)
-        .next("right up");
+        .ok("memory", memory_detail);
+
+    recap = match register_outcome {
+        Ok(right_agent::agent::RegisterResult { pc_running: false }) => {
+            recap.next("right up")
+        }
+        Ok(right_agent::agent::RegisterResult { pc_running: true }) => {
+            recap.next("send /start to your bot in Telegram")
+        }
+        Err(e) => {
+            tracing::warn!(error = format!("{e:#}"), "PC reload failed during agent init");
+            recap
+                .warn("reload", "failed to add to running right")
+                .next("right restart")
+        }
+    };
     println!("{}", recap.render(theme));
 
     Ok(())
