@@ -197,6 +197,23 @@ fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
     })
 }
 
+/// Mark all active `sessions` rows in the agent's `data.db` as inactive.
+/// Returns the number of rows updated. Skipped (returns 0) if `data.db`
+/// is missing.
+#[allow(dead_code)] // called by execute() in Task 7
+fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
+    if !agent_dir.join("data.db").exists() {
+        tracing::debug!("rebootstrap: data.db absent, skipping session deactivation");
+        return Ok(0);
+    }
+    let conn = crate::memory::open_connection(agent_dir, false)
+        .map_err(|e| miette::miette!("open data.db failed: {e:#}"))?;
+    let n = conn
+        .execute("UPDATE sessions SET is_active = 0 WHERE is_active = 1", [])
+        .map_err(|e| miette::miette!("UPDATE sessions failed: {e:#}"))?;
+    Ok(n)
+}
+
 /// Remove identity files from `agent_dir`. Infallible — "not found" and
 /// I/O errors are logged at DEBUG/WARN respectively but never returned.
 #[allow(dead_code)] // called by execute() in Task 7
@@ -362,5 +379,65 @@ mod tests {
         let content = std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap();
         assert_eq!(content, crate::codegen::BOOTSTRAP_INSTRUCTIONS);
         assert_ne!(content, "stale");
+    }
+
+    #[test]
+    fn deactivate_active_sessions_flips_all_active_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        // Two active sessions for two distinct (chat_id, thread_id),
+        // and one already-inactive session that must stay untouched.
+        conn.execute(
+            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
+             VALUES (1, 0, 'uuid-a', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
+             VALUES (2, 0, 'uuid-b', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
+             VALUES (3, 0, 'uuid-c', 0)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let n = deactivate_active_sessions(dir.path()).unwrap();
+        assert_eq!(n, 2);
+
+        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        let active_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_count, 0, "no rows should remain active");
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 3, "no rows should be deleted");
+    }
+
+    #[test]
+    fn deactivate_active_sessions_skips_when_db_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No data.db
+        let n = deactivate_active_sessions(dir.path()).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn deactivate_active_sessions_no_active_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = crate::memory::open_connection(dir.path(), true).unwrap();
+        let n = deactivate_active_sessions(dir.path()).unwrap();
+        assert_eq!(n, 0);
     }
 }
