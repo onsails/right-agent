@@ -88,9 +88,32 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
 /// Run the full rebootstrap sequence (host + sandbox file ops + session
 /// deactivation). Caller is responsible for stopping the bot before and
 /// restarting it after.
-pub async fn execute(_plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport> {
-    // Filled in by Task 7.
-    miette::bail!("rebootstrap::execute not yet implemented")
+pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport> {
+    std::fs::create_dir_all(&plan.backup_dir).map_err(|e| {
+        miette::miette!(
+            "failed to create backup dir {}: {e:#}",
+            plan.backup_dir.display()
+        )
+    })?;
+
+    let host_backed_up = backup_host_files(&plan.agent_dir, &plan.backup_dir)?;
+    let sandbox_backed_up =
+        backup_sandbox_files(plan.sandbox_name.as_deref(), &plan.backup_dir).await?;
+
+    // Once backup succeeds, delete from sandbox first — failure here would
+    // otherwise let reverse_sync re-populate the host on the next message.
+    delete_identity_from_sandbox(plan.sandbox_name.as_deref()).await?;
+    delete_identity_from_host(&plan.agent_dir);
+
+    write_bootstrap_md(&plan.agent_dir)?;
+    let sessions_deactivated = deactivate_active_sessions(&plan.agent_dir)?;
+
+    Ok(RebootstrapReport {
+        backup_dir: plan.backup_dir.clone(),
+        host_backed_up,
+        sandbox_backed_up,
+        sessions_deactivated,
+    })
 }
 
 /// Copy any present identity files from `agent_dir` into `backup_dir`.
@@ -98,7 +121,6 @@ pub async fn execute(_plan: &RebootstrapPlan) -> miette::Result<RebootstrapRepor
 ///
 /// `backup_dir` must already exist. Missing source files are skipped at
 /// DEBUG level (not errors).
-#[allow(dead_code)] // called by execute() in Task 7
 fn backup_host_files(
     agent_dir: &Path,
     backup_dir: &Path,
@@ -128,7 +150,6 @@ fn backup_host_files(
 ///
 /// Returns the list of files that were actually downloaded. A missing
 /// sandbox file is not an error; a download failure on a present file is.
-#[allow(dead_code)] // called by execute() in Task 7
 async fn backup_sandbox_files(
     sandbox_name: Option<&str>,
     backup_dir: &Path,
@@ -189,7 +210,6 @@ async fn backup_sandbox_files(
 
 /// Recreate `BOOTSTRAP.md` on host with the canonical bootstrap instructions.
 /// Overwrites any existing file.
-#[allow(dead_code)] // called by execute() in Task 7
 fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
     let path = agent_dir.join("BOOTSTRAP.md");
     std::fs::write(&path, crate::codegen::BOOTSTRAP_INSTRUCTIONS).map_err(|e| {
@@ -200,7 +220,6 @@ fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
 /// Mark all active `sessions` rows in the agent's `data.db` as inactive.
 /// Returns the number of rows updated. Skipped (returns 0) if `data.db`
 /// is missing.
-#[allow(dead_code)] // called by execute() in Task 7
 fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
     if !agent_dir.join("data.db").exists() {
         tracing::debug!("rebootstrap: data.db absent, skipping session deactivation");
@@ -216,7 +235,6 @@ fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
 
 /// Remove identity files from `agent_dir`. Infallible — "not found" and
 /// I/O errors are logged at DEBUG/WARN respectively but never returned.
-#[allow(dead_code)] // called by execute() in Task 7
 fn delete_identity_from_host(agent_dir: &Path) {
     for &name in IDENTITY_FILES {
         let p = agent_dir.join(name);
@@ -235,7 +253,6 @@ fn delete_identity_from_host(agent_dir: &Path) {
 ///
 /// Skipped (returns `Ok`) when `sandbox_name` is `None` (none-mode) or when
 /// OpenShell is not ready / the sandbox doesn't exist.
-#[allow(dead_code)] // called by execute() in Task 7
 async fn delete_identity_from_sandbox(sandbox_name: Option<&str>) -> miette::Result<()> {
     let Some(sandbox) = sandbox_name else {
         return Ok(());
@@ -491,5 +508,64 @@ mod tests {
         let _ = crate::memory::open_connection(dir.path(), true).unwrap();
         let n = deactivate_active_sessions(dir.path()).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_none_mode_full_path() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join("agents");
+        let agent_dir = agents.join("nm");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "id\n").unwrap();
+        std::fs::write(agent_dir.join("SOUL.md"), "soul\n").unwrap();
+        std::fs::write(agent_dir.join("USER.md"), "user\n").unwrap();
+        // Seed an active session so we can verify deactivation.
+        let conn = crate::memory::open_connection(&agent_dir, true).unwrap();
+        conn.execute(
+            "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
+             VALUES (42, 0, 'session-uuid', 1)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let p = plan(home.path(), "nm").unwrap();
+        let report = execute(&p).await.unwrap();
+
+        // Host identity files moved to backup, deleted from agent dir.
+        for &f in IDENTITY_FILES {
+            assert!(
+                !agent_dir.join(f).exists(),
+                "{f} should be gone from agent dir"
+            );
+            assert!(
+                report.backup_dir.join(f).exists(),
+                "{f} should be in backup"
+            );
+        }
+        assert_eq!(report.host_backed_up, IDENTITY_FILES.to_vec());
+        assert!(
+            report.sandbox_backed_up.is_empty(),
+            "none-mode = no sandbox backup"
+        );
+
+        // BOOTSTRAP.md recreated.
+        assert_eq!(
+            std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap(),
+            crate::codegen::BOOTSTRAP_INSTRUCTIONS
+        );
+
+        // Session deactivated.
+        assert_eq!(report.sessions_deactivated, 1);
+        let conn = crate::memory::open_connection(&agent_dir, false).unwrap();
+        let active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 0);
     }
 }
