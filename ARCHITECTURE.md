@@ -122,6 +122,16 @@ right agent backup <name> [--sandbox-only]
   ├─ Full mode: + agent.yaml, policy.yaml, VACUUM INTO data.db
   └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
 
+right agent rebootstrap <name> [-y]
+  ├─ Confirm (yes/no) unless -y
+  ├─ Stop <name>-bot via process-compose REST API (best-effort)
+  ├─ Backup IDENTITY.md / SOUL.md / USER.md (host + sandbox copies)
+  │   to ~/.right/backups/<agent>/rebootstrap-<YYYYMMDD-HHMM>/
+  ├─ rm -f the same files from /sandbox/ via gRPC exec_in_sandbox
+  ├─ Remove host copies, write fresh BOOTSTRAP.md from BOOTSTRAP_INSTRUCTIONS
+  ├─ UPDATE sessions SET is_active = 0 WHERE is_active = 1 in data.db
+  └─ Restart <name>-bot if we stopped it
+
 right agent init <name> --from-backup <path>
   ├─ Validate: agent must not exist, backup has sandbox.tar.gz + agent.yaml
   ├─ Restore config files to new agent dir
