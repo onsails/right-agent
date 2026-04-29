@@ -9,7 +9,10 @@
 </p>
 
 <p align="center">
-  <b>an agent that ships as a product</b><br/>
+  <img src="assets/tagline-banner.svg" alt="an agent that ships as a product" width="540">
+</p>
+
+<p align="center">
   the choices are made. sandboxed by default. lives in telegram. runs on your $20 claude subscription.
 </p>
 
