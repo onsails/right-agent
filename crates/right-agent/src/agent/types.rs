@@ -430,8 +430,6 @@ pub struct AgentDef {
     pub soul_path: Option<PathBuf>,
     /// Path to USER.md if present.
     pub user_path: Option<PathBuf>,
-    /// Path to AGENTS.md if present.
-    pub agents_path: Option<PathBuf>,
     /// Path to TOOLS.md if present.
     pub tools_path: Option<PathBuf>,
     /// Path to BOOTSTRAP.md if present.
