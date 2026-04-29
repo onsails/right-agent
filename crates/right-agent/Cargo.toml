@@ -53,6 +53,7 @@ fastrand = "2"
 test-support = []
 
 [dev-dependencies]
+right-agent = { path = ".", features = ["test-support"] }
 insta = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 wiremock = "0.6"

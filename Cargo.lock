@@ -2872,6 +2872,7 @@ dependencies = [
  "prost-types",
  "rand 0.10.1",
  "reqwest 0.13.2",
+ "right-agent",
  "rmcp",
  "rusqlite",
  "rusqlite_migration",
