@@ -11,6 +11,7 @@ pub mod openshell;
 pub mod platform_store;
 #[cfg(unix)]
 pub mod process_group;
+pub mod rebootstrap;
 pub mod runtime;
 pub mod sandbox_exec;
 pub mod stt;
