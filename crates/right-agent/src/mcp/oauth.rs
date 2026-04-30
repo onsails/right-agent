@@ -222,6 +222,8 @@ fn parse_www_authenticate_resource_metadata(header: &str) -> Option<String> {
 /// `resource_metadata` parameter. Any other outcome (success, non-401
 /// error, missing/malformed header, network error) yields `None` so
 /// the caller can fall through to the well-known chain.
+/// Only `401` is treated as the WWW-Authenticate signal — `403` and other
+/// status codes (including `200`) fall through to the well-known chain.
 async fn probe_resource_metadata_via_www_authenticate(
     client: &reqwest::Client,
     server_url: &str,
@@ -763,6 +765,7 @@ mod tests {
             .mount(&server)
             .await;
 
+        // Step 0 probes GET /mcp → 404 (wiremock default), probe returns None.
         // Anything else 404s implicitly via wiremock's default.
 
         let client = reqwest::Client::new();
@@ -779,7 +782,8 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        // Every probe gets 401 — chain has no successful URL.
+        // Step 0 gets 401 with no WWW-Authenticate header — probe falls through.
+        // Well-known chain also gets 401 everywhere — chain has no successful URL.
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
@@ -1096,6 +1100,9 @@ mod tests {
 
         let server = MockServer::start().await;
 
+        // Step 0 probes GET /mcp → 404 (no mock matches; wiremock default),
+        // probe returns None and the chain proceeds to the well-known fallback.
+
         // Path-suffixed RFC 9728 → 404 (Linear does not host metadata here)
         Mock::given(method("GET"))
             .and(path("/.well-known/oauth-protected-resource/mcp"))
@@ -1276,6 +1283,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/.well-known/oauth-authorization-server"))
             .respond_with(ResponseTemplate::new(200).set_body_json(as_meta))
+            .expect(1)
             .mount(&server)
             .await;
 
