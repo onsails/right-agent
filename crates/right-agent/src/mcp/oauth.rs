@@ -974,4 +974,63 @@ mod tests {
             "non-2xx should be TokenExchangeFailed: {result:?}"
         );
     }
+
+    #[tokio::test]
+    async fn discover_as_linear_pattern_uses_origin_well_known() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Path-suffixed RFC 9728 → 404 (Linear does not host metadata here)
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // Path-suffixed RFC 8414 → 404
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // Path-suffixed OIDC → 404
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // Resource-path-prefixed OIDC → 401 (this is the URL that aborted
+        // the loop in production; mock Linear's actual response).
+        Mock::given(method("GET"))
+            .and(path("/mcp/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        // ORIGIN-ONLY RFC 8414 → 200 with valid AS metadata. Linear hosts
+        // metadata here. Current code never probes this URL when the MCP
+        // server URL has a non-empty path; Task 2 makes it probe this URL,
+        // and Task 3 makes the chain reach this URL despite the 401 above.
+        let as_meta = serde_json::json!({
+            "authorization_endpoint": "https://auth.linear.example/authorize",
+            "token_endpoint":         "https://auth.linear.example/token"
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let meta = result.expect("discover_as must succeed for Linear-style server");
+        assert_eq!(meta.authorization_endpoint, "https://auth.linear.example/authorize");
+        assert_eq!(meta.token_endpoint, "https://auth.linear.example/token");
+    }
 }
