@@ -1,16 +1,14 @@
 //! Bootstrap welcome photo — embedded asset + send-gating predicate.
 //!
 //! The PNG is embedded at compile time so the bot has no runtime filesystem
-//! dependency on the asset. Anchoring on `CARGO_MANIFEST_DIR` keeps the path
-//! correct regardless of which file inside the crate references this module.
+//! dependency on the asset. The path is crate-relative through the
+//! `crates/bot/assets` symlink so `cargo package --verify` resolves it from
+//! the dereferenced tarball copy as well as from the working tree.
 
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, MessageId, ReplyParameters, ThreadId};
 
-const WELCOME_PNG: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/character-on-coal.png"
-));
+const WELCOME_PNG: &[u8] = include_bytes!("../../assets/character-on-coal.png");
 
 // Telegram caption hard limit; HTML tags count toward it.
 const CAPTION_LIMIT: usize = 1024;
