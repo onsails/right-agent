@@ -162,19 +162,94 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
     let mut urls = Vec::new();
 
     if path.is_empty() || path == "/" {
-        // No-path AS URL: try RFC 8414, then OIDC
+        // No-path AS URL: try RFC 8414, then OIDC.
         urls.push(format!("{origin}/.well-known/oauth-authorization-server"));
         urls.push(format!("{origin}/.well-known/openid-configuration"));
     } else {
-        // Path-bearing AS URL: try all variants
+        // Path-bearing AS URL: try RFC 8414 §3.1 path-aware variants first…
         urls.push(format!(
             "{origin}/.well-known/oauth-authorization-server{path}"
         ));
         urls.push(format!("{origin}/.well-known/openid-configuration{path}"));
         urls.push(format!("{origin}{path}/.well-known/openid-configuration"));
+        // …then origin-only fallbacks. Many real MCP servers (Linear, …) host
+        // metadata at the origin-only well-known location even when the
+        // server URL itself has a path component.
+        urls.push(format!("{origin}/.well-known/oauth-authorization-server"));
+        urls.push(format!("{origin}/.well-known/openid-configuration"));
     }
 
     urls
+}
+
+/// Extract `resource_metadata="<url>"` (RFC 9728 §5.1) from a `WWW-Authenticate`
+/// header value. Returns `None` if the parameter is absent or malformed.
+///
+/// Supports both the quoted RFC-compliant form (`resource_metadata="https://…"`)
+/// and the unquoted form some servers emit. We deliberately do not parse the
+/// full Bearer challenge grammar (RFC 6750 §3) — only the one parameter we need.
+/// The parameter-name search is case-sensitive — RFC 9110 §11.2 allows
+/// case-insensitive names but real-world servers (Linear, Notion, …)
+/// always emit lowercase `resource_metadata`.
+fn parse_www_authenticate_resource_metadata(header: &str) -> Option<String> {
+    let needle = "resource_metadata=";
+    let start = header.find(needle)? + needle.len();
+    let rest = &header[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        let value = &stripped[..end];
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    } else {
+        let end = rest.find(',').unwrap_or(rest.len());
+        let value = rest[..end].trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    }
+}
+
+/// Step 0 of MCP Authorization-spec discovery: probe the MCP server URL
+/// unauthenticated and read RFC 9728 metadata location from the
+/// `WWW-Authenticate: Bearer resource_metadata="<url>"` challenge.
+///
+/// Returns `Some(url)` if the server returned a 401 with a parseable
+/// `resource_metadata` parameter. Any other outcome (success, non-401
+/// error, missing/malformed header, network error) yields `None` so
+/// the caller can fall through to the well-known chain.
+/// Only `401` is treated as the WWW-Authenticate signal — `403` and other
+/// status codes (including `200`) fall through to the well-known chain.
+async fn probe_resource_metadata_via_www_authenticate(
+    client: &reqwest::Client,
+    server_url: &str,
+) -> Option<String> {
+    let resp = match client.get(server_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            debug!("WWW-Authenticate probe: request failed for {server_url}: {e}");
+            return None;
+        }
+    };
+    if resp.status().as_u16() != 401 {
+        debug!(
+            "WWW-Authenticate probe: {server_url} returned {} (not 401), skipping",
+            resp.status()
+        );
+        return None;
+    }
+    let header = resp
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)?
+        .to_str()
+        .ok()?;
+    let url = parse_www_authenticate_resource_metadata(header)?;
+    debug!("WWW-Authenticate probe: resource_metadata = {url}");
+    Some(url)
 }
 
 /// Discover the Authorization Server metadata for a given MCP server URL.
@@ -184,7 +259,9 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
 /// 2. RFC 8414 AS metadata (`/.well-known/oauth-authorization-server`)
 /// 3. OIDC discovery (`/.well-known/openid-configuration`)
 ///
-/// Per D-07: 404 → try next fallback. 5xx → abort immediately.
+/// Any non-2xx response (or connection error) on a speculative probe URL
+/// is logged and skipped — the URL simply doesn't host metadata. Only when
+/// every URL in the chain fails does this return `DiscoveryFailed`.
 pub async fn discover_as(
     client: &reqwest::Client,
     server_url: &str,
@@ -202,8 +279,21 @@ pub async fn discover_as(
     let raw_path = parsed.path();
     let path = raw_path.trim_end_matches('/');
 
+    // --- Step 0: WWW-Authenticate probe (MCP Authorization spec / RFC 9728 §5.1) ---
+    // Send unauthenticated request to the MCP URL; the server should respond
+    // 401 with a `WWW-Authenticate: Bearer resource_metadata="<url>"` header
+    // pointing at its RFC 9728 metadata. This is the canonical mechanism;
+    // well-known guesses below are best-effort fallbacks for servers that
+    // don't follow the spec.
+    let www_authenticate_url =
+        probe_resource_metadata_via_www_authenticate(client, server_url).await;
+
     // --- Step 1: RFC 9728 resource metadata ---
-    let rfc9728_url = if path.is_empty() || path == "/" {
+    // Use the URL from Step 0 if we have it; otherwise synthesize the
+    // path-aware/origin well-known URL.
+    let rfc9728_url = if let Some(u) = www_authenticate_url {
+        u
+    } else if path.is_empty() || path == "/" {
         format!("{origin}/.well-known/oauth-protected-resource")
     } else {
         format!("{origin}/.well-known/oauth-protected-resource{path}")
@@ -233,28 +323,27 @@ pub async fn discover_as(
                             )
                         })?,
                 )
-            } else if status.as_u16() == 404 {
-                debug!("discover_as: RFC 9728 returned 404, falling back to RFC 8414");
-                None
             } else {
-                // 5xx or other error → abort immediately
-                return Err(OAuthError::DiscoveryFailed(format!(
-                    "RFC 9728 server error {status} at {rfc9728_url}"
-                )));
+                // Any non-2xx (404, 401, 5xx, …) → speculative URL didn't
+                // hit metadata. Skip and try the AS metadata fallback chain.
+                debug!(
+                    "discover_as: RFC 9728 returned {status}, falling back to AS metadata"
+                );
+                None
             }
         }
         Err(e) => {
-            // Connection error (server not running, etc.) → abort
-            return Err(OAuthError::DiscoveryFailed(format!(
-                "RFC 9728 request failed for {rfc9728_url}: {e}"
-            )));
+            // Connection error on a speculative URL → skip, try fallback.
+            debug!("discover_as: RFC 9728 request failed for {rfc9728_url}: {e}, falling back");
+            None
         }
     };
 
-    // --- Steps 2 & 3: AS metadata + OIDC using the AS URL (or server_url as fallback) ---
+    // --- Steps 2 & 3: AS metadata + OIDC ---
     let as_base = as_url.as_deref().unwrap_or(server_url);
     let as_meta_urls = as_metadata_urls(as_base);
 
+    let mut last_err: Option<String> = None;
     for url in &as_meta_urls {
         debug!("discover_as: trying AS metadata at {url}");
         match client.get(url).send().await {
@@ -268,25 +357,20 @@ pub async fn discover_as(
                     })?;
                     debug!("discover_as: succeeded via {url}");
                     return Ok(meta);
-                } else if status.as_u16() == 404 {
-                    debug!("discover_as: {url} returned 404, trying next");
-                    continue;
-                } else {
-                    return Err(OAuthError::DiscoveryFailed(format!(
-                        "AS metadata server error {status} at {url}"
-                    )));
                 }
+                debug!("discover_as: {url} returned {status}, trying next");
+                last_err = Some(format!("{status} at {url}"));
             }
             Err(e) => {
-                return Err(OAuthError::DiscoveryFailed(format!(
-                    "AS metadata request failed for {url}: {e}"
-                )));
+                debug!("discover_as: AS metadata request failed for {url}: {e}, trying next");
+                last_err = Some(format!("request failed for {url}: {e}"));
             }
         }
     }
 
     Err(OAuthError::DiscoveryFailed(format!(
-        "no AS metadata found for {server_url}"
+        "no AS metadata found for {server_url} (last probe: {})",
+        last_err.unwrap_or_else(|| "no probes executed".to_string())
     )))
 }
 
@@ -602,37 +686,37 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
-        // JSON for ResourceMetadata pointing to the same host
-        let resource_meta_body = r#"{"authorization_servers":["http://127.0.0.1:0"]}"#;
         let as_meta_body = r#"{"authorization_endpoint":"https://auth.example.com/authorize","token_endpoint":"https://auth.example.com/token"}"#;
 
-        // Spin up a minimal HTTP server that returns ResourceMetadata on RFC 9728 path
+        // Spin up a minimal HTTP server
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        // Patch: serve RFC 9728 response then AS metadata response
-        let resource_meta_body_owned = resource_meta_body.to_string();
         let as_meta_body_owned = as_meta_body.to_string();
         tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf).await;
-            let request = String::from_utf8_lossy(&buf);
-            let response_body = if request.contains(".well-known/oauth-protected-resource") {
-                let as_url = format!(r#"{{"authorization_servers":["http://127.0.0.1:{port}"]}}"#);
-                as_url
-            } else {
-                resource_meta_body_owned.clone()
-            };
-            // Return ResourceMetadata — points back to same server
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
+            // Step 0 probe: GET /mcp → 404 (no WWW-Authenticate header).
+            // discover_as sends this first; a 404 means probe returns None.
+            let (mut stream0, _) = listener.accept().await.unwrap();
+            let mut buf0 = [0u8; 4096];
+            let _ = stream0.read(&mut buf0).await;
+            let resp0 = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream0.write_all(resp0.as_bytes()).await;
 
-            // Second connection for AS metadata
+            // Step 1: GET /.well-known/oauth-protected-resource/mcp → 200 with
+            // ResourceMetadata pointing back to the same host for AS metadata.
+            let (mut stream1, _) = listener.accept().await.unwrap();
+            let mut buf1 = [0u8; 4096];
+            let _ = stream1.read(&mut buf1).await;
+            let rfc9728_body =
+                format!(r#"{{"authorization_servers":["http://127.0.0.1:{port}"]}}"#);
+            let resp1 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                rfc9728_body.len(),
+                rfc9728_body
+            );
+            let _ = stream1.write_all(resp1.as_bytes()).await;
+
+            // Step 2+3: GET /.well-known/oauth-authorization-server → 200 with AS metadata.
             let (mut stream2, _) = listener.accept().await.unwrap();
             let mut buf2 = [0u8; 4096];
             let _ = stream2.read(&mut buf2).await;
@@ -657,27 +741,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_as_5xx_aborts_immediately() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
+    async fn discover_as_5xx_skips_and_continues() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let server = MockServer::start().await;
 
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf).await;
-            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            let _ = stream.write_all(resp.as_bytes()).await;
+        // RFC 9728 path-suffixed → 500 (must NOT abort the chain).
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        // Origin-only AS metadata → 200 (must be reached).
+        let as_meta = serde_json::json!({
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint":         "https://auth.example.com/token"
         });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta))
+            .mount(&server)
+            .await;
+
+        // Step 0 probes GET /mcp → 404 (wiremock default), probe returns None.
+        // Anything else 404s implicitly via wiremock's default.
 
         let client = reqwest::Client::new();
-        let server_url = format!("http://127.0.0.1:{port}/mcp");
+        let server_url = format!("{}/mcp", server.uri());
         let result = discover_as(&client, &server_url).await;
+
+        let meta = result.expect("5xx on a speculative probe must not abort the chain");
+        assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
+    }
+
+    #[tokio::test]
+    async fn discover_as_all_non_2xx_returns_discovery_failed() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Step 0 gets 401 with no WWW-Authenticate header — probe falls through.
+        // Well-known chain also gets 401 everywhere — chain has no successful URL.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
         assert!(
             matches!(result, Err(OAuthError::DiscoveryFailed(_))),
-            "5xx should abort: {result:?}"
+            "all-401 chain must end in DiscoveryFailed: {result:?}"
         );
     }
 
@@ -973,5 +1091,208 @@ mod tests {
             matches!(result, Err(OAuthError::TokenExchangeFailed(_))),
             "non-2xx should be TokenExchangeFailed: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn discover_as_linear_pattern_uses_origin_well_known() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // Step 0 probes GET /mcp → 404 (no mock matches; wiremock default),
+        // probe returns None and the chain proceeds to the well-known fallback.
+
+        // Path-suffixed RFC 9728 → 404 (Linear does not host metadata here)
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // Path-suffixed RFC 8414 → 404
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // Path-suffixed OIDC → 404
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration/mcp"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        // Resource-path-prefixed OIDC → 401 (this is the URL that aborted
+        // the loop in production; mock Linear's actual response).
+        Mock::given(method("GET"))
+            .and(path("/mcp/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        // ORIGIN-ONLY RFC 8414 → 200 with valid AS metadata. Linear hosts
+        // metadata here. Current code never probes this URL when the MCP
+        // server URL has a non-empty path; Task 2 makes it probe this URL,
+        // and Task 3 makes the chain reach this URL despite the 401 above.
+        let as_meta = serde_json::json!({
+            "authorization_endpoint": "https://auth.linear.example/authorize",
+            "token_endpoint":         "https://auth.linear.example/token"
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let meta = result.expect("discover_as must succeed for Linear-style server");
+        assert_eq!(meta.authorization_endpoint, "https://auth.linear.example/authorize");
+        assert_eq!(meta.token_endpoint, "https://auth.linear.example/token");
+    }
+
+    #[test]
+    fn as_metadata_urls_path_bearing_includes_origin_only_fallback() {
+        let urls = as_metadata_urls("https://mcp.linear.app/mcp");
+        assert_eq!(urls.len(), 5, "expected 5 URLs, got {urls:?}");
+        // Path-aware variants come first (RFC 8414 §3.1).
+        assert_eq!(
+            urls[0],
+            "https://mcp.linear.app/.well-known/oauth-authorization-server/mcp"
+        );
+        assert_eq!(
+            urls[1],
+            "https://mcp.linear.app/.well-known/openid-configuration/mcp"
+        );
+        assert_eq!(
+            urls[2],
+            "https://mcp.linear.app/mcp/.well-known/openid-configuration"
+        );
+        // Origin-only fallbacks come after (real-world: Linear, …).
+        assert_eq!(
+            urls[3],
+            "https://mcp.linear.app/.well-known/oauth-authorization-server"
+        );
+        assert_eq!(
+            urls[4],
+            "https://mcp.linear.app/.well-known/openid-configuration"
+        );
+    }
+
+    #[test]
+    fn as_metadata_urls_no_path_unchanged() {
+        // Origin-only AS URL should still produce the same two URLs as before.
+        let urls = as_metadata_urls("https://auth.example.com");
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://auth.example.com/.well-known/oauth-authorization-server");
+        assert_eq!(urls[1], "https://auth.example.com/.well-known/openid-configuration");
+    }
+
+    #[test]
+    fn parse_www_authenticate_quoted_resource_metadata() {
+        let h = r#"Bearer realm="Linear", resource_metadata="https://mcp.linear.app/.well-known/oauth-protected-resource""#;
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(h),
+            Some("https://mcp.linear.app/.well-known/oauth-protected-resource".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_unquoted_resource_metadata() {
+        let h = "Bearer resource_metadata=https://api.example.com/.well-known/x";
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(h),
+            Some("https://api.example.com/.well-known/x".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_unquoted_with_trailing_param() {
+        let h = "Bearer resource_metadata=https://api.example.com/x, error=invalid_token";
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(h),
+            Some("https://api.example.com/x".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_no_resource_metadata_returns_none() {
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(r#"Bearer realm="x""#),
+            None
+        );
+        assert_eq!(parse_www_authenticate_resource_metadata("Basic realm=x"), None);
+        assert_eq!(parse_www_authenticate_resource_metadata(""), None);
+    }
+
+    #[test]
+    fn parse_www_authenticate_empty_quoted_value_returns_none() {
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(r#"Bearer resource_metadata="""#),
+            None,
+            "empty quoted value is malformed and must be None"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_as_uses_www_authenticate_resource_metadata() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let metadata_path = "/.well-known/oauth-protected-resource";
+
+        // Step 0: unauthenticated GET /mcp returns 401 with WWW-Authenticate
+        // pointing to the metadata URL on this same host.
+        let www_authenticate = format!(
+            r#"Bearer realm="MCP", resource_metadata="{}{}""#,
+            server.uri(),
+            metadata_path
+        );
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("WWW-Authenticate", www_authenticate.as_str()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Step 1: RFC 9728 resource metadata at the WWW-Authenticate-supplied URL
+        // points at the AS URL, also on this same host.
+        let resource_meta = serde_json::json!({
+            "authorization_servers": [server.uri()]
+        });
+        Mock::given(method("GET"))
+            .and(path(metadata_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(resource_meta))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // Step 2: AS metadata at the origin-only RFC 8414 URL of the AS host.
+        let as_meta = serde_json::json!({
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint":         "https://auth.example.com/token"
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let meta = result.expect("WWW-Authenticate-driven discovery must succeed");
+        assert_eq!(meta.authorization_endpoint, "https://auth.example.com/authorize");
+        assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
     }
 }
