@@ -238,28 +238,27 @@ pub async fn discover_as(
                             )
                         })?,
                 )
-            } else if status.as_u16() == 404 {
-                debug!("discover_as: RFC 9728 returned 404, falling back to RFC 8414");
-                None
             } else {
-                // 5xx or other error → abort immediately
-                return Err(OAuthError::DiscoveryFailed(format!(
-                    "RFC 9728 server error {status} at {rfc9728_url}"
-                )));
+                // Any non-2xx (404, 401, 5xx, …) → speculative URL didn't
+                // hit metadata. Skip and try the AS metadata fallback chain.
+                debug!(
+                    "discover_as: RFC 9728 returned {status}, falling back to AS metadata"
+                );
+                None
             }
         }
         Err(e) => {
-            // Connection error (server not running, etc.) → abort
-            return Err(OAuthError::DiscoveryFailed(format!(
-                "RFC 9728 request failed for {rfc9728_url}: {e}"
-            )));
+            // Connection error on a speculative URL → skip, try fallback.
+            debug!("discover_as: RFC 9728 request failed for {rfc9728_url}: {e}, falling back");
+            None
         }
     };
 
-    // --- Steps 2 & 3: AS metadata + OIDC using the AS URL (or server_url as fallback) ---
+    // --- Steps 2 & 3: AS metadata + OIDC ---
     let as_base = as_url.as_deref().unwrap_or(server_url);
     let as_meta_urls = as_metadata_urls(as_base);
 
+    let mut last_err: Option<String> = None;
     for url in &as_meta_urls {
         debug!("discover_as: trying AS metadata at {url}");
         match client.get(url).send().await {
@@ -273,25 +272,20 @@ pub async fn discover_as(
                     })?;
                     debug!("discover_as: succeeded via {url}");
                     return Ok(meta);
-                } else if status.as_u16() == 404 {
-                    debug!("discover_as: {url} returned 404, trying next");
-                    continue;
-                } else {
-                    return Err(OAuthError::DiscoveryFailed(format!(
-                        "AS metadata server error {status} at {url}"
-                    )));
                 }
+                debug!("discover_as: {url} returned {status}, trying next");
+                last_err = Some(format!("{status} at {url}"));
             }
             Err(e) => {
-                return Err(OAuthError::DiscoveryFailed(format!(
-                    "AS metadata request failed for {url}: {e}"
-                )));
+                debug!("discover_as: AS metadata request failed for {url}: {e}, trying next");
+                last_err = Some(format!("request failed for {url}: {e}"));
             }
         }
     }
 
     Err(OAuthError::DiscoveryFailed(format!(
-        "no AS metadata found for {server_url}"
+        "no AS metadata found for {server_url} (last probe: {})",
+        last_err.unwrap_or_else(|| "no probes executed".to_string())
     )))
 }
 
@@ -662,27 +656,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_as_5xx_aborts_immediately() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
+    async fn discover_as_5xx_skips_and_continues() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let server = MockServer::start().await;
 
-        tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf).await;
-            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            let _ = stream.write_all(resp.as_bytes()).await;
+        // RFC 9728 path-suffixed → 500 (must NOT abort the chain).
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        // Origin-only AS metadata → 200 (must be reached).
+        let as_meta = serde_json::json!({
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint":         "https://auth.example.com/token"
         });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta))
+            .mount(&server)
+            .await;
+
+        // Anything else 404s implicitly via wiremock's default.
 
         let client = reqwest::Client::new();
-        let server_url = format!("http://127.0.0.1:{port}/mcp");
+        let server_url = format!("{}/mcp", server.uri());
         let result = discover_as(&client, &server_url).await;
+
+        let meta = result.expect("5xx on a speculative probe must not abort the chain");
+        assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
+    }
+
+    #[tokio::test]
+    async fn discover_as_all_non_2xx_returns_discovery_failed() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Every probe gets 401 — chain has no successful URL.
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
         assert!(
             matches!(result, Err(OAuthError::DiscoveryFailed(_))),
-            "5xx should abort: {result:?}"
+            "all-401 chain must end in DiscoveryFailed: {result:?}"
         );
     }
 
