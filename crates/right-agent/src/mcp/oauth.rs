@@ -214,6 +214,42 @@ fn parse_www_authenticate_resource_metadata(header: &str) -> Option<String> {
     }
 }
 
+/// Step 0 of MCP Authorization-spec discovery: probe the MCP server URL
+/// unauthenticated and read RFC 9728 metadata location from the
+/// `WWW-Authenticate: Bearer resource_metadata="<url>"` challenge.
+///
+/// Returns `Some(url)` if the server returned a 401 with a parseable
+/// `resource_metadata` parameter. Any other outcome (success, non-401
+/// error, missing/malformed header, network error) yields `None` so
+/// the caller can fall through to the well-known chain.
+async fn probe_resource_metadata_via_www_authenticate(
+    client: &reqwest::Client,
+    server_url: &str,
+) -> Option<String> {
+    let resp = match client.get(server_url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            debug!("WWW-Authenticate probe: request failed for {server_url}: {e}");
+            return None;
+        }
+    };
+    if resp.status().as_u16() != 401 {
+        debug!(
+            "WWW-Authenticate probe: {server_url} returned {} (not 401), skipping",
+            resp.status()
+        );
+        return None;
+    }
+    let header = resp
+        .headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)?
+        .to_str()
+        .ok()?;
+    let url = parse_www_authenticate_resource_metadata(header)?;
+    debug!("WWW-Authenticate probe: resource_metadata = {url}");
+    Some(url)
+}
+
 /// Discover the Authorization Server metadata for a given MCP server URL.
 ///
 /// Implements the 3-step fallback chain mandated by the MCP Authorization spec:
@@ -241,8 +277,21 @@ pub async fn discover_as(
     let raw_path = parsed.path();
     let path = raw_path.trim_end_matches('/');
 
+    // --- Step 0: WWW-Authenticate probe (MCP Authorization spec / RFC 9728 §5.1) ---
+    // Send unauthenticated request to the MCP URL; the server should respond
+    // 401 with a `WWW-Authenticate: Bearer resource_metadata="<url>"` header
+    // pointing at its RFC 9728 metadata. This is the canonical mechanism;
+    // well-known guesses below are best-effort fallbacks for servers that
+    // don't follow the spec.
+    let www_authenticate_url =
+        probe_resource_metadata_via_www_authenticate(client, server_url).await;
+
     // --- Step 1: RFC 9728 resource metadata ---
-    let rfc9728_url = if path.is_empty() || path == "/" {
+    // Use the URL from Step 0 if we have it; otherwise synthesize the
+    // path-aware/origin well-known URL.
+    let rfc9728_url = if let Some(u) = www_authenticate_url {
+        u
+    } else if path.is_empty() || path == "/" {
         format!("{origin}/.well-known/oauth-protected-resource")
     } else {
         format!("{origin}/.well-known/oauth-protected-resource{path}")
@@ -635,37 +684,37 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
-        // JSON for ResourceMetadata pointing to the same host
-        let resource_meta_body = r#"{"authorization_servers":["http://127.0.0.1:0"]}"#;
         let as_meta_body = r#"{"authorization_endpoint":"https://auth.example.com/authorize","token_endpoint":"https://auth.example.com/token"}"#;
 
-        // Spin up a minimal HTTP server that returns ResourceMetadata on RFC 9728 path
+        // Spin up a minimal HTTP server
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        // Patch: serve RFC 9728 response then AS metadata response
-        let resource_meta_body_owned = resource_meta_body.to_string();
         let as_meta_body_owned = as_meta_body.to_string();
         tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf).await;
-            let request = String::from_utf8_lossy(&buf);
-            let response_body = if request.contains(".well-known/oauth-protected-resource") {
-                let as_url = format!(r#"{{"authorization_servers":["http://127.0.0.1:{port}"]}}"#);
-                as_url
-            } else {
-                resource_meta_body_owned.clone()
-            };
-            // Return ResourceMetadata — points back to same server
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
+            // Step 0 probe: GET /mcp → 404 (no WWW-Authenticate header).
+            // discover_as sends this first; a 404 means probe returns None.
+            let (mut stream0, _) = listener.accept().await.unwrap();
+            let mut buf0 = [0u8; 4096];
+            let _ = stream0.read(&mut buf0).await;
+            let resp0 = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream0.write_all(resp0.as_bytes()).await;
 
-            // Second connection for AS metadata
+            // Step 1: GET /.well-known/oauth-protected-resource/mcp → 200 with
+            // ResourceMetadata pointing back to the same host for AS metadata.
+            let (mut stream1, _) = listener.accept().await.unwrap();
+            let mut buf1 = [0u8; 4096];
+            let _ = stream1.read(&mut buf1).await;
+            let rfc9728_body =
+                format!(r#"{{"authorization_servers":["http://127.0.0.1:{port}"]}}"#);
+            let resp1 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                rfc9728_body.len(),
+                rfc9728_body
+            );
+            let _ = stream1.write_all(resp1.as_bytes()).await;
+
+            // Step 2+3: GET /.well-known/oauth-authorization-server → 200 with AS metadata.
             let (mut stream2, _) = listener.accept().await.unwrap();
             let mut buf2 = [0u8; 4096];
             let _ = stream2.read(&mut buf2).await;
@@ -1180,5 +1229,60 @@ mod tests {
             None,
             "empty quoted value is malformed and must be None"
         );
+    }
+
+    #[tokio::test]
+    async fn discover_as_uses_www_authenticate_resource_metadata() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let metadata_path = "/.well-known/oauth-protected-resource";
+
+        // Step 0: unauthenticated GET /mcp returns 401 with WWW-Authenticate
+        // pointing to the metadata URL on this same host.
+        let www_authenticate = format!(
+            r#"Bearer realm="MCP", resource_metadata="{}{}""#,
+            server.uri(),
+            metadata_path
+        );
+        Mock::given(method("GET"))
+            .and(path("/mcp"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .insert_header("WWW-Authenticate", www_authenticate.as_str()),
+            )
+            .mount(&server)
+            .await;
+
+        // Step 1: RFC 9728 resource metadata at the WWW-Authenticate-supplied URL
+        // points at the AS URL, also on this same host.
+        let resource_meta = serde_json::json!({
+            "authorization_servers": [server.uri()]
+        });
+        Mock::given(method("GET"))
+            .and(path(metadata_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(resource_meta))
+            .mount(&server)
+            .await;
+
+        // Step 2: AS metadata at the origin-only RFC 8414 URL of the AS host.
+        let as_meta = serde_json::json!({
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint":         "https://auth.example.com/token"
+        });
+        Mock::given(method("GET"))
+            .and(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(as_meta))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let server_url = format!("{}/mcp", server.uri());
+        let result = discover_as(&client, &server_url).await;
+
+        let meta = result.expect("WWW-Authenticate-driven discovery must succeed");
+        assert_eq!(meta.authorization_endpoint, "https://auth.example.com/authorize");
+        assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
     }
 }
