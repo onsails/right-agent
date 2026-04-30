@@ -6,7 +6,7 @@
 
 # <img src="assets/section-mark.svg" height="20" alt=""> an agent that ships as a product
 
-the choices are made. sandboxed by default. lives in telegram. runs on your $20 claude subscription.
+the choices are made. sandboxed by default. lives in telegram. runs on one subscription, shared across agents.
 
 <img src="images/screenshot.png" alt="Right Agent in Telegram" width="720"/>
 
@@ -22,11 +22,11 @@ the choices are made. sandboxed by default. lives in telegram. runs on your $20 
 
 ## <img src="assets/section-mark.svg" height="20" alt=""> the problem
 
-in most agent setups, the agent you leave running long-term has two problems baked in.
+in most agent setups, the agent runs as your user. it can read every file you can read — ssh keys, aws credentials, mcp tokens, every .env under your home.
 
-tokens sit in a plaintext config file. the sandbox is missing or fake. context resets on restart. enough for a demo, not for what you depend on.
+docker helps with the filesystem. it doesn't help with mcp credentials — they get forwarded into the container as environment variables. the agent, and any bash command it runs, can read them.
 
-and getting even that far costs a weekend: a chat backend, a memory store, a tunnel, a sandbox layer — pick them, wire them. the agent works on monday. it didn't have to take a weekend.
+getting a working setup also costs a weekend: chat backend, memory store, tunnel, sandbox layer — pick them, wire them.
 
 right agent fixes both. the pieces are picked, the wiring is done, telegram is your only console.
 
@@ -38,7 +38,7 @@ we make the choices for you and polish what we ship. the box is closed:
 
 - **chat surface.** telegram. dm, groups, topics — polished, with attachments both ways, media groups, voice notes. not a matrix of telegram + slack + discord + web ui.
 - **memory.** [hindsight cloud](https://hindsight.vectorize.io) (semantic recall, recommended) or local `MEMORY.md` (no cloud dependency). picked at agent init.
-- **model provider.** your claude subscription. `claude -p`, no api keys per agent.
+- **model provider.** your claude subscription. `claude -p`, no api keys per agent. anthropic has been restricting third-party wrappers — `claude -p` is first-party, unaffected.
 - **tunnel.** cloudflared. free, secure, production-grade.
 - **sandbox.** [nvidia openshell](https://github.com/NVIDIA/OpenShell), on by default. the only opt-out is for agents that need host access (e.g. computer-use, browser automation), and that's set explicitly per-agent.
 
@@ -97,7 +97,7 @@ on a typical agent setup, the agent has direct access to:
 - any `.env` file under your home directory
 - the workspace and memory of every other agent on the host
 
-one compromised turn, the attacker walks out with all of it.
+one compromised turn, and an attacker has all of it.
 
 ### <img src="assets/subsection-mark.svg" height="14" alt=""> the sandbox boundary
 
