@@ -264,7 +264,7 @@ async fn complete_oauth_flow(
                 )
             } else {
                 format!(
-                    "Authenticated with {} (agent {agent_name}). Tools available on next session.",
+                    "Authenticated with {} (agent {agent_name}).",
                     pending.server_name,
                 )
             };
