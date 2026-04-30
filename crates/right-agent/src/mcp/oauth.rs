@@ -1042,6 +1042,7 @@ mod tests {
     #[test]
     fn as_metadata_urls_path_bearing_includes_origin_only_fallback() {
         let urls = as_metadata_urls("https://mcp.linear.app/mcp");
+        assert_eq!(urls.len(), 5, "expected 5 URLs, got {urls:?}");
         // Path-aware variants come first (RFC 8414 §3.1).
         assert_eq!(
             urls[0],
@@ -1056,17 +1057,13 @@ mod tests {
             "https://mcp.linear.app/mcp/.well-known/openid-configuration"
         );
         // Origin-only fallbacks come after (real-world: Linear, …).
-        assert!(
-            urls.contains(
-                &"https://mcp.linear.app/.well-known/oauth-authorization-server".to_string()
-            ),
-            "origin-only RFC 8414 URL must be in fallback list, got {urls:?}"
+        assert_eq!(
+            urls[3],
+            "https://mcp.linear.app/.well-known/oauth-authorization-server"
         );
-        assert!(
-            urls.contains(
-                &"https://mcp.linear.app/.well-known/openid-configuration".to_string()
-            ),
-            "origin-only OIDC URL must be in fallback list, got {urls:?}"
+        assert_eq!(
+            urls[4],
+            "https://mcp.linear.app/.well-known/openid-configuration"
         );
     }
 
