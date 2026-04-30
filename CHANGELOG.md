@@ -1,4 +1,30 @@
 # Changelog
+## [0.2.7] - 2026-04-30
+
+
+### Bug Fixes
+
+- **oauth**: Drop misleading "next session" notice from auth success
+- **oauth**: Try origin-only well-known URLs for path-bearing MCP
+- **oauth**: Skip speculative probes on any non-2xx, not just 404
+- **oauth**: WWW-Authenticate parser rejects empty quoted value
+
+### Documentation
+
+- **oauth**: Refresh discover_as comment to match new tolerant contract
+
+### Features
+
+- **oauth**: Parse resource_metadata from WWW-Authenticate header
+- **oauth**: Probe WWW-Authenticate for resource_metadata URL
+
+### Testing
+
+- **oauth**: Regression for Linear-pattern AS discovery
+- **oauth**: Tighten as_metadata_urls assertions to positional indices
+- **oauth**: Pin WWW-Authenticate path with wiremock .expect(1)
+- **oauth**: Clarify Step 0 implications in discovery tests
+
 ## [0.2.6] - 2026-04-29
 
 
