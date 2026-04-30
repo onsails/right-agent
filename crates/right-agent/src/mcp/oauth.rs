@@ -188,13 +188,21 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
 /// Supports both the quoted RFC-compliant form (`resource_metadata="https://…"`)
 /// and the unquoted form some servers emit. We deliberately do not parse the
 /// full Bearer challenge grammar (RFC 6750 §3) — only the one parameter we need.
+/// The parameter-name search is case-sensitive — RFC 9110 §11.2 allows
+/// case-insensitive names but real-world servers (Linear, Notion, …)
+/// always emit lowercase `resource_metadata`.
 fn parse_www_authenticate_resource_metadata(header: &str) -> Option<String> {
     let needle = "resource_metadata=";
     let start = header.find(needle)? + needle.len();
     let rest = &header[start..];
     if let Some(stripped) = rest.strip_prefix('"') {
         let end = stripped.find('"')?;
-        Some(stripped[..end].to_string())
+        let value = &stripped[..end];
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
     } else {
         let end = rest.find(',').unwrap_or(rest.len());
         let value = rest[..end].trim();
@@ -1163,5 +1171,14 @@ mod tests {
         );
         assert_eq!(parse_www_authenticate_resource_metadata("Basic realm=x"), None);
         assert_eq!(parse_www_authenticate_resource_metadata(""), None);
+    }
+
+    #[test]
+    fn parse_www_authenticate_empty_quoted_value_returns_none() {
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(r#"Bearer resource_metadata="""#),
+            None,
+            "empty quoted value is malformed and must be None"
+        );
     }
 }
