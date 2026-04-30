@@ -189,7 +189,9 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
 /// 2. RFC 8414 AS metadata (`/.well-known/oauth-authorization-server`)
 /// 3. OIDC discovery (`/.well-known/openid-configuration`)
 ///
-/// Per D-07: 404 → try next fallback. 5xx → abort immediately.
+/// Any non-2xx response (or connection error) on a speculative probe URL
+/// is logged and skipped — the URL simply doesn't host metadata. Only when
+/// every URL in the chain fails does this return `DiscoveryFailed`.
 pub async fn discover_as(
     client: &reqwest::Client,
     server_url: &str,
