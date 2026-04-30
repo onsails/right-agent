@@ -1252,6 +1252,7 @@ mod tests {
                 ResponseTemplate::new(401)
                     .insert_header("WWW-Authenticate", www_authenticate.as_str()),
             )
+            .expect(1)
             .mount(&server)
             .await;
 
@@ -1263,6 +1264,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(metadata_path))
             .respond_with(ResponseTemplate::new(200).set_body_json(resource_meta))
+            .expect(1)
             .mount(&server)
             .await;
 
