@@ -182,6 +182,30 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
     urls
 }
 
+/// Extract `resource_metadata="<url>"` (RFC 9728 §5.1) from a `WWW-Authenticate`
+/// header value. Returns `None` if the parameter is absent or malformed.
+///
+/// Supports both the quoted RFC-compliant form (`resource_metadata="https://…"`)
+/// and the unquoted form some servers emit. We deliberately do not parse the
+/// full Bearer challenge grammar (RFC 6750 §3) — only the one parameter we need.
+fn parse_www_authenticate_resource_metadata(header: &str) -> Option<String> {
+    let needle = "resource_metadata=";
+    let start = header.find(needle)? + needle.len();
+    let rest = &header[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(stripped[..end].to_string())
+    } else {
+        let end = rest.find(',').unwrap_or(rest.len());
+        let value = rest[..end].trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    }
+}
+
 /// Discover the Authorization Server metadata for a given MCP server URL.
 ///
 /// Implements the 3-step fallback chain mandated by the MCP Authorization spec:
@@ -1102,5 +1126,42 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0], "https://auth.example.com/.well-known/oauth-authorization-server");
         assert_eq!(urls[1], "https://auth.example.com/.well-known/openid-configuration");
+    }
+
+    #[test]
+    fn parse_www_authenticate_quoted_resource_metadata() {
+        let h = r#"Bearer realm="Linear", resource_metadata="https://mcp.linear.app/.well-known/oauth-protected-resource""#;
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(h),
+            Some("https://mcp.linear.app/.well-known/oauth-protected-resource".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_unquoted_resource_metadata() {
+        let h = "Bearer resource_metadata=https://api.example.com/.well-known/x";
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(h),
+            Some("https://api.example.com/.well-known/x".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_unquoted_with_trailing_param() {
+        let h = "Bearer resource_metadata=https://api.example.com/x, error=invalid_token";
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(h),
+            Some("https://api.example.com/x".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_www_authenticate_no_resource_metadata_returns_none() {
+        assert_eq!(
+            parse_www_authenticate_resource_metadata(r#"Bearer realm="x""#),
+            None
+        );
+        assert_eq!(parse_www_authenticate_resource_metadata("Basic realm=x"), None);
+        assert_eq!(parse_www_authenticate_resource_metadata(""), None);
     }
 }
