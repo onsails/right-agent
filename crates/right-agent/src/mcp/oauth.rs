@@ -162,16 +162,21 @@ fn as_metadata_urls(as_url: &str) -> Vec<String> {
     let mut urls = Vec::new();
 
     if path.is_empty() || path == "/" {
-        // No-path AS URL: try RFC 8414, then OIDC
+        // No-path AS URL: try RFC 8414, then OIDC.
         urls.push(format!("{origin}/.well-known/oauth-authorization-server"));
         urls.push(format!("{origin}/.well-known/openid-configuration"));
     } else {
-        // Path-bearing AS URL: try all variants
+        // Path-bearing AS URL: try RFC 8414 §3.1 path-aware variants first…
         urls.push(format!(
             "{origin}/.well-known/oauth-authorization-server{path}"
         ));
         urls.push(format!("{origin}/.well-known/openid-configuration{path}"));
         urls.push(format!("{origin}{path}/.well-known/openid-configuration"));
+        // …then origin-only fallbacks. Many real MCP servers (Linear, …) host
+        // metadata at the origin-only well-known location even when the
+        // server URL itself has a path component.
+        urls.push(format!("{origin}/.well-known/oauth-authorization-server"));
+        urls.push(format!("{origin}/.well-known/openid-configuration"));
     }
 
     urls
@@ -1032,5 +1037,45 @@ mod tests {
         let meta = result.expect("discover_as must succeed for Linear-style server");
         assert_eq!(meta.authorization_endpoint, "https://auth.linear.example/authorize");
         assert_eq!(meta.token_endpoint, "https://auth.linear.example/token");
+    }
+
+    #[test]
+    fn as_metadata_urls_path_bearing_includes_origin_only_fallback() {
+        let urls = as_metadata_urls("https://mcp.linear.app/mcp");
+        // Path-aware variants come first (RFC 8414 §3.1).
+        assert_eq!(
+            urls[0],
+            "https://mcp.linear.app/.well-known/oauth-authorization-server/mcp"
+        );
+        assert_eq!(
+            urls[1],
+            "https://mcp.linear.app/.well-known/openid-configuration/mcp"
+        );
+        assert_eq!(
+            urls[2],
+            "https://mcp.linear.app/mcp/.well-known/openid-configuration"
+        );
+        // Origin-only fallbacks come after (real-world: Linear, …).
+        assert!(
+            urls.contains(
+                &"https://mcp.linear.app/.well-known/oauth-authorization-server".to_string()
+            ),
+            "origin-only RFC 8414 URL must be in fallback list, got {urls:?}"
+        );
+        assert!(
+            urls.contains(
+                &"https://mcp.linear.app/.well-known/openid-configuration".to_string()
+            ),
+            "origin-only OIDC URL must be in fallback list, got {urls:?}"
+        );
+    }
+
+    #[test]
+    fn as_metadata_urls_no_path_unchanged() {
+        // Origin-only AS URL should still produce the same two URLs as before.
+        let urls = as_metadata_urls("https://auth.example.com");
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://auth.example.com/.well-known/oauth-authorization-server");
+        assert_eq!(urls[1], "https://auth.example.com/.well-known/openid-configuration");
     }
 }
