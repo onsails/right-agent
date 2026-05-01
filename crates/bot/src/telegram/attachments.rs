@@ -415,6 +415,7 @@ pub enum ChatContext {
 pub struct ReplyToBody {
     pub author: MessageAuthor,
     pub text: Option<String>,
+    pub attachments: Vec<ResolvedAttachment>,
 }
 
 /// Message in a debounce batch -- text and/or attachments.
@@ -549,6 +550,22 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             }
             if let Some(ref t) = r.text {
                 writeln!(out, "      text: \"{}\"", yaml_escape_string(t)).expect("infallible");
+            }
+            if !r.attachments.is_empty() {
+                out.push_str("      attachments:\n");
+                for att in &r.attachments {
+                    writeln!(out, "        - type: {}", att.kind.as_str())
+                        .expect("infallible");
+                    writeln!(out, "          path: {}", att.path.display())
+                        .expect("infallible");
+                    writeln!(out, "          mime_type: {}", att.mime_type)
+                        .expect("infallible");
+                    if let Some(ref fname) = att.filename {
+                        let escaped = yaml_escape_string(fname);
+                        writeln!(out, "          filename: \"{escaped}\"")
+                            .expect("infallible");
+                    }
+                }
             }
         }
 
@@ -1938,6 +1955,46 @@ mod tests {
         assert!(result.contains("    reply_to_id: 3\n"));
     }
 
+    #[test]
+    fn format_cc_input_includes_reply_to_attachments() {
+        let ts = Utc::now();
+        let msgs = vec![InputMessage {
+            message_id: 5,
+            text: Some("вот этот док".into()),
+            timestamp: ts,
+            attachments: vec![],
+            author: test_author(),
+            forward_info: None,
+            reply_to_id: Some(3),
+            chat: ChatContext::Private { id: 99 },
+            reply_to_body: Some(ReplyToBody {
+                author: MessageAuthor {
+                    name: "Sender".into(),
+                    username: None,
+                    user_id: Some(42),
+                },
+                text: Some("Votre document edf.pdf".into()),
+                attachments: vec![ResolvedAttachment {
+                    kind: AttachmentKind::Document,
+                    path: std::path::PathBuf::from("/sandbox/inbox/document_3_0.pdf"),
+                    mime_type: "application/pdf".into(),
+                    filename: Some("edf.pdf".into()),
+                }],
+            }),
+        }];
+        let result = format_cc_input(&msgs).unwrap();
+        assert!(result.contains("    reply_to:\n"), "missing reply_to block");
+        assert!(result.contains("      text: \"Votre document edf.pdf\"\n"));
+        assert!(
+            result.contains("      attachments:\n"),
+            "missing nested attachments under reply_to:\n{result}"
+        );
+        assert!(result.contains("        - type: document\n"));
+        assert!(result.contains("          path: /sandbox/inbox/document_3_0.pdf\n"));
+        assert!(result.contains("          mime_type: application/pdf\n"));
+        assert!(result.contains("          filename: \"edf.pdf\"\n"));
+    }
+
     fn att_with(
         kind: OutboundKind,
         group: Option<&str>,
@@ -2244,6 +2301,7 @@ mod group_format_tests {
                     user_id: Some(42),
                 },
                 text: Some("here is the function: foo()".into()),
+                attachments: vec![],
             }),
         };
         let yaml = format_cc_input(&[m]).unwrap();
