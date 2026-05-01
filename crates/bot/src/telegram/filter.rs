@@ -52,7 +52,10 @@ pub fn make_routing_filter(
                 // Non-album group messages still require an explicit address.
                 // Album siblings are admitted unaddressed; the worker aggregates
                 // them and applies a final addressed-batch gate before invoking CC.
-                if addressed.is_none() && msg.media_group_id().is_none() {
+                if addressed.is_none()
+                    && msg.media_group_id().is_none()
+                    && msg.forward_origin().is_none()
+                {
                     return None;
                 }
                 Some(RoutingDecision {
@@ -283,5 +286,77 @@ mod tests {
         assert!(f(s2).is_some(), "sibling 2 must reach handle_message");
         let d3 = f(s3).expect("captioned sibling must reach handle_message");
         assert!(d3.address.is_some());
+    }
+
+    #[test]
+    fn forward_origin_passes_in_open_group() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        let allowlist = allowlist_with(vec![], vec![chat_id]);
+
+        // Forwarded document, no caption, no @mention anywhere.
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "U"},
+            "forward_origin": {
+                "type": "user",
+                "date": 0,
+                "sender_user": {"id": 99999, "is_bot": false, "first_name": "Sender"}
+            },
+            "document": {
+                "file_id": "BAAD",
+                "file_unique_id": "uniq",
+                "file_name": "edf.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 1024
+            }
+        }))
+        .unwrap();
+
+        let f = make_routing_filter(allowlist, identity);
+        let d = f(msg).expect("forward should pass in open group");
+        assert!(d.address.is_none());
+        assert!(d.group_open);
+    }
+
+    #[test]
+    fn forward_origin_dropped_for_untrusted_sender_and_closed_group() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        // No trusted users, no open groups.
+        let allowlist = allowlist_with(vec![], vec![]);
+
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "U"},
+            "forward_origin": {
+                "type": "user",
+                "date": 0,
+                "sender_user": {"id": 99999, "is_bot": false, "first_name": "Sender"}
+            },
+            "document": {
+                "file_id": "BAAD",
+                "file_unique_id": "uniq",
+                "file_name": "edf.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 1024
+            }
+        }))
+        .unwrap();
+
+        let f = make_routing_filter(allowlist, identity);
+        assert!(f(msg).is_none());
     }
 }
