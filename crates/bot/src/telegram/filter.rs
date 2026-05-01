@@ -359,4 +359,48 @@ mod tests {
         let f = make_routing_filter(allowlist, identity);
         assert!(f(msg).is_none());
     }
+
+    #[test]
+    fn forward_with_caption_mention_routes_as_addressed() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        let allowlist = allowlist_with(vec![], vec![chat_id]);
+
+        // Forwarded message with a fresh user-typed caption containing @mention.
+        // Address detection must win — `address` should be Some(GroupMentionText),
+        // not None (which would mean "admitted only by forward gate").
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "U"},
+            "forward_origin": {
+                "type": "user",
+                "date": 0,
+                "sender_user": {"id": 99999, "is_bot": false, "first_name": "Sender"}
+            },
+            "document": {
+                "file_id": "BAAD",
+                "file_unique_id": "uniq",
+                "file_name": "edf.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 1024
+            },
+            "caption": "@rightaww_bot вот этот",
+            "caption_entities": [{
+                "type": "mention",
+                "offset": 0,
+                "length": 13
+            }]
+        }))
+        .unwrap();
+
+        let f = make_routing_filter(allowlist, identity);
+        let d = f(msg).expect("forward with caption mention must route");
+        assert_eq!(d.address, Some(AddressKind::GroupMentionText));
+    }
 }

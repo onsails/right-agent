@@ -507,8 +507,11 @@ pub fn spawn_worker(
                 // Reply-to attachments: same pipeline, separate batch keyed off
                 // the replied-to message id so files land at predictable paths
                 // (document_<replied_to_id>_<idx>.pdf, etc).
-                let resolved_reply_to = if msg.reply_to_attachments.is_empty() {
-                    vec![]
+                let (resolved_reply_to, reply_to_voice_markers) = if msg
+                    .reply_to_attachments
+                    .is_empty()
+                {
+                    (vec![], vec![])
                 } else {
                     let reply_to_msg_id = msg.reply_to_id.unwrap_or(msg.message_id);
                     match super::attachments::download_attachments(
@@ -524,7 +527,7 @@ pub fn spawn_worker(
                     )
                     .await
                     {
-                        Ok((resolved, _markers)) => resolved,
+                        Ok(r) => r,
                         Err(e) => {
                             tracing::error!(
                                 ?key,
@@ -548,6 +551,10 @@ pub fn spawn_worker(
 
                 let reply_to_body = msg.reply_to_body.clone().map(|mut body| {
                     body.attachments = resolved_reply_to;
+                    body.text = crate::stt::combine_markers_with_text(
+                        &reply_to_voice_markers,
+                        body.text.as_deref(),
+                    );
                     body
                 });
 
@@ -2549,6 +2556,42 @@ mod tests {
         a.address = Some(super::super::mention::AddressKind::GroupMentionText);
         let batch = vec![a, debug_msg(2, Some("alb"))];
         assert!(batch_is_addressed(&batch));
+    }
+
+    #[test]
+    fn batch_is_addressed_drops_lone_forward() {
+        // A forward admitted by the routing filter (address: None) on its own
+        // must NOT pass the worker-level addressed gate.
+        let mut fwd = debug_msg(1, None);
+        fwd.forward_info = Some(super::super::attachments::ForwardInfo {
+            from: super::super::attachments::MessageAuthor {
+                name: "Sender".into(),
+                username: None,
+                user_id: Some(99999),
+            },
+            date: Utc::now(),
+        });
+        assert!(!batch_is_addressed(&[fwd]));
+    }
+
+    #[test]
+    fn batch_is_addressed_admits_addressed_plus_forward() {
+        // Mixed batch — an addressed comment alongside an admitted forward —
+        // passes the gate because at least one sibling carries an address.
+        let mut comment = debug_msg(1, None);
+        comment.address = Some(super::super::mention::AddressKind::GroupMentionText);
+
+        let mut forward = debug_msg(2, None);
+        forward.forward_info = Some(super::super::attachments::ForwardInfo {
+            from: super::super::attachments::MessageAuthor {
+                name: "Sender".into(),
+                username: None,
+                user_id: Some(99999),
+            },
+            date: Utc::now(),
+        });
+
+        assert!(batch_is_addressed(&[comment, forward]));
     }
 }
 
