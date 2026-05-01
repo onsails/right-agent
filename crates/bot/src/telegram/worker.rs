@@ -70,6 +70,10 @@ pub struct DebounceMsg {
     pub group_open: bool,
     pub chat: super::attachments::ChatContext,
     pub reply_to_body: Option<super::attachments::ReplyToBody>,
+    /// Inbound attachments from the replied-to message, downloaded in the
+    /// worker pipeline alongside primary attachments. Always empty if the
+    /// user did not reply to a non-bot message.
+    pub reply_to_attachments: Vec<super::attachments::InboundAttachment>,
     /// `Some(id)` when this message is part of a Telegram album (media group);
     /// shared by all siblings of the album.
     pub media_group_id: Option<String>,
@@ -499,6 +503,54 @@ pub fn spawn_worker(
                         }
                     }
                 };
+
+                // Reply-to attachments: same pipeline, separate batch keyed off
+                // the replied-to message id so files land at predictable paths
+                // (document_<replied_to_id>_<idx>.pdf, etc).
+                let resolved_reply_to = if msg.reply_to_attachments.is_empty() {
+                    vec![]
+                } else {
+                    let reply_to_msg_id = msg.reply_to_id.unwrap_or(msg.message_id);
+                    match super::attachments::download_attachments(
+                        &msg.reply_to_attachments,
+                        reply_to_msg_id,
+                        &ctx.bot,
+                        &ctx.agent_dir,
+                        ctx.ssh_config_path.as_deref(),
+                        ctx.resolved_sandbox.as_deref(),
+                        tg_chat_id,
+                        eff_thread_id,
+                        ctx.stt.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok((resolved, _markers)) => resolved,
+                        Err(e) => {
+                            tracing::error!(
+                                ?key,
+                                "reply_to attachment download failed: {:#}",
+                                e
+                            );
+                            let _ = send_tg(
+                                &ctx.bot,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &format!(
+                                    "⚠️ Failed to download attachment from replied-to message: {e:#}",
+                                ),
+                            )
+                            .await;
+                            skip_batch = true;
+                            break;
+                        }
+                    }
+                };
+
+                let reply_to_body = msg.reply_to_body.clone().map(|mut body| {
+                    body.attachments = resolved_reply_to;
+                    body
+                });
+
                 input_messages.push(super::attachments::InputMessage {
                     message_id: msg.message_id,
                     text: crate::stt::combine_markers_with_text(
@@ -511,7 +563,7 @@ pub fn spawn_worker(
                     forward_info: msg.forward_info.clone(),
                     reply_to_id: msg.reply_to_id,
                     chat: msg.chat.clone(),
-                    reply_to_body: msg.reply_to_body.clone(),
+                    reply_to_body,
                 });
             }
             if skip_batch {
@@ -2371,6 +2423,7 @@ mod tests {
                 topic_id: None,
             },
             reply_to_body: None,
+            reply_to_attachments: vec![],
             media_group_id: media_group_id.map(|s| s.to_string()),
         }
     }

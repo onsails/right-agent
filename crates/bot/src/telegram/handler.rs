@@ -271,20 +271,27 @@ pub async fn handle_message(
     // Populate reply_to_body only when the user replied to a non-bot message.
     // When they reply to our own bot message, the context is already in the CC
     // session history — emitting it again would be noisy and duplicative.
-    let reply_to_body = msg.reply_to_message().and_then(|r| {
-        let from = r.from.as_ref()?;
-        if from.is_bot && from.id.0 == identity.user_id {
-            return None;
-        }
-        Some(super::attachments::ReplyToBody {
-            author: super::attachments::MessageAuthor {
-                name: from.full_name(),
-                username: from.username.as_ref().map(|u| format!("@{u}")),
-                user_id: Some(from.id.0 as i64),
-            },
-            text: r.text().or(r.caption()).map(|t| t.to_string()),
-        })
-    });
+    // `reply_to_attachments` mirrors `reply_to_body`: empty when the body is
+    // None, otherwise the inbound attachments of the replied-to message.
+    let (reply_to_body, reply_to_attachments) = match msg.reply_to_message() {
+        Some(r) => match r.from.as_ref() {
+            Some(from) if !(from.is_bot && from.id.0 == identity.user_id) => {
+                let body = super::attachments::ReplyToBody {
+                    author: super::attachments::MessageAuthor {
+                        name: from.full_name(),
+                        username: from.username.as_ref().map(|u| format!("@{u}")),
+                        user_id: Some(from.id.0 as i64),
+                    },
+                    text: r.text().or(r.caption()).map(|t| t.to_string()),
+                    attachments: vec![], // populated post-debounce in worker
+                };
+                let inbound = super::attachments::extract_attachments(r);
+                (Some(body), inbound)
+            }
+            _ => (None, vec![]),
+        },
+        None => (None, vec![]),
+    };
 
     // Strip `@botname` mentions from text AFTER interceptors (auth code / MCP
     // token) have seen the raw string. No-op when the pattern isn't present.
@@ -302,6 +309,7 @@ pub async fn handle_message(
         group_open: decision.group_open,
         chat: chat_ctx,
         reply_to_body,
+        reply_to_attachments,
         media_group_id: msg.media_group_id().map(|m| m.0.clone()),
     };
 
