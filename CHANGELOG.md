@@ -1,4 +1,13 @@
 # Changelog
+## [0.2.8] - 2026-05-01
+
+
+### Bug Fixes
+
+- **bot**: Admit forwards through group routing filter
+- **bot**: Extract attachments from reply_to_message
+- **bot**: Preserve voice transcript from reply_to + add gate tests
+
 ## [0.2.7] - 2026-04-30
 
 
