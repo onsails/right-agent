@@ -60,6 +60,18 @@ pub fn control_master_socket_path(ssh_config_dir: &Path, sandbox_name: &str) -> 
     ssh_config_dir.join(format!("{sandbox_name}.cm"))
 }
 
+/// Build the ControlMaster directive block to append to an SSH config file.
+///
+/// Uses the resolved absolute socket path (no `~` expansion ambiguity) so the
+/// directive behaves identically regardless of the bot's `HOME` env var.
+pub fn control_master_directives(ssh_config_dir: &Path, sandbox_name: &str) -> String {
+    let socket = control_master_socket_path(ssh_config_dir, sandbox_name);
+    format!(
+        "\n# Connection multiplexing — see docs/superpowers/specs/2026-05-05-ssh-controlmaster-design.md\nControlMaster auto\nControlPath {}\nControlPersist yes\n",
+        socket.display()
+    )
+}
+
 /// Resolve the default mTLS directory for the OpenShell gateway.
 ///
 /// Checks `OPENSHELL_MTLS_DIR` env var first, then falls back to the
@@ -443,7 +455,10 @@ pub async fn generate_ssh_config(name: &str, config_dir: &Path) -> miette::Resul
     }
 
     let dest = config_dir.join(format!("{name}.ssh-config"));
-    tokio::fs::write(&dest, &output.stdout)
+    let mut content = output.stdout;
+    let directives = control_master_directives(config_dir, name);
+    content.extend_from_slice(directives.as_bytes());
+    tokio::fs::write(&dest, &content)
         .await
         .map_err(|e| miette::miette!("failed to write ssh-config to {}: {e:#}", dest.display()))?;
 

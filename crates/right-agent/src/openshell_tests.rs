@@ -1045,3 +1045,20 @@ async fn test_sandbox_holds_name_lock() {
     handle.join().unwrap();
     assert!(acquired.load(Ordering::SeqCst));
 }
+
+#[test]
+fn generate_ssh_config_appends_control_master_directives() {
+    // Pure-content check: verify the appended block has the expected
+    // shape without spawning the openshell CLI. Calls the helper that
+    // builds the appended snippet.
+    let dir = std::path::Path::new("/var/lib/right/run/ssh");
+    let block = control_master_directives(dir, "rightclaw-brain-20260415");
+    assert!(block.contains("\nControlMaster auto\n"), "missing ControlMaster auto: {block}");
+    assert!(
+        block.contains(
+            "\nControlPath /var/lib/right/run/ssh/rightclaw-brain-20260415.cm\n"
+        ),
+        "missing ControlPath: {block}",
+    );
+    assert!(block.contains("\nControlPersist yes\n"), "missing ControlPersist: {block}");
+}
