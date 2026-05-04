@@ -14,6 +14,13 @@ use crate::openshell_proto::openshell::v1::{ExecSandboxRequest, GetSandboxReques
 /// SANDBOX_PHASE_READY value from openshell.datamodel.v1.SandboxPhase.
 const SANDBOX_PHASE_READY: i32 = 2;
 
+/// Timeout for SSH ControlMaster probe and control operations (`-O check`, `-O exit`).
+///
+/// These operations target a local Unix-domain socket — they complete in milliseconds
+/// under normal conditions. 5 seconds is generous enough to absorb a loaded system
+/// while still surfacing a dead or unresponsive master quickly.
+const SSH_CONTROL_OP_TIMEOUT_SECS: u64 = 5;
+
 /// Path to `mcp.json` inside an OpenShell sandbox.
 pub const SANDBOX_MCP_JSON_PATH: &str = "/sandbox/mcp.json";
 
@@ -560,7 +567,11 @@ pub async fn check_control_master(config_path: &Path, host: &str) -> bool {
         }
     };
 
-    let output = match tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await
+    let output = match tokio::time::timeout(
+        Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
     {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
@@ -568,12 +579,118 @@ pub async fn check_control_master(config_path: &Path, host: &str) -> bool {
             return false;
         }
         Err(_) => {
-            tracing::debug!(host, "ssh -O check timed out after 5s");
+            tracing::debug!(
+                host,
+                "ssh -O check timed out after {}s",
+                SSH_CONTROL_OP_TIMEOUT_SECS,
+            );
             return false;
         }
     };
 
     output.status.success()
+}
+
+/// At bot startup, clean up a stale ControlMaster socket left behind by
+/// a previous SIGKILL'd bot process.
+///
+/// If the socket file does not exist: no-op.
+/// If the socket exists and a master is alive (`ssh -O check` succeeds):
+///   leave it alone — the new bot will reuse the existing master.
+/// If the socket exists but no master is alive:
+///   best-effort `ssh -O exit` (in case the master is reachable from
+///   somewhere we don't see), then `rm -f` the socket so the next ssh
+///   call can establish a fresh master without `bind: Address already in use`.
+pub async fn clean_stale_control_master(
+    config_path: &Path,
+    host: &str,
+    socket_path: &Path,
+) -> miette::Result<()> {
+    if !socket_path.exists() {
+        tracing::debug!(socket = %socket_path.display(), "no stale control-master socket");
+        return Ok(());
+    }
+
+    if check_control_master(config_path, host).await {
+        tracing::info!(
+            socket = %socket_path.display(),
+            "control-master from previous bot is alive, will reuse",
+        );
+        return Ok(());
+    }
+
+    tracing::info!(
+        socket = %socket_path.display(),
+        "stale control-master socket found, cleaning up",
+    );
+
+    // Best-effort exit; ignore failure (master is dead anyway).
+    let mut exit_cmd = Command::new("ssh");
+    exit_cmd.arg("-F").arg(config_path);
+    exit_cmd.args(["-O", "exit"]);
+    exit_cmd.arg(host);
+    exit_cmd.stdout(Stdio::null());
+    exit_cmd.stderr(Stdio::null());
+    if let Ok(mut child) = crate::process_group::ProcessGroupChild::spawn(exit_cmd) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
+            child.wait_with_output(),
+        )
+        .await;
+    }
+
+    if let Err(e) = std::fs::remove_file(socket_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(miette::miette!(
+            "failed to remove stale control-master socket {}: {e:#}",
+            socket_path.display(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Tear down a ControlMaster: send `ssh -O exit` and remove the socket file.
+///
+/// Best-effort and non-fatal — used during graceful shutdown and sandbox
+/// migration. Logs at info; never returns an error.
+pub async fn tear_down_control_master(config_path: &Path, host: &str, socket_path: &Path) {
+    let mut exit_cmd = Command::new("ssh");
+    exit_cmd.arg("-F").arg(config_path);
+    exit_cmd.args(["-O", "exit"]);
+    exit_cmd.arg(host);
+    exit_cmd.stdout(Stdio::null());
+    exit_cmd.stderr(Stdio::null());
+
+    match crate::process_group::ProcessGroupChild::spawn(exit_cmd) {
+        Ok(mut child) => {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
+                child.wait_with_output(),
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::warn!(host, error = %e, "ssh -O exit spawn failed during teardown");
+        }
+    }
+
+    match std::fs::remove_file(socket_path) {
+        Ok(_) => {
+            tracing::info!(socket = %socket_path.display(), "control-master socket removed");
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(socket = %socket_path.display(), "control-master socket already gone");
+        }
+        Err(e) => {
+            tracing::warn!(
+                socket = %socket_path.display(),
+                error = %e,
+                "failed to remove control-master socket",
+            );
+        }
+    }
 }
 
 /// Stream `tar czpf -` from inside the sandbox to a local file via SSH.
