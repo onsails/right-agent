@@ -688,6 +688,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         (None, None)
     };
 
+    // Snapshot for shutdown teardown — the originals are moved into run_telegram below.
+    let shutdown_ssh_config = ssh_config_path.clone();
+    let shutdown_sandbox = resolved_sandbox.clone();
+
     // Create inbox/outbox inside sandbox for attachment handling.
     // This is also the first ssh -F <config> call, which establishes the
     // ControlMaster (see clean_stale_control_master above + SSH config
@@ -894,6 +898,17 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     if let Some(handle) = upgrade_handle {
         let _ = handle.await;
     }
+
+    // Tear down the OpenSSH ControlMaster so we don't leak the master ssh
+    // process across bot restarts. Best-effort.
+    if let (Some(cfg_path), Some(sandbox_name)) = (shutdown_ssh_config, shutdown_sandbox) {
+        let ssh_config_dir = home.join("run").join("ssh");
+        let socket =
+            right_agent::openshell::control_master_socket_path(&ssh_config_dir, &sandbox_name);
+        let host = right_agent::openshell::ssh_host_for_sandbox(&sandbox_name);
+        right_agent::openshell::tear_down_control_master(&cfg_path, &host, &socket).await;
+    }
+
     tracing::info!("graceful shutdown complete");
 
     // Propagate any dispatcher/axum error first, then signal config restart.
