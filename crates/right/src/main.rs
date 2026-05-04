@@ -4706,6 +4706,19 @@ async fn perform_migration(
     crate::wizard::update_agent_yaml_sandbox_name(&agent_dir, &new_sandbox)?;
     println!("  sandbox.name set to '{new_sandbox}' in agent.yaml");
 
+    // Tear down the old sandbox's ControlMaster before we remove its config.
+    // Best-effort — the master may already be dead if the bot exited cleanly.
+    let old_socket = right_agent::openshell::control_master_socket_path(
+        &home.join("run").join("ssh"),
+        old_sandbox,
+    );
+    right_agent::openshell::tear_down_control_master(
+        &old_ssh_config,
+        &old_ssh_host,
+        &old_socket,
+    )
+    .await;
+
     // Delete old sandbox (best-effort).
     println!("  Deleting old sandbox '{old_sandbox}'...");
     right_agent::openshell::delete_sandbox(old_sandbox).await;
