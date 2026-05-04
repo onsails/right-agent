@@ -1047,7 +1047,7 @@ async fn test_sandbox_holds_name_lock() {
 }
 
 #[test]
-fn generate_ssh_config_appends_control_master_directives() {
+fn control_master_directives_block_content() {
     // Pure-content check: verify the appended block has the expected
     // shape without spawning the openshell CLI. Calls the helper that
     // builds the appended snippet.

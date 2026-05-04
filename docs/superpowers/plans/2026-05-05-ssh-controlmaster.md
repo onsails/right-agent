@@ -96,7 +96,7 @@ Append to `crates/right-agent/src/openshell_tests.rs`:
 
 ```rust
 #[test]
-fn generate_ssh_config_appends_control_master_directives() {
+fn control_master_directives_block_content() {
     // Pure-content check: verify the appended block has the expected
     // shape without spawning the openshell CLI. Calls the helper that
     // builds the appended snippet.
@@ -115,7 +115,7 @@ fn generate_ssh_config_appends_control_master_directives() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p right-agent --lib generate_ssh_config_appends_control_master_directives`
+Run: `cargo test -p right-agent --lib control_master_directives_block_content`
 Expected: FAIL — `control_master_directives` is undefined.
 
 - [ ] **Step 3: Add the directive-builder helper, then call it from `generate_ssh_config`**
@@ -150,7 +150,7 @@ Then modify `generate_ssh_config` (lines 411-442). Replace the block starting at
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo test -p right-agent --lib generate_ssh_config_appends_control_master_directives`
+Run: `cargo test -p right-agent --lib control_master_directives_block_content`
 Expected: PASS.
 
 - [ ] **Step 5: Run full openshell tests to confirm no regression**
