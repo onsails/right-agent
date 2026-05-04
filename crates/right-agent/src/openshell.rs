@@ -654,7 +654,8 @@ pub async fn clean_stale_control_master(
 /// Tear down a ControlMaster: send `ssh -O exit` and remove the socket file.
 ///
 /// Best-effort and non-fatal — used during graceful shutdown and sandbox
-/// migration. Logs at info; never returns an error.
+/// migration. Never returns an error; outcomes are logged at info, debug,
+/// or warn depending on what happened.
 pub async fn tear_down_control_master(config_path: &Path, host: &str, socket_path: &Path) {
     let mut exit_cmd = Command::new("ssh");
     exit_cmd.arg("-F").arg(config_path);
@@ -665,11 +666,21 @@ pub async fn tear_down_control_master(config_path: &Path, host: &str, socket_pat
 
     match crate::process_group::ProcessGroupChild::spawn(exit_cmd) {
         Ok(mut child) => {
-            let _ = tokio::time::timeout(
+            match tokio::time::timeout(
                 Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
                 child.wait_with_output(),
             )
-            .await;
+            .await
+            {
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::debug!(
+                        host,
+                        "ssh -O exit timed out after {}s during teardown",
+                        SSH_CONTROL_OP_TIMEOUT_SECS,
+                    );
+                }
+            }
         }
         Err(e) => {
             tracing::warn!(host, error = %e, "ssh -O exit spawn failed during teardown");
