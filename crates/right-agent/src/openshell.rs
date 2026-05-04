@@ -538,6 +538,44 @@ pub async fn ssh_exec(
     Ok(stdout)
 }
 
+/// Check whether an OpenSSH ControlMaster is alive at the ControlPath
+/// specified in the given SSH config.
+///
+/// Returns `true` iff `ssh -F <config> -O check <host>` exits 0. Returns
+/// `false` for any other exit, spawn failure, or timeout. This is a probe,
+/// not an error path — the caller decides what to do with the answer.
+pub async fn check_control_master(config_path: &Path, host: &str) -> bool {
+    let mut command = Command::new("ssh");
+    command.arg("-F").arg(config_path);
+    command.args(["-O", "check"]);
+    command.arg(host);
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+
+    let mut child = match crate::process_group::ProcessGroupChild::spawn(command) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(host, error = %e, "ssh -O check spawn failed");
+            return false;
+        }
+    };
+
+    let output = match tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await
+    {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            tracing::debug!(host, error = %e, "ssh -O check wait failed");
+            return false;
+        }
+        Err(_) => {
+            tracing::debug!(host, "ssh -O check timed out after 5s");
+            return false;
+        }
+    };
+
+    output.status.success()
+}
+
 /// Stream `tar czpf -` from inside the sandbox to a local file via SSH.
 ///
 /// Runs `tar czpf - -C / sandbox` on the remote host, piping stdout directly
