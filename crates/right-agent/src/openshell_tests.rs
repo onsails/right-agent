@@ -44,6 +44,16 @@ fn ssh_host_for_sandbox_formats_correctly() {
     );
 }
 
+#[test]
+fn control_master_socket_path_uses_sandbox_name() {
+    use std::path::Path;
+    let dir = Path::new("/tmp/foo/run/ssh");
+    assert_eq!(
+        control_master_socket_path(dir, "rightclaw-brain-20260415-1430"),
+        Path::new("/tmp/foo/run/ssh/rightclaw-brain-20260415-1430.cm"),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Mock gRPC server for is_sandbox_ready / wait_for_ready tests
 // ---------------------------------------------------------------------------

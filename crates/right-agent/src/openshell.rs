@@ -50,6 +50,16 @@ pub fn ssh_host_for_sandbox(sandbox_name: &str) -> String {
     format!("openshell-{sandbox_name}")
 }
 
+/// Filesystem path to the OpenSSH ControlMaster socket for a sandbox.
+///
+/// Keyed on sandbox name so each sandbox gets its own master. Sandbox
+/// migration produces a new sandbox name → new ControlPath → no stale-master
+/// reuse risk. See spec for rationale (OpenSSH matches multiplex candidates
+/// on `(user, host, port)` and the host alias is per-sandbox).
+pub fn control_master_socket_path(ssh_config_dir: &Path, sandbox_name: &str) -> PathBuf {
+    ssh_config_dir.join(format!("{sandbox_name}.cm"))
+}
+
 /// Resolve the default mTLS directory for the OpenShell gateway.
 ///
 /// Checks `OPENSHELL_MTLS_DIR` env var first, then falls back to the
