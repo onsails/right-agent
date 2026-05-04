@@ -671,6 +671,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
         let config_path =
             right_agent::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
+
+        // Clean up stale ControlMaster socket from a SIGKILL'd previous bot.
+        // The next ssh call (inbox/outbox mkdir below) implicitly establishes
+        // a fresh master via ControlMaster=auto in the config we just wrote.
+        let cm_socket =
+            right_agent::openshell::control_master_socket_path(&ssh_config_dir, &sandbox);
+        let cm_host = right_agent::openshell::ssh_host_for_sandbox(&sandbox);
+        right_agent::openshell::clean_stale_control_master(&config_path, &cm_host, &cm_socket)
+            .await?;
+
         tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
 
         (Some(config_path), Some((mtls_dir, sandbox_id)))
@@ -678,7 +688,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         (None, None)
     };
 
-    // Create inbox/outbox inside sandbox for attachment handling
+    // Create inbox/outbox inside sandbox for attachment handling.
+    // This is also the first ssh -F <config> call, which establishes the
+    // ControlMaster (see clean_stale_control_master above + SSH config
+    // appended directives in generate_ssh_config).
     if is_sandboxed && let Some(ref cfg_path) = ssh_config_path {
         let ssh_host =
             right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
