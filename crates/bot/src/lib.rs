@@ -367,6 +367,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
     tracing::info!(agent = %args.agent, "data.db opened");
 
+    // One-time data migration: rewrite legacy `@immediate` + `X-FORK-FROM:`
+    // bg-continuation rows into the new `@bg:<uuid>` schedule encoding.
+    // Idempotent — safe to re-run on every startup.
+    match crate::cron::migrate_legacy_bg_continuation(&_conn) {
+        Ok(0) => {}
+        Ok(n) => {
+            tracing::info!(agent = %args.agent, "migrated {n} legacy bg-continuation rows")
+        }
+        Err(e) => {
+            tracing::error!(agent = %args.agent, "legacy bg-continuation migration failed: {e:#}")
+        }
+    }
+
     // Resolve Telegram token
     let token = telegram::resolve_token(&config)?;
 

@@ -270,6 +270,47 @@ fn is_run_job_loop_skip_kind(kind: &right_agent::cron_spec::ScheduleKind) -> boo
     )
 }
 
+/// One-time startup migration: rewrite legacy `@immediate` + `X-FORK-FROM:`
+/// rows produced by the old bg-continuation convention into the new
+/// `@bg:<uuid>` sentinel + clean prompt body. Idempotent — rows already in
+/// the new form are filtered out by `WHERE schedule = '@immediate'`.
+/// Invalid UUIDs in the legacy header leave the row untouched (logged at
+/// WARN). Returns the number of rows rewritten.
+pub fn migrate_legacy_bg_continuation(
+    conn: &rusqlite::Connection,
+) -> Result<usize, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    let mut migrated = 0usize;
+    {
+        let mut stmt = tx.prepare(
+            "SELECT job_name, prompt FROM cron_specs WHERE schedule = '@immediate'",
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .filter_map(Result::ok)
+            .collect();
+        for (name, prompt) in rows {
+            let Some(rest) = prompt.strip_prefix("X-FORK-FROM: ") else {
+                continue;
+            };
+            let Some((sess, body)) = rest.split_once('\n') else {
+                continue;
+            };
+            let Ok(fork_from) = uuid::Uuid::parse_str(sess) else {
+                tracing::warn!(job = %name, "legacy @immediate row has invalid UUID in X-FORK-FROM; skipping");
+                continue;
+            };
+            tx.execute(
+                "UPDATE cron_specs SET schedule = ?1, prompt = ?2 WHERE job_name = ?3",
+                rusqlite::params![format!("@bg:{fork_from}"), body, name],
+            )?;
+            migrated += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(migrated)
+}
+
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
@@ -1767,6 +1808,85 @@ mod tests {
         assert!(!is_run_job_loop_skip_kind(&ScheduleKind::Recurring(
             "*/5 * * * *".into()
         )));
+    }
+
+    #[test]
+    fn migrate_legacy_bg_rewrites_at_immediate_with_x_fork_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let main = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('bg-old', '@immediate', ?1, '6h', 5.0, 0, NULL, -100, NULL, ?2, ?2)",
+            rusqlite::params![format!("X-FORK-FROM: {main}\nbody continues here"), now],
+        ).unwrap();
+
+        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
+        assert_eq!(migrated, 1);
+
+        let (schedule, prompt): (String, String) = conn
+            .query_row(
+                "SELECT schedule, prompt FROM cron_specs WHERE job_name = 'bg-old'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(schedule, format!("@bg:{main}"));
+        assert_eq!(prompt, "body continues here");
+    }
+
+    #[test]
+    fn migrate_legacy_bg_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let main = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('bg-old', '@immediate', ?1, '6h', 5.0, 0, NULL, -100, NULL, ?2, ?2)",
+            rusqlite::params![format!("X-FORK-FROM: {main}\nbody"), now],
+        ).unwrap();
+
+        let first = migrate_legacy_bg_continuation(&conn).unwrap();
+        let second = migrate_legacy_bg_continuation(&conn).unwrap();
+        assert_eq!(first, 1);
+        assert_eq!(second, 0, "second pass must migrate zero rows");
+    }
+
+    #[test]
+    fn migrate_legacy_bg_skips_invalid_uuid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('bg-bad', '@immediate', 'X-FORK-FROM: not-a-uuid\nbody', '6h', 5.0, 0, NULL, -100, NULL, ?1, ?1)",
+            rusqlite::params![now],
+        ).unwrap();
+
+        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
+        assert_eq!(migrated, 0);
+
+        let schedule: String = conn
+            .query_row("SELECT schedule FROM cron_specs WHERE job_name = 'bg-bad'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(schedule, "@immediate", "row with invalid UUID must be untouched");
+    }
+
+    #[test]
+    fn migrate_legacy_bg_skips_immediate_without_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('plain-imm', '@immediate', 'just a prompt', '6h', 5.0, 0, NULL, -100, NULL, ?1, ?1)",
+            rusqlite::params![now],
+        ).unwrap();
+
+        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
+        assert_eq!(migrated, 0);
     }
 }
 
