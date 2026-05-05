@@ -1327,3 +1327,33 @@
         assert_eq!(run_chat, Some(77));
         assert_eq!(run_thread, Some(3));
     }
+
+    #[test]
+    fn from_db_row_recurring() {
+        let kind = ScheduleKind::from_db_row("*/5 * * * *", None, 1).unwrap();
+        assert!(matches!(kind, ScheduleKind::Recurring(s) if s == "*/5 * * * *"));
+    }
+
+    #[test]
+    fn from_db_row_one_shot_cron() {
+        let kind = ScheduleKind::from_db_row("0 9 * * *", None, 0).unwrap();
+        assert!(matches!(kind, ScheduleKind::OneShotCron(s) if s == "0 9 * * *"));
+    }
+
+    #[test]
+    fn from_db_row_run_at() {
+        let kind = ScheduleKind::from_db_row("", Some("2026-12-25T00:00:00Z"), 0).unwrap();
+        assert!(matches!(kind, ScheduleKind::RunAt(_)));
+    }
+
+    #[test]
+    fn from_db_row_immediate_sentinel() {
+        let kind = ScheduleKind::from_db_row(IMMEDIATE_SENTINEL, None, 0).unwrap();
+        assert!(matches!(kind, ScheduleKind::Immediate));
+    }
+
+    #[test]
+    fn from_db_row_invalid_run_at_returns_err() {
+        let err = ScheduleKind::from_db_row("", Some("not-a-date"), 0);
+        assert!(err.is_err());
+    }

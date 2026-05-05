@@ -84,6 +84,30 @@ impl ScheduleKind {
     pub fn is_one_shot(&self) -> bool {
         matches!(self, Self::OneShotCron(_) | Self::RunAt(_) | Self::Immediate)
     }
+
+    /// Parse a (`schedule`, `run_at`, `recurring`) row tuple from `cron_specs`
+    /// into the typed kind. Single source of truth — `load_specs_from_db`
+    /// calls this for every row. Returns `Err(message)` on malformed input.
+    pub fn from_db_row(
+        schedule: &str,
+        run_at: Option<&str>,
+        recurring: i64,
+    ) -> Result<Self, String> {
+        if let Some(rat) = run_at {
+            let dt = rat
+                .parse::<DateTime<Utc>>()
+                .map_err(|e| format!("invalid run_at datetime '{rat}': {e}"))?;
+            return Ok(Self::RunAt(dt));
+        }
+        if schedule == IMMEDIATE_SENTINEL {
+            return Ok(Self::Immediate);
+        }
+        if recurring == 0 {
+            Ok(Self::OneShotCron(schedule.to_string()))
+        } else {
+            Ok(Self::Recurring(schedule.to_string()))
+        }
+    }
 }
 
 impl std::fmt::Display for ScheduleKind {
@@ -704,20 +728,12 @@ pub fn load_specs_from_db(
             target_thread_id,
         ) = row?;
 
-        let schedule_kind = if let Some(ref rat) = run_at {
-            match rat.parse::<DateTime<Utc>>() {
-                Ok(dt) => ScheduleKind::RunAt(dt),
-                Err(e) => {
-                    tracing::error!(job = %job_name, "invalid run_at in DB: {e:#}");
-                    continue;
-                }
+        let schedule_kind = match ScheduleKind::from_db_row(&schedule, run_at.as_deref(), recurring) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::error!(job = %job_name, "failed to parse schedule kind: {e}");
+                continue;
             }
-        } else if schedule == IMMEDIATE_SENTINEL {
-            ScheduleKind::Immediate
-        } else if recurring == 0 {
-            ScheduleKind::OneShotCron(schedule)
-        } else {
-            ScheduleKind::Recurring(schedule)
         };
 
         specs.insert(
