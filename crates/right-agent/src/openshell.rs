@@ -567,13 +567,13 @@ pub async fn ssh_exec(
             // Timeout: kill the direct ssh client but leave the ControlMaster
             // and its ProxyCommand alive so subsequent calls can still reuse them.
             // `child` was consumed by `wait_with_output`; use the PID directly.
-            if let Some(pid) = child_pid {
-                if let Err(e) = nix::sys::signal::kill(
+            if let Some(pid) = child_pid
+                && let Err(e) = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGKILL,
-                ) {
-                    tracing::debug!(host, pid, error = %e, "ssh kill on timeout: already exited?");
-                }
+                )
+            {
+                tracing::debug!(host, pid, error = %e, "ssh kill on timeout: already exited?");
             }
             Err(miette::miette!("ssh exec timed out after {timeout_secs}s"))
         }
