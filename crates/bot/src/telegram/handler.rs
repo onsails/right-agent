@@ -992,61 +992,55 @@ async fn dcr_failure_fallback(
     )
     .await?;
 
+    // The aggregator stores the bare URL at registration time (see
+    // handle_mcp_add's OAuth branch), so server_url here should already be
+    // bare. Log anomalies instead of silently rewriting them — a query
+    // string or parse failure here signals a registration-time integrity
+    // bug worth surfacing.
     let bare_url = match reqwest::Url::parse(server_url) {
-        Ok(mut u) => {
-            u.set_query(None);
-            u.to_string()
+        Ok(u) if u.query().is_some() => {
+            tracing::warn!(
+                server = server_name,
+                %server_url,
+                "registered server URL unexpectedly has a query string"
+            );
+            let mut clean = u;
+            clean.set_query(None);
+            clean.to_string()
         }
-        Err(_) => server_url.to_string(),
+        Ok(_) => server_url.to_string(),
+        Err(e) => {
+            tracing::warn!(
+                server = server_name,
+                %server_url,
+                err = %e,
+                "registered server URL failed to parse — using as-is"
+            );
+            server_url.to_string()
+        }
     };
 
     // Detect auth type via Haiku when a sandbox is available; otherwise default
     // to bearer. The user can always override with `HeaderName: token` syntax.
     let (auth_type, auth_header): (String, Option<String>) =
         if ssh_config_path.is_some() && right_agent::mcp::credentials::is_public_url(&bare_url) {
-            bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-                .await
-                .ok();
             bot.send_message(msg.chat.id, "Detecting authentication method...")
                 .await?;
-
-            let typing_bot = bot.clone();
-            let typing_chat_id = msg.chat.id;
-            let typing_cancel = tokio_util::sync::CancellationToken::new();
-            let typing_token = typing_cancel.clone();
-            tokio::spawn(async move {
-                loop {
-                    typing_bot
-                        .send_chat_action(typing_chat_id, teloxide::types::ChatAction::Typing)
-                        .await
-                        .ok();
-                    tokio::select! {
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                        _ = typing_token.cancelled() => break,
-                    }
-                }
-            });
-
-            let result =
-                detect_auth_type_via_haiku(&bare_url, agent_dir, ssh_config_path, resolved_sandbox)
-                    .await;
-            typing_cancel.cancel();
-
-            match result {
-                Ok(r) => {
-                    tracing::info!(auth_type = %r.auth_type, header = ?r.header_name, "haiku detected auth type (DCR fallback)");
-                    // query_string is impossible after stripping the URL query;
-                    // downgrade so the user can still supply a token.
-                    if r.auth_type == "bearer" || r.auth_type == "header" {
-                        (r.auth_type, r.header_name)
-                    } else {
-                        ("bearer".into(), None)
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("haiku auth detection failed: {e}, falling back to bearer");
-                    ("bearer".into(), None)
-                }
+            let (t, h) = detect_auth_with_typing_indicator(
+                bot,
+                msg.chat.id,
+                &bare_url,
+                agent_dir,
+                ssh_config_path,
+                resolved_sandbox,
+            )
+            .await;
+            // query_string is impossible after stripping the URL query;
+            // downgrade so the user can still supply a token.
+            if t == "bearer" || t == "header" {
+                (t, h)
+            } else {
+                ("bearer".into(), None)
             }
         } else {
             ("bearer".into(), None)
@@ -1177,43 +1171,17 @@ async fn handle_mcp_add(
     let (auth_type, auth_header): (String, Option<String>) = if has_query {
         ("query_string".into(), None)
     } else if is_public {
-        // Public URL — dispatch haiku for classification
         bot.send_message(msg.chat.id, "Detecting authentication method...")
             .await?;
-
-        // Send typing indicator every 5s while haiku runs
-        let typing_bot = bot.clone();
-        let typing_chat_id = msg.chat.id;
-        let typing_cancel = tokio_util::sync::CancellationToken::new();
-        let typing_token = typing_cancel.clone();
-        tokio::spawn(async move {
-            loop {
-                typing_bot
-                    .send_chat_action(typing_chat_id, teloxide::types::ChatAction::Typing)
-                    .await
-                    .ok();
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
-                    _ = typing_token.cancelled() => break,
-                }
-            }
-        });
-
-        let result =
-            detect_auth_type_via_haiku(&bare_url, agent_dir, ssh_config_path, resolved_sandbox)
-                .await;
-        typing_cancel.cancel();
-
-        match result {
-            Ok(result) => {
-                tracing::info!(auth_type = %result.auth_type, header = ?result.header_name, "haiku detected auth type");
-                (result.auth_type, result.header_name)
-            }
-            Err(e) => {
-                tracing::warn!("haiku auth detection failed: {e}, falling back to bearer");
-                ("bearer".into(), None)
-            }
-        }
+        detect_auth_with_typing_indicator(
+            bot,
+            msg.chat.id,
+            &bare_url,
+            agent_dir,
+            ssh_config_path,
+            resolved_sandbox,
+        )
+        .await
     } else {
         // Private/local — assume bearer
         ("bearer".into(), None)
@@ -1300,13 +1268,32 @@ async fn request_token_and_register(
     .await?;
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-    {
+    let prev = {
         let mut slot = pending_token_slot.0.lock().await;
+        let prev = slot.take();
         *slot = Some(PendingTokenRequest {
             chat_id: chat_id.0,
             thread_id: eff_thread_id,
             sender: tx,
         });
+        prev
+    };
+    // Drop the prior request OUTSIDE the lock. Dropping it closes the oneshot
+    // synchronously, so the prior waiter wakes immediately with RecvError.
+    if let Some(prev) = prev {
+        let prev_chat_id = teloxide::types::ChatId(prev.chat_id);
+        let prev_thread_id = prev.thread_id;
+        let mut send = bot.send_message(
+            prev_chat_id,
+            "Previous MCP token request superseded by a new /mcp command.",
+        );
+        if prev_thread_id != 0 {
+            send = send.message_thread_id(teloxide::types::ThreadId(
+                teloxide::types::MessageId(prev_thread_id as i32),
+            ));
+        }
+        send.await.ok();
+        drop(prev); // explicit — closes the oneshot
     }
 
     tokio::spawn(async move {
@@ -1389,6 +1376,57 @@ struct AuthDetectionResult {
     auth_type: String,
     #[serde(default)]
     header_name: Option<String>,
+}
+
+/// Run Haiku auth-type detection wrapped in a Telegram typing-indicator that
+/// pulses every 5s. Returns `(auth_type, auth_header)` defaulting to bearer
+/// when detection fails or no sandbox is configured.
+///
+/// Used by `/mcp add` (after stripping query string) and the `/mcp auth`
+/// DCR-failure fallback.
+///
+/// PRECONDITION: caller MUST gate this on
+/// `right_agent::mcp::credentials::is_public_url(bare_url) && ssh_config_path.is_some()`.
+/// Calling this for a private URL burns a Haiku invocation for no benefit; calling it
+/// without a sandbox falls through to the bearer default.
+async fn detect_auth_with_typing_indicator(
+    bot: &BotType,
+    chat_id: teloxide::types::ChatId,
+    bare_url: &str,
+    agent_dir: &Path,
+    ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
+) -> (String, Option<String>) {
+    let typing_bot = bot.clone();
+    let typing_cancel = tokio_util::sync::CancellationToken::new();
+    let typing_token = typing_cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = typing_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing) => {}
+                _ = typing_token.cancelled() => break,
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                _ = typing_token.cancelled() => break,
+            }
+        }
+    });
+
+    let result =
+        detect_auth_type_via_haiku(bare_url, agent_dir, ssh_config_path, resolved_sandbox).await;
+    typing_cancel.cancel();
+
+    match result {
+        Ok(r) => {
+            tracing::info!(auth_type = %r.auth_type, header = ?r.header_name, "haiku detected auth type");
+            (r.auth_type, r.header_name)
+        }
+        Err(e) => {
+            tracing::warn!("haiku auth detection failed: {e}, falling back to bearer");
+            ("bearer".into(), None)
+        }
+    }
 }
 
 /// Run haiku in sandbox to detect MCP server auth type.
