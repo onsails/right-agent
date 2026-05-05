@@ -476,6 +476,9 @@ with it unless directly required to answer the most recent message.\n\
 Take as much time as you need within your budget. Your reply will be relayed\n\
 back to the main conversation, so write it as if responding to the user\n\
 directly.\n\
+\n\
+You MUST produce a non-empty notify.content. Silence is not a valid outcome\n\
+for this turn — the user is waiting for an answer.\n\
 \u{27e8}\u{27e8}/SYSTEM_NOTICE\u{27e9}\u{27e9}"
     )
 }
@@ -3072,6 +3075,17 @@ mod background_continuation_tests {
         let p = build_continuation_prompt(BgReason::UserRequested);
         assert!(p.contains("user moved this work to background"));
         assert!(p.contains("MOST RECENT MESSAGE"));
+    }
+
+    #[test]
+    fn build_continuation_prompt_forbids_silence() {
+        let p = build_continuation_prompt(BgReason::AutoTimeout);
+        assert!(
+            p.contains("Silence is not a valid outcome"),
+            "must explicitly forbid silent output; got {p:?}"
+        );
+        let q = build_continuation_prompt(BgReason::UserRequested);
+        assert!(q.contains("Silence is not a valid outcome"));
     }
 
     #[test]
