@@ -33,6 +33,15 @@ pub const BOOTSTRAP_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"conte
 /// of why there is nothing to report (e.g. "No changes since last run").
 pub const CRON_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"type":["object","null"],"properties":{"content":{"type":"string"},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]},"summary":{"type":"string"},"no_notify_reason":{"type":["string","null"]}},"required":["summary"]}"#;
 
+/// Structured-output schema for background-continuation cron runs.
+///
+/// `notify` is required and non-null; `notify.content` must be a non-empty
+/// string. `summary` is required (kept for log/analytics parity with
+/// `CRON_SCHEMA_JSON`). `no_notify_reason` is absent — silence is not a
+/// valid outcome for this job kind, since the user is waiting for the
+/// foreground answer that was sent to background.
+pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"notify":{"type":"object","properties":{"content":{"type":"string","minLength":1},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]},"summary":{"type":"string"}},"required":["summary","notify"]}"#;
+
 /// Generate the base system prompt for all agent modes.
 ///
 /// This replaces CC's default system prompt via `--system-prompt-file`.

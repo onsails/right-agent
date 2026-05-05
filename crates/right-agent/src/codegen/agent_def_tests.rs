@@ -1,5 +1,6 @@
 use crate::codegen::{
-    BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, REPLY_SCHEMA_JSON, generate_system_prompt,
+    BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, REPLY_SCHEMA_JSON,
+    generate_system_prompt,
 };
 
 #[test]
@@ -213,6 +214,53 @@ fn bootstrap_schema_attachments_item_has_media_group_id() {
 fn cron_schema_attachments_item_has_media_group_id() {
     let items = attachments_item_schema(
         CRON_SCHEMA_JSON,
+        &["properties", "notify", "properties", "attachments", "items"],
+    );
+    assert_has_nullable_media_group_id(&items);
+}
+
+#[test]
+fn bg_continuation_schema_requires_notify() {
+    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
+    let required = v["required"].as_array().unwrap();
+    let names: Vec<&str> = required.iter().filter_map(|x| x.as_str()).collect();
+    assert!(names.contains(&"notify"), "notify must be required");
+    assert!(names.contains(&"summary"), "summary must be required");
+}
+
+#[test]
+fn bg_continuation_schema_notify_is_non_nullable_object() {
+    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
+    let notify_type = &v["properties"]["notify"]["type"];
+    assert_eq!(
+        notify_type.as_str(),
+        Some("object"),
+        "notify must be non-nullable; got {:?}",
+        notify_type
+    );
+}
+
+#[test]
+fn bg_continuation_schema_content_min_length_one() {
+    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
+    let min_len = &v["properties"]["notify"]["properties"]["content"]["minLength"];
+    assert_eq!(min_len.as_i64(), Some(1));
+}
+
+#[test]
+fn bg_continuation_schema_no_notify_reason_field_absent() {
+    let v: serde_json::Value = serde_json::from_str(BG_CONTINUATION_SCHEMA_JSON).unwrap();
+    let props = v["properties"].as_object().unwrap();
+    assert!(
+        !props.contains_key("no_notify_reason"),
+        "no_notify_reason must not be in bg schema"
+    );
+}
+
+#[test]
+fn bg_continuation_schema_attachments_item_has_media_group_id() {
+    let items = attachments_item_schema(
+        BG_CONTINUATION_SCHEMA_JSON,
         &["properties", "notify", "properties", "attachments", "items"],
     );
     assert_has_nullable_media_group_id(&items);
