@@ -25,8 +25,9 @@ use super::bot::build_bot;
 use super::filter::make_routing_filter;
 use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
-    RightHome, SshConfigPath, handle_cron, handle_doctor, handle_list, handle_mcp,
-    handle_message, handle_new, handle_start, handle_stop_callback, handle_switch, handle_usage,
+    RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_doctor, handle_list,
+    handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
+    handle_usage,
 };
 use super::mention::BotIdentity;
 use super::oauth_callback::PendingAuthMap;
@@ -150,6 +151,8 @@ where
         stt,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
+    // Interim: local instance; Task 12 replaces with shared instance wired from lib.rs.
+    let bg_requests: super::BgRequests = Arc::new(DashMap::new());
 
     // Spawn memory-alerts watcher (AuthFailed + client-flood) — only when Hindsight is configured.
     // Pass the live allowlist handle; recipients are resolved at broadcast time so
@@ -178,6 +181,7 @@ where
         Arc::clone(&settings_arc),
         Arc::clone(&stop_tokens),
         Arc::clone(&idle_ts),
+        Arc::clone(&bg_requests),
     );
 
     let shutdown_token = dispatcher.shutdown_token();
@@ -374,6 +378,7 @@ fn build_dispatcher(
     settings_arc: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
     idle_ts: Arc<IdleTimestamp>,
+    bg_requests: super::BgRequests,
 ) -> teloxide::dispatching::Dispatcher<BotType, RequestError, DefaultKey> {
     let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
 
@@ -438,7 +443,14 @@ fn build_dispatcher(
         .branch(command_handler)
         .endpoint(handle_message);
 
-    let callback_handler = Update::filter_callback_query().endpoint(handle_stop_callback);
+    let callback_handler = Update::filter_callback_query()
+        .branch(
+            dptree::filter(|q: CallbackQuery| {
+                q.data.as_deref().is_some_and(|d| d.starts_with("bg:"))
+            })
+            .endpoint(handle_bg_callback),
+        )
+        .endpoint(handle_stop_callback);
 
     let schema = dptree::entry()
         .branch(message_handler)
@@ -458,7 +470,8 @@ fn build_dispatcher(
             stop_tokens,
             idle_ts,
             identity_arc,
-            allowlist
+            allowlist,
+            bg_requests
         ])
         .build()
 }
@@ -521,6 +534,7 @@ mod tests {
             stt: None,
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
+        let bg_requests: super::super::BgRequests = Arc::new(DashMap::new());
         let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
 
         // The call under test. If dptree type_check fails, this aborts the
@@ -540,6 +554,7 @@ mod tests {
             settings,
             stop_tokens,
             idle_ts,
+            bg_requests,
         );
     }
 }

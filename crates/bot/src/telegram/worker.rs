@@ -46,12 +46,16 @@ const CC_TIMEOUT_SECS: u64 = 600;
 /// Maximum character count for Hindsight recall queries (~530 tokens, safely under the 500-token API limit).
 const RECALL_MAX_CHARS: usize = 800;
 
-/// Build the inline keyboard with a single "Stop" button for thinking messages.
-fn stop_keyboard(chat_id: i64, eff_thread_id: i64) -> teloxide::types::InlineKeyboardMarkup {
+/// Build the inline keyboard for thinking messages: Stop + Background.
+fn working_keyboard(chat_id: i64, eff_thread_id: i64) -> teloxide::types::InlineKeyboardMarkup {
     teloxide::types::InlineKeyboardMarkup::new(vec![vec![
         teloxide::types::InlineKeyboardButton::callback(
             "\u{26d4} Stop",
             format!("stop:{chat_id}:{eff_thread_id}"),
+        ),
+        teloxide::types::InlineKeyboardButton::callback(
+            "\u{1f319} Background",
+            format!("bg:{chat_id}:{eff_thread_id}"),
         ),
     ]])
 }
@@ -110,6 +114,9 @@ pub struct WorkerContext {
     /// Per-main-session async mutex map. Worker acquires before `claude -p --resume <main>`;
     /// delivery acquires before its own `--resume`. Closes the TOCTOU race on session JSONL.
     pub session_locks: super::SessionLocks,
+    /// Per-(chat, thread) flag set by the bg callback. Worker checks after kill+wait
+    /// to distinguish UserRequested backgrounding from auto-timeout.
+    pub bg_requests: super::BgRequests,
     /// Shared idle timestamp — worker updates after each reply sent.
     pub idle_timestamp: Arc<std::sync::atomic::AtomicI64>,
     /// Internal API client for aggregator IPC (Unix socket).
@@ -1654,7 +1661,7 @@ async fn invoke_cc(
                         // show_thinking=true: update with events every 2s.
                         // show_thinking=false: send static "Working..." once, no updates.
                         if super::stream::format_event(&event).is_some() {
-                            let kb = stop_keyboard(chat_id, eff_thread_id);
+                            let kb = working_keyboard(chat_id, eff_thread_id);
 
                             if thinking_msg_id.is_none() {
                                 // First displayable event — send thinking message.
@@ -2341,17 +2348,22 @@ mod tests {
     }
 
     #[test]
-    fn stop_keyboard_format() {
-        let kb = stop_keyboard(12345, 678);
-        let buttons = &kb.inline_keyboard;
-        assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].len(), 1);
+    fn working_keyboard_has_stop_and_background() {
+        let kb = working_keyboard(12345, 678);
+        let buttons: Vec<Vec<_>> = kb.inline_keyboard.into_iter().collect();
+        assert_eq!(buttons.len(), 1, "single row");
+        assert_eq!(buttons[0].len(), 2, "two buttons");
         assert_eq!(buttons[0][0].text, "\u{26d4} Stop");
-        match &buttons[0][0].kind {
-            teloxide::types::InlineKeyboardButtonKind::CallbackData(data) => {
-                assert_eq!(data, "stop:12345:678");
-            }
-            other => panic!("expected CallbackData, got {other:?}"),
+        assert_eq!(buttons[0][1].text, "\u{1f319} Background");
+        if let teloxide::types::InlineKeyboardButtonKind::CallbackData(data) = &buttons[0][0].kind {
+            assert_eq!(data, "stop:12345:678");
+        } else {
+            panic!("Stop button must use CallbackData");
+        }
+        if let teloxide::types::InlineKeyboardButtonKind::CallbackData(data) = &buttons[0][1].kind {
+            assert_eq!(data, "bg:12345:678");
+        } else {
+            panic!("Background button must use CallbackData");
         }
     }
 

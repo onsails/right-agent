@@ -353,6 +353,7 @@ pub async fn handle_message(
                     model: settings.model.clone(),
                     stop_tokens: Arc::clone(&stop_tokens),
                     session_locks: Arc::new(dashmap::DashMap::new()),
+                    bg_requests: Arc::new(dashmap::DashMap::new()),
                     idle_timestamp: Arc::clone(&idle_ts.0),
                     internal_client: Arc::clone(&internal_api.0),
                     hindsight: settings.hindsight.clone(),
@@ -1911,6 +1912,52 @@ pub async fn handle_stop_callback(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Background button callback query handler
+// ---------------------------------------------------------------------------
+
+/// Handle the Background button callback query from thinking messages.
+///
+/// Callback data format: `bg:{chat_id}:{eff_thread_id}`
+/// Sets the bg flag in `BgRequests` and cancels the worker's stop token —
+/// the worker reads the flag after kill+wait and emits Backgrounded.
+pub async fn handle_bg_callback(
+    bot: BotType,
+    q: CallbackQuery,
+    stop_tokens: super::StopTokens,
+    bg_requests: super::BgRequests,
+) -> ResponseResult<()> {
+    let data = q.data.as_deref().unwrap_or("");
+    let parts: Vec<&str> = data.splitn(3, ':').collect();
+    let qid = q.id;
+
+    let text = if parts.len() == 3
+        && parts[0] == "bg"
+        && let Ok(chat_id) = parts[1].parse::<i64>()
+        && let Ok(thread_id) = parts[2].parse::<i64>()
+    {
+        let key = (chat_id, thread_id);
+        if let Some(entry) = stop_tokens.get(&key) {
+            bg_requests.insert(key, ());
+            entry.value().cancel();
+            drop(entry);
+            Some("Sending to background...")
+        } else {
+            Some("Already finished")
+        }
+    } else {
+        None
+    };
+
+    let mut answer = bot.answer_callback_query(qid);
+    if let Some(t) = text {
+        answer = answer.text(t);
+    }
+    answer.await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2074,5 +2121,26 @@ mod tests {
     #[test]
     fn format_duration_malformed() {
         assert_eq!(format_duration("bad", "2026-04-11T10:00:00Z"), "");
+    }
+
+    #[test]
+    fn parse_bg_callback_data_valid() {
+        let data = "bg:42:7";
+        let parts: Vec<&str> = data.splitn(3, ':').collect();
+        assert_eq!(parts[0], "bg");
+        assert_eq!(parts[1].parse::<i64>().unwrap(), 42);
+        assert_eq!(parts[2].parse::<i64>().unwrap(), 7);
+    }
+
+    #[test]
+    fn parse_bg_callback_data_malformed() {
+        for bad in ["", "bg", "bg:", "bg:abc:0", "bg:1", "stop:1:2"] {
+            let parts: Vec<&str> = bad.splitn(3, ':').collect();
+            let valid = parts.len() == 3
+                && parts[0] == "bg"
+                && parts[1].parse::<i64>().is_ok()
+                && parts[2].parse::<i64>().is_ok();
+            assert!(!valid, "bad={bad} unexpectedly parsed as valid");
+        }
     }
 }

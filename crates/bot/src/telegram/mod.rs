@@ -55,6 +55,11 @@ pub(crate) type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
 /// Key: root_session_id UUID string. Value: shared mutex.
 pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
+/// Per-(chat, thread) flag set by the Background button callback.
+/// Presence in the map means the user requested backgrounding (not a Stop).
+/// Worker checks after kill+wait to distinguish from auto-timeout.
+pub(crate) type BgRequests = Arc<DashMap<(i64, i64), ()>>;
+
 use right_agent::agent::types::AgentConfig;
 
 /// Resolve Telegram token from agent.yaml config.
