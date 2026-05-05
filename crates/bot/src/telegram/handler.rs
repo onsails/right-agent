@@ -653,6 +653,9 @@ pub async fn handle_mcp(
                 pending_auth,
                 &home.0,
                 &internal.0,
+                &pending_token_slot,
+                ssh_config.0.as_deref(),
+                settings.resolved_sandbox.as_deref(),
             )
             .await
         }
@@ -739,6 +742,13 @@ async fn handle_mcp_list(
 }
 
 /// `/mcp auth <server>` -- initiate OAuth flow: discovery, PKCE, send auth URL.
+///
+/// If Dynamic Client Registration fails (some servers advertise OAuth metadata
+/// but never implement DCR — e.g. browser-use's `/oauth/register` returns 404),
+/// fall back to API-key auth: run Haiku auth-type detection (when a sandbox is
+/// available) and ask the user for a token via `PendingTokenSlot`.
+// internal helper; refactor to a config struct is out of scope for this cleanup pass
+#[allow(clippy::too_many_arguments)]
 async fn handle_mcp_auth(
     bot: &BotType,
     msg: &Message,
@@ -747,6 +757,9 @@ async fn handle_mcp_auth(
     pending_auth: PendingAuthMap,
     home: &Path,
     internal: &right_agent::mcp::internal_client::InternalClient,
+    pending_token_slot: &PendingTokenSlot,
+    ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp auth");
 
@@ -855,6 +868,28 @@ async fn handle_mcp_auth(
     .await
     {
         Ok(pair) => pair,
+        Err(right_agent::mcp::oauth::OAuthError::DcrFailed(detail)) => {
+            // Some servers advertise OAuth metadata (RFC 8414) but never implement
+            // Dynamic Client Registration — `registration_endpoint` 404s. Falling
+            // back to API-key auth: detect header name via Haiku, then ask the
+            // user for a token. The server stays registered; mcp_add overwrites
+            // auth_type from "oauth" to whatever the user provides.
+            tracing::warn!(server = server_name, %detail, "mcp auth: DCR failed, falling back to API-key auth");
+            return dcr_failure_fallback(
+                bot,
+                msg,
+                server_name,
+                &server_url,
+                agent_dir,
+                &agent_name,
+                detail,
+                pending_token_slot,
+                ssh_config_path,
+                resolved_sandbox,
+                internal,
+            )
+            .await;
+        }
         Err(e) => {
             bot.send_message(msg.chat.id, format!("Client registration failed: {e:#}"))
                 .await?;
@@ -925,6 +960,111 @@ async fn handle_mcp_auth(
     )
     .await?;
     Ok(())
+}
+
+/// Recovery path when an OAuth-advertising MCP server fails Dynamic Client
+/// Registration. Tells the user, runs Haiku auth-type detection (when a
+/// sandbox is configured), and prompts for an API-key token via
+/// `request_token_and_register`. The token-prompt task overwrites the
+/// existing `auth_type=oauth` row with the resolved bearer/header values.
+#[allow(clippy::too_many_arguments)]
+async fn dcr_failure_fallback(
+    bot: &BotType,
+    msg: &Message,
+    server_name: &str,
+    server_url: &str,
+    agent_dir: &Path,
+    agent_name: &str,
+    dcr_detail: String,
+    pending_token_slot: &PendingTokenSlot,
+    ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
+    internal: &right_agent::mcp::internal_client::InternalClient,
+) -> Result<(), RequestError> {
+    let escaped_detail = super::markdown::html_escape(&dcr_detail);
+    send_html_reply(
+        bot,
+        msg.chat.id,
+        effective_thread_id(msg),
+        &format!(
+            "OAuth metadata advertised a registration endpoint, but DCR failed:\n<code>{escaped_detail}</code>\n\nFalling back to API-key authentication."
+        ),
+    )
+    .await?;
+
+    let bare_url = match reqwest::Url::parse(server_url) {
+        Ok(mut u) => {
+            u.set_query(None);
+            u.to_string()
+        }
+        Err(_) => server_url.to_string(),
+    };
+
+    // Detect auth type via Haiku when a sandbox is available; otherwise default
+    // to bearer. The user can always override with `HeaderName: token` syntax.
+    let (auth_type, auth_header): (String, Option<String>) =
+        if ssh_config_path.is_some() && right_agent::mcp::credentials::is_public_url(&bare_url) {
+            bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+                .await
+                .ok();
+            bot.send_message(msg.chat.id, "Detecting authentication method...")
+                .await?;
+
+            let typing_bot = bot.clone();
+            let typing_chat_id = msg.chat.id;
+            let typing_cancel = tokio_util::sync::CancellationToken::new();
+            let typing_token = typing_cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    typing_bot
+                        .send_chat_action(typing_chat_id, teloxide::types::ChatAction::Typing)
+                        .await
+                        .ok();
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                        _ = typing_token.cancelled() => break,
+                    }
+                }
+            });
+
+            let result =
+                detect_auth_type_via_haiku(&bare_url, agent_dir, ssh_config_path, resolved_sandbox)
+                    .await;
+            typing_cancel.cancel();
+
+            match result {
+                Ok(r) => {
+                    tracing::info!(auth_type = %r.auth_type, header = ?r.header_name, "haiku detected auth type (DCR fallback)");
+                    // query_string is impossible after stripping the URL query;
+                    // downgrade so the user can still supply a token.
+                    if r.auth_type == "bearer" || r.auth_type == "header" {
+                        (r.auth_type, r.header_name)
+                    } else {
+                        ("bearer".into(), None)
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("haiku auth detection failed: {e}, falling back to bearer");
+                    ("bearer".into(), None)
+                }
+            }
+        } else {
+            ("bearer".into(), None)
+        };
+
+    request_token_and_register(
+        bot.clone(),
+        msg.chat.id,
+        effective_thread_id(msg),
+        right_agent::mcp::internal_client::InternalClient::new(internal.socket_path()),
+        agent_name.to_string(),
+        server_name.to_string(),
+        bare_url,
+        auth_type,
+        auth_header,
+        pending_token_slot.clone(),
+    )
+    .await
 }
 
 /// `/mcp add <name> <url>` -- add an MCP server via the internal aggregator API.
@@ -1109,13 +1249,53 @@ async fn handle_mcp_add(
 
     // Token needed — prompt user and spawn background task to wait + register.
     // Must return from handler so the dispatcher can deliver the token message.
-    let header_hint = auth_header
+    request_token_and_register(
+        bot.clone(),
+        msg.chat.id,
+        eff_thread_id,
+        right_agent::mcp::internal_client::InternalClient::new(internal.socket_path()),
+        agent_name.to_string(),
+        name.to_string(),
+        bare_url.to_string(),
+        auth_type,
+        auth_header,
+        pending_token_slot.clone(),
+    )
+    .await
+}
+
+/// Prompt the user for an auth token, then spawn a background task that waits
+/// for it (via `PendingTokenSlot`), parses optional `HeaderName: token` syntax,
+/// and registers/updates the MCP server with the resolved auth fields.
+///
+/// Used by both `/mcp add` (for non-OAuth servers) and `/mcp auth` (as a
+/// DCR-failure fallback when an OAuth-advertising server doesn't actually
+/// implement Dynamic Client Registration).
+///
+/// Returns immediately after parking the oneshot sender so the dispatcher
+/// remains free to deliver the token message into the slot.
+#[allow(clippy::too_many_arguments)]
+async fn request_token_and_register(
+    bot: BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    internal: right_agent::mcp::internal_client::InternalClient,
+    agent_name: String,
+    server_name: String,
+    bare_url: String,
+    initial_auth_type: String,
+    initial_auth_header: Option<String>,
+    pending_token_slot: PendingTokenSlot,
+) -> Result<(), RequestError> {
+    let header_hint = initial_auth_header
         .as_deref()
         .map(|h| format!("the {h} token"))
         .unwrap_or_else(|| "the token".into());
     bot.send_message(
-        msg.chat.id,
-        format!("Send {header_hint} for {name}, or HeaderName: token to specify a custom header:"),
+        chat_id,
+        format!(
+            "Send {header_hint} for {server_name}, or HeaderName: token to specify a custom header:"
+        ),
     )
     .await?;
 
@@ -1123,29 +1303,23 @@ async fn handle_mcp_add(
     {
         let mut slot = pending_token_slot.0.lock().await;
         *slot = Some(PendingTokenRequest {
-            chat_id: msg.chat.id.0,
+            chat_id: chat_id.0,
             thread_id: eff_thread_id,
             sender: tx,
         });
     }
 
-    // Spawn background task for token wait + registration.
-    // Extract owned values — the spawned future must be 'static.
-    let bot = bot.clone();
-    let internal = right_agent::mcp::internal_client::InternalClient::new(internal.socket_path());
-    let chat_id = msg.chat.id;
-    let bare_url = bare_url.to_string();
-    let name = name.to_string();
-    let agent_name = agent_name.to_string();
-    let pending_token_slot = pending_token_slot.clone();
     tokio::spawn(async move {
         let raw_input = match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
             Ok(Ok(input)) => input,
             _ => {
                 pending_token_slot.0.lock().await.take();
-                bot.send_message(chat_id, "Timed out waiting for token. /mcp add cancelled.")
-                    .await
-                    .ok();
+                bot.send_message(
+                    chat_id,
+                    "Timed out waiting for token. MCP authentication cancelled.",
+                )
+                .await
+                .ok();
                 return;
             }
         };
@@ -1168,17 +1342,17 @@ async fn handle_mcp_add(
                         Some(header.to_string()),
                     )
                 } else {
-                    (raw_input, auth_type, auth_header)
+                    (raw_input, initial_auth_type, initial_auth_header)
                 }
             } else {
-                (raw_input, auth_type, auth_header)
+                (raw_input, initial_auth_type, initial_auth_header)
             };
 
-        tracing::info!(url = %bare_url, %auth_type, "mcp add: registering server");
+        tracing::info!(url = %bare_url, %auth_type, "mcp: registering server with token");
         match internal
             .mcp_add(
                 &agent_name,
-                &name,
+                &server_name,
                 &bare_url,
                 Some(&auth_type),
                 auth_header.as_deref(),
@@ -1187,7 +1361,7 @@ async fn handle_mcp_add(
             .await
         {
             Ok(resp) => {
-                let escaped = super::markdown::html_escape(&name);
+                let escaped = super::markdown::html_escape(&server_name);
                 let mut reply = format!("Added MCP server <b>{escaped}</b>.");
                 if resp.tools_count > 0 {
                     reply.push_str(&format!(" {} tools available.", resp.tools_count));
