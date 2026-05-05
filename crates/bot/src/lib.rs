@@ -786,6 +786,31 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         chrono::Utc::now().timestamp(),
     ))));
 
+    // Per-main-session mutex map and per-(chat,thread) bg-request flags.
+    // Shared across worker, delivery, and callback handlers.
+    let session_locks: crate::telegram::SessionLocks = Arc::new(dashmap::DashMap::new());
+    let bg_requests: crate::telegram::BgRequests = Arc::new(dashmap::DashMap::new());
+
+    // Periodic sweeper: drop orphan mutex entries (entries whose only Arc holder
+    // is the map itself). Without this, the map grows unboundedly on long-lived
+    // agents — every unique session UUID adds an entry forever.
+    {
+        let session_locks = Arc::clone(&session_locks);
+        let sweep_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(3600));
+            iv.tick().await;
+            loop {
+                tokio::select! {
+                    _ = iv.tick() => {
+                        session_locks.retain(|_, arc| Arc::strong_count(arc) > 1);
+                    }
+                    _ = sweep_shutdown.cancelled() => break,
+                }
+            }
+        });
+    }
+
     // Cron delivery loop: delivers pending cron results through main CC session when idle
     let delivery_agent_dir = agent_dir.clone();
     let delivery_agent_name = args.agent.clone();
@@ -797,6 +822,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_shutdown = shutdown.clone();
     let delivery_sandbox = resolved_sandbox.clone();
     let delivery_upgrade_lock = Arc::clone(&upgrade_lock);
+    let delivery_session_locks = Arc::clone(&session_locks);
     let delivery_handle = tokio::spawn(async move {
         cron_delivery::run_delivery_loop(
             delivery_agent_dir,
@@ -809,8 +835,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_shutdown,
             delivery_sandbox,
             delivery_upgrade_lock,
-            // Task 12 will replace with the shared SessionLocks instance.
-            Arc::new(dashmap::DashMap::new()),
+            delivery_session_locks,
         )
         .await;
     });
@@ -875,6 +900,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             prefetch_cache,
             upgrade_lock,
             stt,
+            Arc::clone(&session_locks),
+            Arc::clone(&bg_requests),
             update_listener,
         ) => result,
         result = axum_handle => result

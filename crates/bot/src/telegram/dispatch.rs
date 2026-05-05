@@ -98,6 +98,8 @@ pub async fn run_telegram<L>(
     prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
+    session_locks: super::SessionLocks,
+    bg_requests: super::BgRequests,
     update_listener: L,
 ) -> miette::Result<()>
 where
@@ -151,8 +153,6 @@ where
         stt,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
-    // Interim: local instance; Task 12 replaces with shared instance wired from lib.rs.
-    let bg_requests: super::BgRequests = Arc::new(DashMap::new());
 
     // Spawn memory-alerts watcher (AuthFailed + client-flood) — only when Hindsight is configured.
     // Pass the live allowlist handle; recipients are resolved at broadcast time so
@@ -181,6 +181,7 @@ where
         Arc::clone(&settings_arc),
         Arc::clone(&stop_tokens),
         Arc::clone(&idle_ts),
+        Arc::clone(&session_locks),
         Arc::clone(&bg_requests),
     );
 
@@ -378,8 +379,14 @@ fn build_dispatcher(
     settings_arc: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
     idle_ts: Arc<IdleTimestamp>,
+    session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
 ) -> teloxide::dispatching::Dispatcher<BotType, RequestError, DefaultKey> {
+    let worker_ctl = super::WorkerControlDeps {
+        stop_tokens,
+        session_locks,
+        bg_requests,
+    };
     let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
 
     // Dispatch schema (RESEARCH.md Pattern 1)
@@ -467,11 +474,10 @@ fn build_dispatcher(
             pending_token_slot_arc,
             internal_api_arc,
             settings_arc,
-            stop_tokens,
             idle_ts,
             identity_arc,
             allowlist,
-            bg_requests
+            worker_ctl
         ])
         .build()
 }
@@ -534,6 +540,7 @@ mod tests {
             stt: None,
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
+        let session_locks: super::super::SessionLocks = Arc::new(DashMap::new());
         let bg_requests: super::super::BgRequests = Arc::new(DashMap::new());
         let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
 
@@ -554,6 +561,7 @@ mod tests {
             settings,
             stop_tokens,
             idle_ts,
+            session_locks,
             bg_requests,
         );
     }

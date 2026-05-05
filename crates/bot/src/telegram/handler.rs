@@ -136,10 +136,10 @@ pub async fn handle_message(
     ssh_config: Arc<SshConfigPath>,
     intercept_slots: Arc<InterceptSlots>,
     settings: Arc<AgentSettings>,
-    stop_tokens: super::StopTokens,
     idle_ts: Arc<IdleTimestamp>,
     internal_api: Arc<InternalApi>,
     identity: Arc<super::mention::BotIdentity>,
+    worker_ctl: super::WorkerControlDeps,
 ) -> ResponseResult<()> {
     idle_ts.0.store(
         chrono::Utc::now().timestamp(),
@@ -351,9 +351,9 @@ pub async fn handle_message(
                     auth_code_tx: Arc::clone(&intercept_slots.auth_code),
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
-                    stop_tokens: Arc::clone(&stop_tokens),
-                    session_locks: Arc::new(dashmap::DashMap::new()),
-                    bg_requests: Arc::new(dashmap::DashMap::new()),
+                    stop_tokens: Arc::clone(&worker_ctl.stop_tokens),
+                    session_locks: Arc::clone(&worker_ctl.session_locks),
+                    bg_requests: Arc::clone(&worker_ctl.bg_requests),
                     idle_timestamp: Arc::clone(&idle_ts.0),
                     internal_client: Arc::clone(&internal_api.0),
                     hindsight: settings.hindsight.clone(),
@@ -1880,7 +1880,7 @@ async fn build_usage_summary(agent_dir: &Path, detail: bool) -> Result<String, m
 pub async fn handle_stop_callback(
     bot: BotType,
     q: CallbackQuery,
-    stop_tokens: super::StopTokens,
+    worker_ctl: super::WorkerControlDeps,
 ) -> ResponseResult<()> {
     let data = q.data.as_deref().unwrap_or("");
     let parts: Vec<&str> = data.splitn(3, ':').collect();
@@ -1892,7 +1892,7 @@ pub async fn handle_stop_callback(
         && let Ok(thread_id) = parts[2].parse::<i64>()
     {
         let key = (chat_id, thread_id);
-        if let Some(entry) = stop_tokens.get(&key) {
+        if let Some(entry) = worker_ctl.stop_tokens.get(&key) {
             entry.value().cancel();
             drop(entry); // release DashMap read guard before await
             Some("Stopping...")
@@ -1924,8 +1924,7 @@ pub async fn handle_stop_callback(
 pub async fn handle_bg_callback(
     bot: BotType,
     q: CallbackQuery,
-    stop_tokens: super::StopTokens,
-    bg_requests: super::BgRequests,
+    worker_ctl: super::WorkerControlDeps,
 ) -> ResponseResult<()> {
     let data = q.data.as_deref().unwrap_or("");
     let parts: Vec<&str> = data.splitn(3, ':').collect();
@@ -1937,8 +1936,8 @@ pub async fn handle_bg_callback(
         && let Ok(thread_id) = parts[2].parse::<i64>()
     {
         let key = (chat_id, thread_id);
-        if let Some(entry) = stop_tokens.get(&key) {
-            bg_requests.insert(key, ());
+        if let Some(entry) = worker_ctl.stop_tokens.get(&key) {
+            worker_ctl.bg_requests.insert(key, ());
             entry.value().cancel();
             drop(entry);
             Some("Sending to background...")
