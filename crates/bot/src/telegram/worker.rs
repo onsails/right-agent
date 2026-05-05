@@ -551,6 +551,11 @@ fn build_memory_marker(
     }
 }
 
+/// Placeholder — full implementation in Task 11.
+fn build_bg_marker_for_chat(_agent_dir: &std::path::Path, _chat_id: i64) -> Option<String> {
+    None
+}
+
 // ── Async worker ─────────────────────────────────────────────────────────────
 
 /// Collect a single debounce batch starting from `first`, draining additional
@@ -1695,8 +1700,13 @@ async fn invoke_cc(
         };
 
         let marker = build_memory_marker(wrapper_status, client_drops_24h);
-        match (recall_content.as_deref(), marker.as_deref()) {
-            (None, None) => {
+        let bg_marker = build_bg_marker_for_chat(&ctx.agent_dir, chat_id);
+        match (
+            recall_content.as_deref(),
+            marker.as_deref(),
+            bg_marker.as_deref(),
+        ) {
+            (None, None, None) => {
                 let sandbox_ref = match (
                     ctx.ssh_config_path.as_deref(),
                     ctx.resolved_sandbox.as_deref(),
@@ -1709,7 +1719,7 @@ async fn invoke_cc(
                 };
                 super::prompt::remove_composite_memory(&ctx.agent_dir, sandbox_ref).await;
             }
-            (content, marker_str) => {
+            (content, marker_str, bg_marker_str) => {
                 // content may be None (no recall) while marker is Some —
                 // deploy a marker-only file so the agent still sees status.
                 let body = content.unwrap_or("");
@@ -1719,6 +1729,7 @@ async fn invoke_cc(
                     &ctx.agent_dir,
                     ctx.resolved_sandbox.as_deref(),
                     marker_str,
+                    bg_marker_str,
                 )
                 .await
                 {

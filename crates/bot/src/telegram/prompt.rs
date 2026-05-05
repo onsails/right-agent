@@ -135,12 +135,14 @@ pub(crate) async fn deploy_composite_memory(
     agent_dir: &std::path::Path,
     resolved_sandbox: Option<&str>,
     status_marker: Option<&str>,
+    bg_marker: Option<&str>,
 ) -> Result<(), DeployError> {
-    let marker_tail = status_marker
+    let status_tail = status_marker
         .map(|m| format!("\n\n{m}"))
         .unwrap_or_default();
+    let bg_tail = bg_marker.map(|m| format!("\n\n{m}")).unwrap_or_default();
     let fenced = format!(
-        "<memory-context>\n[System: recalled memory context, {label}.]\n\n{content}\n</memory-context>{marker_tail}"
+        "<memory-context>\n[System: recalled memory context, {label}.]\n\n{content}\n</memory-context>{status_tail}{bg_tail}"
     );
     let host_path = agent_dir.join(".claude").join("composite-memory.md");
     tokio::fs::write(&host_path, &fenced)
