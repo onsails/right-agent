@@ -337,51 +337,18 @@ async fn execute_job(
     let mut disallowed_tools = crate::telegram::invocation::baseline_disallowed_tools();
     disallowed_tools.push("Agent".into());
 
-    // Optional X-FORK-FROM header in the prompt: when present, this is a
-    // background-continuation job that must `--resume <main> --fork-session
-    // --session-id <run_id>`. We strip the header before passing the prompt to CC.
-    //
-    // The header is bot-internal — only `enqueue_background_job` produces it,
-    // and only with `ScheduleKind::Immediate`. We refuse to honour it on any
-    // other schedule_kind (an agent that calls `cron_create` cannot hijack
-    // `--resume` by crafting a prompt) and we refuse if the captured session
-    // segment isn't a well-formed UUID.
-    let (fork_from_main_session, prompt_for_cc): (Option<String>, String) = if matches!(
-        spec.schedule_kind,
-        right_agent::cron_spec::ScheduleKind::Immediate
-    ) && let Some(rest) = spec.prompt.strip_prefix("X-FORK-FROM: ")
-    {
-        match rest.split_once('\n') {
-            Some((sess, body)) => match uuid::Uuid::parse_str(sess) {
-                Ok(_) => (Some(sess.to_string()), body.to_string()),
-                Err(e) => {
-                    tracing::error!(
-                        job = %job_name,
-                        invalid_uuid = %sess,
-                        "X-FORK-FROM header had invalid UUID — refusing to run job: {e:#}"
-                    );
-                    update_run_record(&conn, &run_id, Some(-1), "failed");
-                    std::fs::remove_file(&lock_path).ok();
-                    return;
-                }
-            },
-            None => {
-                tracing::warn!(
-                    job = %job_name,
-                    "X-FORK-FROM header without newline; treating prompt as plain"
-                );
-                (None, spec.prompt.clone())
-            }
-        }
-    } else {
-        (None, spec.prompt.clone())
-    };
+    // Schema and (optional) --fork-session source come from spec.schedule_kind.
+    // BackgroundContinuation produces both a stricter schema (bg) and a
+    // resume-target main session UUID; everything else gets the regular
+    // cron schema and no fork.
+    let (json_schema_str, fork_from_main_session) = select_schema_and_fork(spec);
+    let prompt_for_cc = spec.prompt.clone();
 
     let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let invocation = crate::telegram::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
-        json_schema: Some(right_agent::codegen::CRON_SCHEMA_JSON.into()),
+        json_schema: Some(json_schema_str.into()),
         output_format: crate::telegram::invocation::OutputFormat::StreamJson,
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
