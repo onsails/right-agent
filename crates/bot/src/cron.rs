@@ -1526,6 +1526,8 @@ mod tests {
             lock_ttl: None,
             max_budget_usd: 2.0,
             triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
         }
     }
 

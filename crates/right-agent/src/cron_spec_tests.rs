@@ -394,6 +394,8 @@
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
         };
         let triggered = CronSpec {
             triggered_at: Some("2026-04-15T12:00:00Z".into()),
@@ -410,6 +412,8 @@
             lock_ttl: None,
             max_budget_usd: 1.0,
             triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
         };
         let changed_schedule = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/10 * * * *".into()),
@@ -423,9 +427,14 @@
             max_budget_usd: 2.0,
             ..base.clone()
         };
+        let changed_target = CronSpec {
+            target_chat_id: Some(-12345),
+            ..base.clone()
+        };
         assert_ne!(base, changed_schedule);
         assert_ne!(base, changed_prompt);
         assert_ne!(base, changed_budget);
+        assert_ne!(base, changed_target, "target_chat_id change must be a real change");
     }
 
     #[test]
@@ -435,6 +444,33 @@
         trigger_spec(&conn, "tr-load").unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
         assert!(specs["tr-load"].triggered_at.is_some());
+    }
+
+    #[test]
+    fn load_specs_from_db_carries_target_fields() {
+        let conn = setup_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('with-target', '*/5 * * * *', 'p', NULL, 1.0, 1, -555, 9, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, created_at, updated_at) \
+             VALUES ('no-target', '*/5 * * * *', 'p', NULL, 1.0, 1, ?1, ?1)",
+            [&now],
+        )
+        .unwrap();
+
+        let specs = load_specs_from_db(&conn).unwrap();
+        let with = &specs["with-target"];
+        assert_eq!(with.target_chat_id, Some(-555));
+        assert_eq!(with.target_thread_id, Some(9));
+
+        let without = &specs["no-target"];
+        assert_eq!(without.target_chat_id, None);
+        assert_eq!(without.target_thread_id, None);
     }
 
     #[test]

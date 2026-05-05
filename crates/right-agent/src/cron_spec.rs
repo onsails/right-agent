@@ -104,18 +104,24 @@ pub struct CronSpec {
     pub lock_ttl: Option<String>,
     pub max_budget_usd: f64,
     pub triggered_at: Option<String>,
+    pub target_chat_id: Option<i64>,
+    pub target_thread_id: Option<i64>,
 }
 
 /// Compare only the spec fields that define the job configuration.
 /// `triggered_at` is transient state (set/cleared by trigger flow) and must NOT
 /// participate in equality — otherwise the reconciler aborts running jobs on every
 /// trigger because the in-memory snapshot differs from the DB snapshot.
+/// `target_chat_id` and `target_thread_id` ARE config: changing them via
+/// `cron_update` is a real change the reconciler must react to.
 impl PartialEq for CronSpec {
     fn eq(&self, other: &Self) -> bool {
         self.schedule_kind == other.schedule_kind
             && self.prompt == other.prompt
             && self.lock_ttl == other.lock_ttl
             && self.max_budget_usd == other.max_budget_usd
+            && self.target_chat_id == other.target_chat_id
+            && self.target_thread_id == other.target_thread_id
     }
 }
 
@@ -630,7 +636,7 @@ pub fn load_specs_from_db(
 ) -> Result<HashMap<String, CronSpec>, rusqlite::Error> {
     let mut specs = HashMap::new();
     let mut stmt = conn.prepare(
-        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at FROM cron_specs",
+        "SELECT job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -643,12 +649,24 @@ pub fn load_specs_from_db(
             row.get::<_, Option<String>>(5)?,
             row.get::<_, i64>(6)?,
             row.get::<_, Option<String>>(7)?,
+            row.get::<_, Option<i64>>(8)?,
+            row.get::<_, Option<i64>>(9)?,
         ))
     })?;
 
     for row in rows {
-        let (job_name, schedule, prompt, lock_ttl, max_budget_usd, triggered_at, recurring, run_at) =
-            row?;
+        let (
+            job_name,
+            schedule,
+            prompt,
+            lock_ttl,
+            max_budget_usd,
+            triggered_at,
+            recurring,
+            run_at,
+            target_chat_id,
+            target_thread_id,
+        ) = row?;
 
         let schedule_kind = if let Some(ref rat) = run_at {
             match rat.parse::<DateTime<Utc>>() {
@@ -674,6 +692,8 @@ pub fn load_specs_from_db(
                 lock_ttl,
                 max_budget_usd,
                 triggered_at,
+                target_chat_id,
+                target_thread_id,
             },
         );
     }
