@@ -287,6 +287,19 @@ async fn execute_job(
     let mut disallowed_tools = crate::telegram::invocation::baseline_disallowed_tools();
     disallowed_tools.push("Agent".into());
 
+    // Optional X-FORK-FROM header in the prompt: when present, this is a
+    // background-continuation job that must `--resume <main> --fork-session
+    // --session-id <run_id>`. We strip the header before passing the prompt to CC.
+    let (fork_from_main_session, prompt_for_cc): (Option<String>, String) =
+        if let Some(rest) = spec.prompt.strip_prefix("X-FORK-FROM: ") {
+            match rest.split_once('\n') {
+                Some((sess, body)) => (Some(sess.to_string()), body.to_string()),
+                None => (None, spec.prompt.clone()),
+            }
+        } else {
+            (None, spec.prompt.clone())
+        };
+
     let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let invocation = crate::telegram::invocation::ClaudeInvocation {
@@ -296,13 +309,13 @@ async fn execute_job(
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
         max_turns: None,
-        resume_session_id: None,
+        resume_session_id: fork_from_main_session.clone(),
         new_session_id: Some(run_id.clone()),
-        fork_session: false,
+        fork_session: fork_from_main_session.is_some(),
         allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],
-        prompt: Some(spec.prompt.clone()),
+        prompt: Some(prompt_for_cc.clone()),
     };
 
     let claude_args = invocation.into_args();
@@ -1449,6 +1462,38 @@ mod tests {
             specs["trig-test"].triggered_at.is_some(),
             "triggered_at should be loaded"
         );
+    }
+
+    #[test]
+    fn fork_from_header_is_parsed_and_stripped() {
+        let prompt = "X-FORK-FROM: abc-123-uuid\nthe rest of the prompt\nmore lines";
+        let (fork, body): (Option<String>, String) =
+            if let Some(rest) = prompt.strip_prefix("X-FORK-FROM: ") {
+                match rest.split_once('\n') {
+                    Some((sess, body)) => (Some(sess.to_string()), body.to_string()),
+                    None => (None, prompt.to_string()),
+                }
+            } else {
+                (None, prompt.to_string())
+            };
+        assert_eq!(fork.as_deref(), Some("abc-123-uuid"));
+        assert_eq!(body, "the rest of the prompt\nmore lines");
+    }
+
+    #[test]
+    fn no_fork_header_leaves_prompt_intact() {
+        let prompt = "regular cron prompt";
+        let (fork, body): (Option<String>, String) =
+            if let Some(rest) = prompt.strip_prefix("X-FORK-FROM: ") {
+                match rest.split_once('\n') {
+                    Some((sess, body)) => (Some(sess.to_string()), body.to_string()),
+                    None => (None, prompt.to_string()),
+                }
+            } else {
+                (None, prompt.to_string())
+            };
+        assert!(fork.is_none());
+        assert_eq!(body, "regular cron prompt");
     }
 
     #[test]
