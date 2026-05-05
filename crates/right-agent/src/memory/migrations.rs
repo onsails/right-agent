@@ -144,9 +144,14 @@ fn v17_cron_target(tx: &Transaction) -> Result<(), HookError> {
 ///
 /// Snapshot of the spec's delivery target taken at run-insert time. Lets the
 /// delivery loop find the recipient even after a one-shot spec auto-deletes.
-/// Idempotent — checks pragma_table_info before each ALTER. Both columns are
-/// nullable; existing rows stay NULL (their spec is already gone — no recovery
-/// path) and continue to surface as `delivery_status='no_target'`.
+/// Both columns are nullable. After adding the columns we backfill them from
+/// `cron_specs` for any pre-existing run whose spec is still alive (recurring
+/// crons): the delivery loop reads the target straight from `cron_runs` (no
+/// LEFT JOIN to `cron_specs`), so without this backfill any undelivered run
+/// would be permanently `no_target` after upgrade. The UPDATE is idempotent —
+/// it filters by `target_chat_id IS NULL` so re-runs are no-ops. Rows whose
+/// spec has already been deleted stay NULL and continue to surface as
+/// `delivery_status='no_target'` (no recovery path).
 fn v18_cron_runs_target(tx: &Transaction) -> Result<(), HookError> {
     let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
         let count: i64 = tx.query_row(
@@ -163,6 +168,15 @@ fn v18_cron_runs_target(tx: &Transaction) -> Result<(), HookError> {
     if !has_column("target_thread_id")? {
         tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN target_thread_id INTEGER")?;
     }
+    // Backfill target columns from cron_specs for runs whose spec still
+    // exists. Idempotent — only touches rows where target_chat_id IS NULL.
+    tx.execute_batch(
+        "UPDATE cron_runs \
+           SET target_chat_id = (SELECT target_chat_id FROM cron_specs WHERE cron_specs.job_name = cron_runs.job_name), \
+               target_thread_id = (SELECT target_thread_id FROM cron_specs WHERE cron_specs.job_name = cron_runs.job_name) \
+           WHERE cron_runs.target_chat_id IS NULL \
+             AND EXISTS (SELECT 1 FROM cron_specs WHERE cron_specs.job_name = cron_runs.job_name)",
+    )?;
     Ok(())
 }
 
@@ -930,5 +944,55 @@ mod tests {
         MIGRATIONS.to_latest(&mut conn).unwrap();
         // Apply again — must not error (re-running should be a no-op).
         MIGRATIONS.to_latest(&mut conn).unwrap();
+    }
+
+    #[test]
+    fn v18_backfills_target_from_cron_specs_for_pending_undelivered_runs() {
+        // Stop one version before v18 so the legacy run is inserted into a
+        // cron_runs table that does not yet have target_* columns.
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 17).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        // Spec with target_chat_id set, target_thread_id NULL.
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, created_at, updated_at, target_chat_id) \
+             VALUES ('legacy-recurring', '*/5 * * * *', 'p', 1.0, ?1, ?1, 12345)",
+            [&now],
+        )
+        .unwrap();
+        // Pre-v18 cron_runs row: status=success, notify_json present,
+        // delivered_at NULL — i.e. an undelivered run waiting for the
+        // delivery loop to pick it up.
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at) \
+             VALUES ('run-1', 'legacy-recurring', ?1, ?1, 0, 'success', '/tmp/x.ndjson', 's', '{\"text\":\"hi\"}', NULL)",
+            [&now],
+        )
+        .unwrap();
+        // Apply v18 — this is what we're actually testing.
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let chat: Option<i64> = conn
+            .query_row(
+                "SELECT target_chat_id FROM cron_runs WHERE id = 'run-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chat,
+            Some(12345),
+            "v18 must backfill target_chat_id from cron_specs"
+        );
+        let thread: Option<i64> = conn
+            .query_row(
+                "SELECT target_thread_id FROM cron_runs WHERE id = 'run-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            thread.is_none(),
+            "target_thread_id should remain NULL when spec's thread is NULL"
+        );
     }
 }
