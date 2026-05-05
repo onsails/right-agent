@@ -270,42 +270,51 @@ fn is_run_job_loop_skip_kind(kind: &right_agent::cron_spec::ScheduleKind) -> boo
     )
 }
 
+/// Header prefix produced by the deprecated bg-continuation convention.
+/// Followed by the fork-from UUID and a newline, then the actual prompt body.
+const LEGACY_FORK_HEADER: &str = "X-FORK-FROM: ";
+
 /// One-time startup migration: rewrite legacy `@immediate` + `X-FORK-FROM:`
 /// rows produced by the old bg-continuation convention into the new
 /// `@bg:<uuid>` sentinel + clean prompt body. Idempotent — rows already in
-/// the new form are filtered out by `WHERE schedule = '@immediate'`.
-/// Invalid UUIDs in the legacy header leave the row untouched (logged at
-/// WARN). Returns the number of rows rewritten.
+/// the new form are filtered out by the `schedule = IMMEDIATE_SENTINEL`
+/// predicate. Invalid UUIDs in the legacy header leave the row untouched
+/// (logged at WARN). Returns the number of rows rewritten.
 pub fn migrate_legacy_bg_continuation(
     conn: &rusqlite::Connection,
 ) -> Result<usize, rusqlite::Error> {
+    use right_agent::cron_spec::{IMMEDIATE_SENTINEL, ScheduleKind};
+
+    let candidates: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT job_name, prompt FROM cron_specs WHERE schedule = ?1",
+        )?;
+        stmt.query_map([IMMEDIATE_SENTINEL], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+
     let tx = conn.unchecked_transaction()?;
     let mut migrated = 0usize;
-    {
-        let mut stmt = tx.prepare(
-            "SELECT job_name, prompt FROM cron_specs WHERE schedule = '@immediate'",
+    for (name, prompt) in candidates {
+        let Some(rest) = prompt.strip_prefix(LEGACY_FORK_HEADER) else {
+            continue;
+        };
+        let Some((sess, body)) = rest.split_once('\n') else {
+            continue;
+        };
+        let Ok(fork_from) = uuid::Uuid::parse_str(sess) else {
+            tracing::warn!(job = %name, "legacy @immediate row has invalid UUID in X-FORK-FROM; skipping");
+            continue;
+        };
+        let new_schedule = ScheduleKind::BackgroundContinuation { fork_from }.to_string();
+        tx.execute(
+            "UPDATE cron_specs SET schedule = ?1, prompt = ?2 WHERE job_name = ?3",
+            rusqlite::params![new_schedule, body, name],
         )?;
-        let rows: Vec<(String, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .filter_map(Result::ok)
-            .collect();
-        for (name, prompt) in rows {
-            let Some(rest) = prompt.strip_prefix("X-FORK-FROM: ") else {
-                continue;
-            };
-            let Some((sess, body)) = rest.split_once('\n') else {
-                continue;
-            };
-            let Ok(fork_from) = uuid::Uuid::parse_str(sess) else {
-                tracing::warn!(job = %name, "legacy @immediate row has invalid UUID in X-FORK-FROM; skipping");
-                continue;
-            };
-            tx.execute(
-                "UPDATE cron_specs SET schedule = ?1, prompt = ?2 WHERE job_name = ?3",
-                rusqlite::params![format!("@bg:{fork_from}"), body, name],
-            )?;
-            migrated += 1;
-        }
+        migrated += 1;
     }
     tx.commit()?;
     Ok(migrated)
@@ -410,6 +419,7 @@ async fn execute_job(
 
     let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
+    let fork_session = fork_from_main_session.is_some();
     let invocation = crate::telegram::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
         json_schema: Some(json_schema_str.into()),
@@ -417,13 +427,13 @@ async fn execute_job(
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
         max_turns: None,
-        resume_session_id: fork_from_main_session.clone(),
+        resume_session_id: fork_from_main_session,
         new_session_id: Some(run_id.clone()),
-        fork_session: fork_from_main_session.is_some(),
+        fork_session,
         allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],
-        prompt: Some(prompt_for_cc.clone()),
+        prompt: Some(prompt_for_cc),
     };
 
     let claude_args = invocation.into_args();

@@ -30,7 +30,7 @@ pub const DEFAULT_CRON_BUDGET_USD: f64 = 5.0;
 pub const IMMEDIATE_DEFAULT_LOCK_TTL: &str = "6h";
 
 /// Sentinel value stored in the `schedule` column for Immediate cron jobs.
-pub(crate) const IMMEDIATE_SENTINEL: &str = "@immediate";
+pub const IMMEDIATE_SENTINEL: &str = "@immediate";
 
 /// Sentinel prefix for `BackgroundContinuation` schedule encoding.
 /// Stored as `@bg:<fork_from-uuid>` in the `schedule` column.

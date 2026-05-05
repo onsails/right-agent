@@ -363,14 +363,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     );
 
     // Open data.db (creates if absent, applies migrations)
-    let _conn = open_connection(&agent_dir, true)
+    let conn = open_connection(&agent_dir, true)
         .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
     tracing::info!(agent = %args.agent, "data.db opened");
 
     // One-time data migration: rewrite legacy `@immediate` + `X-FORK-FROM:`
     // bg-continuation rows into the new `@bg:<uuid>` schedule encoding.
     // Idempotent — safe to re-run on every startup.
-    match crate::cron::migrate_legacy_bg_continuation(&_conn) {
+    //
+    // Deliberate FAIL FAST exception: a transient DB error here only causes
+    // legacy rows to keep their old encoding for one more boot; the cron
+    // engine ignores them (`@immediate` no longer maps to a fork target),
+    // so they sit dormant rather than corrupting state. Halting bot startup
+    // would block agents whose data.db has zero legacy rows for a problem
+    // affecting nobody. Logged at error so the next boot retries and the
+    // condition stays visible.
+    match crate::cron::migrate_legacy_bg_continuation(&conn) {
         Ok(0) => {}
         Ok(n) => {
             tracing::info!(agent = %args.agent, "migrated {n} legacy bg-continuation rows")

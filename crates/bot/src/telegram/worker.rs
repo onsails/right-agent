@@ -503,8 +503,17 @@ fn enqueue_background_job(
         &suffix[..JOB_SUFFIX_HEX_CHARS]
     );
     let prompt = build_continuation_prompt(reason);
-    let fork_from = uuid::Uuid::parse_str(main_session_id)
-        .map_err(|e| format!("main_session_id '{main_session_id}' is not a UUID: {e:#}"))?;
+    let fork_from = uuid::Uuid::parse_str(main_session_id).map_err(|e| {
+        tracing::error!(
+            chat_id,
+            thread_id,
+            main_session_id,
+            error = %format!("{e:#}"),
+            "enqueue_background_job: main_session_id is not a valid UUID — \
+             upstream invariant violated (data corruption or bug)"
+        );
+        format!("main_session_id '{main_session_id}' is not a UUID: {e:#}")
+    })?;
     let target_thread = if thread_id == 0 { None } else { Some(thread_id) };
     right_agent::cron_spec::insert_background_continuation(
         conn,
@@ -560,35 +569,63 @@ fn build_memory_marker(
 ///   queued for delivery (held by `IDLE_THRESHOLD_SECS` until the chat
 ///   goes idle).
 ///
-/// Returns `None` if the DB cannot be opened or no rows match. Errors do
-/// not propagate (best-effort marker — failure leaves composite-memory
-/// without the marker rather than blocking the turn).
+/// Best-effort: a DB failure here would block the foreground turn for an
+/// observability tail. We log at WARN and return `None` so the agent still
+/// gets its reply.
 fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) -> Option<String> {
-    let conn = right_agent::memory::open_connection(agent_dir, false).ok()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, job_name, started_at, status \
-             FROM cron_runs \
-             WHERE target_chat_id = ?1 \
-               AND ((status = 'running') OR (status = 'success' AND delivered_at IS NULL)) \
-             ORDER BY started_at",
-        )
-        .ok()?;
-    let rows: Vec<(String, String, String, String)> = stmt
-        .query_map([target_chat_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })
-        .ok()?
-        .filter_map(Result::ok)
-        .collect();
-    if rows.is_empty() {
+    let conn = match right_agent::memory::open_connection(agent_dir, false) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(?target_chat_id, "bg marker: open_connection failed: {e:#}");
+            return None;
+        }
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT id, job_name, started_at, status \
+         FROM cron_runs \
+         WHERE target_chat_id = ?1 \
+           AND ((status = 'running') OR (status = 'success' AND delivered_at IS NULL)) \
+         ORDER BY started_at",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(?target_chat_id, "bg marker: prepare failed: {e:#}");
+            return None;
+        }
+    };
+    let row_iter = match stmt.query_map([target_chat_id], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    }) {
+        Ok(it) => it,
+        Err(e) => {
+            tracing::warn!(?target_chat_id, "bg marker: query failed: {e:#}");
+            return None;
+        }
+    };
+    let mut body = String::new();
+    for row in row_iter {
+        match row {
+            Ok((id, name, ts, st)) => {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                use std::fmt::Write as _;
+                let _ = write!(body, "{name} (run {id}) — started {ts}, {st}");
+            }
+            Err(e) => {
+                tracing::warn!(?target_chat_id, "bg marker: row decode failed: {e:#}");
+                return None;
+            }
+        }
+    }
+    if body.is_empty() {
         return None;
     }
-    let body = rows
-        .iter()
-        .map(|(id, name, ts, st)| format!("{name} (run {id}) — started {ts}, {st}"))
-        .collect::<Vec<_>>()
-        .join("\n");
     Some(format!("<background-jobs>\n{body}\n</background-jobs>"))
 }
 

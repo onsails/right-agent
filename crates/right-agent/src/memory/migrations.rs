@@ -20,6 +20,7 @@ const V15_SCHEMA: &str = include_str!("sql/v15_usage_events.sql");
 const V16_SCHEMA: &str = include_str!("sql/v16_usage_api_key_source.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V17_SCHEMA: &str = include_str!("sql/v17_cron_target.sql");
+const V19_SCHEMA: &str = include_str!("sql/v19_cron_runs_target_index.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -200,6 +201,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v16_usage_api_key_source),
         M::up_with_hook("", v17_cron_target),
         M::up_with_hook("", v18_cron_runs_target),
+        M::up(V19_SCHEMA),
     ])
 });
 

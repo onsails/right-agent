@@ -1211,7 +1211,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 3. user_version matches migration.
-    let expected: u32 = 18;
+    let expected: u32 = 19;
     match conn.query_row::<u32, _, _>("PRAGMA user_version", [], |r| r.get(0)) {
         Ok(version) if version == expected => out.push(DoctorCheck {
             name: "memory schema".into(),

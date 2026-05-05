@@ -38,7 +38,15 @@ All three CC invocation paths use `build_prompt_assembly_script()`:
 |--------|--------|---------------|--------|-------|
 | Worker (Telegram messages) | `telegram/worker.rs` | true/false | reply-schema.json | agent config |
 | Cron (scheduled jobs) | `cron.rs` | false | CRON_SCHEMA_JSON | agent config |
+| Cron (background continuation) | `cron.rs` (`ScheduleKind::BackgroundContinuation`) | false | BG_CONTINUATION_SCHEMA_JSON | agent config |
 | Delivery (cron result relay) | `cron_delivery.rs` | false | reply-schema.json | claude-haiku-4-5-20251001 |
+
+`cron::execute_job` selects between `CRON_SCHEMA_JSON` and
+`BG_CONTINUATION_SCHEMA_JSON` via `select_schema_and_fork` (in
+`crates/bot/src/cron.rs`): the `BackgroundContinuation { fork_from }`
+variant routes to `BG_CONTINUATION_SCHEMA_JSON` and supplies
+`fork_from` as the `--resume`/`--fork-session` source; all other kinds
+use `CRON_SCHEMA_JSON` with no fork.
 
 ## Prompt Structure
 
@@ -187,6 +195,30 @@ Telegram media group (album). Validation and degradation rules match Telegram's
 Same as reply-schema plus required `bootstrap_complete` (boolean).
 Server-side validation: `bootstrap_complete: true` is ignored unless IDENTITY.md,
 SOUL.md, USER.md all exist on the host after reverse_sync.
+
+### CRON_SCHEMA_JSON (cron jobs — default)
+Defined in `crates/right-agent/src/codegen/agent_def.rs`. Required:
+`summary` (string). Optional: `notify` (object | null) and
+`no_notify_reason` (string | null). When `notify` is non-null, its
+`content` field is required. `notify: null` is the silent-output path
+(cron ran but has nothing to report); `no_notify_reason` should then
+carry a short factual explanation.
+
+### BG_CONTINUATION_SCHEMA_JSON (cron jobs — background continuation)
+Defined in `crates/right-agent/src/codegen/agent_def.rs`. Selected by
+`cron::execute_job` via `select_schema_and_fork` for
+`ScheduleKind::BackgroundContinuation` runs (foreground turns the
+worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
+
+- `notify` is REQUIRED and non-null — silent output is forbidden because
+  the user is waiting for the foreground answer that was sent to
+  background.
+- `notify.content` has `minLength: 1` (no empty replies).
+- `no_notify_reason` is absent from the schema — silence is not a valid
+  outcome for this job kind.
+
+`summary` remains required for log/analytics parity with
+`CRON_SCHEMA_JSON`.
 
 ## MCP Server Instructions
 
