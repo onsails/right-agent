@@ -532,14 +532,50 @@ pub fn update_spec_partial(
         sets.join(", ")
     );
 
+    // Determine if the caller is changing target columns. If so, we must
+    // propagate the new values to undelivered `cron_runs` rows so that runs
+    // queued before the redirect (status='success', delivered_at IS NULL)
+    // are routed to the new chat/thread on the next delivery tick. Without
+    // this, the run-time snapshot on cron_runs would strand them on the
+    // pre-update target — a regression vs the pre-snapshot LEFT JOIN
+    // semantics where the delivery loop always re-read the spec.
+    let target_changed = target_chat_id.is_some() || target_thread_id.is_some();
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("begin transaction failed: {e:#}"))?;
+
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let rows = conn
+    let rows = tx
         .execute(&sql, param_refs.as_slice())
         .map_err(|e| format!("update failed: {e:#}"))?;
 
     if rows == 0 {
         return Err(format!("job '{job_name}' not found"));
     }
+
+    if target_changed {
+        // Read back the spec's authoritative target after the UPDATE; this
+        // handles the case where the caller changed only one of the two
+        // target columns (the unspecified column must keep its prior value
+        // on undelivered runs, not be clobbered).
+        let (new_chat, new_thread): (Option<i64>, Option<i64>) = tx
+            .query_row(
+                "SELECT target_chat_id, target_thread_id FROM cron_specs WHERE job_name = ?1",
+                rusqlite::params![job_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| format!("read-back failed: {e:#}"))?;
+        tx.execute(
+            "UPDATE cron_runs SET target_chat_id = ?1, target_thread_id = ?2 \
+             WHERE job_name = ?3 AND delivered_at IS NULL",
+            rusqlite::params![new_chat, new_thread, job_name],
+        )
+        .map_err(|e| format!("cron_runs target propagation failed: {e:#}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("commit transaction failed: {e:#}"))?;
 
     Ok(CronSpecResult {
         message: format!("Updated cron job '{job_name}'."),

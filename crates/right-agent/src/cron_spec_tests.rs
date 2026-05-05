@@ -1145,3 +1145,185 @@
         assert_eq!(lock_ttl.as_deref(), Some(IMMEDIATE_DEFAULT_LOCK_TTL));
         assert_eq!(lock_ttl.as_deref(), Some("6h"));
     }
+
+    /// Regression: changing `target_chat_id` via `update_spec_partial` must
+    /// also redirect any already-finished-but-undelivered `cron_runs` rows
+    /// to the new chat. Pre-snapshot the delivery loop re-read the spec via
+    /// LEFT JOIN, so a target change took effect immediately. Now that
+    /// `cron_runs` carries its own snapshot we have to propagate the update
+    /// alongside the spec write to preserve that user-visible behavior.
+    /// Delivered runs (delivered_at IS NOT NULL) must NOT be rewritten —
+    /// they reflect what was actually sent.
+    #[test]
+    fn update_spec_partial_propagates_target_to_undelivered_runs() {
+        let conn = setup_db();
+
+        // Insert spec with original target chat 100.
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('redirect', '*/5 * * * *', 'p', 1.0, 1, NULL, 100, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        // Undelivered run (status='success', notify_json present, delivered_at NULL),
+        // snapshotted at insert time with target_chat_id=100.
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
+             VALUES ('run-undelivered', 'redirect', '2026-01-01T00:01:00Z', '2026-01-01T00:02:00Z', 0, 'success', '/tmp/log', '{\"reply\":\"hi\"}', NULL, 100, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // Already-delivered run with the old target — must remain at 100.
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
+             VALUES ('run-delivered', 'redirect', '2026-01-01T00:00:30Z', '2026-01-01T00:00:45Z', 0, 'success', '/tmp/log', '{\"reply\":\"hi\"}', '2026-01-01T00:00:50Z', 100, NULL)",
+            [],
+        )
+        .unwrap();
+
+        update_spec_partial(
+            &conn,
+            "redirect",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(200),
+            None,
+        )
+        .unwrap();
+
+        // Spec target updated.
+        let spec_chat: Option<i64> = conn
+            .query_row(
+                "SELECT target_chat_id FROM cron_specs WHERE job_name = 'redirect'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_chat, Some(200));
+
+        // Undelivered run redirected.
+        let undelivered_chat: Option<i64> = conn
+            .query_row(
+                "SELECT target_chat_id FROM cron_runs WHERE id = 'run-undelivered'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            undelivered_chat,
+            Some(200),
+            "undelivered run must be redirected to the new chat"
+        );
+
+        // Delivered run untouched.
+        let delivered_chat: Option<i64> = conn
+            .query_row(
+                "SELECT target_chat_id FROM cron_runs WHERE id = 'run-delivered'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            delivered_chat,
+            Some(100),
+            "delivered run must keep its historical target snapshot"
+        );
+    }
+
+    /// Updating only `target_thread_id` (chat unchanged) must propagate the
+    /// new thread to undelivered runs while preserving the spec's chat.
+    #[test]
+    fn update_spec_partial_propagates_thread_only_change() {
+        let conn = setup_db();
+
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('thr', '*/5 * * * *', 'p', 1.0, 1, NULL, 500, 7, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
+             VALUES ('run-thr', 'thr', '2026-01-01T00:01:00Z', '2026-01-01T00:02:00Z', 0, 'success', '/tmp/log', '{}', NULL, 500, 7)",
+            [],
+        )
+        .unwrap();
+
+        update_spec_partial(
+            &conn,
+            "thr",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(99)),
+        )
+        .unwrap();
+
+        let (run_chat, run_thread): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-thr'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(run_chat, Some(500), "chat must be preserved");
+        assert_eq!(run_thread, Some(99), "thread must be redirected");
+    }
+
+    /// Updates that don't touch target columns (e.g. prompt-only) must NOT
+    /// rewrite cron_runs — those rows should retain the run-time snapshot
+    /// untouched.
+    #[test]
+    fn update_spec_partial_non_target_change_leaves_runs_alone() {
+        let conn = setup_db();
+
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+             VALUES ('np', '*/5 * * * *', 'p', 1.0, 1, NULL, 100, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        // Run snapshotted with a *different* (stale) target — simulates a run
+        // that captured the spec target before some hypothetical earlier
+        // redirect. A prompt-only update must not normalize it.
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
+             VALUES ('run-np', 'np', '2026-01-01T00:01:00Z', '2026-01-01T00:02:00Z', 0, 'success', '/tmp/log', '{}', NULL, 77, 3)",
+            [],
+        )
+        .unwrap();
+
+        update_spec_partial(
+            &conn,
+            "np",
+            None,
+            None,
+            Some("new prompt"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let (run_chat, run_thread): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-np'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(run_chat, Some(77));
+        assert_eq!(run_thread, Some(3));
+    }
