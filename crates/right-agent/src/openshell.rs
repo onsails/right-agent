@@ -509,6 +509,24 @@ pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> 
 /// Uses `-F config_path` to pick up the sandbox SSH config, and
 /// `host` as the SSH host alias (see [`ssh_host`]).
 /// Returns stdout on success.
+///
+/// # ControlMaster compatibility
+///
+/// This function intentionally does NOT use [`ProcessGroupChild`]. The SSH
+/// config appended by [`generate_ssh_config`] includes `ControlMaster auto /
+/// ControlPersist yes`, so the first `ssh_exec` call spawns a background
+/// master process and a ProxyCommand that serves as the master's transport.
+/// Both are in the *same OS process group* as the initial `ssh` client.
+///
+/// Using `ProcessGroupChild` (which calls `killpg(SIGKILL)` on drop) would
+/// kill the ProxyCommand and the master with it — defeating multiplexing.
+/// Instead, we use a plain `tokio::process::Child` with `kill_on_drop(false)`.
+///
+/// On timeout the direct `ssh` client process is killed individually; the
+/// background master and its ProxyCommand are left intact so subsequent calls
+/// can still reuse them. Cleanup happens via [`tear_down_control_master`] at
+/// bot shutdown or sandbox migration, and via [`clean_stale_control_master`]
+/// at bot startup.
 pub async fn ssh_exec(
     config_path: &Path,
     host: &str,
@@ -522,27 +540,44 @@ pub async fn ssh_exec(
     command.args(cmd);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    command.kill_on_drop(false);
 
-    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
+    let child = command
+        .spawn()
         .map_err(|e| miette::miette!("failed to spawn ssh: {e:#}"))?;
 
+    // Capture the PID before consuming `child` in wait_with_output.
+    let child_pid = child.id();
+
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let output = tokio::time::timeout(timeout_dur, child.wait_with_output())
-        .await
-        .map_err(|_| miette::miette!("ssh exec timed out after {timeout_secs}s"))?
-        .map_err(|e| miette::miette!("ssh exec failed: {e:#}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(host, ?cmd, %stderr, "ssh exec failed");
-        return Err(miette::miette!(
-            "ssh exec on '{host}' failed (exit {}): {stderr}",
-            output.status
-        ));
+    match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
+        Ok(Ok(output)) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!(host, ?cmd, %stderr, "ssh exec failed");
+                return Err(miette::miette!(
+                    "ssh exec on '{host}' failed (exit {}): {stderr}",
+                    output.status
+                ));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        }
+        Ok(Err(e)) => Err(miette::miette!("ssh exec failed: {e:#}")),
+        Err(_) => {
+            // Timeout: kill the direct ssh client but leave the ControlMaster
+            // and its ProxyCommand alive so subsequent calls can still reuse them.
+            // `child` was consumed by `wait_with_output`; use the PID directly.
+            if let Some(pid) = child_pid {
+                if let Err(e) = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                ) {
+                    tracing::debug!(host, pid, error = %e, "ssh kill on timeout: already exited?");
+                }
+            }
+            Err(miette::miette!("ssh exec timed out after {timeout_secs}s"))
+        }
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    Ok(stdout)
 }
 
 /// Check whether an OpenSSH ControlMaster is alive at the ControlPath
