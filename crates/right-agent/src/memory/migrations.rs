@@ -140,6 +140,32 @@ fn v17_cron_target(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v18: Add target_chat_id and target_thread_id to cron_runs.
+///
+/// Snapshot of the spec's delivery target taken at run-insert time. Lets the
+/// delivery loop find the recipient even after a one-shot spec auto-deletes.
+/// Idempotent — checks pragma_table_info before each ALTER. Both columns are
+/// nullable; existing rows stay NULL (their spec is already gone — no recovery
+/// path) and continue to surface as `delivery_status='no_target'`.
+fn v18_cron_runs_target(tx: &Transaction) -> Result<(), HookError> {
+    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('cron_runs') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    };
+
+    if !has_column("target_chat_id")? {
+        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN target_chat_id INTEGER")?;
+    }
+    if !has_column("target_thread_id")? {
+        tx.execute_batch("ALTER TABLE cron_runs ADD COLUMN target_thread_id INTEGER")?;
+    }
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -159,6 +185,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V15_SCHEMA),
         M::up_with_hook("", v16_usage_api_key_source),
         M::up_with_hook("", v17_cron_target),
+        M::up_with_hook("", v18_cron_runs_target),
     ])
 });
 
@@ -873,5 +900,35 @@ mod tests {
             target.is_none(),
             "legacy row should have NULL target_chat_id"
         );
+    }
+
+    #[test]
+    fn v18_cron_runs_has_target_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('cron_runs')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.contains(&"target_chat_id".to_string()),
+            "cron_runs.target_chat_id column missing"
+        );
+        assert!(
+            cols.contains(&"target_thread_id".to_string()),
+            "cron_runs.target_thread_id column missing"
+        );
+    }
+
+    #[test]
+    fn v18_is_idempotent() {
+        // Apply once.
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        // Apply again — must not error (re-running should be a no-op).
+        MIGRATIONS.to_latest(&mut conn).unwrap();
     }
 }
