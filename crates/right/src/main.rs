@@ -2247,8 +2247,13 @@ async fn cmd_up(
     detach: bool,
     debug: bool,
 ) -> miette::Result<()> {
+    let t_total = std::time::Instant::now();
+    let mut t_phase = std::time::Instant::now();
+
     // Fail fast if required tools are missing.
     right_agent::runtime::verify_dependencies()?;
+    tracing::info!(elapsed_ms = t_phase.elapsed().as_millis() as u64, "up: verify_dependencies");
+    t_phase = std::time::Instant::now();
 
     let run_dir = home.join("run");
 
@@ -2264,6 +2269,8 @@ async fn cmd_up(
         ));
     }
     check_port_available(right_agent::runtime::MCP_HTTP_PORT).await?;
+    tracing::info!(elapsed_ms = t_phase.elapsed().as_millis() as u64, "up: pc_health + port_check");
+    t_phase = std::time::Instant::now();
 
     // Discover agents.
     let agents_dir = right_agent::config::agents_dir(home);
@@ -2276,6 +2283,12 @@ async fn cmd_up(
             "no agents found. Run `right agent init <name>` to create one."
         ));
     }
+    tracing::info!(
+        elapsed_ms = t_phase.elapsed().as_millis() as u64,
+        agents = agents.len(),
+        "up: discover_agents"
+    );
+    t_phase = std::time::Instant::now();
 
     // Pre-flight: when any agent needs sandbox, verify OpenShell is ready.
     // The bot process needs mTLS certs to connect to the gateway's gRPC API —
@@ -2292,6 +2305,13 @@ async fn cmd_up(
             })
             .unwrap_or(true) // default is openshell
     });
+    tracing::info!(
+        elapsed_ms = t_phase.elapsed().as_millis() as u64,
+        any_sandboxed,
+        "up: sandbox_mode_scan"
+    );
+    t_phase = std::time::Instant::now();
+
     if any_sandboxed {
         match right_agent::openshell::preflight_check() {
             right_agent::openshell::OpenShellStatus::Ready(_) => {}
@@ -2338,6 +2358,11 @@ async fn cmd_up(
             }
         }
     }
+    tracing::info!(
+        elapsed_ms = t_phase.elapsed().as_millis() as u64,
+        "up: openshell_preflight"
+    );
+    t_phase = std::time::Instant::now();
 
     // Download any whisper models needed by STT-enabled agents.
     {
@@ -2359,6 +2384,11 @@ async fn cmd_up(
             }
         }
     }
+    tracing::info!(
+        elapsed_ms = t_phase.elapsed().as_millis() as u64,
+        "up: whisper_models_cache"
+    );
+    t_phase = std::time::Instant::now();
 
     // Clear rightcron init locks so the bootstrap hook fires on this session.
     for agent in &agents {
@@ -2374,6 +2404,10 @@ async fn cmd_up(
     // Run cross-agent codegen: token map, policy validation,
     // cloudflared config, process-compose.yaml, and runtime state.
     right_agent::codegen::run_agent_codegen(home, &agents, &self_exe, debug)?;
+    tracing::info!(
+        elapsed_ms = t_phase.elapsed().as_millis() as u64,
+        "up: cross_agent_codegen"
+    );
 
     // Check that at least one agent has a Telegram token configured.
     let has_bot_agents = agents.iter().any(|a| {
@@ -2409,6 +2443,12 @@ async fn cmd_up(
     {
         cmd.env("PC_API_TOKEN", token);
     }
+
+    tracing::info!(
+        total_pre_pc_ms = t_total.elapsed().as_millis() as u64,
+        detach,
+        "up: spawning process-compose"
+    );
 
     if detach {
         cmd.arg("--detached");
