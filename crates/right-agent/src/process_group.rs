@@ -196,6 +196,65 @@ mod tests {
         );
     }
 
+    /// Mirrors the SSH ControlMaster hang seen in production (2026-05-05):
+    /// the slave ssh forwards its stdio FDs to the master via SCM_RIGHTS,
+    /// so SIGKILLing the slave leaves the pipe write-end held by another
+    /// process and an unbounded `read_to_string(stderr)` never sees EOF.
+    ///
+    /// We can't bring up a real ssh master in a unit test, but the failure
+    /// mode is general: any process whose backgrounded child inherits stderr
+    /// leaves the FD open after the direct child dies. This test exercises
+    /// that shape and asserts the worker/cron post-break read pattern —
+    /// `tokio::time::timeout` around `read_to_string` — returns within its
+    /// budget instead of hanging.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_stderr_read_returns_when_grandchild_holds_fd() {
+        use tokio::io::{AsyncReadExt, BufReader};
+
+        let mut cmd = Command::new("bash");
+        // Background a sleep that inherits stderr (FD 2), then echo a marker
+        // and wait. SIGKILLing bash leaves the orphan sleep holding the FD.
+        cmd.arg("-c").arg("sleep 30 & echo started >&2; wait");
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = ProcessGroupChild::spawn(cmd).expect("spawn");
+        let stderr = child.stderr().expect("stderr piped");
+        let mut reader = BufReader::new(stderr);
+
+        // Synchronise on the marker so we know the backgrounded sleep has
+        // forked and inherited the FD before we kill bash.
+        let mut marker = String::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            use tokio::io::AsyncBufReadExt;
+            reader.read_line(&mut marker).await
+        })
+        .await
+        .expect("marker read should not time out")
+        .expect("marker read");
+        assert_eq!(marker.trim(), "started");
+
+        // Kill the direct child (bash). The backgrounded sleep survives and
+        // keeps its inherited stderr FD open.
+        child.kill().await.expect("kill bash");
+        let _ = tokio::time::timeout(Duration::from_millis(500), child.wait()).await;
+
+        // Bounded drain — exactly what worker.rs/cron.rs do post-break. With
+        // an unbounded read this would block for the orphan sleep's full 30s
+        // (or until the surrounding test runner times out).
+        let started = tokio::time::Instant::now();
+        let mut buf = String::new();
+        let _ =
+            tokio::time::timeout(Duration::from_secs(1), reader.read_to_string(&mut buf)).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "bounded read returned in {elapsed:?} — should be ≤ ~1s",
+        );
+        // child's Drop fires killpg on the whole group, reaping the orphan.
+    }
+
     /// Regression test for the cancel-safety bug: tokio::time::timeout
     /// wrapping wait_with_output must kill the process group when the
     /// timeout elapses. The previous `wait_with_output(self)` signature

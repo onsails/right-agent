@@ -440,6 +440,12 @@ async fn execute_job(
         let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
+        // Opt out of multiplexing — see worker.rs `invoke_cc` for the
+        // rationale. Cron jobs are long-lived just like worker turns and hit
+        // the same hang if the master holds forwarded FDs after we kill the
+        // slave.
+        c.arg("-o").arg("ControlMaster=no");
+        c.arg("-o").arg("ControlPath=none");
         c.arg(&ssh_host);
         c.arg("--");
         c.arg(assembly_script);
@@ -514,21 +520,76 @@ async fn execute_job(
         collected_lines.push(line);
     }
 
-    // Wait for child exit and capture stderr.
-    let exit_status = match child.wait().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(job = %job_name, "wait failed: {e:#}");
-            update_run_record(&conn, &run_id, None, "failed");
-            std::fs::remove_file(&lock_path).ok();
-            return;
+    // Post-stream-loop cleanup. ProcessGroupChild::Drop kills the slave's
+    // group on function return, so a hang here can never outlive `execute_job`.
+    // Inside the function we still bound each blocking syscall (the same
+    // wedged-pipe defense the worker uses).
+    let child_pid = child.id();
+
+    let wait_started = tokio::time::Instant::now();
+    let exit_status = match tokio::time::timeout(
+        std::time::Duration::from_secs(POST_BREAK_WAIT_TIMEOUT_SECS),
+        child.wait(),
+    )
+    .await
+    {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(e)) => {
+            tracing::error!(job = %job_name, child_pid, "wait failed: {e:#}");
+            None
+        }
+        Err(_) => {
+            tracing::error!(
+                job = %job_name,
+                child_pid,
+                elapsed_ms = wait_started.elapsed().as_millis() as u64,
+                "child.wait timed out — slave wedged; ProcessGroupChild::Drop will killpg on return",
+            );
+            None
         }
     };
-    // stderr is still owned by child — read it via the handle.
+    if exit_status.is_none() {
+        update_run_record(&conn, &run_id, None, "failed");
+        std::fs::remove_file(&lock_path).ok();
+        return;
+    }
+    let exit_status = exit_status.unwrap();
+    tracing::debug!(
+        job = %job_name,
+        child_pid,
+        exit_code = ?exit_status.code(),
+        wait_ms = wait_started.elapsed().as_millis() as u64,
+        "post-break: child waited",
+    );
+
+    // stderr is still owned by child — bounded read so a wedged pipe doesn't
+    // stall the cron worker.
     let stderr_bytes = if let Some(mut stderr) = child.stderr() {
         let mut buf = Vec::new();
-        if let Err(e) = stderr.read_to_end(&mut buf).await {
-            tracing::warn!(job = %job_name, "failed to read stderr: {e:#}");
+        let read_started = tokio::time::Instant::now();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(POST_BREAK_STDERR_TIMEOUT_SECS),
+            stderr.read_to_end(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok(n)) => tracing::debug!(
+                job = %job_name,
+                child_pid,
+                bytes = n,
+                read_ms = read_started.elapsed().as_millis() as u64,
+                "post-break: stderr drained",
+            ),
+            Ok(Err(e)) => {
+                tracing::warn!(job = %job_name, child_pid, "failed to read stderr: {e:#}")
+            }
+            Err(_) => tracing::error!(
+                job = %job_name,
+                child_pid,
+                bytes_so_far = buf.len(),
+                elapsed_ms = read_started.elapsed().as_millis() as u64,
+                "stderr read timed out — pipe write-end held by another process",
+            ),
         }
         buf
     } else {
@@ -819,6 +880,14 @@ fn update_run_record(
 
 /// Timeout for waiting on in-flight execute_job tasks during shutdown.
 const SHUTDOWN_JOB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Bound on `child.wait()` after the cron stream loop exits — see the
+/// matching constant in `telegram::worker` for the rationale.
+const POST_BREAK_WAIT_TIMEOUT_SECS: u64 = 5;
+
+/// Bound on draining cron stderr after exit — see the matching constant in
+/// `telegram::worker`.
+const POST_BREAK_STDERR_TIMEOUT_SECS: u64 = 2;
 
 /// Shared storage for in-flight execute_job handles.
 ///

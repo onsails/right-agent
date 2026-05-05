@@ -43,6 +43,17 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
 
+/// Bound on `child.wait()` after we've already broken from the streaming
+/// loop. The slave should be either gone (deadline/stop SIGKILL) or about
+/// to exit (stdout EOF). Five seconds is generous and only matters as a
+/// guard against future plumbing regressions.
+const POST_BREAK_WAIT_TIMEOUT_SECS: u64 = 5;
+
+/// Bound on draining stderr after exit. Stderr text is purely diagnostic —
+/// when the pipe is wedged (FD held by some other process) we'd rather
+/// log the wedge and continue with an empty buffer than block the worker.
+const POST_BREAK_STDERR_TIMEOUT_SECS: u64 = 2;
+
 /// Maximum character count for Hindsight recall queries (~530 tokens, safely under the 500-token API limit).
 const RECALL_MAX_CHARS: usize = 800;
 
@@ -1753,6 +1764,16 @@ async fn invoke_cc(
         }
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
+        // Opt out of multiplexing for the long-lived `claude -p` channel.
+        // In multiplex mode the slave forwards stdin/stdout/stderr FDs to the
+        // master via SCM_RIGHTS; SIGKILLing the slave on deadline leaves the
+        // master holding those FDs until the remote command exits, hanging
+        // the bot's post-kill stderr read indefinitely. The handshake savings
+        // ControlMaster offers are noise next to a turn that lasts seconds to
+        // minutes — so for this one call site we connect directly. Short ssh
+        // calls (mkdir, attachments, ssh_exec) keep using the master.
+        c.arg("-o").arg("ControlMaster=no");
+        c.arg("-o").arg("ControlPath=none");
         c.arg(&ssh_host);
         c.arg("--");
         c.arg(assembly_script);
@@ -1989,20 +2010,70 @@ async fn invoke_cc(
             }
             _ = tokio::time::sleep_until(deadline) => {
                 timed_out = true;
+                tracing::warn!(
+                    ?chat_id,
+                    turn_id,
+                    child_pid = child.id(),
+                    "deadline fired ({}s) — sending SIGKILL to claude -p",
+                    CC_TIMEOUT_SECS,
+                );
                 child.kill().await.ok();
                 break;
             }
             _ = stop_token.cancelled() => {
                 stopped = true;
+                tracing::info!(
+                    ?chat_id,
+                    turn_id,
+                    child_pid = child.id(),
+                    "stop_token cancelled — sending SIGKILL to claude -p",
+                );
                 child.kill().await.ok();
                 break;
             }
         }
     }
 
-    // Wait for process exit.
-    let exit_status = child.wait().await.ok();
+    // Post-break cleanup. ProcessGroupChild::Drop kills the slave's group on
+    // function return, so a hang here can never outlive `invoke_cc`. Inside
+    // the function we still bound each blocking syscall: with future SSH or
+    // subprocess plumbing changes, the master could once again hold the slave's
+    // pipe FDs and stall these reads. The bounds keep the worker walking even
+    // if that recurs, and the structured logs make the recurrence visible.
+    let child_pid = child.id();
+
+    let wait_started = tokio::time::Instant::now();
+    let exit_status = match tokio::time::timeout(
+        Duration::from_secs(POST_BREAK_WAIT_TIMEOUT_SECS),
+        child.wait(),
+    )
+    .await
+    {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(e)) => {
+            tracing::warn!(?chat_id, turn_id, child_pid, "child.wait failed: {e:#}");
+            None
+        }
+        Err(_) => {
+            tracing::error!(
+                ?chat_id,
+                turn_id,
+                child_pid,
+                elapsed_ms = wait_started.elapsed().as_millis() as u64,
+                "child.wait timed out — slave is wedged; ProcessGroupChild::Drop will killpg on return",
+            );
+            None
+        }
+    };
     let exit_code = exit_status.and_then(|s| s.code()).unwrap_or(-1);
+    tracing::debug!(
+        ?chat_id,
+        turn_id,
+        child_pid,
+        exit_code,
+        wait_ms = wait_started.elapsed().as_millis() as u64,
+        "post-break: child waited",
+    );
 
     // Remove stop token — session no longer cancellable. Done FIRST so any
     // bg/stop callback that fires after this point sees an empty slot and
@@ -2014,11 +2085,42 @@ async fn invoke_cc(
     // so `stopped` is true here as well; bg semantics override.
     let was_bg_request = consume_bg_request(&ctx.bg_requests, (chat_id, eff_thread_id), turn_id);
 
-    // Read any remaining stderr.
+    // Read any remaining stderr. Bounded to keep a wedged pipe from blocking
+    // the worker — see the post-break cleanup comment above.
     let stderr_str = if let Some(mut stderr) = child.stderr() {
         let mut buf = String::new();
         use tokio::io::AsyncReadExt;
-        let _ = stderr.read_to_string(&mut buf).await;
+        let read_started = tokio::time::Instant::now();
+        match tokio::time::timeout(
+            Duration::from_secs(POST_BREAK_STDERR_TIMEOUT_SECS),
+            stderr.read_to_string(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok(n)) => {
+                tracing::debug!(
+                    ?chat_id,
+                    turn_id,
+                    child_pid,
+                    bytes = n,
+                    read_ms = read_started.elapsed().as_millis() as u64,
+                    "post-break: stderr drained",
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(?chat_id, turn_id, child_pid, "stderr read failed: {e:#}");
+            }
+            Err(_) => {
+                tracing::error!(
+                    ?chat_id,
+                    turn_id,
+                    child_pid,
+                    bytes_so_far = buf.len(),
+                    elapsed_ms = read_started.elapsed().as_millis() as u64,
+                    "stderr read timed out — pipe write-end held by another process (ssh master forwarding?)",
+                );
+            }
+        }
         buf
     } else {
         String::new()
