@@ -551,9 +551,45 @@ fn build_memory_marker(
     }
 }
 
-/// Placeholder — full implementation in Task 11.
-fn build_bg_marker_for_chat(_agent_dir: &std::path::Path, _chat_id: i64) -> Option<String> {
-    None
+/// Build the `<background-jobs>` marker tail for `composite-memory.md`.
+///
+/// Surfaces in-flight bg/cron runs targeted at this chat so the foreground
+/// agent is aware of work pending in the background. Two states qualify:
+/// - `status = 'running'` — job currently executing.
+/// - `status = 'success' AND delivered_at IS NULL` — job finished, answer
+///   queued for delivery (held by `IDLE_THRESHOLD_SECS` until the chat
+///   goes idle).
+///
+/// Returns `None` if the DB cannot be opened or no rows match. Errors do
+/// not propagate (best-effort marker — failure leaves composite-memory
+/// without the marker rather than blocking the turn).
+fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) -> Option<String> {
+    let conn = right_agent::memory::open_connection(agent_dir, false).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, job_name, started_at, status \
+             FROM cron_runs \
+             WHERE target_chat_id = ?1 \
+               AND ((status = 'running') OR (status = 'success' AND delivered_at IS NULL)) \
+             ORDER BY started_at",
+        )
+        .ok()?;
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([target_chat_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
+        .ok()?
+        .filter_map(Result::ok)
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let body = rows
+        .iter()
+        .map(|(id, name, ts, st)| format!("{name} (run {id}) — started {ts}, {st}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!("<background-jobs>\n{body}\n</background-jobs>"))
 }
 
 // ── Async worker ─────────────────────────────────────────────────────────────
@@ -3134,6 +3170,82 @@ mod background_continuation_tests {
             "continuation notice must be in prompt body; got {prompt:?}"
         );
         assert!(prompt.contains("10-minute safety limit"));
+    }
+
+    #[test]
+    fn build_bg_marker_returns_none_when_no_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _conn = open_connection(tmp.path(), true).unwrap();
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        assert!(m.is_none(), "no rows → no marker; got {m:?}");
+    }
+
+    #[test]
+    fn build_bg_marker_includes_running_run_for_chat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_connection(tmp.path(), true).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
+             VALUES ('run-A', 'bg-job-A', ?1, 'running', '/log', -100, NULL)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        drop(conn);
+        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        assert!(m.starts_with("<background-jobs>"), "got {m:?}");
+        assert!(m.contains("bg-job-A"));
+        assert!(m.contains("run-A"));
+        assert!(m.contains("running"));
+    }
+
+    #[test]
+    fn build_bg_marker_includes_undelivered_success_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_connection(tmp.path(), true).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, target_chat_id, target_thread_id, delivery_status) \
+             VALUES ('run-B', 'bg-job-B', ?1, ?1, 'success', '/log', -100, NULL, 'pending')",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        drop(conn);
+        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        assert!(m.contains("bg-job-B"));
+        assert!(m.contains("success"));
+    }
+
+    #[test]
+    fn build_bg_marker_excludes_other_chat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_connection(tmp.path(), true).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
+             VALUES ('run-other', 'bg-other', ?1, 'running', '/log', -999, NULL)",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        drop(conn);
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        assert!(m.is_none(), "row for other chat must not appear; got {m:?}");
+    }
+
+    #[test]
+    fn build_bg_marker_excludes_delivered_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_connection(tmp.path(), true).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, target_chat_id, target_thread_id, delivered_at, delivery_status) \
+             VALUES ('run-D', 'bg-D', ?1, ?1, 'success', '/log', -100, NULL, ?1, 'delivered')",
+            rusqlite::params![now],
+        )
+        .unwrap();
+        drop(conn);
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        assert!(m.is_none(), "delivered run must not appear; got {m:?}");
     }
 }
 
