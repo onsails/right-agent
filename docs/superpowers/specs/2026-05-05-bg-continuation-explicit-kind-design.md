@@ -54,25 +54,27 @@ fetch their results.
   cover the agent-side path.
 - Cancelling or showing live progress of running bg jobs (covered by
   unrelated "Future work" in the parent spec).
-- Changing how regular crons (`Cron`, `OneShot`, `Immediate`) decide to
-  notify. Their existing schema and `silent` semantics stay.
+- Changing how regular crons (`Recurring`, `OneShotCron`, `RunAt`,
+  `Immediate`) decide to notify. Their existing `CRON_SCHEMA_JSON`
+  and `silent` semantics stay.
 - Cross-chat awareness. The marker is filtered by `target_chat_id`.
 
 ## Decisions summary
 
 | Decision | Choice |
 |---|---|
-| Job-kind representation | New `ScheduleKind::BackgroundContinuation { fork_from: Uuid }` variant. |
-| DB encoding | `schedule = '@bg:<uuid>'` sentinel, no schema migration. |
-| Where fork_from is parsed | `cron_spec.rs::ScheduleKind::from_db` (single source of truth). |
+| Job-kind representation | New `ScheduleKind::BackgroundContinuation { fork_from: Uuid }` variant alongside existing `Recurring`, `OneShotCron`, `RunAt`, `Immediate`. |
+| DB encoding | `schedule = '@bg:<uuid>'` sentinel, no DDL change. |
+| Where fork_from is parsed | New `ScheduleKind::from_db_row(schedule, run_at, recurring) -> Result<ScheduleKind, String>` extracted from the inline match in `load_specs_from_db` (cron_spec.rs:707-721). Single source of truth. |
 | Drop X-FORK-FROM prompt header | Yes. `prompt` carries only the user-facing system notice. |
 | Schema for bg | New `BG_CONTINUATION_SCHEMA_JSON`, `notify` required + non-null, `notify.content` `minLength: 1`. |
 | Schema selection | `matches!(spec.schedule_kind, BackgroundContinuation { .. })`. |
 | Continuation-prompt tweak | Add explicit "silence is not allowed" line. |
 | Main-session awareness | `<background-jobs>` marker appended to `composite-memory.md` next to `<memory-status>`. |
-| Awareness data source | `SELECT id, started_at FROM cron_runs WHERE status='running' AND target_chat_id = ?`. |
+| Awareness data source | `SELECT id, started_at, status FROM cron_runs WHERE target_chat_id = ?1 AND ((status='running') OR (status='success' AND delivered_at IS NULL))`. |
 | Defensive delivery for silent bg | Dropped. Schema enforcement is sufficient; `cron_show_run` is the escape hatch. |
 | Migration of in-flight `@immediate`+X-FORK-FROM rows | One-time startup migration; overwrites `schedule` and strips header from `prompt`. |
+| `insert_immediate_cron` helper | Deleted. Sole production caller (`enqueue_background_job`) switches to new `insert_background_continuation`. Existing tests for the old helper are migrated to the new one or removed if redundant. |
 
 ## Schema-selection discriminator
 
@@ -101,40 +103,70 @@ construction. Prompt-header parsing in `execute_job` is removed.
 
 ```rust
 pub enum ScheduleKind {
-    Cron(String),
-    OneShot { run_at: DateTime<Utc> },
+    Recurring(String),
+    OneShotCron(String),
+    RunAt(DateTime<Utc>),
     Immediate,
-    BackgroundContinuation { fork_from: Uuid },
+    BackgroundContinuation { fork_from: Uuid },   // NEW
 }
 ```
 
 DB encoding: `schedule = '@bg:<uuid>'`. Existing `'@immediate'` sentinel
 keeps mapping to `ScheduleKind::Immediate`.
 
-`ScheduleKind::from_db(schedule, run_at, recurring)` extends the existing
-sentinel branch:
-- `'@immediate'` → `Immediate`.
-- `'@bg:<uuid>'` → `BackgroundContinuation { fork_from }`. Invalid UUID
-  is a hard parse error (existing `from_db` error path).
+Refactor (small, scoped to this PR): extract the inline match in
+`load_specs_from_db` (cron_spec.rs:707-721) into
+`ScheduleKind::from_db_row(schedule: &str, run_at: Option<&str>, recurring: i64) -> Result<ScheduleKind, String>`.
+Single source of truth for sentinel parsing. `load_specs_from_db` calls
+it and skips rows that fail to parse with a `tracing::error!` (current
+behaviour). Branches:
+- `run_at = Some(_)` → `RunAt(dt)`
+- `schedule == "@immediate"` → `Immediate`
+- `schedule.starts_with("@bg:")` → parse trailing UUID; on failure
+  return `Err`. On success: `BackgroundContinuation { fork_from }`
+- `recurring == 0` → `OneShotCron(schedule.to_string())`
+- otherwise → `Recurring(schedule.to_string())`
 
-`is_one_shot()` returns `true` for `BackgroundContinuation`.
+`is_one_shot()` returns `true` for `BackgroundContinuation` (auto-deletes
+after one fire, like other one-shots).
+
 `cron_schedule()` returns `None` for `BackgroundContinuation`.
 
-`insert_immediate_cron` (current bg path) is renamed to
-`insert_background_continuation` and takes `fork_from: Uuid` as an
-explicit parameter. It stores `schedule = format!("@bg:{fork_from}")`,
-`run_at = NULL`, `recurring = 0`. The prompt is the body returned by
-`build_continuation_prompt(reason)` — no header.
+`Display for ScheduleKind` extends to write `format!("@bg:{fork_from}")`
+for `BackgroundContinuation` — round-trips with `from_db_row`.
 
-A new `insert_immediate_cron_v2` MAY be added later if non-bg Immediate
-use cases emerge. For now there is no caller for plain `Immediate`
-inserts, so `insert_immediate_cron` is fully replaced (no deprecated
-shim).
+`insert_immediate_cron` (cron_spec.rs:358) is **deleted**. Replaced by:
 
-`resolve_schedule_fields` keeps its existing 3-way mutual exclusion
-(schedule | run_at | immediate). `BackgroundContinuation` is not
-constructible from CLI/MCP — only from worker-internal code paths via
-`insert_background_continuation`.
+```rust
+pub fn insert_background_continuation(
+    conn: &rusqlite::Connection,
+    job_name: &str,
+    prompt: &str,
+    fork_from: Uuid,
+    target_chat_id: i64,
+    target_thread_id: Option<i64>,
+    max_budget_usd: Option<f64>,
+) -> Result<CronSpecResult, String>
+```
+
+Stores `schedule = format!("@bg:{fork_from}")`, `run_at = NULL`,
+`recurring = 0`, `lock_ttl = IMMEDIATE_DEFAULT_LOCK_TTL` (semantics
+identical to bg today). Calls into `create_spec_v2` with a new
+`bg_fork_from: Option<Uuid>` parameter (keeps the validator/insert path
+unified) — see resolve_schedule_fields update below.
+
+`resolve_schedule_fields` extends the 4-way mutual exclusion to
+`schedule | run_at | immediate | bg_fork_from`. The bg case stores
+`@bg:<uuid>` into `db_schedule`, `run_at = None`, `recurring = 0`, no
+warning. Reaching this branch via `create_spec_v2` is bot-internal —
+`cron_create` MCP path never sets `bg_fork_from`, only
+`insert_background_continuation` does.
+
+`BackgroundContinuation` is not constructible from CLI/MCP. Tests for
+`insert_immediate_cron` (`cron_spec_tests.rs:1117,1135,1137` and
+integration test `crates/bot/tests/cron_immediate.rs`) are migrated to
+`insert_background_continuation` with a fixed `fork_from = Uuid::nil()`
+or random — they exercise the same DB path with the new sentinel.
 
 ### `right-agent/src/codegen/agent_def.rs` — new schema
 
@@ -240,30 +272,42 @@ order-dependent slice.
 ```rust
 fn build_bg_marker(conn: &Connection, target_chat_id: i64) -> Option<String> {
     let mut stmt = conn.prepare(
-        "SELECT id, started_at FROM cron_runs \
-         WHERE status = 'running' AND target_chat_id = ?1 \
+        "SELECT id, job_name, started_at, status \
+         FROM cron_runs \
+         WHERE target_chat_id = ?1 \
+           AND ((status = 'running') OR (status = 'success' AND delivered_at IS NULL)) \
          ORDER BY started_at",
     ).ok()?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map([target_chat_id], |r| Ok((r.get(0)?, r.get(1)?)))
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([target_chat_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })
         .ok()?
         .filter_map(Result::ok)
         .collect();
     if rows.is_empty() { return None; }
     let body = rows.iter()
-        .map(|(id, ts)| format!("{id} — started {ts}"))
+        .map(|(id, name, ts, st)| format!("{name} (run {id}) — started {ts}, {st}"))
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!("<background-jobs>\n{body}\n</background-jobs>"))
 }
 ```
 
+The query covers two states:
+- `status='running'` — job in flight.
+- `status='success' AND delivered_at IS NULL` — job finished, answer is
+  queued for delivery (held by `IDLE_THRESHOLD_SECS` until the chat goes
+  idle). The agent should be aware that an answer exists even before it
+  lands.
+
 The query is unscoped to `bg-*` job-name prefix on purpose: any
 in-flight cron belonging to this chat is useful awareness. If we later
 disambiguate (only show bg-continuation jobs), we filter by
-`schedule LIKE '@bg:%'` joined to `cron_specs` — but that JOIN re-couples
-to a deleted spec for already-fired one-shots. Simpler to surface all
-running runs by `target_chat_id`.
+`job_name LIKE 'bg-%'`. Acceptable today.
+
+Both `id` (run UUID) and `job_name` (`bg-XXX`) are included so the agent
+can pass either to `cron_show_run` (which accepts run IDs).
 
 Caller (worker.rs:1686 area) opens the per-agent connection that's
 already opened nearby for hindsight (or a short-lived new one), runs
@@ -326,10 +370,11 @@ Cite in commit message.
 
 | Test | File | Verifies |
 |---|---|---|
-| `bg_kind_db_roundtrip` | `cron_spec_tests.rs` | `BackgroundContinuation { fork_from } ↔ '@bg:<uuid>'` |
-| `bg_kind_invalid_uuid_errors` | `cron_spec_tests.rs` | `from_db('@bg:not-a-uuid', ...)` fails |
+| `bg_kind_db_roundtrip` | `cron_spec_tests.rs` | `BackgroundContinuation { fork_from } ↔ '@bg:<uuid>'` via `from_db_row` + `Display` |
+| `bg_kind_invalid_uuid_errors` | `cron_spec_tests.rs` | `from_db_row("@bg:not-a-uuid", None, 0)` returns `Err` |
 | `bg_kind_is_one_shot` | `cron_spec_tests.rs` | `is_one_shot()` returns true |
 | `bg_kind_no_cron_schedule` | `cron_spec_tests.rs` | `cron_schedule()` returns None |
+| `immediate_kind_still_parses` | `cron_spec_tests.rs` | `from_db_row("@immediate", None, 0)` → `Immediate` (regression guard) |
 | `bg_continuation_schema_shape` | `agent_def_tests.rs` | `notify` required, `notify.content` minLength=1 |
 | `bg_marker_emits_running_runs_for_chat` | `worker.rs::tests` | filter by `target_chat_id` and `status='running'` |
 | `bg_marker_empty_returns_none` | `worker.rs::tests` | no rows → None |
@@ -391,6 +436,23 @@ Any external tool that reads `cron_specs.prompt` directly and expected
 the header (none today) breaks. Searched: no callers outside `cron.rs`.
 Internal-only convention removed cleanly.
 
+### Forked child sees its own bg marker
+
+The cron path also assembles its system prompt via
+`build_prompt_assembly_script` (`prompt.rs:54`), which `cat`s
+`composite-memory.md`. So the forked CC session reading the
+`<background-jobs>` block will see a row for itself
+(`status='running'` for the very run it is). This is a harmless
+artefact — the prompt makes the bg job's task explicit, and seeing
+itself in the marker doesn't change the answer. Worth noting in case
+log output looks confusing during debugging.
+
+If we later want to suppress it, the worker writes
+`composite-memory.md` per foreground turn; cron-path could deploy a
+*separate* `composite-memory.md` without the marker (or skip the
+deploy entirely — cron's prompt context is the forked jsonl, recall
+is intentionally skipped per ARCHITECTURE.md "Cron jobs skip memory").
+
 ### Schema mismatch on schema-violating responses
 
 If the agent somehow violates `BG_CONTINUATION_SCHEMA_JSON` (returns
@@ -419,14 +481,30 @@ success, better than silence. Acceptable.
 
 ### Compatibility with existing crons
 
-- New `BackgroundContinuation` variant requires updates to all
-  exhaustive matches on `ScheduleKind`. Compiler-enforced; locate via
-  `rg "ScheduleKind::"`. Known callsites:
-  - `cron_spec.rs::cron_schedule()`, `is_one_shot()`,
-    `resolve_schedule_fields`
-  - `cron.rs:1036` schedule display in `/cron list`
-  - `cron.rs:936` overdue reconcile
-  - `cron.rs::execute_job` (this PR)
+- New `BackgroundContinuation` variant requires updates at:
+
+  **Compiler-enforced (exhaustive `match`):**
+  - `cron_spec.rs::cron_schedule()`, `is_one_shot()`, `Display`
+  - `cron_spec.rs::resolve_schedule_fields` (extended to 4-way exclusion)
+  - `cron_spec.rs::load_specs_from_db` → moved to `from_db_row`
+
+  **NOT compiler-enforced (`matches!` macros — silent miss if forgotten):**
+  - `cron.rs:1121` `matches!(.., RunAt(dt) if dt <= now)` — bg variant is fired in the Immediate branch instead, so this filter stays unchanged. Verify by integration test that bg jobs don't double-fire.
+  - `cron.rs:1142-1146` Immediate-fire filter — **extend to**
+    `Immediate | BackgroundContinuation { .. }`. Without this the bg
+    job never fires. Critical-path miss.
+  - `cron.rs:1182-1186` "skip from run_job_loop" filter — **extend to**
+    `RunAt(_) | Immediate | BackgroundContinuation { .. }`. Without
+    this the reconciler spawns a long-running cron-style handle for
+    the bg row, which is wrong (one-shot, not recurring).
+  - `cron.rs:331` X-FORK-FROM detection block — **deleted** in this PR.
+
+  **Schema/fork-from in execute_job:** new `match &spec.schedule_kind`
+  selecting bg schema and `fork_from`. Exhaustive — compiler-enforced.
+
+- Test callsites referencing existing variants stay unchanged unless
+  they specifically test bg behaviour. New tests for
+  `BackgroundContinuation` are listed under Testing strategy.
 - Legacy `@immediate` rows with X-FORK-FROM headers are migrated at
   startup and become indistinguishable from freshly-inserted bg rows.
 - `BG_CONTINUATION_SCHEMA_JSON` is independent of `CRON_SCHEMA_JSON` —
