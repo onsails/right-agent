@@ -12,234 +12,40 @@ Three crates in a Cargo workspace:
 
 ## Module Map
 
-### right-agent (core)
-
-- `agent/` — agent discovery (presence detected by `agent.yaml`) and types (`AgentDef`, `AgentConfig`, `RestartPolicy`).
-- `config/` — `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
-- `codegen/` — per-agent and cross-agent code generation: settings, `.claude.json`, `.mcp.json`, policy, process-compose, TOOLS.md, MCP instructions, bundled skills, cloudflared. The helper API in `codegen/contract.rs` is the only sanctioned writer (see Upgrade & Migration Model).
-- `memory/` — Hindsight Cloud client (`hindsight.rs`), composite memory in file or Hindsight mode (`composite.rs`), schema migrations, prompt-injection guard. `store.rs` is legacy SQLite memory retained for migration compat.
-- `runtime/` — `RuntimeState` JSON persistence, process-compose REST client, dependency checks.
-- `mcp/` — OAuth credentials, internal UDS client (bot→aggregator), OAuth flow, proxy backend, token refresh scheduler.
-- Single-file modules: `openshell.rs` (gRPC mTLS + CLI wrappers), `stt.rs` (whisper model cache + ffmpeg), `doctor.rs`, `init.rs`, `error.rs`.
-
-### right (CLI)
-
-- `main.rs` — CLI dispatcher.
-- `aggregator.rs` — MCP Aggregator (Aggregator + ToolDispatcher + BackendRegistry).
-- `right_backend.rs` — built-in MCP tools (memory, cron, mcp_list, bootstrap).
-- `internal_api.rs` — internal REST API on Unix socket.
-- `memory_server.rs` — deprecated CLI-only MCP stdio server.
-
-### right-bot
-
-- `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start teloxide.
-- `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, prompt assembly, attachments (with STT integration), `invocation.rs` (`ClaudeInvocation` builder — see Claude Invocation Contract).
-- `login.rs` — token-based Claude login flow (setup-token, env var injection).
-- `sync.rs` — background platform-store sync to `/sandbox/.platform/`.
-- `cron.rs`, `cron_delivery.rs` — cron engine and delivery loop (resumes main session so cron results land in agent context).
-- `reflection.rs` — `reflect_on_failure` primitive (see Reflection Primitive).
-- `stt/` — host-side voice/video_note transcription (ffmpeg + whisper-rs + Russian markers).
-- `error.rs` — `BotError` types.
+See: `docs/architecture/modules.md`.
 
 ## Data Flow
 
 ### Agent Lifecycle
 
-```
-right init  /  right agent init <name>
-  ├─ `agent init` runs an interactive wizard (sandbox mode, network policy,
-  │   telegram, chat IDs, stt, memory) and writes sandbox config + policy.yaml
-  │   to the agent dir. `init` skips the wizard and also writes
-  │   ~/.right/config.yaml + detects Telegram token / cloudflared tunnel.
-  ├─ Create ~/.right/agents/<name>/ with template files
-  ├─ Write BOOTSTRAP.md, TOOLS.md, agent.yaml
-  │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
-  ├─ Generate .claude/settings.json, .claude.json
-  └─ Symlink credentials from ~/.claude/
-
-right up [--agents x,y] [--detach] [--no-sandbox]
-  ├─ Discover agents from agents/ directory
-  ├─ Per agent: resolve secret for token map (generate if missing)
-  ├─ Generate agent-tokens.json
-  ├─ Generate process-compose.yaml (minijinja)
-  ├─ Generate cloudflared config (if tunnel)
-  └─ Launch process-compose (TUI or detached)
-
-right bot --agent <name>  (spawned by process-compose)
-  ├─ Resolve token, open data.db
-  ├─ Per-agent codegen:
-  │   ├─ settings.json, schemas
-  │   ├─ .claude.json, credentials symlink, mcp.json
-  │   ├─ TOOLS.md, skills install, policy.yaml
-  │   └─ data.db init, git init, secret generation
-  ├─ Clear Telegram webhook, verify bot identity
-  ├─ Sandbox lifecycle:
-  │   ├─ Check if sandbox exists via gRPC → reuse with policy hot-reload
-  │   ├─ Or create new: prepare staging dir, spawn sandbox, wait for READY
-  │   └─ Generate SSH config for sandbox exec
-  ├─ Initial sync (blocking): deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
-  ├─ Start background sync task (every 5 min — re-deploys /sandbox/.platform/, GC stale entries)
-  ├─ Start cron engine, OAuth callback server, refresh scheduler
-  └─ Start teloxide long-polling dispatcher
-
-Per message:
-  ├─ Extract text + attachments from Telegram message
-  ├─ Check if token request waiting for auth token → forward to intercept slot
-  ├─ Route to worker task via DashMap<(chat_id, thread_id), Sender>
-  ├─ Worker: debounce 500ms → download attachments → upload to sandbox inbox
-  ├─ Format input: single text → raw string, multi/attachments → YAML
-  ├─ Pipe input to claude -p via stdin (SSH or direct)
-  │   ├─ First message: --session-id <uuid> (new session)
-  │   ├─ Subsequent: --resume <root_session_id> (persistent session)
-  │   └─ Sessions persist across messages — agent retains full CC context
-  ├─ If foreground exits via 600s timeout or 🌙 Background button:
-  │   ├─ Insert cron_specs row with schedule_kind=Immediate, prompt prefixed
-  │   │   with `X-FORK-FROM: <main_session_id>\n` and the continuation prompt
-  │   ├─ Edit thinking message to per-reason banner ("⏱ Foreground hit 10-min
-  │   │   limit — continuing in background…" / "🌙 Working in background…")
-  │   └─ Worker returns; debounce frees, user can send next message
-  ├─ Parse reply JSON with typed attachments
-  ├─ Send text reply to Telegram
-  ├─ Download outbound attachments from sandbox outbox → send to Telegram
-  └─ Periodic cleanup: hourly, configurable retention (default 7 days)
-
-Config change (right agent config):
-  ├─ Writes agent.yaml
-  ├─ Detects filesystem policy change via gRPC GetSandboxPolicyStatus
-  │   ├─ Network-only change: config_watcher → bot restart → hot-reload
-  │   └─ Filesystem change: sandbox migration (below)
-  ├─ config_watcher detects change (2s debounce)
-  ├─ Bot exits with code 2
-  ├─ process-compose restarts bot (on_failure policy)
-  └─ Bot re-runs per-agent codegen with new config → applies fresh policy
-
-Sandbox migration (filesystem policy change):
-  ├─ Backup sandbox-only (SSH tar czpf)
-  ├─ Create new sandbox right-<agent>-<YYYYMMDD-HHMM> with new policy
-  ├─ Wait for READY + SSH ready
-  ├─ Restore files via SSH tar xzpf
-  ├─ Write sandbox.name to agent.yaml
-  ├─ Delete old sandbox (best-effort)
-  └─ config_watcher restarts bot → picks up new sandbox
-
-right agent backup <name> [--sandbox-only]
-  ├─ Sandbox mode: SSH tar /sandbox/ → sandbox.tar.gz
-  ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz
-  ├─ Full mode: + agent.yaml, policy.yaml, VACUUM INTO data.db
-  └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
-
-right agent rebootstrap <name> [-y]
-  ├─ Confirm (yes/no) unless -y
-  ├─ Stop <name>-bot via process-compose REST API (best-effort)
-  ├─ Backup IDENTITY.md / SOUL.md / USER.md (host + sandbox copies)
-  │   to ~/.right/backups/<agent>/rebootstrap-<YYYYMMDD-HHMM>/
-  ├─ rm -f the same files from /sandbox/ via gRPC exec_in_sandbox
-  ├─ Remove host copies, write fresh BOOTSTRAP.md from BOOTSTRAP_INSTRUCTIONS
-  ├─ UPDATE sessions SET is_active = 0 WHERE is_active = 1 in data.db
-  └─ Restart <name>-bot if we stopped it
-
-right agent init <name> --from-backup <path>
-  ├─ Validate: agent must not exist, backup has sandbox.tar.gz + agent.yaml
-  ├─ Restore config files to new agent dir
-  ├─ Create new sandbox with timestamped name
-  ├─ Restore sandbox files via SSH tar
-  ├─ Write sandbox.name to agent.yaml
-  └─ Run codegen + initial sync
-
-right down
-  └─ POST /project/stop to process-compose REST API
-```
+See: `docs/architecture/lifecycle.md` (covers `right init`, `right up`,
+per-message flow, sandbox migration, `right agent backup`,
+`right agent rebootstrap`, `right agent init --from-backup`, and
+`right down`).
 
 ### Voice transcription
 
-`voice` and `video_note` Telegram attachments are transcribed on the host
-inside `download_attachments` when `agent.yaml`'s `stt.enabled` is true and
-ffmpeg is present. The transcript is wrapped in a Russian marker
-(`[Пользователь надиктовал...]` / `[Пользователь записал кружок...]`) and
-prepended to the user-message text. The original audio file is dropped on
-the host — it never reaches the sandbox.
-
-Models live at `~/.right/cache/whisper/ggml-<model>.bin` and are
-downloaded at `right up` (skipped if ffmpeg is missing). Default model
-is `small`; per-agent override via `agent.yaml`:
-
-    stt:
-      enabled: true
-      model: small   # tiny | base | small | medium | large-v3
-
-When ffmpeg is missing or the model file is absent, the bot still runs;
-voice messages produce an error marker that the agent relays to the user.
+See: `docs/architecture/lifecycle.md` (Voice transcription).
 
 ### OpenShell Sandbox Architecture
 
-Sandboxes are **persistent** — never deleted automatically. They live as long as the agent lives and survive bot restarts.
+Sandboxes are **persistent** — never deleted automatically. They live as
+long as the agent lives and survive bot restarts.
 
-```
-Bot startup:
-  ├─ gRPC GetSandbox → exists?
-  │   ├─ YES: apply_policy (hot-reload via openshell policy set --wait)
-  │   └─ NO: prepare_staging_dir → spawn_sandbox → wait_for_ready
-  ├─ generate_ssh_config (on every startup, host-side file)
-  ├─ initial_sync (blocking — before teloxide starts)
-  │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
-  │   └─ Download .claude.json, verify trust keys, fix if CC overwrote them
-  └─ Background sync (every 5 min, re-deploys /sandbox/.platform/, GC stale entries)
+Policy hot-reload via `openshell policy set --wait` covers the network
+section only. Filesystem/landlock changes require sandbox recreation
+(see `Upgrade & Migration Model` below).
 
-Sandbox network:
-  ├─ HTTP CONNECT proxy at 10.200.0.1:3128 (set via HTTPS_PROXY env)
-  ├─ TLS MITM: proxy auto-detects TLS (ClientHello peek) and terminates
-  │   unconditionally for credential injection (OpenShell v0.0.30+)
-  │   └─ Sandbox trusts CA via /etc/openshell-tls/ca-bundle.pem
-  └─ Policy controls which domains are allowed (wildcards supported)
-
-Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platform/ during initial_sync):
-  ├─ .claude/settings.json    — CC behavioral flags
-  ├─ .claude/reply-schema.json — structured output schema
-  ├─ .claude.json              — trust + onboarding
-  └─ mcp.json                  — MCP server entries
-  EXCLUDED: skills (deployed to /sandbox/.platform/), credentials, plugins
-
-Platform store (/sandbox/.platform/ inside sandbox):
-  ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>, ...
-  ├─ Content-addressed skill dirs: skills/rightmcp.<hash>/, skills/rightcron.<hash>/
-  ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
-  ├─ Read-only (chmod a-w after deploy)
-  └─ GC removes stale entries after each sync cycle
-```
+See: `docs/architecture/sandbox.md` for staging-dir layout, platform-store
+deployment, TLS-MITM, and the bot-startup sandbox sequence.
 
 ### Login Flow (setup-token)
 
-When `claude -p` returns 403/401 (auth error):
-
-```
-1. is_auth_error() detects auth failure in CC JSON output
-2. spawn_token_request() — tokio task:
-   ├─ Send "Claude needs authentication" notification to Telegram
-   ├─ Send setup-token instructions to Telegram
-   ├─ Delete stale token from auth_tokens table (if any)
-   ├─ Create oneshot channel, store sender in auth_code_tx intercept slot
-   ├─ Wait for token from Telegram (5-min timeout)
-   ├─ Telegram handler intercepts next message as token
-   ├─ Save token to auth_tokens table in data.db
-   └─ Send "Token saved" confirmation to Telegram
-3. On next claude -p: load token from auth_tokens, inject as
-   CLAUDE_CODE_OAUTH_TOKEN env var (sandbox: export in shell script,
-   no-sandbox: cmd.env())
-4. On error/timeout: notify user, reset auth_watcher_active flag
-```
+See: `docs/architecture/lifecycle.md` (Login Flow).
 
 ### MCP Token Refresh
 
-```
-OAuth callback (bot) → POST /set-token to Aggregator (Unix socket)
-  → Aggregator updates DynamicAuthClient.token in-memory
-  → Aggregator saves to mcp_servers SQLite table (auth_token, expires_at, etc.)
-  → Aggregator starts refresh timer (expires_at - 10 min)
-  → on timer: POST refresh_token to token_endpoint
-  → update DynamicAuthClient.token in-memory
-  → save refreshed token to SQLite (db_update_oauth_token)
-  → no .mcp.json writes, no sandbox uploads
-```
+See: `docs/architecture/mcp.md` (MCP Token Refresh).
 
 ### MCP Auth Types
 
@@ -254,38 +60,28 @@ Four auth methods supported (detected automatically by `/mcp add`):
 
 ### MCP Aggregator
 
-The Aggregator replaces HttpMemoryServer as the MCP endpoint. One shared process
-serves all agents on TCP :8100/mcp with per-agent Bearer token authentication.
+One shared aggregator process serves all agents on TCP `:8100/mcp` with
+per-agent Bearer-token auth. Tool routing rules:
 
-Tool routing:
-  - No `__` prefix → RightBackend (built-in tools, unprefixed)
-  - `rightmeta__` prefix → Aggregator management (read-only: mcp_list)
-  - `{server}__` prefix → ProxyBackend (forwarded to upstream MCP)
+- No `__` prefix → `RightBackend` (built-in tools, unprefixed).
+- `rightmeta__` prefix → Aggregator management (read-only: `mcp_list`).
+- `{server}__` prefix → `ProxyBackend` (forwarded to upstream MCP).
 
-Internal REST API on Unix socket (~/.right/run/internal.sock):
-  - POST /mcp-add — register external MCP server
-  - POST /mcp-remove — remove external MCP server
-  - POST /set-token — deliver OAuth tokens after authentication
-  - POST /mcp-list — list MCP servers with status
-  - POST /mcp-instructions — fetch MCP server instructions markdown
-
-Telegram bot uses InternalClient (hyper UDS) to call these endpoints.
+Internal REST API on Unix socket (`~/.right/run/internal.sock`):
+`POST /mcp-add`, `POST /mcp-remove`, `POST /set-token`, `POST /mcp-list`,
+`POST /mcp-instructions`. Telegram bot uses `InternalClient` (hyper UDS).
 Agents cannot reach the Unix socket from inside the sandbox.
+
+See: `docs/architecture/mcp.md` for dispatch detail and rationale.
 
 ### Prompting Architecture
 
-Every `claude -p` invocation gets a **composite system prompt** assembled from
-compiled-in constants (operating instructions, bootstrap) and agent-owned files
-(IDENTITY.md, SOUL.md, USER.md, TOOLS.md, MCP instructions, composite-memory).
-No `--agent` flag — `--system-prompt-file` is the sole prompt mechanism.
+Every `claude -p` invocation gets a composite system prompt via
+`--system-prompt-file` (the sole prompt mechanism — no `--agent` flag).
+Prompt caching is critical — avoid per-message tool calls to read
+identity files.
 
-A single `build_prompt_assembly_script()` generates a parameterized shell script
-(root_path=/sandbox for OpenShell, root_path=agent_dir for no-sandbox) that assembles
-the composite. Sandbox: executed via SSH. No-sandbox: executed via `bash -c`.
-
-Prompt caching is critical — avoid per-message tool calls to read identity files.
-
-See PROMPT_SYSTEM.md for full documentation.
+See `PROMPT_SYSTEM.md` for full documentation.
 
 ### Claude Invocation Contract
 
@@ -312,81 +108,43 @@ args manually.
 
 ### Reflection Primitive
 
-`crates/bot/src/reflection.rs` exposes `reflect_on_failure(ctx) -> Result<String, ReflectionError>`.
-On CC invocation failure the worker (`telegram::worker`) and cron (`cron.rs`)
+`crates/bot/src/reflection.rs` exposes
+`reflect_on_failure(ctx) -> Result<String, ReflectionError>`. On CC
+invocation failure the worker (`telegram::worker`) and cron (`cron.rs`)
 call it to give the agent a short `--resume`-d turn wrapped in
-`⟨⟨SYSTEM_NOTICE⟩⟩ … ⟨⟨/SYSTEM_NOTICE⟩⟩`, so the agent produces a human-friendly
-summary of the failure instead of the raw ring-buffer dump.
+`⟨⟨SYSTEM_NOTICE⟩⟩ … ⟨⟨/SYSTEM_NOTICE⟩⟩`, so the agent produces a
+human-friendly summary of the failure.
 
-- Worker uses `ReflectionLimits::WORKER` (3 turns, $0.20, 90s process timeout).
-  Reflection reply is sent to Telegram directly; on reflection failure, the
-  caller falls back to the raw error message.
-- Cron uses `ReflectionLimits::CRON` (5 turns, $0.40, 180s process timeout).
-  Reflection reply is stored in `cron_runs.notify_json`; `cron_delivery` picks
-  it up and relays using `DELIVERY_INSTRUCTION_FAILURE` (non-verbatim — agent
-  may rephrase lightly, must preserve facts).
-- `usage_events` rows for reflection use `source = "reflection"`, discriminated
-  by `chat_id` (worker parent) vs `job_name` (cron parent). `/usage` shows them
-  on a separate "🧠 Reflection" line per window.
-- Reflection never reflects on itself. Hindsight `memory_retain` is skipped for
-  reflection turns.
-- `cron_runs.status` gates delivery: `'failed'` routes to
-  `DELIVERY_INSTRUCTION_FAILURE`, any other status (currently `'success'`)
-  routes to `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
+Reflection never reflects on itself. Hindsight `memory_retain` is skipped
+for reflection turns. `cron_runs.status` gates delivery: `'failed'` routes
+to `DELIVERY_INSTRUCTION_FAILURE`; any other status routes to
+`DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
+
+See: `docs/architecture/sessions.md` for `ReflectionLimits` (worker vs
+cron), usage-event accounting, and label-routing detail.
 
 ### Stream Logging
 
-CC is invoked with `--verbose --output-format stream-json`. Worker reads stdout
-line-by-line via `tokio::io::AsyncBufReadExt`. For cron jobs, stdout is tee'd into
-an NDJSON log inside the sandbox at `/sandbox/crons/logs/{job_name}-{run_id}.ndjson`
-(agents can read these directly via `Read`). Per-job retention keeps the last 10 logs.
-Worker sessions do not write stream logs.
-
-When `show_thinking: true` (default), a live thinking message in Telegram shows
-the last 5 events (tool calls, text) with turn counter and cost. Updated every 2s
-via `editMessageText`. Stays in chat after completion.
-
-CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
-per-message from agent.yaml). Cron jobs disable `Agent` tool to prevent budget waste on
-subagent branches. Process timeout (600s) is a safety net only.
+See: `docs/architecture/sessions.md` (Stream Logging).
 
 ### Cron Schedule Kinds
 
-`cron_specs.schedule` stores a schedule string that maps to a `ScheduleKind` variant:
+`cron_specs.schedule` stores a schedule string that maps to a
+`ScheduleKind` variant. The **`Immediate`** variant (encoded as
+`schedule = '@immediate'`) is bot-internal — used for
+background-continuation jobs and fired on the next reconcile tick (≤5s).
+`insert_immediate_cron` defaults `lock_ttl` to
+`IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`); the lock heartbeat is written once
+at job start and never refreshed, so a tighter TTL would let the
+reconciler spawn a duplicate `execute_job` against the same spec on the
+next 5-second tick. The TTL is the duplicate-prevention guard, not a
+wall-clock execution limit.
 
-- `ScheduleKind::Recurring("0 9 * * *")` — fires repeatedly per cron expression.
-- `ScheduleKind::OneShotCron("30 15 * * *")` — fires once on next match, then deletes.
-- `ScheduleKind::RunAt(2026-12-25T15:30:00Z)` — fires once at absolute time, then deletes.
-- `ScheduleKind::Immediate` — fires on next reconcile tick (≤5s), then deletes.
-  Encoded as `schedule = '@immediate'` sentinel, no DB migration. Used by the
-  bot for background-continuation jobs (also available to `cron_create` as
-  `--immediate` once exposed in the MCP surface). `insert_immediate_cron`
-  defaults `lock_ttl` to `IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`) when the caller
-  passes none — bg-continuation turns can legitimately run for hours, and the
-  lock heartbeat is written once at job start and never refreshed, so a tight
-  TTL would let the reconciler spawn a duplicate `execute_job` against the
-  same spec on the next 5-second tick. The TTL is the duplicate-prevention
-  guard, not a wall-clock execution limit.
+See: `docs/architecture/sessions.md` for the full variant list.
 
 ### Per-session mutex on --resume
 
-Worker (`bot/src/telegram/worker.rs`) and cron delivery
-(`bot/src/cron_delivery.rs`) both invoke `claude -p --resume <main_session_id>`,
-which mutates the session's JSONL file. Concurrent invocations against the same
-session would interleave or lose turns.
-
-A `SessionLocks` map (`Arc<DashMap<String, Arc<Mutex<()>>>>`) keyed by the main
-`root_session_id` serialises these accesses. Worker acquires before each
-foreground turn; delivery acquires before each Haiku-relayed delivery. Cron
-job execution itself does NOT acquire — it runs `--fork-session` against a new
-session ID and does not race the main session JSONL.
-
-`IDLE_THRESHOLD_SECS = 180` remains as UX politeness ("don't interrupt the
-user mid-conversation"), but correctness now lives in the mutex.
-
-Sweep: a periodic task in `lib.rs` (every hour) drops entries whose Arc has no
-external strong references — protects against unbounded growth on long-lived
-agents.
+See: `docs/architecture/sessions.md` (Per-session mutex on --resume).
 
 ### Background continuation: X-FORK-FROM convention
 
@@ -420,67 +178,17 @@ See [Upgrade & Migration Model](#upgrade--migration-model) for category definiti
 
 ### Memory
 
-Two modes, configured per-agent via `memory.provider` in agent.yaml:
+Two modes, configured per-agent via `memory.provider` in `agent.yaml`:
+**Hindsight** (primary, Hindsight Cloud API) and **file** (fallback,
+agent-managed `MEMORY.md`). MCP tools `memory_retain` / `memory_recall` /
+`memory_reflect` are exposed only in Hindsight mode.
 
-**Hindsight mode (primary):** Hindsight Cloud API (`api.hindsight.vectorize.io`),
-one bank per agent. Three MCP tools exposed via aggregator:
-`memory_retain`, `memory_recall`, `memory_reflect`. Prefetch cache is in-memory
-(lost on restart → blocking recall on first interaction).
-
-Auto-retain after each turn: content formatted as JSON role/content/timestamp
-array, `document_id` = CC session UUID (same as `--resume`), `update_mode:
-"append"` so only new content triggers LLM extraction (O(n) vs O(n²) for
-full-session replace). Tags: `["chat:<chat_id>"]` for per-chat scoping.
-
-Auto-recall before each `claude -p`: query truncated to 800 chars, tags
-`["chat:<chat_id>"]` with `tags_match: "any"` (returns per-chat + global untagged
-memories). Prefetch uses same parameters.
-
-**Cron jobs skip memory:** Cron and delivery sessions perform no auto-recall
-or auto-retain. Cron prompts are static instructions — recall results would be
-irrelevant and corrupt user memory representations (same approach as hermes-agent
-`skip_memory=True`). Crons can call `memory_recall` and `memory_retain` MCP tools
-explicitly when needed.
-
-**Backgrounded turns retain user message at fork time:** When a foreground turn
-is sent to background (auto-timeout at 10 min, or user clicks the Background
-button), the worker's `Backgrounded` arm retains the user message *only* (no
-assistant text yet) keyed by the main `--resume` session UUID with
-`update_mode: "append"`. Without this, the cron-delivery answer relayed back
-through `--resume <main>` would arrive over a session whose user turn was
-never recorded in Hindsight (cron-side sessions skip auto-retain). The
-assistant turn extends the same document later via either an explicit
-`memory_retain` MCP call from the cron prompt or the next foreground turn's
-auto-retain.
-
-**File mode (fallback):** Agent manages `MEMORY.md` via CC Edit/Write.
-Bot injects file contents into system prompt (truncated to 200 lines).
-No MCP memory tools.
-
-The legacy `store_record` / `query_records` / `search_records` / `delete_record`
-tools are removed from the surface; their backing tables (`memories`,
-`memories_fts`, `memory_events`) are retained for migration compat.
+See: `docs/architecture/memory.md` for auto-retain/recall semantics,
+prefetch cache behavior, cron-skip rules, and backgrounded-turn handling.
 
 ### Memory Resilience Layer
 
-`memory::resilient::ResilientHindsight` wraps `HindsightClient` with:
-- per-process circuit breaker (closed→open after 5 fails in 30s; 30s initial
-  open with doubling backoff to a 10 min cap; 1h hard open on Auth)
-- classified retries (Transient/RateLimited yes; Auth/Client/Malformed no)
-- SQLite-backed `pending_retains` queue (1000-row cap, 24h age cap)
-- `watch::Sender<MemoryStatus>` signalling Healthy/Degraded/AuthFailed
-
-The bot runs a single drain task (30s interval, batch 20, stop on first
-non-Client failure). The aggregator shares the same SQLite queue via the
-per-agent `data.db`; it enqueues on failure but never drains.
-
-Telegram alerts (`memory_alerts` table, 24h dedup, 1h startup cleanup) fire
-on:
-- `AuthFailed` transition
-- >20 `Client`-kind drops in a 1h rolling window (`client_flood`)
-
-Doctor checks queue size (500/900 row thresholds), oldest-row age (1h/12h
-thresholds), and long-standing (>24h) alerts.
+See: `docs/architecture/memory.md` (Memory Resilience Layer).
 
 ### Memory Schema (SQLite)
 
@@ -522,24 +230,18 @@ subsequent command that needs to talk to PC. Older state files without the
 
 ### PC_API_TOKEN authentication
 
-`right up` generates a random API token (`pc_api_token` in
-`state.json`) and passes it to process-compose via `PC_API_TOKEN` env var.
-PcClient reads the token from state.json and includes it in every request as
-the `X-PC-Token-Key` header (process-compose's only supported scheme — it
-does NOT honor `Authorization: Bearer`). Process-compose rejects
-unauthenticated requests when this env var is set.
+`right up` generates a random API token (`pc_api_token` in `state.json`)
+and passes it to process-compose via `PC_API_TOKEN` env var. PcClient
+includes it in every request as the `X-PC-Token-Key` header
+(process-compose's only supported scheme — does NOT honor
+`Authorization: Bearer`).
 
-This prevents any stray HTTP caller (tests, debugging tools, browser
-extensions) from accidentally stopping or restarting production bots by
-hitting `localhost:18927`.
-
-**When adding new CLI commands that touch PC, never import `PC_PORT` directly —
-always resolve through `from_home(home)`.** For "is PC running?" probes,
-treat `Ok(None)` as "no — skip or fail with a clear message pointing at
-`right up`". `PC_PORT` may still be referenced in two places: by
-`cmd_up` when passing `--port` to launch PC, and by `pipeline.rs` when
-writing the default into `state.json`. Both are the same constant by
-construction.
+**When adding new CLI commands that touch PC, never import `PC_PORT`
+directly — always resolve through `from_home(home)`.** For "is PC
+running?" probes, treat `Ok(None)` as "no — skip or fail with a clear
+message pointing at `right up`". `PC_PORT` may still be referenced by
+`cmd_up` (passing `--port` to launch PC) and `pipeline.rs` (default into
+`state.json`).
 
 ## SQLite Rules
 
@@ -732,4 +434,7 @@ theme detection. Do not repeat; migrate existing offenders when touched.
 
 ## Logging
 
-Bot processes write to both stderr (process-compose TUI) and `~/.right/logs/<agent>.log` (daily rotation via `tracing-appender`). MCP Aggregator writes to both stdout (colored) and `~/.right/logs/mcp-aggregator.log` (daily rotation, no ANSI). Login flow has step-by-step INFO-level logging for debuggability.
+Bot processes log to stderr + `~/.right/logs/<agent>.log` (daily rotation
+via `tracing-appender`). Aggregator logs to stdout +
+`~/.right/logs/mcp-aggregator.log`. See: `docs/architecture/sessions.md`
+for stream-logging detail.
