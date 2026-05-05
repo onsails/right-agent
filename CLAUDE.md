@@ -18,97 +18,8 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 - **Compatibility**: Drop-in compatible with OpenClaw file conventions and ClawHub SKILL.md format
 - **Security**: Agents default to OpenShell sandbox (`sandbox: mode: openshell`). Agents needing host access (computer-use, Chrome) can use `sandbox: mode: none`. Always `--dangerously-skip-permissions` — OpenShell policy is the security layer for sandboxed agents.
 - **OpenShell status**: Alpha software — may have breaking changes. Design for resilience.
-## Technology Stack
+- **Stack**: `Cargo.toml` is the source of truth for dependencies. Project standards in `CLAUDE.rust.md`.
 
-## Async vs Sync Decision
-## Recommended Stack
-### Core Framework
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| clap | 4.6.0 | CLI argument parsing | Industry standard. Derive API is ergonomic. Powers ripgrep, fd, bat. Subcommand model maps perfectly to `right up/down/status/attach/restart`. | HIGH |
-| tokio | 1.50.0 | Async runtime | Required by reqwest. Process monitoring and HTTP calls benefit from async. Use `features = ["full"]` for process spawning + signal handling. | HIGH |
-| serde | 1.0.228 | Serialization framework | Non-negotiable for any Rust project touching structured data. | HIGH |
-### YAML Parsing
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| serde-saphyr | 0.0.22 | YAML deserialization | `serde_yaml` is deprecated (archived March 2024). `serde-saphyr` is the best replacement: panic-free on malformed input, no unsafe code, 1000+ passing tests including full yaml-test-suite, outperforms alternatives in benchmarks. The `serde_yml` fork (0.0.12) has lower adoption and less rigorous testing. | MEDIUM |
-### Template Generation
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| minijinja | 2.18.0 | Generate process-compose.yaml | Jinja2-compatible, minimal dependencies (only serde), actively maintained by Armin Ronacher. Used by crates.io itself. Perfect for generating YAML configs from agent directory scan results. Avoids string concatenation for YAML generation. | HIGH |
-### HTTP Client
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| reqwest | 0.13.2 | HTTP client for process-compose REST API and ClawHub API | 300M+ downloads. Async-first, ergonomic, handles JSON/headers/auth. Only serious choice for async Rust HTTP. | HIGH |
-### Error Handling
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| thiserror | 2.0.18 | Structured error types | Derive macro for library-quality error enums. Use for internal error types (AgentError, PolicyError, ConfigError). | HIGH |
-| miette | 7.6.0 | User-facing diagnostic errors | Compiler-style error output with source snippets, labels, suggestions. When a user's `agent.yaml` has invalid config, miette shows exactly where. Better UX than color-eyre for config-heavy CLIs. | HIGH |
-### Process Management
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| std::process::Command | stdlib | Spawn process-compose and openshell | Standard library is sufficient for launching external processes. No need for exotic crates. | HIGH |
-| tokio::process | 1.50.0 (via tokio) | Async process spawning/monitoring | Async `Child` with `kill_on_drop`. Use for launching `process-compose up` and monitoring its lifecycle. | HIGH |
-| ctrlc | 3.5.2 | Signal handling (SIGINT/SIGTERM) | Cross-platform Ctrl+C handling. Triggers graceful shutdown: sends `process-compose down` before exit. Simple API, well-maintained. | HIGH |
-### Logging/Tracing
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| tracing | 0.1.44 | Structured logging | Ecosystem standard. Structured spans for "agent-x starting", "policy validation", etc. | HIGH |
-| tracing-subscriber | 0.3.23 | Log output formatting | `fmt` subscriber with `EnvFilter` for `RUST_LOG` support. Use `json` feature for machine-readable logs in detached mode. | HIGH |
-### Testing
-| Technology | Version | Purpose | Why | Confidence |
-|------------|---------|---------|-----|------------|
-| assert_cmd | 2.2.0 | CLI integration testing | Run `right` binary, assert on stdout/stderr/exit codes. The standard for Rust CLI testing. | HIGH |
-| predicates | 3.1.4 | Assertion helpers | Pairs with assert_cmd. `predicate::str::contains("agent started")` style assertions. | HIGH |
-| tempfile | (latest) | Temp directories for test agent layouts | Create isolated agent directory structures per test. | HIGH |
-### Supporting Libraries
-| Library | Version | Purpose | When to Use | Confidence |
-|---------|---------|---------|-------------|------------|
-| dirs | latest | XDG/platform directories | Locate config dirs, cache dirs for Right Agent state. | HIGH |
-| which | latest | Find executables in PATH | Verify `process-compose`, `openshell`, `claude` are installed before `right up`. | HIGH |
-| walkdir | latest | Directory traversal | Scan `agents/` directory to discover agent subdirectories. | HIGH |
-## External Dependencies (Not Rust Crates)
-| Technology | Version | Purpose | Integration Pattern |
-|------------|---------|---------|---------------------|
-| process-compose | v1.100.0+ | Process orchestration + TUI | Right Agent generates `process-compose.yaml`, launches `process-compose up`. Controls via REST API on `localhost:8080` (or UDS). Auth via `PC_API_TOKEN`. |
-| OpenShell | latest (alpha) | Sandbox enforcement | CLI invocation: `openshell sandbox create --policy <path> -- claude`. Each agent process in process-compose.yaml wraps its command with openshell. |
-| Claude Code CLI | latest | AI agent sessions | Launched inside OpenShell sandboxes. Not directly managed by Right Agent -- process-compose handles lifecycle. |
-## Integration Patterns
-### process-compose Integration
-### OpenShell Integration
-# Per-agent command in process-compose.yaml:
-# Policy hot-reload (network/inference sections):
-## Alternatives Considered
-| Category | Recommended | Alternative | Why Not |
-|----------|-------------|-------------|---------|
-| YAML parsing | serde-saphyr | serde_yml | Less rigorous testing, simple fork of deprecated crate |
-| YAML parsing | serde-saphyr | serde_yaml | Deprecated and archived since March 2024 |
-| Template engine | minijinja | tera | Heavier deps, diverges from Jinja2, overkill for YAML generation |
-| Template engine | minijinja | string formatting | Error-prone for nested YAML structures |
-| HTTP client | reqwest | ureq | Sync-only, conflicts with async architecture |
-| Error handling | miette + thiserror | color-eyre | color-eyre archived, miette better for config-error-heavy CLI |
-| Error handling | miette + thiserror | anyhow | Too generic, no structured error types |
-| Signal handling | ctrlc | signal-hook | Overpowered for SIGINT/SIGTERM only |
-| CLI testing | assert_cmd | trycmd | Too rigid for early-stage development |
-| Async runtime | tokio | smol/async-std | Ecosystem is tokio. reqwest needs tokio. No contest. |
-## Cargo.toml Dependencies
-## Sources
-- [clap on crates.io](https://crates.io/crates/clap) - v4.6.0, verified 2026-03-21
-- [reqwest on crates.io](https://crates.io/crates/reqwest) - v0.13.2, verified 2026-03-21
-- [serde-saphyr on crates.io](https://crates.io/crates/serde-saphyr) - v0.0.22, verified 2026-03-21
-- [minijinja on crates.io](https://crates.io/crates/minijinja) - v2.18.0, verified 2026-03-21
-- [miette on crates.io](https://crates.io/crates/miette) - v7.6.0, verified 2026-03-21
-- [thiserror on crates.io](https://crates.io/crates/thiserror) - v2.0.18, verified 2026-03-21
-- [tokio on crates.io](https://crates.io/crates/tokio) - v1.50.0, verified 2026-03-21
-- [ctrlc on crates.io](https://crates.io/crates/ctrlc) - v3.5.2, verified 2026-03-21
-- [process-compose GitHub releases](https://github.com/F1bonacc1/process-compose/releases) - v1.100.0
-- [process-compose remote client docs](https://f1bonacc1.github.io/process-compose/client/)
-- [NVIDIA OpenShell GitHub](https://github.com/NVIDIA/OpenShell)
-- [NVIDIA OpenShell Developer Guide](https://docs.nvidia.com/openshell/latest/index.html)
-- [serde_yaml deprecation discussion](https://users.rust-lang.org/t/serde-yaml-deprecation-alternatives/108868)
-- [Rust CLI testing with assert_cmd](https://alexwlchan.net/2025/testing-rust-cli-apps-with-assert-cmd/)
-- [Async Rust: When to Use It](https://www.wyeworks.com/blog/2025/02/25/async-rust-when-to-use-it-when-to-avoid-it/)
 ## Docs
 
 - Always commit `docs/superpowers/` spec and plan files. Never leave them untracked.
@@ -125,6 +36,26 @@ Right Agent is an opinionated, closed-box AI agent platform — peer to OpenClaw
 - **Self-healing platform**: Never manually fix agent sandboxes, configs, or state. If a platform change breaks an agent, the platform code must detect and recover automatically (re-upload if files are missing, adjust policy, etc.). Manual fixes mask bugs and prevent proper testing.
 - **Never delete sandboxes for recovery**: Sandboxes contain agent data (credentials, installed tools, agent-created files). Deleting a sandbox destroys this data. Platform changes must be designed to work with existing sandboxes — never require sandbox recreation as a migration path.
 - **Upgrade-friendly design**: Every new feature must be adoptable by already-deployed agents without recreation. New config fields default to the previous behavior (backward-compatible defaults). `agent config` must expose all user-facing settings — if a feature exists but can't be toggled via CLI, it's incomplete. Think in terms of upgrades, not fresh installs.
+## Architecture docs split
+
+`ARCHITECTURE.md` is **prescriptive only** — load-bearing rules, contracts,
+gotchas, reference tables. It is `@`-imported and loads on every
+conversation; every line costs tokens.
+
+Descriptive content (data flows, feature mechanics, walkthroughs) lives in
+`docs/architecture/*.md`. Reference these files by **plain path** in
+`ARCHITECTURE.md` or here — never `@`-import them. That is the whole point
+of the split.
+
+When adding new content to `ARCHITECTURE.md`, ask: "is this a rule the
+codebase enforces, or a description of how it works?" Rule →
+`ARCHITECTURE.md`. Description → `docs/architecture/`.
+
+**Cite-on-touch (mandatory):** when modifying a subsystem, re-read the
+corresponding `docs/architecture/<x>.md` and update it if drifted. These
+docs are not auto-loaded, so they will rot silently if not maintained.
+Code is authoritative; the satellite doc is a courtesy to readers.
+
 ## Architecture
 
 @ARCHITECTURE.md
