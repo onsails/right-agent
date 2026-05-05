@@ -282,26 +282,10 @@ async fn execute_job(
         return;
     }
 
-    // Disallow CC built-in tools — cron jobs must not self-schedule, manage tasks, or spawn subagents.
-    // Agent is disabled to prevent budget waste on parallel subagent branches.
-    let disallowed_tools: Vec<String> = [
-        "Agent",
-        "CronCreate",
-        "CronList",
-        "CronDelete",
-        "TaskCreate",
-        "TaskUpdate",
-        "TaskList",
-        "TaskGet",
-        "TaskOutput",
-        "TaskStop",
-        "EnterPlanMode",
-        "ExitPlanMode",
-        "RemoteTrigger",
-    ]
-    .iter()
-    .map(|&s| s.into())
-    .collect();
+    // Cron extends the baseline (invocation.rs) with `Agent` to prevent
+    // budget waste on parallel subagent branches.
+    let mut disallowed_tools = crate::telegram::invocation::baseline_disallowed_tools();
+    disallowed_tools.push("Agent".into());
 
     let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 

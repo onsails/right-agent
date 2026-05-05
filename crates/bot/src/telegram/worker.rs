@@ -1257,24 +1257,9 @@ async fn invoke_cc(
         tracing::info!(?chat_id, "bootstrap mode: BOOTSTRAP.md present");
     }
 
-    // Disallow CC built-in tools that conflict with MCP equivalents.
-    let disallowed_tools: Vec<String> = [
-        "CronCreate",
-        "CronList",
-        "CronDelete",
-        "TaskCreate",
-        "TaskUpdate",
-        "TaskList",
-        "TaskGet",
-        "TaskOutput",
-        "TaskStop",
-        "EnterPlanMode",
-        "ExitPlanMode",
-        "RemoteTrigger",
-    ]
-    .iter()
-    .map(|&s| s.into())
-    .collect();
+    // Block harness built-ins that conflict with MCP equivalents or that
+    // don't belong in a headless Telegram-driven agent (see invocation.rs).
+    let disallowed_tools = super::invocation::baseline_disallowed_tools();
 
     let schema_filename = if bootstrap_mode {
         "bootstrap-schema.json"

@@ -478,7 +478,9 @@ async fn deliver_through_session(
         resume_session_id: session_id,
         new_session_id: None,
         allowed_tools: vec![],
-        disallowed_tools: vec![], // delivery is a relay — no tools to disable
+        // Delivery is a relay, but harness built-ins are still available — apply
+        // baseline so the haiku relay can't self-loop or escape via TeamCreate etc.
+        disallowed_tools: crate::telegram::invocation::baseline_disallowed_tools(),
         extra_args: vec![],
         prompt: None, // stdin-piped
     };

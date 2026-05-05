@@ -1,5 +1,46 @@
 use std::path::Path;
 
+/// Built-in CC harness tools blocked for every agent-driven `claude -p` call.
+///
+/// `Cron*` / memory / etc. are reserved for our MCP equivalents; the rest are
+/// harness-only tools (multi-agent UI, dynamic /loop wakeup, plan mode,
+/// worktree juggling, push notifications, in-process Monitor) that don't
+/// belong in a headless Telegram-driven agent.
+///
+/// `Agent` is NOT in this list — workers use subagents legitimately. Cron
+/// and reflection extend this baseline with `Agent` themselves.
+pub(crate) const BASELINE_DISALLOWED_TOOLS: &[&str] = &[
+    // Right Agent provides MCP equivalents — block harness versions.
+    "CronCreate",
+    "CronList",
+    "CronDelete",
+    "TaskCreate",
+    "TaskUpdate",
+    "TaskList",
+    "TaskGet",
+    "TaskOutput",
+    "TaskStop",
+    // Harness-only tools that don't fit a headless Telegram agent.
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "RemoteTrigger",
+    "ScheduleWakeup",
+    "EnterWorktree",
+    "ExitWorktree",
+    "Monitor",
+    "PushNotification",
+    "TeamCreate",
+    "TeamDelete",
+    "AskUserQuestion",
+];
+
+pub(crate) fn baseline_disallowed_tools() -> Vec<String> {
+    BASELINE_DISALLOWED_TOOLS
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
 /// CC output format flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
@@ -249,6 +290,37 @@ mod tests {
         let pos = args.iter().position(|a| a == "--disallowedTools").unwrap();
         assert_eq!(args[pos + 1], "CronCreate");
         assert_eq!(args[pos + 2], "CronList");
+    }
+
+    #[test]
+    fn baseline_disallowed_tools_blocks_harness_self_loops() {
+        let baseline = baseline_disallowed_tools();
+        for required in [
+            "ScheduleWakeup",
+            "EnterWorktree",
+            "ExitWorktree",
+            "Monitor",
+            "PushNotification",
+            "TeamCreate",
+            "TeamDelete",
+            "AskUserQuestion",
+            "EnterPlanMode",
+            "RemoteTrigger",
+            "CronCreate",
+            "TaskCreate",
+        ] {
+            assert!(
+                baseline.iter().any(|s| s == required),
+                "baseline must block {required}"
+            );
+        }
+        // Tools we deliberately keep available.
+        for kept in ["SendMessage", "LSP", "WebFetch", "WebSearch", "Agent"] {
+            assert!(
+                !baseline.iter().any(|s| s == kept),
+                "baseline must NOT block {kept}"
+            );
+        }
     }
 
     #[test]

@@ -215,7 +215,11 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         resume_session_id: Some(ctx.session_uuid.clone()),
         new_session_id: None,
         allowed_tools: vec![],
-        disallowed_tools: vec!["Agent".into()],
+        disallowed_tools: {
+            let mut d = crate::telegram::invocation::baseline_disallowed_tools();
+            d.push("Agent".into());
+            d
+        },
         extra_args: vec![],
         prompt: None,
     };
