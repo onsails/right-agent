@@ -227,6 +227,26 @@ fn insert_running_run(
     Ok(())
 }
 
+/// Pick the JSON schema and (optional) `--fork-session` source for a cron run.
+///
+/// `BackgroundContinuation` is the only kind that runs against
+/// [`right_agent::codegen::BG_CONTINUATION_SCHEMA_JSON`] — its forked turn
+/// MUST reply (notify required + non-null) because the user is waiting for
+/// the foreground answer sent to background. All other kinds use
+/// [`right_agent::codegen::CRON_SCHEMA_JSON`] where `notify: null` (silent)
+/// is a valid outcome.
+fn select_schema_and_fork(
+    spec: &right_agent::cron_spec::CronSpec,
+) -> (&'static str, Option<String>) {
+    match &spec.schedule_kind {
+        right_agent::cron_spec::ScheduleKind::BackgroundContinuation { fork_from } => (
+            right_agent::codegen::BG_CONTINUATION_SCHEMA_JSON,
+            Some(fork_from.to_string()),
+        ),
+        _ => (right_agent::codegen::CRON_SCHEMA_JSON, None),
+    }
+}
+
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
@@ -1772,6 +1792,57 @@ mod tests {
             "run_cron_task must exit within 2s of shutdown — \
              job loop handles are likely blocking (not aborted on shutdown)"
         );
+    }
+
+    #[test]
+    fn select_schema_for_recurring_uses_cron_schema() {
+        let spec = right_agent::cron_spec::CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        let (schema, fork) = select_schema_and_fork(&spec);
+        assert_eq!(schema, right_agent::codegen::CRON_SCHEMA_JSON);
+        assert!(fork.is_none());
+    }
+
+    #[test]
+    fn select_schema_for_immediate_uses_cron_schema() {
+        let spec = right_agent::cron_spec::CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::Immediate,
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        let (schema, fork) = select_schema_and_fork(&spec);
+        assert_eq!(schema, right_agent::codegen::CRON_SCHEMA_JSON);
+        assert!(fork.is_none());
+    }
+
+    #[test]
+    fn select_schema_for_bg_uses_bg_schema_and_fork_from() {
+        let main = uuid::Uuid::new_v4();
+        let spec = right_agent::cron_spec::CronSpec {
+            schedule_kind: right_agent::cron_spec::ScheduleKind::BackgroundContinuation {
+                fork_from: main,
+            },
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        let (schema, fork) = select_schema_and_fork(&spec);
+        assert_eq!(schema, right_agent::codegen::BG_CONTINUATION_SCHEMA_JSON);
+        assert_eq!(fork.as_deref(), Some(main.to_string().as_str()));
     }
 }
 
