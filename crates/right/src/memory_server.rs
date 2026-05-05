@@ -293,6 +293,7 @@ impl MemoryServer {
             params.run_at.as_deref(),
             Some(params.target_chat_id),
             params.target_thread_id,
+            false,
         )
         .map_err(|e| McpError::invalid_params(e, None))?;
         Ok(CallToolResult::success(vec![Content::text(

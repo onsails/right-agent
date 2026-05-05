@@ -180,6 +180,7 @@ impl RightBackend {
             params.run_at.as_deref(),
             Some(params.target_chat_id),
             params.target_thread_id,
+            false,
         )
         .map_err(|e| anyhow::anyhow!("invalid params: {e}"))?;
         Ok(CallToolResult::success(vec![Content::text(

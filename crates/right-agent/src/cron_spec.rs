@@ -7,6 +7,9 @@ use chrono::{DateTime, Utc};
 /// Default budget cap per cron invocation (USD).
 pub const DEFAULT_CRON_BUDGET_USD: f64 = 5.0;
 
+/// Sentinel value stored in the `schedule` column for Immediate cron jobs.
+pub(crate) const IMMEDIATE_SENTINEL: &str = "@immediate";
+
 /// Single source of truth for cron timings shown to users and the agent.
 ///
 /// Engine tick interval is intentionally omitted from this surface — it is an
@@ -43,6 +46,7 @@ pub enum ScheduleKind {
     /// Absolute UTC time, fires once then auto-deletes.
     RunAt(DateTime<Utc>),
     /// Fires on the next reconcile tick, then auto-deletes.
+    /// Stored as the `'@immediate'` sentinel in the `schedule` column.
     Immediate,
 }
 
@@ -176,19 +180,32 @@ fn validate_spec_inputs(
     Ok(schedule_warning)
 }
 
-/// Resolve schedule/recurring/run_at into DB column values.
+/// Resolve schedule/recurring/run_at/immediate into DB column values.
 ///
 /// Returns `(schedule_str, recurring_int, run_at_str, optional_warning)`.
+/// Exactly one of `schedule`, `run_at`, `immediate=true` must be provided.
 fn resolve_schedule_fields(
     schedule: Option<&str>,
     recurring: Option<bool>,
     run_at: Option<&str>,
+    immediate: bool,
 ) -> Result<(String, i64, Option<String>, Option<String>), String> {
+    let provided_count =
+        (schedule.is_some() as u8) + (run_at.is_some() as u8) + (immediate as u8);
+    if provided_count > 1 {
+        return Err(
+            "schedule, run_at, and immediate are mutually exclusive — provide exactly one".into(),
+        );
+    }
+    if provided_count == 0 {
+        return Err("one of schedule, run_at, or immediate must be provided".into());
+    }
+
+    if immediate {
+        return Ok((IMMEDIATE_SENTINEL.to_string(), 0, None, None));
+    }
+
     match (schedule, run_at) {
-        (Some(_), Some(_)) => {
-            Err("schedule and run_at are mutually exclusive — provide one or the other".into())
-        }
-        (None, None) => Err("one of schedule or run_at must be provided".into()),
         (Some(sched), None) => {
             let warning = validate_schedule(sched)?;
             let rec = if recurring.unwrap_or(true) { 1 } else { 0 };
@@ -205,6 +222,7 @@ fn resolve_schedule_fields(
             };
             Ok(("".to_string(), 0, Some(rat.to_string()), warning))
         }
+        _ => unreachable!("provided_count guarantees one of these arms"),
     }
 }
 
@@ -244,8 +262,9 @@ pub fn create_spec(
 
 /// Create a cron spec with one-shot support.
 ///
-/// Exactly one of `schedule`/`run_at` must be provided.
-/// `run_at` implies `recurring=false`.
+/// Exactly one of `schedule`, `run_at`, or `immediate=true` must be provided.
+/// `run_at` implies `recurring=false`. `immediate=true` fires on the next
+/// reconcile tick then auto-deletes.
 #[allow(clippy::too_many_arguments)]
 pub fn create_spec_v2(
     conn: &rusqlite::Connection,
@@ -258,6 +277,7 @@ pub fn create_spec_v2(
     run_at: Option<&str>,
     target_chat_id: Option<i64>,
     target_thread_id: Option<i64>,
+    immediate: bool,
 ) -> Result<CronSpecResult, String> {
     validate_job_name(job_name)?;
     if prompt.trim().is_empty() {
@@ -273,7 +293,7 @@ pub fn create_spec_v2(
     }
 
     let (db_schedule, db_recurring, db_run_at, schedule_warning) =
-        resolve_schedule_fields(schedule, recurring, run_at)?;
+        resolve_schedule_fields(schedule, recurring, run_at, immediate)?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
@@ -295,6 +315,34 @@ pub fn create_spec_v2(
         }
         Err(e) => Err(format!("insert failed: {e:#}")),
     }
+}
+
+/// Insert a one-shot Immediate cron job. Bot-internal use (background continuation).
+///
+/// Fires on the next reconcile tick, then auto-deletes. Validates the job name
+/// and budget like `create_spec_v2`. `max_budget_usd = None` uses the project
+/// default (`DEFAULT_CRON_BUDGET_USD`).
+pub fn insert_immediate_cron(
+    conn: &rusqlite::Connection,
+    job_name: &str,
+    prompt: &str,
+    target_chat_id: i64,
+    target_thread_id: Option<i64>,
+    max_budget_usd: Option<f64>,
+) -> Result<CronSpecResult, String> {
+    create_spec_v2(
+        conn,
+        job_name,
+        None,
+        prompt,
+        None,
+        max_budget_usd,
+        None,
+        None,
+        Some(target_chat_id),
+        target_thread_id,
+        true,
+    )
 }
 
 /// Update an existing cron spec. Returns error if job not found.
@@ -583,7 +631,7 @@ pub fn load_specs_from_db(
                     continue;
                 }
             }
-        } else if schedule == "@immediate" {
+        } else if schedule == IMMEDIATE_SENTINEL {
             ScheduleKind::Immediate
         } else if recurring == 0 {
             ScheduleKind::OneShotCron(schedule)
@@ -1180,6 +1228,7 @@ mod tests {
             Some("2026-12-25T15:30:00Z"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(result.message.contains("Created"));
@@ -1199,6 +1248,7 @@ mod tests {
             Some("2026-12-25T15:30:00Z"),
             None,
             None,
+            false,
         )
         .unwrap_err();
         assert!(err.contains("mutually exclusive"));
@@ -1218,6 +1268,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap_err();
         assert!(err.contains("one of"));
@@ -1237,6 +1288,7 @@ mod tests {
             Some("not-a-datetime"),
             None,
             None,
+            false,
         )
         .unwrap_err();
         assert!(err.contains("invalid"));
@@ -1256,6 +1308,7 @@ mod tests {
             Some("2020-01-01T00:00:00Z"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(result.message.contains("Created"));
@@ -1275,6 +1328,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         let specs = load_specs_from_db(&conn).unwrap();
@@ -1298,6 +1352,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         create_spec_v2(
@@ -1311,6 +1366,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         create_spec_v2(
@@ -1324,6 +1380,7 @@ mod tests {
             Some("2026-12-25T15:30:00Z"),
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -1356,6 +1413,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         update_spec_partial(
@@ -1391,6 +1449,7 @@ mod tests {
             Some("2026-12-25T15:30:00Z"),
             None,
             None,
+            false,
         )
         .unwrap();
         update_spec_partial(
@@ -1427,6 +1486,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         update_spec_partial(
@@ -1463,6 +1523,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         let err = update_spec_partial(
@@ -1495,6 +1556,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         let err = update_spec_partial(
@@ -1537,6 +1599,7 @@ mod tests {
             None,
             Some(-100),
             Some(7),
+            false,
         )
         .unwrap();
 
@@ -1565,6 +1628,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -1593,6 +1657,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         update_spec_partial(
@@ -1632,6 +1697,7 @@ mod tests {
             None,
             Some(-1),
             Some(42),
+            false,
         )
         .unwrap();
         // Outer Some = field present; inner None = clear to NULL.
@@ -1672,6 +1738,7 @@ mod tests {
             None,
             Some(-1),
             Some(42),
+            false,
         )
         .unwrap();
         // Update only the prompt; targets must stay.
@@ -1732,6 +1799,7 @@ mod tests {
             None,
             Some(-100),
             Some(5),
+            false,
         )
         .unwrap();
         let json = list_specs(&conn).unwrap();
@@ -1739,5 +1807,64 @@ mod tests {
         let row = &value.as_array().unwrap()[0];
         assert_eq!(row["target_chat_id"].as_i64(), Some(-100));
         assert_eq!(row["target_thread_id"].as_i64(), Some(5));
+    }
+
+    #[test]
+    fn resolve_schedule_fields_immediate_mutex() {
+        use super::resolve_schedule_fields;
+        // immediate + schedule → error
+        assert!(resolve_schedule_fields(Some("*/5 * * * *"), None, None, true).is_err());
+        // immediate + run_at → error
+        assert!(resolve_schedule_fields(None, None, Some("2026-12-25T00:00:00Z"), true).is_err());
+        // immediate alone → ok with sentinel
+        let (sched, rec, run_at, _) = resolve_schedule_fields(None, None, None, true).unwrap();
+        assert_eq!(sched, IMMEDIATE_SENTINEL);
+        assert_eq!(rec, 0);
+        assert!(run_at.is_none());
+    }
+
+    #[test]
+    fn create_spec_v2_immediate_inserts_sentinel() {
+        let conn = setup_db();
+        create_spec_v2(
+            &conn,
+            "bg-test",
+            None,
+            "do it now",
+            None,
+            Some(5.0),
+            None,
+            None,
+            Some(-100),
+            Some(7),
+            true,
+        )
+        .unwrap();
+        let stored: (String, i64, Option<String>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT schedule, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs WHERE job_name = 'bg-test'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, IMMEDIATE_SENTINEL);
+        assert_eq!(stored.1, 0);
+        assert!(stored.2.is_none());
+        assert_eq!(stored.3, Some(-100));
+        assert_eq!(stored.4, Some(7));
+    }
+
+    #[test]
+    fn insert_immediate_cron_uses_default_budget_when_none() {
+        let conn = setup_db();
+        insert_immediate_cron(&conn, "bg-2", "prompt", -42, Some(0), None).unwrap();
+        let budget: f64 = conn
+            .query_row(
+                "SELECT max_budget_usd FROM cron_specs WHERE job_name = 'bg-2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!((budget - DEFAULT_CRON_BUDGET_USD).abs() < f64::EPSILON);
     }
 }
