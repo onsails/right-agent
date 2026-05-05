@@ -42,6 +42,8 @@ pub enum ScheduleKind {
     OneShotCron(String),
     /// Absolute UTC time, fires once then auto-deletes.
     RunAt(DateTime<Utc>),
+    /// Fires on the next reconcile tick, then auto-deletes.
+    Immediate,
 }
 
 impl ScheduleKind {
@@ -49,13 +51,13 @@ impl ScheduleKind {
     pub fn cron_schedule(&self) -> Option<&str> {
         match self {
             Self::Recurring(s) | Self::OneShotCron(s) => Some(s),
-            Self::RunAt(_) => None,
+            Self::RunAt(_) | Self::Immediate => None,
         }
     }
 
     /// Whether this is a one-shot job (fires once then deletes).
     pub fn is_one_shot(&self) -> bool {
-        matches!(self, Self::OneShotCron(_) | Self::RunAt(_))
+        matches!(self, Self::OneShotCron(_) | Self::RunAt(_) | Self::Immediate)
     }
 }
 
@@ -581,6 +583,8 @@ pub fn load_specs_from_db(
                     continue;
                 }
             }
+        } else if schedule == "@immediate" {
+            ScheduleKind::Immediate
         } else if recurring == 0 {
             ScheduleKind::OneShotCron(schedule)
         } else {
@@ -1693,6 +1697,25 @@ mod tests {
             .unwrap();
         assert_eq!(chat, Some(-1));
         assert_eq!(thread, Some(42));
+    }
+
+    #[test]
+    fn load_specs_round_trips_immediate() {
+        let conn = setup_db();
+        conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
+             VALUES ('imm', '@immediate', 'do it now', 5.0, 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let specs = load_specs_from_db(&conn).unwrap();
+        assert!(matches!(specs["imm"].schedule_kind, ScheduleKind::Immediate));
+    }
+
+    #[test]
+    fn immediate_is_one_shot() {
+        assert!(ScheduleKind::Immediate.is_one_shot());
+        assert!(ScheduleKind::Immediate.cron_schedule().is_none());
     }
 
     #[test]
