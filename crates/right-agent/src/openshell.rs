@@ -74,7 +74,11 @@ pub fn control_master_socket_path(ssh_config_dir: &Path, sandbox_name: &str) -> 
 pub fn control_master_directives(ssh_config_dir: &Path, sandbox_name: &str) -> String {
     let socket = control_master_socket_path(ssh_config_dir, sandbox_name);
     format!(
-        "\n# Connection multiplexing — see docs/superpowers/specs/2026-05-05-ssh-controlmaster-design.md\nControlMaster auto\nControlPath {}\nControlPersist yes\n",
+        "\n\
+        # Connection multiplexing — see docs/superpowers/specs/2026-05-05-ssh-controlmaster-design.md\n\
+        ControlMaster auto\n\
+        ControlPath {}\n\
+        ControlPersist yes\n",
         socket.display()
     )
 }
@@ -580,6 +584,59 @@ pub async fn ssh_exec(
     }
 }
 
+/// Run a single OpenSSH ControlMaster control operation
+/// (`ssh -F <config> -O <op> <host>`) and report whether it exited 0.
+///
+/// Used by the three control-op callers (`check`, `clean_stale`, `tear_down`).
+/// Failures and timeouts return `false` and log at `debug` — the caller
+/// decides what to do with the answer.
+///
+/// Uses plain `tokio::process::Child` with `kill_on_drop(false)` for the same
+/// reason as [`ssh_exec`]: `ProcessGroupChild`'s `killpg(SIGKILL)` would also
+/// kill the master's ProxyCommand if it happened to share the spawning ssh's
+/// process group. Control ops do not establish a connection, so they don't
+/// fork a ProxyCommand themselves — but using the consistent pattern keeps
+/// the rationale on one shape and avoids future "let's unify these" mistakes.
+async fn run_ssh_control_op(config_path: &Path, host: &str, op: &str) -> bool {
+    let mut command = Command::new("ssh");
+    command.arg("-F").arg(config_path);
+    command.args(["-O", op]);
+    command.arg(host);
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+    command.kill_on_drop(false);
+
+    let child = match command.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(host, op, error = %e, "ssh -O spawn failed");
+            return false;
+        }
+    };
+
+    match tokio::time::timeout(
+        Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(o)) => o.status.success(),
+        Ok(Err(e)) => {
+            tracing::debug!(host, op, error = %e, "ssh -O wait failed");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(
+                host,
+                op,
+                "ssh -O timed out after {}s",
+                SSH_CONTROL_OP_TIMEOUT_SECS,
+            );
+            false
+        }
+    }
+}
+
 /// Check whether an OpenSSH ControlMaster is alive at the ControlPath
 /// specified in the given SSH config.
 ///
@@ -587,43 +644,7 @@ pub async fn ssh_exec(
 /// `false` for any other exit, spawn failure, or timeout. This is a probe,
 /// not an error path — the caller decides what to do with the answer.
 pub async fn check_control_master(config_path: &Path, host: &str) -> bool {
-    let mut command = Command::new("ssh");
-    command.arg("-F").arg(config_path);
-    command.args(["-O", "check"]);
-    command.arg(host);
-    command.stdout(Stdio::null());
-    command.stderr(Stdio::null());
-
-    let mut child = match crate::process_group::ProcessGroupChild::spawn(command) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!(host, error = %e, "ssh -O check spawn failed");
-            return false;
-        }
-    };
-
-    let output = match tokio::time::timeout(
-        Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            tracing::debug!(host, error = %e, "ssh -O check wait failed");
-            return false;
-        }
-        Err(_) => {
-            tracing::debug!(
-                host,
-                "ssh -O check timed out after {}s",
-                SSH_CONTROL_OP_TIMEOUT_SECS,
-            );
-            return false;
-        }
-    };
-
-    output.status.success()
+    run_ssh_control_op(config_path, host, "check").await
 }
 
 /// At bot startup, clean up a stale ControlMaster socket left behind by
@@ -659,20 +680,8 @@ pub async fn clean_stale_control_master(
         "stale control-master socket found, cleaning up",
     );
 
-    // Best-effort exit; ignore failure (master is dead anyway).
-    let mut exit_cmd = Command::new("ssh");
-    exit_cmd.arg("-F").arg(config_path);
-    exit_cmd.args(["-O", "exit"]);
-    exit_cmd.arg(host);
-    exit_cmd.stdout(Stdio::null());
-    exit_cmd.stderr(Stdio::null());
-    if let Ok(mut child) = crate::process_group::ProcessGroupChild::spawn(exit_cmd) {
-        let _ = tokio::time::timeout(
-            Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
-            child.wait_with_output(),
-        )
-        .await;
-    }
+    // Best-effort exit; ignore the result (master is dead anyway).
+    let _ = run_ssh_control_op(config_path, host, "exit").await;
 
     if let Err(e) = std::fs::remove_file(socket_path)
         && e.kind() != std::io::ErrorKind::NotFound
@@ -692,35 +701,7 @@ pub async fn clean_stale_control_master(
 /// migration. Never returns an error; outcomes are logged at info, debug,
 /// or warn depending on what happened.
 pub async fn tear_down_control_master(config_path: &Path, host: &str, socket_path: &Path) {
-    let mut exit_cmd = Command::new("ssh");
-    exit_cmd.arg("-F").arg(config_path);
-    exit_cmd.args(["-O", "exit"]);
-    exit_cmd.arg(host);
-    exit_cmd.stdout(Stdio::null());
-    exit_cmd.stderr(Stdio::null());
-
-    match crate::process_group::ProcessGroupChild::spawn(exit_cmd) {
-        Ok(mut child) => {
-            match tokio::time::timeout(
-                Duration::from_secs(SSH_CONTROL_OP_TIMEOUT_SECS),
-                child.wait_with_output(),
-            )
-            .await
-            {
-                Ok(_) => {}
-                Err(_) => {
-                    tracing::debug!(
-                        host,
-                        "ssh -O exit timed out after {}s during teardown",
-                        SSH_CONTROL_OP_TIMEOUT_SECS,
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(host, error = %e, "ssh -O exit spawn failed during teardown");
-        }
-    }
+    let _ = run_ssh_control_op(config_path, host, "exit").await;
 
     match std::fs::remove_file(socket_path) {
         Ok(_) => {

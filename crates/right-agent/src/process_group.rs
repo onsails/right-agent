@@ -13,6 +13,12 @@
 //! suspension point. This makes `ProcessGroupChild` cancel-safe under
 //! `tokio::time::timeout` and `tokio::select!` — when the awaiting task
 //! is dropped, Drop fires and the whole process group is SIGKILLed.
+//!
+//! **Do not use for the first ssh call against a `ControlMaster auto`
+//! config.** The master and its ProxyCommand share the spawning ssh's
+//! process group; `killpg(SIGKILL)` would kill the ProxyCommand and
+//! defeat multiplexing. See `ssh_exec` in `openshell.rs` for the pattern
+//! that establishes the master safely.
 
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;

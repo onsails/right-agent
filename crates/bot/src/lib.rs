@@ -899,8 +899,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let _ = handle.await;
     }
 
-    // Tear down the OpenSSH ControlMaster so we don't leak the master ssh
-    // process across bot restarts. Best-effort.
+    // Without this, the master ssh process outlives the bot and only gets
+    // cleaned up by `clean_stale_control_master` on the next start.
     if let (Some(cfg_path), Some(sandbox_name)) = (shutdown_ssh_config, shutdown_sandbox) {
         let ssh_config_dir = home.join("run").join("ssh");
         let socket =
