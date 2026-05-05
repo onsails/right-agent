@@ -298,6 +298,7 @@ async fn execute_job(
         max_turns: None,
         resume_session_id: None,
         new_session_id: Some(run_id.clone()),
+        fork_session: false,
         allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],

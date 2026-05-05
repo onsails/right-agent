@@ -1282,6 +1282,7 @@ async fn invoke_cc(
         max_turns: None,
         resume_session_id: None,
         new_session_id: None,
+        fork_session: false,
         allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],

@@ -1465,6 +1465,7 @@ async fn detect_auth_type_via_haiku(
         max_turns: Some(10),
         resume_session_id: None,
         new_session_id: None,
+        fork_session: false,
         allowed_tools: vec!["WebSearch".into(), "WebFetch".into()],
         disallowed_tools: vec![],
         extra_args: vec![],

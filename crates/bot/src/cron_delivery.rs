@@ -477,6 +477,7 @@ async fn deliver_through_session(
         max_turns: None,
         resume_session_id: session_id,
         new_session_id: None,
+        fork_session: false,
         allowed_tools: vec![],
         // Delivery is a relay, but harness built-ins are still available — apply
         // baseline so the haiku relay can't self-loop or escape via TeamCreate etc.

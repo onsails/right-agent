@@ -59,6 +59,7 @@ pub(crate) struct ClaudeInvocation {
     pub(crate) max_turns: Option<u32>,
     pub(crate) resume_session_id: Option<String>,
     pub(crate) new_session_id: Option<String>,
+    pub(crate) fork_session: bool,
     pub(crate) allowed_tools: Vec<String>,
     pub(crate) disallowed_tools: Vec<String>,
     pub(crate) extra_args: Vec<String>,
@@ -91,9 +92,16 @@ impl ClaudeInvocation {
         }
 
         // 4. Session
-        if let Some(id) = self.resume_session_id {
+        if let Some(resume_id) = self.resume_session_id {
             args.push("--resume".into());
-            args.push(id);
+            args.push(resume_id);
+            if self.fork_session {
+                args.push("--fork-session".into());
+                if let Some(new_id) = self.new_session_id {
+                    args.push("--session-id".into());
+                    args.push(new_id);
+                }
+            }
         } else if let Some(id) = self.new_session_id {
             args.push("--session-id".into());
             args.push(id);
@@ -219,6 +227,7 @@ mod tests {
             max_turns: None,
             resume_session_id: None,
             new_session_id: None,
+            fork_session: false,
             allowed_tools: vec![],
             disallowed_tools: vec![],
             extra_args: vec![],
@@ -386,5 +395,33 @@ mod tests {
         let agent_dir = PathBuf::from("/home/user/agents/foo");
         let path = mcp_config_path(None, &agent_dir);
         assert_eq!(path, "/home/user/agents/foo/mcp.json");
+    }
+
+    #[test]
+    fn fork_session_emits_resume_fork_and_session_id() {
+        let mut inv = minimal();
+        inv.resume_session_id = Some("main-uuid".into());
+        inv.new_session_id = Some("fork-uuid".into());
+        inv.fork_session = true;
+        let args = inv.into_args();
+
+        let resume_pos = args.iter().position(|a| a == "--resume").expect("--resume missing");
+        let fork_pos = args.iter().position(|a| a == "--fork-session").expect("--fork-session missing");
+        let session_pos = args.iter().position(|a| a == "--session-id").expect("--session-id missing");
+
+        assert!(resume_pos < fork_pos, "--resume must precede --fork-session");
+        assert!(fork_pos < session_pos, "--fork-session must precede --session-id");
+        assert_eq!(args[resume_pos + 1], "main-uuid");
+        assert_eq!(args[session_pos + 1], "fork-uuid");
+    }
+
+    #[test]
+    fn fork_session_without_resume_does_not_emit_flag() {
+        let mut inv = minimal();
+        inv.new_session_id = Some("only-new".into());
+        inv.fork_session = true;
+        let args = inv.into_args();
+        assert!(!args.contains(&"--fork-session".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
     }
 }

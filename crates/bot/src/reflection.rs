@@ -214,6 +214,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         max_turns: Some(ctx.limits.max_turns),
         resume_session_id: Some(ctx.session_uuid.clone()),
         new_session_id: None,
+        fork_session: false,
         allowed_tools: vec![],
         disallowed_tools: {
             let mut d = crate::telegram::invocation::baseline_disallowed_tools();
