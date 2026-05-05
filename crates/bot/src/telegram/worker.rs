@@ -327,8 +327,6 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
 
 /// Returns a short human-readable phrase describing why a foreground turn was
 /// backgrounded. Used in the continuation system prompt and in test assertions.
-// Used by build_continuation_prompt (called in tests and Task 11).
-#[allow(dead_code)]
 fn continuation_reason_text(reason: BgReason) -> &'static str {
     match reason {
         BgReason::AutoTimeout => {
@@ -342,8 +340,6 @@ fn continuation_reason_text(reason: BgReason) -> &'static str {
 ///
 /// The notice instructs the agent to continue from the most recent user
 /// message without re-engaging prior history, and frames why the fork happened.
-// Called from enqueue_background_job and tests; wired into Task 11 callers.
-#[allow(dead_code)]
 fn build_continuation_prompt(reason: BgReason) -> String {
     let reason_text = continuation_reason_text(reason);
     format!(
@@ -364,8 +360,6 @@ directly.\n\
 
 /// Generate a 4-character lowercase alphanumeric suffix using the system clock
 /// as entropy. Avoids pulling in `rand` for this single use site.
-// Used by enqueue_background_job (wired in Task 11).
-#[allow(dead_code)]
 fn random_suffix4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -389,8 +383,6 @@ fn random_suffix4() -> String {
 /// line that `cron::execute_job` (Task 10) will strip and parse.
 ///
 /// Returns the generated job name on success.
-// Called from spawn_worker in Task 11.
-#[allow(dead_code)]
 fn enqueue_background_job(
     conn: &rusqlite::Connection,
     chat_id: i64,
@@ -719,7 +711,6 @@ pub fn spawn_worker(
                                 session_uuid.clone()
                             }
                             InvokeCcFailure::NonReflectable { .. } => String::new(),
-                            // Task 11 will extract main_session_id here.
                             InvokeCcFailure::Backgrounded { main_session_id, .. } => {
                                 main_session_id.clone()
                             }
@@ -1078,11 +1069,70 @@ pub fn spawn_worker(
                         }
                     }
                 }
-                // Task 11 will implement the full Backgrounded handling (edit banner,
-                // notify user, enqueue job). For now the variant is defined but not yet
-                // emitted, so this arm can never be reached.
-                Err(InvokeCcFailure::Backgrounded { .. }) => {
-                    tracing::warn!(?key, "Backgrounded outcome received but Task 11 not yet wired");
+                Err(InvokeCcFailure::Backgrounded {
+                    reason,
+                    main_session_id,
+                    thinking_msg_id,
+                }) => {
+                    tracing::info!(?key, ?reason, "backgrounding turn");
+
+                    // 1. Open DB connection and enqueue the background job.
+                    let conn = match right_agent::memory::open_connection(&ctx.agent_dir, false) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!(?key, "DB open for bg enqueue failed: {e:#}");
+                            send_error_to_telegram(
+                                &ctx,
+                                tg_chat_id,
+                                eff_thread_id,
+                                "\u{26a0}\u{fe0f} Failed to enqueue background job: database unavailable.",
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    let job_name = match enqueue_background_job(
+                        &conn,
+                        chat_id,
+                        eff_thread_id,
+                        &main_session_id,
+                        reason,
+                    ) {
+                        Ok(name) => name,
+                        Err(e) => {
+                            tracing::error!(?key, "bg enqueue failed: {e}");
+                            send_error_to_telegram(
+                                &ctx,
+                                tg_chat_id,
+                                eff_thread_id,
+                                &format!(
+                                    "\u{26a0}\u{fe0f} Failed to enqueue background job: {}",
+                                    html_escape(&e)
+                                ),
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
+                    tracing::info!(?key, %job_name, "background job enqueued");
+
+                    // 2. Edit thinking message to per-reason banner, clear keyboard.
+                    if let Some(msg_id) = thinking_msg_id {
+                        let banner = match reason {
+                            BgReason::AutoTimeout => {
+                                "\u{23f1} Foreground hit 10-min limit — continuing in background. \
+                                 Will reply when ready \u{1f319}"
+                            }
+                            BgReason::UserRequested => {
+                                "\u{1f319} Working in background. Will reply when ready"
+                            }
+                        };
+                        let _ = ctx
+                            .bot
+                            .edit_message_text(tg_chat_id, msg_id, banner)
+                            .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                            .await;
+                    }
                 }
             }
 
@@ -1276,8 +1326,6 @@ fn spawn_token_request(
 }
 
 /// Why a foreground CC turn was moved to background execution.
-// Variants are wired in Task 11 (invoke_cc emission + spawn_worker handling).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BgReason {
     /// The CC subprocess was killed because it exceeded the 10-minute safety limit.
@@ -1308,10 +1356,8 @@ pub(crate) enum InvokeCcFailure {
     /// errors, schema read failures). The `message` is sent to Telegram verbatim.
     NonReflectable { message: String },
     /// The foreground turn was terminated (timeout or user request) and work
-    /// has been enqueued as a background cron job. `spawn_worker` (Task 11)
-    /// will edit `thinking_msg_id` with a per-reason banner.
-    // Variant is emitted in Task 11.
-    #[allow(dead_code)]
+    /// has been enqueued as a background cron job. `spawn_worker` edits
+    /// `thinking_msg_id` with a per-reason banner.
     Backgrounded {
         reason: BgReason,
         /// UUID of the main session from which the background job should fork.
@@ -1856,6 +1902,14 @@ async fn invoke_cc(
     // Remove stop token — session no longer cancellable.
     ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
 
+    // User clicked Background — check before treating cancellation as a normal stop.
+    // The bg callback inserts the flag and cancels the stop token, so `stopped` is
+    // true here as well; bg semantics override.
+    let was_bg_request = ctx
+        .bg_requests
+        .remove(&(chat_id, eff_thread_id))
+        .is_some();
+
     // Read any remaining stderr.
     let stderr_str = if let Some(mut stderr) = child.stderr() {
         let mut buf = String::new();
@@ -1871,6 +1925,7 @@ async fn invoke_cc(
         exit_code,
         timed_out,
         stopped,
+        was_bg_request,
         stream_log = %stream_log_path.display(),
         sandboxed,
         "claude -p finished"
@@ -1885,11 +1940,18 @@ async fn invoke_cc(
     // If we're about to return a Reflectable, spawn_worker will edit the
     // thinking message into a banner — skip the cost/turns finalization here
     // to avoid a visible flash of the final summary before the banner.
-    let will_reflect = timed_out || (exit_code != 0 && !is_auth_error(&stdout_str));
+    let will_reflect = exit_code != 0 && !is_auth_error(&stdout_str);
+    // Backgrounding paths (user-requested via bg button, or auto-timeout) also
+    // hand the thinking message off to spawn_worker for the bg banner edit.
+    let will_background = was_bg_request || timed_out;
 
     // Final thinking message update based on completion mode.
     if let Some(msg_id) = thinking_msg_id {
-        if stopped {
+        if will_background {
+            // Backgrounding (user-requested or auto-timeout) — spawn_worker
+            // will edit the thinking message into the bg banner. Don't touch
+            // it here.
+        } else if stopped {
             // Stopped by user — show final state, remove keyboard.
             // In groups we never rendered the thinking view, so reuse the
             // "Working..." placeholder for consistency with the initial send.
@@ -1923,6 +1985,17 @@ async fn invoke_cc(
         // spawn_worker will edit it into a banner.
     }
 
+    // Handle user-requested backgrounding — must come BEFORE the `stopped`
+    // check, since the bg button cancels the same stop_token (so `stopped` is
+    // also true).
+    if was_bg_request {
+        return Err(InvokeCcFailure::Backgrounded {
+            reason: BgReason::UserRequested,
+            main_session_id: session_uuid.clone(),
+            thinking_msg_id,
+        });
+    }
+
     // Handle user-initiated stop.
     if stopped {
         tracing::info!(?chat_id, "CC session stopped by user");
@@ -1934,25 +2007,11 @@ async fn invoke_cc(
         });
     }
 
-    // Handle timeout.
+    // Handle timeout — backgrounding instead of reflection.
     if timed_out {
-        let mut timeout_msg = format!(
-            "⚠️ Agent timed out ({CC_TIMEOUT_SECS}s safety limit). Last activity:\n─────────────\n"
-        );
-        for event in ring_buffer.events() {
-            if let Some(formatted) = super::stream::format_event(event) {
-                timeout_msg.push_str(&formatted);
-                timeout_msg.push('\n');
-            }
-        }
-        timeout_msg.push_str(&format!("\nStream log: {}", stream_log_path.display()));
-        return Err(InvokeCcFailure::Reflectable {
-            kind: FailureKind::SafetyTimeout {
-                limit_secs: CC_TIMEOUT_SECS,
-            },
-            ring_buffer_tail: ring_buffer.events().clone(),
-            session_uuid: session_uuid.clone(),
-            raw_message: timeout_msg,
+        return Err(InvokeCcFailure::Backgrounded {
+            reason: BgReason::AutoTimeout,
+            main_session_id: session_uuid.clone(),
             thinking_msg_id,
         });
     }

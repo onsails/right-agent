@@ -25,7 +25,10 @@ const ACTIVITY_SNIPPET_LEN: usize = 80;
 /// reason text inserted into the SYSTEM_NOTICE prompt.
 #[derive(Debug, Clone)]
 pub(crate) enum FailureKind {
-    /// Process was killed by the 600-second safety net in worker.
+    /// Process was killed by a safety-timeout net. Worker no longer emits this
+    /// (timeouts now go through the Backgrounded path); retained for cron-side
+    /// classification if a cron job's CC subprocess hits its own safety net.
+    #[allow(dead_code)]
     SafetyTimeout { limit_secs: u64 },
     /// CC reported `--max-budget-usd` exhaustion.
     BudgetExceeded { limit_usd: f64 },
