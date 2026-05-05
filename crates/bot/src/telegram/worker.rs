@@ -178,6 +178,60 @@ pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
     )
 }
 
+/// Decide whether a bg-request flag should be honored.
+///
+/// Even after `consume_bg_request` returns true, an intra-turn race can fire
+/// the bg button after CC has already produced a real reply (stdout closed →
+/// break, child exited 0). In that window the callback finds the StopTokens
+/// entry (still present until just after the select-break), reads its
+/// turn_id, and inserts `bg_requests[key] = turn_id`. Without this gate the
+/// worker would reclassify the successful turn as Backgrounded, drop the
+/// reply, and enqueue a duplicate continuation cron job.
+///
+/// Only honor the bg request when the turn did NOT finish normally — i.e.
+/// either the safety timeout fired, CC exited non-zero, or stdout is empty.
+/// All three conditions describe a turn that has no valid reply to deliver.
+pub(crate) fn should_honor_bg_request(
+    was_bg: bool,
+    timed_out: bool,
+    exit_code: i32,
+    stdout: &str,
+) -> bool {
+    was_bg && (timed_out || exit_code != 0 || stdout.is_empty())
+}
+
+/// Atomically remove and classify the bg_requests entry for `key`.
+///
+/// Returns `true` only when an entry exists AND its stored turn_id matches the
+/// caller's `current_turn_id` — i.e. the bg click was issued *for this very
+/// turn*. Stale entries (from a previous turn that exited without cleanup, or
+/// a bg click that races a normal stream-end completion of this turn) are
+/// dropped and treated as not-bg, so a normal-completion turn can never be
+/// silently reclassified as Backgrounded (which would drop the real reply).
+///
+/// The entry is always removed regardless of match result, so leaked entries
+/// from other turn ids cannot accumulate at the same (chat, thread) key.
+pub(crate) fn consume_bg_request(
+    bg_requests: &super::BgRequests,
+    key: (i64, i64),
+    current_turn_id: u64,
+) -> bool {
+    match bg_requests.remove(&key) {
+        Some((_, stamped_id)) if stamped_id == current_turn_id => true,
+        Some((_, stamped_id)) => {
+            tracing::warn!(
+                chat_id = key.0,
+                eff_thread_id = key.1,
+                current_turn_id,
+                stamped_id,
+                "ignoring stale bg_requests entry from another turn"
+            );
+            false
+        }
+        None => false,
+    }
+}
+
 /// Check whether CC stdout JSON indicates an authentication failure (403/401).
 ///
 /// Returns true when the JSON has `is_error: true` and the `result` string
@@ -314,6 +368,63 @@ fn recall_tags(chat_id: i64) -> Vec<String> {
     vec![format!("chat:{chat_id}")]
 }
 
+/// Build the JSON role/content/timestamp array sent to Hindsight as the
+/// retain payload.
+///
+/// `assistant_text = None` is used by the Backgrounded path: the user message
+/// is retained at fork time so the document_id (= main session UUID) stays in
+/// sync with the conversation. The eventual cron-delivery answer relayed back
+/// through `--resume <main>` does not auto-retain (cron sessions skip memory),
+/// so this is the only chance to record the user turn before recall on the
+/// next foreground message would otherwise return a context hole.
+fn build_retain_content(user_text: &str, assistant_text: Option<&str>, now_rfc3339: &str) -> String {
+    let mut items = vec![serde_json::json!({
+        "role": "user",
+        "content": user_text,
+        "timestamp": now_rfc3339,
+    })];
+    if let Some(a) = assistant_text {
+        items.push(serde_json::json!({
+            "role": "assistant",
+            "content": a,
+            "timestamp": now_rfc3339,
+        }));
+    }
+    serde_json::Value::Array(items).to_string()
+}
+
+/// Spawn a fire-and-forget Hindsight retain for the current turn.
+///
+/// Used by the success path (with assistant reply) and the Backgrounded path
+/// (user message only). Both paths key the retain by the main `--resume`
+/// session UUID with `update_mode: "append"`, so Hindsight processes
+/// incrementally regardless of which side fires.
+fn spawn_auto_retain(
+    hs: Arc<right_agent::memory::ResilientHindsight>,
+    user_text: String,
+    assistant_text: Option<String>,
+    document_id: String,
+    tags: Vec<String>,
+) {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    tokio::spawn(async move {
+        let content = build_retain_content(&user_text, assistant_text.as_deref(), &now);
+        if let Err(e) = hs
+            .retain(
+                &content,
+                Some("conversation between Right Agent and the User"),
+                Some(&document_id),
+                Some("append"),
+                Some(&tags),
+                right_agent::memory::resilient::POLICY_AUTO_RETAIN,
+            )
+            .await
+        {
+            tracing::warn!("auto-retain failed: {e:#}");
+        }
+    });
+}
+
 /// Truncate a string to at most `max_chars` characters (not bytes).
 ///
 /// Hindsight recall API rejects queries over 500 tokens. At ~1 token per
@@ -358,31 +469,9 @@ directly.\n\
     )
 }
 
-/// Generate a 4-character lowercase alphanumeric suffix using the system clock
-/// as entropy. Avoids pulling in `rand` for this single use site.
-fn random_suffix4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    let mut n = nanos as u64;
-    let mut out = String::with_capacity(4);
-    for _ in 0..4 {
-        out.push(ALPHABET[(n % ALPHABET.len() as u64) as usize] as char);
-        n /= ALPHABET.len() as u64;
-    }
-    out
-}
-
 /// Enqueue a one-shot background cron job that will fork from `main_session_id`
-/// and continue the interrupted turn.
-///
-/// The main session UUID is embedded in the prompt via an `X-FORK-FROM:` header
-/// line that `cron::execute_job` (Task 10) will strip and parse.
-///
-/// Returns the generated job name on success.
+/// and continue the interrupted turn. Job name is `bg-<HHMMSS>-<uuid4>` —
+/// timestamped for human scanning, uuid-suffixed for collision-free PK insert.
 fn enqueue_background_job(
     conn: &rusqlite::Connection,
     chat_id: i64,
@@ -390,10 +479,12 @@ fn enqueue_background_job(
     main_session_id: &str,
     reason: BgReason,
 ) -> Result<String, String> {
+    const JOB_SUFFIX_HEX_CHARS: usize = 8;
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
     let job_name = format!(
         "bg-{}-{}",
         chrono::Utc::now().format("%H%M%S"),
-        random_suffix4()
+        &suffix[..JOB_SUFFIX_HEX_CHARS]
     );
     let prompt_user_msg = build_continuation_prompt(reason);
     // Embed the session UUID as a header line so cron's execute_job can build
@@ -929,11 +1020,6 @@ pub fn spawn_worker(
                     // 1. Edit the old thinking message to a short neutral banner
                     //    (no ring-buffer dump) and clear the stop keyboard.
                     let banner = match &kind {
-                        crate::reflection::FailureKind::SafetyTimeout { limit_secs } => {
-                            format!(
-                                "\u{26a0}\u{fe0f} Hit {limit_secs}s safety limit — thinking again…"
-                            )
-                        }
                         crate::reflection::FailureKind::NonZeroExit { code } => {
                             format!(
                                 "\u{26a0}\u{fe0f} Claude exited with code {code} — thinking again…"
@@ -1076,6 +1162,28 @@ pub fn spawn_worker(
                 }) => {
                     tracing::info!(?key, ?reason, "backgrounding turn");
 
+                    // Retain the user message before forking. Cron-delivery later
+                    // resumes the same `main_session_id` to relay the answer, but
+                    // cron paths skip auto-retain (see ARCHITECTURE.md "Cron jobs
+                    // skip memory"). Without this call the user turn never reaches
+                    // Hindsight and the next foreground recall is blind to it.
+                    // `update_mode: "append"` matches the success path so the
+                    // assistant turn (whenever the agent later writes one — via
+                    // memory_retain MCP call from the cron prompt, or via a
+                    // subsequent foreground turn) extends the same document.
+                    if let Some(ref hs) = ctx.hindsight {
+                        let sender_id = batch.first().and_then(|m| m.author.user_id);
+                        let retain_tags_v =
+                            retain_tags(chat_id, sender_id, eff_thread_id, is_group);
+                        spawn_auto_retain(
+                            Arc::clone(hs),
+                            input.clone(),
+                            None,
+                            main_session_id.clone(),
+                            retain_tags_v,
+                        );
+                    }
+
                     // 1. Open DB connection and enqueue the background job.
                     let conn = match right_agent::memory::open_connection(&ctx.agent_dir, false) {
                         Ok(c) => c,
@@ -1140,36 +1248,23 @@ pub fn spawn_worker(
             // reply_text_for_retain is only set on the Ok success path; reflection
             // replies are intentionally excluded from Hindsight (SYSTEM_NOTICE prompts
             // are platform noise, not user-agent conversation).
+            //
+            // The Backgrounded path retains the user message above (no assistant
+            // text) so the main session_id has the user turn recorded before the
+            // cron-delivery answer arrives — cron-side sessions skip auto-retain
+            // entirely, so without this the next recall would have a context hole.
             if let Some(ref hs) = ctx.hindsight {
                 // Auto-retain this turn.
                 if let Some(ref reply_text) = reply_text_for_retain {
-                    let hs_retain = Arc::clone(hs);
-                    let retain_input = input.clone();
-                    let retain_response = reply_text.clone();
-                    let retain_doc_id = session_uuid.clone();
                     let sender_id = batch.first().and_then(|m| m.author.user_id);
                     let retain_tags_v = retain_tags(chat_id, sender_id, eff_thread_id, is_group);
-                    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                    tokio::spawn(async move {
-                        let content = serde_json::json!([
-                            {"role": "user", "content": retain_input, "timestamp": now},
-                            {"role": "assistant", "content": retain_response, "timestamp": now},
-                        ])
-                        .to_string();
-                        if let Err(e) = hs_retain
-                            .retain(
-                                &content,
-                                Some("conversation between Right Agent and the User"),
-                                Some(&retain_doc_id),
-                                Some("append"),
-                                Some(&retain_tags_v),
-                                right_agent::memory::resilient::POLICY_AUTO_RETAIN,
-                            )
-                            .await
-                        {
-                            tracing::warn!("auto-retain failed: {e:#}");
-                        }
-                    });
+                    spawn_auto_retain(
+                        Arc::clone(hs),
+                        input.clone(),
+                        Some(reply_text.clone()),
+                        session_uuid.clone(),
+                        retain_tags_v,
+                    );
                 }
 
                 // Prefetch for next turn.
@@ -1616,18 +1711,23 @@ async fn invoke_cc(
         Some(super::prompt::MemoryMode::File)
     };
 
-    // Acquire the per-session mutex when this turn resumes the main session.
-    // First-call turns (no --resume) skip the lock — they cannot race anything.
-    // The guard is held for the entire CC subprocess lifetime, then dropped on return.
-    let _session_guard: Option<tokio::sync::OwnedMutexGuard<()>> = if !is_first_call {
+    // Per-session mutex on `--resume` AND `--session-id` — also held on
+    // first-call turns to prevent cron-delivery's `--resume <new_uuid>` from
+    // racing the JSONL write. `cron_delivery::run_delivery_loop` reads the
+    // freshly-inserted active session via `get_active_session` and may invoke
+    // `claude -p --resume <session_uuid>` while this worker's
+    // `claude -p --session-id <session_uuid>` subprocess is still writing the
+    // JSONL. Acquiring the lock unconditionally serialises both. On first
+    // call the lock is uncontended (fresh UUID, no other holder), so there's
+    // zero overhead vs. the previous skip-on-first-call path. The guard is
+    // held for the entire CC subprocess lifetime, then dropped on return.
+    let _session_guard: tokio::sync::OwnedMutexGuard<()> = {
         let entry = ctx
             .session_locks
             .entry(session_uuid.clone())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
-        Some(entry.lock_owned().await)
-    } else {
-        None
+        entry.lock_owned().await
     };
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
@@ -1713,9 +1813,14 @@ async fn invoke_cc(
     }
 
     // Insert stop token so callback handler can kill this CC session.
+    // `turn_id` stamps this invocation so concurrent bg/stop callbacks can be
+    // tied to the *current* turn — see `BgRequests` docs for the race this
+    // closes (silent reply loss when a bg click lands between stream-end and
+    // our cleanup of `stop_tokens`).
     let stop_token = CancellationToken::new();
+    let turn_id = super::next_turn_id();
     ctx.stop_tokens
-        .insert((chat_id, eff_thread_id), stop_token.clone());
+        .insert((chat_id, eff_thread_id), (turn_id, stop_token.clone()));
 
     // Stream stdout line-by-line: log to file, parse events, update thinking message.
     let stdout = child
@@ -1899,16 +2004,15 @@ async fn invoke_cc(
     let exit_status = child.wait().await.ok();
     let exit_code = exit_status.and_then(|s| s.code()).unwrap_or(-1);
 
-    // Remove stop token — session no longer cancellable.
+    // Remove stop token — session no longer cancellable. Done FIRST so any
+    // bg/stop callback that fires after this point sees an empty slot and
+    // bails with "Already finished" instead of inserting into bg_requests.
     ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
 
     // User clicked Background — check before treating cancellation as a normal stop.
-    // The bg callback inserts the flag and cancels the stop token, so `stopped` is
-    // true here as well; bg semantics override.
-    let was_bg_request = ctx
-        .bg_requests
-        .remove(&(chat_id, eff_thread_id))
-        .is_some();
+    // The bg callback inserts a (key -> turn_id) entry and cancels the stop token,
+    // so `stopped` is true here as well; bg semantics override.
+    let was_bg_request = consume_bg_request(&ctx.bg_requests, (chat_id, eff_thread_id), turn_id);
 
     // Read any remaining stderr.
     let stderr_str = if let Some(mut stderr) = child.stderr() {
@@ -1936,6 +2040,26 @@ async fn invoke_cc(
     }
 
     let stdout_str = result_line.unwrap_or_default();
+
+    // Intra-turn race guard: a bg click that landed in the window between
+    // select-break and `stop_tokens.remove` (or even after, before the
+    // bg_requests insert) can flip `was_bg_request` true on a turn that
+    // already produced a valid reply. Honor bg only when there's no real
+    // reply to deliver. The bg_requests entry was already removed by
+    // `consume_bg_request`, so dropping the flag here cannot leak.
+    let bg_click_after_success =
+        was_bg_request && !timed_out && exit_code == 0 && !stdout_str.is_empty();
+    let was_bg_request =
+        should_honor_bg_request(was_bg_request, timed_out, exit_code, &stdout_str);
+    if bg_click_after_success {
+        // bg click landed on a normally-finished turn — drop the flag so the
+        // real reply still gets delivered.
+        tracing::debug!(
+            ?chat_id,
+            turn_id,
+            "bg click after natural completion — ignored"
+        );
+    }
 
     // If we're about to return a Reflectable, spawn_worker will edit the
     // thinking message into a banner — skip the cost/turns finalization here
@@ -2866,5 +2990,230 @@ mod background_continuation_tests {
         assert_eq!(target_chat, Some(-42));
         assert_eq!(target_thread, Some(7));
         assert!(prompt.contains("10-minute safety limit"));
+    }
+}
+
+#[cfg(test)]
+mod bg_request_race_tests {
+    use super::*;
+    use dashmap::DashMap;
+    use std::sync::Arc;
+
+    fn empty_bg_map() -> super::super::BgRequests {
+        Arc::new(DashMap::new())
+    }
+
+    #[test]
+    fn empty_map_returns_false() {
+        let bg = empty_bg_map();
+        assert!(!consume_bg_request(&bg, (1, 0), 42));
+    }
+
+    #[test]
+    fn matching_turn_id_returns_true_and_removes_entry() {
+        let bg = empty_bg_map();
+        bg.insert((1, 0), 42);
+        assert!(consume_bg_request(&bg, (1, 0), 42));
+        assert!(
+            bg.get(&(1, 0)).is_none(),
+            "matched entry must be removed on consume"
+        );
+    }
+
+    #[test]
+    fn stale_turn_id_returns_false_and_removes_entry() {
+        // The race we're guarding against: a bg click from turn id 999 lands
+        // in the map (e.g. the previous turn's exit path leaked it, or a click
+        // raced a normal stream-end completion). The current turn (id=1) must
+        // NOT see this as a bg request — otherwise its real reply gets
+        // silently dropped and the user sees only the bg banner.
+        let bg = empty_bg_map();
+        bg.insert((1, 0), 999);
+        let was_bg = consume_bg_request(&bg, (1, 0), 1);
+        assert!(
+            !was_bg,
+            "stale entry from another turn must not classify as bg"
+        );
+        assert!(
+            bg.get(&(1, 0)).is_none(),
+            "stale entry must be removed so it can't leak into the next turn"
+        );
+    }
+
+    #[test]
+    fn next_turn_id_is_monotonic() {
+        let a = super::super::next_turn_id();
+        let b = super::super::next_turn_id();
+        let c = super::super::next_turn_id();
+        assert!(a < b && b < c, "turn ids must be strictly increasing");
+    }
+
+    // Intra-turn race: bg click lands AFTER stdout closed and child exited 0.
+    // The current turn produced a valid reply — honoring bg here would silently
+    // drop that reply and enqueue a duplicate continuation cron. The gate must
+    // clear was_bg_request so the worker delivers the reply normally.
+    #[test]
+    fn bg_click_after_success_is_ignored() {
+        assert!(
+            !should_honor_bg_request(true, false, 0, "{\"result\":\"hi\"}"),
+            "bg click on a normally-finished turn must not be honored"
+        );
+    }
+
+    #[test]
+    fn bg_click_on_timeout_is_honored() {
+        assert!(
+            should_honor_bg_request(true, true, -1, ""),
+            "auto-timeout with bg flag must be honored"
+        );
+    }
+
+    #[test]
+    fn bg_click_with_empty_stdout_is_honored() {
+        // Exit 0 but no result line — there is no reply to deliver, so honor.
+        assert!(
+            should_honor_bg_request(true, false, 0, ""),
+            "bg with empty stdout must be honored — no reply to drop"
+        );
+    }
+
+    #[test]
+    fn bg_click_with_nonzero_exit_is_honored() {
+        // CC failed; the worker would otherwise route to reflection. Bg wins
+        // because the user explicitly asked to background.
+        assert!(
+            should_honor_bg_request(true, false, 1, "{\"result\":\"err\"}"),
+            "bg with non-zero exit must be honored"
+        );
+    }
+
+    #[test]
+    fn no_bg_flag_short_circuits() {
+        // When consume_bg_request already returned false the gate is a no-op.
+        assert!(!should_honor_bg_request(false, false, 0, "reply"));
+        assert!(!should_honor_bg_request(false, true, -1, ""));
+        assert!(!should_honor_bg_request(false, false, 1, ""));
+    }
+}
+
+#[cfg(test)]
+mod auto_retain_tests {
+    use super::*;
+    use right_agent::memory::ResilientHindsight;
+    use right_agent::memory::hindsight::HindsightClient;
+
+    /// Spawn a one-shot mock Hindsight server that captures the first POST's
+    /// request line and body, then returns a 200. Mirrors the helper in
+    /// right-agent's hindsight tests but is private to this module so the bot
+    /// crate doesn't grow a public dep on test internals of right-agent.
+    async fn mock_one_shot() -> (
+        tokio::task::JoinHandle<(String, String)>, // (first_line, body)
+        String,                                    // base_url
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = vec![0u8; 16384];
+            // Read until we have headers + full body. Hindsight retain bodies
+            // are small (< 4 KiB), one read is enough on loopback.
+            let n = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let first_line = request.lines().next().unwrap_or("").to_string();
+            let req_body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            let resp_body = r#"{"success":true,"operation_id":"op-1"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                resp_body.len(),
+                resp_body,
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            (first_line, req_body)
+        });
+        (handle, url)
+    }
+
+    fn make_resilient(base_url: &str) -> Arc<ResilientHindsight> {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let _ = right_agent::memory::open_connection(&dir, true).unwrap();
+        let client = HindsightClient::new("hs_test", "test-bank", "high", 1024, Some(base_url));
+        Arc::new(ResilientHindsight::new(client, dir, "bot"))
+    }
+
+    // --- pure helper ---
+
+    #[test]
+    fn build_retain_content_with_assistant_includes_both_roles() {
+        let s = build_retain_content("hi", Some("hello"), "2026-05-05T00:00:00Z");
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"], "hi");
+        assert_eq!(arr[1]["role"], "assistant");
+        assert_eq!(arr[1]["content"], "hello");
+    }
+
+    #[test]
+    fn build_retain_content_user_only_omits_assistant() {
+        let s = build_retain_content("user only", None, "2026-05-05T00:00:00Z");
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "no assistant entry expected on bg path");
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"], "user only");
+    }
+
+    // --- spawn_auto_retain wired to a mock server ---
+
+    /// Asserts the Backgrounded-path retain shape:
+    ///   - one POST hits Hindsight,
+    ///   - body contains the user message with no assistant role,
+    ///   - update_mode = "append",
+    ///   - document_id = main_session_id,
+    ///   - tag chat:<chat_id> is present.
+    #[tokio::test]
+    async fn backgrounded_arm_retains_user_message_only() {
+        let (handle, url) = mock_one_shot().await;
+        let hs = make_resilient(&url);
+
+        let user_text = "what is 2+2?".to_string();
+        let main_session_id = "main-session-uuid-bg".to_string();
+        let tags = retain_tags(/*chat_id*/ 4242, /*sender_id*/ Some(7), /*thread_id*/ 0, /*is_group*/ false);
+
+        // Mirrors the call inside the Backgrounded arm.
+        spawn_auto_retain(
+            Arc::clone(&hs),
+            user_text.clone(),
+            None, // user-message only — no assistant reply yet
+            main_session_id.clone(),
+            tags.clone(),
+        );
+
+        // Wait for the mock server to receive the request and capture body.
+        let (first_line, body) = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("mock server timed out — retain was not invoked")
+            .expect("mock task panicked");
+        assert!(first_line.starts_with("POST"), "expected POST, got: {first_line}");
+
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("body is not JSON: {e} body={body}"));
+
+        // Outer envelope.
+        let item = &parsed["items"][0];
+        assert_eq!(item["document_id"], main_session_id);
+        assert_eq!(item["update_mode"], "append");
+        assert_eq!(item["tags"][0], "chat:4242");
+
+        // Inner content array: user-only.
+        let content_str = item["content"].as_str().expect("content is JSON-encoded string");
+        let inner: serde_json::Value = serde_json::from_str(content_str).unwrap();
+        let arr = inner.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "bg retain must contain exactly one entry (user)");
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[0]["content"], user_text);
     }
 }

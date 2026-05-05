@@ -1090,3 +1090,22 @@
             .unwrap();
         assert!((budget - DEFAULT_CRON_BUDGET_USD).abs() < f64::EPSILON);
     }
+
+    /// `insert_immediate_cron` substitutes [`IMMEDIATE_DEFAULT_LOCK_TTL`] when
+    /// the caller passes no explicit lock_ttl. This prevents the reader-side
+    /// `unwrap_or("30m")` default from letting the reconciler spawn a duplicate
+    /// `execute_job` against a long-running bg-continuation spec after 30 min.
+    #[test]
+    fn insert_immediate_cron_defaults_lock_ttl_to_six_hours() {
+        let conn = setup_db();
+        insert_immediate_cron(&conn, "bg-3", "prompt", -42, None, None).unwrap();
+        let lock_ttl: Option<String> = conn
+            .query_row(
+                "SELECT lock_ttl FROM cron_specs WHERE job_name = 'bg-3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lock_ttl.as_deref(), Some(IMMEDIATE_DEFAULT_LOCK_TTL));
+        assert_eq!(lock_ttl.as_deref(), Some("6h"));
+    }

@@ -25,11 +25,6 @@ const ACTIVITY_SNIPPET_LEN: usize = 80;
 /// reason text inserted into the SYSTEM_NOTICE prompt.
 #[derive(Debug, Clone)]
 pub(crate) enum FailureKind {
-    /// Process was killed by a safety-timeout net. Worker no longer emits this
-    /// (timeouts now go through the Backgrounded path); retained for cron-side
-    /// classification if a cron job's CC subprocess hits its own safety net.
-    #[allow(dead_code)]
-    SafetyTimeout { limit_secs: u64 },
     /// CC reported `--max-budget-usd` exhaustion.
     BudgetExceeded { limit_usd: f64 },
     /// CC reported `--max-turns` exhaustion.
@@ -99,9 +94,6 @@ pub(crate) enum ReflectionError {
 /// Render a human-readable reason text for the SYSTEM_NOTICE header.
 pub(crate) fn failure_reason_text(kind: &FailureKind) -> String {
     match kind {
-        FailureKind::SafetyTimeout { limit_secs } => {
-            format!("hit the {limit_secs}-second safety limit before producing a reply")
-        }
         FailureKind::BudgetExceeded { limit_usd } => {
             format!("exceeded the budget of ${limit_usd:.2}")
         }
@@ -408,14 +400,11 @@ mod tests {
     #[test]
     fn reason_text_per_kind() {
         assert!(
-            failure_reason_text(&FailureKind::SafetyTimeout { limit_secs: 600 })
-                .contains("600-second safety limit")
-        );
-        assert!(
             failure_reason_text(&FailureKind::BudgetExceeded { limit_usd: 2.0 }).contains("$2.00")
         );
         assert!(failure_reason_text(&FailureKind::MaxTurns { limit: 30 }).contains("30"));
         assert!(failure_reason_text(&FailureKind::NonZeroExit { code: 137 }).contains("137"));
+        assert!(failure_reason_text(&FailureKind::NonZeroExit { code: -1 }).contains("-1"));
     }
 
     #[test]
@@ -466,10 +455,10 @@ mod tests {
             },
             StreamEvent::Text("partial finding".into()),
         ]);
-        let p = build_reflection_prompt(&FailureKind::SafetyTimeout { limit_secs: 600 }, &tail, 3);
+        let p = build_reflection_prompt(&FailureKind::NonZeroExit { code: -1 }, &tail, 3);
         assert!(p.starts_with("⟨⟨SYSTEM_NOTICE⟩⟩"));
         assert!(p.contains("⟨⟨/SYSTEM_NOTICE⟩⟩"));
-        assert!(p.contains("600-second safety limit"));
+        assert!(p.contains("exited with code -1"));
         assert!(p.contains("called Read"));
         assert!(p.contains("partial finding"));
         assert!(p.contains("stay within 3 turns"));

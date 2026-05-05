@@ -7,6 +7,27 @@ use chrono::{DateTime, Utc};
 /// Default budget cap per cron invocation (USD).
 pub const DEFAULT_CRON_BUDGET_USD: f64 = 5.0;
 
+/// Default `lock_ttl` for `Immediate` cron jobs when the caller does not
+/// supply one.
+///
+/// Immediate jobs are the bot's background-continuation primitive — they
+/// run the same long turn the foreground worker was running when its 10-min
+/// timeout fired (or the user pressed 🌙). Those turns can legitimately last
+/// hours.
+///
+/// The lock heartbeat is written ONCE at job start and never refreshed, so
+/// `is_lock_fresh` is the only guard against the reconciler spawning a
+/// duplicate `execute_job` against a still-running spec on the next 5-second
+/// tick. The previous reader-side default of `"30m"` was tighter than the
+/// realistic upper bound for a single bg-continuation turn, which let
+/// duplicates sneak through. `"6h"` is generous enough to cover any
+/// plausible single-turn execution while still bounding runaway specs.
+///
+/// This is the duplicate-prevention guard, NOT a wall-clock execution
+/// budget — that is `max_budget_usd` plus `--max-turns` plus the process
+/// timeout in the worker.
+pub const IMMEDIATE_DEFAULT_LOCK_TTL: &str = "6h";
+
 /// Sentinel value stored in the `schedule` column for Immediate cron jobs.
 pub(crate) const IMMEDIATE_SENTINEL: &str = "@immediate";
 
@@ -62,6 +83,16 @@ impl ScheduleKind {
     /// Whether this is a one-shot job (fires once then deletes).
     pub fn is_one_shot(&self) -> bool {
         matches!(self, Self::OneShotCron(_) | Self::RunAt(_) | Self::Immediate)
+    }
+}
+
+impl std::fmt::Display for ScheduleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Recurring(s) | Self::OneShotCron(s) => f.write_str(s),
+            Self::RunAt(dt) => write!(f, "{}", dt.to_rfc3339()),
+            Self::Immediate => f.write_str(IMMEDIATE_SENTINEL),
+        }
     }
 }
 
@@ -190,28 +221,13 @@ fn resolve_schedule_fields(
     run_at: Option<&str>,
     immediate: bool,
 ) -> Result<(String, i64, Option<String>, Option<String>), String> {
-    let provided_count =
-        (schedule.is_some() as u8) + (run_at.is_some() as u8) + (immediate as u8);
-    if provided_count > 1 {
-        return Err(
-            "schedule, run_at, and immediate are mutually exclusive — provide exactly one".into(),
-        );
-    }
-    if provided_count == 0 {
-        return Err("one of schedule, run_at, or immediate must be provided".into());
-    }
-
-    if immediate {
-        return Ok((IMMEDIATE_SENTINEL.to_string(), 0, None, None));
-    }
-
-    match (schedule, run_at) {
-        (Some(sched), None) => {
+    match (schedule, run_at, immediate) {
+        (Some(sched), None, false) => {
             let warning = validate_schedule(sched)?;
             let rec = if recurring.unwrap_or(true) { 1 } else { 0 };
             Ok((sched.to_string(), rec, None, warning))
         }
-        (None, Some(rat)) => {
+        (None, Some(rat), false) => {
             let dt = rat
                 .parse::<DateTime<Utc>>()
                 .map_err(|e| format!("invalid run_at datetime '{rat}': {e}"))?;
@@ -222,7 +238,13 @@ fn resolve_schedule_fields(
             };
             Ok(("".to_string(), 0, Some(rat.to_string()), warning))
         }
-        _ => unreachable!("provided_count guarantees one of these arms"),
+        (None, None, true) => Ok((IMMEDIATE_SENTINEL.to_string(), 0, None, None)),
+        (None, None, false) => {
+            Err("one of schedule, run_at, or immediate must be provided".into())
+        }
+        _ => Err(
+            "schedule, run_at, and immediate are mutually exclusive — provide exactly one".into(),
+        ),
     }
 }
 
@@ -322,6 +344,11 @@ pub fn create_spec_v2(
 /// Fires on the next reconcile tick, then auto-deletes. Validates the job name
 /// and budget like `create_spec_v2`. `max_budget_usd = None` uses the project
 /// default (`DEFAULT_CRON_BUDGET_USD`).
+///
+/// `lock_ttl` defaults to [`IMMEDIATE_DEFAULT_LOCK_TTL`] (`"6h"`) when the
+/// caller passes `None`. Background-continuation jobs are intentionally
+/// long-running; the lock_ttl is the duplicate-prevention guard, not a
+/// wall-clock limit. See [`IMMEDIATE_DEFAULT_LOCK_TTL`] for rationale.
 pub fn insert_immediate_cron(
     conn: &rusqlite::Connection,
     job_name: &str,
@@ -335,7 +362,7 @@ pub fn insert_immediate_cron(
         job_name,
         None,
         prompt,
-        None,
+        Some(IMMEDIATE_DEFAULT_LOCK_TTL),
         max_budget_usd,
         None,
         None,

@@ -290,15 +290,42 @@ async fn execute_job(
     // Optional X-FORK-FROM header in the prompt: when present, this is a
     // background-continuation job that must `--resume <main> --fork-session
     // --session-id <run_id>`. We strip the header before passing the prompt to CC.
-    let (fork_from_main_session, prompt_for_cc): (Option<String>, String) =
-        if let Some(rest) = spec.prompt.strip_prefix("X-FORK-FROM: ") {
-            match rest.split_once('\n') {
-                Some((sess, body)) => (Some(sess.to_string()), body.to_string()),
-                None => (None, spec.prompt.clone()),
+    //
+    // The header is bot-internal — only `enqueue_background_job` produces it,
+    // and only with `ScheduleKind::Immediate`. We refuse to honour it on any
+    // other schedule_kind (an agent that calls `cron_create` cannot hijack
+    // `--resume` by crafting a prompt) and we refuse if the captured session
+    // segment isn't a well-formed UUID.
+    let (fork_from_main_session, prompt_for_cc): (Option<String>, String) = if matches!(
+        spec.schedule_kind,
+        right_agent::cron_spec::ScheduleKind::Immediate
+    ) && let Some(rest) = spec.prompt.strip_prefix("X-FORK-FROM: ")
+    {
+        match rest.split_once('\n') {
+            Some((sess, body)) => match uuid::Uuid::parse_str(sess) {
+                Ok(_) => (Some(sess.to_string()), body.to_string()),
+                Err(e) => {
+                    tracing::error!(
+                        job = %job_name,
+                        invalid_uuid = %sess,
+                        "X-FORK-FROM header had invalid UUID — refusing to run job: {e:#}"
+                    );
+                    update_run_record(&conn, &run_id, Some(-1), "failed");
+                    std::fs::remove_file(&lock_path).ok();
+                    return;
+                }
+            },
+            None => {
+                tracing::warn!(
+                    job = %job_name,
+                    "X-FORK-FROM header without newline; treating prompt as plain"
+                );
+                (None, spec.prompt.clone())
             }
-        } else {
-            (None, spec.prompt.clone())
-        };
+        }
+    } else {
+        (None, spec.prompt.clone())
+    };
 
     let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
@@ -906,6 +933,63 @@ fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
     }
 }
 
+/// Fire a batch of one-shot specs (RunAt or Immediate). Each becomes a spawned
+/// `execute_job` followed by `delete_one_shot_spec`. The lock check is best-effort —
+/// `execute_job` re-checks under the upgrade-lock guard before writing the lock file.
+#[allow(clippy::too_many_arguments)]
+fn fire_one_shot_specs(
+    specs: Vec<(String, CronSpec)>,
+    kind_label: &'static str,
+    triggered_handles: &mut Vec<JoinHandle<()>>,
+    agent_dir: &std::path::Path,
+    agent_name: &str,
+    model: &Option<String>,
+    ssh_config_path: &Option<std::path::PathBuf>,
+    internal_client: &Arc<right_agent::mcp::internal_client::InternalClient>,
+    execute_handles: &ExecuteHandles,
+    resolved_sandbox: &Option<String>,
+    upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
+) {
+    for (name, spec) in specs {
+        let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+        if is_lock_fresh(agent_dir, &name, lock_ttl) {
+            tracing::info!(job = %name, kind = kind_label, "one-shot job locked — skipping until next tick");
+            continue;
+        }
+
+        tracing::info!(job = %name, kind = kind_label, "firing one-shot job");
+        let jn = name.clone();
+        let sp = spec.clone();
+        let ad = agent_dir.to_path_buf();
+        let an = agent_name.to_string();
+        let md = model.clone();
+        let sc = ssh_config_path.clone();
+        let ic = Arc::clone(internal_client);
+        let rs = resolved_sandbox.clone();
+        let ul = Arc::clone(upgrade_lock);
+        let handle = tokio::spawn(async move {
+            execute_job(
+                &jn,
+                &sp,
+                &ad,
+                &an,
+                md.as_deref(),
+                sc.as_deref(),
+                &ic,
+                rs.as_deref(),
+                ul,
+            )
+            .await;
+            delete_one_shot_spec(&ad, &jn);
+        });
+        if let Ok(mut guard) = execute_handles.lock() {
+            guard.push((name, handle));
+        } else {
+            triggered_handles.push(handle);
+        }
+    }
+}
+
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 fn reconcile_jobs(
@@ -939,44 +1023,19 @@ fn reconcile_jobs(
         .map(|(name, spec)| (name.clone(), spec.clone()))
         .collect();
 
-    for (name, spec) in overdue_run_at {
-        let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
-        if is_lock_fresh(agent_dir, &name, lock_ttl) {
-            tracing::info!(job = %name, "run_at overdue but locked — skipping until next tick");
-            continue;
-        }
-
-        tracing::info!(job = %name, "firing overdue run_at job");
-        let jn = name.clone();
-        let sp = spec.clone();
-        let ad = agent_dir.to_path_buf();
-        let an = agent_name.to_string();
-        let md = model.clone();
-        let sc = ssh_config_path.clone();
-        let ic = Arc::clone(internal_client);
-        let rs = resolved_sandbox.clone();
-        let ul = Arc::clone(upgrade_lock);
-        let handle = tokio::spawn(async move {
-            execute_job(
-                &jn,
-                &sp,
-                &ad,
-                &an,
-                md.as_deref(),
-                sc.as_deref(),
-                &ic,
-                rs.as_deref(),
-                ul,
-            )
-            .await;
-            delete_one_shot_spec(&ad, &jn);
-        });
-        if let Ok(mut guard) = execute_handles.lock() {
-            guard.push((name, handle));
-        } else {
-            triggered_handles.push(handle);
-        }
-    }
+    fire_one_shot_specs(
+        overdue_run_at,
+        "run_at",
+        triggered_handles,
+        agent_dir,
+        agent_name,
+        model,
+        ssh_config_path,
+        internal_client,
+        execute_handles,
+        resolved_sandbox,
+        upgrade_lock,
+    );
 
     // Fire Immediate specs (every tick — they are one-shot)
     let immediate: Vec<(String, CronSpec)> = new_specs
@@ -990,44 +1049,19 @@ fn reconcile_jobs(
         .map(|(name, spec)| (name.clone(), spec.clone()))
         .collect();
 
-    for (name, spec) in immediate {
-        let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
-        if is_lock_fresh(agent_dir, &name, lock_ttl) {
-            tracing::info!(job = %name, "immediate job locked — skipping until next tick");
-            continue;
-        }
-
-        tracing::info!(job = %name, "firing immediate job");
-        let jn = name.clone();
-        let sp = spec.clone();
-        let ad = agent_dir.to_path_buf();
-        let an = agent_name.to_string();
-        let md = model.clone();
-        let sc = ssh_config_path.clone();
-        let ic = Arc::clone(internal_client);
-        let rs = resolved_sandbox.clone();
-        let ul = Arc::clone(upgrade_lock);
-        let handle = tokio::spawn(async move {
-            execute_job(
-                &jn,
-                &sp,
-                &ad,
-                &an,
-                md.as_deref(),
-                sc.as_deref(),
-                &ic,
-                rs.as_deref(),
-                ul,
-            )
-            .await;
-            delete_one_shot_spec(&ad, &jn);
-        });
-        if let Ok(mut guard) = execute_handles.lock() {
-            guard.push((name, handle));
-        } else {
-            triggered_handles.push(handle);
-        }
-    }
+    fire_one_shot_specs(
+        immediate,
+        "immediate",
+        triggered_handles,
+        agent_dir,
+        agent_name,
+        model,
+        ssh_config_path,
+        internal_client,
+        execute_handles,
+        resolved_sandbox,
+        upgrade_lock,
+    );
 
     // Abort handles for removed or changed jobs (CRON-06)
     let to_remove: Vec<String> = handles
@@ -1083,12 +1117,7 @@ fn reconcile_jobs(
             .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
-        let sched_display = spec.schedule_kind.cron_schedule().unwrap_or(match &spec.schedule_kind {
-            right_agent::cron_spec::ScheduleKind::RunAt(_) => "<run_at>",
-            right_agent::cron_spec::ScheduleKind::Immediate => "<immediate>",
-            _ => "<unknown>",
-        });
-        tracing::info!(job = %name, schedule = %sched_display, "cron job scheduled");
+        tracing::info!(job = %name, schedule = %spec.schedule_kind, "cron job scheduled");
     }
 
     // Check for triggered jobs (manual trigger via cron_trigger MCP tool)
@@ -1464,34 +1493,109 @@ mod tests {
         );
     }
 
+    /// Mirror of the X-FORK-FROM parser inlined in `execute_job`. The parser
+    /// itself isn't a public helper — we replicate the exact `if matches! && let
+    /// let Some(rest)` shape so any drift between this and the production
+    /// branch is caught by review of cron.rs side by side.
+    ///
+    /// Returns `Err(())` to model the refuse-path (invalid UUID) — production
+    /// code logs an error, marks the run as failed, removes the lock, and
+    /// returns from `execute_job`; here we just signal "refused".
+    fn parse_fork_from(spec: &right_agent::cron_spec::CronSpec) -> Result<(Option<String>, String), ()> {
+        if matches!(
+            spec.schedule_kind,
+            right_agent::cron_spec::ScheduleKind::Immediate
+        ) && let Some(rest) = spec.prompt.strip_prefix("X-FORK-FROM: ")
+        {
+            match rest.split_once('\n') {
+                Some((sess, body)) => match uuid::Uuid::parse_str(sess) {
+                    Ok(_) => Ok((Some(sess.to_string()), body.to_string())),
+                    Err(_) => Err(()),
+                },
+                None => Ok((None, spec.prompt.clone())),
+            }
+        } else {
+            Ok((None, spec.prompt.clone()))
+        }
+    }
+
+    fn make_spec(kind: right_agent::cron_spec::ScheduleKind, prompt: &str) -> right_agent::cron_spec::CronSpec {
+        right_agent::cron_spec::CronSpec {
+            schedule_kind: kind,
+            prompt: prompt.to_string(),
+            lock_ttl: None,
+            max_budget_usd: 2.0,
+            triggered_at: None,
+        }
+    }
+
     #[test]
-    fn fork_from_header_is_parsed_and_stripped() {
-        let prompt = "X-FORK-FROM: abc-123-uuid\nthe rest of the prompt\nmore lines";
-        let (fork, body): (Option<String>, String) =
-            if let Some(rest) = prompt.strip_prefix("X-FORK-FROM: ") {
-                match rest.split_once('\n') {
-                    Some((sess, body)) => (Some(sess.to_string()), body.to_string()),
-                    None => (None, prompt.to_string()),
-                }
-            } else {
-                (None, prompt.to_string())
-            };
-        assert_eq!(fork.as_deref(), Some("abc-123-uuid"));
+    fn fork_from_header_is_parsed_and_stripped_for_immediate() {
+        let uuid = "12345678-1234-1234-1234-123456789abc";
+        let prompt = format!("X-FORK-FROM: {uuid}\nthe rest of the prompt\nmore lines");
+        let spec = make_spec(right_agent::cron_spec::ScheduleKind::Immediate, &prompt);
+        let (fork, body) = parse_fork_from(&spec).expect("valid UUID must parse");
+        assert_eq!(fork.as_deref(), Some(uuid));
         assert_eq!(body, "the rest of the prompt\nmore lines");
+    }
+
+    #[test]
+    fn fork_from_header_with_invalid_uuid_is_refused_for_immediate() {
+        let prompt = "X-FORK-FROM: not-a-uuid\nthe rest of the prompt";
+        let spec = make_spec(right_agent::cron_spec::ScheduleKind::Immediate, prompt);
+        let result = parse_fork_from(&spec);
+        assert!(
+            result.is_err(),
+            "Immediate + invalid UUID must take the refuse path"
+        );
+    }
+
+    #[test]
+    fn fork_from_header_is_ignored_for_recurring_schedule() {
+        let uuid = "12345678-1234-1234-1234-123456789abc";
+        let prompt = format!("X-FORK-FROM: {uuid}\nbody text");
+        let spec = make_spec(
+            right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".to_string()),
+            &prompt,
+        );
+        let (fork, body) = parse_fork_from(&spec).expect("recurring path never refuses");
+        assert!(
+            fork.is_none(),
+            "Recurring schedules must not honour X-FORK-FROM"
+        );
+        assert_eq!(body, prompt, "prompt must be passed through verbatim");
+    }
+
+    #[test]
+    fn fork_from_header_is_ignored_for_oneshot_cron() {
+        let uuid = "12345678-1234-1234-1234-123456789abc";
+        let prompt = format!("X-FORK-FROM: {uuid}\nbody text");
+        let spec = make_spec(
+            right_agent::cron_spec::ScheduleKind::OneShotCron("*/5 * * * *".to_string()),
+            &prompt,
+        );
+        let (fork, body) = parse_fork_from(&spec).expect("oneshot path never refuses");
+        assert!(fork.is_none());
+        assert_eq!(body, prompt);
+    }
+
+    #[test]
+    fn no_fork_header_for_immediate_leaves_prompt_intact() {
+        let prompt = "regular immediate prompt";
+        let spec = make_spec(right_agent::cron_spec::ScheduleKind::Immediate, prompt);
+        let (fork, body) = parse_fork_from(&spec).expect("no header — never refuses");
+        assert!(fork.is_none());
+        assert_eq!(body, "regular immediate prompt");
     }
 
     #[test]
     fn no_fork_header_leaves_prompt_intact() {
         let prompt = "regular cron prompt";
-        let (fork, body): (Option<String>, String) =
-            if let Some(rest) = prompt.strip_prefix("X-FORK-FROM: ") {
-                match rest.split_once('\n') {
-                    Some((sess, body)) => (Some(sess.to_string()), body.to_string()),
-                    None => (None, prompt.to_string()),
-                }
-            } else {
-                (None, prompt.to_string())
-            };
+        let spec = make_spec(
+            right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".to_string()),
+            prompt,
+        );
+        let (fork, body) = parse_fork_from(&spec).expect("no header — never refuses");
         assert!(fork.is_none());
         assert_eq!(body, "regular cron prompt");
     }

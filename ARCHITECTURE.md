@@ -360,7 +360,13 @@ subagent branches. Process timeout (600s) is a safety net only.
 - `ScheduleKind::Immediate` — fires on next reconcile tick (≤5s), then deletes.
   Encoded as `schedule = '@immediate'` sentinel, no DB migration. Used by the
   bot for background-continuation jobs (also available to `cron_create` as
-  `--immediate` once exposed in the MCP surface).
+  `--immediate` once exposed in the MCP surface). `insert_immediate_cron`
+  defaults `lock_ttl` to `IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`) when the caller
+  passes none — bg-continuation turns can legitimately run for hours, and the
+  lock heartbeat is written once at job start and never refreshed, so a tight
+  TTL would let the reconciler spawn a duplicate `execute_job` against the
+  same spec on the next 5-second tick. The TTL is the duplicate-prevention
+  guard, not a wall-clock execution limit.
 
 ### Per-session mutex on --resume
 
@@ -392,7 +398,11 @@ session's full history; the body is a short SYSTEM_NOTICE asking the agent to
 finish answering the user's most recent message.
 
 This convention avoids a `cron_specs` schema migration. It is bot-internal —
-no agent or user is expected to construct prompts with this prefix.
+no agent or user is expected to construct prompts with this prefix. The parser
+refuses to run a job whose `schedule_kind` is anything other than `Immediate`
+even if the prefix is present — agents cannot hijack `--resume` by crafting
+prompts. Invalid UUIDs in the header are also refused (the run is marked
+`failed`, the lock file is removed, and `execute_job` returns).
 
 ### Configuration Hierarchy
 
@@ -431,6 +441,17 @@ or auto-retain. Cron prompts are static instructions — recall results would be
 irrelevant and corrupt user memory representations (same approach as hermes-agent
 `skip_memory=True`). Crons can call `memory_recall` and `memory_retain` MCP tools
 explicitly when needed.
+
+**Backgrounded turns retain user message at fork time:** When a foreground turn
+is sent to background (auto-timeout at 10 min, or user clicks the Background
+button), the worker's `Backgrounded` arm retains the user message *only* (no
+assistant text yet) keyed by the main `--resume` session UUID with
+`update_mode: "append"`. Without this, the cron-delivery answer relayed back
+through `--resume <main>` would arrive over a session whose user turn was
+never recorded in Hindsight (cron-side sessions skip auto-retain). The
+assistant turn extends the same document later via either an explicit
+`memory_retain` MCP call from the cron prompt or the next foreground turn's
+auto-retain.
 
 **File mode (fallback):** Agent manages `MEMORY.md` via CC Edit/Write.
 Bot injects file contents into system prompt (truncated to 200 lines).

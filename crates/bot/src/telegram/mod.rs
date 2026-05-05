@@ -44,11 +44,26 @@ where
 
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 
+/// Process-local monotonic turn id. Allocated by `next_turn_id()` at the start
+/// of every `invoke_cc` call so the worker can match concurrent bg-callback
+/// inserts to the *current* turn (not a previous one).
+static NEXT_TURN_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a fresh per-turn id. Monotonic across the bot process.
+pub(crate) fn next_turn_id() -> u64 {
+    NEXT_TURN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Shared map of active CC sessions that can be stopped via inline button.
-/// Key: (chat_id, eff_thread_id). Value: CancellationToken to kill the CC process.
-pub(crate) type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
+/// Key: (chat_id, eff_thread_id). Value: (turn_id, CancellationToken).
+///
+/// `turn_id` stamps each invocation so concurrent callbacks (Background, Stop)
+/// can be tied to the *current* turn instead of a stale one — see
+/// `BgRequests` for the matching half of the protocol.
+pub(crate) type StopTokens = Arc<DashMap<(i64, i64), (u64, CancellationToken)>>;
 
 /// Per-main-session async mutex map. Worker acquires before `claude -p --resume <main>`;
 /// delivery acquires before its own `--resume`. Closes the TOCTOU race on session JSONL.
@@ -57,8 +72,10 @@ pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>
 
 /// Per-(chat, thread) flag set by the Background button callback.
 /// Presence in the map means the user requested backgrounding (not a Stop).
-/// Worker checks after kill+wait to distinguish from auto-timeout.
-pub(crate) type BgRequests = Arc<DashMap<(i64, i64), ()>>;
+/// Value: turn_id of the turn the bg request was issued against. Worker
+/// only honors entries whose stored turn_id matches its own current turn —
+/// stale entries from a previous turn are dropped on exit.
+pub(crate) type BgRequests = Arc<DashMap<(i64, i64), u64>>;
 
 /// Bundle of per-session control maps that flow into `WorkerContext` when
 /// `handle_message` spawns a per-session worker. Bundled because dptree

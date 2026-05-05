@@ -794,11 +794,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Periodic sweeper: drop orphan mutex entries (entries whose only Arc holder
     // is the map itself). Without this, the map grows unboundedly on long-lived
     // agents — every unique session UUID adds an entry forever.
+    const SESSION_LOCK_SWEEP_INTERVAL_SECS: u64 = 3600;
     {
         let session_locks = Arc::clone(&session_locks);
         let sweep_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            let mut iv = tokio::time::interval(std::time::Duration::from_secs(3600));
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(
+                SESSION_LOCK_SWEEP_INTERVAL_SECS,
+            ));
             iv.tick().await;
             loop {
                 tokio::select! {

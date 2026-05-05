@@ -46,10 +46,21 @@ pub struct PendingTokenSlot(pub Arc<tokio::sync::Mutex<Option<PendingTokenReques
 
 /// Pending token request from /mcp add flow.
 pub struct PendingTokenRequest {
+    /// Process-monotonic id, allocated from `NEXT_TOKEN_REQ_ID`. Used by the
+    /// task spawned in `request_token_and_register` to detect supersession:
+    /// on timeout/error, the task only `take()`s the slot if its id still
+    /// matches, so a later `/mcp ...` invocation that already parked a fresh
+    /// `PendingTokenRequest` is not silently discarded.
+    pub id: u64,
     pub chat_id: i64,
     pub thread_id: i64,
     pub sender: tokio::sync::oneshot::Sender<String>,
 }
+
+/// Process-local monotonic id allocator for `PendingTokenRequest`. Wraps after
+/// 2^64-1 increments — well beyond any plausible bot lifetime, so wraparound
+/// is not a correctness concern in practice.
+static NEXT_TOKEN_REQ_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Bundle of message-intercept slots to reduce dptree DI parameter count.
 /// Contains both auth code and MCP token intercept slots, plus the
@@ -1270,10 +1281,13 @@ async fn request_token_and_register(
     .await?;
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+    let req_id =
+        NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let prev = {
         let mut slot = pending_token_slot.0.lock().await;
         let prev = slot.take();
         *slot = Some(PendingTokenRequest {
+            id: req_id,
             chat_id: chat_id.0,
             thread_id: eff_thread_id,
             sender: tx,
@@ -1302,7 +1316,15 @@ async fn request_token_and_register(
         let raw_input = match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
             Ok(Ok(input)) => input,
             _ => {
-                pending_token_slot.0.lock().await.take();
+                // Only take the slot if it still belongs to *this* request.
+                // Otherwise a newer /mcp invocation has already parked its own
+                // PendingTokenRequest in the slot — clearing it here would
+                // silently drop the user's next token message.
+                let mut slot = pending_token_slot.0.lock().await;
+                if slot.as_ref().map(|s| s.id) == Some(req_id) {
+                    slot.take();
+                }
+                drop(slot);
                 bot.send_message(
                     chat_id,
                     "Timed out waiting for token. MCP authentication cancelled.",
@@ -1893,7 +1915,9 @@ pub async fn handle_stop_callback(
     {
         let key = (chat_id, thread_id);
         if let Some(entry) = worker_ctl.stop_tokens.get(&key) {
-            entry.value().cancel();
+            // Value is (turn_id, CancellationToken). turn_id is unused here —
+            // Stop has the same effect regardless of which turn is running.
+            entry.value().1.cancel();
             drop(entry); // release DashMap read guard before await
             Some("Stopping...")
         } else {
@@ -1937,8 +1961,13 @@ pub async fn handle_bg_callback(
     {
         let key = (chat_id, thread_id);
         if let Some(entry) = worker_ctl.stop_tokens.get(&key) {
-            worker_ctl.bg_requests.insert(key, ());
-            entry.value().cancel();
+            // Stamp the bg request with the *current* turn's id (read from the
+            // stop_tokens entry itself). The worker matches this id on exit so
+            // a click that races a stream-end completion can never cause the
+            // worker to misclassify a normal-finished turn as Backgrounded.
+            let (turn_id, token) = entry.value();
+            worker_ctl.bg_requests.insert(key, *turn_id);
+            token.cancel();
             drop(entry);
             Some("Sending to background...")
         } else {
@@ -2141,5 +2170,87 @@ mod tests {
                 && parts[2].parse::<i64>().is_ok();
             assert!(!valid, "bad={bad} unexpectedly parsed as valid");
         }
+    }
+
+    /// Regression: a stale supersession-cleanup task must NOT clear a freshly
+    /// parked PendingTokenRequest. See
+    /// `request_token_and_register` — without the id-stamp guard, task A's
+    /// timeout/error arm would `take()` whatever currently sits in the slot,
+    /// silently dropping request B that the user just parked via a second
+    /// `/mcp auth` command.
+    #[tokio::test]
+    async fn supersession_cleanup_does_not_clobber_newer_request() {
+        // Park request A.
+        let slot = PendingTokenSlot(Arc::new(tokio::sync::Mutex::new(None)));
+        let (tx_a, _rx_a) = tokio::sync::oneshot::channel::<String>();
+        let req_a_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut s = slot.0.lock().await;
+            *s = Some(PendingTokenRequest {
+                id: req_a_id,
+                chat_id: 100,
+                thread_id: 0,
+                sender: tx_a,
+            });
+        }
+
+        // Supersede with request B.
+        let (tx_b, _rx_b) = tokio::sync::oneshot::channel::<String>();
+        let req_b_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(req_b_id > req_a_id);
+        {
+            let mut s = slot.0.lock().await;
+            // Drop the prior sender (would wake task A's `rx_a` with RecvError).
+            let _prev = s.take();
+            *s = Some(PendingTokenRequest {
+                id: req_b_id,
+                chat_id: 200,
+                thread_id: 0,
+                sender: tx_b,
+            });
+        }
+
+        // Now exercise the guarded cleanup that task A performs in its
+        // timeout/error arm. With the id guard it must NOT clear the slot.
+        {
+            let mut s = slot.0.lock().await;
+            if s.as_ref().map(|p| p.id) == Some(req_a_id) {
+                s.take();
+            }
+        }
+
+        // Slot should still contain request B.
+        let s = slot.0.lock().await;
+        let pending = s.as_ref().expect("slot must still contain request B");
+        assert_eq!(pending.id, req_b_id);
+        assert_eq!(pending.chat_id, 200);
+    }
+
+    /// Sanity: when the slot still holds the same request that scheduled the
+    /// cleanup, the guarded `take()` clears it (the non-superseded path).
+    #[tokio::test]
+    async fn supersession_cleanup_clears_when_id_matches() {
+        let slot = PendingTokenSlot(Arc::new(tokio::sync::Mutex::new(None)));
+        let (tx, _rx) = tokio::sync::oneshot::channel::<String>();
+        let req_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut s = slot.0.lock().await;
+            *s = Some(PendingTokenRequest {
+                id: req_id,
+                chat_id: 300,
+                thread_id: 0,
+                sender: tx,
+            });
+        }
+
+        {
+            let mut s = slot.0.lock().await;
+            if s.as_ref().map(|p| p.id) == Some(req_id) {
+                s.take();
+            }
+        }
+
+        let s = slot.0.lock().await;
+        assert!(s.is_none(), "slot must be empty after matching cleanup");
     }
 }
