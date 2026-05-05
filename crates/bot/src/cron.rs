@@ -964,6 +964,57 @@ fn reconcile_jobs(
         }
     }
 
+    // Fire Immediate specs (every tick — they are one-shot)
+    let immediate: Vec<(String, CronSpec)> = new_specs
+        .iter()
+        .filter(|(_, spec)| {
+            matches!(
+                &spec.schedule_kind,
+                right_agent::cron_spec::ScheduleKind::Immediate
+            )
+        })
+        .map(|(name, spec)| (name.clone(), spec.clone()))
+        .collect();
+
+    for (name, spec) in immediate {
+        let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+        if is_lock_fresh(agent_dir, &name, lock_ttl) {
+            tracing::info!(job = %name, "immediate job locked — skipping until next tick");
+            continue;
+        }
+
+        tracing::info!(job = %name, "firing immediate job");
+        let jn = name.clone();
+        let sp = spec.clone();
+        let ad = agent_dir.to_path_buf();
+        let an = agent_name.to_string();
+        let md = model.clone();
+        let sc = ssh_config_path.clone();
+        let ic = Arc::clone(internal_client);
+        let rs = resolved_sandbox.clone();
+        let ul = Arc::clone(upgrade_lock);
+        let handle = tokio::spawn(async move {
+            execute_job(
+                &jn,
+                &sp,
+                &ad,
+                &an,
+                md.as_deref(),
+                sc.as_deref(),
+                &ic,
+                rs.as_deref(),
+                ul,
+            )
+            .await;
+            delete_one_shot_spec(&ad, &jn);
+        });
+        if let Ok(mut guard) = execute_handles.lock() {
+            guard.push((name, handle));
+        } else {
+            triggered_handles.push(handle);
+        }
+    }
+
     // Abort handles for removed or changed jobs (CRON-06)
     let to_remove: Vec<String> = handles
         .iter()
@@ -980,10 +1031,11 @@ fn reconcile_jobs(
 
     // Spawn new handles for new or changed jobs
     for (name, spec) in &new_specs {
-        // Skip RunAt specs — they are handled above via reconcile tick, not run_job_loop
+        // Skip RunAt and Immediate specs — they are handled above, not run_job_loop
         if matches!(
             spec.schedule_kind,
             right_agent::cron_spec::ScheduleKind::RunAt(_)
+                | right_agent::cron_spec::ScheduleKind::Immediate
         ) {
             continue;
         }
@@ -1017,7 +1069,11 @@ fn reconcile_jobs(
             .await;
         });
         handles.insert(name.clone(), (spec.clone(), handle));
-        let sched_display = spec.schedule_kind.cron_schedule().unwrap_or("<run_at>");
+        let sched_display = spec.schedule_kind.cron_schedule().unwrap_or(match &spec.schedule_kind {
+            right_agent::cron_spec::ScheduleKind::RunAt(_) => "<run_at>",
+            right_agent::cron_spec::ScheduleKind::Immediate => "<immediate>",
+            _ => "<unknown>",
+        });
         tracing::info!(job = %name, schedule = %sched_display, "cron job scheduled");
     }
 
