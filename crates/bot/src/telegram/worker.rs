@@ -107,6 +107,9 @@ pub struct WorkerContext {
     pub model: Option<String>,
     /// Shared map for stop button — worker inserts token before CC, removes after exit.
     pub stop_tokens: super::StopTokens,
+    /// Per-main-session async mutex map. Worker acquires before `claude -p --resume <main>`;
+    /// delivery acquires before its own `--resume`. Closes the TOCTOU race on session JSONL.
+    pub session_locks: super::SessionLocks,
     /// Shared idle timestamp — worker updates after each reply sent.
     pub idle_timestamp: Arc<std::sync::atomic::AtomicI64>,
     /// Internal API client for aggregator IPC (Unix socket).
@@ -1437,6 +1440,20 @@ async fn invoke_cc(
         })
     } else {
         Some(super::prompt::MemoryMode::File)
+    };
+
+    // Acquire the per-session mutex when this turn resumes the main session.
+    // First-call turns (no --resume) skip the lock — they cannot race anything.
+    // The guard is held for the entire CC subprocess lifetime, then dropped on return.
+    let _session_guard: Option<tokio::sync::OwnedMutexGuard<()>> = if !is_first_call {
+        let entry = ctx
+            .session_locks
+            .entry(session_uuid.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        Some(entry.lock_owned().await)
+    } else {
+        None
     };
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {

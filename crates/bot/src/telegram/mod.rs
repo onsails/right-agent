@@ -50,6 +50,11 @@ use tokio_util::sync::CancellationToken;
 /// Key: (chat_id, eff_thread_id). Value: CancellationToken to kill the CC process.
 pub(crate) type StopTokens = Arc<DashMap<(i64, i64), CancellationToken>>;
 
+/// Per-main-session async mutex map. Worker acquires before `claude -p --resume <main>`;
+/// delivery acquires before its own `--resume`. Closes the TOCTOU race on session JSONL.
+/// Key: root_session_id UUID string. Value: shared mutex.
+pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+
 use right_agent::agent::types::AgentConfig;
 
 /// Resolve Telegram token from agent.yaml config.

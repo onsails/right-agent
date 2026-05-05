@@ -352,6 +352,7 @@ pub async fn handle_message(
                     show_thinking: settings.show_thinking,
                     model: settings.model.clone(),
                     stop_tokens: Arc::clone(&stop_tokens),
+                    session_locks: Arc::new(dashmap::DashMap::new()),
                     idle_timestamp: Arc::clone(&idle_ts.0),
                     internal_client: Arc::clone(&internal_api.0),
                     hindsight: settings.hindsight.clone(),
