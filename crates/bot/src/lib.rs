@@ -809,6 +809,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_shutdown,
             delivery_sandbox,
             delivery_upgrade_lock,
+            // Task 12 will replace with the shared SessionLocks instance.
+            Arc::new(dashmap::DashMap::new()),
         )
         .await;
     });

@@ -247,6 +247,7 @@ pub async fn run_delivery_loop(
     shutdown: tokio_util::sync::CancellationToken,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
+    session_locks: crate::telegram::SessionLocks,
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
@@ -386,6 +387,7 @@ pub async fn run_delivery_loop(
             &internal_client,
             resolved_sandbox.as_deref(),
             &upgrade_lock,
+            session_locks.clone(),
         )
         .await
         {
@@ -454,11 +456,26 @@ async fn deliver_through_session(
     internal_client: &right_agent::mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
     upgrade_lock: &tokio::sync::RwLock<()>,
+    session_locks: crate::telegram::SessionLocks,
 ) -> Result<(), String> {
     use std::process::Stdio;
 
     // Block while upgrade is running.
     let _upgrade_guard = upgrade_lock.read().await;
+
+    // Acquire the per-session mutex so delivery doesn't race with an active worker
+    // turn on the same CC session (same --resume chain). None when there is no
+    // active session — nothing to race with.
+    let _session_guard = match session_id.clone() {
+        Some(id) => {
+            let entry = session_locks
+                .entry(id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            Some(entry.lock_owned().await)
+        }
+        None => None,
+    };
 
     // Delivery always uses Haiku — cheap relay task.
     const DELIVERY_MODEL: &str = "claude-haiku-4-5-20251001";
