@@ -325,6 +325,94 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> &str {
     }
 }
 
+/// Returns a short human-readable phrase describing why a foreground turn was
+/// backgrounded. Used in the continuation system prompt and in test assertions.
+// Used by build_continuation_prompt (called in tests and Task 11).
+#[allow(dead_code)]
+fn continuation_reason_text(reason: BgReason) -> &'static str {
+    match reason {
+        BgReason::AutoTimeout => {
+            "the foreground turn hit the 10-minute safety limit and was terminated"
+        }
+        BgReason::UserRequested => "the user moved this work to background execution",
+    }
+}
+
+/// Build the system-notice injected as stdin to the background CC fork.
+///
+/// The notice instructs the agent to continue from the most recent user
+/// message without re-engaging prior history, and frames why the fork happened.
+// Called from enqueue_background_job and tests; wired into Task 11 callers.
+#[allow(dead_code)]
+fn build_continuation_prompt(reason: BgReason) -> String {
+    let reason_text = continuation_reason_text(reason);
+    format!(
+        "\u{27e8}\u{27e8}SYSTEM_NOTICE\u{27e9}\u{27e9}\n\
+You were forked from the main conversation because {reason_text}.\n\
+The previous turn did not complete. Please continue and produce a final\n\
+answer to the user's MOST RECENT MESSAGE.\n\
+\n\
+Earlier conversation history is provided as context only — do not re-engage\n\
+with it unless directly required to answer the most recent message.\n\
+\n\
+Take as much time as you need within your budget. Your reply will be relayed\n\
+back to the main conversation, so write it as if responding to the user\n\
+directly.\n\
+\u{27e8}\u{27e8}/SYSTEM_NOTICE\u{27e9}\u{27e9}"
+    )
+}
+
+/// Generate a 4-character lowercase alphanumeric suffix using the system clock
+/// as entropy. Avoids pulling in `rand` for this single use site.
+// Used by enqueue_background_job (wired in Task 11).
+#[allow(dead_code)]
+fn random_suffix4() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut n = nanos as u64;
+    let mut out = String::with_capacity(4);
+    for _ in 0..4 {
+        out.push(ALPHABET[(n % ALPHABET.len() as u64) as usize] as char);
+        n /= ALPHABET.len() as u64;
+    }
+    out
+}
+
+/// Enqueue a one-shot background cron job that will fork from `main_session_id`
+/// and continue the interrupted turn.
+///
+/// The main session UUID is embedded in the prompt via an `X-FORK-FROM:` header
+/// line that `cron::execute_job` (Task 10) will strip and parse.
+///
+/// Returns the generated job name on success.
+// Called from spawn_worker in Task 11.
+#[allow(dead_code)]
+fn enqueue_background_job(
+    conn: &rusqlite::Connection,
+    chat_id: i64,
+    thread_id: i64,
+    main_session_id: &str,
+    reason: BgReason,
+) -> Result<String, String> {
+    let job_name = format!(
+        "bg-{}-{}",
+        chrono::Utc::now().format("%H%M%S"),
+        random_suffix4()
+    );
+    let prompt_user_msg = build_continuation_prompt(reason);
+    // Embed the session UUID as a header line so cron's execute_job can build
+    // the --fork-session invocation. This avoids a DB migration (no column
+    // for fork_from_session). Task 10 implements the parser side.
+    let full_prompt = format!("X-FORK-FROM: {main_session_id}\n{prompt_user_msg}");
+    let target_thread = if thread_id == 0 { None } else { Some(thread_id) };
+    right_agent::cron_spec::insert_immediate_cron(conn, &job_name, &full_prompt, chat_id, target_thread, None)?;
+    Ok(job_name)
+}
+
 /// Build the `<memory-status>` marker appended to composite-memory.md.
 ///
 /// Returns `None` when memory is healthy and no retain-side drops have
@@ -631,6 +719,10 @@ pub fn spawn_worker(
                                 session_uuid.clone()
                             }
                             InvokeCcFailure::NonReflectable { .. } => String::new(),
+                            // Task 11 will extract main_session_id here.
+                            InvokeCcFailure::Backgrounded { main_session_id, .. } => {
+                                main_session_id.clone()
+                            }
                         };
                         // is_first_call=false: failures don't produce a normal
                         // reply, so the bootstrap welcome photo should not fire.
@@ -986,6 +1078,12 @@ pub fn spawn_worker(
                         }
                     }
                 }
+                // Task 11 will implement the full Backgrounded handling (edit banner,
+                // notify user, enqueue job). For now the variant is defined but not yet
+                // emitted, so this arm can never be reached.
+                Err(InvokeCcFailure::Backgrounded { .. }) => {
+                    tracing::warn!(?key, "Backgrounded outcome received but Task 11 not yet wired");
+                }
             }
 
             // Auto-retain and prefetch (fire-and-forget).
@@ -1177,6 +1275,17 @@ fn spawn_token_request(
     });
 }
 
+/// Why a foreground CC turn was moved to background execution.
+// Variants are wired in Task 11 (invoke_cc emission + spawn_worker handling).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BgReason {
+    /// The CC subprocess was killed because it exceeded the 10-minute safety limit.
+    AutoTimeout,
+    /// The user pressed the "Background" inline button during the thinking phase.
+    UserRequested,
+}
+
 /// Classification of why `invoke_cc` failed, used by `spawn_worker` to decide
 /// between sending the raw error text and running a reflection pass.
 #[derive(Debug)]
@@ -1198,6 +1307,18 @@ pub(crate) enum InvokeCcFailure {
     /// A failure we do NOT want to reflect on (parse failures, pre-CC setup
     /// errors, schema read failures). The `message` is sent to Telegram verbatim.
     NonReflectable { message: String },
+    /// The foreground turn was terminated (timeout or user request) and work
+    /// has been enqueued as a background cron job. `spawn_worker` (Task 11)
+    /// will edit `thinking_msg_id` with a per-reason banner.
+    // Variant is emitted in Task 11.
+    #[allow(dead_code)]
+    Backgrounded {
+        reason: BgReason,
+        /// UUID of the main session from which the background job should fork.
+        main_session_id: String,
+        /// The live "thinking" message to edit with a backgrounded banner.
+        thinking_msg_id: Option<teloxide::types::MessageId>,
+    },
 }
 
 impl From<String> for InvokeCcFailure {
@@ -2636,5 +2757,55 @@ mod tag_tests {
     fn recall_tags_unchanged_by_group() {
         let t = recall_tags(-1001);
         assert_eq!(t, vec!["chat:-1001"]);
+    }
+}
+
+#[cfg(test)]
+mod background_continuation_tests {
+    use super::*;
+    use right_agent::memory::open_connection;
+
+    #[test]
+    fn continuation_prompt_auto_timeout_includes_focus_hint() {
+        let p = build_continuation_prompt(BgReason::AutoTimeout);
+        assert!(p.contains("10-minute safety limit"));
+        assert!(p.contains("MOST RECENT MESSAGE"));
+        assert!(p.contains("\u{27e8}\u{27e8}SYSTEM_NOTICE\u{27e9}\u{27e9}"));
+        assert!(p.contains("\u{27e8}\u{27e8}/SYSTEM_NOTICE\u{27e9}\u{27e9}"));
+    }
+
+    #[test]
+    fn continuation_prompt_user_requested_uses_correct_reason() {
+        let p = build_continuation_prompt(BgReason::UserRequested);
+        assert!(p.contains("user moved this work to background"));
+        assert!(p.contains("MOST RECENT MESSAGE"));
+    }
+
+    #[test]
+    fn enqueue_background_job_inserts_immediate_with_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_connection(tmp.path(), true).expect("open_connection must succeed");
+        let job = enqueue_background_job(&conn, -42, 7, "main-uuid", BgReason::AutoTimeout)
+            .expect("enqueue must succeed");
+        assert!(job.starts_with("bg-"));
+
+        let (schedule, recurring, target_chat, target_thread, prompt): (
+            String,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT schedule, recurring, target_chat_id, target_thread_id, prompt FROM cron_specs WHERE job_name = ?1",
+                rusqlite::params![job],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(schedule, "@immediate");
+        assert_eq!(recurring, 0);
+        assert_eq!(target_chat, Some(-42));
+        assert_eq!(target_thread, Some(7));
+        assert!(prompt.contains("10-minute safety limit"));
     }
 }
