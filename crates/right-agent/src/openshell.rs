@@ -526,11 +526,12 @@ pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> 
 /// kill the ProxyCommand and the master with it — defeating multiplexing.
 /// Instead, we use a plain `tokio::process::Child` with `kill_on_drop(false)`.
 ///
-/// On timeout the direct `ssh` client process is killed individually; the
-/// background master and its ProxyCommand are left intact so subsequent calls
-/// can still reuse them. Cleanup happens via [`tear_down_control_master`] at
-/// bot shutdown or sandbox migration, and via [`clean_stale_control_master`]
-/// at bot startup.
+/// On timeout or `tokio::select!` cancellation the direct `ssh` client process
+/// is killed individually via an RAII [`SshClientKillGuard`]; the background
+/// master and its ProxyCommand are left intact so subsequent calls can still
+/// reuse them. Cleanup happens via [`tear_down_control_master`] at bot
+/// shutdown or sandbox migration, and via [`clean_stale_control_master`] at
+/// bot startup.
 pub async fn ssh_exec(
     config_path: &Path,
     host: &str,
@@ -550,12 +551,16 @@ pub async fn ssh_exec(
         .spawn()
         .map_err(|e| miette::miette!("failed to spawn ssh: {e:#}"))?;
 
-    // Capture the PID before consuming `child` in wait_with_output.
-    let child_pid = child.id();
+    // Arm the kill guard immediately after spawn.  The guard SIGKILLs the
+    // direct ssh client PID on drop unless explicitly disarmed — covering
+    // timeout, `tokio::select!` cancellation, task abort, and panics alike.
+    let mut kill_guard = SshClientKillGuard::new(child.id());
 
     let timeout_dur = Duration::from_secs(timeout_secs);
     match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
         Ok(Ok(output)) => {
+            // Process exited cleanly — no kill needed.
+            kill_guard.disarm();
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 tracing::error!(host, ?cmd, %stderr, "ssh exec failed");
@@ -568,18 +573,37 @@ pub async fn ssh_exec(
         }
         Ok(Err(e)) => Err(miette::miette!("ssh exec failed: {e:#}")),
         Err(_) => {
-            // Timeout: kill the direct ssh client but leave the ControlMaster
-            // and its ProxyCommand alive so subsequent calls can still reuse them.
-            // `child` was consumed by `wait_with_output`; use the PID directly.
-            if let Some(pid) = child_pid
-                && let Err(e) = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid as i32),
-                    nix::sys::signal::Signal::SIGKILL,
-                )
-            {
-                tracing::debug!(host, pid, error = %e, "ssh kill on timeout: already exited?");
-            }
+            // Timeout: kill_guard drops at the end of this arm and SIGKILLs
+            // the ssh client while leaving the ControlMaster intact.
             Err(miette::miette!("ssh exec timed out after {timeout_secs}s"))
+        }
+    }
+    // kill_guard drops here on every non-Ok(Ok) path; SIGKILL fires unless
+    // disarmed above.
+}
+
+/// Drop guard that SIGKILLs a captured ssh PID unless explicitly disarmed.
+/// Used by [`ssh_exec`] to guarantee the ssh client doesn't outlive the future
+/// even on `tokio::select!` cancellation or task abort.
+struct SshClientKillGuard(Option<u32>);
+
+impl SshClientKillGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self(pid)
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for SshClientKillGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
         }
     }
 }
