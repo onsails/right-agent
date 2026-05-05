@@ -5,7 +5,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 
 /// Default budget cap per cron invocation (USD).
-pub const DEFAULT_CRON_BUDGET_USD: f64 = 2.0;
+pub const DEFAULT_CRON_BUDGET_USD: f64 = 5.0;
 
 /// Single source of truth for cron timings shown to users and the agent.
 ///
