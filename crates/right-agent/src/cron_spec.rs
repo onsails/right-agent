@@ -3,6 +3,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 /// Default budget cap per cron invocation (USD).
 pub const DEFAULT_CRON_BUDGET_USD: f64 = 5.0;
@@ -30,6 +31,10 @@ pub const IMMEDIATE_DEFAULT_LOCK_TTL: &str = "6h";
 
 /// Sentinel value stored in the `schedule` column for Immediate cron jobs.
 pub(crate) const IMMEDIATE_SENTINEL: &str = "@immediate";
+
+/// Sentinel prefix for `BackgroundContinuation` schedule encoding.
+/// Stored as `@bg:<fork_from-uuid>` in the `schedule` column.
+pub(crate) const BG_SENTINEL_PREFIX: &str = "@bg:";
 
 /// Single source of truth for cron timings shown to users and the agent.
 ///
@@ -69,6 +74,10 @@ pub enum ScheduleKind {
     /// Fires on the next reconcile tick, then auto-deletes.
     /// Stored as the `'@immediate'` sentinel in the `schedule` column.
     Immediate,
+    /// Bot-internal background continuation: fires on the next reconcile
+    /// tick with `--resume <fork_from> --fork-session --session-id <run_id>`,
+    /// auto-deletes. Stored as `'@bg:<fork_from-uuid>'`.
+    BackgroundContinuation { fork_from: Uuid },
 }
 
 impl ScheduleKind {
@@ -76,13 +85,19 @@ impl ScheduleKind {
     pub fn cron_schedule(&self) -> Option<&str> {
         match self {
             Self::Recurring(s) | Self::OneShotCron(s) => Some(s),
-            Self::RunAt(_) | Self::Immediate => None,
+            Self::RunAt(_) | Self::Immediate | Self::BackgroundContinuation { .. } => None,
         }
     }
 
     /// Whether this is a one-shot job (fires once then deletes).
     pub fn is_one_shot(&self) -> bool {
-        matches!(self, Self::OneShotCron(_) | Self::RunAt(_) | Self::Immediate)
+        matches!(
+            self,
+            Self::OneShotCron(_)
+                | Self::RunAt(_)
+                | Self::Immediate
+                | Self::BackgroundContinuation { .. }
+        )
     }
 
     /// Parse a (`schedule`, `run_at`, `recurring`) row tuple from `cron_specs`
@@ -98,6 +113,11 @@ impl ScheduleKind {
                 .parse::<DateTime<Utc>>()
                 .map_err(|e| format!("invalid run_at datetime '{rat}': {e}"))?;
             return Ok(Self::RunAt(dt));
+        }
+        if let Some(rest) = schedule.strip_prefix(BG_SENTINEL_PREFIX) {
+            let fork_from = Uuid::parse_str(rest)
+                .map_err(|e| format!("invalid bg fork_from UUID '{rest}': {e}"))?;
+            return Ok(Self::BackgroundContinuation { fork_from });
         }
         if schedule == IMMEDIATE_SENTINEL {
             return Ok(Self::Immediate);
@@ -116,6 +136,9 @@ impl std::fmt::Display for ScheduleKind {
             Self::Recurring(s) | Self::OneShotCron(s) => f.write_str(s),
             Self::RunAt(dt) => write!(f, "{}", dt.to_rfc3339()),
             Self::Immediate => f.write_str(IMMEDIATE_SENTINEL),
+            Self::BackgroundContinuation { fork_from } => {
+                write!(f, "{BG_SENTINEL_PREFIX}{fork_from}")
+            }
         }
     }
 }

@@ -2929,6 +2929,7 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "url",
+ "uuid",
  "walkdir",
  "which",
  "wiremock",

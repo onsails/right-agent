@@ -48,6 +48,7 @@ nix = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 const_format = { workspace = true }
+uuid = { workspace = true }
 fastrand = "2"
 
 [features]

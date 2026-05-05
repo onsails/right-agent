@@ -1357,3 +1357,60 @@
         let err = ScheduleKind::from_db_row("", Some("not-a-date"), 0);
         assert!(err.is_err());
     }
+
+    #[test]
+    fn from_db_row_bg_continuation() {
+        let main = uuid::Uuid::new_v4();
+        let kind = ScheduleKind::from_db_row(&format!("@bg:{main}"), None, 0).unwrap();
+        match kind {
+            ScheduleKind::BackgroundContinuation { fork_from } => {
+                assert_eq!(fork_from, main);
+            }
+            other => panic!("expected BackgroundContinuation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_db_row_bg_invalid_uuid_errors() {
+        let err = ScheduleKind::from_db_row("@bg:not-a-uuid", None, 0);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("invalid"));
+    }
+
+    #[test]
+    fn from_db_row_bg_missing_uuid_errors() {
+        let err = ScheduleKind::from_db_row("@bg:", None, 0);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn bg_kind_display_round_trips() {
+        let main = uuid::Uuid::new_v4();
+        let kind = ScheduleKind::BackgroundContinuation { fork_from: main };
+        let s = format!("{kind}");
+        assert_eq!(s, format!("@bg:{main}"));
+        let parsed = ScheduleKind::from_db_row(&s, None, 0).unwrap();
+        assert_eq!(kind, parsed);
+    }
+
+    #[test]
+    fn bg_kind_is_one_shot() {
+        let kind = ScheduleKind::BackgroundContinuation {
+            fork_from: uuid::Uuid::new_v4(),
+        };
+        assert!(kind.is_one_shot());
+    }
+
+    #[test]
+    fn bg_kind_no_cron_schedule() {
+        let kind = ScheduleKind::BackgroundContinuation {
+            fork_from: uuid::Uuid::new_v4(),
+        };
+        assert!(kind.cron_schedule().is_none());
+    }
+
+    #[test]
+    fn immediate_kind_still_parses_after_bg_addition() {
+        let kind = ScheduleKind::from_db_row(IMMEDIATE_SENTINEL, None, 0).unwrap();
+        assert!(matches!(kind, ScheduleKind::Immediate));
+    }
