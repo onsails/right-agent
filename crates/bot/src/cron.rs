@@ -201,6 +201,32 @@ fn classify_cron_failure(
     }
 }
 
+/// Insert a freshly-started cron run with `status='running'`, snapshotting the
+/// spec's delivery target onto the row so one-shot delivery survives spec
+/// auto-deletion.
+fn insert_running_run(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    job_name: &str,
+    started_at: &str,
+    log_path: &str,
+    spec: &right_agent::cron_spec::CronSpec,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
+         VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+        rusqlite::params![
+            run_id,
+            job_name,
+            started_at,
+            log_path,
+            spec.target_chat_id,
+            spec.target_thread_id,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
@@ -273,9 +299,13 @@ async fn execute_job(
             return;
         }
     };
-    if let Err(e) = conn.execute(
-        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path) VALUES (?1, ?2, ?3, 'running', ?4)",
-        rusqlite::params![run_id, job_name, started_at, log_path_str],
+    if let Err(e) = insert_running_run(
+        &conn,
+        &run_id,
+        job_name,
+        &started_at,
+        &log_path_str,
+        spec,
     ) {
         tracing::error!(job = %job_name, "DB insert failed: {e:#}");
         std::fs::remove_file(&lock_path).ok();
@@ -1673,5 +1703,83 @@ mod tests {
             "run_cron_task must exit within 2s of shutdown — \
              job loop handles are likely blocking (not aborted on shutdown)"
         );
+    }
+}
+
+#[cfg(test)]
+mod target_snapshot_tests {
+    use super::*;
+    use right_agent::cron_spec::{CronSpec, ScheduleKind};
+
+    fn migrated_conn() -> (tempfile::TempDir, rusqlite::Connection) {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
+        (dir, conn)
+    }
+
+    #[test]
+    fn insert_running_run_snapshots_target() {
+        let (_dir, conn) = migrated_conn();
+        let spec = CronSpec {
+            schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: Some(-777),
+            target_thread_id: Some(13),
+        };
+        insert_running_run(
+            &conn,
+            "run-1",
+            "job-x",
+            "2026-05-05T12:00:00Z",
+            "/log/path",
+            &spec,
+        )
+        .unwrap();
+
+        let (chat, thread): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(chat, Some(-777));
+        assert_eq!(thread, Some(13));
+    }
+
+    #[test]
+    fn insert_running_run_writes_null_when_spec_has_no_target() {
+        let (_dir, conn) = migrated_conn();
+        let spec = CronSpec {
+            schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        insert_running_run(
+            &conn,
+            "run-2",
+            "job-y",
+            "2026-05-05T12:00:00Z",
+            "/log/path",
+            &spec,
+        )
+        .unwrap();
+
+        let (chat, thread): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(chat, None);
+        assert_eq!(thread, None);
     }
 }
