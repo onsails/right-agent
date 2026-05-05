@@ -92,6 +92,12 @@ Per message:
   │   ├─ First message: --session-id <uuid> (new session)
   │   ├─ Subsequent: --resume <root_session_id> (persistent session)
   │   └─ Sessions persist across messages — agent retains full CC context
+  ├─ If foreground exits via 600s timeout or 🌙 Background button:
+  │   ├─ Insert cron_specs row with schedule_kind=Immediate, prompt prefixed
+  │   │   with `X-FORK-FROM: <main_session_id>\n` and the continuation prompt
+  │   ├─ Edit thinking message to per-reason banner ("⏱ Foreground hit 10-min
+  │   │   limit — continuing in background…" / "🌙 Working in background…")
+  │   └─ Worker returns; debounce frees, user can send next message
   ├─ Parse reply JSON with typed attachments
   ├─ Send text reply to Telegram
   ├─ Download outbound attachments from sandbox outbox → send to Telegram
@@ -343,6 +349,50 @@ via `editMessageText`. Stays in chat after completion.
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Cron jobs disable `Agent` tool to prevent budget waste on
 subagent branches. Process timeout (600s) is a safety net only.
+
+### Cron Schedule Kinds
+
+`cron_specs.schedule` stores a schedule string that maps to a `ScheduleKind` variant:
+
+- `ScheduleKind::Recurring("0 9 * * *")` — fires repeatedly per cron expression.
+- `ScheduleKind::OneShotCron("30 15 * * *")` — fires once on next match, then deletes.
+- `ScheduleKind::RunAt(2026-12-25T15:30:00Z)` — fires once at absolute time, then deletes.
+- `ScheduleKind::Immediate` — fires on next reconcile tick (≤5s), then deletes.
+  Encoded as `schedule = '@immediate'` sentinel, no DB migration. Used by the
+  bot for background-continuation jobs (also available to `cron_create` as
+  `--immediate` once exposed in the MCP surface).
+
+### Per-session mutex on --resume
+
+Worker (`bot/src/telegram/worker.rs`) and cron delivery
+(`bot/src/cron_delivery.rs`) both invoke `claude -p --resume <main_session_id>`,
+which mutates the session's JSONL file. Concurrent invocations against the same
+session would interleave or lose turns.
+
+A `SessionLocks` map (`Arc<DashMap<String, Arc<Mutex<()>>>>`) keyed by the main
+`root_session_id` serialises these accesses. Worker acquires before each
+foreground turn; delivery acquires before each Haiku-relayed delivery. Cron
+job execution itself does NOT acquire — it runs `--fork-session` against a new
+session ID and does not race the main session JSONL.
+
+`IDLE_THRESHOLD_SECS = 180` remains as UX politeness ("don't interrupt the
+user mid-conversation"), but correctness now lives in the mutex.
+
+Sweep: a periodic task in `lib.rs` (every hour) drops entries whose Arc has no
+external strong references — protects against unbounded growth on long-lived
+agents.
+
+### Background continuation: X-FORK-FROM convention
+
+A background continuation cron job is identified by its prompt starting with
+`X-FORK-FROM: <main_session_id>\n`. `cron::execute_job` strips this header,
+sets `ClaudeInvocation::resume_session_id` and `fork_session = true`, and
+passes the body as the user message. The forked session inherits the main
+session's full history; the body is a short SYSTEM_NOTICE asking the agent to
+finish answering the user's most recent message.
+
+This convention avoids a `cron_specs` schema migration. It is bot-internal —
+no agent or user is expected to construct prompts with this prefix.
 
 ### Configuration Hierarchy
 
