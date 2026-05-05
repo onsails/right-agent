@@ -1,4 +1,75 @@
 # Changelog
+## [0.2.9] - 2026-05-05
+
+
+### Bug Fixes
+
+- **bot**: Fall back to API-key auth when MCP DCR fails
+- **bot**: Block harness self-loop tools (ScheduleWakeup et al.)
+- **cron**: Read delivery target from cron_runs, drop JOIN to cron_specs
+- **openshell**: Rename test to reflect what it actually exercises
+- **openshell**: Clarify tear_down_control_master logging
+- **openshell**: Collapse nested if-let to satisfy clippy::collapsible_if
+- **openshell**: Restore ssh_exec cancel-safety via RAII pid guard
+- Address review-loop findings on background-continuation
+- **cron**: Backfill cron_runs target from live specs in v18
+- **cron**: Propagate cron_update target changes to undelivered runs
+- **bot**: Opt out of ssh ControlMaster for long-lived claude -p
+
+### Features
+
+- **bot**: Clean stale ControlMaster socket at startup
+- **bot**: Tear down ControlMaster on graceful shutdown
+- **cron**: Fire ScheduleKind::Immediate jobs on next reconcile tick
+- **invocation**: Add fork_session flag emitting --fork-session
+- **worker**: Per-main-session mutex on --resume to close TOCTOU race
+- **cron-delivery**: Acquire per-session mutex before --resume into main
+- **bot**: Background button + handle_bg_callback dispatch
+- **worker**: BgReason, Backgrounded outcome, enqueue helper, continuation prompt
+- **cron**: Honour X-FORK-FROM header for background continuation jobs
+- **worker**: Replace SafetyTimeout-reflection with Backgrounded path
+- **bot**: Wire SessionLocks + BgRequests through dispatch and delivery
+- **cron**: Snapshot target_chat_id/target_thread_id onto cron_runs
+- **cron**: Add select_schema_and_fork helper for kind-aware invocation
+- **cron**: Extend reconcile filters to fire BackgroundContinuation jobs
+- **worker**: Instruct bg fork that silence is not a valid outcome
+- **cron**: Startup migration for legacy @immediate+X-FORK-FROM rows
+- **prompt**: Add bg_marker slot to deploy_composite_memory; stub builder
+- **worker**: Build_bg_marker_for_chat surfaces in-flight bg runs to main session
+- **openshell**: Add control_master_socket_path helper
+- **openshell**: Append ControlMaster directives to generated SSH config
+- **openshell**: Add check_control_master helper
+- **openshell**: Add clean_stale_control_master and tear_down_control_master
+- **cron**: Raise default budget to $5
+- **cron**: Add ScheduleKind::Immediate variant with @immediate sentinel
+- **cron**: Migrate cron_runs to carry target_chat_id/target_thread_id (v18)
+- **cron**: Carry target_chat_id/target_thread_id on CronSpec
+- **cron-spec**: Add ScheduleKind::BackgroundContinuation variant
+- **codegen**: Add BG_CONTINUATION_SCHEMA_JSON for forked bg turns
+- **worker**: Produce BackgroundContinuation rows; drop X-FORK-FROM prefix
+- **migrate**: Tear down old ControlMaster during sandbox migration
+- **cron**: Immediate kind in create_spec_v2 + insert_immediate_cron helper
+
+### Miscellaneous
+
+- **cron**: Remove dead X-FORK-FROM test mirror after kind-driven dispatch
+- **up**: Log per-phase elapsed_ms before process-compose start
+
+### Refactor
+
+- **bot**: Address review feedback for MCP DCR fallback
+- **cron**: Replace X-FORK-FROM prompt parsing with kind-driven dispatch
+- **cron**: Extract reconcile predicate fns so regression tests bind to production
+- **openshell**: Unify ssh -O control-op plumbing
+- **cron**: Extract cron_spec tests to sibling file
+- **cron-spec**: Extract ScheduleKind::from_db_row from inline match
+- **bg-continuation**: Apply review-loop fixes
+
+### Testing
+
+- **openshell**: Verify ControlMaster engages multiplexing on first ssh call
+- **cron**: Bump expected schema version to v18
+
 ## [0.2.8] - 2026-05-01
 
 

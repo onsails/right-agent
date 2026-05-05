@@ -2844,7 +2844,7 @@ dependencies = [
 
 [[package]]
 name = "right"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "right-agent"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "base64",
  "chrono",
@@ -2937,7 +2937,7 @@ dependencies = [
 
 [[package]]
 name = "right-bot"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "axum",
  "chrono",
