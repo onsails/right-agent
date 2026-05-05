@@ -54,8 +54,9 @@ Per message:
   │   ├─ Subsequent: --resume <root_session_id> (persistent session)
   │   └─ Sessions persist across messages — agent retains full CC context
   ├─ If foreground exits via 600s timeout or 🌙 Background button:
-  │   ├─ Insert cron_specs row with schedule_kind=Immediate, prompt prefixed
-  │   │   with `X-FORK-FROM: <main_session_id>\n` and the continuation prompt
+  │   ├─ Insert cron_specs row with schedule_kind=BackgroundContinuation
+  │   │   { fork_from: <main_session_id> } (encoded as `@bg:<uuid>`) and
+  │   │   the continuation prompt body
   │   ├─ Edit thinking message to per-reason banner ("⏱ Foreground hit 10-min
   │   │   limit — continuing in background…" / "🌙 Working in background…")
   │   └─ Worker returns; debounce frees, user can send next message

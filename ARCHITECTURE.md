@@ -131,14 +131,24 @@ See: `docs/architecture/sessions.md` (Stream Logging).
 
 `cron_specs.schedule` stores a schedule string that maps to a
 `ScheduleKind` variant. The **`Immediate`** variant (encoded as
-`schedule = '@immediate'`) is bot-internal — used for
-background-continuation jobs and fired on the next reconcile tick (≤5s).
-`insert_immediate_cron` defaults `lock_ttl` to
+`schedule = '@immediate'`) is bot-internal and fires on the next
+reconcile tick (≤5s). `insert_immediate_cron` defaults `lock_ttl` to
 `IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`); the lock heartbeat is written once
 at job start and never refreshed, so a tighter TTL would let the
 reconciler spawn a duplicate `execute_job` against the same spec on the
 next 5-second tick. The TTL is the duplicate-prevention guard, not a
 wall-clock execution limit.
+
+The **`BackgroundContinuation { fork_from }`** variant (encoded as
+`schedule = '@bg:<fork_from-uuid>'`) is also bot-internal — produced
+when the worker offloads an interrupted foreground turn to background
+via `cron_spec::insert_background_continuation`. Like `Immediate`, it
+fires on the next reconcile tick (≤5s) with the same
+`IMMEDIATE_DEFAULT_LOCK_TTL`. Unlike `Immediate`, it carries the main
+session UUID as typed data and runs against
+`BG_CONTINUATION_SCHEMA_JSON`, which forbids silent output (`notify`
+is required and non-null) so the user always receives a delivered
+answer.
 
 See: `docs/architecture/sessions.md` for the full variant list.
 
@@ -146,21 +156,30 @@ See: `docs/architecture/sessions.md` for the full variant list.
 
 See: `docs/architecture/sessions.md` (Per-session mutex on --resume).
 
-### Background continuation: X-FORK-FROM convention
+### Background continuation: `BackgroundContinuation` schedule kind
 
-A background continuation cron job is identified by its prompt starting with
-`X-FORK-FROM: <main_session_id>\n`. `cron::execute_job` strips this header,
-sets `ClaudeInvocation::resume_session_id` and `fork_session = true`, and
-passes the body as the user message. The forked session inherits the main
-session's full history; the body is a short SYSTEM_NOTICE asking the agent to
-finish answering the user's most recent message.
+A background-continuation cron job is identified by its
+`ScheduleKind::BackgroundContinuation { fork_from: Uuid }` variant,
+encoded in the `cron_specs.schedule` column as `@bg:<fork_from-uuid>`.
+`cron::execute_job` matches the variant via `select_schema_and_fork`
+and emits a CC invocation with `--resume <fork_from> --fork-session
+--session-id <run_id>`. The forked session inherits the main session's
+full history; the prompt body is a short SYSTEM_NOTICE
+(`build_continuation_prompt`) asking the agent to finish answering
+the user's most recent message.
 
-This convention avoids a `cron_specs` schema migration. It is bot-internal —
-no agent or user is expected to construct prompts with this prefix. The parser
-refuses to run a job whose `schedule_kind` is anything other than `Immediate`
-even if the prefix is present — agents cannot hijack `--resume` by crafting
-prompts. Invalid UUIDs in the header are also refused (the run is marked
-`failed`, the lock file is removed, and `execute_job` returns).
+Bot-internal: only `worker::enqueue_background_job` constructs this
+variant via `cron_spec::insert_background_continuation`. Agents
+cannot hijack `--resume` because the variant carries `fork_from` as
+typed data, and the `cron_create` MCP path never sets it.
+`select_schema_and_fork` co-derives the JSON schema
+(`BG_CONTINUATION_SCHEMA_JSON`, which forbids silent output) and the
+`fork_from` source from the same variant — drift between the two
+effects is impossible by construction.
+
+A one-time startup migration `cron::migrate_legacy_bg_continuation`
+rewrites pre-existing rows that used the deprecated
+`@immediate` + `X-FORK-FROM:` convention into the new form.
 
 ### Configuration Hierarchy
 

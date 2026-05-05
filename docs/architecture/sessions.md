@@ -72,12 +72,32 @@ summary of the failure instead of the raw ring-buffer dump.
 - `ScheduleKind::OneShotCron("30 15 * * *")` — fires once on next match, then deletes.
 - `ScheduleKind::RunAt(2026-12-25T15:30:00Z)` — fires once at absolute time, then deletes.
 - `ScheduleKind::Immediate` — fires on next reconcile tick (≤5s), then deletes.
-  Encoded as `schedule = '@immediate'` sentinel, no DB migration. Used by the
-  bot for background-continuation jobs (also available to `cron_create` as
-  `--immediate` once exposed in the MCP surface). `insert_immediate_cron`
-  defaults `lock_ttl` to `IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`) when the caller
-  passes none — bg-continuation turns can legitimately run for hours, and the
-  lock heartbeat is written once at job start and never refreshed, so a tight
-  TTL would let the reconciler spawn a duplicate `execute_job` against the
-  same spec on the next 5-second tick. The TTL is the duplicate-prevention
-  guard, not a wall-clock execution limit.
+  Encoded as `schedule = '@immediate'` sentinel, no DB migration. Bot-internal
+  (also available to `cron_create` as `--immediate` once exposed in the MCP
+  surface). `insert_immediate_cron` defaults `lock_ttl` to
+  `IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`) when the caller passes none — the lock
+  heartbeat is written once at job start and never refreshed, so a tight TTL
+  would let the reconciler spawn a duplicate `execute_job` against the same
+  spec on the next 5-second tick. The TTL is the duplicate-prevention guard,
+  not a wall-clock execution limit.
+- `ScheduleKind::BackgroundContinuation { fork_from }` — fires on next reconcile
+  tick (≤5s), then deletes. Encoded as `schedule = '@bg:<fork_from-uuid>'`.
+  Bot-internal: produced only by `worker::enqueue_background_job` (via
+  `cron_spec::insert_background_continuation`) when a foreground turn hits the
+  600s timeout or the user taps the 🌙 Background button. Inherits the
+  `IMMEDIATE_DEFAULT_LOCK_TTL` default since these turns can run for hours.
+
+  At dispatch time `cron::execute_job` calls `select_schema_and_fork`, which
+  co-derives two effects from the same variant: (1) the structured-output JSON
+  schema (`BG_CONTINUATION_SCHEMA_JSON` — forbids silent output, `notify` is
+  required and non-null), and (2) the `fork_from` UUID passed to
+  `ClaudeInvocation` as `--resume <fork_from> --fork-session --session-id
+  <run_id>`. The forked session inherits the main session's history; the
+  prompt body — built by `build_continuation_prompt` — is a SYSTEM_NOTICE
+  asking the agent to finish answering the user's most recent message.
+
+  Agents cannot hijack `--resume` by crafting prompts: the variant carries
+  `fork_from` as typed data, and the `cron_create` MCP surface never produces
+  it. A one-time startup migration `cron::migrate_legacy_bg_continuation`
+  rewrites pre-existing rows that used the deprecated `@immediate` +
+  `X-FORK-FROM:` convention into the new encoding.
