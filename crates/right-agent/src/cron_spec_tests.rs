@@ -1,4 +1,5 @@
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn validate_job_name_valid() {
@@ -1114,12 +1115,39 @@
     }
 
     #[test]
-    fn insert_immediate_cron_uses_default_budget_when_none() {
+    fn insert_background_continuation_writes_bg_sentinel() {
         let conn = setup_db();
-        insert_immediate_cron(&conn, "bg-2", "prompt", -42, Some(0), None).unwrap();
+        let main = Uuid::new_v4();
+        insert_background_continuation(&conn, "bg-x1", "do thing", main, -100, Some(7), Some(5.0))
+            .unwrap();
+        let (schedule, recurring, run_at, chat, thread): (
+            String,
+            i64,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT schedule, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs WHERE job_name = 'bg-x1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(schedule, format!("@bg:{main}"));
+        assert_eq!(recurring, 0);
+        assert!(run_at.is_none());
+        assert_eq!(chat, Some(-100));
+        assert_eq!(thread, Some(7));
+    }
+
+    #[test]
+    fn insert_background_continuation_uses_default_budget_when_none() {
+        let conn = setup_db();
+        insert_background_continuation(&conn, "bg-x2", "prompt", Uuid::new_v4(), -42, None, None)
+            .unwrap();
         let budget: f64 = conn
             .query_row(
-                "SELECT max_budget_usd FROM cron_specs WHERE job_name = 'bg-2'",
+                "SELECT max_budget_usd FROM cron_specs WHERE job_name = 'bg-x2'",
                 [],
                 |r| r.get(0),
             )
@@ -1127,23 +1155,32 @@
         assert!((budget - DEFAULT_CRON_BUDGET_USD).abs() < f64::EPSILON);
     }
 
-    /// `insert_immediate_cron` substitutes [`IMMEDIATE_DEFAULT_LOCK_TTL`] when
-    /// the caller passes no explicit lock_ttl. This prevents the reader-side
-    /// `unwrap_or("30m")` default from letting the reconciler spawn a duplicate
-    /// `execute_job` against a long-running bg-continuation spec after 30 min.
     #[test]
-    fn insert_immediate_cron_defaults_lock_ttl_to_six_hours() {
+    fn insert_background_continuation_defaults_lock_ttl_to_six_hours() {
         let conn = setup_db();
-        insert_immediate_cron(&conn, "bg-3", "prompt", -42, None, None).unwrap();
+        insert_background_continuation(&conn, "bg-x3", "prompt", Uuid::new_v4(), -42, None, None)
+            .unwrap();
         let lock_ttl: Option<String> = conn
             .query_row(
-                "SELECT lock_ttl FROM cron_specs WHERE job_name = 'bg-3'",
+                "SELECT lock_ttl FROM cron_specs WHERE job_name = 'bg-x3'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert_eq!(lock_ttl.as_deref(), Some(IMMEDIATE_DEFAULT_LOCK_TTL));
-        assert_eq!(lock_ttl.as_deref(), Some("6h"));
+    }
+
+    #[test]
+    fn insert_background_continuation_round_trips_through_load() {
+        let conn = setup_db();
+        let main = Uuid::new_v4();
+        insert_background_continuation(&conn, "bg-x4", "prompt", main, -42, None, None).unwrap();
+        let specs = load_specs_from_db(&conn).unwrap();
+        let spec = specs.get("bg-x4").expect("spec must load");
+        match &spec.schedule_kind {
+            ScheduleKind::BackgroundContinuation { fork_from } => assert_eq!(*fork_from, main),
+            other => panic!("expected BackgroundContinuation, got {other:?}"),
+        }
     }
 
     /// Regression: changing `target_chat_id` via `update_spec_partial` must

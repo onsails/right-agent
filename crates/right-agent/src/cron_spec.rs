@@ -392,37 +392,55 @@ pub fn create_spec_v2(
     }
 }
 
-/// Insert a one-shot Immediate cron job. Bot-internal use (background continuation).
+/// Insert a one-shot `BackgroundContinuation` cron job. Bot-internal use only —
+/// produced by the worker when foreground turns are sent to background, never
+/// constructible from CLI/MCP.
 ///
-/// Fires on the next reconcile tick, then auto-deletes. Validates the job name
-/// and budget like `create_spec_v2`. `max_budget_usd = None` uses the project
-/// default (`DEFAULT_CRON_BUDGET_USD`).
-///
-/// `lock_ttl` defaults to [`IMMEDIATE_DEFAULT_LOCK_TTL`] (`"6h"`) when the
-/// caller passes `None`. Background-continuation jobs are intentionally
-/// long-running; the lock_ttl is the duplicate-prevention guard, not a
-/// wall-clock limit. See [`IMMEDIATE_DEFAULT_LOCK_TTL`] for rationale.
-pub fn insert_immediate_cron(
+/// Stores `schedule = '@bg:<fork_from>'`, `recurring = 0`, `run_at = NULL`,
+/// `lock_ttl = IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`).
+/// `max_budget_usd = None` uses [`DEFAULT_CRON_BUDGET_USD`].
+pub fn insert_background_continuation(
     conn: &rusqlite::Connection,
     job_name: &str,
     prompt: &str,
+    fork_from: Uuid,
     target_chat_id: i64,
     target_thread_id: Option<i64>,
     max_budget_usd: Option<f64>,
 ) -> Result<CronSpecResult, String> {
-    create_spec_v2(
-        conn,
-        job_name,
-        None,
-        prompt,
-        Some(IMMEDIATE_DEFAULT_LOCK_TTL),
-        max_budget_usd,
-        None,
-        None,
-        Some(target_chat_id),
-        target_thread_id,
-        true,
-    )
+    validate_job_name(job_name)?;
+    if prompt.trim().is_empty() {
+        return Err("prompt must not be empty".into());
+    }
+    if let Some(budget) = max_budget_usd
+        && budget <= 0.0
+    {
+        return Err("max_budget_usd must be greater than 0".into());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
+    let schedule = format!("{BG_SENTINEL_PREFIX}{fork_from}");
+    let lock_ttl = IMMEDIATE_DEFAULT_LOCK_TTL;
+
+    let result = conn.execute(
+        "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?7, ?8, ?9)",
+        rusqlite::params![job_name, schedule, prompt, lock_ttl, budget, target_chat_id, target_thread_id, now, now],
+    );
+
+    match result {
+        Ok(_) => Ok(CronSpecResult {
+            message: format!("Created bg-continuation job '{job_name}'."),
+            warning: None,
+        }),
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
+        {
+            Err(format!("job '{job_name}' already exists"))
+        }
+        Err(e) => Err(format!("insert failed: {e:#}")),
+    }
 }
 
 /// Update an existing cron spec. Returns error if job not found.

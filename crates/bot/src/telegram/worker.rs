@@ -480,9 +480,11 @@ directly.\n\
     )
 }
 
-/// Enqueue a one-shot background cron job that will fork from `main_session_id`
-/// and continue the interrupted turn. Job name is `bg-<HHMMSS>-<uuid4>` —
-/// timestamped for human scanning, uuid-suffixed for collision-free PK insert.
+/// Enqueue a one-shot `BackgroundContinuation` cron job that will fork from
+/// `main_session_id` and continue the interrupted turn. Job name is
+/// `bg-<HHMMSS>-<8hex>` — timestamped for human scanning, uuid-suffixed for
+/// collision-free PK insert. The `fork_from` UUID is carried structurally in
+/// the schedule kind, NOT as a header in the prompt body.
 fn enqueue_background_job(
     conn: &rusqlite::Connection,
     chat_id: i64,
@@ -497,13 +499,19 @@ fn enqueue_background_job(
         chrono::Utc::now().format("%H%M%S"),
         &suffix[..JOB_SUFFIX_HEX_CHARS]
     );
-    let prompt_user_msg = build_continuation_prompt(reason);
-    // Embed the session UUID as a header line so cron's execute_job can build
-    // the --fork-session invocation. This avoids a DB migration (no column
-    // for fork_from_session). Task 10 implements the parser side.
-    let full_prompt = format!("X-FORK-FROM: {main_session_id}\n{prompt_user_msg}");
+    let prompt = build_continuation_prompt(reason);
+    let fork_from = uuid::Uuid::parse_str(main_session_id)
+        .map_err(|e| format!("main_session_id '{main_session_id}' is not a UUID: {e:#}"))?;
     let target_thread = if thread_id == 0 { None } else { Some(thread_id) };
-    right_agent::cron_spec::insert_immediate_cron(conn, &job_name, &full_prompt, chat_id, target_thread, None)?;
+    right_agent::cron_spec::insert_background_continuation(
+        conn,
+        &job_name,
+        &prompt,
+        fork_from,
+        chat_id,
+        target_thread,
+        None,
+    )?;
     Ok(job_name)
 }
 
@@ -3067,10 +3075,11 @@ mod background_continuation_tests {
     }
 
     #[test]
-    fn enqueue_background_job_inserts_immediate_with_target() {
+    fn enqueue_background_job_inserts_bg_kind_with_target() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_connection(tmp.path(), true).expect("open_connection must succeed");
-        let job = enqueue_background_job(&conn, -42, 7, "main-uuid", BgReason::AutoTimeout)
+        let main = uuid::Uuid::new_v4().to_string();
+        let job = enqueue_background_job(&conn, -42, 7, &main, BgReason::AutoTimeout)
             .expect("enqueue must succeed");
         assert!(job.starts_with("bg-"));
 
@@ -3087,10 +3096,18 @@ mod background_continuation_tests {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
-        assert_eq!(schedule, "@immediate");
+        assert_eq!(schedule, format!("@bg:{main}"));
         assert_eq!(recurring, 0);
         assert_eq!(target_chat, Some(-42));
         assert_eq!(target_thread, Some(7));
+        assert!(
+            !prompt.starts_with("X-FORK-FROM:"),
+            "X-FORK-FROM header must NOT be in prompt; got {prompt:?}"
+        );
+        assert!(
+            prompt.contains("SYSTEM_NOTICE"),
+            "continuation notice must be in prompt body; got {prompt:?}"
+        );
         assert!(prompt.contains("10-minute safety limit"));
     }
 }
