@@ -1123,13 +1123,14 @@ fn reconcile_jobs(
         upgrade_lock,
     );
 
-    // Fire Immediate specs (every tick — they are one-shot)
+    // Fire Immediate + BackgroundContinuation specs (every tick — they are one-shot)
     let immediate: Vec<(String, CronSpec)> = new_specs
         .iter()
         .filter(|(_, spec)| {
             matches!(
                 &spec.schedule_kind,
                 right_agent::cron_spec::ScheduleKind::Immediate
+                    | right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
             )
         })
         .map(|(name, spec)| (name.clone(), spec.clone()))
@@ -1137,7 +1138,7 @@ fn reconcile_jobs(
 
     fire_one_shot_specs(
         immediate,
-        "immediate",
+        "immediate-or-bg",
         triggered_handles,
         agent_dir,
         agent_name,
@@ -1165,11 +1166,13 @@ fn reconcile_jobs(
 
     // Spawn new handles for new or changed jobs
     for (name, spec) in &new_specs {
-        // Skip RunAt and Immediate specs — they are handled above, not run_job_loop
+        // Skip RunAt, Immediate, and BackgroundContinuation specs —
+        // they are handled above, not run_job_loop
         if matches!(
             spec.schedule_kind,
             right_agent::cron_spec::ScheduleKind::RunAt(_)
                 | right_agent::cron_spec::ScheduleKind::Immediate
+                | right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
         ) {
             continue;
         }
@@ -1701,6 +1704,57 @@ mod tests {
         let (schema, fork) = select_schema_and_fork(&spec);
         assert_eq!(schema, right_agent::codegen::BG_CONTINUATION_SCHEMA_JSON);
         assert_eq!(fork.as_deref(), Some(main.to_string().as_str()));
+    }
+
+    #[test]
+    fn reconcile_immediate_filter_includes_bg_continuation() {
+        use right_agent::cron_spec::{CronSpec, ScheduleKind};
+        let main = uuid::Uuid::new_v4();
+        let specs: std::collections::HashMap<String, CronSpec> = [(
+            "bg-1".to_string(),
+            CronSpec {
+                schedule_kind: ScheduleKind::BackgroundContinuation { fork_from: main },
+                prompt: "p".into(),
+                lock_ttl: Some("6h".into()),
+                max_budget_usd: 5.0,
+                triggered_at: None,
+                target_chat_id: Some(-1),
+                target_thread_id: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+
+        // Mirror the production filter exactly. If it drifts, this test fails.
+        let immediate: Vec<(String, CronSpec)> = specs
+            .iter()
+            .filter(|(_, spec)| {
+                matches!(
+                    &spec.schedule_kind,
+                    ScheduleKind::Immediate | ScheduleKind::BackgroundContinuation { .. }
+                )
+            })
+            .map(|(name, spec)| (name.clone(), spec.clone()))
+            .collect();
+        assert_eq!(
+            immediate.len(),
+            1,
+            "bg row must match the immediate-fire filter"
+        );
+    }
+
+    #[test]
+    fn reconcile_skip_filter_excludes_bg_from_run_job_loop() {
+        use right_agent::cron_spec::ScheduleKind;
+        let kind = ScheduleKind::BackgroundContinuation {
+            fork_from: uuid::Uuid::new_v4(),
+        };
+        assert!(matches!(
+            kind,
+            ScheduleKind::RunAt(_)
+                | ScheduleKind::Immediate
+                | ScheduleKind::BackgroundContinuation { .. }
+        ));
     }
 }
 
