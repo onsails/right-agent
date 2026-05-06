@@ -87,7 +87,7 @@ async fn persist_new(
 }
 
 /// Trusted-only gate. Returns true when the sender is in the trusted-users allowlist.
-fn sender_is_trusted(msg: &Message, allowlist: &AllowlistHandle) -> bool {
+pub(crate) fn sender_is_trusted(msg: &Message, allowlist: &AllowlistHandle) -> bool {
     let Some(sender) = msg.from.as_ref() else {
         return false;
     };

@@ -1152,7 +1152,7 @@ pub fn spawn_worker(
                             chat_id,
                             thread_id: eff_thread_id,
                         },
-                        model: (**ctx.model.load()).clone(),
+                        model: crate::snapshot_model(&ctx.model),
                     };
 
                     match crate::reflection::reflect_on_failure(refl_ctx).await {
@@ -1650,7 +1650,7 @@ async fn invoke_cc(
         mcp_config_path: Some(mcp_path),
         json_schema: Some(reply_schema),
         output_format: super::invocation::OutputFormat::StreamJson,
-        model: (**ctx.model.load()).clone(),
+        model: crate::snapshot_model(&ctx.model),
         max_budget_usd: None,
         max_turns: None,
         resume_session_id: None,

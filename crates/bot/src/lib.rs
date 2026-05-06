@@ -14,6 +14,15 @@ pub use error::BotError;
 
 use right_agent::agent::allowlist::{self, AllowlistHandle, AllowlistState};
 
+/// Snapshot the current value of an `ArcSwap<Option<String>>` into an owned `Option<String>`.
+///
+/// The double-deref dance (`(**cell.load()).clone()`) reads the `Guard`, then derefs to the
+/// inner `Arc`, then clones the `Option<String>` payload. The intermediate guard and arc are
+/// dropped before the return — no lock-like resource is held.
+pub(crate) fn snapshot_model(cell: &arc_swap::ArcSwap<Option<String>>) -> Option<String> {
+    (**cell.load()).clone()
+}
+
 /// Load `allowlist.yaml` for this agent, migrating from the legacy
 /// `agent.yaml::allowed_chat_ids` field on first boot. Returns a shareable
 /// `AllowlistHandle` ready for the routing filter and command handlers.

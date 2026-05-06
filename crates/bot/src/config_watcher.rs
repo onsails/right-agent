@@ -12,9 +12,17 @@ use arc_swap::ArcSwap;
 use right_agent::agent::types::AgentConfig;
 use tokio_util::sync::CancellationToken;
 
+/// Debounce window for filesystem events — long enough to coalesce editor
+/// save bursts (write + rename + chmod), short enough that user-visible
+/// hot-reload feels immediate.
+const DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Classification of a single agent.yaml change event.
 #[derive(Debug)]
 pub(crate) enum ChangeKind {
+    /// File contents bytewise unchanged — fs noise (mtime touch, atomic
+    /// rename, etc.). Skip silently.
+    NoChange,
     /// Only `model` changed — apply in-memory and continue running.
     HotReloadable { new_model: Option<String> },
     /// Anything else — graceful restart.
@@ -26,8 +34,13 @@ pub(crate) enum ChangeKind {
 /// Compares old + new yaml as parsed `AgentConfig` values with `model`
 /// nulled out on both sides. If the rest is equal, hot-reload; else
 /// restart. Parse failure on either side fails-safe to restart.
+/// `AgentConfig` derives `PartialEq` field-by-field, so HashMap-typed
+/// fields like `env` compare order-insensitively.
 pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
-    let old: AgentConfig = match serde_saphyr::from_str(old_yaml) {
+    if old_yaml == new_yaml {
+        return ChangeKind::NoChange;
+    }
+    let mut old: AgentConfig = match serde_saphyr::from_str(old_yaml) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -37,7 +50,7 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
             return ChangeKind::RestartRequired;
         }
     };
-    let new: AgentConfig = match serde_saphyr::from_str(new_yaml) {
+    let mut new: AgentConfig = match serde_saphyr::from_str(new_yaml) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
@@ -47,12 +60,10 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
             return ChangeKind::RestartRequired;
         }
     };
-    let mut old_no_model = old.clone();
-    let mut new_no_model = new.clone();
-    old_no_model.model = None;
-    new_no_model.model = None;
-    if old_no_model == new_no_model {
-        ChangeKind::HotReloadable { new_model: new.model }
+    let new_model = new.model.take();
+    old.model = None;
+    if old == new {
+        ChangeKind::HotReloadable { new_model }
     } else {
         ChangeKind::RestartRequired
     }
@@ -71,7 +82,6 @@ pub fn spawn_config_watcher(
 ) -> miette::Result<()> {
     use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
     use std::sync::mpsc;
-    use std::time::Duration;
 
     let watch_dir = agent_yaml
         .parent()
@@ -83,13 +93,12 @@ pub fn spawn_config_watcher(
         .to_os_string();
     let yaml_path: PathBuf = agent_yaml.to_path_buf();
 
-    // Cache the initial yaml content so the first event has something to diff against.
     let initial_yaml = std::fs::read_to_string(&yaml_path)
         .map_err(|e| miette::miette!("failed to read {} for watcher: {e:#}", yaml_path.display()))?;
 
     let (tx, rx) = mpsc::channel();
 
-    let mut debouncer = new_debouncer(Duration::from_secs(2), tx)
+    let mut debouncer = new_debouncer(DEBOUNCE, tx)
         .map_err(|e| miette::miette!("failed to create file watcher: {e:#}"))?;
 
     debouncer
@@ -127,14 +136,18 @@ pub fn spawn_config_watcher(
                     };
 
                     match diff_classify(&last_yaml, &new_yaml) {
+                        ChangeKind::NoChange => {
+                            last_yaml = new_yaml;
+                        }
                         ChangeKind::HotReloadable { new_model } => {
                             tracing::info!(
                                 model = ?new_model.as_deref().unwrap_or("default"),
                                 "agent.yaml: model-only change — hot-reloading"
                             );
+                            // Two writers exist (this watcher + /model callback); both derive
+                            // the value from disk, so last-write-wins converges race-free.
                             model_swap.store(Arc::new(new_model));
                             last_yaml = new_yaml;
-                            // Continue watching; do not cancel.
                         }
                         ChangeKind::RestartRequired => {
                             tracing::info!(
@@ -222,14 +235,9 @@ mod tests {
     }
 
     #[test]
-    fn diff_unchanged_yaml_is_hot_reloadable_with_same_model() {
+    fn diff_identical_yaml_is_no_change() {
         let yaml = "restart: never\nmodel: \"claude-haiku-4-5\"\n";
-        match classify(yaml, yaml) {
-            ChangeKind::HotReloadable { new_model } => {
-                assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
-            }
-            other => panic!("expected HotReloadable, got {other:?}"),
-        }
+        assert!(matches!(classify(yaml, yaml), ChangeKind::NoChange));
     }
 
     #[test]

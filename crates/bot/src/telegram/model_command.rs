@@ -14,8 +14,8 @@
 /// model via the exact model-ID string CC accepts on the command line.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelChoice {
-    /// Short alias used in callback_data (≤ 16 bytes; stays under
-    /// Telegram's 64-byte callback_data limit even with the `model:` prefix).
+    /// Short alias used in callback_data. Combined with the `model:` prefix
+    /// (6 bytes) the total stays under Telegram's 64-byte limit.
     pub alias: &'static str,
     /// Button label (also row label in the body text).
     pub label: &'static str,
@@ -113,8 +113,9 @@ pub async fn handle_model(
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
 ) -> teloxide::prelude::ResponseResult<()> {
     use teloxide::prelude::*;
-    // Group gate: trusted users only.
-    if !super::handler::is_private_chat(&msg.chat.kind) && !sender_is_trusted(&msg, &allowlist) {
+    if !super::handler::is_private_chat(&msg.chat.kind)
+        && !super::allowlist_commands::sender_is_trusted(&msg, &allowlist)
+    {
         tracing::debug!(
             chat_id = msg.chat.id.0,
             user_id = msg.from.as_ref().map(|u| u.id.0),
@@ -151,7 +152,7 @@ pub async fn handle_model_callback(
     use teloxide::prelude::*;
 
     let Some(data) = q.data.as_deref() else {
-        // No data — nothing to do. Ack so Telegram clears the loading spinner.
+        // Ack so Telegram clears the loading spinner.
         bot.answer_callback_query(q.id).await?;
         return Ok(());
     };
@@ -168,8 +169,9 @@ pub async fn handle_model_callback(
         return Ok(());
     };
 
-    // Group gate: re-check on the click, not just on /model.
-    // Fail-secure: missing q.message → treat as group (require trust check).
+    // Re-check group gate on every click (the keyboard persists in chat,
+    // any group member can click). Fail-secure: missing q.message → treat
+    // as group, require trust.
     let in_group = q
         .message
         .as_ref()
@@ -189,10 +191,13 @@ pub async fn handle_model_callback(
     }
 
     let agent_yaml_path = agent_dir.0.join("agent.yaml");
-    let old_value: Option<String> = (**settings.model.load()).clone();
+    let old_value: Option<String> = crate::snapshot_model(&settings.model);
 
-    // ① Persist to disk first. If this fails, in-memory stays untouched.
-    if let Err(e) = persist_model(&agent_yaml_path, choice.model_id) {
+    // Persist before swap: if disk write fails, in-memory stays untouched.
+    if let Err(e) = right_agent::agent::types::write_agent_yaml_model(
+        &agent_yaml_path,
+        choice.model_id,
+    ) {
         tracing::error!(error = %format!("{e:#}"), "/model: failed to write agent.yaml");
         bot.answer_callback_query(q.id)
             .text("Failed to save model — see bot logs")
@@ -200,60 +205,43 @@ pub async fn handle_model_callback(
         return Ok(());
     }
 
-    // ② Hot-swap in-memory.
+    // Two writers exist (this callback + config_watcher); both derive the value
+    // from disk, so last-write-wins converges race-free.
     settings
         .model
         .store(std::sync::Arc::new(choice.model_id.map(str::to_owned)));
 
-    let user_id = q.from.id.0 as i64;
-    let chat_id = q.message.as_ref().map(|m| m.chat().id.0).unwrap_or(0);
     tracing::info!(
         from = ?old_value.as_deref().unwrap_or("default"),
         to = ?choice.model_id.unwrap_or("default"),
-        chat_id,
-        user_id,
+        chat_id = q.message.as_ref().map(|m| m.chat().id.0),
+        user_id = q.from.id.0,
         "model switched via /model"
     );
 
-    // ③ Refresh the menu UI (best-effort — failure logs but does not abort).
+    // Best-effort menu refresh + toast in parallel. Edit failure is logged
+    // but non-fatal: the persistent state and the toast are the source of
+    // truth; the visible menu is a courtesy. Telegram requires
+    // answerCallbackQuery within ~3s to clear the spinner — running it
+    // concurrent with the edit avoids that timeout on slow networks.
+    let toast = bot
+        .answer_callback_query(q.id)
+        .text(format!("Switched to {}", choice.label));
     if let Some(message) = q.message.as_ref() {
         let new_body = render_menu_body(choice.model_id);
         let new_kb = render_keyboard(choice.model_id);
-        if let Err(e) = bot
+        let edit = bot
             .edit_message_text(message.chat().id, message.id(), new_body)
-            .reply_markup(new_kb)
-            .await
-        {
+            .reply_markup(new_kb);
+        let (edit_result, toast_result) = tokio::join!(edit.send(), toast.send());
+        if let Err(e) = edit_result {
             tracing::warn!(error = %e, "failed to edit /model menu after switch");
         }
+        toast_result?;
+    } else {
+        toast.await?;
     }
-
-    // ④ Toast confirming the switch.
-    bot.answer_callback_query(q.id)
-        .text(format!("Switched to {}", choice.label))
-        .await?;
     Ok(())
-}
-
-fn persist_model(
-    agent_yaml: &std::path::Path,
-    model_id: Option<&str>,
-) -> miette::Result<()> {
-    right_agent::agent::types::write_agent_yaml_model(agent_yaml, model_id)
-}
-
-fn sender_is_trusted(
-    msg: &teloxide::types::Message,
-    allowlist: &right_agent::agent::allowlist::AllowlistHandle,
-) -> bool {
-    let Some(sender) = msg.from.as_ref() else {
-        return false;
-    };
-    allowlist
-        .0
-        .read()
-        .expect("allowlist lock poisoned")
-        .is_user_trusted(sender.id.0 as i64)
 }
 
 #[cfg(test)]

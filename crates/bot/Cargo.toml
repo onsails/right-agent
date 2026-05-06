@@ -21,7 +21,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
 cron = { workspace = true }
-arc-swap = "1.7"
+arc-swap = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
 shlex = { workspace = true }
