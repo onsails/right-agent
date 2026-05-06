@@ -2995,6 +2995,7 @@ dependencies = [
 name = "right-db"
 version = "0.2.10"
 dependencies = [
+ "chrono",
  "rusqlite",
  "rusqlite_migration",
  "tempfile",
