@@ -1,6 +1,17 @@
-/// Errors that can occur in the memory module.
+//! Errors raised by the Hindsight resilience layer + retain queue.
+//!
+//! Pure SQLite plumbing errors come from `right_db::DbError`; we
+//! wrap them via `#[from]` so existing call sites that match on
+//! `MemoryError::Sqlite(_)` or `MemoryError::Migration(_)` keep
+//! compiling.
+
+pub use right_db::DbError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
+    #[error("db error: {0}")]
+    Db(#[from] DbError),
+
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 

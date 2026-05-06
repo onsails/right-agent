@@ -14,7 +14,7 @@ pub enum ErrorKind {
 }
 
 impl MemoryError {
-    /// Classify this error. Non-Hindsight variants (Sqlite/Migration/Injection/NotFound)
+    /// Classify this error. Non-Hindsight variants (Db/Sqlite/Migration/Injection/NotFound)
     /// are unreachable at the wrapper boundary and classified as `Transient` defensively.
     pub fn classify(&self) -> ErrorKind {
         match self {
@@ -28,7 +28,8 @@ impl MemoryError {
             MemoryError::HindsightConnect(_) => ErrorKind::Transient,
             MemoryError::HindsightParse(_) => ErrorKind::Malformed,
             MemoryError::HindsightOther(_) => ErrorKind::Transient,
-            MemoryError::Sqlite(_)
+            MemoryError::Db(_)
+            | MemoryError::Sqlite(_)
             | MemoryError::Migration(_)
             | MemoryError::InjectionDetected
             | MemoryError::NotFound(_) => ErrorKind::Transient,
@@ -94,6 +95,17 @@ mod tests {
         assert_eq!(
             MemoryError::HindsightParse("bad json".into()).classify(),
             ErrorKind::Malformed
+        );
+    }
+
+    #[test]
+    fn classify_db_transient() {
+        assert_eq!(
+            MemoryError::Db(right_db::DbError::Sqlite(
+                rusqlite::Error::ExecuteReturnedResults
+            ))
+            .classify(),
+            ErrorKind::Transient
         );
     }
 }
