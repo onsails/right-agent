@@ -36,10 +36,8 @@ pub async fn request_token(
     event_tx: mpsc::Sender<LoginEvent>,
     token_rx: oneshot::Receiver<String>,
 ) {
-    let db_path = agent_dir.join("data.db");
-
     // Delete stale token if present
-    match open_db_and_delete_stale(&db_path) {
+    match open_db_and_delete_stale(agent_dir) {
         Ok(()) => {}
         Err(e) => {
             let _ = event_tx
@@ -78,7 +76,7 @@ pub async fn request_token(
     );
 
     // Save token
-    match save_token(&db_path, &token) {
+    match save_token(agent_dir, &token) {
         Ok(()) => {
             let _ = event_tx.send(LoginEvent::Done).await;
         }
@@ -91,16 +89,16 @@ pub async fn request_token(
 }
 
 /// Open DB and delete any existing auth token (it's stale if we're here).
-fn open_db_and_delete_stale(db_path: &Path) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("open db: {e}"))?;
+fn open_db_and_delete_stale(agent_dir: &Path) -> Result<(), String> {
+    let conn = right_db::open_connection(agent_dir, false).map_err(|e| format!("open db: {e}"))?;
     right_agent::mcp::credentials::delete_auth_token(&conn)
         .map_err(|e| format!("delete stale token: {e}"))?;
     Ok(())
 }
 
 /// Save token to DB.
-fn save_token(db_path: &Path, token: &str) -> Result<(), String> {
-    let conn = rusqlite::Connection::open(db_path).map_err(|e| format!("open db: {e}"))?;
+fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
+    let conn = right_db::open_connection(agent_dir, false).map_err(|e| format!("open db: {e}"))?;
     right_agent::mcp::credentials::save_auth_token(&conn, token)
         .map_err(|e| format!("save token: {e}"))?;
     Ok(())
@@ -110,7 +108,7 @@ fn save_token(db_path: &Path, token: &str) -> Result<(), String> {
 ///
 /// `agent_dir` is the agent directory (data.db lives inside it).
 pub fn load_auth_token(agent_dir: &Path) -> Option<String> {
-    let conn = rusqlite::Connection::open(agent_dir.join("data.db")).ok()?;
+    let conn = right_db::open_connection(agent_dir, false).ok()?;
     right_agent::mcp::credentials::get_auth_token(&conn)
         .ok()
         .flatten()
@@ -142,7 +140,7 @@ mod tests {
     fn load_auth_token_returns_saved_token() {
         let dir = tempdir().unwrap();
         init_db(dir.path());
-        let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+        let conn = right_db::open_connection(dir.path(), false).unwrap();
         right_agent::mcp::credentials::save_auth_token(&conn, "my-token").unwrap();
         assert_eq!(load_auth_token(dir.path()).as_deref(), Some("my-token"));
     }
@@ -195,7 +193,7 @@ mod tests {
 
         // Pre-seed a stale token
         {
-            let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+            let conn = right_db::open_connection(dir.path(), false).unwrap();
             right_agent::mcp::credentials::save_auth_token(&conn, "stale-token").unwrap();
         }
         assert_eq!(load_auth_token(dir.path()).as_deref(), Some("stale-token"));
