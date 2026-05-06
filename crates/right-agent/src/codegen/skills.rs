@@ -278,7 +278,7 @@ mod tests {
         ];
         for (source_name, installed_name) in skills {
             let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../skills")
+                .join("skills")
                 .join(source_name);
             let target_dir = dir.path().join(".claude/skills").join(installed_name);
 
