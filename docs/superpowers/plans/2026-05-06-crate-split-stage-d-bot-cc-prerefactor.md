@@ -334,16 +334,35 @@ pub fn html_escape(s: &str) -> String {
 
 /// In-place variant of [`html_escape`] that appends to a caller-supplied buffer.
 pub fn html_escape_into(s: &str, out: &mut String) {
-    // ... (copy verbatim from telegram/markdown.rs)
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
 }
 
-/// Strip all HTML tags from a string, returning the visible text.
+/// Strip HTML tags and unescape basic HTML entities.
 pub fn strip_html_tags(html: &str) -> String {
-    // ... (copy verbatim from telegram/markdown.rs)
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
 }
 ```
 
-(Replace the body comments with the actual function bodies copied from the source. The implementer should diff against the original to confirm parity.)
+(The bodies are copied verbatim from `crates/bot/src/telegram/markdown.rs:265-280` and `crates/bot/src/telegram/markdown.rs:395-410`. If the source has drifted since spec-write time, prefer the source — diff to confirm parity.)
 
 - [ ] **Step 2: Remove originals from `telegram/markdown.rs` and re-import**
 
