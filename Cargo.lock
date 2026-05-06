@@ -2974,6 +2974,7 @@ dependencies = [
  "right-agent",
  "rusqlite",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "shlex",
  "signal-hook 0.4.4",
