@@ -384,7 +384,7 @@ async fn execute_job(
 
     // DB insert: status='running' (D-04)
     // Open connection per-job — rusqlite::Connection is !Send
-    let conn = match right_agent::memory::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(job = %job_name, "DB open failed: {e:#}");
@@ -976,7 +976,7 @@ pub async fn run_cron_task(
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
-    let conn = match right_agent::memory::open_connection(&agent_dir, false) {
+    let conn = match right_db::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(agent = %agent_name, "cron task: DB open failed: {e:#}");
@@ -1079,7 +1079,7 @@ pub async fn run_cron_task(
 /// Delete a one-shot spec after it has fired. Opens a fresh DB connection
 /// (callers are inside `tokio::spawn` and cannot share the reconciler's connection).
 fn delete_one_shot_spec(agent_dir: &std::path::Path, job_name: &str) {
-    let conn = match right_agent::memory::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(job = %job_name, "failed to open DB for post-fire delete: {e:#}");
@@ -1644,7 +1644,7 @@ mod tests {
     #[test]
     fn test_triggered_at_loaded_from_db() {
         let dir = tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
 
         right_agent::cron_spec::create_spec(
             &conn,
@@ -1667,7 +1667,7 @@ mod tests {
     #[test]
     fn test_clear_triggered_at_works() {
         let dir = tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
 
         right_agent::cron_spec::create_spec(&conn, "clr-test", "*/5 * * * *", "test", None, None)
             .unwrap();
@@ -1692,7 +1692,7 @@ mod tests {
         let agent_dir = dir.path().to_path_buf();
 
         // Create DB and register a job with a far-future schedule (once per year)
-        let conn = right_agent::memory::open_connection(&agent_dir, true).unwrap();
+        let conn = right_db::open_connection(&agent_dir, true).unwrap();
         right_agent::cron_spec::create_spec(
             &conn,
             "slow-job",
@@ -1843,7 +1843,7 @@ mod tests {
     #[test]
     fn migrate_legacy_bg_rewrites_at_immediate_with_x_fork_from() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
         let main = uuid::Uuid::new_v4();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -1869,7 +1869,7 @@ mod tests {
     #[test]
     fn migrate_legacy_bg_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
         let main = uuid::Uuid::new_v4();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
@@ -1887,7 +1887,7 @@ mod tests {
     #[test]
     fn migrate_legacy_bg_skips_invalid_uuid() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
@@ -1907,7 +1907,7 @@ mod tests {
     #[test]
     fn migrate_legacy_bg_skips_immediate_without_header() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
@@ -1927,7 +1927,7 @@ mod target_snapshot_tests {
 
     fn migrated_conn() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         (dir, conn)
     }
 

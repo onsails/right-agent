@@ -166,7 +166,7 @@ fn row_to_session(row: &rusqlite::Row) -> Result<SessionRow, rusqlite::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use right_agent::memory::open_connection;
+    use right_db::open_connection;
     use tempfile::tempdir;
 
     fn test_conn() -> (tempfile::TempDir, rusqlite::Connection) {

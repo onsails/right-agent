@@ -34,7 +34,7 @@ pub fn spawn_watcher(
     allowlist: AllowlistHandle,
 ) {
     // Startup cleanup: delete alerts older than 1h so crash-loops re-notify.
-    match right_agent::memory::open_connection(&agent_dir, false) {
+    match right_db::open_connection(&agent_dir, false) {
         Ok(conn) => {
             if let Err(e) = conn.execute(
                 "DELETE FROM memory_alerts WHERE datetime(first_sent_at) < datetime('now', '-1 hour')",
@@ -120,7 +120,7 @@ async fn handle_status_change(
         }
     } else if matches!(status, MemoryStatus::Healthy) {
         // Clear dedup on recovery.
-        match right_agent::memory::open_connection(db, false) {
+        match right_db::open_connection(db, false) {
             Ok(conn) => {
                 if let Err(e) = conn.execute(
                     "DELETE FROM memory_alerts WHERE alert_type = ?1",
@@ -135,7 +135,7 @@ async fn handle_status_change(
 }
 
 fn should_fire(db: &std::path::Path, alert_type: &str) -> bool {
-    let conn = match right_agent::memory::open_connection(db, false) {
+    let conn = match right_db::open_connection(db, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("should_fire open failed: {e:#}");
@@ -166,7 +166,7 @@ fn should_fire(db: &std::path::Path, alert_type: &str) -> bool {
 }
 
 fn record_fire(db: &std::path::Path, alert_type: &str) {
-    match right_agent::memory::open_connection(db, false) {
+    match right_db::open_connection(db, false) {
         Ok(conn) => {
             let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             if let Err(e) = conn.execute(

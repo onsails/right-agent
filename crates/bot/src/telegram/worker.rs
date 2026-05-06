@@ -574,7 +574,7 @@ fn build_memory_marker(
 /// observability tail. We log at WARN and return `None` so the agent still
 /// gets its reply.
 fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) -> Option<String> {
-    let conn = match right_agent::memory::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(?target_chat_id, "bg marker: open_connection failed: {e:#}");
@@ -952,7 +952,7 @@ pub fn spawn_worker(
                     "bootstrap complete — identity files present after sync"
                 );
                 // Open a short-lived connection to deactivate the session.
-                if let Ok(conn) = right_agent::memory::open_connection(&ctx.agent_dir, false) {
+                if let Ok(conn) = right_db::open_connection(&ctx.agent_dir, false) {
                     deactivate_current(&conn, chat_id, eff_thread_id)
                         .map_err(|e| {
                             tracing::error!(
@@ -1286,7 +1286,7 @@ pub fn spawn_worker(
                     }
 
                     // 1. Open DB connection and enqueue the background job.
-                    let conn = match right_agent::memory::open_connection(&ctx.agent_dir, false) {
+                    let conn = match right_db::open_connection(&ctx.agent_dir, false) {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::error!(?key, "DB open for bg enqueue failed: {e:#}");
@@ -1597,7 +1597,7 @@ async fn invoke_cc(
     ctx: &WorkerContext,
 ) -> Result<CcReply, InvokeCcFailure> {
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
-    let conn = right_agent::memory::open_connection(&ctx.agent_dir, false)
+    let conn = right_db::open_connection(&ctx.agent_dir, false)
         .map_err(|e| format!("⚠️ Agent error: DB open failed: {:#}", e))?;
 
     // Session lookup / create (SES-02, SES-03)
@@ -3144,7 +3144,7 @@ mod tag_tests {
 #[cfg(test)]
 mod background_continuation_tests {
     use super::*;
-    use right_agent::memory::open_connection;
+    use right_db::open_connection;
 
     #[test]
     fn continuation_prompt_auto_timeout_includes_focus_hint() {
@@ -3431,7 +3431,7 @@ mod auto_retain_tests {
 
     fn make_resilient(base_url: &str) -> Arc<ResilientHindsight> {
         let dir = tempfile::tempdir().unwrap().keep();
-        let _ = right_agent::memory::open_connection(&dir, true).unwrap();
+        let _ = right_db::open_connection(&dir, true).unwrap();
         let client = HindsightClient::new("hs_test", "test-bank", "high", 1024, Some(base_url));
         Arc::new(ResilientHindsight::new(client, dir, "bot"))
     }

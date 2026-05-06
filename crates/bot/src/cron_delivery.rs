@@ -247,7 +247,7 @@ pub async fn run_delivery_loop(
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
-    let conn = match right_agent::memory::open_connection(&agent_dir, false) {
+    let conn = match right_db::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("cron delivery: DB open failed: {e:#}");
@@ -693,7 +693,7 @@ mod tests {
 
     fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
-        let conn = right_agent::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         (dir, conn)
     }
 

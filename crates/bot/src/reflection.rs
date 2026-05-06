@@ -356,7 +356,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
 
     // Account usage (best-effort — log but don't fail reflection on usage insert error).
     if let Some(breakdown) = crate::telegram::stream::parse_usage_full(&result_line) {
-        match right_agent::memory::open_connection(&ctx.agent_dir, false) {
+        match right_db::open_connection(&ctx.agent_dir, false) {
             Ok(conn) => {
                 let res = match &ctx.parent_source {
                     ParentSource::Worker { chat_id, thread_id } => {

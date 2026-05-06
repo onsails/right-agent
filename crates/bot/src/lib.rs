@@ -422,7 +422,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Log registered MCP servers at startup.
     {
-        let conn = right_agent::memory::open_connection(&agent_dir, false)
+        let conn = right_db::open_connection(&agent_dir, false)
             .map_err(|e| miette::miette!("failed to open data.db for MCP check: {e:#}"))?;
         match right_agent::mcp::credentials::db_list_servers(&conn) {
             Ok(servers) => {
@@ -1016,7 +1016,7 @@ async fn run_drain_loop(
         ) {
             continue;
         }
-        let conn = match right_agent::memory::open_connection(&agent_db, false) {
+        let conn = match right_db::open_connection(&agent_db, false) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("drain: open_connection failed: {e:#}");
@@ -1072,7 +1072,7 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
         }
     };
 
-    let conn = match right_agent::memory::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("failed to open DB for oauth-state migration: {e:#}");
