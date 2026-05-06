@@ -195,6 +195,15 @@ rewrites pre-existing rows that used the deprecated
 
 See [Upgrade & Migration Model](#upgrade--migration-model) for category definitions.
 
+**Hot-reloadable fields in `agent.yaml`.** Most fields trigger a graceful
+restart on change (via `config_watcher`). The exception is `model`:
+the watcher's smart-diff classifies a model-only change as hot-reloadable
+and stores the new value into `AgentSettings.model` (an `Arc<ArcSwap<...>>`)
+without restarting. The Telegram `/model` command exploits this path —
+in-flight CC subprocesses keep their old `--model`; the next invocation
+in any chat picks up the new value. Adding more hot-reloadable fields
+requires extending the diff in `crates/bot/src/config_watcher.rs::diff_classify`.
+
 ### Memory
 
 Two modes, configured per-agent via `memory.provider` in `agent.yaml`:

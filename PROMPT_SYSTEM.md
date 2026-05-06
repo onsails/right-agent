@@ -48,6 +48,11 @@ variant routes to `BG_CONTINUATION_SCHEMA_JSON` and supplies
 `fork_from` as the `--resume`/`--fork-session` source; all other kinds
 use `CRON_SCHEMA_JSON` with no fork.
 
+**Model selection.** The agent's Claude model is read from
+`agent.yaml::model` (or omitted for CC's default). Users can switch via
+the Telegram `/model` command, which writes to `agent.yaml` and hot-reloads
+without restart — the next CC invocation passes `--model <new>`.
+
 ## Prompt Structure
 
 ### Normal mode
