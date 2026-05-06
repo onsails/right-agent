@@ -91,7 +91,7 @@ pub fn render_menu_body(current: Option<&str>) -> String {
 }
 
 /// Render the inline keyboard — 2 columns × 2 rows, with `✓` prefix on the active button.
-pub fn render_keyboard(current: Option<&str>) -> teloxide::types::InlineKeyboardMarkup {
+pub(crate) fn render_keyboard(current: Option<&str>) -> teloxide::types::InlineKeyboardMarkup {
     use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
     let active = active_choice(current);
     let button = |c: &ModelChoice| -> InlineKeyboardButton {
@@ -106,6 +106,51 @@ pub fn render_keyboard(current: Option<&str>) -> teloxide::types::InlineKeyboard
         vec![button(&MODEL_CHOICES[0]), button(&MODEL_CHOICES[1])],
         vec![button(&MODEL_CHOICES[2]), button(&MODEL_CHOICES[3])],
     ])
+}
+
+/// Open the `/model` menu. Allowlist-gated in groups.
+pub async fn handle_model(
+    bot: super::BotType,
+    msg: teloxide::types::Message,
+    settings: std::sync::Arc<super::handler::AgentSettings>,
+    allowlist: right_agent::agent::allowlist::AllowlistHandle,
+) -> teloxide::prelude::ResponseResult<()> {
+    use teloxide::prelude::*;
+    // Group gate: trusted users only.
+    if !super::handler::is_private_chat(&msg.chat.kind) && !sender_is_trusted(&msg, &allowlist) {
+        tracing::debug!(
+            chat_id = msg.chat.id.0,
+            user_id = msg.from.as_ref().map(|u| u.id.0),
+            "/model ignored: non-trusted sender in group"
+        );
+        return Ok(());
+    }
+
+    let current = settings.model.load();
+    let current_str: Option<&str> = (*current).as_deref();
+    let body = render_menu_body(current_str);
+    let keyboard = render_keyboard(current_str);
+
+    let mut send = bot.send_message(msg.chat.id, body).reply_markup(keyboard);
+    if let Some(thread_id) = msg.thread_id {
+        send = send.message_thread_id(thread_id);
+    }
+    send.await?;
+    Ok(())
+}
+
+fn sender_is_trusted(
+    msg: &teloxide::types::Message,
+    allowlist: &right_agent::agent::allowlist::AllowlistHandle,
+) -> bool {
+    let Some(sender) = msg.from.as_ref() else {
+        return false;
+    };
+    allowlist
+        .0
+        .read()
+        .expect("allowlist lock poisoned")
+        .is_user_trusted(sender.id.0 as i64)
 }
 
 #[cfg(test)]
@@ -190,6 +235,32 @@ mod tests {
         assert!(
             !body.contains("✓"),
             "no checkmark anywhere when custom:\n{body}"
+        );
+    }
+
+    #[test]
+    fn render_keyboard_has_4_buttons_in_2_rows() {
+        let kb = render_keyboard(None);
+        assert_eq!(kb.inline_keyboard.len(), 2);
+        assert_eq!(kb.inline_keyboard[0].len(), 2);
+        assert_eq!(kb.inline_keyboard[1].len(), 2);
+    }
+
+    #[test]
+    fn render_keyboard_callback_data_format() {
+        let kb = render_keyboard(None);
+        let data: Vec<String> = kb
+            .inline_keyboard
+            .iter()
+            .flatten()
+            .filter_map(|b| match &b.kind {
+                teloxide::types::InlineKeyboardButtonKind::CallbackData(d) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            data,
+            vec!["model:default", "model:sonnet", "model:sonnet1m", "model:haiku"]
         );
     }
 }
