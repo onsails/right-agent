@@ -153,7 +153,6 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     use right_agent::{
         agent::discovery::{parse_agent_config, validate_agent_name},
         config::resolve_home,
-        memory::open_connection,
     };
     use std::path::PathBuf;
 
@@ -372,7 +371,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     );
 
     // Open data.db (creates if absent, applies migrations)
-    let conn = open_connection(&agent_dir, true)
+    let conn = right_db::open_connection(&agent_dir, true)
         .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
     tracing::info!(agent = %args.agent, "data.db opened");
 
