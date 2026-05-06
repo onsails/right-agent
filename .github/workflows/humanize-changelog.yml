@@ -1,0 +1,45 @@
+name: Humanize Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: humanize-changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  humanize:
+    name: humanize
+    if: |
+      startsWith(github.event.pull_request.title, 'chore: release') &&
+      github.event.pull_request.user.login == 'github-actions[bot]' &&
+      github.event.sender.login != 'claude[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read humanize prompt
+        id: prompt
+        run: |
+          {
+            echo 'value<<PROMPT_EOF'
+            cat .github/prompts/humanize-changelog.md
+            echo 'PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude humanize
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: ${{ steps.prompt.outputs.value }}
