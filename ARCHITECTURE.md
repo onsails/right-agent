@@ -2,11 +2,12 @@
 
 ## Workspace
 
-Three crates in a Cargo workspace:
+Four crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
-| **right-agent** | `crates/right-agent/` | Core library — agent discovery, codegen, config, memory, runtime, MCP, OpenShell |
+| **right-db** | `crates/right-db/` | Per-agent SQLite plumbing — `open_connection`, central migration registry, `sql/v*.sql` |
+| **right-agent** | `crates/right-agent/` | Core library — agent discovery, codegen, config, memory (Hindsight + retain queue), runtime, MCP, OpenShell |
 | **right** | `crates/right/` | CLI binary (`right`) + MCP Aggregator (HTTP) |
 | **right-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
 
@@ -275,7 +276,7 @@ message pointing at `right up`". `PC_PORT` may still be referenced by
 
 ### Migration Ownership
 
-Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `open_connection(path, migrate: true)`. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false`. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations.
+Both the MCP aggregator (`right-mcp-server`) and bot processes run schema migrations on per-agent `data.db` via `right_db::open_connection(path, migrate: true)`. Migrations are idempotent — concurrent callers are safe (WAL mode + busy_timeout). CLI commands and other processes open with `migrate: false`. Bot processes still declare `depends_on: right-mcp-server` for MCP readiness, but no longer depend on it for schema migrations. The migration registry (`right_db::migrations::MIGRATIONS`) is the sole place to add new tables.
 
 ### Transaction Rule
 
