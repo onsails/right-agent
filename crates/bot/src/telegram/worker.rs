@@ -119,7 +119,8 @@ pub struct WorkerContext {
     /// Show live thinking indicator in Telegram.
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
-    pub model: Option<String>,
+    /// Shared swap cell — load on each CC invocation so /model takes effect immediately.
+    pub model: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
     /// Shared map for stop button — worker inserts token before CC, removes after exit.
     pub stop_tokens: super::StopTokens,
     /// Per-main-session async mutex map. Worker acquires before `claude -p --resume <main>`;
@@ -1151,7 +1152,7 @@ pub fn spawn_worker(
                             chat_id,
                             thread_id: eff_thread_id,
                         },
-                        model: ctx.model.clone(),
+                        model: (**ctx.model.load()).clone(),
                     };
 
                     match crate::reflection::reflect_on_failure(refl_ctx).await {
@@ -1649,7 +1650,7 @@ async fn invoke_cc(
         mcp_config_path: Some(mcp_path),
         json_schema: Some(reply_schema),
         output_format: super::invocation::OutputFormat::StreamJson,
-        model: ctx.model.clone(),
+        model: (**ctx.model.load()).clone(),
         max_budget_usd: None,
         max_turns: None,
         resume_session_id: None,

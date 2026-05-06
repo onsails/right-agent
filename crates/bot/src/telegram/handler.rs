@@ -86,7 +86,9 @@ pub struct IdleTimestamp(pub Arc<std::sync::atomic::AtomicI64>);
 pub struct AgentSettings {
     pub show_thinking: bool,
     /// Claude model override (passed as --model). None = inherit CLI default.
-    pub model: Option<String>,
+    /// Lock-free swap cell — `/model` callback and `config_watcher` (model-only diff)
+    /// store new values; CC invocations load on every call.
+    pub model: std::sync::Arc<arc_swap::ArcSwap<Option<String>>>,
     /// Resolved sandbox name (None when running without sandbox).
     pub resolved_sandbox: Option<String>,
     /// Hindsight memory client (None when using file-based memory).

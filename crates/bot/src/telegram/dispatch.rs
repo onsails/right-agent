@@ -144,7 +144,7 @@ where
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         show_thinking,
-        model,
+        model: Arc::new(arc_swap::ArcSwap::from_pointee(model)),
         resolved_sandbox,
         hindsight: hindsight_wrapper,
         prefetch_cache,
@@ -531,7 +531,7 @@ mod tests {
         ))));
         let settings = Arc::new(AgentSettings {
             show_thinking: false,
-            model: None,
+            model: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
             resolved_sandbox: None,
             hindsight: None,
             prefetch_cache: Some(PrefetchCache::new()),
