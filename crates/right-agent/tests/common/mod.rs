@@ -35,7 +35,7 @@ pub mod mock {
 pub async fn wrap(url: &str, source: &str) -> ResilientHindsight {
     // `into_path()` is deprecated in current tempfile; use `.keep()`.
     let dir = tempfile::tempdir().unwrap().keep();
-    let _ = right_agent::memory::open_connection(&dir, true).unwrap();
+    let _ = right_db::open_connection(&dir, true).unwrap();
     let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(url));
     ResilientHindsight::new(client, dir, source)
 }

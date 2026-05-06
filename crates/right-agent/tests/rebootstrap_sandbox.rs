@@ -20,7 +20,7 @@ fn seed_agent_dir(agent_dir: &Path, sandbox_name: &str) {
     std::fs::write(agent_dir.join("SOUL.md"), "host soul\n").unwrap();
     std::fs::write(agent_dir.join("USER.md"), "host user\n").unwrap();
 
-    let conn = right_agent::memory::open_connection(agent_dir, true).unwrap();
+    let conn = right_db::open_connection(agent_dir, true).unwrap();
     conn.execute(
         "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
          VALUES (1, 0, 'sandbox-session-uuid', 1)",

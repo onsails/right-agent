@@ -56,11 +56,12 @@ fastrand = "2"
 test-support = []
 
 [dev-dependencies]
-right-agent = { path = ".", features = ["test-support"] }
 insta = { workspace = true }
+right-agent = { path = ".", features = ["test-support"] }
+right-db = { path = "../right-db" }
+tokio = { version = "1.52", features = ["test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 wiremock = "0.6"
-tokio = { version = "1.52", features = ["test-util"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

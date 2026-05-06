@@ -33,7 +33,7 @@ async fn outage_queues_retain_and_degrades_status() {
 
     assert!(matches!(wrapper.status(), MemoryStatus::Degraded { .. }));
 
-    let conn = right_agent::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
         .unwrap();
@@ -63,7 +63,7 @@ async fn client_error_drops_record_bumps_counter_no_enqueue() {
         .await;
 
     assert_eq!(wrapper.client_drops_24h().await, 1);
-    let conn = right_agent::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
         .unwrap();
@@ -91,7 +91,7 @@ async fn recovery_drains_queue_after_breaker_closes() {
             .await;
     }
 
-    let conn = right_agent::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
     let queued: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
         .unwrap();
@@ -127,7 +127,7 @@ async fn recovery_drains_queue_after_breaker_closes() {
 async fn drain_poison_pill_deleted_good_records_still_processed() {
     let (_h, url) = common::mock::always(200, r#"{"success":true}"#).await;
     let wrapper = common::wrap(&url, "bot").await;
-    let conn = right_agent::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
 
     right_agent::memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None)
         .unwrap();
@@ -154,7 +154,7 @@ async fn drain_poison_pill_deleted_good_records_still_processed() {
 async fn queue_eviction_at_cap() {
     let (_h, url) = common::mock::always(200, r#"{"success":true}"#).await;
     let wrapper = common::wrap(&url, "bot").await;
-    let conn = right_agent::memory::open_connection(wrapper.agent_db_path(), false).unwrap();
+    let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
 
     for i in 0..(right_agent::memory::retain_queue::QUEUE_CAP + 5) {
         let c = format!("row-{i}");
