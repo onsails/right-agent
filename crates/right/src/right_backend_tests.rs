@@ -27,7 +27,7 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
     let agent_dir = agents_dir.join(name);
     std::fs::create_dir_all(&agent_dir).expect("create agent dir");
     // open_connection will create the DB and run migrations
-    let _conn = right_agent::memory::open_connection(&agent_dir, true).expect("open memory db");
+    let _conn = right_db::open_connection(&agent_dir, true).expect("open memory db");
     agent_dir
 }
 
@@ -238,7 +238,7 @@ async fn bootstrap_done_sandbox_files_present() {
     let agent_dir = agents_dir.join(agent_name);
     std::fs::create_dir_all(&agent_dir).unwrap();
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "bootstrap").unwrap();
-    let _conn = right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    let _conn = right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend
@@ -284,7 +284,7 @@ async fn bootstrap_done_sandbox_files_missing() {
     let agents_dir = tmp.path().join("agents");
     let agent_dir = agents_dir.join(agent_name);
     std::fs::create_dir_all(&agent_dir).unwrap();
-    let _conn = right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    let _conn = right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend
@@ -346,7 +346,7 @@ async fn cron_create_rejects_target_not_in_allowlist() {
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[100], &[]);
     // Initialize the agent's data.db so get_conn succeeds.
-    right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -378,7 +378,7 @@ async fn cron_create_accepts_target_in_allowlist_group() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[], &[-200]);
-    right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -408,7 +408,7 @@ async fn cron_create_rejects_missing_target_chat_id() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[100], &[]);
-    right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -433,7 +433,7 @@ async fn cron_create_rejects_when_allowlist_missing() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     // Note: NOT calling write_allowlist — file does not exist.
-    right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     let args = serde_json::json!({
@@ -469,7 +469,7 @@ async fn cron_update_changes_target_chat_id_with_validation() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[100], &[-200, -300]);
-    right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     backend
@@ -539,7 +539,7 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
     let agent_dir = agents_dir.join("a1");
     std::fs::create_dir_all(&agent_dir).unwrap();
     write_allowlist(&agent_dir, &[], &[-200]);
-    right_agent::memory::open_connection(&agent_dir, true).unwrap();
+    right_db::open_connection(&agent_dir, true).unwrap();
 
     let backend = RightBackend::new(agents_dir.clone(), None);
     backend
@@ -571,7 +571,7 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
         .await
         .unwrap();
 
-    let conn = right_agent::memory::open_connection(&agent_dir, false).unwrap();
+    let conn = right_db::open_connection(&agent_dir, false).unwrap();
     let thread: Option<i64> = conn
         .query_row(
             "SELECT target_thread_id FROM cron_specs WHERE job_name='j1'",

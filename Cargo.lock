@@ -2879,6 +2879,7 @@ dependencies = [
  "reqwest 0.13.3",
  "right-agent",
  "right-bot",
+ "right-db",
  "rmcp",
  "rusqlite",
  "schemars 1.2.1",

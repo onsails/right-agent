@@ -718,7 +718,7 @@ mod tests {
         let agents_dir = tmp.join("agents");
         let agent_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        right_agent::memory::open_db(&agent_dir, true).unwrap();
+        right_db::open_db(&agent_dir, true).unwrap();
 
         let right = RightBackend::new(agents_dir, None);
         let registry = BackendRegistry {
@@ -1138,11 +1138,11 @@ mod tests {
 
         let agent1_dir = agents_dir.join("test-agent");
         std::fs::create_dir_all(&agent1_dir).unwrap();
-        right_agent::memory::open_db(&agent1_dir, true).unwrap();
+        right_db::open_db(&agent1_dir, true).unwrap();
 
         let agent2_dir = agents_dir.join("new-agent");
         std::fs::create_dir_all(&agent2_dir).unwrap();
-        right_agent::memory::open_db(&agent2_dir, true).unwrap();
+        right_db::open_db(&agent2_dir, true).unwrap();
 
         let token_map_path = tmp.path().join("agent-tokens.json");
         std::fs::write(

@@ -132,7 +132,7 @@ impl RightBackend {
             return Ok(Arc::clone(entry.value()));
         }
         let db_dir = self.agents_dir.join(agent_name);
-        let conn = right_agent::memory::open_connection(&db_dir, false)
+        let conn = right_db::open_connection(&db_dir, false)
             .with_context(|| format!("failed to open memory DB for {agent_name}"))?;
         let conn = Arc::new(Mutex::new(conn));
         self.conn_cache

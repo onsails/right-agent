@@ -996,7 +996,7 @@ mod tests {
         use right_agent::memory::hindsight::HindsightClient;
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
-        let _ = right_agent::memory::open_connection(&dir, true).unwrap();
+        let _ = right_db::open_connection(&dir, true).unwrap();
         let client = HindsightClient::new("hs_x", "bank-1", "high", 1024, Some(url));
         let resilient = std::sync::Arc::new(ResilientHindsight::new(client, dir, "test"));
         (tmp, std::sync::Arc::new(HindsightBackend::new(resilient)))

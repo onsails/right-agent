@@ -4,7 +4,7 @@ use tempfile::tempdir;
 
 fn setup_server() -> (MemoryServer, tempfile::TempDir) {
     let dir = tempdir().expect("tempdir");
-    let conn = right_agent::memory::open_connection(dir.path(), true).expect("open_connection");
+    let conn = right_db::open_connection(dir.path(), true).expect("open_connection");
     let server = MemoryServer::new(
         conn,
         "test-agent".to_string(),
