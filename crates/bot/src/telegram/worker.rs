@@ -103,8 +103,8 @@ pub struct WorkerContext {
     /// Agent name for --agent flag on first CC invocation (AGDEF-02).
     pub agent_name: String,
     pub bot: super::BotType,
-    /// agent_dir — passed separately so worker opens its own Connection
-    pub db_path: PathBuf,
+    /// Agent directory, passed separately so worker opens its own DB connection.
+    pub agent_db_dir: PathBuf,
     /// When true, pass --verbose to CC subprocess and log CC stderr at debug level.
     pub debug: bool,
     /// Path to the SSH config file for this agent's OpenShell sandbox (None when --no-sandbox).
@@ -1442,7 +1442,7 @@ fn spawn_token_request(
 ) {
     let agent_name = ctx.agent_name.clone();
     let bot = ctx.bot.clone();
-    let db_path = ctx.db_path.clone();
+    let agent_db_dir = ctx.agent_db_dir.clone();
     let active_flag = Arc::clone(&ctx.auth_watcher_active);
     let auth_code_tx_slot = Arc::clone(&ctx.auth_code_tx);
 
@@ -1472,7 +1472,7 @@ fn spawn_token_request(
         // Spawn token request task
         let agent_for_login = agent_name.clone();
         tokio::spawn(async move {
-            crate::login::request_token(&db_path, &agent_for_login, event_tx, token_rx).await;
+            crate::login::request_token(&agent_db_dir, &agent_for_login, event_tx, token_rx).await;
         });
 
         // Process events with timeout
@@ -1853,7 +1853,7 @@ async fn invoke_cc(
             memory_mode.as_ref(),
         );
         // Inject auth token as env var in the remote shell
-        if let Some(token) = crate::login::load_auth_token(&ctx.db_path) {
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir) {
             let escaped_token = token.replace('\'', "'\\''");
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped_token}'\n{assembly_script}");
@@ -1898,7 +1898,7 @@ async fn invoke_cc(
         c.arg(&assembly_script);
         c.env("HOME", &ctx.agent_dir);
         c.env("USE_BUILTIN_RIPGREP", "0");
-        if let Some(token) = crate::login::load_auth_token(&ctx.db_path) {
+        if let Some(token) = crate::login::load_auth_token(&ctx.agent_db_dir) {
             c.env("CLAUDE_CODE_OAUTH_TOKEN", &token);
         }
         c.current_dir(&ctx.agent_dir);

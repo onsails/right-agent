@@ -356,7 +356,7 @@ pub async fn handle_message(
                     agent_dir: agent_dir.0.clone(),
                     agent_name,
                     bot: bot.clone(),
-                    db_path: agent_dir.0.clone(),
+                    agent_db_dir: agent_dir.0.clone(),
                     debug: settings.debug,
                     ssh_config_path: ssh_config.0.clone(),
                     resolved_sandbox: settings.resolved_sandbox.clone(),

@@ -2,7 +2,7 @@
 //! correctly by the bot-internal helper.
 
 use right_agent::cron_spec::insert_background_continuation;
-use right_agent::memory::open_connection;
+use right_db::open_connection;
 use uuid::Uuid;
 
 #[tokio::test]
