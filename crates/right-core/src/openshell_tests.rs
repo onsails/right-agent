@@ -633,7 +633,7 @@ network_policies:
     binaries:
       - path: "**"
 "#;
-    std::fs::write(&policy_path, &policy).unwrap();
+    std::fs::write(&policy_path, policy).unwrap();
 
     // Create a staging dir with a small test file (same as init uploads agent defs).
     let staging = tmp.path().join("staging");
