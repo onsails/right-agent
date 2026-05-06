@@ -36,19 +36,7 @@ pub const IMMEDIATE_SENTINEL: &str = "@immediate";
 /// Stored as `@bg:<fork_from-uuid>` in the `schedule` column.
 pub(crate) const BG_SENTINEL_PREFIX: &str = "@bg:";
 
-/// Single source of truth for cron timings shown to users and the agent.
-///
-/// Engine tick interval is intentionally omitted from this surface — it is an
-/// implementation detail that feels real-time and should never appear in user-
-/// facing copy or tool descriptions.
-///
-/// `IDLE_THRESHOLD_SECS` is user-meaningful: it answers "why didn't the cron
-/// notification arrive yet?" — we hold pending notifications until the chat has
-/// been idle for this long (within CC's 5-min prompt cache TTL).
-pub const IDLE_THRESHOLD_SECS: i64 = 180;
-
-/// Human-readable form for prose ("3 min" reads better than "180 s").
-pub const IDLE_THRESHOLD_MIN: i64 = IDLE_THRESHOLD_SECS / 60;
+pub use right_core::time_constants::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
 
 /// Description string for the `cron_trigger` MCP tool. Built at compile time
 /// from `IDLE_THRESHOLD_MIN` so the number cannot drift from the runtime.
@@ -916,4 +904,3 @@ pub fn get_recent_runs(
 #[cfg(test)]
 #[path = "cron_spec_tests.rs"]
 mod tests;
-

@@ -15,7 +15,7 @@ pub use right_core::process_group;
 pub mod rebootstrap;
 pub mod runtime;
 pub use right_core::sandbox_exec;
-pub mod stt;
+pub use right_core::stt;
 #[cfg(unix)]
 pub use right_core::test_cleanup;
 #[cfg(all(unix, test))]

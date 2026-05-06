@@ -903,9 +903,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Build STT context once at startup — shared across all worker sessions via Arc.
     let stt: Option<Arc<crate::stt::SttContext>> = if config.stt.enabled {
-        let model_path = right_agent::stt::model_cache_path(&home, config.stt.model);
+        let model_path = right_core::stt::model_cache_path(&home, config.stt.model);
         let transcriber = crate::stt::Transcriber::new(model_path);
-        let ffmpeg_available = right_agent::stt::ffmpeg_available();
+        let ffmpeg_available = right_core::stt::ffmpeg_available();
         if !ffmpeg_available {
             tracing::warn!(
                 "ffmpeg not found in PATH — voice messages will be answered with an error marker. \

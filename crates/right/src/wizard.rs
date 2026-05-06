@@ -1093,7 +1093,7 @@ async fn memory_setup(
 /// Linux: print install instructions only.
 /// Returns true iff ffmpeg is in PATH after this call.
 pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
-    if right_agent::stt::ffmpeg_available() {
+    if right_core::stt::ffmpeg_available() {
         return Ok(true);
     }
 
@@ -1144,7 +1144,7 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 );
                 return Ok(false);
             }
-            if !right_agent::stt::ffmpeg_available() {
+            if !right_core::stt::ffmpeg_available() {
                 println!(
                     "{}",
                     right_agent::ui::status(right_agent::ui::Glyph::Warn)
@@ -1182,8 +1182,8 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
 /// Wizard step: ask enable/disable + model selection, run ffmpeg detection
 /// + install prompt as needed. Returns Some((enabled, model)) on completion,
 ///   None if the user pressed Esc on either prompt (caller decides where to go back).
-pub fn stt_setup() -> miette::Result<Option<(bool, right_agent::agent::types::WhisperModel)>> {
-    use right_agent::agent::types::WhisperModel;
+pub fn stt_setup() -> miette::Result<Option<(bool, right_core::stt::WhisperModel)>> {
+    use right_core::stt::WhisperModel;
 
     // Step 1: enable y/n
     let Some(enable) = right_agent::init::inquire_back(|| {
@@ -1711,7 +1711,8 @@ fn update_agent_yaml_chat_ids(path: &Path, ids: &[i64]) -> miette::Result<()> {
 #[cfg(test)]
 mod stt_yaml_tests {
     use super::*;
-    use right_agent::agent::types::{SttConfig, WhisperModel};
+    use right_agent::agent::types::SttConfig;
+    use right_core::stt::WhisperModel;
 
     #[test]
     fn append_stt_when_block_missing() {

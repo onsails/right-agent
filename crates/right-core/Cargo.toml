@@ -16,7 +16,7 @@ serde-saphyr = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 tokio = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 url = { workspace = true }
 walkdir = { workspace = true }
 sha2 = { workspace = true }

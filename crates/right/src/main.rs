@@ -1793,10 +1793,10 @@ fn cmd_agent_init(
 
         // Run wizard or use CLI flags. Esc goes back to previous step.
         if !interactive {
-            let ffmpeg_ok = right_agent::stt::ffmpeg_available();
+            let ffmpeg_ok = right_core::stt::ffmpeg_available();
             let stt = right_agent::agent::types::SttConfig {
                 enabled: ffmpeg_ok,
-                model: right_agent::agent::types::WhisperModel::Small,
+                model: right_core::stt::WhisperModel::Small,
             };
             if !ffmpeg_ok {
                 eprintln!(
@@ -2369,7 +2369,7 @@ async fn cmd_up(
 
     // Download any whisper models needed by STT-enabled agents.
     {
-        use right_agent::agent::types::WhisperModel;
+        use right_core::stt::WhisperModel;
         use std::collections::HashSet;
 
         let mut models: HashSet<WhisperModel> = HashSet::new();
@@ -2382,7 +2382,7 @@ async fn cmd_up(
         }
         if !models.is_empty() {
             println!("Ensuring whisper models are cached...");
-            if let Err(e) = right_agent::stt::ensure_models_cached(home, &models).await {
+            if let Err(e) = right_core::stt::ensure_models_cached(home, &models).await {
                 eprintln!("warning: model cache step failed: {e:#}");
             }
         }

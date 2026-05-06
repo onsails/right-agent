@@ -341,69 +341,7 @@ fn default_retention_days() -> u32 {
     7
 }
 
-/// Whisper model size for speech-to-text transcription.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum WhisperModel {
-    Tiny,
-    Base,
-    #[default]
-    Small,
-    Medium,
-    #[serde(rename = "large-v3")]
-    LargeV3,
-}
-
-impl WhisperModel {
-    pub fn filename(&self) -> &'static str {
-        match self {
-            Self::Tiny => "ggml-tiny.bin",
-            Self::Base => "ggml-base.bin",
-            Self::Small => "ggml-small.bin",
-            Self::Medium => "ggml-medium.bin",
-            Self::LargeV3 => "ggml-large-v3.bin",
-        }
-    }
-
-    pub fn download_url(&self) -> &'static str {
-        match self {
-            Self::Tiny => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-            Self::Base => "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-            Self::Small => {
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-            }
-            Self::Medium => {
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-            }
-            Self::LargeV3 => {
-                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
-            }
-        }
-    }
-
-    pub fn approx_size_mb(&self) -> u64 {
-        match self {
-            Self::Tiny => 75,
-            Self::Base => 150,
-            Self::Small => 470,
-            Self::Medium => 1500,
-            Self::LargeV3 => 3100,
-        }
-    }
-
-    /// Kebab-case YAML string for this model — mirrors serde's rename_all output.
-    pub fn yaml_str(self) -> &'static str {
-        match self {
-            Self::Tiny => "tiny",
-            Self::Base => "base",
-            Self::Small => "small",
-            Self::Medium => "medium",
-            Self::LargeV3 => "large-v3",
-        }
-    }
-}
+pub use right_core::stt::WhisperModel;
 
 /// Speech-to-text configuration for an agent.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
