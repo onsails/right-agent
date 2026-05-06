@@ -29,6 +29,7 @@ use super::handler::{
     handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
     handle_usage,
 };
+use super::model_command::{handle_model, handle_model_callback};
 use super::mention::BotIdentity;
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
@@ -48,6 +49,8 @@ enum BotCommand {
     Mcp(String),
     #[command(description = "Run diagnostics")]
     Doctor,
+    #[command(description = "Switch Claude model (menu)")]
+    Model,
     #[command(description = "Cron job status (list or detail)")]
     Cron(String),
     #[command(description = "Add trusted user (reply to user, or /allow <user_id>)")]
@@ -398,6 +401,7 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Switch(uuid)].endpoint(handle_switch))
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
+        .branch(dptree::case![BotCommand::Model].endpoint(handle_model))
         .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
         .branch(dptree::case![BotCommand::Usage(arg)].endpoint(handle_usage))
         .branch(
@@ -451,6 +455,12 @@ fn build_dispatcher(
         .endpoint(handle_message);
 
     let callback_handler = Update::filter_callback_query()
+        .branch(
+            dptree::filter(|q: CallbackQuery| {
+                q.data.as_deref().is_some_and(|d| d.starts_with("model:"))
+            })
+            .endpoint(handle_model_callback),
+        )
         .branch(
             dptree::filter(|q: CallbackQuery| {
                 q.data.as_deref().is_some_and(|d| d.starts_with("bg:"))

@@ -7,9 +7,6 @@
 //! In-memory: stores into `AgentSettings.model: Arc<ArcSwap<Option<String>>>`.
 //! Group chats are gated by the trusted-users allowlist (same gate as `/allow`).
 
-// `#[allow(dead_code)]` kept until T8 wires the callback into the dispatcher.
-#![allow(dead_code)]
-
 /// One row in the curated model menu.
 ///
 /// `model_id == None` represents the "Default" option — no `--model`
