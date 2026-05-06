@@ -92,7 +92,7 @@ pub async fn run_telegram<L>(
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
     show_thinking: bool,
-    model: Option<String>,
+    model: Arc<arc_swap::ArcSwap<Option<String>>>,
     shutdown: CancellationToken,
     idle_ts: Arc<IdleTimestamp>,
     internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
@@ -147,7 +147,7 @@ where
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         show_thinking,
-        model: Arc::new(arc_swap::ArcSwap::from_pointee(model)),
+        model,
         resolved_sandbox,
         hindsight: hindsight_wrapper,
         prefetch_cache,

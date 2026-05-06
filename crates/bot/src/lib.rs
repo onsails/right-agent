@@ -443,13 +443,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Graceful restart: config watcher cancels the shutdown token (created
     // earlier, alongside the memory-drain task) when agent.yaml changes.
+    // Model-only changes are hot-reloaded into model_arc without restart.
     use std::sync::atomic::{AtomicBool, Ordering};
     let config_changed = Arc::new(AtomicBool::new(false));
     let agent_yaml_path = agent_dir.join("agent.yaml");
+    // Create the model swap cell here so both the watcher and the telegram
+    // dispatcher share the same Arc. The watcher writes; the dispatcher reads.
+    let model_arc: Arc<arc_swap::ArcSwap<Option<String>>> =
+        Arc::new(arc_swap::ArcSwap::from_pointee(config.model.clone()));
     config_watcher::spawn_config_watcher(
         &agent_yaml_path,
         shutdown.clone(),
         Arc::clone(&config_changed),
+        Arc::clone(&model_arc),
     )?;
 
     // Build shared OAuth PendingAuth map
@@ -915,7 +921,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             home.clone(),
             ssh_config_path,
             config.show_thinking,
-            config.model.clone(),
+            model_arc,
             shutdown.clone(),
             Arc::clone(&idle_timestamp),
             Arc::clone(&internal_client),

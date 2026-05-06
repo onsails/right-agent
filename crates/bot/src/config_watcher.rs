@@ -1,22 +1,73 @@
-//! Watch agent.yaml for changes and trigger graceful restart.
+//! Watch agent.yaml for changes. Model-only changes are hot-reloaded
+//! into the in-memory ArcSwap cell; any other change triggers graceful
+//! restart.
 //!
 //! Uses `notify` with debouncing (2s) to avoid reacting to partial writes.
-//! On change detection, sets a flag and cancels the provided `CancellationToken`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use arc_swap::ArcSwap;
+use right_agent::agent::types::AgentConfig;
 use tokio_util::sync::CancellationToken;
+
+/// Classification of a single agent.yaml change event.
+#[derive(Debug)]
+pub(crate) enum ChangeKind {
+    /// Only `model` changed — apply in-memory and continue running.
+    HotReloadable { new_model: Option<String> },
+    /// Anything else — graceful restart.
+    RestartRequired,
+}
+
+/// Decide whether a change can be hot-reloaded or requires a restart.
+///
+/// Compares old + new yaml as parsed `AgentConfig` values with `model`
+/// nulled out on both sides. If the rest is equal, hot-reload; else
+/// restart. Parse failure on either side fails-safe to restart.
+pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
+    let old: AgentConfig = match serde_saphyr::from_str(old_yaml) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "config_watcher: failed to parse old agent.yaml — restart required"
+            );
+            return ChangeKind::RestartRequired;
+        }
+    };
+    let new: AgentConfig = match serde_saphyr::from_str(new_yaml) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "config_watcher: failed to parse new agent.yaml — restart required"
+            );
+            return ChangeKind::RestartRequired;
+        }
+    };
+    let mut old_no_model = old.clone();
+    let mut new_no_model = new.clone();
+    old_no_model.model = None;
+    new_no_model.model = None;
+    if old_no_model == new_no_model {
+        ChangeKind::HotReloadable { new_model: new.model }
+    } else {
+        ChangeKind::RestartRequired
+    }
+}
 
 /// Spawn a blocking thread that watches `agent.yaml` for modifications.
 ///
-/// When a change is detected (debounced 2s), sets `config_changed` to true
-/// and cancels `token`, signalling all subsystems to begin graceful shutdown.
-/// The caller checks `config_changed` after shutdown to decide the exit code.
+/// On change:
+/// - `HotReloadable` → store new model into `model_swap`, log info, do not cancel.
+/// - `RestartRequired` → set `config_changed`, cancel `token` (existing path).
 pub fn spawn_config_watcher(
     agent_yaml: &Path,
     token: CancellationToken,
     config_changed: Arc<AtomicBool>,
+    model_swap: Arc<ArcSwap<Option<String>>>,
 ) -> miette::Result<()> {
     use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
     use std::sync::mpsc;
@@ -30,6 +81,11 @@ pub fn spawn_config_watcher(
         .file_name()
         .ok_or_else(|| miette::miette!("agent.yaml has no filename"))?
         .to_os_string();
+    let yaml_path: PathBuf = agent_yaml.to_path_buf();
+
+    // Cache the initial yaml content so the first event has something to diff against.
+    let initial_yaml = std::fs::read_to_string(&yaml_path)
+        .map_err(|e| miette::miette!("failed to read {} for watcher: {e:#}", yaml_path.display()))?;
 
     let (tx, rx) = mpsc::channel();
 
@@ -42,8 +98,8 @@ pub fn spawn_config_watcher(
         .map_err(|e| miette::miette!("failed to watch {}: {e:#}", watch_dir.display()))?;
 
     std::thread::spawn(move || {
-        // Move debouncer into thread to keep it alive.
         let _debouncer = debouncer;
+        let mut last_yaml = initial_yaml;
 
         for result in rx {
             match result {
@@ -52,11 +108,42 @@ pub fn spawn_config_watcher(
                         e.kind == DebouncedEventKind::Any
                             && e.path.file_name() == Some(&yaml_filename)
                     });
-                    if relevant {
-                        tracing::info!("agent.yaml changed — initiating graceful restart");
-                        config_changed.store(true, Ordering::Release);
-                        token.cancel();
-                        return;
+                    if !relevant {
+                        continue;
+                    }
+
+                    let new_yaml = match std::fs::read_to_string(&yaml_path) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "config_watcher: failed to read {} after change — restart",
+                                yaml_path.display()
+                            );
+                            config_changed.store(true, Ordering::Release);
+                            token.cancel();
+                            return;
+                        }
+                    };
+
+                    match diff_classify(&last_yaml, &new_yaml) {
+                        ChangeKind::HotReloadable { new_model } => {
+                            tracing::info!(
+                                model = ?new_model.as_deref().unwrap_or("default"),
+                                "agent.yaml: model-only change — hot-reloading"
+                            );
+                            model_swap.store(Arc::new(new_model));
+                            last_yaml = new_yaml;
+                            // Continue watching; do not cancel.
+                        }
+                        ChangeKind::RestartRequired => {
+                            tracing::info!(
+                                "agent.yaml changed (non-model) — initiating graceful restart"
+                            );
+                            config_changed.store(true, Ordering::Release);
+                            token.cancel();
+                            return;
+                        }
                     }
                 }
                 Err(e) => {
@@ -67,4 +154,88 @@ pub fn spawn_config_watcher(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn classify(old: &str, new: &str) -> ChangeKind {
+        diff_classify(old, new)
+    }
+
+    #[test]
+    fn diff_model_only_is_hot_reloadable() {
+        let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
+        let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_model } => {
+                assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_model_added_is_hot_reloadable() {
+        let old = "restart: never\nmax_restarts: 5\n";
+        let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_model } => {
+                assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_model_removed_is_hot_reloadable() {
+        let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
+        let new = "restart: never\nmax_restarts: 5\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_model } => {
+                assert!(new_model.is_none());
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_other_field_changed_is_restart_required() {
+        let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
+        let new = "restart: always\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
+        assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
+    }
+
+    #[test]
+    fn diff_model_and_other_field_is_restart_required() {
+        let old = "restart: never\nmodel: \"claude-sonnet-4-6\"\n";
+        let new = "restart: always\nmodel: \"claude-haiku-4-5\"\n";
+        assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
+    }
+
+    #[test]
+    fn diff_parse_failure_is_restart_required() {
+        let old = "restart: never\n";
+        let new = "{ this is not yaml";
+        assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
+    }
+
+    #[test]
+    fn diff_unchanged_yaml_is_hot_reloadable_with_same_model() {
+        let yaml = "restart: never\nmodel: \"claude-haiku-4-5\"\n";
+        match classify(yaml, yaml) {
+            ChangeKind::HotReloadable { new_model } => {
+                assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_config_partial_eq_smoke_test() {
+        let a: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
+        let b: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
+        assert_eq!(a, b);
+    }
 }
