@@ -85,12 +85,16 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
         .unwrap_or(SandboxMode::Openshell);
 
     let sandbox_name = match sandbox_mode {
-        SandboxMode::Openshell => Some(
-            config
+        SandboxMode::Openshell => {
+            let explicit_sandbox_name = config
                 .as_ref()
-                .map(|c| crate::openshell::resolve_sandbox_name(agent_name, c))
-                .unwrap_or_else(|| crate::openshell::sandbox_name(agent_name)),
-        ),
+                .and_then(|c| c.sandbox.as_ref())
+                .and_then(|s| s.name.as_deref());
+            Some(crate::openshell::resolve_sandbox_name(
+                agent_name,
+                explicit_sandbox_name,
+            ))
+        }
         SandboxMode::None => None,
     };
 

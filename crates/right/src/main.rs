@@ -1676,10 +1676,12 @@ fn cmd_agent_init(
             println!("Agent \"{name}\" already exists at {}", agent_dir.display());
             println!("This will permanently delete:");
             println!("  - All agent files (identity, memory, skills, config)");
-            let display_sb = saved
+            let explicit_sandbox_name = saved
                 .as_ref()
-                .map(|c| right_agent::openshell::resolve_sandbox_name(name, c))
-                .unwrap_or_else(|| right_agent::openshell::sandbox_name(name));
+                .and_then(|c| c.sandbox.as_ref())
+                .and_then(|s| s.name.as_deref());
+            let display_sb =
+                right_agent::openshell::resolve_sandbox_name(name, explicit_sandbox_name);
             println!("  - OpenShell sandbox \"{}\" (if exists)", display_sb);
             print!("Continue? [y/N] ");
             io::stdout()
@@ -1695,10 +1697,11 @@ fn cmd_agent_init(
         }
 
         // Delete sandbox (best-effort, async).
-        let sb_name = saved
+        let explicit_sandbox_name = saved
             .as_ref()
-            .map(|c| right_agent::openshell::resolve_sandbox_name(name, c))
-            .unwrap_or_else(|| right_agent::openshell::sandbox_name(name));
+            .and_then(|c| c.sandbox.as_ref())
+            .and_then(|s| s.name.as_deref());
+        let sb_name = right_agent::openshell::resolve_sandbox_name(name, explicit_sandbox_name);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 right_agent::openshell::delete_sandbox(&sb_name).await;
@@ -3024,10 +3027,12 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
 
     // 3. Sandbox tar download (if sandboxed)
     if is_sandboxed {
-        let sb_name = config
+        let explicit_sandbox_name = config
             .as_ref()
-            .map(|c| right_agent::openshell::resolve_sandbox_name(agent_name, c))
-            .unwrap_or_else(|| right_agent::openshell::sandbox_name(agent_name));
+            .and_then(|c| c.sandbox.as_ref())
+            .and_then(|s| s.name.as_deref());
+        let sb_name =
+            right_agent::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
         // Verify OpenShell is reachable
         let mtls_dir = match right_agent::openshell::preflight_check() {
@@ -3180,10 +3185,12 @@ async fn cmd_agent_destroy(
             println!("  Size: {}", format_bytes(size));
         }
         if is_sandboxed {
-            let sb_name = config
+            let explicit_sandbox_name = config
                 .as_ref()
-                .map(|c| right_agent::openshell::resolve_sandbox_name(agent_name, c))
-                .unwrap_or_else(|| right_agent::openshell::sandbox_name(agent_name));
+                .and_then(|c| c.sandbox.as_ref())
+                .and_then(|s| s.name.as_deref());
+            let sb_name =
+                right_agent::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
             println!("  Sandbox: {sb_name}");
         } else {
             println!("  Sandbox: none");
@@ -3562,11 +3569,12 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     }
 
     // 4. Locate SSH config
-    let sb_name = agent
+    let explicit_sandbox_name = agent
         .config
         .as_ref()
-        .map(|c| right_agent::openshell::resolve_sandbox_name(agent_name, c))
-        .unwrap_or_else(|| right_agent::openshell::sandbox_name(agent_name));
+        .and_then(|c| c.sandbox.as_ref())
+        .and_then(|s| s.name.as_deref());
+    let sb_name = right_agent::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
     let ssh_config = home.join(format!("run/ssh/{}.ssh-config", sb_name));
     if !ssh_config.exists() {
         return Err(miette::miette!(
@@ -4536,7 +4544,8 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
         }
     };
 
-    let sb_name = right_agent::openshell::resolve_sandbox_name(agent_name, &config);
+    let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
+    let sb_name = right_agent::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
     let mut grpc = match right_agent::openshell::connect_grpc(&mtls_dir).await {
         Ok(g) => g,

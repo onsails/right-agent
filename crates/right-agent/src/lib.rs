@@ -7,7 +7,8 @@ pub use right_core::error;
 pub mod init;
 pub mod mcp;
 pub mod memory;
-pub mod openshell;
+pub use right_core::openshell;
+pub use right_core::openshell_proto;
 pub mod platform_store;
 #[cfg(unix)]
 pub use right_core::process_group;
@@ -22,23 +23,3 @@ pub mod test_support;
 pub mod tunnel;
 pub use right_core::ui;
 pub mod usage;
-
-/// Generated protobuf types for the OpenShell gRPC API.
-#[allow(clippy::large_enum_variant)]
-pub mod openshell_proto {
-    pub mod openshell {
-        pub mod v1 {
-            tonic::include_proto!("openshell.v1");
-        }
-        pub mod datamodel {
-            pub mod v1 {
-                tonic::include_proto!("openshell.datamodel.v1");
-            }
-        }
-        pub mod sandbox {
-            pub mod v1 {
-                tonic::include_proto!("openshell.sandbox.v1");
-            }
-        }
-    }
-}

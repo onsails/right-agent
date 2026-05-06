@@ -377,8 +377,12 @@ impl RightBackend {
 
         let missing: Vec<&str> = if let Some(mtls_dir) = &self.mtls_dir {
             let sandbox_name = match right_agent::agent::parse_agent_config(&agent_dir) {
-                Ok(Some(config)) => right_agent::openshell::resolve_sandbox_name(agent_name, &config),
-                _ => right_agent::openshell::sandbox_name(agent_name),
+                Ok(Some(config)) => {
+                    let explicit_sandbox_name =
+                        config.sandbox.as_ref().and_then(|s| s.name.as_deref());
+                    right_agent::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name)
+                }
+                _ => right_agent::openshell::resolve_sandbox_name(agent_name, None),
             };
             let mut client = right_agent::openshell::connect_grpc(mtls_dir)
                 .await

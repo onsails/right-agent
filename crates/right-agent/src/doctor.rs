@@ -180,9 +180,10 @@ fn check_sandbox_for_agent(
         _ => return None, // OpenShell not ready — skip sandbox check
     };
 
-    let sandbox = config
-        .map(|c| crate::openshell::resolve_sandbox_name(agent_name, c))
-        .unwrap_or_else(|| crate::openshell::sandbox_name(agent_name));
+    let explicit_sandbox_name = config
+        .and_then(|c| c.sandbox.as_ref())
+        .and_then(|s| s.name.as_deref());
+    let sandbox = crate::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
     // Requires a tokio runtime — skip gracefully in sync test contexts.
     let handle = match tokio::runtime::Handle::try_current() {

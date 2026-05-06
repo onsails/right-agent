@@ -572,9 +572,10 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Resolve sandbox name once — used throughout the bot lifetime.
     // None when running without sandbox (mode: none).
     let resolved_sandbox: Option<String> = if is_sandboxed {
+        let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
         Some(right_agent::openshell::resolve_sandbox_name(
             &args.agent,
-            &config,
+            explicit_sandbox_name,
         ))
     } else {
         None

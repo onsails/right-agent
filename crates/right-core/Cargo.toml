@@ -21,7 +21,9 @@ url = { workspace = true }
 walkdir = { workspace = true }
 sha2 = { workspace = true }
 fs4 = { workspace = true }
+futures = { workspace = true }
 nix = { workspace = true }
+tempfile = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
@@ -36,5 +38,5 @@ hyper-util = { workspace = true }
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-tempfile = { workspace = true }
 right-core = { path = ".", features = ["test-support"] }
+tokio-stream = { version = "0.1", features = ["net"] }

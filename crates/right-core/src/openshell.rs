@@ -44,11 +44,9 @@ pub fn ssh_host(agent_name: &str) -> String {
 }
 
 /// Resolve sandbox name: explicit from config, or deterministic fallback.
-pub fn resolve_sandbox_name(agent_name: &str, config: &crate::agent::types::AgentConfig) -> String {
-    config
-        .sandbox
-        .as_ref()
-        .and_then(|s| s.name.clone())
+pub fn resolve_sandbox_name(agent_name: &str, explicit_name: Option<&str>) -> String {
+    explicit_name
+        .map(str::to_owned)
         .unwrap_or_else(|| sandbox_name(agent_name))
 }
 

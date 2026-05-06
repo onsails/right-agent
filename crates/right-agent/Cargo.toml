@@ -64,6 +64,3 @@ right-db = { path = "../right-db" }
 tokio = { version = "1.52", features = ["test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 wiremock = "0.6"
-
-[build-dependencies]
-tonic-prost-build = "0.14"

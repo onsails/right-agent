@@ -110,10 +110,11 @@ async fn try_sandbox_backup(
     config: &Option<AgentConfig>,
     backup_dir: &Path,
 ) -> bool {
-    let sb_name = config
+    let explicit_sandbox_name = config
         .as_ref()
-        .map(|c| crate::openshell::resolve_sandbox_name(agent_name, c))
-        .unwrap_or_else(|| crate::openshell::sandbox_name(agent_name));
+        .and_then(|c| c.sandbox.as_ref())
+        .and_then(|s| s.name.as_deref());
+    let sb_name = crate::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
     // Check OpenShell availability
     let mtls_dir = match crate::openshell::preflight_check() {
@@ -245,10 +246,12 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
     }
 
     if is_sandboxed {
-        let sb_name = config
+        let explicit_sandbox_name = config
             .as_ref()
-            .map(|c| crate::openshell::resolve_sandbox_name(&options.agent_name, c))
-            .unwrap_or_else(|| crate::openshell::sandbox_name(&options.agent_name));
+            .and_then(|c| c.sandbox.as_ref())
+            .and_then(|s| s.name.as_deref());
+        let sb_name =
+            crate::openshell::resolve_sandbox_name(&options.agent_name, explicit_sandbox_name);
         crate::openshell::delete_sandbox(&sb_name).await;
         result.sandbox_deleted = true;
     }
