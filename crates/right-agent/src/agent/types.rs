@@ -448,6 +448,69 @@ impl AgentDef {
     }
 }
 
+/// Write `agent.yaml::model` via line-oriented MergedRMW.
+///
+/// `Some(value)` replaces or appends a `model: "<value>"` line.
+/// `None` removes the existing `model:` line, leaving the key absent
+/// (CC will use its default model).
+///
+/// Delegates to [`crate::codegen::contract::write_merged_rmw`]. Preserves
+/// all unknown fields, comments, and blank lines. The value is always
+/// double-quoted to handle YAML special characters (e.g. the `[` in
+/// `claude-sonnet-4-6[1m]`).
+pub fn write_agent_yaml_model(
+    path: &std::path::Path,
+    new_value: Option<&str>,
+) -> miette::Result<()> {
+    crate::codegen::contract::write_merged_rmw(path, |existing| {
+        let original = existing.unwrap_or("");
+
+        // Walk lines, replacing or removing the first `^model:` line.
+        // Must match top-level only — indentation = nested key (e.g. memory.model).
+        let mut found = false;
+        let mut out = String::with_capacity(original.len() + 64);
+        for line in original.split_inclusive('\n') {
+            let is_top_level_model = line
+                .strip_prefix("model:")
+                .map(|rest| {
+                    rest.starts_with(' ')
+                        || rest.starts_with('\t')
+                        || rest.is_empty()
+                        || rest.starts_with('\n')
+                        || rest.starts_with('\r')
+                })
+                .unwrap_or(false);
+            if is_top_level_model {
+                found = true;
+                if let Some(v) = new_value {
+                    let needs_newline = line.ends_with('\n');
+                    out.push_str(&format!(
+                        "model: \"{}\"{}",
+                        v.replace('\\', "\\\\").replace('"', "\\\""),
+                        if needs_newline { "\n" } else { "" }
+                    ));
+                }
+                // else: skip this line entirely (removal)
+            } else {
+                out.push_str(line);
+            }
+        }
+
+        // Append if the key was absent and we have a new value.
+        if !found && let Some(v) = new_value {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "model: \"{}\"\n",
+                v.replace('\\', "\\\\").replace('"', "\\\""),
+            ));
+        }
+
+        Ok(out)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +762,123 @@ sandbox:
         let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
         let sb = config.sandbox.unwrap();
         assert!(sb.name.is_none());
+    }
+
+    #[test]
+    fn write_agent_yaml_model_appends_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "restart: never\nmax_restarts: 5\n").unwrap();
+
+        super::write_agent_yaml_model(&path, Some("claude-sonnet-4-6")).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("restart: never"), "preserve existing fields:\n{result}");
+        assert!(result.contains("max_restarts: 5"), "preserve existing fields:\n{result}");
+        assert!(
+            result.contains("model: \"claude-sonnet-4-6\""),
+            "append model when absent:\n{result}"
+        );
+        let parsed: AgentConfig = serde_saphyr::from_str(&result).unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(parsed.max_restarts, 5);
+    }
+
+    #[test]
+    fn write_agent_yaml_model_replaces_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            "restart: never\nmodel: sonnet\nmax_restarts: 5\n",
+        )
+        .unwrap();
+
+        super::write_agent_yaml_model(&path, Some("claude-haiku-4-5")).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !result.contains("model: sonnet"),
+            "old value must be gone:\n{result}"
+        );
+        assert!(
+            result.contains("model: \"claude-haiku-4-5\""),
+            "new value must be present:\n{result}"
+        );
+        let restart_pos = result.find("restart:").unwrap();
+        let model_pos = result.find("model:").unwrap();
+        assert!(restart_pos < model_pos, "field order preserved:\n{result}");
+    }
+
+    #[test]
+    fn write_agent_yaml_model_removes_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            "restart: never\nmodel: \"claude-sonnet-4-6\"\nmax_restarts: 5\n",
+        )
+        .unwrap();
+
+        super::write_agent_yaml_model(&path, None).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(!result.contains("model:"), "model line removed:\n{result}");
+        assert!(result.contains("restart: never"));
+        assert!(result.contains("max_restarts: 5"));
+        let parsed: AgentConfig = serde_saphyr::from_str(&result).unwrap();
+        assert!(parsed.model.is_none());
+    }
+
+    #[test]
+    fn write_agent_yaml_model_none_when_already_absent_is_noop_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        let original = "restart: never\nmax_restarts: 5\n";
+        std::fs::write(&path, original).unwrap();
+
+        super::write_agent_yaml_model(&path, None).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("restart: never"));
+        assert!(!result.contains("model:"));
+    }
+
+    #[test]
+    fn write_agent_yaml_model_preserves_comments_and_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(
+            &path,
+            "# Agent config\nrestart: never\n\n# Restart policy bump\nmax_restarts: 5\n",
+        )
+        .unwrap();
+
+        super::write_agent_yaml_model(&path, Some("claude-haiku-4-5")).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("# Agent config"), "leading comment preserved:\n{result}");
+        assert!(
+            result.contains("# Restart policy bump"),
+            "interior comment preserved:\n{result}"
+        );
+    }
+
+    #[test]
+    fn write_agent_yaml_model_value_with_brackets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "restart: never\n").unwrap();
+
+        super::write_agent_yaml_model(&path, Some("claude-sonnet-4-6[1m]")).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            result.contains("model: \"claude-sonnet-4-6[1m]\""),
+            "bracketed value double-quoted:\n{result}"
+        );
+        let parsed: AgentConfig = serde_saphyr::from_str(&result).unwrap();
+        assert_eq!(parsed.model.as_deref(), Some("claude-sonnet-4-6[1m]"));
     }
 }
 
