@@ -9,6 +9,7 @@ pub(crate) mod invocation;
 pub mod markdown;
 pub mod memory_alerts;
 pub mod mention;
+pub(crate) mod model_command;
 pub mod oauth_callback;
 pub(crate) mod prompt;
 pub mod session;
