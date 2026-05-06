@@ -18,10 +18,7 @@ use std::path::Path;
 /// Idempotent. WAL journal mode + 5s busy_timeout. The connection is
 /// returned for callers that need it; use [`open_db`] when you only
 /// want to ensure the file exists.
-pub fn open_connection(
-    agent_path: &Path,
-    migrate: bool,
-) -> Result<rusqlite::Connection, DbError> {
+pub fn open_connection(agent_path: &Path, migrate: bool) -> Result<rusqlite::Connection, DbError> {
     let db_path = agent_path.join("data.db");
     let mut conn = rusqlite::Connection::open(&db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
