@@ -134,9 +134,9 @@ async fn bootstrap_done_with_files() {
 async fn create_test_sandbox(
     mtls_dir: &std::path::Path,
     sandbox_name: &str,
-) -> right_agent::sandbox_exec::SandboxExec {
-    right_agent::test_cleanup::pkill_test_orphans(sandbox_name);
-    right_agent::test_cleanup::register_test_sandbox(sandbox_name);
+) -> right_core::sandbox_exec::SandboxExec {
+    right_core::test_cleanup::pkill_test_orphans(sandbox_name);
+    right_core::test_cleanup::register_test_sandbox(sandbox_name);
 
     let mut grpc_client = right_agent::openshell::connect_grpc(mtls_dir)
         .await
@@ -192,7 +192,7 @@ network_policies:
         .await
         .expect("resolve sandbox_id");
 
-    let sbox = right_agent::sandbox_exec::SandboxExec::new(
+    let sbox = right_core::sandbox_exec::SandboxExec::new(
         mtls_dir.to_path_buf(),
         sandbox_name.to_owned(),
         sandbox_id,
@@ -257,7 +257,7 @@ async fn bootstrap_done_sandbox_files_present() {
     );
 
     right_agent::openshell::delete_sandbox(sandbox_name).await;
-    right_agent::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
 #[tokio::test]
@@ -307,7 +307,7 @@ async fn bootstrap_done_sandbox_files_missing() {
     );
 
     right_agent::openshell::delete_sandbox(sandbox_name).await;
-    right_agent::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
 // ---------------------------------------------------------------------------

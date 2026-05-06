@@ -29,4 +29,10 @@ pub mod openshell_proto {
 }
 #[cfg(unix)]
 pub mod process_group;
+pub mod platform_store;
+pub mod sandbox_exec;
+#[cfg(unix)]
+pub mod test_cleanup;
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub mod test_support;
 pub mod ui;

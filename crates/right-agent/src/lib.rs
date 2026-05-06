@@ -9,17 +9,17 @@ pub mod mcp;
 pub mod memory;
 pub use right_core::openshell;
 pub use right_core::openshell_proto;
-pub mod platform_store;
+pub use right_core::platform_store;
 #[cfg(unix)]
 pub use right_core::process_group;
 pub mod rebootstrap;
 pub mod runtime;
-pub mod sandbox_exec;
+pub use right_core::sandbox_exec;
 pub mod stt;
 #[cfg(unix)]
-pub mod test_cleanup;
-#[cfg(all(unix, any(test, feature = "test-support")))]
-pub mod test_support;
+pub use right_core::test_cleanup;
+#[cfg(all(unix, test))]
+pub use right_core::test_support;
 pub mod tunnel;
 pub use right_core::ui;
 pub mod usage;

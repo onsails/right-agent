@@ -1,10 +1,10 @@
 //! Integration test for `claude upgrade` inside an OpenShell sandbox.
 //!
-//! Creates an ephemeral sandbox via `right_agent::test_support::TestSandbox`,
+//! Creates an ephemeral sandbox via `right_core::test_support::TestSandbox`,
 //! runs `claude upgrade`, and asserts the full post-upgrade state.
 //! Requires a running OpenShell gateway (dev machines have it — no #[ignore]).
 
-use right_agent::test_support::TestSandbox;
+use right_core::test_support::TestSandbox;
 
 /// Full lifecycle: upgrade runs, symlink appears, upgraded binary reports
 /// a Claude Code version, and PATH precedence favours `/sandbox/.local/bin`.

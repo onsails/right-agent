@@ -41,7 +41,7 @@ whisper-rs = { version = "0.16", default-features = false }
 whisper-rs = { version = "0.16", default-features = false, features = ["metal"] }
 
 [dev-dependencies]
-right-agent = { path = "../right-agent", version = "*", features = ["test-support"] }
+right-agent = { path = "../right-agent", version = "*" }
 right-core = { path = "../right-core", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"

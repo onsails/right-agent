@@ -750,7 +750,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // settings.json, etc. before any claude -p invocations.
     let sync_handle = if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
         let sandbox = resolved_sandbox.clone().unwrap();
-        let sbox = right_agent::sandbox_exec::SandboxExec::new(
+        let sbox = right_core::sandbox_exec::SandboxExec::new(
             mtls_dir.clone(),
             sandbox,
             sandbox_id.clone(),

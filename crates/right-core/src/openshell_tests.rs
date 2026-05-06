@@ -53,8 +53,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-// Deferred until Stage B moves `test_support` into `right-core`.
-#[cfg(any())]
 use crate::test_support::TestSandbox;
 
 /// Shared sandbox for upload / download / verify tests that need a generic
@@ -70,7 +68,6 @@ use crate::test_support::TestSandbox;
 /// The acquire_sandbox_slot guard is held for the lifetime of the process,
 /// counting against MAX_CONCURRENT_SANDBOX_TESTS as one slot total for this
 /// binary's shared sandbox (not one per test).
-#[cfg(any())]
 async fn shared_test_sandbox() -> &'static TestSandbox {
     use tokio::sync::OnceCell;
     struct Shared {
@@ -512,7 +509,6 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[cfg(any())]
 async fn verify_sandbox_files_detects_missing_and_reuploads() {
     let sbox = shared_test_sandbox().await;
 
@@ -539,7 +535,6 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
 /// This is the scenario where gRPC reports READY but SSH transport
 /// may not be up yet, causing "Connection reset by peer".
 #[tokio::test]
-#[cfg(any())]
 async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     let _slot = super::acquire_sandbox_slot();
     // ensure_sandbox takes the explicit sandbox name. Use the same legacy
@@ -567,11 +562,77 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     // SSH transport take significantly longer to become ready.
     let tmp = tempfile::tempdir().unwrap();
     let policy_path = tmp.path().join("policy.yaml");
-    let policy = crate::codegen::policy::generate_policy(
-        18927,
-        &crate::agent::types::NetworkPolicy::Restrictive,
-        None,
-    );
+    let policy = r#"version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /lib64
+    - /etc
+    - /proc
+    - /dev/urandom
+    - /var/log
+  read_write:
+    - /dev/null
+    - /tmp
+    - /sandbox
+    - /platform
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  anthropic:
+    endpoints:
+      - host: "*.anthropic.com"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "anthropic.com"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "*.claude.com"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "claude.com"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "*.claude.ai"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "claude.ai"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "storage.googleapis.com"
+        port: 443
+        protocol: rest
+        access: full
+    binaries:
+      - path: "**"
+
+  right:
+    endpoints:
+      - host: "host.openshell.internal"
+        port: 18927
+        allowed_ips:
+          - "172.16.0.0/12"
+          - "192.168.0.0/16"
+        protocol: rest
+        access: full
+    binaries:
+      - path: "**"
+"#;
     std::fs::write(&policy_path, &policy).unwrap();
 
     // Create a staging dir with a small test file (same as init uploads agent defs).
@@ -615,7 +676,6 @@ async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
 }
 
 #[tokio::test]
-#[cfg(any())]
 async fn verify_sandbox_files_passes_when_all_present() {
     let sbox = shared_test_sandbox().await;
 
@@ -637,7 +697,6 @@ async fn verify_sandbox_files_passes_when_all_present() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[cfg(any())]
 async fn upload_file_to_directory() {
     let sbox = shared_test_sandbox().await;
 
@@ -654,7 +713,6 @@ async fn upload_file_to_directory() {
 }
 
 #[tokio::test]
-#[cfg(any())]
 async fn upload_file_overwrites_existing() {
     let sbox = shared_test_sandbox().await;
 
@@ -678,7 +736,6 @@ async fn upload_file_overwrites_existing() {
 }
 
 #[tokio::test]
-#[cfg(any())]
 async fn upload_file_to_nested_dir() {
     let sbox = shared_test_sandbox().await;
 
@@ -730,7 +787,6 @@ async fn upload_file_rejects_non_directory_dest() {
 /// OpenShell has a known bug where directory uploads silently drop small files.
 /// Also tests overwrite: sync runs every 5 min, so repeated uploads must work.
 #[tokio::test]
-#[cfg(any())]
 async fn upload_directory_preserves_files_and_overwrites() {
     let sbox = shared_test_sandbox().await;
 
@@ -772,7 +828,6 @@ async fn upload_directory_preserves_files_and_overwrites() {
 /// writes to DEST as a directory. `download_file` must hide that and deliver
 /// the file at exactly the caller's `host_dest` path.
 #[tokio::test]
-#[cfg(any())]
 async fn download_file_writes_to_exact_dest_path() {
     let sbox = shared_test_sandbox().await;
 
@@ -807,7 +862,6 @@ async fn download_file_writes_to_exact_dest_path() {
 }
 
 #[tokio::test]
-#[cfg(any())]
 async fn download_file_overwrites_existing_file() {
     let sbox = shared_test_sandbox().await;
 
@@ -835,7 +889,6 @@ async fn download_file_overwrites_existing_file() {
 /// `tmp/outbox/<basename>/` (with the file buried inside). New downloads with
 /// the same dest path must not be blocked by that stale state.
 #[tokio::test]
-#[cfg(any())]
 async fn download_file_replaces_stale_directory_at_dest() {
     let sbox = shared_test_sandbox().await;
 
@@ -863,7 +916,6 @@ async fn download_file_replaces_stale_directory_at_dest() {
 }
 
 #[tokio::test]
-#[cfg(any())]
 async fn download_file_creates_parent_directory() {
     let sbox = shared_test_sandbox().await;
 
@@ -1021,7 +1073,6 @@ fn test_name_lock_sanitizes_name() {
 }
 
 #[tokio::test]
-#[cfg(any())]
 async fn test_sandbox_holds_name_lock() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;

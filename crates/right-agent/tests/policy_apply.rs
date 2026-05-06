@@ -30,7 +30,7 @@ use right_agent::codegen::policy::generate_policy;
 use right_agent::openshell::{
     self, DEFAULT_EXEC_TIMEOUT_SECS, acquire_sandbox_slot, OpenShellStatus,
 };
-use right_agent::test_cleanup;
+use right_core::test_cleanup;
 
 /// Spawn a sandbox using `policy_yaml` as its startup policy and return its
 /// name once READY. Registers panic-hook cleanup so `panic = "abort"` still

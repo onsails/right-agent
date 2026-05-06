@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use right_agent::rebootstrap::{self, IDENTITY_FILES, RebootstrapPlan};
-use right_agent::test_support::TestSandbox;
+use right_core::test_support::TestSandbox;
 
 /// Write a host-side agent dir with `agent.yaml` pointing at `sandbox_name`,
 /// the three identity files, and a stamped active session row in data.db.

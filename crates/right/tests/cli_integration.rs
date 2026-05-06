@@ -741,8 +741,8 @@ async fn test_policy_validates_against_openshell() {
 
     let sandbox_name = "right-test-policy-validate";
 
-    right_agent::test_cleanup::pkill_test_orphans(sandbox_name);
-    right_agent::test_cleanup::register_test_sandbox(sandbox_name);
+    right_core::test_cleanup::pkill_test_orphans(sandbox_name);
+    right_core::test_cleanup::register_test_sandbox(sandbox_name);
 
     // Clean up leftover from a previous failed run.
     let mut client = right_agent::openshell::connect_grpc(&mtls_dir).await.unwrap();
@@ -774,7 +774,7 @@ async fn test_policy_validates_against_openshell() {
 
     // Cleanup regardless of outcome.
     right_agent::openshell::delete_sandbox(sandbox_name).await;
-    right_agent::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
 
     ready.expect("sandbox did not become READY — generated policy may be invalid");
 }

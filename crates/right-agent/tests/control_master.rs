@@ -4,7 +4,7 @@
 #![cfg(unix)]
 
 use right_agent::openshell;
-use right_agent::test_support::TestSandbox;
+use right_core::test_support::TestSandbox;
 
 #[tokio::test]
 async fn control_master_engages_after_first_ssh_call() {

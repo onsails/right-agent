@@ -13,7 +13,7 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 /// ensuring sandbox has correct config before any `claude -p` invocations.
 pub async fn initial_sync(
     agent_dir: &Path,
-    sbox: &right_agent::sandbox_exec::SandboxExec,
+    sbox: &right_core::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     tracing::info!(
         sandbox = sbox.sandbox_name(),
@@ -30,7 +30,7 @@ pub async fn initial_sync(
 /// Run the periodic sync loop (spawned as background task after initial_sync).
 pub async fn run_sync_task(
     agent_dir: PathBuf,
-    sbox: right_agent::sandbox_exec::SandboxExec,
+    sbox: right_core::sandbox_exec::SandboxExec,
     shutdown: CancellationToken,
 ) {
     let mut tick = interval(SYNC_INTERVAL);
@@ -55,13 +55,13 @@ pub async fn run_sync_task(
 
 async fn sync_cycle(
     agent_dir: &Path,
-    sbox: &right_agent::sandbox_exec::SandboxExec,
+    sbox: &right_core::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     // Build manifest of platform-managed files
-    let manifest = right_agent::platform_store::build_manifest(agent_dir)?;
+    let manifest = right_core::platform_store::build_manifest(agent_dir)?;
 
     // Deploy to /platform/ with content-addressed names + symlinks
-    right_agent::platform_store::deploy_manifest(sbox, &manifest).await?;
+    right_core::platform_store::deploy_manifest(sbox, &manifest).await?;
 
     // Verify .claude.json (separate flow — not content-addressed)
     verify_claude_json(agent_dir, sbox.sandbox_name()).await?;
@@ -279,7 +279,7 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
 /// Agents install CLI tools (gh extensions, etc.) to `$HOME/.local/bin` which maps
 /// to `/sandbox/.local/bin`. This is already writable, but not in PATH by default.
 async fn ensure_local_bin_in_path(
-    sbox: &right_agent::sandbox_exec::SandboxExec,
+    sbox: &right_core::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     let (bashrc, code) = sbox.exec(&["cat", "/sandbox/.bashrc"]).await?;
 
@@ -300,4 +300,3 @@ async fn ensure_local_bin_in_path(
 
     Ok(())
 }
-

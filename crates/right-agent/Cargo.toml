@@ -53,12 +53,8 @@ const_format = { workspace = true }
 uuid = { workspace = true }
 fastrand = "2"
 
-[features]
-test-support = []
-
 [dev-dependencies]
 insta = { workspace = true }
-right-agent = { path = ".", features = ["test-support"] }
 right-core = { path = "../right-core", features = ["test-support"] }
 right-db = { path = "../right-db" }
 tokio = { version = "1.52", features = ["test-util"] }
