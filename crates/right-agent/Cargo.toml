@@ -14,7 +14,6 @@ include_dir = { workspace = true }
 walkdir = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
-reqwest = { workspace = true }
 tokio = { workspace = true }
 which = { workspace = true }
 rusqlite = { workspace = true }
@@ -23,6 +22,8 @@ tempfile = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 rand = { workspace = true }
+right-db = { path = "../right-db" }
+reqwest = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }
 owo-colors = { workspace = true }
