@@ -2,14 +2,24 @@
 
 ## Workspace
 
-Four crates in a Cargo workspace:
+Five crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
-| **right-db** | `crates/right-db/` | Per-agent SQLite plumbing — `open_connection`, central migration registry, `sql/v*.sql` |
-| **right-agent** | `crates/right-agent/` | Core library — agent discovery, codegen, config, memory (Hindsight + retain queue), runtime, MCP, OpenShell |
+| **right-core** | `crates/right-core/` | Stable platform foundation: error/ui/config/OpenShell/proto/platform_store/stt/test_support, time constants |
+| **right-db** | `crates/right-db/` | Per-agent SQLite plumbing: `open_connection`, central migration registry, `sql/v*.sql` |
+| **right-agent** | `crates/right-agent/` | Core library: agent discovery, codegen, memory (Hindsight + retain queue), runtime, MCP, tunnel |
 | **right** | `crates/right/` | CLI binary (`right`) + MCP Aggregator (HTTP) |
 | **right-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
+
+`right-core` hosts stable platform primitives: error rendering,
+brand-conformant UI atoms, configuration parsing, the OpenShell gRPC client
+and generated proto types, process-group and sandbox-exec helpers,
+`platform_store`, STT model-download helpers with `WhisperModel`, and
+`test_support::TestSandbox`. These modules change rarely; leaf-crate edits do
+not invalidate this build cache. `tonic-prost-build` lives in
+`crates/right-core/build.rs` and only re-runs when the OpenShell `.proto`
+files change.
 
 ## Module Map
 
@@ -382,7 +392,7 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 ## Integration Tests Using Live Sandboxes
 
 Any test that needs a live OpenShell sandbox MUST create it via
-`right_agent::test_support::TestSandbox::create("<test-name>")`. The helper:
+`right_core::test_support::TestSandbox::create("<test-name>")`. The helper:
 
 - Generates a unique `right-test-<name>` sandbox with a minimal permissive policy (wildcard `"**.*"` host on port 443, `binaries: "**"`).
 - Registers the sandbox in `test_cleanup` so sandboxes are deleted even under `panic = "abort"` (the panic hook drains the registry and calls `openshell sandbox delete`).
@@ -394,13 +404,13 @@ Consumers outside `right-agent`'s own unit tests depend on the `test-support` fe
 
 ```toml
 [dev-dependencies]
-right-agent = { path = "...", features = ["test-support"] }
+right-core = { path = "...", features = ["test-support"] }
 ```
 
 Rules:
 
 - Never hardcode sandbox names (no `right-foo-test-lifecycle` fixtures).
-- Never invoke the `openshell` CLI from tests. Use `TestSandbox::exec` or the gRPC helpers in `crate::openshell`.
+- Never invoke the `openshell` CLI from tests. Use `TestSandbox::exec` or the gRPC helpers in `right_core::openshell`.
 - Never add `#[ignore]` to sandbox tests. Dev machines have OpenShell.
 - Parallel caps (`SandboxTestSlot` / `acquire_sandbox_slot`) are unchanged — tests that create multiple sandboxes should still acquire a slot.
 
@@ -420,7 +430,7 @@ Rules:
 ## Brand-conformant CLI output
 
 Every user-facing TUI surface in `right` and `right-bot` MUST go through
-`right_agent::ui::*` (see `crates/right-agent/src/ui/`). Raw `println!` /
+`right_core::ui::*` (see `crates/right-core/src/ui/`). Raw `println!` /
 `eprintln!` of user-facing text is a review-blocking defect. Visual
 contract, atoms, and theme rules: `docs/brand-guidelines.html` and the
 redesign spec at

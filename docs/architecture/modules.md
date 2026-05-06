@@ -6,15 +6,25 @@
 
 ## Module Map
 
+### right-core (stable platform foundation)
+
+- `config/` - `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
+- `ui/` - brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection.
+- `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
+- `platform_store.rs` - content-addressed platform store deployment to `/sandbox/.platform/`.
+- `sandbox_exec.rs` - clonable gRPC sandbox execution handle.
+- `stt.rs` - `WhisperModel`, whisper model cache paths, ffmpeg detection, and model download.
+- `test_cleanup.rs` and `test_support.rs` - live-sandbox test cleanup and `TestSandbox`.
+- Single-file modules: `error.rs`, `process_group.rs`, `time_constants.rs`.
+
 ### right-agent (core)
 
 - `agent/` — agent discovery (presence detected by `agent.yaml`) and types (`AgentDef`, `AgentConfig`, `RestartPolicy`).
-- `config/` — `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
 - `codegen/` — per-agent and cross-agent code generation: settings, `.claude.json`, `.mcp.json`, policy, process-compose, TOOLS.md, MCP instructions, bundled skills, cloudflared. The helper API in `codegen/contract.rs` is the only sanctioned writer (see Upgrade & Migration Model).
 - `memory/` — Hindsight Cloud client (`hindsight.rs`), composite memory in file or Hindsight mode (`composite.rs`), schema migrations, prompt-injection guard. `store.rs` is legacy SQLite memory retained for migration compat.
 - `runtime/` — `RuntimeState` JSON persistence, process-compose REST client, dependency checks.
 - `mcp/` — OAuth credentials, internal UDS client (bot→aggregator), OAuth flow, proxy backend, token refresh scheduler.
-- Single-file modules: `openshell.rs` (gRPC mTLS + CLI wrappers), `stt.rs` (whisper model cache + ffmpeg), `doctor.rs`, `init.rs`, `error.rs`.
+- Single-file modules: `doctor.rs`, `init.rs`, `rebootstrap.rs`, `cron_spec.rs`, `tunnel/`, `usage/`.
 
 ### right (CLI)
 
