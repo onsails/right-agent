@@ -787,7 +787,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Cron results are persisted to DB; Telegram delivery is handled separately.
     let cron_agent_dir = agent_dir.clone();
     let cron_agent_name = args.agent.clone();
-    let cron_model = config.model.clone();
+    let cron_model = Arc::clone(&model_arc);
     let cron_ssh_config = ssh_config_path.clone();
     let cron_internal_client = Arc::clone(&internal_client);
     let cron_shutdown = shutdown.clone();

@@ -169,11 +169,12 @@ pub async fn handle_model_callback(
     };
 
     // Group gate: re-check on the click, not just on /model.
+    // Fail-secure: missing q.message → treat as group (require trust check).
     let in_group = q
         .message
         .as_ref()
         .map(|m| !super::handler::is_private_chat(&m.chat().kind))
-        .unwrap_or(false);
+        .unwrap_or(true);
     if in_group {
         let user_id = q.from.id.0 as i64;
         let trusted = allowlist

@@ -967,7 +967,7 @@ type ExecuteHandles = Arc<std::sync::Mutex<Vec<(String, JoinHandle<()>)>>>;
 pub async fn run_cron_task(
     agent_dir: std::path::PathBuf,
     agent_name: String,
-    model: Option<String>,
+    model: Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: Option<std::path::PathBuf>,
     internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
@@ -1103,7 +1103,7 @@ fn fire_one_shot_specs(
     triggered_handles: &mut Vec<JoinHandle<()>>,
     agent_dir: &std::path::Path,
     agent_name: &str,
-    model: &Option<String>,
+    model: &Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: &Option<std::path::PathBuf>,
     internal_client: &Arc<right_agent::mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
@@ -1122,7 +1122,9 @@ fn fire_one_shot_specs(
         let sp = spec.clone();
         let ad = agent_dir.to_path_buf();
         let an = agent_name.to_string();
-        let md = model.clone();
+        // Snapshot the current model at fire time so the job uses the value
+        // that is current now, not the boot-time value.
+        let md: Option<String> = (**model.load()).clone();
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(internal_client);
         let rs = resolved_sandbox.clone();
@@ -1158,7 +1160,7 @@ fn reconcile_jobs(
     conn: &rusqlite::Connection,
     agent_dir: &std::path::Path,
     agent_name: &str,
-    model: &Option<String>,
+    model: &Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: &Option<std::path::PathBuf>,
     internal_client: &Arc<right_agent::mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
@@ -1246,7 +1248,7 @@ fn reconcile_jobs(
         let job_spec = spec.clone();
         let job_agent_dir = agent_dir.to_path_buf();
         let job_agent_name = agent_name.to_string();
-        let job_model = model.clone();
+        let job_model = Arc::clone(model);
         let job_ssh_config = ssh_config_path.clone();
         let job_execute_handles = Arc::clone(execute_handles);
         let job_internal_client = Arc::clone(internal_client);
@@ -1292,7 +1294,8 @@ fn reconcile_jobs(
             let sp = spec.clone();
             let ad = agent_dir.to_path_buf();
             let an = agent_name.to_string();
-            let md = model.clone();
+            // Snapshot current model at trigger time.
+            let md: Option<String> = (**model.load()).clone();
             let sc = ssh_config_path.clone();
             let ic = Arc::clone(internal_client);
             let rs = resolved_sandbox.clone();
@@ -1333,7 +1336,7 @@ async fn run_job_loop(
     spec: CronSpec,
     agent_dir: std::path::PathBuf,
     agent_name: String,
-    model: Option<String>,
+    model: Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: Option<std::path::PathBuf>,
     internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
@@ -1382,7 +1385,8 @@ async fn run_job_loop(
         let sp = spec.clone();
         let ad = agent_dir.clone();
         let an = agent_name.clone();
-        let md = model.clone();
+        // Snapshot the current model at fire time, not at loop-spawn time.
+        let md: Option<String> = (**model.load()).clone();
         let sc = ssh_config_path.clone();
         let ic = Arc::clone(&internal_client);
         let rs = resolved_sandbox.clone();
@@ -1461,6 +1465,23 @@ mod classify_tests {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// ArcSwap cell used by run_cron_task must reflect the current value, not
+    /// the value at task-spawn time.  This test verifies the deref-load pattern
+    /// that every call site in this module uses.
+    #[test]
+    fn cron_reads_current_model_from_arcswap() {
+        let cell: Arc<arc_swap::ArcSwap<Option<String>>> =
+            Arc::new(arc_swap::ArcSwap::from_pointee(None));
+        // Simulate a /model update arriving after boot.
+        cell.store(Arc::new(Some("claude-haiku-4-5".to_owned())));
+        let snapshot: Option<String> = (**cell.load()).clone();
+        assert_eq!(snapshot.as_deref(), Some("claude-haiku-4-5"));
+        // Simulate a second /model update.
+        cell.store(Arc::new(Some("claude-opus-4-5".to_owned())));
+        let snapshot2: Option<String> = (**cell.load()).clone();
+        assert_eq!(snapshot2.as_deref(), Some("claude-opus-4-5"));
+    }
 
     #[test]
     fn test_to_7field_step() {
@@ -1691,10 +1712,11 @@ mod tests {
         let ic = Arc::new(right_agent::mcp::internal_client::InternalClient::new(
             "/nonexistent.sock",
         ));
+        let model_cell = Arc::new(arc_swap::ArcSwap::from_pointee(None::<String>));
         let cron_handle = tokio::spawn(run_cron_task(
             agent_dir,
             "test-agent".to_string(),
-            None,
+            model_cell,
             None,
             ic,
             shutdown_clone,
