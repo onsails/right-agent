@@ -18,7 +18,7 @@ pub use right_core::sandbox_exec;
 pub use right_core::stt;
 #[cfg(unix)]
 pub use right_core::test_cleanup;
-#[cfg(all(unix, test))]
+#[cfg(all(unix, any(test, feature = "test-support")))]
 pub use right_core::test_support;
 pub mod tunnel;
 pub use right_core::ui;

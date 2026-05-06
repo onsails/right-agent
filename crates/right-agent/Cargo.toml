@@ -53,6 +53,9 @@ const_format = { workspace = true }
 uuid = { workspace = true }
 fastrand = "2"
 
+[features]
+test-support = ["right-core/test-support"]
+
 [dev-dependencies]
 insta = { workspace = true }
 right-core = { path = "../right-core", features = ["test-support"] }
