@@ -154,7 +154,7 @@ pub fn run_single_agent_codegen(
     write_agent_owned(&claude_dir.join("settings.local.json"), "{}")?;
 
     // Initialize per-agent memory database.
-    crate::memory::open_db(&agent.path, false).map_err(|e| {
+    right_db::open_db(&agent.path, false).map_err(|e| {
         miette::miette!("failed to open memory database for '{}': {e:#}", agent.name)
     })?;
     tracing::debug!(agent = %agent.name, "data.db initialized");

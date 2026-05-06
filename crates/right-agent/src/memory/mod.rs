@@ -8,8 +8,6 @@ pub mod resilient;
 pub mod retain_queue;
 pub mod status;
 
-#[cfg(test)]
-pub use right_db::migrations;
 pub use right_db::{open_connection, open_db};
 
 pub use classify::ErrorKind;

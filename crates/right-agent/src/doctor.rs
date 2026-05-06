@@ -857,7 +857,7 @@ fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
             continue;
         }
 
-        let conn = match crate::memory::open_connection(&path, false) {
+        let conn = match right_db::open_connection(&path, false) {
             Ok(c) => c,
             Err(_) => continue, // skip agents with unreadable DB
         };
@@ -1039,7 +1039,7 @@ fn check_openshell_gateway_health() -> DoctorCheck {
 pub fn check_cron_targets(agent_dir: &Path) -> Vec<DoctorCheck> {
     let mut out = Vec::new();
 
-    let conn = match crate::memory::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             out.push(DoctorCheck {
@@ -1172,7 +1172,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     let db_path = agent_dir.join("data.db");
 
     // 1. data.db opens.
-    let conn = match crate::memory::open_connection(agent_dir, false) {
+    let conn = match right_db::open_connection(agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
             out.push(DoctorCheck {
@@ -1456,7 +1456,7 @@ mod cron_target_tests {
     fn null_target_warns() {
         let dir = tempfile::tempdir().unwrap();
         write_allowlist(dir.path(), &[100], &[]);
-        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         seed_cron(&conn, "j1", None);
         drop(conn);
 
@@ -1473,7 +1473,7 @@ mod cron_target_tests {
     fn target_outside_allowlist_warns() {
         let dir = tempfile::tempdir().unwrap();
         write_allowlist(dir.path(), &[100], &[]);
-        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         seed_cron(&conn, "j1", Some(-999));
         drop(conn);
 
@@ -1490,7 +1490,7 @@ mod cron_target_tests {
     fn valid_target_passes() {
         let dir = tempfile::tempdir().unwrap();
         write_allowlist(dir.path(), &[], &[-200]);
-        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         seed_cron(&conn, "j1", Some(-200));
         drop(conn);
 

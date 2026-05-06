@@ -322,7 +322,7 @@ impl ResilientHindsight {
     ) {
         // Open a fresh connection for each enqueue — cheap (WAL, same process),
         // and avoids holding the drain connection while we're on the error path.
-        match crate::memory::open_connection(&self.agent_db_path, false) {
+        match right_db::open_connection(&self.agent_db_path, false) {
             Ok(conn) => {
                 if let Err(e) = super::retain_queue::enqueue(
                     &conn,
@@ -391,7 +391,7 @@ impl ResilientHindsight {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::open_connection;
+    use right_db::open_connection;
     use tempfile::tempdir;
 
     #[tokio::test]

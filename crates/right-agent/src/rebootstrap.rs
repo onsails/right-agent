@@ -290,7 +290,7 @@ fn deactivate_active_sessions(agent_dir: &Path) -> miette::Result<usize> {
         tracing::debug!("rebootstrap: data.db absent, skipping session deactivation");
         return Ok(0);
     }
-    let conn = crate::memory::open_connection(agent_dir, false)
+    let conn = right_db::open_connection(agent_dir, false)
         .map_err(|e| miette::miette!("open data.db failed: {e:#}"))?;
     let n = conn
         .execute("UPDATE sessions SET is_active = 0 WHERE is_active = 1", [])
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn deactivate_active_sessions_flips_all_active_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         // Two active sessions for two distinct (chat_id, thread_id),
         // and one already-inactive session that must stay untouched.
         conn.execute(
@@ -529,7 +529,7 @@ mod tests {
         let n = deactivate_active_sessions(dir.path()).unwrap();
         assert_eq!(n, 2);
 
-        let conn = crate::memory::open_connection(dir.path(), true).unwrap();
+        let conn = right_db::open_connection(dir.path(), true).unwrap();
         let active_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE is_active = 1",
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn deactivate_active_sessions_no_active_returns_zero() {
         let dir = tempfile::tempdir().unwrap();
-        let _ = crate::memory::open_connection(dir.path(), true).unwrap();
+        let _ = right_db::open_connection(dir.path(), true).unwrap();
         let n = deactivate_active_sessions(dir.path()).unwrap();
         assert_eq!(n, 0);
     }
@@ -571,7 +571,7 @@ mod tests {
         std::fs::write(agent_dir.join("SOUL.md"), "soul\n").unwrap();
         std::fs::write(agent_dir.join("USER.md"), "user\n").unwrap();
         // Seed an active session so we can verify deactivation.
-        let conn = crate::memory::open_connection(&agent_dir, true).unwrap();
+        let conn = right_db::open_connection(&agent_dir, true).unwrap();
         conn.execute(
             "INSERT INTO sessions (chat_id, thread_id, root_session_id, is_active) \
              VALUES (42, 0, 'session-uuid', 1)",
@@ -609,7 +609,7 @@ mod tests {
 
         // Session deactivated.
         assert_eq!(report.sessions_deactivated, 1);
-        let conn = crate::memory::open_connection(&agent_dir, false).unwrap();
+        let conn = right_db::open_connection(&agent_dir, false).unwrap();
         let active: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sessions WHERE is_active = 1",

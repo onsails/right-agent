@@ -51,7 +51,7 @@
 
     fn setup_db() -> rusqlite::Connection {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::memory::migrations::MIGRATIONS
+        right_db::MIGRATIONS
             .to_latest(&mut conn)
             .unwrap();
         conn

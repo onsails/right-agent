@@ -126,7 +126,7 @@ fn aggregate_per_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::open_connection;
+    use right_db::open_connection;
     use crate::usage::UsageBreakdown;
     use crate::usage::insert::{insert_cron, insert_interactive};
     use tempfile::tempdir;

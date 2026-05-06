@@ -568,7 +568,7 @@ fn check_mcp_tokens_counts_registered_servers() {
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     // Create data.db with a registered server
-    let conn = crate::memory::open_connection(&agent_dir, true).unwrap();
+    let conn = right_db::open_connection(&agent_dir, true).unwrap();
     crate::mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
 
     let result = check_mcp_tokens_impl(dir.path());
@@ -589,7 +589,7 @@ fn check_mcp_tokens_pass_no_servers() {
     std::fs::create_dir_all(&agent_dir).unwrap();
 
     // Create data.db but register no servers
-    let _conn = crate::memory::open_connection(&agent_dir, true).unwrap();
+    let _conn = right_db::open_connection(&agent_dir, true).unwrap();
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);
@@ -791,7 +791,7 @@ fn doctor_bootstrap_pending_skips_identity_checks() {
 
 mod memory_tests {
     use super::*;
-    use crate::memory::open_connection;
+    use right_db::open_connection;
     use tempfile::tempdir;
 
     #[test]

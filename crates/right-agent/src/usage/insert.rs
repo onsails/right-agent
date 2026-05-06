@@ -95,7 +95,7 @@ fn insert_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::open_connection;
+    use right_db::open_connection;
     use tempfile::tempdir;
 
     fn sample_breakdown() -> UsageBreakdown {

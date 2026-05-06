@@ -193,7 +193,7 @@ pub async fn reconnect_task(
     *token_arc.write().await = Some(access_token.clone());
 
     // Persist to SQLite.
-    let conn = crate::memory::open_connection(&agent_dir, false)
+    let conn = right_db::open_connection(&agent_dir, false)
         .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
     let expires_at = new_state.expires_at.to_rfc3339();
     crate::mcp::credentials::db_update_oauth_token(
@@ -376,7 +376,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::memory::migrations::MIGRATIONS
+        right_db::MIGRATIONS
             .to_latest(&mut conn)
             .unwrap();
 
@@ -468,7 +468,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         // Initialize schema and insert the server row that db_update_oauth_token requires.
-        let conn = crate::memory::open_connection(tmp.path(), true).unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('composio', 'https://example.com/mcp', 'oauth')",
             [],

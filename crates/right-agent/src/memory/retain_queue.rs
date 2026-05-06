@@ -227,7 +227,7 @@ fn load_batch(conn: &Connection, limit: usize) -> Result<Vec<PendingRetain>, Mem
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::open_connection;
+    use right_db::open_connection;
     use tempfile::tempdir;
 
     fn fresh_db() -> Connection {
@@ -416,8 +416,8 @@ mod tests {
         // Without the fix, this test deadlocks (drain holds tx; enqueue waits on busy_timeout).
         let dir = tempdir().unwrap();
         let path = dir.keep();
-        let drain_conn = crate::memory::open_connection(&path, true).unwrap();
-        let enq_conn = crate::memory::open_connection(&path, false).unwrap();
+        let drain_conn = right_db::open_connection(&path, true).unwrap();
+        let enq_conn = right_db::open_connection(&path, false).unwrap();
 
         // Seed with one row to drain.
         enqueue(&drain_conn, "bot", "first", None, None, None, None).unwrap();
