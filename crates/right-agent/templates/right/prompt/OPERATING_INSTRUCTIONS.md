@@ -183,10 +183,13 @@ NEVER guess — quote the actual error in your report.
 
 | Error pattern | Meaning | Action |
 |---|---|---|
-| "unauthorized", "forbidden", "auth", 401, 403 | Authentication/permission problem | Tell the user to run `/mcp auth <server>` |
+| HTTP 401/403 from MCP transport, OR error string `Authentication required for '<server>'. Use /mcp auth <server>` (raised by Right Agent's proxy when the OAuth token is missing/expired) | MCP-transport-level auth: Right Agent ↔ MCP server | Tell the user to run `/mcp auth <server>` |
 | "Validation error: Required at", "missing fields", "Invalid request data" | Wrong parameter format — you sent the wrong field names or types | Re-read the tool's inputSchema and fix your call. Common mistake: using `input` instead of `arguments`, or passing a JSON string instead of an object |
 | "connection refused", "timeout", "unreachable" | Server is down or unreachable | Report the outage, suggest retrying later |
 | "not found", "unknown tool" | Wrong tool slug | Use SEARCH_TOOLS to find the correct slug |
+| Tool response payload itself contains a status/instruction field (e.g. `status_message`, `error.message`, `instructions`) telling you what to do next | Upstream tool already diagnosed the issue and prescribed the fix | Follow the upstream instruction verbatim. Do NOT translate it into `/mcp auth` advice. |
+
+**Trust upstream diagnostics.** When a tool's own response payload tells you what action to take ("call X to set up connection", "visit URL Y to authorize", etc.), follow it as-is. `/mcp auth` is a Right Agent CLI command for re-authorizing the MCP transport — it is not a fix-all for any authentication-shaped error inside tool responses.
 
 **Critical:** "missing fields" means YOUR request is malformed — it is NOT a permissions
 issue and NOT a server-side bug. Always fix your request before retrying or reporting failure.
