@@ -555,7 +555,7 @@ async fn deliver_through_session(
             assembly_script =
                 format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n{assembly_script}");
         }
-        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         c.arg(&ssh_host);
@@ -595,7 +595,7 @@ async fn deliver_through_session(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn failed: {e:#}"))?;
 
     if let Some(mut stdin) = child.stdin() {

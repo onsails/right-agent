@@ -5,7 +5,7 @@ use std::process::Command;
 use serde::Deserialize;
 
 use right_agent::agent::discover_agents;
-use right_agent::config::{TunnelConfig, read_global_config, write_global_config};
+use right_core::config::{TunnelConfig, read_global_config, write_global_config};
 use right_agent::init::validate_telegram_token;
 
 /// Every user-visible string from every prompt in the wizard — labels, Select
@@ -256,10 +256,10 @@ pub fn tunnel_setup(
                 );
                 delete_tunnel(&cf_bin, &entry.name)?;
                 let fresh = create_tunnel(&cf_bin, tunnel_name)?;
-                let theme = right_agent::ui::detect();
+                let theme = right_core::ui::detect();
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    right_core::ui::status(right_core::ui::Glyph::Ok)
                         .noun("tunnel")
                         .verb("recreated")
                         .detail(fresh.name.as_str())
@@ -270,10 +270,10 @@ pub fn tunnel_setup(
         }
         None => {
             let entry = create_tunnel(&cf_bin, tunnel_name)?;
-            let theme = right_agent::ui::detect();
+            let theme = right_core::ui::detect();
             println!(
                 "{}",
-                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                right_core::ui::status(right_core::ui::Glyph::Ok)
                     .noun("tunnel")
                     .verb("created")
                     .detail(entry.name.as_str())
@@ -346,10 +346,10 @@ fn handle_existing_tunnel(
     } else {
         &existing.id
     };
-    let theme = right_agent::ui::detect();
+    let theme = right_core::ui::detect();
     println!(
         "{}",
-        right_agent::ui::status(right_agent::ui::Glyph::Warn)
+        right_core::ui::status(right_core::ui::Glyph::Warn)
             .noun("tunnel")
             .verb(format!("found \"{}\"", existing.name))
             .detail(format!("{}…", short_uuid))
@@ -359,7 +359,7 @@ fn handle_existing_tunnel(
     if !has_local_creds {
         println!(
             "{}    note: credentials file missing on this machine. choose \"delete and recreate\" to regenerate.",
-            right_agent::ui::Rail::blank(theme)
+            right_core::ui::Rail::blank(theme)
         );
     }
 
@@ -386,10 +386,10 @@ fn handle_existing_tunnel(
                 return Err(miette::miette!("tunnel name cannot be empty"));
             }
             let entry = create_tunnel(cf_bin, new_name)?;
-            let theme = right_agent::ui::detect();
+            let theme = right_core::ui::detect();
             println!(
                 "{}",
-                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                right_core::ui::status(right_core::ui::Glyph::Ok)
                     .noun("tunnel")
                     .verb("created")
                     .detail(entry.name.as_str())
@@ -414,7 +414,7 @@ fn handle_existing_tunnel(
             delete_tunnel(cf_bin, &existing.name)?;
             println!(
                 "{}",
-                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                right_core::ui::status(right_core::ui::Glyph::Ok)
                     .noun("tunnel")
                     .verb("deleted")
                     .detail(existing.name.as_str())
@@ -424,7 +424,7 @@ fn handle_existing_tunnel(
             let entry = create_tunnel(cf_bin, original_name)?;
             println!(
                 "{}",
-                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                right_core::ui::status(right_core::ui::Glyph::Ok)
                     .noun("tunnel")
                     .verb("created")
                     .detail(entry.name.as_str())
@@ -505,10 +505,10 @@ pub fn telegram_setup(
         match validate_telegram_token(trimmed) {
             Ok(()) => return Ok(TelegramSetupOutcome::Token(trimmed.to_string())),
             Err(e) if required => {
-                let theme = right_agent::ui::detect();
+                let theme = right_core::ui::detect();
                 eprintln!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    right_core::ui::status(right_core::ui::Glyph::Warn)
                         .noun("invalid")
                         .verb(format!("{e:#}"))
                         .render(theme)
@@ -567,10 +567,10 @@ pub fn chat_ids_setup(required: bool) -> miette::Result<Option<Vec<i64>>> {
         match parsed {
             Ok(ids) => return Ok(Some(ids)),
             Err(e) if required => {
-                let theme = right_agent::ui::detect();
+                let theme = right_core::ui::detect();
                 eprintln!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    right_core::ui::status(right_core::ui::Glyph::Warn)
                         .noun("invalid")
                         .verb(format!("{e:#}"))
                         .render(theme)
@@ -616,7 +616,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
             &config.tunnel.tunnel_uuid[..8.min(config.tunnel.tunnel_uuid.len())]
         );
 
-        let agents_dir = right_agent::config::agents_dir(home);
+        let agents_dir = right_core::config::agents_dir(home);
         let agents = if agents_dir.exists() {
             discover_agents(&agents_dir).unwrap_or_default()
         } else {
@@ -646,10 +646,10 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
                 let mut new_config = read_global_config(home)?;
                 new_config.tunnel = result;
                 write_global_config(home, &new_config)?;
-                let theme = right_agent::ui::detect();
+                let theme = right_core::ui::detect();
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    right_core::ui::status(right_core::ui::Glyph::Ok)
                         .noun("tunnel")
                         .verb("saved")
                         .render(theme)
@@ -673,7 +673,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
 /// If `agent_name` is `None`, presents a picker to choose from discovered agents.
 /// Returns the chosen agent name so callers can act on it (e.g. sandbox migration).
 pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Result<String> {
-    let agents_dir = right_agent::config::agents_dir(home);
+    let agents_dir = right_core::config::agents_dir(home);
 
     let chosen_name = match agent_name {
         Some(name) => name.to_string(),
@@ -758,9 +758,9 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         options.push(opt_memory.clone());
         options.push(opt_done.clone());
 
-        let theme = right_agent::ui::detect();
-        println!("{}", right_agent::ui::section(theme, &format!("agent: {chosen_name}")));
-        println!("{}", right_agent::ui::Rail::blank(theme));
+        let theme = right_core::ui::detect();
+        println!("{}", right_core::ui::section(theme, &format!("agent: {chosen_name}")));
+        println!("{}", right_core::ui::Rail::blank(theme));
 
         let selection = inquire::Select::new("settings:", options)
                 .prompt()
@@ -883,7 +883,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         if let Some(noun) = saved_noun {
             println!(
                 "{}",
-                right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                right_core::ui::status(right_core::ui::Glyph::Ok)
                     .noun(noun)
                     .verb("saved")
                     .render(theme)
@@ -1019,10 +1019,10 @@ async fn memory_setup(
     });
 
     if let Some(k) = resolved_key.as_deref() {
-        let theme = right_agent::ui::detect();
+        let theme = right_core::ui::detect();
         println!(
             "{}",
-            right_agent::ui::status(right_agent::ui::Glyph::Info)
+            right_core::ui::status(right_core::ui::Glyph::Info)
                 .noun("hindsight")
                 .verb("validating key")
                 .render(theme)
@@ -1031,7 +1031,7 @@ async fn memory_setup(
             ValidationResult::Valid { banks } => {
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Ok)
+                    right_core::ui::status(right_core::ui::Glyph::Ok)
                         .noun("hindsight")
                         .verb(format!("{banks} bank(s) accessible"))
                         .render(theme)
@@ -1051,7 +1051,7 @@ async fn memory_setup(
             ValidationResult::Unreachable { detail } => {
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    right_core::ui::status(right_core::ui::Glyph::Warn)
                         .noun("hindsight")
                         .verb(format!("unreachable ({detail})"))
                         .render(theme)
@@ -1066,10 +1066,10 @@ async fn memory_setup(
             }
         }
     } else {
-        let theme = right_agent::ui::detect();
+        let theme = right_core::ui::detect();
         println!(
             "{}",
-            right_agent::ui::status(right_agent::ui::Glyph::Warn)
+            right_core::ui::status(right_core::ui::Glyph::Warn)
                 .noun("hindsight")
                 .verb("no key — saving without validation")
                 .render(theme)
@@ -1111,11 +1111,11 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
             .with_default(true)
             .prompt()
             .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
-            let theme = right_agent::ui::detect();
+            let theme = right_core::ui::detect();
             if !install {
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    right_core::ui::status(right_core::ui::Glyph::Warn)
                         .noun("stt")
                         .verb("disabled (install ffmpeg: brew install ffmpeg)")
                         .render(theme)
@@ -1130,14 +1130,14 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
             if !status.success() {
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Err)
+                    right_core::ui::status(right_core::ui::Glyph::Err)
                         .noun("ffmpeg")
                         .verb(format!("install failed ({status})"))
                         .render(theme)
                 );
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    right_core::ui::status(right_core::ui::Glyph::Warn)
                         .noun("stt")
                         .verb("disabled")
                         .render(theme)
@@ -1147,14 +1147,14 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
             if !right_core::stt::ffmpeg_available() {
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    right_core::ui::status(right_core::ui::Glyph::Warn)
                         .noun("ffmpeg")
                         .verb("not in PATH yet — restart shell")
                         .render(theme)
                 );
                 println!(
                     "{}",
-                    right_agent::ui::status(right_agent::ui::Glyph::Warn)
+                    right_core::ui::status(right_core::ui::Glyph::Warn)
                         .noun("stt")
                         .verb("disabled")
                         .render(theme)

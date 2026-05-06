@@ -92,7 +92,7 @@ pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Re
         let sandbox_path = format!("/sandbox/{filename}");
         join_set.spawn(async move {
             let result =
-                right_agent::openshell::download_file(&sandbox, &sandbox_path, &dl_path).await;
+                right_core::openshell::download_file(&sandbox, &sandbox_path, &dl_path).await;
             (filename, dl_path, result)
         });
     }
@@ -203,13 +203,13 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
 
     // Download .claude.json from sandbox
     if let Err(e) =
-        right_agent::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded).await
+        right_core::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded).await
     {
         tracing::warn!("sync: failed to download .claude.json (may not exist yet): {e:#}");
         // Upload host version as baseline
         let host_claude_json = agent_dir.join(".claude.json");
         if host_claude_json.exists() {
-            right_agent::openshell::upload_file(sandbox, &host_claude_json, "/sandbox/")
+            right_core::openshell::upload_file(sandbox, &host_claude_json, "/sandbox/")
                 .await
                 .map_err(|e| miette::miette!("sync: upload .claude.json baseline: {e:#}"))?;
         }
@@ -265,7 +265,7 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
         let fixed_path = tmp_dir.path().join(".claude.json");
         std::fs::write(&fixed_path, &fixed)
             .map_err(|e| miette::miette!("failed to write fixed .claude.json: {e:#}"))?;
-        right_agent::openshell::upload_file(sandbox, &fixed_path, "/sandbox/")
+        right_core::openshell::upload_file(sandbox, &fixed_path, "/sandbox/")
             .await
             .map_err(|e| miette::miette!("sync: re-upload fixed .claude.json: {e:#}"))?;
         tracing::info!("sync: fixed and re-uploaded .claude.json (right-agent keys were modified)");

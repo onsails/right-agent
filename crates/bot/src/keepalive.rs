@@ -69,7 +69,7 @@ async fn ping_claude(
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         let sandbox_name = resolved_sandbox
             .ok_or_else(|| "sandbox mode but no resolved sandbox name".to_string())?;
-        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(sandbox_name);
+        let ssh_host = right_core::openshell::ssh_host_for_sandbox(sandbox_name);
 
         let mut script = String::new();
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
@@ -106,7 +106,7 @@ async fn ping_claude(
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
 
-    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn failed: {e:#}"))?;
     let status = child
         .wait()

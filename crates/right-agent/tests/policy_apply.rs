@@ -27,7 +27,7 @@ use std::path::Path;
 
 use right_agent::agent::types::NetworkPolicy;
 use right_agent::codegen::policy::generate_policy;
-use right_agent::openshell::{
+use right_core::openshell::{
     self, DEFAULT_EXEC_TIMEOUT_SECS, acquire_sandbox_slot, OpenShellStatus,
 };
 use right_core::test_cleanup;

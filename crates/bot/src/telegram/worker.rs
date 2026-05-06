@@ -1841,7 +1841,7 @@ async fn invoke_cc(
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.
         let ssh_host =
-            right_agent::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
+            right_core::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
         let mut assembly_script = super::prompt::build_prompt_assembly_script(
             &base_prompt,
             bootstrap_mode,
@@ -1917,7 +1917,7 @@ async fn invoke_cc(
         "invoking claude -p"
     );
 
-    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
 
     // Write input to stdin, then drop to signal EOF.

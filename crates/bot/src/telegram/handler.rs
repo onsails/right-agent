@@ -816,7 +816,7 @@ async fn handle_mcp_auth(
     };
 
     // 2. Read tunnel config
-    let global_config = match right_agent::config::read_global_config(home) {
+    let global_config = match right_core::config::read_global_config(home) {
         Ok(c) => c,
         Err(e) => {
             bot.send_message(msg.chat.id, format!("Cannot read config.yaml: {e:#}"))
@@ -1509,7 +1509,7 @@ async fn detect_auth_type_via_haiku(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
 
     let output = tokio::time::timeout(
@@ -1777,8 +1777,8 @@ pub async fn handle_doctor(
     }
     tracing::info!("handle_doctor: running diagnostics");
     let checks = right_agent::doctor::run_doctor(&home.0);
-    let theme = right_agent::ui::Theme::Mono;
-    let mut block = right_agent::ui::Block::new();
+    let theme = right_core::ui::Theme::Mono;
+    let mut block = right_core::ui::Block::new();
     for check in &checks {
         block.push(check.to_ui_line());
     }

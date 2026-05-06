@@ -18,7 +18,7 @@ const UPGRADE_TIMEOUT_SECS: u64 = 120;
 /// Run a single upgrade attempt at startup (blocking).
 /// Called before cron/telegram tasks exist — no lock needed.
 pub async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str, sandbox: &str) {
-    let ssh_host = right_agent::openshell::ssh_host_for_sandbox(sandbox);
+    let ssh_host = right_core::openshell::ssh_host_for_sandbox(sandbox);
     run_upgrade(ssh_config_path, &ssh_host, agent_name).await;
 }
 
@@ -48,7 +48,7 @@ async fn run_upgrade_loop(
     shutdown: CancellationToken,
     upgrade_lock: &tokio::sync::RwLock<()>,
 ) {
-    let ssh_host = right_agent::openshell::ssh_host_for_sandbox(sandbox);
+    let ssh_host = right_core::openshell::ssh_host_for_sandbox(sandbox);
     let mut interval = tokio::time::interval(UPGRADE_INTERVAL);
     // First tick fires immediately — consume it since startup upgrade already ran.
     interval.tick().await;
@@ -81,7 +81,7 @@ async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
     // native build to .local/bin/. Without `claude install` first, upgrade
     // warns "config install method is 'unknown'". Idempotent — no-ops if
     // already installed.
-    if let Err(e) = right_agent::openshell::ssh_exec(
+    if let Err(e) = right_core::openshell::ssh_exec(
         ssh_config_path,
         ssh_host,
         &["claude", "install"],
@@ -93,7 +93,7 @@ async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
         return;
     }
 
-    let result = right_agent::openshell::ssh_exec(
+    let result = right_core::openshell::ssh_exec(
         ssh_config_path,
         ssh_host,
         &["claude", "upgrade"],

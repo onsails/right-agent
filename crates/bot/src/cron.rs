@@ -117,7 +117,7 @@ async fn cleanup_old_logs(
         return;
     }
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         // List matching files sorted newest-first, skip `keep`, delete the rest.
         // Using find+stat avoids ls parsing pitfalls with special characters in filenames.
         let cleanup_cmd = format!(
@@ -132,7 +132,7 @@ async fn cleanup_old_logs(
             .arg(&cleanup_cmd);
         c.stdout(std::process::Stdio::piped());
         c.stderr(std::process::Stdio::piped());
-        let output = match right_agent::process_group::ProcessGroupChild::spawn(c) {
+        let output = match right_core::process_group::ProcessGroupChild::spawn(c) {
             Ok(mut child) => child.wait_with_output().await,
             Err(e) => Err(e),
         };
@@ -498,7 +498,7 @@ async fn execute_job(
         assembly_script = format!(
             "set -o pipefail\nmkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
         );
-        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         // Opt out of multiplexing — see worker.rs `invoke_cc` for the
@@ -562,7 +562,7 @@ async fn execute_job(
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
-    let mut child = match right_agent::process_group::ProcessGroupChild::spawn(cmd) {
+    let mut child = match right_core::process_group::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
             update_run_record(&conn, &run_id, None, "failed");
@@ -710,7 +710,7 @@ async fn execute_job(
                             for att in atts {
                                 let dest = outbox_dir.join(attachment_filename(&att.path));
                                 if let Err(e) =
-                                    right_agent::openshell::download_file(sandbox, &att.path, &dest)
+                                    right_core::openshell::download_file(sandbox, &att.path, &dest)
                                         .await
                                 {
                                     tracing::error!(

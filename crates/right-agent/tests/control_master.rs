@@ -3,7 +3,7 @@
 
 #![cfg(unix)]
 
-use right_agent::openshell;
+use right_core::openshell;
 use right_core::test_support::TestSandbox;
 
 #[tokio::test]

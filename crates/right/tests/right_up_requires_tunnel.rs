@@ -8,7 +8,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use right_agent::openshell::acquire_test_name_lock;
+use right_core::openshell::acquire_test_name_lock;
 use tempfile::TempDir;
 
 fn write_minimal_agent(home: &std::path::Path) {

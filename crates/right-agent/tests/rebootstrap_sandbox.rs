@@ -37,7 +37,7 @@ async fn assert_absent_in_sandbox(sandbox: &TestSandbox, path: &str) {
 
 #[tokio::test]
 async fn execute_against_live_sandbox() {
-    let _slot = right_agent::openshell::acquire_sandbox_slot();
+    let _slot = right_core::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rebootstrap").await;
 
     // Seed sandbox-side identity files via in-sandbox shell. echo into

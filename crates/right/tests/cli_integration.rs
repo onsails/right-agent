@@ -733,9 +733,9 @@ fn test_agent_list() {
 /// Creates an ephemeral sandbox via `ensure_sandbox`, applies the policy, then destroys it.
 #[tokio::test]
 async fn test_policy_validates_against_openshell() {
-    let _slot = right_agent::openshell::acquire_sandbox_slot();
-    let mtls_dir = match right_agent::openshell::preflight_check() {
-        right_agent::openshell::OpenShellStatus::Ready(dir) => dir,
+    let _slot = right_core::openshell::acquire_sandbox_slot();
+    let mtls_dir = match right_core::openshell::preflight_check() {
+        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
@@ -745,13 +745,13 @@ async fn test_policy_validates_against_openshell() {
     right_core::test_cleanup::register_test_sandbox(sandbox_name);
 
     // Clean up leftover from a previous failed run.
-    let mut client = right_agent::openshell::connect_grpc(&mtls_dir).await.unwrap();
-    if right_agent::openshell::sandbox_exists(&mut client, sandbox_name)
+    let mut client = right_core::openshell::connect_grpc(&mtls_dir).await.unwrap();
+    if right_core::openshell::sandbox_exists(&mut client, sandbox_name)
         .await
         .unwrap()
     {
-        right_agent::openshell::delete_sandbox(sandbox_name).await;
-        right_agent::openshell::wait_for_deleted(&mut client, sandbox_name, 60, 2)
+        right_core::openshell::delete_sandbox(sandbox_name).await;
+        right_core::openshell::wait_for_deleted(&mut client, sandbox_name, 60, 2)
             .await
             .expect("cleanup of leftover sandbox failed");
     }
@@ -767,13 +767,13 @@ async fn test_policy_validates_against_openshell() {
     fs::write(&policy_path, &policy_yaml).unwrap();
 
     // Create sandbox with the generated policy — this validates the YAML is accepted.
-    let mut child = right_agent::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+    let mut child = right_core::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
         .expect("failed to spawn sandbox");
-    let ready = right_agent::openshell::wait_for_ready(&mut client, sandbox_name, 120, 2).await;
+    let ready = right_core::openshell::wait_for_ready(&mut client, sandbox_name, 120, 2).await;
     let _ = child.kill().await;
 
     // Cleanup regardless of outcome.
-    right_agent::openshell::delete_sandbox(sandbox_name).await;
+    right_core::openshell::delete_sandbox(sandbox_name).await;
     right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
 
     ready.expect("sandbox did not become READY — generated policy may be invalid");

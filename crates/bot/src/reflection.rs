@@ -240,7 +240,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
             ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())
         })?;
-        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(sandbox_name);
+        let ssh_host = right_core::openshell::ssh_host_for_sandbox(sandbox_name);
         let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
         let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
             &base_prompt,
@@ -295,7 +295,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
 
-    let mut child = right_agent::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
         .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
 
     // Pipe the prompt, then drop stdin to signal EOF.

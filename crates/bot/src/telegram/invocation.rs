@@ -160,7 +160,7 @@ impl ClaudeInvocation {
 /// Resolve MCP config path: sandbox path when SSH is configured, local path otherwise.
 pub(crate) fn mcp_config_path(ssh_config_path: Option<&Path>, agent_dir: &Path) -> String {
     if ssh_config_path.is_some() {
-        right_agent::openshell::SANDBOX_MCP_JSON_PATH.to_string()
+        right_core::openshell::SANDBOX_MCP_JSON_PATH.to_string()
     } else {
         agent_dir.join("mcp.json").to_string_lossy().into_owned()
     }
@@ -183,7 +183,7 @@ pub(crate) fn build_claude_command(
     resolved_sandbox: Option<&str>,
 ) -> tokio::process::Command {
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_agent::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut script = String::new();
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
@@ -387,7 +387,7 @@ mod tests {
             Some(Path::new("/tmp/ssh.config")),
             Path::new("/home/user/agents/foo"),
         );
-        assert_eq!(path, right_agent::openshell::SANDBOX_MCP_JSON_PATH);
+        assert_eq!(path, right_core::openshell::SANDBOX_MCP_JSON_PATH);
     }
 
     #[test]

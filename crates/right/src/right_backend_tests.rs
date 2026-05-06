@@ -138,17 +138,17 @@ async fn create_test_sandbox(
     right_core::test_cleanup::pkill_test_orphans(sandbox_name);
     right_core::test_cleanup::register_test_sandbox(sandbox_name);
 
-    let mut grpc_client = right_agent::openshell::connect_grpc(mtls_dir)
+    let mut grpc_client = right_core::openshell::connect_grpc(mtls_dir)
         .await
         .expect("gRPC connect");
 
     // Clean up leftover from a previous failed run.
-    if right_agent::openshell::sandbox_exists(&mut grpc_client, sandbox_name)
+    if right_core::openshell::sandbox_exists(&mut grpc_client, sandbox_name)
         .await
         .unwrap()
     {
-        right_agent::openshell::delete_sandbox(sandbox_name).await;
-        right_agent::openshell::wait_for_deleted(&mut grpc_client, sandbox_name, 60, 2)
+        right_core::openshell::delete_sandbox(sandbox_name).await;
+        right_core::openshell::wait_for_deleted(&mut grpc_client, sandbox_name, 60, 2)
             .await
             .expect("cleanup of leftover sandbox failed");
     }
@@ -181,14 +181,14 @@ network_policies:
     )
     .unwrap();
 
-    let mut child = right_agent::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+    let mut child = right_core::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
         .expect("failed to spawn sandbox");
-    right_agent::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
+    right_core::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
         .await
         .expect("sandbox did not become READY");
     let _ = child.kill().await;
 
-    let sandbox_id = right_agent::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
+    let sandbox_id = right_core::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
         .await
         .expect("resolve sandbox_id");
 
@@ -212,11 +212,11 @@ network_policies:
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_present() {
-    let _slot = right_agent::openshell::acquire_sandbox_slot();
+    let _slot = right_core::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-present";
 
-    let mtls_dir = match right_agent::openshell::preflight_check() {
-        right_agent::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_core::openshell::preflight_check() {
+        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
@@ -256,17 +256,17 @@ async fn bootstrap_done_sandbox_files_present() {
         "BOOTSTRAP.md should be removed from host"
     );
 
-    right_agent::openshell::delete_sandbox(sandbox_name).await;
+    right_core::openshell::delete_sandbox(sandbox_name).await;
     right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_missing() {
-    let _slot = right_agent::openshell::acquire_sandbox_slot();
+    let _slot = right_core::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-missing";
 
-    let mtls_dir = match right_agent::openshell::preflight_check() {
-        right_agent::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_core::openshell::preflight_check() {
+        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
@@ -306,7 +306,7 @@ async fn bootstrap_done_sandbox_files_missing() {
         "should mention USER.md as missing, got: {text}"
     );
 
-    right_agent::openshell::delete_sandbox(sandbox_name).await;
+    right_core::openshell::delete_sandbox(sandbox_name).await;
     right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 

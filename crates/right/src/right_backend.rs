@@ -380,15 +380,15 @@ impl RightBackend {
                 Ok(Some(config)) => {
                     let explicit_sandbox_name =
                         config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-                    right_agent::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name)
+                    right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name)
                 }
-                _ => right_agent::openshell::resolve_sandbox_name(agent_name, None),
+                _ => right_core::openshell::resolve_sandbox_name(agent_name, None),
             };
-            let mut client = right_agent::openshell::connect_grpc(mtls_dir)
+            let mut client = right_core::openshell::connect_grpc(mtls_dir)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
                 .context("bootstrap_done: failed to connect to OpenShell gRPC")?;
-            let sandbox_id = right_agent::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
+            let sandbox_id = right_core::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
                 .context("bootstrap_done: failed to resolve sandbox ID")?;
@@ -396,11 +396,11 @@ impl RightBackend {
             let mut missing = Vec::new();
             for &file in &required {
                 let path = format!("/sandbox/{file}");
-                let (_, exit_code) = right_agent::openshell::exec_in_sandbox(
+                let (_, exit_code) = right_core::openshell::exec_in_sandbox(
                     &mut client,
                     &sandbox_id,
                     &["test", "-f", &path],
-                    right_agent::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+                    right_core::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))

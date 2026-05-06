@@ -149,7 +149,7 @@ pub(crate) async fn deploy_composite_memory(
         .await
         .map_err(DeployError::Write)?;
     if let Some(sandbox) = resolved_sandbox {
-        right_agent::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
+        right_core::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
             .await
             .map_err(|e| DeployError::Upload(format!("{e:#}")))?;
     }
@@ -192,7 +192,7 @@ pub(crate) async fn remove_composite_memory(
         return;
     };
 
-    let ssh_host = right_agent::openshell::ssh_host_for_sandbox(sb.sandbox_name);
+    let ssh_host = right_core::openshell::ssh_host_for_sandbox(sb.sandbox_name);
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.arg("-F").arg(sb.ssh_config);
     cmd.arg(&ssh_host);
