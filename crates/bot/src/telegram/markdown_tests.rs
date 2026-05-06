@@ -104,6 +104,22 @@ fn unordered_list() {
 }
 
 #[test]
+fn list_followed_by_paragraph_separates_with_blank_line() {
+    // Regression: pulldown-cmark's tight-list mode emits item content without
+    // a wrapping Paragraph and emits no Text/Break between End(Item) and the
+    // following Start(Paragraph). Without explicit separation in our handler
+    // for End(Item) / End(List), the next paragraph's text gets concatenated
+    // directly onto the last item's text — visible in Telegram as e.g.
+    // "• last bulletNext paragraph" with no whitespace at all.
+    let input = "- one\n- two\n- three\n\nNext paragraph";
+    let html = md_to_telegram_html(input);
+    assert!(
+        html.contains("• three\n\nNext paragraph"),
+        "expected blank-line separation between list and following paragraph, got: {html:?}"
+    );
+}
+
+#[test]
 fn ordered_list() {
     let input = "1. first\n2. second";
     let html = md_to_telegram_html(input);

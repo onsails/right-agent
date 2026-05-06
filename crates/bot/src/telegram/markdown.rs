@@ -148,8 +148,24 @@ pub fn md_to_telegram_html(md: &str) -> String {
                 TagEnd::Link | TagEnd::Image => out.push_str("</a>"),
                 TagEnd::List(_) => {
                     list_stack.pop();
+                    // Tight-list items emit no Paragraph events around their
+                    // text, so without explicit separation here the next block
+                    // (e.g. a following paragraph) gets concatenated directly
+                    // onto the last item. Add a blank line after the outermost
+                    // list only — nested lists must not produce extra gaps.
+                    if list_stack.is_empty() && !out.ends_with("\n\n") {
+                        if out.ends_with('\n') {
+                            out.push('\n');
+                        } else {
+                            out.push_str("\n\n");
+                        }
+                    }
                 }
-                TagEnd::Item => {}
+                TagEnd::Item => {
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
                 _ => {}
             },
 
