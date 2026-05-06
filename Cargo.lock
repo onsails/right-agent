@@ -2992,6 +2992,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-db"
+version = "0.2.10"
+dependencies = [
+ "rusqlite",
+ "rusqlite_migration",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
