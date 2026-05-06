@@ -2995,6 +2995,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-core"
+version = "0.2.10"
+dependencies = [
+ "chrono",
+ "dirs",
+ "fs4",
+ "http",
+ "hyper-util",
+ "inquire",
+ "miette",
+ "nix",
+ "owo-colors",
+ "prost",
+ "prost-types",
+ "reqwest 0.13.3",
+ "right-core",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "url",
+ "walkdir",
+ "which",
+]
+
+[[package]]
 name = "right-db"
 version = "0.2.10"
 dependencies = [
