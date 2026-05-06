@@ -1,4 +1,15 @@
 # Changelog
+## [0.2.10] - 2026-05-06
+
+
+### Miscellaneous
+
+- Update Cargo.toml dependencies
+
+### Refactor
+
+- Move skills/ and templates/ into right-agent crate
+
 ## [0.2.9] - 2026-05-05
 
 
