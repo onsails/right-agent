@@ -1,9 +1,9 @@
 //! Errors raised by the Hindsight resilience layer + retain queue.
 //!
-//! Pure SQLite plumbing errors come from `right_db::DbError`; we
-//! wrap them via `#[from]` so existing call sites that match on
-//! `MemoryError::Sqlite(_)` or `MemoryError::Migration(_)` keep
-//! compiling.
+//! DB plumbing errors delegated to `right_db` are represented as
+//! `MemoryError::Db`. The legacy `Sqlite` and `Migration` variants
+//! remain for call sites that still construct `MemoryError` directly
+//! from those error types during the staged crate split.
 
 pub use right_db::DbError;
 
