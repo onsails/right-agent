@@ -7,7 +7,7 @@
 //! In-memory: stores into `AgentSettings.model: Arc<ArcSwap<Option<String>>>`.
 //! Group chats are gated by the trusted-users allowlist (same gate as `/allow`).
 
-// Items in this module are wired in subsequent tasks (handle_model, handle_model_callback).
+// `#[allow(dead_code)]` kept until T8 wires the callback into the dispatcher.
 #![allow(dead_code)]
 
 /// One row in the curated model menu.
@@ -137,6 +137,111 @@ pub async fn handle_model(
     }
     send.await?;
     Ok(())
+}
+
+/// Handle a click on a `/model` keyboard button.
+///
+/// Callback data format: `model:<alias>` (e.g. `model:sonnet`).
+/// Re-checks the allowlist on every click — the keyboard stays in the chat
+/// and any group member could click it, not just the `/model` invoker.
+pub async fn handle_model_callback(
+    bot: super::BotType,
+    q: teloxide::types::CallbackQuery,
+    settings: std::sync::Arc<super::handler::AgentSettings>,
+    agent_dir: std::sync::Arc<super::handler::AgentDir>,
+    allowlist: right_agent::agent::allowlist::AllowlistHandle,
+) -> teloxide::prelude::ResponseResult<()> {
+    use teloxide::prelude::*;
+
+    let Some(data) = q.data.as_deref() else {
+        // No data — nothing to do. Ack so Telegram clears the loading spinner.
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+    let Some(alias) = data.strip_prefix("model:") else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+
+    let Some(choice) = lookup(alias) else {
+        tracing::warn!(callback_data = data, "unknown /model alias");
+        bot.answer_callback_query(q.id)
+            .text("Unknown option")
+            .await?;
+        return Ok(());
+    };
+
+    // Group gate: re-check on the click, not just on /model.
+    let in_group = q
+        .message
+        .as_ref()
+        .map(|m| !super::handler::is_private_chat(&m.chat().kind))
+        .unwrap_or(false);
+    if in_group {
+        let user_id = q.from.id.0 as i64;
+        let trusted = allowlist
+            .0
+            .read()
+            .expect("allowlist lock poisoned")
+            .is_user_trusted(user_id);
+        if !trusted {
+            bot.answer_callback_query(q.id).text("Not allowed").await?;
+            return Ok(());
+        }
+    }
+
+    let agent_yaml_path = agent_dir.0.join("agent.yaml");
+    let old_value: Option<String> = (**settings.model.load()).clone();
+
+    // ① Persist to disk first. If this fails, in-memory stays untouched.
+    if let Err(e) = persist_model(&agent_yaml_path, choice.model_id) {
+        tracing::error!(error = %format!("{e:#}"), "/model: failed to write agent.yaml");
+        bot.answer_callback_query(q.id)
+            .text("Failed to save model — see bot logs")
+            .await?;
+        return Ok(());
+    }
+
+    // ② Hot-swap in-memory.
+    settings
+        .model
+        .store(std::sync::Arc::new(choice.model_id.map(str::to_owned)));
+
+    let user_id = q.from.id.0 as i64;
+    let chat_id = q.message.as_ref().map(|m| m.chat().id.0).unwrap_or(0);
+    tracing::info!(
+        from = ?old_value.as_deref().unwrap_or("default"),
+        to = ?choice.model_id.unwrap_or("default"),
+        chat_id,
+        user_id,
+        "model switched via /model"
+    );
+
+    // ③ Refresh the menu UI (best-effort — failure logs but does not abort).
+    if let Some(message) = q.message.as_ref() {
+        let new_body = render_menu_body(choice.model_id);
+        let new_kb = render_keyboard(choice.model_id);
+        if let Err(e) = bot
+            .edit_message_text(message.chat().id, message.id(), new_body)
+            .reply_markup(new_kb)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to edit /model menu after switch");
+        }
+    }
+
+    // ④ Toast confirming the switch.
+    bot.answer_callback_query(q.id)
+        .text(format!("Switched to {}", choice.label))
+        .await?;
+    Ok(())
+}
+
+fn persist_model(
+    agent_yaml: &std::path::Path,
+    model_id: Option<&str>,
+) -> miette::Result<()> {
+    right_agent::agent::types::write_agent_yaml_model(agent_yaml, model_id)
 }
 
 fn sender_is_trusted(
