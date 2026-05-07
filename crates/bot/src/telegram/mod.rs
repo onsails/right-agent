@@ -5,16 +5,13 @@ pub mod bot;
 pub mod dispatch;
 pub mod filter;
 pub mod handler;
-pub(crate) mod invocation;
 pub mod markdown;
 pub mod memory_alerts;
 pub mod mention;
 pub(crate) mod model_command;
 pub mod oauth_callback;
-pub(crate) mod prompt;
 pub mod session;
 pub mod shutdown_listener;
-pub mod stream;
 pub mod webhook;
 pub mod worker;
 

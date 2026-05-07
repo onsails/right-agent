@@ -1539,7 +1539,7 @@ pub(crate) enum InvokeCcFailure {
     /// reflection pass itself fails.
     Reflectable {
         kind: FailureKind,
-        ring_buffer_tail: VecDeque<super::stream::StreamEvent>,
+        ring_buffer_tail: VecDeque<crate::cc::stream::StreamEvent>,
         session_uuid: String,
         raw_message: String,
         /// The live "thinking" message created during the failed CC run, if any.
@@ -1632,7 +1632,7 @@ async fn invoke_cc(
 
     // Block harness built-ins that conflict with MCP equivalents or that
     // don't belong in a headless Telegram-driven agent (see invocation.rs).
-    let disallowed_tools = super::invocation::baseline_disallowed_tools();
+    let disallowed_tools = crate::cc::invocation::baseline_disallowed_tools();
 
     let schema_filename = if bootstrap_mode {
         "bootstrap-schema.json"
@@ -1644,12 +1644,12 @@ async fn invoke_cc(
         .map_err(|e| format_error_reply(-1, &format!("{schema_filename} read failed: {:#}", e)))?;
 
     let mcp_path =
-        super::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
+        crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
 
-    let mut invocation = super::invocation::ClaudeInvocation {
+    let mut invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
         json_schema: Some(reply_schema),
-        output_format: super::invocation::OutputFormat::StreamJson,
+        output_format: crate::cc::invocation::OutputFormat::StreamJson,
         model: crate::snapshot_model(&ctx.model),
         max_budget_usd: None,
         max_turns: None,
@@ -1785,19 +1785,19 @@ async fn invoke_cc(
                     ctx.ssh_config_path.as_deref(),
                     ctx.resolved_sandbox.as_deref(),
                 ) {
-                    (Some(ssh_config), Some(sandbox_name)) => Some(super::prompt::SandboxRef {
+                    (Some(ssh_config), Some(sandbox_name)) => Some(crate::cc::prompt::SandboxRef {
                         ssh_config,
                         sandbox_name,
                     }),
                     _ => None,
                 };
-                super::prompt::remove_composite_memory(&ctx.agent_dir, sandbox_ref).await;
+                crate::cc::prompt::remove_composite_memory(&ctx.agent_dir, sandbox_ref).await;
             }
             (content, marker_str, bg_marker_str) => {
                 // content may be None (no recall) while marker is Some —
                 // deploy a marker-only file so the agent still sees status.
                 let body = content.unwrap_or("");
-                if let Err(e) = super::prompt::deploy_composite_memory(
+                if let Err(e) = crate::cc::prompt::deploy_composite_memory(
                     body,
                     "NOT new user input. Treat as background",
                     &ctx.agent_dir,
@@ -1811,11 +1811,11 @@ async fn invoke_cc(
                 }
             }
         }
-        Some(super::prompt::MemoryMode::Hindsight {
+        Some(crate::cc::prompt::MemoryMode::Hindsight {
             composite_memory_path: sandbox_path,
         })
     } else {
-        Some(super::prompt::MemoryMode::File)
+        Some(crate::cc::prompt::MemoryMode::File)
     };
 
     // Per-session mutex on `--resume` AND `--session-id` — also held on
@@ -1842,7 +1842,7 @@ async fn invoke_cc(
         // from fresh files — single SSH command, no extra roundtrips.
         let ssh_host =
             right_core::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
-        let mut assembly_script = super::prompt::build_prompt_assembly_script(
+        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             bootstrap_mode,
             "/sandbox",
@@ -1882,7 +1882,7 @@ async fn invoke_cc(
             .join(".claude")
             .join("composite-system-prompt.md");
         let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = super::prompt::build_prompt_assembly_script(
+        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             bootstrap_mode,
             &agent_dir_str,
@@ -1969,8 +1969,8 @@ async fn invoke_cc(
         .open(&stream_log_path)
         .ok();
 
-    let mut ring_buffer = super::stream::EventRingBuffer::new(5);
-    let mut usage = super::stream::StreamUsage::default();
+    let mut ring_buffer = crate::cc::stream::EventRingBuffer::new(5);
+    let mut usage = crate::cc::stream::StreamUsage::default();
     let mut result_line: Option<String> = None;
     let mut api_key_source: Option<String> = None;
     let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
@@ -1994,19 +1994,19 @@ async fn invoke_cc(
                         }
 
                         if api_key_source.is_none()
-                            && let Some(src) = super::stream::parse_api_key_source(&line)
+                            && let Some(src) = crate::cc::stream::parse_api_key_source(&line)
                         {
                             api_key_source = Some(src);
                         }
 
-                        let event = super::stream::parse_stream_event(&line);
+                        let event = crate::cc::stream::parse_stream_event(&line);
 
                         match &event {
-                            super::stream::StreamEvent::Result(json) => {
-                                usage = super::stream::parse_usage(json);
+                            crate::cc::stream::StreamEvent::Result(json) => {
+                                usage = crate::cc::stream::parse_usage(json);
                                 result_line = Some(json.clone());
 
-                                match super::stream::parse_usage_full(json) {
+                                match crate::cc::stream::parse_usage_full(json) {
                                     Some(mut breakdown) => {
                                         breakdown.api_key_source = api_key_source
                                             .clone()
@@ -2032,7 +2032,7 @@ async fn invoke_cc(
                                 }
                             }
                             _ => {
-                                if let Some(formatted) = super::stream::format_event(&event) {
+                                if let Some(formatted) = crate::cc::stream::format_event(&event) {
                                     total_assistant_events += 1;
                                     tracing::info!(?chat_id, turn = total_assistant_events, "{formatted}");
                                 }
@@ -2049,7 +2049,7 @@ async fn invoke_cc(
                         // Thinking message: always send (Stop button anchor).
                         // show_thinking=true: update with events every 2s.
                         // show_thinking=false: send static "Working..." once, no updates.
-                        if super::stream::format_event(&event).is_some() {
+                        if crate::cc::stream::format_event(&event).is_some() {
                             let kb = working_keyboard(chat_id, eff_thread_id);
 
                             if thinking_msg_id.is_none() {
@@ -2057,7 +2057,7 @@ async fn invoke_cc(
                                 // In groups, always fall back to the static "Working..."
                                 // placeholder to avoid noisy live updates.
                                 let text = if ctx.show_thinking && !is_group {
-                                    super::stream::format_thinking_message(
+                                    crate::cc::stream::format_thinking_message(
                                         ring_buffer.events(),
                                         &usage,
                                     )
@@ -2081,7 +2081,7 @@ async fn invoke_cc(
                                 && last_edit.elapsed() >= Duration::from_secs(2)
                             {
                                 // Throttled update (show_thinking=true only).
-                                let text = super::stream::format_thinking_message(
+                                let text = crate::cc::stream::format_thinking_message(
                                     ring_buffer.events(),
                                     &usage,
                                 );
@@ -2278,7 +2278,8 @@ async fn invoke_cc(
             // In groups we never rendered the thinking view, so reuse the
             // "Working..." placeholder for consistency with the initial send.
             let text = if ctx.show_thinking && !is_group {
-                let mut msg = super::stream::format_thinking_message(ring_buffer.events(), &usage);
+                let mut msg =
+                    crate::cc::stream::format_thinking_message(ring_buffer.events(), &usage);
                 msg.push_str("\n\u{26d4} Stopped");
                 msg
             } else {
@@ -2292,7 +2293,7 @@ async fn invoke_cc(
                 .await;
         } else if !will_reflect && ctx.show_thinking && !is_group {
             // Normal finish with thinking — final cost/turns, remove keyboard.
-            let text = super::stream::format_thinking_message(ring_buffer.events(), &usage);
+            let text = crate::cc::stream::format_thinking_message(ring_buffer.events(), &usage);
             let _ = ctx
                 .bot
                 .edit_message_text(tg_chat_id, msg_id, &text)

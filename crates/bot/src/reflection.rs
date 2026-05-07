@@ -13,8 +13,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use right_agent::usage::insert::{insert_reflection_cron, insert_reflection_worker};
 
-use crate::telegram::invocation::{ClaudeInvocation, OutputFormat};
-use crate::telegram::stream::{StreamEvent, parse_stream_event};
+use crate::cc::invocation::{ClaudeInvocation, OutputFormat};
+use crate::cc::stream::{StreamEvent, parse_stream_event};
 
 /// Maximum character length for one ring-buffer activity line's text snippet
 /// or tool-argument summary in the reflection prompt. Kept short so the prompt
@@ -194,7 +194,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     let reply_schema = std::fs::read_to_string(&schema_path)?;
 
     // 3. MCP config path (reuse worker's helper).
-    let mcp_path = crate::telegram::invocation::mcp_config_path(
+    let mcp_path = crate::cc::invocation::mcp_config_path(
         ctx.ssh_config_path.as_deref(),
         &ctx.agent_dir,
     );
@@ -212,7 +212,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         fork_session: false,
         allowed_tools: vec![],
         disallowed_tools: {
-            let mut d = crate::telegram::invocation::baseline_disallowed_tools();
+            let mut d = crate::cc::invocation::baseline_disallowed_tools();
             d.push("Agent".into());
             d
         },
@@ -242,7 +242,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         })?;
         let ssh_host = right_core::openshell::ssh_host_for_sandbox(sandbox_name);
         let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
-        let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             false, // not bootstrap mode
             "/sandbox",
@@ -270,7 +270,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
             ctx.session_uuid
         ));
         let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             false,
             &agent_dir_str,
@@ -355,7 +355,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         .ok_or_else(|| ReflectionError::Parse("reply content was null".into()))?;
 
     // Account usage (best-effort — log but don't fail reflection on usage insert error).
-    if let Some(breakdown) = crate::telegram::stream::parse_usage_full(&result_line) {
+    if let Some(breakdown) = crate::cc::stream::parse_usage_full(&result_line) {
         match right_db::open_connection(&ctx.agent_dir, false) {
             Ok(conn) => {
                 let res = match &ctx.parent_source {

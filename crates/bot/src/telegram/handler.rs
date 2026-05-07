@@ -1482,10 +1482,10 @@ async fn detect_auth_type_via_haiku(
 
     const AUTH_DETECTION_SCHEMA: &str = r#"{"type":"object","properties":{"auth_type":{"type":"string","enum":["bearer","header","query_string"]},"header_name":{"type":"string"}},"required":["auth_type"]}"#;
 
-    let invocation = super::invocation::ClaudeInvocation {
+    let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: None,
         json_schema: Some(AUTH_DETECTION_SCHEMA.into()),
-        output_format: super::invocation::OutputFormat::Json,
+        output_format: crate::cc::invocation::OutputFormat::Json,
         model: Some("haiku".into()),
         max_budget_usd: Some(0.20),
         max_turns: Some(10),
@@ -1499,7 +1499,7 @@ async fn detect_auth_type_via_haiku(
     };
     let claude_args = invocation.into_args();
 
-    let mut cmd = super::invocation::build_claude_command(
+    let mut cmd = crate::cc::invocation::build_claude_command(
         &claude_args,
         agent_dir,
         ssh_config_path,

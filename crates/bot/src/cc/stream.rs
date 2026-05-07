@@ -143,7 +143,7 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
         StreamEvent::Text(t) => {
             // Truncate long text — thinking indicator is a preview, not the full reply.
             let preview = truncate_str(t, 150);
-            let escaped = super::markdown::html_escape(&preview);
+            let escaped = crate::cc::markdown_utils::html_escape(&preview);
             Some(format!("\u{1f4dd} \"{escaped}\""))
         }
         StreamEvent::Thinking => Some("\u{1f4ad} thinking...".to_string()),
@@ -165,7 +165,7 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
                 _ => "\u{1f527}",
             };
             let truncated = truncate_str(input_summary, 120);
-            let escaped = super::markdown::html_escape(&truncated);
+            let escaped = crate::cc::markdown_utils::html_escape(&truncated);
             Some(format!("{icon} {tool} <code>{escaped}</code>"))
         }
         StreamEvent::Result(_) | StreamEvent::Other => None,

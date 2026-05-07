@@ -407,7 +407,7 @@ async fn execute_job(
 
     // Cron extends the baseline (invocation.rs) with `Agent` to prevent
     // budget waste on parallel subagent branches.
-    let mut disallowed_tools = crate::telegram::invocation::baseline_disallowed_tools();
+    let mut disallowed_tools = crate::cc::invocation::baseline_disallowed_tools();
     disallowed_tools.push("Agent".into());
 
     // Schema and (optional) --fork-session source come from spec.schedule_kind.
@@ -417,13 +417,13 @@ async fn execute_job(
     let (json_schema_str, fork_from_main_session) = select_schema_and_fork(spec);
     let prompt_for_cc = spec.prompt.clone();
 
-    let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
+    let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let fork_session = fork_from_main_session.is_some();
-    let invocation = crate::telegram::invocation::ClaudeInvocation {
+    let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
         json_schema: Some(json_schema_str.into()),
-        output_format: crate::telegram::invocation::OutputFormat::StreamJson,
+        output_format: crate::cc::invocation::OutputFormat::StreamJson,
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
         max_turns: None,
@@ -476,11 +476,11 @@ async fn execute_job(
     // Cron jobs skip memory injection — cron prompts are static instructions,
     // not user queries. Agents can still call memory_recall/memory_retain MCP
     // tools explicitly from within cron prompts.
-    let memory_mode: Option<crate::telegram::prompt::MemoryMode> = None;
+    let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         // Sandbox mode: assemble system prompt via shell script (same as worker).
-        let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             false,
             "/sandbox",
@@ -516,7 +516,7 @@ async fn execute_job(
         let agent_dir_str = agent_dir.to_string_lossy();
         let prompt_path = agent_dir.join(".claude").join("cron-system-prompt.md");
         let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             false,
             &agent_dir_str,
@@ -803,13 +803,13 @@ async fn execute_job(
             .iter()
             .rev()
             .take(10)
-            .map(|line| crate::telegram::stream::parse_stream_event(line))
+            .map(|line| crate::cc::stream::parse_stream_event(line))
             .filter(|e| {
                 matches!(
                     e,
-                    crate::telegram::stream::StreamEvent::Text(_)
-                        | crate::telegram::stream::StreamEvent::Thinking
-                        | crate::telegram::stream::StreamEvent::ToolUse { .. }
+                    crate::cc::stream::StreamEvent::Text(_)
+                        | crate::cc::stream::StreamEvent::Thinking
+                        | crate::cc::stream::StreamEvent::ToolUse { .. }
                 )
             })
             .take(5)
@@ -863,12 +863,12 @@ async fn execute_job(
     }
 
     if let Some(result_line) = find_last_result_line(&collected_lines) {
-        match crate::telegram::stream::parse_usage_full(result_line) {
+        match crate::cc::stream::parse_usage_full(result_line) {
             Some(mut breakdown) => {
                 // Scan all lines for the init event (first line that matches wins).
                 breakdown.api_key_source = collected_lines
                     .iter()
-                    .find_map(|l| crate::telegram::stream::parse_api_key_source(l))
+                    .find_map(|l| crate::cc::stream::parse_api_key_source(l))
                     .unwrap_or_else(|| "none".into());
                 if let Err(e) = right_agent::usage::insert::insert_cron(&conn, &breakdown, job_name) {
                     tracing::warn!(job = %job_name, "usage insert failed: {e:#}");

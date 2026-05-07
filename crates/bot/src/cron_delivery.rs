@@ -476,15 +476,15 @@ async fn deliver_through_session(
     // Delivery always uses Haiku — cheap relay task.
     const DELIVERY_MODEL: &str = "claude-haiku-4-5-20251001";
 
-    let mcp_path = crate::telegram::invocation::mcp_config_path(ssh_config_path, agent_dir);
+    let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
     let reply_schema_path = agent_dir.join(".claude").join("reply-schema.json");
     let json_schema = std::fs::read_to_string(&reply_schema_path).unwrap_or_default();
 
-    let invocation = crate::telegram::invocation::ClaudeInvocation {
+    let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
         json_schema: Some(json_schema),
-        output_format: crate::telegram::invocation::OutputFormat::Json,
+        output_format: crate::cc::invocation::OutputFormat::Json,
         model: Some(DELIVERY_MODEL.into()),
         max_budget_usd: None,
         max_turns: None,
@@ -494,7 +494,7 @@ async fn deliver_through_session(
         allowed_tools: vec![],
         // Delivery is a relay, but harness built-ins are still available — apply
         // baseline so the haiku relay can't self-loop or escape via TeamCreate etc.
-        disallowed_tools: crate::telegram::invocation::baseline_disallowed_tools(),
+        disallowed_tools: crate::cc::invocation::baseline_disallowed_tools(),
         extra_args: vec![],
         prompt: None, // stdin-piped
     };
@@ -537,10 +537,10 @@ async fn deliver_through_session(
     };
 
     // Delivery sessions skip memory injection — same rationale as cron jobs.
-    let memory_mode: Option<crate::telegram::prompt::MemoryMode> = None;
+    let memory_mode: Option<crate::cc::prompt::MemoryMode> = None;
 
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
-        let mut assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+        let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             false,
             "/sandbox",
@@ -566,7 +566,7 @@ async fn deliver_through_session(
         let agent_dir_str = agent_dir.to_string_lossy();
         let prompt_path = agent_dir.join(".claude").join("delivery-system-prompt.md");
         let prompt_path_str = prompt_path.to_string_lossy();
-        let assembly_script = crate::telegram::prompt::build_prompt_assembly_script(
+        let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             false,
             &agent_dir_str,
