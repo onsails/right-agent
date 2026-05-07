@@ -10,6 +10,7 @@
 pub mod agent_types;
 pub mod config;
 pub mod error;
+pub mod injection_guard;
 pub mod openshell;
 /// Generated protobuf types for the OpenShell gRPC API.
 #[allow(clippy::large_enum_variant)]
@@ -42,4 +43,3 @@ pub mod test_cleanup;
 pub mod test_support;
 pub mod time_constants;
 pub mod ui;
-pub mod injection_guard;
