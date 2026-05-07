@@ -569,7 +569,8 @@ fn check_mcp_tokens_counts_registered_servers() {
 
     // Create data.db with a registered server
     let conn = right_db::open_connection(&agent_dir, true).unwrap();
-    crate::mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
+    right_mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
+        .unwrap();
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);

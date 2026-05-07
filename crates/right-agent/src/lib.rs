@@ -3,7 +3,6 @@ pub mod codegen;
 pub mod cron_spec;
 pub mod doctor;
 pub mod init;
-pub mod mcp;
 pub mod memory;
 pub mod rebootstrap;
 pub mod runtime;

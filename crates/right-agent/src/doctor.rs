@@ -863,7 +863,7 @@ fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
             Err(_) => continue, // skip agents with unreadable DB
         };
 
-        let servers = match crate::mcp::credentials::db_list_servers(&conn) {
+        let servers = match right_mcp::credentials::db_list_servers(&conn) {
             Ok(s) => s,
             Err(_) => continue,
         };
