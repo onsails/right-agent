@@ -99,14 +99,23 @@ fi"#
         String::new()
     } else {
         match memory_mode {
-            Some(MemoryMode::File) => format!(
-                r#"
+            Some(MemoryMode::File) => {
+                let prefix = right_core::injection_guard::memory_wrap_prefix()
+                    .replace('\'', "'\\''");
+                let suffix = right_core::injection_guard::memory_wrap_suffix()
+                    .replace('\'', "'\\''");
+                format!(
+                    r#"
 if [ -s {root_path}/MEMORY.md ]; then
   printf '\n## Long-Term Memory\n\n'
+  printf '%s\n' '{prefix}'
   head -200 {root_path}/MEMORY.md 2>/dev/null \
+    | sed 's|--- END EXTERNAL CONTENT ---|---\xe2\x80\x8b END EXTERNAL CONTENT ---|g' \
     || echo "<memory-status>MEMORY.md unreadable</memory-status>"
+  printf '%s\n' '{suffix}'
 fi"#
-            ),
+                )
+            }
             Some(MemoryMode::Hindsight {
                 composite_memory_path,
             }) => format!(
@@ -523,6 +532,37 @@ mod tests {
             memory_pos > mcp_pos,
             "memory section must come after MCP instructions"
         );
+    }
+
+    #[test]
+    fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
+        let script = build_prompt_assembly_script(
+            "Base",
+            false,
+            "/sandbox",
+            "/tmp/right-system-prompt.md",
+            "/sandbox",
+            &["claude".into()],
+            None,
+            Some(&MemoryMode::File),
+        );
+        assert!(
+            script.contains("BEGIN EXTERNAL CONTENT"),
+            "file-mode memory section must include the ironclaw begin marker"
+        );
+        assert!(
+            script.contains("END EXTERNAL CONTENT"),
+            "file-mode memory section must include the ironclaw end marker"
+        );
+        // Boundary-injection escape: the script must transform any close
+        // delimiter inside MEMORY.md content into the ZWSP-injected variant.
+        // The sed expression source-reference must mention `END EXTERNAL CONTENT`.
+        assert!(
+            script.contains("sed"),
+            "file-mode wrap must apply sed-based escape on MEMORY.md content"
+        );
+        // head -200 still applies for size cap
+        assert!(script.contains("head -200"), "must keep MEMORY.md truncation");
     }
 
     #[test]
