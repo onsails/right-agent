@@ -1,7 +1,7 @@
 # MCP Aggregator and token refresh
 
 > **Status:** descriptive doc. Re-read and update when modifying this
-> subsystem (see `CLAUDE.md` → "Architecture docs split"). Code is
+> subsystem (see `AGENTS.md` → "Architecture docs split"). Code is
 > authoritative; this file may have drifted.
 
 ## MCP Token Refresh
