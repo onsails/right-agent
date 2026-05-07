@@ -3,7 +3,6 @@ pub mod codegen;
 pub use right_core::config;
 pub mod cron_spec;
 pub mod doctor;
-pub use right_core::error;
 pub mod init;
 pub mod mcp;
 pub mod memory;
