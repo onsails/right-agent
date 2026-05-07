@@ -5,8 +5,6 @@ pub mod doctor;
 pub mod init;
 pub mod mcp;
 pub mod memory;
-pub use right_core::openshell;
-pub use right_core::openshell_proto;
 pub mod rebootstrap;
 pub mod runtime;
 pub use right_core::stt;

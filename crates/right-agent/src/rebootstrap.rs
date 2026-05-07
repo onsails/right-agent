@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tonic::transport::Channel;
 
 use crate::agent::types::{AgentConfig, SandboxMode};
-use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
+use right_core::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 
 /// Identity files that bootstrap (re)creates and that this command rewinds.
 pub const IDENTITY_FILES: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md"];
@@ -90,7 +90,7 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
                 .as_ref()
                 .and_then(|c| c.sandbox.as_ref())
                 .and_then(|s| s.name.as_deref());
-            Some(crate::openshell::resolve_sandbox_name(
+            Some(right_core::openshell::resolve_sandbox_name(
                 agent_name,
                 explicit_sandbox_name,
             ))
@@ -197,8 +197,8 @@ async fn open_sandbox_session(
         return Ok((None, SandboxStatus::NoneMode));
     };
 
-    let mtls_dir = match crate::openshell::preflight_check() {
-        crate::openshell::OpenShellStatus::Ready(d) => d,
+    let mtls_dir = match right_core::openshell::preflight_check() {
+        right_core::openshell::OpenShellStatus::Ready(d) => d,
         other => {
             tracing::info!(
                 ?other,
@@ -208,12 +208,12 @@ async fn open_sandbox_session(
         }
     };
 
-    let mut client = crate::openshell::connect_grpc(&mtls_dir).await?;
-    if !crate::openshell::sandbox_exists(&mut client, sandbox).await? {
+    let mut client = right_core::openshell::connect_grpc(&mtls_dir).await?;
+    if !right_core::openshell::sandbox_exists(&mut client, sandbox).await? {
         tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping sandbox-side ops");
         return Ok((None, SandboxStatus::Skipped("sandbox absent")));
     }
-    let id = crate::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+    let id = right_core::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
     Ok((
         Some(SandboxSession {
             name: sandbox.to_string(),
@@ -248,11 +248,11 @@ async fn backup_sandbox_files(
     let mut copied = Vec::new();
     for &name in IDENTITY_FILES {
         let sandbox_path = format!("/sandbox/{name}");
-        let (_stdout, exit) = crate::openshell::exec_in_sandbox(
+        let (_stdout, exit) = right_core::openshell::exec_in_sandbox(
             &mut session.client,
             &session.id,
             &["test", "-f", &sandbox_path],
-            crate::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+            right_core::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
         )
         .await?;
         if exit != 0 {
@@ -260,7 +260,7 @@ async fn backup_sandbox_files(
             continue;
         }
         let dst = sandbox_backup_dir.join(name);
-        crate::openshell::download_file(&session.name, &sandbox_path, &dst).await?;
+        right_core::openshell::download_file(&session.name, &sandbox_path, &dst).await?;
         copied.push(name);
     }
     Ok(copied)
@@ -340,11 +340,11 @@ async fn delete_identity_from_sandbox(
     let mut cmd: Vec<&str> = vec!["rm", "-f"];
     cmd.extend(paths.iter().map(|s| s.as_str()));
 
-    let (stdout, exit) = crate::openshell::exec_in_sandbox(
+    let (stdout, exit) = right_core::openshell::exec_in_sandbox(
         &mut session.client,
         &session.id,
         &cmd,
-        crate::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+        right_core::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await?;
     if exit != 0 {
