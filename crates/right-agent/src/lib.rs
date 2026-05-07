@@ -12,5 +12,4 @@ pub mod rebootstrap;
 pub mod runtime;
 pub use right_core::stt;
 pub mod tunnel;
-pub use right_core::ui;
 pub mod usage;

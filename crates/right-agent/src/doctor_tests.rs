@@ -123,7 +123,7 @@ fn run_doctor_reports_missing_identity() {
 
 #[test]
 fn doctor_check_to_ui_line_shows_name_status_detail() {
-    use crate::ui::Theme;
+    use right_core::ui::Theme;
     let check = DoctorCheck {
         name: "test-binary".to_string(),
         status: CheckStatus::Pass,
@@ -138,7 +138,7 @@ fn doctor_check_to_ui_line_shows_name_status_detail() {
 
 #[test]
 fn doctor_check_to_ui_line_shows_fix_on_failure() {
-    use crate::ui::Theme;
+    use right_core::ui::Theme;
     let check = DoctorCheck {
         name: "missing".to_string(),
         status: CheckStatus::Fail,
