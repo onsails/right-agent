@@ -1,10 +1,6 @@
 use serde::Deserialize;
 
-/// Default TCP port for the process-compose API.
-pub const PC_PORT: u16 = 18927;
-
-/// Default TCP port for the right-mcp-server HTTP transport.
-pub const MCP_HTTP_PORT: u16 = 8100;
+use right_core::runtime_state::read_state;
 
 /// Status information for a single process managed by process-compose.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -82,7 +78,7 @@ impl PcClient {
         if !state_path.exists() {
             return Ok(None);
         }
-        let state = crate::runtime::state::read_state(&state_path)?;
+        let state = read_state(&state_path)?;
         let client = Self::new(state.pc_port, state.pc_api_token)?;
         Ok(Some(client))
     }

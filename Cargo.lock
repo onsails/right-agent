@@ -3000,6 +3000,7 @@ dependencies = [
 name = "right-core"
 version = "0.2.10"
 dependencies = [
+ "base64",
  "chrono",
  "dirs",
  "fs4",
@@ -3012,6 +3013,7 @@ dependencies = [
  "owo-colors",
  "prost",
  "prost-types",
+ "rand 0.10.1",
  "reqwest 0.13.3",
  "right-core",
  "serde",

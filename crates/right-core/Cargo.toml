@@ -8,6 +8,8 @@ test-support = []
 
 [dependencies]
 miette = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

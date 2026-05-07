@@ -4,7 +4,7 @@ use minijinja::{Environment, context};
 use serde::Serialize;
 
 use crate::agent::{AgentDef, RestartPolicy};
-use crate::runtime::MCP_HTTP_PORT;
+use crate::runtime::{MCP_HTTP_PORT, PC_PORT};
 
 const PC_TEMPLATE: &str = include_str!("../../templates/process-compose.yaml.j2");
 
@@ -164,7 +164,7 @@ pub fn generate_process_compose(
     tmpl.render(context! {
         agents => bot_agents,
         cloudflared => cf_entry,
-        pc_port => crate::runtime::pc_client::PC_PORT,
+        pc_port => PC_PORT,
         right_mcp_server => right_mcp_server,
     })
     .map_err(|e| miette::miette!("template render error: {e:#}"))
