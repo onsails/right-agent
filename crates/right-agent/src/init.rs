@@ -24,7 +24,7 @@ pub struct InitOverrides {
     pub stt: SttConfig,
 }
 
-const DEFAULT_BOOTSTRAP: &str = crate::codegen::BOOTSTRAP_INSTRUCTIONS;
+const DEFAULT_BOOTSTRAP: &str = right_codegen::BOOTSTRAP_INSTRUCTIONS;
 const DEFAULT_TOOLS: &str = include_str!("../templates/right/agent/TOOLS.md");
 const DEFAULT_AGENT_YAML: &str = include_str!("../templates/right/agent/agent.yaml");
 
@@ -84,7 +84,7 @@ pub fn init_agent(
 
     // Install built-in skills into .claude/skills/ (standard Agent Skills path).
     // Claude Code discovers skills from .claude/skills/ relative to cwd.
-    crate::codegen::install_builtin_skills(&agents_dir, &ov.memory_provider)?;
+    right_codegen::install_builtin_skills(&agents_dir, &ov.memory_provider)?;
 
     // Resolve host HOME once, before any HOME env manipulation (Phase 8).
     let host_home =
@@ -92,7 +92,7 @@ pub fn init_agent(
 
     // Generate .claude/settings.json via codegen (D-17, D-18).
     {
-        let settings = crate::codegen::generate_settings()?;
+        let settings = right_codegen::generate_settings()?;
         let claude_dir = agents_dir.join(".claude");
         std::fs::create_dir_all(&claude_dir)
             .map_err(|e| miette::miette!("Failed to create {}: {}", claude_dir.display(), e))?;
@@ -186,7 +186,7 @@ pub fn init_agent(
 
     // Generate policy.yaml when sandbox mode is openshell.
     if matches!(ov.sandbox_mode, SandboxMode::Openshell) {
-        let policy_yaml = crate::codegen::policy::generate_policy(
+        let policy_yaml = right_codegen::policy::generate_policy(
             crate::runtime::MCP_HTTP_PORT,
             &ov.network_policy,
             None,
@@ -229,10 +229,10 @@ pub fn init_agent(
         bootstrap_path: None,
         heartbeat_path: None,
     };
-    crate::codegen::generate_agent_claude_json(&trust_agent)?;
+    right_codegen::generate_agent_claude_json(&trust_agent)?;
 
     // Create credential symlink so agent can use OAuth under HOME override (D-07, D-08).
-    crate::codegen::create_credential_symlink(&trust_agent, &host_home)?;
+    right_codegen::create_credential_symlink(&trust_agent, &host_home)?;
 
     Ok(agents_dir)
 }

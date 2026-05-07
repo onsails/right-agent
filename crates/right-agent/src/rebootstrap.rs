@@ -270,7 +270,7 @@ async fn backup_sandbox_files(
 /// Overwrites any existing file.
 fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
     let path = agent_dir.join("BOOTSTRAP.md");
-    std::fs::write(&path, crate::codegen::BOOTSTRAP_INSTRUCTIONS).map_err(|e| {
+    std::fs::write(&path, right_codegen::BOOTSTRAP_INSTRUCTIONS).map_err(|e| {
         miette::miette!("failed to write BOOTSTRAP.md at {}: {e:#}", path.display())
     })
 }
@@ -487,7 +487,7 @@ mod tests {
         let path = agent_dir.join("BOOTSTRAP.md");
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, crate::codegen::BOOTSTRAP_INSTRUCTIONS);
+        assert_eq!(content, right_codegen::BOOTSTRAP_INSTRUCTIONS);
     }
 
     #[test]
@@ -500,7 +500,7 @@ mod tests {
         write_bootstrap_md(&agent_dir).unwrap();
 
         let content = std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap();
-        assert_eq!(content, crate::codegen::BOOTSTRAP_INSTRUCTIONS);
+        assert_eq!(content, right_codegen::BOOTSTRAP_INSTRUCTIONS);
         assert_ne!(content, "stale");
     }
 
@@ -608,7 +608,7 @@ mod tests {
         // BOOTSTRAP.md recreated.
         assert_eq!(
             std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap(),
-            crate::codegen::BOOTSTRAP_INSTRUCTIONS
+            right_codegen::BOOTSTRAP_INSTRUCTIONS
         );
 
         // Session deactivated.

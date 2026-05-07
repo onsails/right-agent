@@ -62,7 +62,7 @@ pub async fn register_with_running_pc(
     let all_agents = crate::agent::discover_agents(&agents_dir)?;
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
-    crate::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
+    right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
     client.reload_configuration().await?;
     tracing::info!(agent = %options.agent_name, "reloaded process-compose configuration");

@@ -269,7 +269,7 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         let all_agents = crate::agent::discover_agents(&agents_dir)?;
         let self_exe = std::env::current_exe()
             .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
-        crate::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
+        right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
         match pc_client.reload_configuration().await {
             Ok(()) => {

@@ -6,7 +6,7 @@ pub use right_core::agent_types::*;
 /// `None` removes the existing `model:` line, leaving the key absent
 /// (CC will use its default model).
 ///
-/// Delegates to [`crate::codegen::contract::write_merged_rmw`]. Preserves
+/// Delegates to [`right_codegen::contract::write_merged_rmw`]. Preserves
 /// all unknown fields, comments, and blank lines. The value is always
 /// double-quoted to handle YAML special characters (e.g. the `[` in
 /// `claude-sonnet-4-6[1m]`).
@@ -14,7 +14,7 @@ pub fn write_agent_yaml_model(
     path: &std::path::Path,
     new_value: Option<&str>,
 ) -> miette::Result<()> {
-    crate::codegen::contract::write_merged_rmw(path, |existing| {
+    right_codegen::contract::write_merged_rmw(path, |existing| {
         let original = existing.unwrap_or("");
 
         // Walk lines, replacing or removing the first `^model:` line.
