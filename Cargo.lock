@@ -1746,6 +1746,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_safety"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b3ceb4e968b1e464897b621b1ba1a7c81401dbf570454def26c5d54eddb71d"
+dependencies = [
+ "aho-corasick",
+ "regex",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "is-terminal"
 version = "0.4.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3040,6 +3054,7 @@ dependencies = [
  "http",
  "hyper-util",
  "inquire",
+ "ironclaw_safety",
  "miette",
  "nix",
  "owo-colors",
