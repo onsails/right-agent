@@ -25,6 +25,14 @@ cache. `tonic-prost-build` lives in
 `crates/right-core/build.rs` and only re-runs when the OpenShell `.proto`
 files change.
 
+`right-bot` owns two sibling subtrees: `bot::cc::*` for generic Claude Code
+subprocess plumbing (`invocation`, `prompt`, `stream`, `worker_reply`,
+`attachments_dto`, `markdown_utils`) and `bot::telegram::*` for
+Telegram-specific glue (`handler`, `dispatch`, `filter`, `mention`,
+`oauth_callback`, `webhook`, attachment delivery, and chat/session handling).
+The `cc/` subtree is generic enough for Stage E to lift into a `right-cc`
+crate; Telegram code depends on it for shared output DTOs and HTML helpers.
+
 ## Module Map
 
 See: `docs/architecture/modules.md`.
@@ -101,7 +109,7 @@ See `PROMPT_SYSTEM.md` for full documentation.
 ### Claude Invocation Contract
 
 Every `claude -p` invocation MUST go through `ClaudeInvocation` (defined in
-`crates/bot/src/telegram/invocation.rs`). Direct construction of `claude_args`
+`crates/bot/src/cc/invocation.rs`). Direct construction of `claude_args`
 vectors is forbidden — the builder enforces invariant flags at compile time.
 
 **Invariants** (always present, cannot be omitted):

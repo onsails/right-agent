@@ -62,7 +62,8 @@
 ### right-bot
 
 - `lib.rs` — entry: resolve agent dir, open `data.db`, sandbox lifecycle, start teloxide.
-- `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, prompt assembly, attachments (with STT integration), `invocation.rs` (`ClaudeInvocation` builder — see Claude Invocation Contract).
+- `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
+- `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, and attachment delivery (with STT integration).
 - `login.rs` — token-based Claude login flow (setup-token, env var injection).
 - `sync.rs` — background platform-store sync to `/sandbox/.platform/`.
 - `cron.rs`, `cron_delivery.rs` — cron engine and delivery loop (resumes main session so cron results land in agent context).
