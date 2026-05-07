@@ -5,6 +5,10 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+pub use crate::cc::markdown_utils::{html_escape, strip_html_tags};
+
+use crate::cc::markdown_utils::html_escape_into;
+
 #[cfg(test)]
 #[path = "markdown_tests.rs"]
 mod tests;
@@ -262,23 +266,6 @@ fn render_table_row(cells: &[String], widths: &[usize], col_count: usize, out: &
     out.push('\n');
 }
 
-pub(crate) fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    html_escape_into(s, &mut out);
-    out
-}
-
-pub(crate) fn html_escape_into(s: &str, out: &mut String) {
-    for ch in s.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
 const TELEGRAM_LIMIT: usize = 4096;
 
 /// Round a byte index down to the nearest char boundary in `s`.
@@ -390,21 +377,4 @@ fn parse_telegram_tag(content: &str) -> Option<String> {
         "b" | "i" | "s" | "u" | "code" | "pre" | "a" | "blockquote" => Some(name.to_string()),
         _ => None,
     }
-}
-
-/// Strip HTML tags and unescape basic HTML entities.
-pub fn strip_html_tags(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
 }
