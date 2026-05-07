@@ -629,7 +629,7 @@ async fn deliver_through_session(
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);
-    let (reply, _) = crate::telegram::worker::parse_reply_output(&raw)
+    let (reply, _) = crate::cc::worker_reply::parse_reply_output(&raw)
         .map_err(|e| format!("reply parse: {e}"))?;
 
     if let Some(ref content) = reply.content {

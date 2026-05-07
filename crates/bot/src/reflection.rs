@@ -348,7 +348,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     })?;
 
     // Parse reply via the shared helper (handles content: Option<String>, nested result, etc.).
-    let (reply_output, _session_id) = crate::telegram::worker::parse_reply_output(&result_line)
+    let (reply_output, _session_id) = crate::cc::worker_reply::parse_reply_output(&result_line)
         .map_err(ReflectionError::Parse)?;
     let content = reply_output
         .content
