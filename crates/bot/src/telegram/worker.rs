@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
-pub(crate) use crate::cc::worker_reply::should_accept_bootstrap;
 pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
+use crate::cc::worker_reply::should_accept_bootstrap;
 use crate::reflection::FailureKind;
 
 use super::session::{

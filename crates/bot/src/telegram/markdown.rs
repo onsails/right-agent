@@ -5,8 +5,9 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-pub use crate::cc::markdown_utils::{html_escape, strip_html_tags};
+pub use crate::cc::markdown_utils::strip_html_tags;
 
+pub(crate) use crate::cc::markdown_utils::html_escape;
 use crate::cc::markdown_utils::html_escape_into;
 
 #[cfg(test)]
