@@ -74,7 +74,7 @@ pub struct InterceptSlots {
 
 /// Newtype wrapper for the InternalClient used to communicate with the MCP aggregator.
 #[derive(Clone)]
-pub struct InternalApi(pub Arc<right_agent::mcp::internal_client::InternalClient>);
+pub struct InternalApi(pub Arc<right_mcp::internal_client::InternalClient>);
 
 /// Shared timestamp of last interaction (unix seconds).
 /// Updated by handler on incoming messages and by worker after sending replies.
@@ -92,9 +92,9 @@ pub struct AgentSettings {
     /// Resolved sandbox name (None when running without sandbox).
     pub resolved_sandbox: Option<String>,
     /// Hindsight memory client (None when using file-based memory).
-    pub hindsight: Option<std::sync::Arc<right_agent::memory::ResilientHindsight>>,
+    pub hindsight: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
     /// Prefetch cache for Hindsight recall results.
-    pub prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
+    pub prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
     /// RwLock gate — upgrade takes write (exclusive), CC invocations take read (shared).
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// When true, CC subprocesses run with --verbose and stderr is logged at debug level.
@@ -716,7 +716,7 @@ async fn handle_mcp_list(
     bot: &BotType,
     msg: &Message,
     agent_name: &str,
-    internal: &right_agent::mcp::internal_client::InternalClient,
+    internal: &right_mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
     tracing::info!(agent = %agent_name, "mcp list");
 
@@ -771,7 +771,7 @@ async fn handle_mcp_auth(
     agent_dir: &Path,
     pending_auth: PendingAuthMap,
     home: &Path,
-    internal: &right_agent::mcp::internal_client::InternalClient,
+    internal: &right_mcp::internal_client::InternalClient,
     pending_token_slot: &PendingTokenSlot,
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
@@ -847,7 +847,7 @@ async fn handle_mcp_auth(
     )
     .await?;
 
-    let metadata = match right_agent::mcp::oauth::discover_as(&http_client, &server_url).await {
+    let metadata = match right_mcp::oauth::discover_as(&http_client, &server_url).await {
         Ok(m) => m,
         Err(e) => {
             bot.send_message(
@@ -874,7 +874,7 @@ async fn handle_mcp_auth(
         return Ok(());
     }
     let redirect_uri = format!("https://{}/oauth/{agent_name}/callback", tunnel.hostname);
-    let (client_id, client_secret) = match right_agent::mcp::oauth::register_client_or_fallback(
+    let (client_id, client_secret) = match right_mcp::oauth::register_client_or_fallback(
         &http_client,
         &metadata,
         None, // no static clientId from .claude.json -- DCR only
@@ -883,7 +883,7 @@ async fn handle_mcp_auth(
     .await
     {
         Ok(pair) => pair,
-        Err(right_agent::mcp::oauth::OAuthError::DcrFailed(detail)) => {
+        Err(right_mcp::oauth::OAuthError::DcrFailed(detail)) => {
             // Some servers advertise OAuth metadata (RFC 8414) but never implement
             // Dynamic Client Registration — `registration_endpoint` 404s. Falling
             // back to API-key auth: detect header name via Haiku, then ask the
@@ -913,8 +913,8 @@ async fn handle_mcp_auth(
     };
 
     // 6. Generate PKCE + state
-    let (code_verifier, code_challenge) = right_agent::mcp::oauth::generate_pkce();
-    let state = right_agent::mcp::oauth::generate_state();
+    let (code_verifier, code_challenge) = right_mcp::oauth::generate_pkce();
+    let state = right_mcp::oauth::generate_state();
 
     // 7. Tunnel healthcheck -- hit tunnel root to verify cloudflared is running
     let healthcheck_url = format!("https://{}/", tunnel.hostname);
@@ -947,7 +947,7 @@ async fn handle_mcp_auth(
     }
 
     // 8. Store PendingAuth
-    let pending = right_agent::mcp::oauth::PendingAuth {
+    let pending = right_mcp::oauth::PendingAuth {
         server_name: server_name.to_string(),
         server_url: server_url.clone(),
         code_verifier,
@@ -961,7 +961,7 @@ async fn handle_mcp_auth(
     pending_auth.lock().await.insert(state.clone(), pending);
 
     // 9. Build and send auth URL
-    let auth_url = right_agent::mcp::oauth::build_auth_url(
+    let auth_url = right_mcp::oauth::build_auth_url(
         &metadata,
         &client_id,
         &redirect_uri,
@@ -994,7 +994,7 @@ async fn dcr_failure_fallback(
     pending_token_slot: &PendingTokenSlot,
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
-    internal: &right_agent::mcp::internal_client::InternalClient,
+    internal: &right_mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
     let escaped_detail = super::markdown::html_escape(&dcr_detail);
     send_html_reply(
@@ -1038,7 +1038,7 @@ async fn dcr_failure_fallback(
     // Detect auth type via Haiku when a sandbox is available; otherwise default
     // to bearer. The user can always override with `HeaderName: token` syntax.
     let (auth_type, auth_header): (String, Option<String>) =
-        if ssh_config_path.is_some() && right_agent::mcp::credentials::is_public_url(&bare_url) {
+        if ssh_config_path.is_some() && right_mcp::credentials::is_public_url(&bare_url) {
             bot.send_message(msg.chat.id, "Detecting authentication method...")
                 .await?;
             let (t, h) = detect_auth_with_typing_indicator(
@@ -1065,7 +1065,7 @@ async fn dcr_failure_fallback(
         bot.clone(),
         msg.chat.id,
         effective_thread_id(msg),
-        right_agent::mcp::internal_client::InternalClient::new(internal.socket_path()),
+        right_mcp::internal_client::InternalClient::new(internal.socket_path()),
         agent_name.to_string(),
         server_name.to_string(),
         bare_url,
@@ -1091,7 +1091,7 @@ async fn handle_mcp_add(
     msg: &Message,
     config_str: &str,
     agent_dir: &Path,
-    internal: &right_agent::mcp::internal_client::InternalClient,
+    internal: &right_mcp::internal_client::InternalClient,
     pending_token_slot: &PendingTokenSlot,
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
@@ -1139,7 +1139,7 @@ async fn handle_mcp_add(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    let oauth_result = right_agent::mcp::oauth::discover_as(&http_client, &bare_url).await;
+    let oauth_result = right_mcp::oauth::discover_as(&http_client, &bare_url).await;
     let oauth_discovered = oauth_result.is_ok();
     tracing::info!(url = %bare_url, oauth_discovered, err = ?oauth_result.err(), "mcp add: OAuth AS discovery complete");
 
@@ -1181,7 +1181,7 @@ async fn handle_mcp_add(
 
     // Step 2: Determine auth type for non-OAuth servers
     tracing::info!(url = %bare_url, "mcp add: determining auth type (non-OAuth path)");
-    let is_public = right_agent::mcp::credentials::is_public_url(&bare_url);
+    let is_public = right_mcp::credentials::is_public_url(&bare_url);
 
     let (auth_type, auth_header): (String, Option<String>) = if has_query {
         ("query_string".into(), None)
@@ -1236,7 +1236,7 @@ async fn handle_mcp_add(
         bot.clone(),
         msg.chat.id,
         eff_thread_id,
-        right_agent::mcp::internal_client::InternalClient::new(internal.socket_path()),
+        right_mcp::internal_client::InternalClient::new(internal.socket_path()),
         agent_name.to_string(),
         name.to_string(),
         bare_url.to_string(),
@@ -1262,7 +1262,7 @@ async fn request_token_and_register(
     bot: BotType,
     chat_id: teloxide::types::ChatId,
     eff_thread_id: i64,
-    internal: right_agent::mcp::internal_client::InternalClient,
+    internal: right_mcp::internal_client::InternalClient,
     agent_name: String,
     server_name: String,
     bare_url: String,
@@ -1412,7 +1412,7 @@ struct AuthDetectionResult {
 /// DCR-failure fallback.
 ///
 /// PRECONDITION: caller MUST gate this on
-/// `right_agent::mcp::credentials::is_public_url(bare_url) && ssh_config_path.is_some()`.
+/// `right_mcp::credentials::is_public_url(bare_url) && ssh_config_path.is_some()`.
 /// Calling this for a private URL burns a Haiku invocation for no benefit; calling it
 /// without a sandbox falls through to the bearer default.
 async fn detect_auth_with_typing_indicator(
@@ -1567,11 +1567,11 @@ async fn handle_mcp_remove(
     msg: &Message,
     server_name: &str,
     agent_dir: &Path,
-    internal: &right_agent::mcp::internal_client::InternalClient,
+    internal: &right_mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
     tracing::info!(agent_dir = %agent_dir.display(), server = %server_name, "mcp remove");
 
-    if server_name == right_agent::mcp::PROTECTED_MCP_SERVER {
+    if server_name == right_mcp::PROTECTED_MCP_SERVER {
         bot.send_message(
             msg.chat.id,
             format!("Cannot remove '{server_name}' — required for core functionality."),

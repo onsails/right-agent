@@ -7,8 +7,8 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use right_agent::agent::allowlist::AllowlistHandle;
-use right_agent::memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
-use right_agent::memory::{MemoryStatus, ResilientHindsight};
+use right_memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
+use right_memory::{MemoryStatus, ResilientHindsight};
 
 use super::{BotType, broadcast_to_chats};
 
@@ -81,7 +81,7 @@ pub fn spawn_watcher(
             loop {
                 t.tick().await;
                 let drops_1h = wrapper.client_drops_1h().await;
-                if drops_1h > right_agent::memory::resilient::CLIENT_FLOOD_THRESHOLD
+                if drops_1h > right_memory::resilient::CLIENT_FLOOD_THRESHOLD
                     && should_fire(&db, CLIENT_FLOOD)
                 {
                     let msg = format!(

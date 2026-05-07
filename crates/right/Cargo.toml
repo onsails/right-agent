@@ -10,8 +10,11 @@ path = "src/main.rs"
 [dependencies]
 right-agent = { path = "../right-agent", version = "*" }
 right-bot = { path = "../bot", version = "*" }
+right-codegen = { path = "../right-codegen" }
 right-core = { path = "../right-core" }
 right-db = { path = "../right-db" }
+right-mcp = { path = "../right-mcp" }
+right-memory = { path = "../right-memory" }
 clap = { workspace = true }
 dirs = { workspace = true }
 miette = { workspace = true }

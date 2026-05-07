@@ -95,10 +95,10 @@ pub async fn run_telegram<L>(
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
     shutdown: CancellationToken,
     idle_ts: Arc<IdleTimestamp>,
-    internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
+    internal_client: Arc<right_mcp::internal_client::InternalClient>,
     resolved_sandbox: Option<String>,
-    hindsight_wrapper: Option<std::sync::Arc<right_agent::memory::ResilientHindsight>>,
-    prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
+    hindsight_wrapper: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
+    prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     session_locks: super::SessionLocks,
@@ -499,8 +499,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicI64};
 
     use right_agent::agent::allowlist::{AllowlistHandle, AllowlistState};
-    use right_agent::mcp::internal_client::InternalClient;
-    use right_agent::memory::prefetch::PrefetchCache;
+    use right_mcp::internal_client::InternalClient;
+    use right_memory::prefetch::PrefetchCache;
     use tokio::sync::{Mutex, RwLock};
 
     /// Smoke test: construct the real dispatcher with dummy deps. If a handler

@@ -392,7 +392,7 @@ impl MemoryServer {
             .conn
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
-        let servers = right_agent::mcp::credentials::db_list_servers(&conn)
+        let servers = right_mcp::credentials::db_list_servers(&conn)
             .map_err(|e| McpError::internal_error(format!("{e:#}"), None))?;
         let items: Vec<serde_json::Value> = servers
             .iter()

@@ -234,7 +234,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         )
     };
     let base_prompt =
-        right_agent::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {

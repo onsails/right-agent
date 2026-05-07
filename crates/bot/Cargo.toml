@@ -5,8 +5,11 @@ edition.workspace = true
 
 [dependencies]
 right-agent = { path = "../right-agent", version = "*" }
+right-codegen = { path = "../right-codegen" }
 right-core = { path = "../right-core" }
 right-db = { path = "../right-db" }
+right-mcp = { path = "../right-mcp" }
+right-memory = { path = "../right-memory" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

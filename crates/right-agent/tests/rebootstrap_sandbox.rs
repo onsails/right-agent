@@ -82,7 +82,7 @@ async fn execute_against_live_sandbox() {
     }
     // Host: BOOTSTRAP.md created
     let bootstrap = std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap();
-    assert_eq!(bootstrap, right_agent::codegen::BOOTSTRAP_INSTRUCTIONS);
+    assert_eq!(bootstrap, right_codegen::BOOTSTRAP_INSTRUCTIONS);
 
     // Backup: host copies (use concrete content map — what seed_agent_dir wrote)
     let expected_host: &[(&str, &str)] = &[

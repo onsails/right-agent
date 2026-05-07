@@ -7,14 +7,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::post};
-use right_agent::mcp::credentials::{self, CredentialError};
-use right_agent::mcp::proxy::{AuthMethod, ProxyBackend};
+use right_mcp::credentials::{self, CredentialError};
+use right_mcp::proxy::{AuthMethod, ProxyBackend};
 use serde::{Deserialize, Serialize};
 
 use crate::aggregator::{
     AgentInfo, AgentTokenMap, ReconnectManagers, RefreshSenders, ToolDispatcher,
 };
-use right_agent::mcp::refresh::{OAuthServerState, RefreshMessage};
+use right_mcp::refresh::{OAuthServerState, RefreshMessage};
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -335,7 +335,7 @@ async fn handle_mcp_remove(
 ) -> axum::response::Response {
     let dispatcher = &state.dispatcher;
     // Reject protected names
-    if req.name == right_agent::mcp::PROTECTED_MCP_SERVER || req.name == "rightmeta" {
+    if req.name == right_mcp::PROTECTED_MCP_SERVER || req.name == "rightmeta" {
         return validation_error(format!(
             "'{}' is a protected server and cannot be removed",
             req.name
@@ -436,7 +436,7 @@ async fn handle_set_token(
             Ok(c) => c,
             Err(e) => return internal_error(format!("mutex poisoned: {e}")).into_response(),
         };
-        if let Err(e) = right_agent::mcp::credentials::db_set_oauth_state(
+        if let Err(e) = right_mcp::credentials::db_set_oauth_state(
             &conn,
             &req.server,
             &req.access_token,
@@ -591,7 +591,7 @@ async fn handle_mcp_instructions(
         }
     };
 
-    let content = right_agent::codegen::generate_mcp_instructions_md(&servers);
+    let content = right_codegen::generate_mcp_instructions_md(&servers);
     Json(McpInstructionsResponse {
         instructions: content,
     })
@@ -693,7 +693,7 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
     let total = state.dispatcher.agents.len();
     (
         StatusCode::OK,
-        Json(right_agent::mcp::internal_client::ReloadResponse {
+        Json(right_mcp::internal_client::ReloadResponse {
             added,
             removed,
             total,

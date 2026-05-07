@@ -21,8 +21,8 @@ use serde::Deserialize;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 
-use right_agent::mcp::internal_client::{InternalClient, SetTokenRequest};
-use right_agent::mcp::oauth::{PendingAuth, exchange_token, verify_state};
+use right_mcp::internal_client::{InternalClient, SetTokenRequest};
+use right_mcp::oauth::{PendingAuth, exchange_token, verify_state};
 
 /// Shared in-memory map of OAuth state -> pending auth session.
 /// Key is the PKCE state parameter (random, one-shot).

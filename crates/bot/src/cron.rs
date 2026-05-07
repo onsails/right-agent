@@ -25,7 +25,7 @@ pub enum CronError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("db error: {0:#}")]
-    Db(#[from] right_agent::memory::MemoryError),
+    Db(#[from] right_memory::MemoryError),
 }
 
 /// Structured output from a cron CC invocation.
@@ -230,20 +230,20 @@ fn insert_running_run(
 /// Pick the JSON schema and (optional) `--fork-session` source for a cron run.
 ///
 /// `BackgroundContinuation` is the only kind that runs against
-/// [`right_agent::codegen::BG_CONTINUATION_SCHEMA_JSON`] — its forked turn
+/// [`right_codegen::BG_CONTINUATION_SCHEMA_JSON`] — its forked turn
 /// MUST reply (notify required + non-null) because the user is waiting for
 /// the foreground answer sent to background. All other kinds use
-/// [`right_agent::codegen::CRON_SCHEMA_JSON`] where `notify: null` (silent)
+/// [`right_codegen::CRON_SCHEMA_JSON`] where `notify: null` (silent)
 /// is a valid outcome.
 fn select_schema_and_fork(
     spec: &right_agent::cron_spec::CronSpec,
 ) -> (&'static str, Option<String>) {
     match &spec.schedule_kind {
         right_agent::cron_spec::ScheduleKind::BackgroundContinuation { fork_from } => (
-            right_agent::codegen::BG_CONTINUATION_SCHEMA_JSON,
+            right_codegen::BG_CONTINUATION_SCHEMA_JSON,
             Some(fork_from.to_string()),
         ),
-        _ => (right_agent::codegen::CRON_SCHEMA_JSON, None),
+        _ => (right_codegen::CRON_SCHEMA_JSON, None),
     }
 }
 
@@ -334,7 +334,7 @@ async fn execute_job(
     agent_name: &str,
     model: Option<&str>,
     ssh_config_path: Option<&std::path::Path>,
-    internal_client: &right_agent::mcp::internal_client::InternalClient,
+    internal_client: &right_mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
 ) {
@@ -451,14 +451,14 @@ async fn execute_job(
         )
     };
     let base_prompt =
-        right_agent::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+        right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
     {
         Ok(resp) => {
             if resp.instructions.trim().len()
-                > right_agent::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                > right_codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
                     .trim()
                     .len()
             {
@@ -969,7 +969,7 @@ pub async fn run_cron_task(
     agent_name: String,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: Option<std::path::PathBuf>,
-    internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
+    internal_client: Arc<right_mcp::internal_client::InternalClient>,
     shutdown: CancellationToken,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -1105,7 +1105,7 @@ fn fire_one_shot_specs(
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: &Option<std::path::PathBuf>,
-    internal_client: &Arc<right_agent::mcp::internal_client::InternalClient>,
+    internal_client: &Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -1162,7 +1162,7 @@ fn reconcile_jobs(
     agent_name: &str,
     model: &Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: &Option<std::path::PathBuf>,
-    internal_client: &Arc<right_agent::mcp::internal_client::InternalClient>,
+    internal_client: &Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -1337,7 +1337,7 @@ async fn run_job_loop(
     agent_name: String,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,
     ssh_config_path: Option<std::path::PathBuf>,
-    internal_client: Arc<right_agent::mcp::internal_client::InternalClient>,
+    internal_client: Arc<right_mcp::internal_client::InternalClient>,
     execute_handles: ExecuteHandles,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -1707,7 +1707,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();
 
-        let ic = Arc::new(right_agent::mcp::internal_client::InternalClient::new(
+        let ic = Arc::new(right_mcp::internal_client::InternalClient::new(
             "/nonexistent.sock",
         ));
         let model_cell = Arc::new(arc_swap::ArcSwap::from_pointee(None::<String>));
@@ -1750,7 +1750,7 @@ mod tests {
             target_thread_id: None,
         };
         let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_agent::codegen::CRON_SCHEMA_JSON);
+        assert_eq!(schema, right_codegen::CRON_SCHEMA_JSON);
         assert!(fork.is_none());
     }
 
@@ -1766,7 +1766,7 @@ mod tests {
             target_thread_id: None,
         };
         let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_agent::codegen::CRON_SCHEMA_JSON);
+        assert_eq!(schema, right_codegen::CRON_SCHEMA_JSON);
         assert!(fork.is_none());
     }
 
@@ -1785,7 +1785,7 @@ mod tests {
             target_thread_id: None,
         };
         let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_agent::codegen::BG_CONTINUATION_SCHEMA_JSON);
+        assert_eq!(schema, right_codegen::BG_CONTINUATION_SCHEMA_JSON);
         assert_eq!(fork.as_deref(), Some(main.to_string().as_str()));
     }
 

@@ -757,7 +757,7 @@ async fn test_policy_validates_against_openshell() {
     }
 
     // Generate the policy under test.
-    let policy_yaml = right_agent::codegen::policy::generate_policy(
+    let policy_yaml = right_codegen::policy::generate_policy(
         right_agent::runtime::MCP_HTTP_PORT,
         &right_agent::agent::types::NetworkPolicy::Permissive,
         None,

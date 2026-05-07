@@ -1,8 +1,8 @@
 //! Integration scenarios covering memory failure handling.
 
-use right_agent::memory::hindsight::RetainItem;
-use right_agent::memory::resilient::{POLICY_AUTO_RETAIN, POLICY_MCP_RECALL};
-use right_agent::memory::{MemoryStatus, ResilientError};
+use right_memory::hindsight::RetainItem;
+use right_memory::resilient::{POLICY_AUTO_RETAIN, POLICY_MCP_RECALL};
+use right_memory::{MemoryStatus, ResilientError};
 
 mod common;
 
@@ -102,7 +102,7 @@ async fn recovery_drains_queue_after_breaker_closes() {
         .await;
     tokio::time::sleep(std::time::Duration::from_secs(31)).await;
 
-    let report = right_agent::memory::retain_queue::drain_tick(&conn, |items| {
+    let report = right_memory::retain_queue::drain_tick(&conn, |items| {
         let w = &wrapper;
         async move {
             let item = RetainItem {
@@ -129,13 +129,13 @@ async fn drain_poison_pill_deleted_good_records_still_processed() {
     let wrapper = common::wrap(&url, "bot").await;
     let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
 
-    right_agent::memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None)
+    right_memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None)
         .unwrap();
-    right_agent::memory::retain_queue::enqueue(&conn, "bot", "GOOD", None, None, None, None).unwrap();
+    right_memory::retain_queue::enqueue(&conn, "bot", "GOOD", None, None, None, None).unwrap();
 
-    let report = right_agent::memory::retain_queue::drain_tick(&conn, |items| async move {
+    let report = right_memory::retain_queue::drain_tick(&conn, |items| async move {
         if items[0].content == "POISON" {
-            Err(right_agent::memory::ErrorKind::Client)
+            Err(right_memory::ErrorKind::Client)
         } else {
             Ok(())
         }
@@ -156,15 +156,15 @@ async fn queue_eviction_at_cap() {
     let wrapper = common::wrap(&url, "bot").await;
     let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
 
-    for i in 0..(right_agent::memory::retain_queue::QUEUE_CAP + 5) {
+    for i in 0..(right_memory::retain_queue::QUEUE_CAP + 5) {
         let c = format!("row-{i}");
-        right_agent::memory::retain_queue::enqueue(&conn, "bot", &c, None, None, None, None).unwrap();
+        right_memory::retain_queue::enqueue(&conn, "bot", &c, None, None, None, None).unwrap();
     }
 
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM pending_retains", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(n as usize, right_agent::memory::retain_queue::QUEUE_CAP);
+    assert_eq!(n as usize, right_memory::retain_queue::QUEUE_CAP);
     let first_gone: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM pending_retains WHERE content = 'row-0'",

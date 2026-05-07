@@ -9,7 +9,7 @@ pub enum BotError {
     NoToken,
 
     #[error("database error: {0}")]
-    DbError(#[from] right_agent::memory::MemoryError),
+    DbError(#[from] right_memory::MemoryError),
 
     #[error("config error: {0}")]
     ConfigError(String),

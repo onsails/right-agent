@@ -3,8 +3,8 @@
 // not others.
 #![allow(dead_code)]
 
-use right_agent::memory::ResilientHindsight;
-use right_agent::memory::hindsight::HindsightClient;
+use right_memory::ResilientHindsight;
+use right_memory::hindsight::HindsightClient;
 
 pub mod mock {
     pub async fn always(status: u16, body: &str) -> (tokio::task::JoinHandle<()>, String) {

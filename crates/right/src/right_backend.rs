@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
-use right_agent::mcp::tool_error::tool_error;
+use right_mcp::tool_error::tool_error;
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{CallToolResult, Content, Tool};
 
@@ -352,7 +352,7 @@ impl RightBackend {
     fn call_mcp_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
-        let servers = right_agent::mcp::credentials::db_list_servers(&conn)?;
+        let servers = right_mcp::credentials::db_list_servers(&conn)?;
         let items: Vec<serde_json::Value> = servers
             .iter()
             .map(|s| {

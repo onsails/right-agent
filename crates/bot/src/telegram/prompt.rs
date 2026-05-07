@@ -66,10 +66,10 @@ pub(crate) fn build_prompt_assembly_script(
     let claude_cmd = escaped_args.join(" ");
 
     let file_sections = if bootstrap_mode {
-        let escaped_bootstrap = right_agent::codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
+        let escaped_bootstrap = right_codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
         format!("\nprintf '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'")
     } else {
-        let escaped_ops = right_agent::codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
+        let escaped_ops = right_codegen::OPERATING_INSTRUCTIONS.replace('\'', "'\\''");
         let mut sections =
             format!("\nprintf '\\n## Operating Instructions\\n'\nprintf '%s\\n' '{escaped_ops}'");
         for s in PROMPT_SECTIONS {

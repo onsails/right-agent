@@ -239,7 +239,7 @@ pub async fn run_delivery_loop(
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     idle_ts: Arc<IdleTimestamp>,
     ssh_config_path: Option<PathBuf>,
-    internal_client: std::sync::Arc<right_agent::mcp::internal_client::InternalClient>,
+    internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
     shutdown: tokio_util::sync::CancellationToken,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
@@ -449,7 +449,7 @@ async fn deliver_through_session(
     target_thread_id: Option<i64>,
     ssh_config_path: Option<&Path>,
     session_id: Option<String>,
-    internal_client: &right_agent::mcp::internal_client::InternalClient,
+    internal_client: &right_mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
     upgrade_lock: &tokio::sync::RwLock<()>,
     session_locks: crate::telegram::SessionLocks,
@@ -514,14 +514,14 @@ async fn deliver_through_session(
         )
     };
     let base_prompt =
-        right_agent::codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+        right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
     {
         Ok(resp) => {
             if resp.instructions.trim().len()
-                > right_agent::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                > right_codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
                     .trim()
                     .len()
             {

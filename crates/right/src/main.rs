@@ -850,7 +850,7 @@ async fn main() -> miette::Result<()> {
             let mut refresh_senders_map = std::collections::HashMap::new();
             let mut reconnect_managers_map: std::collections::HashMap<
                 String,
-                tokio::sync::Mutex<right_agent::mcp::reconnect::ReconnectManager>,
+                tokio::sync::Mutex<right_mcp::reconnect::ReconnectManager>,
             > = std::collections::HashMap::new();
             let http_client = reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
@@ -883,16 +883,16 @@ async fn main() -> miette::Result<()> {
                 #[allow(clippy::type_complexity)]
                 let mut oauth_entries: Vec<(
                     String,
-                    right_agent::mcp::refresh::OAuthServerState,
+                    right_mcp::refresh::OAuthServerState,
                     std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
                 )> = Vec::new();
                 let mut oauth_server_names = std::collections::HashSet::<String>::new();
 
                 match right_db::open_connection(&agent_dir, true) {
-                    Ok(conn) => match right_agent::mcp::credentials::db_list_servers(&conn) {
+                    Ok(conn) => match right_mcp::credentials::db_list_servers(&conn) {
                         Ok(servers) => {
                             for s in servers {
-                                let auth_method = right_agent::mcp::proxy::AuthMethod::from_db(
+                                let auth_method = right_mcp::proxy::AuthMethod::from_db(
                                     s.auth_type.as_deref(),
                                     s.auth_header.as_deref(),
                                 );
@@ -911,7 +911,7 @@ async fn main() -> miette::Result<()> {
                                             .unwrap_or_else(|_| chrono::Utc::now());
                                         oauth_entries.push((
                                             s.name.clone(),
-                                            right_agent::mcp::refresh::OAuthServerState {
+                                            right_mcp::refresh::OAuthServerState {
                                                 refresh_token: s.refresh_token.clone(),
                                                 token_endpoint: te.clone(),
                                                 client_id: cid.clone(),
@@ -924,7 +924,7 @@ async fn main() -> miette::Result<()> {
                                     }
                                 }
 
-                                let backend = right_agent::mcp::proxy::ProxyBackend::new(
+                                let backend = right_mcp::proxy::ProxyBackend::new(
                                     s.name.clone(),
                                     agent_dir.clone(),
                                     s.url.clone(),
@@ -948,7 +948,7 @@ async fn main() -> miette::Result<()> {
                 // Clone proxies for reconnect tasks before moving into registry.
                 let proxies_snapshot: Vec<(
                     String,
-                    std::sync::Arc<right_agent::mcp::proxy::ProxyBackend>,
+                    std::sync::Arc<right_mcp::proxy::ProxyBackend>,
                 )> = proxies
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
@@ -970,7 +970,7 @@ async fn main() -> miette::Result<()> {
                                         .as_deref()
                                         .unwrap_or(agent_name.as_str());
                                     let budget = mem_config.recall_budget.to_string();
-                                    let client = right_agent::memory::hindsight::HindsightClient::new(
+                                    let client = right_memory::hindsight::HindsightClient::new(
                                         api_key,
                                         bank_id,
                                         &budget,
@@ -978,7 +978,7 @@ async fn main() -> miette::Result<()> {
                                         None,
                                     );
                                     let wrapper = std::sync::Arc::new(
-                                        right_agent::memory::ResilientHindsight::new(
+                                        right_memory::ResilientHindsight::new(
                                             client,
                                             agent_dir.clone(),
                                             "aggregator",
@@ -1014,8 +1014,8 @@ async fn main() -> miette::Result<()> {
 
                 // Spawn per-agent refresh scheduler.
                 let (refresh_tx, refresh_rx) =
-                    tokio::sync::mpsc::channel::<right_agent::mcp::refresh::RefreshMessage>(32);
-                tokio::spawn(right_agent::mcp::refresh::run_refresh_scheduler(
+                    tokio::sync::mpsc::channel::<right_mcp::refresh::RefreshMessage>(32);
+                tokio::spawn(right_mcp::refresh::run_refresh_scheduler(
                     agent_dir.clone(),
                     refresh_rx,
                 ));
@@ -1030,9 +1030,9 @@ async fn main() -> miette::Result<()> {
                 // are handled by the reconnect task which sends NewEntry after refresh.
                 for (name, (state, token_arc)) in &oauth_map {
                     if state.refresh_token.is_some() {
-                        let due_in = right_agent::mcp::refresh::refresh_due_in(state);
+                        let due_in = right_mcp::refresh::refresh_due_in(state);
                         if due_in > std::time::Duration::ZERO {
-                            let msg = right_agent::mcp::refresh::RefreshMessage::NewEntry {
+                            let msg = right_mcp::refresh::RefreshMessage::NewEntry {
                                 server_name: name.clone(),
                                 state: state.clone(),
                                 token: token_arc.clone(),
@@ -1049,7 +1049,7 @@ async fn main() -> miette::Result<()> {
                 }
 
                 // Spawn background reconnect tasks (fire-and-forget).
-                let mut reconnect_mgr = right_agent::mcp::reconnect::ReconnectManager::new(
+                let mut reconnect_mgr = right_mcp::reconnect::ReconnectManager::new(
                     refresh_tx.clone(),
                     agent_dir.clone(),
                 );
@@ -1059,7 +1059,7 @@ async fn main() -> miette::Result<()> {
 
                     if let Some((oauth_state, token_arc)) = oauth_map.get(&server_name) {
                         // OAuth server — check token expiry before connecting.
-                        let due_in = right_agent::mcp::refresh::refresh_due_in(oauth_state);
+                        let due_in = right_mcp::refresh::refresh_due_in(oauth_state);
                         tracing::info!(
                             agent = agent_name.as_str(),
                             server = server_name.as_str(),
@@ -1082,7 +1082,7 @@ async fn main() -> miette::Result<()> {
                                 // No refresh_token — cannot refresh.
                                 let b = backend.clone();
                                 tokio::spawn(async move {
-                                    b.set_status(right_agent::mcp::proxy::BackendStatus::NeedsAuth)
+                                    b.set_status(right_mcp::proxy::BackendStatus::NeedsAuth)
                                         .await;
                                 });
                             }
@@ -1107,7 +1107,7 @@ async fn main() -> miette::Result<()> {
                         );
                         let b = backend.clone();
                         tokio::spawn(async move {
-                            b.set_status(right_agent::mcp::proxy::BackendStatus::NeedsAuth)
+                            b.set_status(right_mcp::proxy::BackendStatus::NeedsAuth)
                                 .await;
                         });
                     } else {
@@ -1515,13 +1515,13 @@ fn cmd_init(
             },
             heartbeat_path: None,
         };
-        right_agent::codegen::run_agent_codegen(
+        right_codegen::run_agent_codegen(
             home,
             std::slice::from_ref(&agent_def),
             &self_exe,
             false,
         )?;
-        right_agent::codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
 
         // Create sandbox if openshell mode.
         if matches!(sandbox, right_agent::agent::types::SandboxMode::Openshell) {
@@ -1972,13 +1972,13 @@ fn cmd_agent_init(
             },
             heartbeat_path: None,
         };
-        right_agent::codegen::run_agent_codegen(
+        right_codegen::run_agent_codegen(
             home,
             std::slice::from_ref(&agent_def),
             &self_exe,
             false,
         )?;
-        right_agent::codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
     }
 
     // Create sandbox for openshell agents.
@@ -2406,7 +2406,7 @@ async fn cmd_up(
 
     // Run cross-agent codegen: token map, policy validation,
     // cloudflared config, process-compose.yaml, and runtime state.
-    right_agent::codegen::run_agent_codegen(home, &agents, &self_exe, debug)?;
+    right_codegen::run_agent_codegen(home, &agents, &self_exe, debug)?;
     tracing::info!(
         elapsed_ms = t_phase.elapsed().as_millis() as u64,
         "up: cross_agent_codegen"
@@ -2612,13 +2612,13 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    right_agent::codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
+    right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
     client.reload_configuration().await?;
 
     // Notify aggregator to pick up new agents from updated token map
     let socket_path = home.join("run/internal.sock");
-    let internal = right_agent::mcp::internal_client::InternalClient::new(&socket_path);
+    let internal = right_mcp::internal_client::InternalClient::new(&socket_path);
     match internal.reload().await {
         Ok(resp) => {
             if !resp.added.is_empty() {
@@ -2860,7 +2860,7 @@ async fn cmd_agent_restore(
             .into_diagnostic()
             .map_err(|e| miette::miette!("failed to resolve self exe: {e:#}"))?;
 
-        right_agent::codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+        right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
 
         // Prepare staging dir.
         let staging = agent_dir.join("staging");
@@ -3916,7 +3916,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let agent_dir = make_agent_dir(&tmp, "agent-skills");
 
-        right_agent::codegen::install_builtin_skills(
+        right_codegen::install_builtin_skills(
             &agent_dir,
             &right_agent::agent::types::MemoryProvider::File,
         )
@@ -4406,7 +4406,7 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
         .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent_name))?;
     std::fs::write(
         claude_dir.join("reply-schema.json"),
-        right_agent::codegen::REPLY_SCHEMA_JSON,
+        right_codegen::REPLY_SCHEMA_JSON,
     )
     .map_err(|e| {
         miette::miette!(
@@ -4416,7 +4416,7 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     })?;
     std::fs::write(
         claude_dir.join("cron-schema.json"),
-        right_agent::codegen::CRON_SCHEMA_JSON,
+        right_codegen::CRON_SCHEMA_JSON,
     )
     .map_err(|e| {
         miette::miette!(
@@ -4431,14 +4431,14 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
         .as_ref()
         .map(|c| *c.sandbox_mode())
         .unwrap_or_default();
-    let base_prompt = right_agent::codegen::generate_system_prompt(
+    let base_prompt = right_codegen::generate_system_prompt(
         &agent.name,
         &sandbox_mode,
         &agent.path.to_string_lossy(),
     );
     let mut prompt = base_prompt;
     prompt.push_str("\n## Operating Instructions\n");
-    prompt.push_str(right_agent::codegen::OPERATING_INSTRUCTIONS);
+    prompt.push_str(right_codegen::OPERATING_INSTRUCTIONS);
     prompt.push('\n');
     for (file, header) in [
         ("IDENTITY.md", "## Your Identity"),
@@ -4501,7 +4501,7 @@ fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()>
             .unwrap_or("?");
         let conn = right_db::open_connection(agent_dir, false)
             .map_err(|e| miette::miette!("open data.db for {agent_name}: {e:#}"))?;
-        let servers = right_agent::mcp::credentials::db_list_servers(&conn)
+        let servers = right_mcp::credentials::db_list_servers(&conn)
             .map_err(|e| miette::miette!("db_list_servers for {agent_name}: {e:#}"))?;
         for s in &servers {
             println!("{agent_name}  {} [{}]", s.name, s.url);
@@ -4677,7 +4677,7 @@ async fn perform_migration(
     let self_exe = std::env::current_exe()
         .into_diagnostic()
         .map_err(|e| miette::miette!("failed to resolve self exe: {e:#}"))?;
-    right_agent::codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
+    right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
 
     let staging = agent_dir.join("staging");
     right_core::openshell::prepare_staging_dir(&agent_dir, &staging)?;

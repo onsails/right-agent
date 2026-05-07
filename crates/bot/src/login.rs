@@ -91,7 +91,7 @@ pub async fn request_token(
 /// Open DB and delete any existing auth token (it's stale if we're here).
 fn open_db_and_delete_stale(agent_dir: &Path) -> Result<(), String> {
     let conn = right_db::open_connection(agent_dir, false).map_err(|e| format!("open db: {e}"))?;
-    right_agent::mcp::credentials::delete_auth_token(&conn)
+    right_mcp::credentials::delete_auth_token(&conn)
         .map_err(|e| format!("delete stale token: {e}"))?;
     Ok(())
 }
@@ -99,7 +99,7 @@ fn open_db_and_delete_stale(agent_dir: &Path) -> Result<(), String> {
 /// Save token to DB.
 fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
     let conn = right_db::open_connection(agent_dir, false).map_err(|e| format!("open db: {e}"))?;
-    right_agent::mcp::credentials::save_auth_token(&conn, token)
+    right_mcp::credentials::save_auth_token(&conn, token)
         .map_err(|e| format!("save token: {e}"))?;
     Ok(())
 }
@@ -109,7 +109,7 @@ fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
 /// `agent_dir` is the agent directory (data.db lives inside it).
 pub fn load_auth_token(agent_dir: &Path) -> Option<String> {
     let conn = right_db::open_connection(agent_dir, false).ok()?;
-    right_agent::mcp::credentials::get_auth_token(&conn)
+    right_mcp::credentials::get_auth_token(&conn)
         .ok()
         .flatten()
 }
@@ -141,7 +141,7 @@ mod tests {
         let dir = tempdir().unwrap();
         init_db(dir.path());
         let conn = right_db::open_connection(dir.path(), false).unwrap();
-        right_agent::mcp::credentials::save_auth_token(&conn, "my-token").unwrap();
+        right_mcp::credentials::save_auth_token(&conn, "my-token").unwrap();
         assert_eq!(load_auth_token(dir.path()).as_deref(), Some("my-token"));
     }
 
@@ -194,7 +194,7 @@ mod tests {
         // Pre-seed a stale token
         {
             let conn = right_db::open_connection(dir.path(), false).unwrap();
-            right_agent::mcp::credentials::save_auth_token(&conn, "stale-token").unwrap();
+            right_mcp::credentials::save_auth_token(&conn, "stale-token").unwrap();
         }
         assert_eq!(load_auth_token(dir.path()).as_deref(), Some("stale-token"));
 

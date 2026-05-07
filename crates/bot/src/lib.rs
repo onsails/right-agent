@@ -192,7 +192,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let self_exe =
         std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("right"));
     let agent_def = right_agent::agent::discover_single_agent(&agent_dir)?;
-    right_agent::codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
+    right_codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
     tracing::info!(agent = %args.agent, "per-agent codegen complete");
 
     // Parse config after codegen (secret may have been generated in agent.yaml).
@@ -230,8 +230,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .unwrap_or_default();
 
     let (hindsight_wrapper, prefetch_cache): (
-        Option<Arc<right_agent::memory::ResilientHindsight>>,
-        Option<right_agent::memory::prefetch::PrefetchCache>,
+        Option<Arc<right_memory::ResilientHindsight>>,
+        Option<right_memory::prefetch::PrefetchCache>,
     ) = match &memory_provider {
         right_agent::agent::types::MemoryProvider::Hindsight => {
             let mem_config = config.memory.as_ref().unwrap();
@@ -250,7 +250,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 .unwrap_or(&args.agent)
                 .to_string();
             let budget = mem_config.recall_budget.to_string();
-            let client = right_agent::memory::hindsight::HindsightClient::new(
+            let client = right_memory::hindsight::HindsightClient::new(
                 &api_key,
                 &bank_id,
                 &budget,
@@ -258,14 +258,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                 None,
             );
 
-            let wrapper = Arc::new(right_agent::memory::ResilientHindsight::new(
+            let wrapper = Arc::new(right_memory::ResilientHindsight::new(
                 client,
                 agent_dir.clone(),
                 "bot",
             ));
 
             match wrapper
-                .get_or_create_bank(right_agent::memory::resilient::POLICY_STARTUP_BANK)
+                .get_or_create_bank(right_memory::resilient::POLICY_STARTUP_BANK)
                 .await
             {
                 Ok(profile) => tracing::info!(
@@ -273,12 +273,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                     bank_id = %profile.bank_id,
                     "Hindsight bank ready"
                 ),
-                Err(right_agent::memory::ResilientError::Upstream(e)) => match e.classify() {
-                    right_agent::memory::ErrorKind::Auth => tracing::error!(
+                Err(right_memory::ResilientError::Upstream(e)) => match e.classify() {
+                    right_memory::ErrorKind::Auth => tracing::error!(
                         agent = %args.agent,
                         "Hindsight AUTH failed at startup: {e:#} — booting in degraded mode"
                     ),
-                    right_agent::memory::ErrorKind::Client => tracing::error!(
+                    right_memory::ErrorKind::Client => tracing::error!(
                         agent = %args.agent,
                         "Hindsight 4xx at startup: {e:#} — payload or API-drift bug"
                     ),
@@ -293,7 +293,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                                 match w_bg
                                     .get_or_create_bank(
-                                        right_agent::memory::resilient::POLICY_STARTUP_BANK,
+                                        right_memory::resilient::POLICY_STARTUP_BANK,
                                     )
                                     .await
                                 {
@@ -310,12 +310,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         });
                     }
                 },
-                Err(right_agent::memory::ResilientError::CircuitOpen { .. }) => {
+                Err(right_memory::ResilientError::CircuitOpen { .. }) => {
                     tracing::warn!("unexpected CircuitOpen at startup");
                 }
             }
 
-            let cache = right_agent::memory::prefetch::PrefetchCache::new();
+            let cache = right_memory::prefetch::PrefetchCache::new();
             (Some(wrapper), Some(cache))
         }
         right_agent::agent::types::MemoryProvider::File => (None, None),
@@ -352,7 +352,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     }
 
     // Re-install skills with correct memory variant.
-    right_agent::codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
+    right_codegen::skills::install_builtin_skills(&agent_dir, &memory_provider)?;
 
     let is_sandboxed = matches!(
         config.sandbox_mode(),
@@ -423,7 +423,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     {
         let conn = right_db::open_connection(&agent_dir, false)
             .map_err(|e| miette::miette!("failed to open data.db for MCP check: {e:#}"))?;
-        match right_agent::mcp::credentials::db_list_servers(&conn) {
+        match right_mcp::credentials::db_list_servers(&conn) {
             Ok(servers) => {
                 for s in &servers {
                     tracing::info!(
@@ -480,7 +480,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     // Internal API client for bot→aggregator IPC (MCP add/remove/set-token)
     let internal_socket = home.join("run/internal.sock");
-    let internal_client = Arc::new(right_agent::mcp::internal_client::InternalClient::new(
+    let internal_client = Arc::new(right_mcp::internal_client::InternalClient::new(
         internal_socket,
     ));
 
@@ -518,7 +518,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .secret
         .clone()
         .ok_or_else(|| miette::miette!("agent.yaml missing required `secret:` field"))?;
-    let webhook_secret = right_agent::mcp::derive_token(&agent_secret, "tg-webhook")?;
+    let webhook_secret = right_mcp::derive_token(&agent_secret, "tg-webhook")?;
 
     // Build the webhook listener + router. The listener is consumed by
     // run_telegram → dispatcher.dispatch_with_listener; the router is mounted
@@ -644,7 +644,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         // Regenerate policy with resolved host IP and apply.
         let network_policy = config.network_policy;
-        let policy_content = right_agent::codegen::policy::generate_policy(
+        let policy_content = right_codegen::policy::generate_policy(
             right_agent::runtime::MCP_HTTP_PORT,
             &network_policy,
             host_ip,
@@ -685,7 +685,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         if drifted {
             // Still write so a later `right agent config`-triggered
             // migration sees the fresh policy; skip apply to avoid crash-loop.
-            right_agent::codegen::contract::write_regenerated(&policy_path, &policy_content)?;
+            right_codegen::contract::write_regenerated(&policy_path, &policy_content)?;
             tracing::warn!(
                 agent = %args.agent,
                 "Filesystem policy drift detected for '{}'. Landlock rules in the running sandbox do not match policy.yaml. Run `right agent config {}` (accept defaults) to trigger sandbox migration, or `right agent backup {} --sandbox-only` first if you want a recovery point.",
@@ -693,7 +693,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             );
         } else {
             tracing::info!(agent = %args.agent, "reusing existing sandbox, applying policy with host_ip={:?}", host_ip);
-            right_agent::codegen::contract::write_and_apply_sandbox_policy(
+            right_codegen::contract::write_and_apply_sandbox_policy(
                 &sandbox,
                 &policy_path,
                 &policy_content,
@@ -997,7 +997,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 /// `!Send` and must be driven from a `LocalSet`. Honours `shutdown` so the
 /// loop exits cleanly before the runtime starts tearing down its time driver.
 async fn run_drain_loop(
-    wrapper: std::sync::Arc<right_agent::memory::ResilientHindsight>,
+    wrapper: std::sync::Arc<right_memory::ResilientHindsight>,
     agent_db: std::path::PathBuf,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
@@ -1012,7 +1012,7 @@ async fn run_drain_loop(
         }
         if !matches!(
             wrapper.status(),
-            right_agent::memory::MemoryStatus::Healthy
+            right_memory::MemoryStatus::Healthy
         ) {
             continue;
         }
@@ -1024,10 +1024,10 @@ async fn run_drain_loop(
             }
         };
         let w_call = wrapper.clone();
-        let report = right_agent::memory::retain_queue::drain_tick(&conn, |items| {
+        let report = right_memory::retain_queue::drain_tick(&conn, |items| {
             let w = w_call.clone();
             async move {
-                let item = right_agent::memory::hindsight::RetainItem {
+                let item = right_memory::hindsight::RetainItem {
                     content: items[0].content.clone(),
                     context: items[0].context.clone(),
                     document_id: items[0].document_id.clone(),
@@ -1098,7 +1098,7 @@ fn migrate_oauth_state_to_db(agent_dir: &std::path::Path) {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            if let Err(e) = right_agent::mcp::credentials::db_set_oauth_state(
+            if let Err(e) = right_mcp::credentials::db_set_oauth_state(
                 &conn,
                 name,
                 "",

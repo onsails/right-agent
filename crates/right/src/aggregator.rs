@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
-use right_agent::mcp::proxy::ProxyBackend;
-use right_agent::mcp::refresh::RefreshMessage;
-use right_agent::mcp::tool_error::tool_error;
+use right_mcp::proxy::ProxyBackend;
+use right_mcp::refresh::RefreshMessage;
+use right_mcp::tool_error::tool_error;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult,
@@ -40,7 +40,7 @@ pub(crate) type RefreshSenders = Arc<HashMap<String, tokio::sync::mpsc::Sender<R
 
 /// Per-agent reconnect manager map (one manager per agent, mutex-protected for mutable access).
 pub(crate) type ReconnectManagers =
-    Arc<HashMap<String, tokio::sync::Mutex<right_agent::mcp::reconnect::ReconnectManager>>>;
+    Arc<HashMap<String, tokio::sync::Mutex<right_mcp::reconnect::ReconnectManager>>>;
 
 /// Agent identity resolved from a Bearer token.
 #[derive(Clone, Debug)]
@@ -104,11 +104,11 @@ pub(crate) fn split_prefix(tool_name: &str) -> Option<(&str, &str)> {
 
 /// MCP backend for Hindsight memory tools.
 pub(crate) struct HindsightBackend {
-    client: std::sync::Arc<right_agent::memory::ResilientHindsight>,
+    client: std::sync::Arc<right_memory::ResilientHindsight>,
 }
 
 impl HindsightBackend {
-    pub fn new(client: std::sync::Arc<right_agent::memory::ResilientHindsight>) -> Self {
+    pub fn new(client: std::sync::Arc<right_memory::ResilientHindsight>) -> Self {
         Self { client }
     }
 
@@ -193,7 +193,7 @@ impl HindsightBackend {
                         None,
                         None,
                         None,
-                        right_agent::memory::resilient::POLICY_MCP_RETAIN,
+                        right_memory::resilient::POLICY_MCP_RETAIN,
                     )
                     .await;
                 match res {
@@ -206,15 +206,15 @@ impl HindsightBackend {
                             serde_json::to_string_pretty(&json)?,
                         )]))
                     }
-                    Err(right_agent::memory::ResilientError::Upstream(e)) => {
+                    Err(right_memory::ResilientError::Upstream(e)) => {
                         // ResilientHindsight::retain enqueues for later drain on
                         // Transient/RateLimited. Surface that as a success with a
                         // "queued" marker so the agent does not report a hard
                         // failure nor retry (which would double-enqueue — the
                         // pending_retains queue does not dedup).
                         match e.classify() {
-                            right_agent::memory::ErrorKind::Transient
-                            | right_agent::memory::ErrorKind::RateLimited => {
+                            right_memory::ErrorKind::Transient
+                            | right_memory::ErrorKind::RateLimited => {
                                 let json = serde_json::json!({
                                     "status": "queued",
                                     "reason": "upstream degraded, queued for retry on next drain tick",
@@ -224,15 +224,15 @@ impl HindsightBackend {
                                     serde_json::to_string_pretty(&json)?,
                                 )]))
                             }
-                            right_agent::memory::ErrorKind::Auth => Ok(
+                            right_memory::ErrorKind::Auth => Ok(
                                 tool_error(
                                     "upstream_auth",
                                     format!("{e:#}"),
                                     None,
                                 ),
                             ),
-                            right_agent::memory::ErrorKind::Client
-                            | right_agent::memory::ErrorKind::Malformed => Ok(
+                            right_memory::ErrorKind::Client
+                            | right_memory::ErrorKind::Malformed => Ok(
                                 tool_error(
                                     "upstream_invalid",
                                     format!("{e:#}"),
@@ -241,13 +241,13 @@ impl HindsightBackend {
                             ),
                         }
                     }
-                    Err(right_agent::memory::ResilientError::CircuitOpen { retry_after }) => {
+                    Err(right_memory::ResilientError::CircuitOpen { retry_after }) => {
                         // AuthFailed circuits won't recover without user action — queueing
                         // would grow the backlog indefinitely, so return a hard auth error
                         // rather than a silent queue. retain() honors the same distinction.
                         if matches!(
                             self.client.status(),
-                            right_agent::memory::MemoryStatus::AuthFailed { .. }
+                            right_memory::MemoryStatus::AuthFailed { .. }
                         ) {
                             Ok(tool_error(
                                 "upstream_auth",
@@ -277,7 +277,7 @@ impl HindsightBackend {
                         query,
                         None,
                         None,
-                        right_agent::memory::resilient::POLICY_MCP_RECALL,
+                        right_memory::resilient::POLICY_MCP_RECALL,
                     )
                     .await;
                 match res {
@@ -296,7 +296,7 @@ impl HindsightBackend {
                     .ok_or_else(|| anyhow::anyhow!("missing required param: query"))?;
                 let res = self
                     .client
-                    .reflect(query, right_agent::memory::resilient::POLICY_MCP_REFLECT)
+                    .reflect(query, right_memory::resilient::POLICY_MCP_REFLECT)
                     .await;
                 match res {
                     Ok(result) => {
@@ -317,25 +317,25 @@ impl HindsightBackend {
     /// does not use this helper.
     fn classify_resilient_error(
         &self,
-        e: right_agent::memory::ResilientError,
+        e: right_memory::ResilientError,
     ) -> CallToolResult {
         match e {
-            right_agent::memory::ResilientError::Upstream(ref inner) => match inner.classify() {
-                right_agent::memory::ErrorKind::Transient
-                | right_agent::memory::ErrorKind::RateLimited => {
+            right_memory::ResilientError::Upstream(ref inner) => match inner.classify() {
+                right_memory::ErrorKind::Transient
+                | right_memory::ErrorKind::RateLimited => {
                     tool_error(
                         "upstream_unreachable",
                         format!("{e:#}"),
                         None,
                     )
                 }
-                right_agent::memory::ErrorKind::Auth => tool_error(
+                right_memory::ErrorKind::Auth => tool_error(
                     "upstream_auth",
                     format!("{e:#}"),
                     None,
                 ),
-                right_agent::memory::ErrorKind::Client
-                | right_agent::memory::ErrorKind::Malformed => {
+                right_memory::ErrorKind::Client
+                | right_memory::ErrorKind::Malformed => {
                     tool_error(
                         "upstream_invalid",
                         format!("{e:#}"),
@@ -343,10 +343,10 @@ impl HindsightBackend {
                     )
                 }
             },
-            right_agent::memory::ResilientError::CircuitOpen { retry_after } => {
+            right_memory::ResilientError::CircuitOpen { retry_after } => {
                 if matches!(
                     self.client.status(),
-                    right_agent::memory::MemoryStatus::AuthFailed { .. }
+                    right_memory::MemoryStatus::AuthFailed { .. }
                 ) {
                     tool_error(
                         "upstream_auth",
@@ -425,7 +425,7 @@ impl BackendRegistry {
             let tool_count = handle.try_tools().map(|t| t.len()).unwrap_or(0);
             lines.push(format!(
                 "- {name}: {status} ({tool_count} tools) url={url}",
-                url = right_agent::mcp::credentials::redact_url(handle.url())
+                url = right_mcp::credentials::redact_url(handle.url())
             ));
         }
         Ok(CallToolResult::success(vec![Content::text(
@@ -992,8 +992,8 @@ mod tests {
     fn make_hindsight_backend(
         url: &str,
     ) -> (tempfile::TempDir, std::sync::Arc<HindsightBackend>) {
-        use right_agent::memory::ResilientHindsight;
-        use right_agent::memory::hindsight::HindsightClient;
+        use right_memory::ResilientHindsight;
+        use right_memory::hindsight::HindsightClient;
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let _ = right_db::open_connection(&dir, true).unwrap();

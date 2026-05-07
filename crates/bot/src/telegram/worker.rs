@@ -132,11 +132,11 @@ pub struct WorkerContext {
     /// Shared idle timestamp — worker updates after each reply sent.
     pub idle_timestamp: Arc<std::sync::atomic::AtomicI64>,
     /// Internal API client for aggregator IPC (Unix socket).
-    pub internal_client: std::sync::Arc<right_agent::mcp::internal_client::InternalClient>,
+    pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
     /// Hindsight client for auto-retain/recall (None when memory.provider=file).
-    pub hindsight: Option<std::sync::Arc<right_agent::memory::ResilientHindsight>>,
+    pub hindsight: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
     /// Prefetch cache for auto-recall results (None when memory.provider=file).
-    pub prefetch_cache: Option<right_agent::memory::prefetch::PrefetchCache>,
+    pub prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
     /// RwLock gate — worker acquires read lock before invoke_cc to block during upgrades.
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// STT context — None when stt.enabled=false or whisper model not yet cached.
@@ -412,7 +412,7 @@ fn build_retain_content(user_text: &str, assistant_text: Option<&str>, now_rfc33
 /// session UUID with `update_mode: "append"`, so Hindsight processes
 /// incrementally regardless of which side fires.
 fn spawn_auto_retain(
-    hs: Arc<right_agent::memory::ResilientHindsight>,
+    hs: Arc<right_memory::ResilientHindsight>,
     user_text: String,
     assistant_text: Option<String>,
     document_id: String,
@@ -428,7 +428,7 @@ fn spawn_auto_retain(
                 Some(&document_id),
                 Some("append"),
                 Some(&tags),
-                right_agent::memory::resilient::POLICY_AUTO_RETAIN,
+                right_memory::resilient::POLICY_AUTO_RETAIN,
             )
             .await
         {
@@ -533,10 +533,10 @@ fn enqueue_background_job(
 /// Returns `None` when memory is healthy and no retain-side drops have
 /// accumulated in the last 24h — no marker is injected in that case.
 fn build_memory_marker(
-    status: right_agent::memory::MemoryStatus,
+    status: right_memory::MemoryStatus,
     client_drops_24h: usize,
 ) -> Option<String> {
-    use right_agent::memory::MemoryStatus as S;
+    use right_memory::MemoryStatus as S;
     match status {
         S::AuthFailed { .. } => Some(
             "<memory-status>unavailable — memory provider authentication failed, \
@@ -1380,21 +1380,21 @@ pub fn spawn_worker(
                             &recall_query,
                             Some(&recall_tags_v),
                             Some("any"),
-                            right_agent::memory::resilient::POLICY_PREFETCH,
+                            right_memory::resilient::POLICY_PREFETCH,
                         )
                         .await
                     {
                         Ok(results) if !results.is_empty() => {
-                            let content = right_agent::memory::hindsight::join_recall_texts(&results);
+                            let content = right_memory::hindsight::join_recall_texts(&results);
                             if let Some(ref c) = cache {
                                 c.put(&cache_key, content).await;
                             }
                         }
                         Ok(_) => {}
-                        Err(right_agent::memory::ResilientError::CircuitOpen { .. }) => {
+                        Err(right_memory::ResilientError::CircuitOpen { .. }) => {
                             tracing::warn!("prefetch recall skipped: circuit open");
                         }
-                        Err(right_agent::memory::ResilientError::Upstream(e)) => {
+                        Err(right_memory::ResilientError::Upstream(e)) => {
                             tracing::warn!("prefetch recall failed: {e:#}");
                         }
                     }
@@ -1677,7 +1677,7 @@ async fn invoke_cc(
             Ok(resp) => {
                 // Only include if there's actual content beyond the header
                 if resp.instructions.trim().len()
-                    > right_agent::codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
+                    > right_codegen::mcp_instructions::MCP_INSTRUCTIONS_HEADER
                         .trim()
                         .len()
                 {
@@ -1706,7 +1706,7 @@ async fn invoke_cc(
         )
     };
     let base_prompt =
-        right_agent::codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
 
     let memory_mode = if ctx.hindsight.is_some() {
         let sandbox_path = if ctx.ssh_config_path.is_some() {
@@ -1737,23 +1737,23 @@ async fn invoke_cc(
                     truncated_query,
                     Some(&recall_tags_v),
                     Some("any"),
-                    right_agent::memory::resilient::POLICY_BLOCKING_RECALL,
+                    right_memory::resilient::POLICY_BLOCKING_RECALL,
                 )
                 .await
             {
                 Ok(results) if !results.is_empty() => {
-                    let content = right_agent::memory::hindsight::join_recall_texts(&results);
+                    let content = right_memory::hindsight::join_recall_texts(&results);
                     if let Some(ref cache) = ctx.prefetch_cache {
                         cache.put(&cache_key, content.clone()).await;
                     }
                     Some(content)
                 }
                 Ok(_) => None,
-                Err(right_agent::memory::ResilientError::CircuitOpen { .. }) => {
+                Err(right_memory::ResilientError::CircuitOpen { .. }) => {
                     tracing::warn!(?chat_id, "blocking recall skipped: circuit open");
                     None
                 }
-                Err(right_agent::memory::ResilientError::Upstream(e)) => {
+                Err(right_memory::ResilientError::Upstream(e)) => {
                     tracing::warn!(?chat_id, "blocking recall failed: {e:#}");
                     None
                 }
@@ -1766,7 +1766,7 @@ async fn invoke_cc(
             .hindsight
             .as_ref()
             .map(|h| h.status())
-            .unwrap_or(right_agent::memory::MemoryStatus::Healthy);
+            .unwrap_or(right_memory::MemoryStatus::Healthy);
         let client_drops_24h = if let Some(ref h) = ctx.hindsight {
             h.client_drops_24h().await
         } else {
@@ -3393,8 +3393,8 @@ mod bg_request_race_tests {
 #[cfg(test)]
 mod auto_retain_tests {
     use super::*;
-    use right_agent::memory::ResilientHindsight;
-    use right_agent::memory::hindsight::HindsightClient;
+    use right_memory::ResilientHindsight;
+    use right_memory::hindsight::HindsightClient;
 
     /// Spawn a one-shot mock Hindsight server that captures the first POST's
     /// request line and body, then returns a 200. Mirrors the helper in
