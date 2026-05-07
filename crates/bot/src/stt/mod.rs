@@ -1,8 +1,8 @@
 //! Speech-to-text pipeline: ffmpeg → PCM → whisper-rs → text.
 
-pub mod decode;
-pub mod markers;
-pub mod whisper;
+pub(crate) mod decode;
+pub(crate) mod markers;
+pub(crate) mod whisper;
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -23,7 +23,7 @@ pub enum SttError {
     FileTooLarge { size_mb: u64, max_mb: u64 },
 }
 
-pub const MAX_AUDIO_FILE_MB: u64 = 25;
+pub(crate) const MAX_AUDIO_FILE_MB: u64 = 25;
 
 #[derive(Debug)]
 pub struct TranscriptionResult {
@@ -88,7 +88,7 @@ pub struct SttContext {
 
 /// Build the final text for a message: prepend each marker on its own line,
 /// blank line, then the user text (if any).
-pub fn combine_markers_with_text(markers: &[String], user_text: Option<&str>) -> Option<String> {
+pub(crate) fn combine_markers_with_text(markers: &[String], user_text: Option<&str>) -> Option<String> {
     if markers.is_empty() {
         return user_text.map(str::to_owned);
     }
@@ -106,7 +106,7 @@ pub fn combine_markers_with_text(markers: &[String], user_text: Option<&str>) ->
 /// Try to transcribe `host_path`. On success, returns the success marker.
 /// On any error, returns the corresponding error marker. Always returns
 /// some marker — the caller injects it into the payload.
-pub async fn transcribe_or_marker(
+pub(crate) async fn transcribe_or_marker(
     ctx: &SttContext,
     kind: markers::VoiceKind,
     host_path: &std::path::Path,

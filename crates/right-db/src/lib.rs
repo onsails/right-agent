@@ -5,6 +5,8 @@
 //! `right-agent`, `right-bot`) call `open_connection` here; new tables
 //! are added by editing the central `migrations::MIGRATIONS` array.
 
+#![warn(unreachable_pub)]
+
 pub mod error;
 pub mod migrations;
 

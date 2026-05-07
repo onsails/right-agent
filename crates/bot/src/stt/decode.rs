@@ -7,7 +7,7 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-pub async fn decode_to_pcm_f32(input: &Path) -> Result<Vec<f32>, SttError> {
+pub(crate) async fn decode_to_pcm_f32(input: &Path) -> Result<Vec<f32>, SttError> {
     if which::which("ffmpeg").is_err() {
         return Err(SttError::FfmpegNotFound);
     }

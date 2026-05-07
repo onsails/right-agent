@@ -10,23 +10,22 @@ use crate::telegram::handler::IdleTimestamp;
 
 /// A pending cron result ready for delivery.
 #[derive(Debug)]
-pub struct PendingCronResult {
+pub(crate) struct PendingCronResult {
     pub id: String,
     pub job_name: String,
     pub notify_json: String,
     pub summary: String,
-    pub finished_at: String,
     pub status: String,
     pub target_chat_id: Option<i64>,
     pub target_thread_id: Option<i64>,
 }
 
 /// Query the oldest undelivered cron result with a non-null notify_json.
-pub fn fetch_pending(
+pub(crate) fn fetch_pending(
     conn: &rusqlite::Connection,
 ) -> Result<Option<PendingCronResult>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, job_name, notify_json, summary, finished_at, status, target_chat_id, target_thread_id \
+        "SELECT id, job_name, notify_json, summary, status, target_chat_id, target_thread_id \
          FROM cron_runs \
          WHERE status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
          ORDER BY finished_at ASC LIMIT 1",
@@ -37,10 +36,9 @@ pub fn fetch_pending(
             job_name: row.get(1)?,
             notify_json: row.get(2)?,
             summary: row.get(3)?,
-            finished_at: row.get(4)?,
-            status: row.get(5)?,
-            target_chat_id: row.get(6)?,
-            target_thread_id: row.get(7)?,
+            status: row.get(4)?,
+            target_chat_id: row.get(5)?,
+            target_thread_id: row.get(6)?,
         })
     });
     match result {
@@ -68,13 +66,13 @@ fn mark_delivery_outcome(
 
 /// Deduplicate: for a given job, find the latest undelivered result and mark all
 /// older undelivered results as delivered. Returns (latest_result, skipped_count).
-pub fn deduplicate_job(
+pub(crate) fn deduplicate_job(
     conn: &rusqlite::Connection,
     job_name: &str,
 ) -> Result<Option<(PendingCronResult, u32)>, rusqlite::Error> {
     let latest = conn
         .query_row(
-            "SELECT id, job_name, notify_json, summary, finished_at, status, target_chat_id, target_thread_id \
+            "SELECT id, job_name, notify_json, summary, status, target_chat_id, target_thread_id \
              FROM cron_runs \
              WHERE job_name = ?1 AND status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
              ORDER BY finished_at DESC LIMIT 1",
@@ -85,10 +83,9 @@ pub fn deduplicate_job(
                     job_name: row.get(1)?,
                     notify_json: row.get(2)?,
                     summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    finished_at: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    status: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                    target_chat_id: row.get(6)?,
-                    target_thread_id: row.get(7)?,
+                    status: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    target_chat_id: row.get(5)?,
+                    target_thread_id: row.get(6)?,
                 })
             },
         )
@@ -152,7 +149,7 @@ Here is the YAML report of the cron job:
 /// The output begins with a [`DELIVERY_INSTRUCTION_SUCCESS`] or
 /// [`DELIVERY_INSTRUCTION_FAILURE`] prefix (depending on `pending.status`),
 /// followed by the YAML payload.
-pub fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
+pub(crate) fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
     let total = skipped + 1;
     let instruction = match pending.status.as_str() {
         "failed" => DELIVERY_INSTRUCTION_FAILURE,
@@ -233,7 +230,7 @@ pub(crate) fn classify_pending_target(
 
 /// Main delivery loop. Runs as a tokio task.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_delivery_loop(
+pub(crate) async fn run_delivery_loop(
     agent_dir: PathBuf,
     agent_name: String,
     bot: crate::telegram::BotType,
@@ -830,7 +827,6 @@ mod tests {
             job_name: "health-check".into(),
             notify_json: r#"{"content":"BTC up 2%"}"#.into(),
             summary: "Checked 5 pairs".into(),
-            finished_at: "2026-01-01T00:01:00Z".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
@@ -856,7 +852,6 @@ mod tests {
             job_name: "job1".into(),
             notify_json: r#"{"content":"hello"}"#.into(),
             summary: "done".into(),
-            finished_at: "2026-01-01T00:01:00Z".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
@@ -874,7 +869,6 @@ mod tests {
             job_name: "watcher".into(),
             notify_json: r#"{"content":"Partial data fetched then hit budget"}"#.into(),
             summary: "failed".into(),
-            finished_at: "2026-04-21T10:00:00Z".into(),
             status: "failed".into(),
             target_chat_id: None,
             target_thread_id: None,
@@ -891,7 +885,6 @@ mod tests {
             job_name: "watcher".into(),
             notify_json: r#"{"content":"BTC up 2%"}"#.into(),
             summary: "ok".into(),
-            finished_at: "2026-04-21T10:00:00Z".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,

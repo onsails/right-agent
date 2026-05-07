@@ -87,14 +87,6 @@ pub fn generate_mcp_config_http(
     crate::contract::write_regenerated(&mcp_path, &output)
 }
 
-/// Generate a random 32-byte Bearer token, base64url-encoded (no padding).
-pub fn generate_agent_token() -> String {
-    use base64::Engine as _;
-    let mut bytes = [0u8; 32];
-    rand::fill(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,13 +404,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generate_agent_token_is_32_bytes_base64url() {
-        let token = generate_agent_token();
-        // 32 bytes -> 43 chars in base64url no-pad
-        assert_eq!(token.len(), 43);
-        // Should be different each time
-        let token2 = generate_agent_token();
-        assert_ne!(token, token2);
-    }
 }

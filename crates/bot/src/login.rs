@@ -16,7 +16,7 @@ Then send me the token it prints.";
 
 /// Events emitted during the token request flow.
 #[derive(Debug)]
-pub enum LoginEvent {
+pub(crate) enum LoginEvent {
     /// Login completed — token saved.
     Done,
     /// Login failed.
@@ -30,7 +30,7 @@ pub enum LoginEvent {
 /// - `token_rx`: receives the token string from the Telegram handler
 ///
 /// `agent_dir` is the agent directory (data.db lives inside it).
-pub async fn request_token(
+pub(crate) async fn request_token(
     agent_dir: &Path,
     agent_name: &str,
     event_tx: mpsc::Sender<LoginEvent>,
@@ -107,7 +107,7 @@ fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
 /// Read the auth token from DB, if any.
 ///
 /// `agent_dir` is the agent directory (data.db lives inside it).
-pub fn load_auth_token(agent_dir: &Path) -> Option<String> {
+pub(crate) fn load_auth_token(agent_dir: &Path) -> Option<String> {
     let conn = right_db::open_connection(agent_dir, false).ok()?;
     right_mcp::credentials::get_auth_token(&conn)
         .ok()
@@ -115,7 +115,7 @@ pub fn load_auth_token(agent_dir: &Path) -> Option<String> {
 }
 
 /// Instruction message sent to user when auth is needed.
-pub fn auth_instruction_message() -> &'static str {
+pub(crate) fn auth_instruction_message() -> &'static str {
     TOKEN_INSTRUCTION
 }
 

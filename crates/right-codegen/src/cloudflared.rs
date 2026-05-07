@@ -18,7 +18,7 @@ struct CloudflaredAgent {
 /// fields so cloudflared honours local ingress rules instead of fetching
 /// remote configuration from the Cloudflare dashboard (which is the
 /// behaviour with `--token` alone).
-pub struct CloudflaredCredentials {
+pub(crate) struct CloudflaredCredentials {
     pub tunnel_uuid: String,
     pub credentials_file: PathBuf,
 }
@@ -37,7 +37,7 @@ pub struct CloudflaredCredentials {
 /// * `tunnel_hostname` — public hostname for the named tunnel (e.g. `right.example.com`)
 /// * `credentials` — tunnel credentials embedded as `tunnel:` + `credentials-file:`.
 ///   Mandatory: cloudflared runs in local-ingress mode unconditionally.
-pub fn generate_cloudflared_config(
+pub(crate) fn generate_cloudflared_config(
     agents: &[(String, PathBuf)],
     tunnel_hostname: &str,
     credentials: &CloudflaredCredentials,

@@ -24,13 +24,13 @@ pub(crate) const MAX_OPEN: Duration = Duration::from_secs(600); // 10 min
 pub(crate) const AUTH_OPEN: Duration = Duration::from_secs(3600); // 1h
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
+pub(crate) enum CircuitState {
     Closed,
     Open { until: Instant },
     HalfOpen,
 }
 
-pub struct Breaker {
+pub(crate) struct Breaker {
     state: CircuitState,
     failures: VecDeque<Instant>,
     last_open_duration: Duration,
@@ -43,7 +43,7 @@ impl Default for Breaker {
 }
 
 impl Breaker {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: CircuitState::Closed,
             failures: VecDeque::new(),
@@ -51,13 +51,13 @@ impl Breaker {
         }
     }
 
-    pub fn state(&mut self) -> CircuitState {
+    pub(crate) fn state(&mut self) -> CircuitState {
         self.refresh();
         self.state
     }
 
     /// Call before each network attempt. Returns `Err(retry_after)` when call must be skipped.
-    pub fn admit(&mut self) -> Result<(), Duration> {
+    pub(crate) fn admit(&mut self) -> Result<(), Duration> {
         self.refresh();
         match self.state {
             CircuitState::Closed | CircuitState::HalfOpen => Ok(()),
@@ -66,7 +66,7 @@ impl Breaker {
     }
 
     /// Record an attempt outcome.
-    pub fn record(&mut self, outcome: Outcome) {
+    pub(crate) fn record(&mut self, outcome: Outcome) {
         self.refresh();
         match outcome {
             Outcome::Success => {
@@ -130,7 +130,7 @@ impl Breaker {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Outcome {
+pub(crate) enum Outcome {
     Success,
     Failure(ErrorKind),
 }

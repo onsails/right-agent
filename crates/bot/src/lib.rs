@@ -1,17 +1,16 @@
+#![warn(unreachable_pub)]
+
 mod config_watcher;
-pub mod cron;
-pub mod cron_delivery;
-pub mod cc;
-pub mod error;
+pub(crate) mod cron;
+pub(crate) mod cron_delivery;
+pub(crate) mod cc;
 mod keepalive;
-pub mod login;
-pub mod reflection;
+pub(crate) mod login;
+pub(crate) mod reflection;
 mod stt;
-pub mod sync;
+pub(crate) mod sync;
 pub mod telegram;
 mod upgrade;
-
-pub use error::BotError;
 
 use right_agent::agent::allowlist::{self, AllowlistHandle, AllowlistState};
 

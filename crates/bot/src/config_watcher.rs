@@ -74,7 +74,7 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
 /// On change:
 /// - `HotReloadable` → store new model into `model_swap`, log info, do not cancel.
 /// - `RestartRequired` → set `config_changed`, cancel `token` (existing path).
-pub fn spawn_config_watcher(
+pub(crate) fn spawn_config_watcher(
     agent_yaml: &Path,
     token: CancellationToken,
     config_changed: Arc<AtomicBool>,

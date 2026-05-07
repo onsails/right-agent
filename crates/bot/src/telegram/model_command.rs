@@ -13,7 +13,7 @@
 /// flag, CC chooses its own default. All other rows pin a specific
 /// model via the exact model-ID string CC accepts on the command line.
 #[derive(Debug, Clone, Copy)]
-pub struct ModelChoice {
+pub(crate) struct ModelChoice {
     /// Short alias used in callback_data. Combined with the `model:` prefix
     /// (6 bytes) the total stays under Telegram's 64-byte limit.
     pub alias: &'static str,
@@ -30,7 +30,7 @@ pub struct ModelChoice {
 /// **Local registry, not a project-wide one.** Per the project memory
 /// `feedback_no_central_registries`, this stays here rather than in a
 /// shared types module.
-pub const MODEL_CHOICES: &[ModelChoice] = &[
+pub(crate) const MODEL_CHOICES: &[ModelChoice] = &[
     ModelChoice {
         alias: "default",
         label: "Default",
@@ -58,19 +58,19 @@ pub const MODEL_CHOICES: &[ModelChoice] = &[
 ];
 
 /// Resolve a callback alias to a `ModelChoice`.
-pub fn lookup(alias: &str) -> Option<&'static ModelChoice> {
+pub(crate) fn lookup(alias: &str) -> Option<&'static ModelChoice> {
     MODEL_CHOICES.iter().find(|c| c.alias == alias)
 }
 
 /// Find the choice that matches the given current `model_id` (from `agent.yaml`).
 /// Returns `None` if the value is non-canonical (a "Custom" model).
-pub fn active_choice(current: Option<&str>) -> Option<&'static ModelChoice> {
+pub(crate) fn active_choice(current: Option<&str>) -> Option<&'static ModelChoice> {
     MODEL_CHOICES.iter().find(|c| c.model_id == current)
 }
 
 /// Render the menu body text. Includes a "Current: ... (custom)" prefix line
 /// when the active model is non-canonical.
-pub fn render_menu_body(current: Option<&str>) -> String {
+pub(crate) fn render_menu_body(current: Option<&str>) -> String {
     let active = active_choice(current);
     let mut out = String::from("🤖 Choose Claude model\n\n");
     if let (None, Some(custom)) = (active, current) {
@@ -106,7 +106,7 @@ pub(crate) fn render_keyboard(current: Option<&str>) -> teloxide::types::InlineK
 }
 
 /// Open the `/model` menu. Allowlist-gated in groups.
-pub async fn handle_model(
+pub(crate) async fn handle_model(
     bot: super::BotType,
     msg: teloxide::types::Message,
     settings: std::sync::Arc<super::handler::AgentSettings>,
@@ -142,7 +142,7 @@ pub async fn handle_model(
 /// Callback data format: `model:<alias>` (e.g. `model:sonnet`).
 /// Re-checks the allowlist on every click — the keyboard stays in the chat
 /// and any group member could click it, not just the `/model` invoker.
-pub async fn handle_model_callback(
+pub(crate) async fn handle_model_callback(
     bot: super::BotType,
     q: teloxide::types::CallbackQuery,
     settings: std::sync::Arc<super::handler::AgentSettings>,

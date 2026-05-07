@@ -15,7 +15,7 @@ const RUNNING_STATUS: &str = "Running";
 
 /// Current state of the Cloudflare tunnel.
 #[derive(Debug, Clone, PartialEq)]
-pub enum TunnelState {
+pub(crate) enum TunnelState {
     /// No tunnel section in config.yaml.
     NotConfigured,
     /// Tunnel configured but cloudflared process is not running.
@@ -26,9 +26,10 @@ pub enum TunnelState {
     Healthy,
 }
 
+#[cfg(test)]
 impl TunnelState {
     /// Human-readable error for non-healthy states. Returns `None` for `Healthy`.
-    pub fn error_message(&self) -> Option<String> {
+    pub(crate) fn error_message(&self) -> Option<String> {
         match self {
             Self::NotConfigured => Some(
                 "Tunnel not configured. Run `right config` to set up. \
@@ -57,7 +58,7 @@ impl TunnelState {
 ///
 /// `PcClient::from_home` resolves the PC port from `<home>/run/state.json`; when
 /// this home has no recorded runtime, returns `NotRunning` without probing any port.
-pub async fn check_tunnel(home: &Path) -> TunnelState {
+pub(crate) async fn check_tunnel(home: &Path) -> TunnelState {
     // Step 1: read config
     let config = match read_global_config(home) {
         Ok(c) => c,

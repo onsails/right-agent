@@ -1,3 +1,5 @@
+#![warn(unreachable_pub)]
+
 pub mod credentials;
 pub mod internal_client;
 pub mod oauth;

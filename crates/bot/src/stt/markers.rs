@@ -4,12 +4,12 @@
 use crate::stt::SttError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VoiceKind {
+pub(crate) enum VoiceKind {
     Voice,
     VideoNote,
 }
 
-pub fn marker_success(kind: VoiceKind, transcript: &str) -> String {
+pub(crate) fn marker_success(kind: VoiceKind, transcript: &str) -> String {
     match kind {
         VoiceKind::Voice => {
             format!("[Пользователь надиктовал голосовое сообщение. Расшифровка: {transcript:?}]")
@@ -20,7 +20,7 @@ pub fn marker_success(kind: VoiceKind, transcript: &str) -> String {
     }
 }
 
-pub fn marker_for_error(kind: VoiceKind, err: &SttError) -> String {
+pub(crate) fn marker_for_error(kind: VoiceKind, err: &SttError) -> String {
     let (subject, gendered_too_large) = match kind {
         VoiceKind::Voice => (
             "Пользователь прислал голосовое сообщение",

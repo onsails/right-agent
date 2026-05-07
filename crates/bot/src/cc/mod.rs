@@ -4,9 +4,9 @@
 //! out of Telegram-specific modules. Stage E extracts this subtree to
 //! `right-cc`.
 
-pub mod attachments_dto;
-pub mod invocation;
-pub mod markdown_utils;
-pub mod prompt;
-pub mod stream;
-pub mod worker_reply;
+pub(crate) mod attachments_dto;
+pub(crate) mod invocation;
+pub(crate) mod markdown_utils;
+pub(crate) mod prompt;
+pub(crate) mod stream;
+pub(crate) mod worker_reply;

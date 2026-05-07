@@ -7,13 +7,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::task;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-pub struct WhisperEngine {
+pub(crate) struct WhisperEngine {
     model_path: PathBuf,
     ctx: OnceLock<Arc<Mutex<WhisperContext>>>,
 }
 
 impl WhisperEngine {
-    pub fn new(model_path: PathBuf) -> Self {
+    pub(crate) fn new(model_path: PathBuf) -> Self {
         Self {
             model_path,
             ctx: OnceLock::new(),
@@ -42,7 +42,7 @@ impl WhisperEngine {
 
     /// Run whisper on PCM f32 16 kHz mono. Returns the transcript and the
     /// detected language (if any).
-    pub async fn transcribe(
+    pub(crate) async fn transcribe(
         &self,
         samples: Vec<f32>,
     ) -> Result<(String, Option<String>), SttError> {

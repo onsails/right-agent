@@ -1,10 +1,10 @@
-pub fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     html_escape_into(s, &mut out);
     out
 }
 
-pub fn html_escape_into(s: &str, out: &mut String) {
+pub(crate) fn html_escape_into(s: &str, out: &mut String) {
     for ch in s.chars() {
         match ch {
             '&' => out.push_str("&amp;"),

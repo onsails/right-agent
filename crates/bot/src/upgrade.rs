@@ -17,7 +17,7 @@ const UPGRADE_TIMEOUT_SECS: u64 = 120;
 
 /// Run a single upgrade attempt at startup (blocking).
 /// Called before cron/telegram tasks exist — no lock needed.
-pub async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str, sandbox: &str) {
+pub(crate) async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str, sandbox: &str) {
     let ssh_host = right_core::openshell::ssh_host_for_sandbox(sandbox);
     run_upgrade(ssh_config_path, &ssh_host, agent_name).await;
 }
@@ -29,7 +29,7 @@ pub async fn run_startup_upgrade(ssh_config_path: &Path, agent_name: &str, sandb
 ///
 /// Returns the `JoinHandle` so the caller can await it during shutdown,
 /// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
-pub fn spawn_upgrade_task(
+pub(crate) fn spawn_upgrade_task(
     ssh_config_path: PathBuf,
     agent_name: String,
     sandbox: String,

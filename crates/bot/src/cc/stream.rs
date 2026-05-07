@@ -6,7 +6,7 @@ use right_agent::usage::UsageBreakdown;
 
 /// A parsed stream event from CC's stream-json output.
 #[derive(Debug, Clone)]
-pub enum StreamEvent {
+pub(crate) enum StreamEvent {
     /// Model text output
     Text(String),
     /// Model thinking
@@ -21,13 +21,13 @@ pub enum StreamEvent {
 
 /// Usage info extracted from stream events.
 #[derive(Debug, Default, Clone)]
-pub struct StreamUsage {
+pub(crate) struct StreamUsage {
     pub num_turns: u32,
     pub cost_usd: f64,
 }
 
 /// Parse a single NDJSON line from CC stream-json output.
-pub fn parse_stream_event(line: &str) -> StreamEvent {
+pub(crate) fn parse_stream_event(line: &str) -> StreamEvent {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
         return StreamEvent::Other;
     };
@@ -69,7 +69,7 @@ pub fn parse_stream_event(line: &str) -> StreamEvent {
 }
 
 /// Extract usage info from a result event JSON.
-pub fn parse_usage(result_json: &str) -> StreamUsage {
+pub(crate) fn parse_usage(result_json: &str) -> StreamUsage {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(result_json) else {
         return StreamUsage::default();
     };
@@ -86,7 +86,7 @@ pub fn parse_usage(result_json: &str) -> StreamUsage {
 /// required fields (`total_cost_usd`, `num_turns`, `session_id`) are missing or
 /// the JSON is malformed. The `modelUsage` object is preserved as a JSON string
 /// for per-model reduction at read time.
-pub fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
+pub(crate) fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
     let v: serde_json::Value = serde_json::from_str(result_json).ok()?;
 
     let total_cost_usd = v.get("total_cost_usd")?.as_f64()?;
@@ -124,7 +124,7 @@ pub fn parse_usage_full(result_json: &str) -> Option<UsageBreakdown> {
 ///
 /// Callers fall back to `"none"` (subscription) if `None` is returned —
 /// matching the column default in the `usage_events` table.
-pub fn parse_api_key_source(init_json: &str) -> Option<String> {
+pub(crate) fn parse_api_key_source(init_json: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(init_json).ok()?;
     if v.get("type")?.as_str()? != "system" {
         return None;
@@ -138,7 +138,7 @@ pub fn parse_api_key_source(init_json: &str) -> Option<String> {
 /// Format a single event for Telegram display (HTML mode).
 ///
 /// All dynamic content is HTML-escaped for safe use with ParseMode::Html.
-pub fn format_event(event: &StreamEvent) -> Option<String> {
+pub(crate) fn format_event(event: &StreamEvent) -> Option<String> {
     match event {
         StreamEvent::Text(t) => {
             // Truncate long text — thinking indicator is a preview, not the full reply.
@@ -173,7 +173,7 @@ pub fn format_event(event: &StreamEvent) -> Option<String> {
 }
 
 /// Format the full thinking message: events on top, status footer at bottom.
-pub fn format_thinking_message(events: &VecDeque<StreamEvent>, usage: &StreamUsage) -> String {
+pub(crate) fn format_thinking_message(events: &VecDeque<StreamEvent>, usage: &StreamUsage) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     for event in events {
@@ -208,13 +208,13 @@ pub fn format_thinking_message(events: &VecDeque<StreamEvent>, usage: &StreamUsa
 }
 
 /// Ring buffer of recent displayable events.
-pub struct EventRingBuffer {
+pub(crate) struct EventRingBuffer {
     events: VecDeque<StreamEvent>,
     capacity: usize,
 }
 
 impl EventRingBuffer {
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             events: VecDeque::with_capacity(capacity),
             capacity,
@@ -222,7 +222,7 @@ impl EventRingBuffer {
     }
 
     /// Push an event. Only displayable events (Text, Thinking, ToolUse) are kept.
-    pub fn push(&mut self, event: &StreamEvent) {
+    pub(crate) fn push(&mut self, event: &StreamEvent) {
         if format_event(event).is_some() {
             if self.events.len() == self.capacity {
                 self.events.pop_front();
@@ -231,7 +231,7 @@ impl EventRingBuffer {
         }
     }
 
-    pub fn events(&self) -> &VecDeque<StreamEvent> {
+    pub(crate) fn events(&self) -> &VecDeque<StreamEvent> {
         &self.events
     }
 }

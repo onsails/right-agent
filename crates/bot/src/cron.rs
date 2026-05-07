@@ -16,13 +16,9 @@ struct LockFile {
 
 /// Errors produced by the cron engine.
 #[derive(Debug, thiserror::Error)]
-pub enum CronError {
-    #[error("claude binary not found in PATH")]
-    BinaryNotFound,
+pub(crate) enum CronError {
     #[error("invalid lock_ttl format '{0}' — expected e.g. '30m' or '1h'")]
     InvalidLockTtl(String),
-    #[error("cron expression parse error: {0}")]
-    ScheduleParse(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("db error: {0:#}")]
@@ -31,7 +27,7 @@ pub enum CronError {
 
 /// Structured output from a cron CC invocation.
 #[derive(Debug, serde::Deserialize)]
-pub struct CronReplyOutput {
+pub(crate) struct CronReplyOutput {
     pub notify: Option<CronNotify>,
     pub summary: String,
     pub no_notify_reason: Option<String>,
@@ -39,7 +35,7 @@ pub struct CronReplyOutput {
 
 /// User-facing notification from a cron job.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
-pub struct CronNotify {
+pub(crate) struct CronNotify {
     pub content: String,
     pub attachments: Option<Vec<OutboundAttachment>>,
 }
@@ -59,12 +55,12 @@ fn attachment_filename(path: &str) -> String {
 /// Users write standard 5-field expressions: `<min> <hour> <dom> <mon> <dow>`
 ///
 /// Transformation: prepend "0 " (seconds=0) and append " *" (year=any).
-pub fn to_7field(expr: &str) -> String {
+pub(crate) fn to_7field(expr: &str) -> String {
     format!("0 {} *", expr.trim())
 }
 
 /// Parse a lock_ttl string ("30m", "1h") into a `chrono::Duration`.
-pub fn parse_lock_ttl(s: &str) -> Result<chrono::Duration, CronError> {
+pub(crate) fn parse_lock_ttl(s: &str) -> Result<chrono::Duration, CronError> {
     if let Some(mins) = s.strip_suffix('m') {
         let n: i64 = mins
             .trim()
@@ -86,7 +82,7 @@ pub fn parse_lock_ttl(s: &str) -> Result<chrono::Duration, CronError> {
 ///
 /// Returns `true` if the previous run is still considered active (skip this run).
 /// Returns `false` if no lock file, lock is unparseable, or heartbeat is stale.
-pub fn is_lock_fresh(agent_dir: &std::path::Path, job_name: &str, lock_ttl_str: &str) -> bool {
+pub(crate) fn is_lock_fresh(agent_dir: &std::path::Path, job_name: &str, lock_ttl_str: &str) -> bool {
     let lock_path = agent_dir
         .join("crons")
         .join(".locks")
@@ -281,7 +277,7 @@ const LEGACY_FORK_HEADER: &str = "X-FORK-FROM: ";
 /// the new form are filtered out by the `schedule = IMMEDIATE_SENTINEL`
 /// predicate. Invalid UUIDs in the legacy header leave the row untouched
 /// (logged at WARN). Returns the number of rows rewritten.
-pub fn migrate_legacy_bg_continuation(
+pub(crate) fn migrate_legacy_bg_continuation(
     conn: &rusqlite::Connection,
 ) -> Result<usize, rusqlite::Error> {
     use right_agent::cron_spec::{IMMEDIATE_SENTINEL, ScheduleKind};
@@ -965,7 +961,7 @@ type ExecuteHandles = Arc<std::sync::Mutex<Vec<(String, JoinHandle<()>)>>>;
 /// Signature expected by lib.rs spawn site (CRON-01, CRON-02, CRON-06).
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
-pub async fn run_cron_task(
+pub(crate) async fn run_cron_task(
     agent_dir: std::path::PathBuf,
     agent_name: String,
     model: Arc<arc_swap::ArcSwap<Option<String>>>,

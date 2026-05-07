@@ -11,7 +11,7 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Run one sync cycle. Called synchronously at startup before teloxide starts,
 /// ensuring sandbox has correct config before any `claude -p` invocations.
-pub async fn initial_sync(
+pub(crate) async fn initial_sync(
     agent_dir: &Path,
     sbox: &right_core::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
@@ -28,7 +28,7 @@ pub async fn initial_sync(
 }
 
 /// Run the periodic sync loop (spawned as background task after initial_sync).
-pub async fn run_sync_task(
+pub(crate) async fn run_sync_task(
     agent_dir: PathBuf,
     sbox: right_core::sandbox_exec::SandboxExec,
     shutdown: CancellationToken,
@@ -79,7 +79,7 @@ const REVERSE_SYNC_FILES: &[&str] = &["TOOLS.md", "IDENTITY.md", "SOUL.md", "USE
 ///
 /// Downloads all files concurrently. Changed files are atomically written to host.
 /// Failed downloads trigger host-side deletion (only when sandbox is confirmed reachable).
-pub async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
+pub(crate) async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> miette::Result<()> {
     let tmp_dir = tempfile::tempdir()
         .map_err(|e| miette::miette!("reverse sync: failed to create temp dir: {e:#}"))?;
 

@@ -15,7 +15,7 @@ const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 ///
 /// Returns the `JoinHandle` so the caller can await it during shutdown,
 /// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
-pub fn spawn_keepalive(
+pub(crate) fn spawn_keepalive(
     agent_dir: PathBuf,
     ssh_config_path: Option<PathBuf>,
     resolved_sandbox: Option<String>,

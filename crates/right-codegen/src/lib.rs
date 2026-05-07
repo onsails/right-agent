@@ -1,17 +1,17 @@
-pub mod agent_def;
-pub mod claude_json;
-pub mod cloudflared;
-pub mod contract;
-pub mod mcp_config;
-pub mod mcp_instructions;
-pub mod pipeline;
-pub mod plugin;
-pub mod policy;
-pub mod process_compose;
+#![warn(unreachable_pub)]
 
-pub mod settings;
+pub(crate) mod agent_def;
+pub(crate) mod claude_json;
+pub(crate) mod cloudflared;
+pub mod contract;
+pub(crate) mod mcp_config;
+pub mod mcp_instructions;
+pub(crate) mod pipeline;
+pub mod policy;
+pub(crate) mod process_compose;
+
+pub(crate) mod settings;
 pub mod skills;
-pub mod telegram;
 pub use agent_def::{
     BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_INSTRUCTIONS, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON,
     OPERATING_INSTRUCTIONS, REPLY_SCHEMA_JSON, generate_system_prompt,

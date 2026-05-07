@@ -1,12 +1,13 @@
-pub mod circuit;
-pub mod classify;
-pub mod error;
-pub mod guard;
+#![warn(unreachable_pub)]
+
+pub(crate) mod circuit;
+pub(crate) mod classify;
+pub(crate) mod error;
 pub mod hindsight;
 pub mod prefetch;
 pub mod resilient;
 pub mod retain_queue;
-pub mod status;
+pub(crate) mod status;
 
 pub use classify::ErrorKind;
 pub use error::MemoryError;

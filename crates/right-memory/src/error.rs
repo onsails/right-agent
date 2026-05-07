@@ -5,7 +5,7 @@
 //! remain for call sites that still construct `MemoryError` directly
 //! from those error types during the staged crate split.
 
-pub use right_db::DbError;
+pub(crate) use right_db::DbError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
