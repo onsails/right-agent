@@ -2,22 +2,26 @@
 
 ## Workspace
 
-Five crates in a Cargo workspace:
+Eight crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
 | **right-core** | `crates/right-core/` | Stable platform foundation: error/ui/config/OpenShell/proto/platform_store/stt/test_support, time constants |
 | **right-db** | `crates/right-db/` | Per-agent SQLite plumbing: `open_connection`, central migration registry, `sql/v*.sql` |
-| **right-agent** | `crates/right-agent/` | Core library: agent discovery, codegen, memory (Hindsight + retain queue), runtime, MCP, tunnel |
+| **right-mcp** | `crates/right-mcp/` | MCP aggregator backend, proxy, reconnect, credentials, token derivation, auth tokens |
+| **right-codegen** | `crates/right-codegen/` | Per-agent codegen: settings.json, .mcp.json, prompts, process-compose, cloudflared, sandbox policy, bundled skills |
+| **right-memory** | `crates/right-memory/` | Hindsight-resilience layer and retain queue |
+| **right-agent** | `crates/right-agent/` | Slim orchestrator: agent discovery, runtime, init, doctor, rebootstrap, cron_spec, tunnel, usage |
 | **right** | `crates/right/` | CLI binary (`right`) + MCP Aggregator (HTTP) |
 | **right-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
 
 `right-core` hosts stable platform primitives: error rendering,
 brand-conformant UI atoms, configuration parsing, the OpenShell gRPC client
 and generated proto types, process-group and sandbox-exec helpers,
-`platform_store`, STT model-download helpers with `WhisperModel`, and
-`test_support::TestSandbox`. These modules change rarely; leaf-crate edits do
-not invalidate this build cache. `tonic-prost-build` lives in
+`platform_store`, STT model-download helpers with `WhisperModel`, shared
+agent data types, runtime-state primitives, and `test_support::TestSandbox`.
+These modules change rarely; leaf-crate edits do not invalidate this build
+cache. `tonic-prost-build` lives in
 `crates/right-core/build.rs` and only re-runs when the OpenShell `.proto`
 files change.
 
@@ -326,7 +330,7 @@ runtime discriminates via `openshell::filesystem_policy_changed`.
 
 ### Helper API
 
-`crates/right-agent/src/codegen/contract.rs` provides the only sanctioned writers:
+`crates/right-codegen/src/contract.rs` provides the only sanctioned writers:
 
 - `write_regenerated(path, content)` — all `Regenerated` outputs except
   `SandboxPolicyApply`.

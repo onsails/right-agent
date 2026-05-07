@@ -9,6 +9,8 @@
 ### right-core (stable platform foundation)
 
 - `config/` - `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
+- `agent_types.rs` - shared agent configuration and discovery DTOs (`AgentConfig`, `AgentDef`, sandbox/memory/STT config types).
+- `runtime_state.rs` - process-compose ports, runtime state JSON, and API-token generation.
 - `ui/` - brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection.
 - `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
 - `platform_store.rs` - content-addressed platform store deployment to `/sandbox/.platform/`.
@@ -19,12 +21,35 @@
 
 ### right-agent (core)
 
-- `agent/` — agent discovery (presence detected by `agent.yaml`) and types (`AgentDef`, `AgentConfig`, `RestartPolicy`).
-- `codegen/` — per-agent and cross-agent code generation: settings, `.claude.json`, `.mcp.json`, policy, process-compose, TOOLS.md, MCP instructions, bundled skills, cloudflared. The helper API in `codegen/contract.rs` is the only sanctioned writer (see Upgrade & Migration Model).
-- `memory/` — Hindsight Cloud client (`hindsight.rs`), composite memory in file or Hindsight mode (`composite.rs`), schema migrations, prompt-injection guard. `store.rs` is legacy SQLite memory retained for migration compat.
-- `runtime/` — `RuntimeState` JSON persistence, process-compose REST client, dependency checks.
-- `mcp/` — OAuth credentials, internal UDS client (bot→aggregator), OAuth flow, proxy backend, token refresh scheduler.
+- `agent/` — agent discovery (presence detected by `agent.yaml`) and compatibility re-exports for shared agent types.
+- `codegen/` — compatibility re-export shim for `right-codegen`.
+- `memory/` — compatibility re-export shim for `right-memory` plus `right-db` open helpers.
+- `runtime/` — process-compose REST client, dependency checks, and compatibility re-exports for runtime state primitives.
+- `mcp/` — compatibility re-export shim for `right-mcp`.
 - Single-file modules: `doctor.rs`, `init.rs`, `rebootstrap.rs`, `cron_spec.rs`, `tunnel/`, `usage/`.
+
+### right-codegen
+
+- `pipeline.rs` — per-agent and cross-agent codegen orchestration.
+- `contract.rs` — sanctioned codegen writers and registries (see Upgrade & Migration Model).
+- `agent_def.rs`, `settings.rs`, `claude_json.rs`, `mcp_config.rs`, `mcp_instructions.rs`, `policy.rs`, `process_compose.rs`, `cloudflared.rs`, `telegram.rs`, `plugin.rs`, `skills.rs` — generated artifacts and bundled skill/template installation.
+- `templates/` and `skills/` — compiled codegen-owned prompt, process-compose, cloudflared, and skill assets.
+
+### right-memory
+
+- `hindsight.rs` — Hindsight Cloud API client and DTOs.
+- `resilient.rs`, `circuit.rs`, `classify.rs`, `guard.rs`, `status.rs` — memory failure handling, policy labels, circuit state, classification, and status reporting.
+- `prefetch.rs` — recall prefetch cache.
+- `retain_queue.rs` — SQLite-backed pending-retain queue using `right-db` migrations.
+- `error.rs` — semantic-memory error type and `right-db` boundary.
+
+### right-mcp
+
+- `credentials.rs` — MCP server registry, OAuth state persistence, auth tokens, URL helpers.
+- `internal_client.rs` — bot-to-aggregator Unix-socket client.
+- `oauth.rs`, `refresh.rs`, `reconnect.rs` — OAuth discovery, token refresh, and reconnect handling.
+- `proxy.rs` — upstream MCP proxy backend and auth injection.
+- `tool_error.rs` — MCP tool-error helpers.
 
 ### right (CLI)
 
