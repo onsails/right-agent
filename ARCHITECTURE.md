@@ -21,6 +21,16 @@ Consumers (CLI, bot, and agent internals) import directly from the source crate.
 This keeps the build-cache invariant: an edit inside `right-codegen` rebuilds
 `right-codegen` plus its direct consumers, not `right-agent`.
 
+**Crate boundaries:** `right-core` is the **stable platform foundation**.
+Bar for adding to it: (1) used by 2+ leaf crates, AND (2) not specific
+to any single subsystem. Anticipating reuse is not a reason — promote
+on demand, not on prediction.
+
+Every other crate has a single responsibility (see workspace table).
+New code that doesn't fit an existing crate's charter gets its own
+crate, not a misfit addition. Default placement for new code is the
+most-specific leaf crate.
+
 `right-core` hosts stable platform primitives: error rendering,
 brand-conformant UI atoms, configuration parsing, the OpenShell gRPC client
 and generated proto types, process-group and sandbox-exec helpers,
@@ -267,6 +277,7 @@ Tables in per-agent `data.db`: `memories` / `memory_events` / `memories_fts`
 | Cloudflare Tunnel | CLI (`cloudflared`) | Named tunnel, DNS CNAME, credentials file |
 | MCP Aggregator | HTTP (:8100/mcp) + Unix socket (internal API) | Aggregates built-in + external MCP backends, per-agent Bearer auth |
 | ffmpeg | system | Decode voice/video_note to PCM for whisper-rs | Optional — bot runs without it; voice transcription disabled. doctor warns. |
+| ironclaw_safety | crate | Memory-content sanitization (write) and untrusted-content wrapping (read). See `docs/architecture/memory.md`. |
 
 ## Runtime isolation — mandatory
 
@@ -439,6 +450,11 @@ Rules:
 - **Credential isolation**: Host credentials never uploaded to sandbox. Each sandbox authenticates independently via OAuth login flow.
 - **Network policy**: Wildcard domain allowlists (*.anthropic.com, *.claude.com, *.claude.ai) + `binaries: "**"`. TLS termination is automatic (OpenShell v0.0.30+).
 - **`--dangerously-skip-permissions`**: Always on for all CC invocations. OpenShell policy is the security layer, not CC's permission system.
+- **Prompt-injection defense**: `ironclaw_safety::Sanitizer` runs on
+  memory writes (Hindsight retain path) and `wrap_external_content`
+  frames the `## Memory` section as untrusted data on read. Phase-2
+  wrap is the primary defense; phase-1 sanitize is hygiene. See
+  `docs/architecture/memory.md`.
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent in agent.yaml
 - **Protected MCP**: "right" cannot be removed via `/mcp remove`
 - **MCP tool restriction**: Agents cannot register/remove external MCP servers — `mcp_add`, `mcp_remove`, `mcp_auth` are not exposed as MCP tools. Only the user can manage servers via Telegram `/mcp` commands routed through the internal Unix socket API. This prevents sandbox escape via data exfiltration to attacker-controlled MCP endpoints.
