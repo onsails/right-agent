@@ -7,6 +7,5 @@ pub mod mcp;
 pub mod memory;
 pub mod rebootstrap;
 pub mod runtime;
-pub use right_core::stt;
 pub mod tunnel;
 pub mod usage;

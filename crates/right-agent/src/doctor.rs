@@ -1381,7 +1381,7 @@ fn check_stt(home: &Path) -> Vec<DoctorCheck> {
     let mut out = Vec::new();
 
     // ffmpeg check — one shared check for all stt agents.
-    if !crate::stt::ffmpeg_available() {
+    if !right_core::stt::ffmpeg_available() {
         out.push(DoctorCheck {
             name: "ffmpeg".to_string(),
             status: CheckStatus::Warn,
@@ -1392,7 +1392,7 @@ fn check_stt(home: &Path) -> Vec<DoctorCheck> {
 
     // Per-agent model cache check.
     for (name, stt) in &stt_agents {
-        let model_path = crate::stt::model_cache_path(home, stt.model);
+        let model_path = right_core::stt::model_cache_path(home, stt.model);
         if !model_path.exists() {
             out.push(DoctorCheck {
                 name: format!("stt-model/{name}"),
@@ -1586,7 +1586,7 @@ mod stt_doctor_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         make_agent(tmp.path(), "a", true, WhisperModel::Tiny);
         // Create the model cache file.
-        let cache_path = crate::stt::model_cache_path(tmp.path(), WhisperModel::Tiny);
+        let cache_path = right_core::stt::model_cache_path(tmp.path(), WhisperModel::Tiny);
         std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(&cache_path, b"fake model").unwrap();
         let reports = check_stt(tmp.path());
