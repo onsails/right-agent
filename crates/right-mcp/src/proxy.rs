@@ -322,7 +322,7 @@ impl ProxyBackend {
                 source: e.into(),
             }
         })?;
-        crate::mcp::credentials::db_update_instructions(
+        crate::credentials::db_update_instructions(
             &conn,
             &self.server_name,
             instructions.as_deref(),

@@ -12,8 +12,8 @@ use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::mcp::proxy::{BackendStatus, ProxyBackend};
-use crate::mcp::refresh::{OAuthServerState, RefreshMessage};
+use crate::proxy::{BackendStatus, ProxyBackend};
+use crate::refresh::{OAuthServerState, RefreshMessage};
 
 /// Maximum retry attempts for a cancellable refresh.
 const MAX_RETRIES: u32 = 3;
@@ -45,7 +45,7 @@ pub enum ReconnectError {
 ///
 /// Returns `(updated_state, new_access_token)` on success.
 ///
-/// Differences from [`crate::mcp::refresh::do_refresh`]:
+/// Differences from [`crate::refresh::do_refresh`]:
 /// - Accepts a [`CancellationToken`] and checks it before each attempt.
 /// - During backoff sleeps, races the sleep against `cancel.cancelled()` so
 ///   cancellation wakes up immediately rather than waiting the full delay.
@@ -81,7 +81,7 @@ pub async fn do_refresh_cancellable(
 
         match resp {
             Ok(r) if r.status().is_success() => {
-                let token_resp: crate::mcp::oauth::TokenResponse = r.json().await.map_err(|e| {
+                let token_resp: crate::oauth::TokenResponse = r.json().await.map_err(|e| {
                     tracing::warn!(attempt, "failed to parse token response: {e:#}");
                     ReconnectError::RefreshFailed(attempt + 1)
                 })?;
@@ -151,7 +151,7 @@ pub async fn do_refresh_cancellable(
 /// Steps:
 /// 1. Call [`do_refresh_cancellable`] — cancellable retry loop.
 /// 2. Write new access token to `token_arc` (shared with [`ProxyBackend`]).
-/// 3. Persist refreshed OAuth state to SQLite via [`crate::mcp::credentials::db_update_oauth_token`].
+/// 3. Persist refreshed OAuth state to SQLite via [`crate::credentials::db_update_oauth_token`].
 /// 4. Send [`RefreshMessage::NewEntry`] to the refresh scheduler.
 /// 5. Call [`ProxyBackend::connect`] to re-establish the MCP session.
 ///
@@ -196,7 +196,7 @@ pub async fn reconnect_task(
     let conn = right_db::open_connection(&agent_dir, false)
         .map_err(|e| ReconnectError::PersistFailed(format!("{e:#}")))?;
     let expires_at = new_state.expires_at.to_rfc3339();
-    crate::mcp::credentials::db_update_oauth_token(
+    crate::credentials::db_update_oauth_token(
         &conn,
         &server_name,
         &access_token,
@@ -386,7 +386,7 @@ mod tests {
             tmp.path().to_path_buf(),
             "https://example.com/mcp".into(),
             token_arc.clone(),
-            crate::mcp::proxy::AuthMethod::Bearer,
+            crate::proxy::AuthMethod::Bearer,
         ));
         // Pre-set status to Connected — exhausted retries must not overwrite this.
         backend.set_status(BackendStatus::Connected).await;
@@ -483,7 +483,7 @@ mod tests {
             // Fake URL — connect() will fail, which is expected.
             "https://example.com/mcp".into(),
             token_arc.clone(),
-            crate::mcp::proxy::AuthMethod::Bearer,
+            crate::proxy::AuthMethod::Bearer,
         ));
 
         let (refresh_tx, mut refresh_rx) = mpsc::channel(8);

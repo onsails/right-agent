@@ -8,7 +8,7 @@
 use rmcp::model::{CallToolResult, Content};
 use serde_json::json;
 
-use crate::mcp::proxy::ProxyError;
+use crate::proxy::ProxyError;
 
 /// Build an MCP operation error.
 ///

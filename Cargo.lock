@@ -2932,6 +2932,7 @@ dependencies = [
  "reqwest 0.13.3",
  "right-core",
  "right-db",
+ "right-mcp",
  "rmcp",
  "rusqlite",
  "rusqlite_migration",
@@ -3039,6 +3040,39 @@ dependencies = [
  "rusqlite_migration",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "right-mcp"
+version = "0.2.10"
+dependencies = [
+ "base64",
+ "chrono",
+ "futures",
+ "hmac",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "miette",
+ "rand 0.10.1",
+ "reqwest 0.13.3",
+ "right-core",
+ "right-db",
+ "rmcp",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sse-stream",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

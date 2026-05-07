@@ -1,4 +1,4 @@
-use crate::mcp::credentials::{delete_auth_token, get_auth_token, save_auth_token};
+use crate::credentials::{delete_auth_token, get_auth_token, save_auth_token};
 
 // --- auth_token tests ---
 

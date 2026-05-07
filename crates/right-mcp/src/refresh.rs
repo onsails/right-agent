@@ -39,7 +39,7 @@ pub enum RefreshMessage {
 pub fn load_oauth_entries_from_db(
     conn: &Connection,
 ) -> miette::Result<Vec<(String, OAuthServerState)>> {
-    let servers = crate::mcp::credentials::db_list_oauth_servers(conn)
+    let servers = crate::credentials::db_list_oauth_servers(conn)
         .map_err(|e| miette::miette!("failed to list OAuth servers: {e:#}"))?;
 
     let mut entries = Vec::new();
@@ -131,7 +131,7 @@ pub async fn run_refresh_scheduler(
                         match right_db::open_connection(&agent_dir, false) {
                             Ok(conn) => {
                                 let expires_at = entry_state.expires_at.to_rfc3339();
-                                if let Err(e) = crate::mcp::credentials::db_set_oauth_state(
+                                if let Err(e) = crate::credentials::db_set_oauth_state(
                                     &conn,
                                     &server_name,
                                     &current_token,
@@ -199,7 +199,7 @@ pub async fn run_refresh_scheduler(
                         match right_db::open_connection(&agent_dir, false) {
                             Ok(conn) => {
                                 let expires_at = new_entry.expires_at.to_rfc3339();
-                                if let Err(e) = crate::mcp::credentials::db_update_oauth_token(
+                                if let Err(e) = crate::credentials::db_update_oauth_token(
                                     &conn,
                                     &name,
                                     &access_token,
@@ -228,7 +228,7 @@ pub async fn run_refresh_scheduler(
 /// Attempt token refresh with retries.
 /// Returns (updated_state, new_access_token).
 ///
-/// Delegates to [`crate::mcp::reconnect::do_refresh_cancellable`] with a
+/// Delegates to [`crate::reconnect::do_refresh_cancellable`] with a
 /// never-cancelled token. See that function for the retry/backoff logic.
 pub async fn do_refresh(
     client: &reqwest::Client,
@@ -236,7 +236,7 @@ pub async fn do_refresh(
     _max_retries: u32,
 ) -> miette::Result<(OAuthServerState, String)> {
     let cancel = tokio_util::sync::CancellationToken::new();
-    crate::mcp::reconnect::do_refresh_cancellable(client, entry, &cancel)
+    crate::reconnect::do_refresh_cancellable(client, entry, &cancel)
         .await
         .map_err(|e| miette::miette!("{e}"))
 }
