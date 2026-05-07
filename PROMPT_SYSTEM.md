@@ -79,8 +79,12 @@ without restart — the next CC invocation passes `--model <new>`.
 {fetched from aggregator via POST /mcp-instructions at prompt assembly time}
 
 ## Memory
-{composite-memory — file mode: MEMORY.md contents truncated to 200 lines;
- Hindsight mode: prefetched recall results injected as context}
+{composite-memory: bot-trusted system note (label) → ironclaw
+ untrusted-content wrap (SECURITY NOTICE + BEGIN/END EXTERNAL CONTENT,
+ with boundary escape) → optional bot-trusted status / bg markers.
+ Wrap text is owned by `ironclaw_safety::wrap_external_content` and
+ may evolve with crate updates; see `docs/architecture/memory.md` for
+ the integration.}
 ```
 
 Missing agent-owned files are silently skipped. Operating instructions and bootstrap
