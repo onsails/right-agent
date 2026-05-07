@@ -151,10 +151,8 @@ pub async fn run(args: BotArgs) -> miette::Result<bool> {
 }
 
 async fn run_async(args: BotArgs) -> miette::Result<bool> {
-    use right_agent::{
-        agent::discovery::{parse_agent_config, validate_agent_name},
-        config::resolve_home,
-    };
+    use right_agent::agent::discovery::{parse_agent_config, validate_agent_name};
+    use right_core::config::resolve_home;
     use std::path::PathBuf;
 
     // Resolve RIGHT_HOME
