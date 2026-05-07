@@ -811,7 +811,7 @@ mod memory_tests {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).unwrap();
         for i in 0..600 {
-            crate::memory::retain_queue::enqueue(
+            right_memory::retain_queue::enqueue(
                 &conn,
                 "bot",
                 &format!("c-{i}"),
@@ -836,7 +836,7 @@ mod memory_tests {
         let dir = tempdir().unwrap();
         let conn = open_connection(dir.path(), true).unwrap();
         for i in 0..901 {
-            crate::memory::retain_queue::enqueue(
+            right_memory::retain_queue::enqueue(
                 &conn,
                 "bot",
                 &format!("c-{i}"),

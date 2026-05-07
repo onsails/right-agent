@@ -516,7 +516,7 @@ pub enum ValidationResult {
 /// list-banks endpoint does not depend on either. Returns a classified
 /// [`ValidationResult`] so wizards can show contextual messages.
 pub async fn validate_hindsight_key(api_key: &str) -> ValidationResult {
-    let client = crate::memory::hindsight::HindsightClient::new(
+    let client = right_memory::hindsight::HindsightClient::new(
         api_key,
         "_probe",
         "mid",
@@ -525,7 +525,7 @@ pub async fn validate_hindsight_key(api_key: &str) -> ValidationResult {
     );
     match client.list_banks().await {
         Ok(banks) => ValidationResult::Valid { banks: banks.len() },
-        Err(crate::memory::MemoryError::Hindsight { status, .. })
+        Err(right_memory::MemoryError::Hindsight { status, .. })
             if status == 401 || status == 403 =>
         {
             ValidationResult::Invalid { status }

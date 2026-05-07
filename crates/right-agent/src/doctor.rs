@@ -1235,7 +1235,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 4. pending_retains row count.
-    match crate::memory::retain_queue::count(&conn) {
+    match right_memory::retain_queue::count(&conn) {
         Ok(n) => {
             let (st, detail) = match n {
                 n if n < 500 => (CheckStatus::Pass, format!("{n} entries")),
@@ -1264,7 +1264,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 5. oldest age.
-    match crate::memory::retain_queue::oldest_age(&conn) {
+    match right_memory::retain_queue::oldest_age(&conn) {
         Ok(Some(age)) => {
             let hours = age.as_secs() / 3600;
             let (st, detail) = if hours < 1 {
@@ -1299,7 +1299,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
     }
 
     // 6. memory_alerts rows older than 24h.
-    use crate::memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
+    use right_memory::alert_types::{AUTH_FAILED, CLIENT_FLOOD};
     for alert_type in [AUTH_FAILED, CLIENT_FLOOD] {
         match conn.query_row::<bool, _, _>(
             "SELECT EXISTS(SELECT 1 FROM memory_alerts WHERE alert_type = ?1 \

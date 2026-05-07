@@ -2,7 +2,6 @@ pub mod agent;
 pub mod cron_spec;
 pub mod doctor;
 pub mod init;
-pub mod memory;
 pub mod rebootstrap;
 pub mod runtime;
 pub mod tunnel;
