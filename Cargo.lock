@@ -2934,6 +2934,7 @@ dependencies = [
  "right-core",
  "right-db",
  "right-mcp",
+ "right-memory",
  "rmcp",
  "rusqlite",
  "rusqlite_migration",
@@ -3100,6 +3101,24 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "right-memory"
+version = "0.2.10"
+dependencies = [
+ "chrono",
+ "fastrand",
+ "reqwest 0.13.3",
+ "right-db",
+ "rusqlite",
+ "rusqlite_migration",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(parsed, tags);
     }
 
-    use super::super::ErrorKind;
+    use crate::ErrorKind;
 
     #[derive(Default)]
     struct FakeOutcome {

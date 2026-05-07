@@ -1,0 +1,21 @@
+[package]
+name = "right-memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+right-db = { path = "../right-db" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+rusqlite_migration = { workspace = true }
+fastrand = "2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1.52", features = ["test-util"] }

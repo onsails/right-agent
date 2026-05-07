@@ -146,9 +146,9 @@ impl ResilientHindsight {
                 return false;
             }
             let new = match st {
-                crate::memory::circuit::CircuitState::Closed => MemoryStatus::Healthy,
-                crate::memory::circuit::CircuitState::Open { .. }
-                | crate::memory::circuit::CircuitState::HalfOpen => MemoryStatus::Degraded {
+                crate::circuit::CircuitState::Closed => MemoryStatus::Healthy,
+                crate::circuit::CircuitState::Open { .. }
+                | crate::circuit::CircuitState::HalfOpen => MemoryStatus::Degraded {
                     since: std::time::Instant::now(),
                 },
             };
@@ -507,7 +507,7 @@ mod tests {
         assert!(matches!(err, ResilientError::Upstream(_)));
         // Row should now be in pending_retains.
         let conn = open_connection(w.agent_db_path(), false).unwrap();
-        let cnt = crate::memory::retain_queue::count(&conn).unwrap();
+        let cnt = crate::retain_queue::count(&conn).unwrap();
         assert_eq!(cnt, 1, "expected row enqueued on transient 503");
     }
 
@@ -525,7 +525,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ResilientError::Upstream(_)));
         let conn = open_connection(w.agent_db_path(), false).unwrap();
-        let cnt = crate::memory::retain_queue::count(&conn).unwrap();
+        let cnt = crate::retain_queue::count(&conn).unwrap();
         assert_eq!(cnt, 0, "4xx must not enqueue");
         // Client drop counter must have been bumped.
         assert_eq!(w.client_drops_24h().await, 1);
