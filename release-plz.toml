@@ -30,3 +30,23 @@ git_release_enable = true
 git_release_name = "v{{ version }}"
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
+
+[[package]]
+name = "right-core"
+version_group = "workspace"
+
+[[package]]
+name = "right-db"
+version_group = "workspace"
+
+[[package]]
+name = "right-mcp"
+version_group = "workspace"
+
+[[package]]
+name = "right-codegen"
+version_group = "workspace"
+
+[[package]]
+name = "right-memory"
+version_group = "workspace"
