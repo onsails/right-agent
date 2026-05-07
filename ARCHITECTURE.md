@@ -402,7 +402,7 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 
 ### Cross-references
 
-- `CLAUDE.md` → `Upgrade-friendly design`, `Never delete sandboxes for
+- `AGENTS.md` → `Upgrade-friendly design`, `Never delete sandboxes for
   recovery`, `Self-healing platform` — conventions this model implements.
 - Data Flow → `Sandbox migration (filesystem policy change)` — the migration
   flow used by `Regenerated(SandboxRecreate)`.
