@@ -1,6 +1,6 @@
 //! Generate OpenShell policy.yaml from agent configuration.
 
-use crate::agent::types::NetworkPolicy;
+use right_core::agent_types::NetworkPolicy;
 
 /// Domains allowed in restrictive mode (Anthropic/Claude only).
 const RESTRICTIVE_DOMAINS: &[&str] = &[

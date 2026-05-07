@@ -2930,6 +2930,7 @@ dependencies = [
  "prost-types",
  "rand 0.10.1",
  "reqwest 0.13.3",
+ "right-codegen",
  "right-core",
  "right-db",
  "right-mcp",
@@ -2994,6 +2995,30 @@ dependencies = [
  "uuid",
  "which",
  "whisper-rs",
+]
+
+[[package]]
+name = "right-codegen"
+version = "0.2.10"
+dependencies = [
+ "base64",
+ "dirs",
+ "include_dir",
+ "miette",
+ "minijinja",
+ "rand 0.10.1",
+ "right-core",
+ "right-db",
+ "right-mcp",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "walkdir",
+ "which",
 ]
 
 [[package]]

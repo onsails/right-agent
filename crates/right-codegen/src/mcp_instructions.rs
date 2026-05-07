@@ -1,4 +1,4 @@
-use crate::mcp::credentials::McpServerEntry;
+use right_mcp::credentials::McpServerEntry;
 
 /// Header emitted by [`generate_mcp_instructions_md`] even when no servers
 /// have instructions. Used by callers to detect "header-only" responses.

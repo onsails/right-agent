@@ -1,0 +1,27 @@
+[package]
+name = "right-codegen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+dirs = { workspace = true }
+include_dir = { workspace = true }
+miette = { workspace = true }
+minijinja = { workspace = true }
+rand = { workspace = true }
+right-core = { path = "../right-core" }
+right-db = { path = "../right-db" }
+right-mcp = { path = "../right-mcp" }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+walkdir = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+right-core = { path = "../right-core", features = ["test-support"] }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { version = "1.52", features = ["test-util"] }

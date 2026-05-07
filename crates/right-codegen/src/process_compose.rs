@@ -3,10 +3,10 @@ use std::path::Path;
 use minijinja::{Environment, context};
 use serde::Serialize;
 
-use crate::agent::{AgentDef, RestartPolicy};
-use crate::runtime::{MCP_HTTP_PORT, PC_PORT};
+use right_core::agent_types::{AgentDef, RestartPolicy, SandboxMode};
+use right_core::runtime_state::{MCP_HTTP_PORT, PC_PORT};
 
-const PC_TEMPLATE: &str = include_str!("../../templates/process-compose.yaml.j2");
+const PC_TEMPLATE: &str = include_str!("../templates/process-compose.yaml.j2");
 
 /// Template context for a single bot process entry.
 #[derive(Debug, Serialize)]
@@ -123,12 +123,12 @@ pub fn generate_process_compose(
 
             let mode = config.sandbox_mode();
             let sandbox_mode = match mode {
-                crate::agent::types::SandboxMode::Openshell => "openshell",
-                crate::agent::types::SandboxMode::None => "none",
+                SandboxMode::Openshell => "openshell",
+                SandboxMode::None => "none",
             };
 
             let sandbox_policy_path = match mode {
-                crate::agent::types::SandboxMode::Openshell => {
+                SandboxMode::Openshell => {
                     let policy_file = config
                         .sandbox
                         .as_ref()
@@ -137,7 +137,7 @@ pub fn generate_process_compose(
                         .unwrap_or_else(|| std::path::PathBuf::from("policy.yaml"));
                     Some(agent.path.join(&policy_file).display().to_string())
                 }
-                crate::agent::types::SandboxMode::None => None,
+                SandboxMode::None => None,
             };
 
             Some(BotProcessAgent {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::agent::AgentDef;
+use right_core::agent_types::AgentDef;
 
 /// Generate a per-agent `.claude.json` file with workspace trust and onboarding state.
 ///
@@ -19,7 +19,7 @@ pub fn generate_agent_claude_json(agent: &AgentDef) -> miette::Result<()> {
         .display()
         .to_string();
 
-    crate::codegen::contract::write_merged_rmw(&claude_json_path, |existing| {
+    crate::contract::write_merged_rmw(&claude_json_path, |existing| {
         let mut config: serde_json::Value = match existing {
             Some(content) => serde_json::from_str(content).map_err(|e| {
                 miette::miette!("failed to parse {}: {e:#}", claude_json_path.display())
@@ -114,7 +114,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
+    use right_core::agent_types::{AgentConfig, AgentDef, RestartPolicy};
 
     fn make_test_agent(dir: &std::path::Path, name: &str) -> AgentDef {
         AgentDef {

@@ -1,4 +1,4 @@
-use crate::codegen::{
+use crate::{
     BG_CONTINUATION_SCHEMA_JSON, BOOTSTRAP_SCHEMA_JSON, CRON_SCHEMA_JSON, REPLY_SCHEMA_JSON,
     generate_system_prompt,
 };
@@ -37,7 +37,7 @@ fn bootstrap_schema_has_bootstrap_complete_field() {
 fn system_prompt_contains_agent_name() {
     let result = generate_system_prompt(
         "mybot",
-        &crate::agent::types::SandboxMode::Openshell,
+        &right_core::agent_types::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(result.contains("mybot"));
@@ -47,7 +47,7 @@ fn system_prompt_contains_agent_name() {
 fn system_prompt_contains_right_description() {
     let result = generate_system_prompt(
         "test",
-        &crate::agent::types::SandboxMode::Openshell,
+        &right_core::agent_types::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(result.contains("Right Agent"));
@@ -58,14 +58,14 @@ fn system_prompt_contains_right_description() {
 fn system_prompt_contains_sandbox_mode() {
     let openshell = generate_system_prompt(
         "test",
-        &crate::agent::types::SandboxMode::Openshell,
+        &right_core::agent_types::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(openshell.contains("OpenShell"));
 
     let none = generate_system_prompt(
         "test",
-        &crate::agent::types::SandboxMode::None,
+        &right_core::agent_types::SandboxMode::None,
         "/test/agent/home",
     );
     assert!(none.contains("no sandbox"));
@@ -75,7 +75,7 @@ fn system_prompt_contains_sandbox_mode() {
 fn system_prompt_mentions_right_mcp() {
     let result = generate_system_prompt(
         "test",
-        &crate::agent::types::SandboxMode::Openshell,
+        &right_core::agent_types::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(result.contains("right"));
@@ -86,7 +86,7 @@ fn system_prompt_mentions_right_mcp() {
 fn system_prompt_contains_ssh_block_for_openshell() {
     let result = generate_system_prompt(
         "mybot",
-        &crate::agent::types::SandboxMode::Openshell,
+        &right_core::agent_types::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(
@@ -103,7 +103,7 @@ fn system_prompt_contains_ssh_block_for_openshell() {
 fn system_prompt_no_ssh_block_for_no_sandbox() {
     let result = generate_system_prompt(
         "mybot",
-        &crate::agent::types::SandboxMode::None,
+        &right_core::agent_types::SandboxMode::None,
         "/test/agent/home",
     );
     assert!(
@@ -115,15 +115,15 @@ fn system_prompt_no_ssh_block_for_no_sandbox() {
 #[test]
 fn operating_instructions_constant_is_non_empty() {
     assert!(
-        !crate::codegen::OPERATING_INSTRUCTIONS.is_empty(),
+        !crate::OPERATING_INSTRUCTIONS.is_empty(),
         "OPERATING_INSTRUCTIONS must not be empty"
     );
     assert!(
-        crate::codegen::OPERATING_INSTRUCTIONS.contains("## Your Files"),
+        crate::OPERATING_INSTRUCTIONS.contains("## Your Files"),
         "OPERATING_INSTRUCTIONS must contain Your Files section"
     );
     assert!(
-        crate::codegen::OPERATING_INSTRUCTIONS.contains("## MCP Management"),
+        crate::OPERATING_INSTRUCTIONS.contains("## MCP Management"),
         "OPERATING_INSTRUCTIONS must contain MCP Management section"
     );
 }
@@ -131,19 +131,19 @@ fn operating_instructions_constant_is_non_empty() {
 #[test]
 fn bootstrap_instructions_constant_is_non_empty() {
     assert!(
-        !crate::codegen::BOOTSTRAP_INSTRUCTIONS.is_empty(),
+        !crate::BOOTSTRAP_INSTRUCTIONS.is_empty(),
         "BOOTSTRAP_INSTRUCTIONS must not be empty"
     );
     assert!(
-        crate::codegen::BOOTSTRAP_INSTRUCTIONS.contains("First-Time Setup"),
+        crate::BOOTSTRAP_INSTRUCTIONS.contains("First-Time Setup"),
         "BOOTSTRAP_INSTRUCTIONS must contain bootstrap header"
     );
     assert!(
-        crate::codegen::BOOTSTRAP_INSTRUCTIONS.contains("### IDENTITY.md"),
+        crate::BOOTSTRAP_INSTRUCTIONS.contains("### IDENTITY.md"),
         "BOOTSTRAP_INSTRUCTIONS must contain IDENTITY.md structure"
     );
     assert!(
-        crate::codegen::BOOTSTRAP_INSTRUCTIONS.contains("### SOUL.md"),
+        crate::BOOTSTRAP_INSTRUCTIONS.contains("### SOUL.md"),
         "BOOTSTRAP_INSTRUCTIONS must contain SOUL.md structure"
     );
 }
@@ -152,7 +152,7 @@ fn bootstrap_instructions_constant_is_non_empty() {
 fn system_prompt_contains_home_dir() {
     let result = generate_system_prompt(
         "test",
-        &crate::agent::types::SandboxMode::Openshell,
+        &right_core::agent_types::SandboxMode::Openshell,
         "/my/custom/home",
     );
     assert!(
@@ -268,7 +268,7 @@ fn bg_continuation_schema_attachments_item_has_media_group_id() {
 
 #[test]
 fn operating_instructions_documents_media_groups() {
-    let ops = crate::codegen::OPERATING_INSTRUCTIONS;
+    let ops = crate::OPERATING_INSTRUCTIONS;
     assert!(ops.contains("Media Groups"), "missing media-group docs");
     assert!(
         ops.contains("media_group_id"),

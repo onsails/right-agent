@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/right-agent", "crates/right-core", "crates/right-db", "crates/right-mcp", "crates/right", "crates/bot"]
+members = ["crates/right-agent", "crates/right-core", "crates/right-db", "crates/right-mcp", "crates/right-codegen", "crates/right", "crates/bot"]
 resolver = "3"
 
 [workspace.package]

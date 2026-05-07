@@ -1,9 +1,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::agent::types::{AgentDef, SandboxMode};
-use crate::codegen::cloudflared::CloudflaredCredentials;
-use crate::codegen::contract::{write_agent_owned, write_merged_rmw, write_regenerated};
+use right_core::agent_types::{AgentDef, MemoryProvider, SandboxMode};
+use right_core::runtime_state::{
+    AgentState, MCP_HTTP_PORT, PC_PORT, RuntimeState, generate_pc_api_token, read_state,
+    write_state,
+};
+
+use crate::cloudflared::CloudflaredCredentials;
+use crate::contract::{write_agent_owned, write_merged_rmw, write_regenerated};
 
 /// Inject a secret into agent.yaml if not already present.
 /// Returns the existing or newly generated secret.
@@ -16,16 +21,16 @@ fn ensure_agent_secret(
         return Ok(secret.to_owned());
     }
 
-    let new_secret = crate::mcp::generate_agent_secret();
+    let new_secret = right_mcp::generate_agent_secret();
     let yaml_path = agent_path.join("agent.yaml");
 
     write_merged_rmw(&yaml_path, |existing| {
-        let content = existing
-            .ok_or_else(|| miette::miette!("agent.yaml missing for '{agent_name}'"))?;
+        let content =
+            existing.ok_or_else(|| miette::miette!("agent.yaml missing for '{agent_name}'"))?;
         let mut doc: serde_json::Map<String, serde_json::Value> = serde_saphyr::from_str(content)
             .map_err(|e| {
-                miette::miette!("failed to parse agent.yaml for '{agent_name}': {e:#}")
-            })?;
+            miette::miette!("failed to parse agent.yaml for '{agent_name}': {e:#}")
+        })?;
         doc.insert(
             "secret".to_owned(),
             serde_json::Value::String(new_secret.clone()),
@@ -64,7 +69,7 @@ pub fn run_single_agent_codegen(
         .unwrap_or_default();
 
     // Generate .claude/settings.json with behavioral flags.
-    let settings = crate::codegen::generate_settings()?;
+    let settings = crate::generate_settings()?;
     let claude_dir = agent.path.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| miette::miette!("failed to create .claude dir for '{}': {e:#}", agent.name))?;
@@ -72,13 +77,13 @@ pub fn run_single_agent_codegen(
     // Write reply-schema.json.
     write_regenerated(
         &claude_dir.join("reply-schema.json"),
-        crate::codegen::REPLY_SCHEMA_JSON,
+        crate::REPLY_SCHEMA_JSON,
     )?;
 
     // Write cron-schema.json.
     write_regenerated(
         &claude_dir.join("cron-schema.json"),
-        crate::codegen::CRON_SCHEMA_JSON,
+        crate::CRON_SCHEMA_JSON,
     )?;
 
     // Determine home directory: /sandbox for OpenShell agents, agent path for no-sandbox.
@@ -90,13 +95,13 @@ pub fn run_single_agent_codegen(
     // Write system-prompt.md (base identity for --system-prompt-file).
     write_regenerated(
         &claude_dir.join("system-prompt.md"),
-        &crate::codegen::generate_system_prompt(&agent.name, &agent_sandbox_mode, &home_dir),
+        &crate::generate_system_prompt(&agent.name, &agent_sandbox_mode, &home_dir),
     )?;
 
     // Write bootstrap-schema.json (bootstrap mode structured output).
     write_regenerated(
         &claude_dir.join("bootstrap-schema.json"),
-        crate::codegen::BOOTSTRAP_SCHEMA_JSON,
+        crate::BOOTSTRAP_SCHEMA_JSON,
     )?;
 
     tracing::debug!(agent = %agent.name, "wrote schemas");
@@ -108,17 +113,16 @@ pub fn run_single_agent_codegen(
             agent.name
         )
     })?;
-    let settings_json = serde_json::to_string_pretty(&settings).map_err(|e| {
-        miette::miette!("failed to serialize settings for '{}': {e:#}", agent.name)
-    })?;
+    let settings_json = serde_json::to_string_pretty(&settings)
+        .map_err(|e| miette::miette!("failed to serialize settings for '{}': {e:#}", agent.name))?;
     write_regenerated(&claude_dir.join("settings.json"), &settings_json)?;
     tracing::debug!(agent = %agent.name, "wrote settings.json");
 
     // Generate per-agent .claude.json with trust entries.
-    crate::codegen::generate_agent_claude_json(agent)?;
+    crate::generate_agent_claude_json(agent)?;
 
     // Create credential symlink for OAuth under HOME override.
-    crate::codegen::create_credential_symlink(agent, &host_home)?;
+    crate::create_credential_symlink(agent, &host_home)?;
 
     // git init if .git/ missing. Non-fatal: log warning and continue if git binary absent.
     if !agent.path.join(".git").exists() {
@@ -147,8 +151,8 @@ pub fn run_single_agent_codegen(
         .as_ref()
         .and_then(|c| c.memory.as_ref())
         .map(|m| &m.provider)
-        .unwrap_or(&crate::agent::types::MemoryProvider::File);
-    crate::codegen::install_builtin_skills(&agent.path, memory_provider)?;
+        .unwrap_or(&MemoryProvider::File);
+    crate::install_builtin_skills(&agent.path, memory_provider)?;
 
     // Write settings.local.json only if absent (CC may write runtime state here).
     write_agent_owned(&claude_dir.join("settings.local.json"), "{}")?;
@@ -169,23 +173,18 @@ pub fn run_single_agent_codegen(
         .as_ref()
         .map(|c| c.network_policy)
         .unwrap_or_default();
-    let mcp_port = crate::runtime::MCP_HTTP_PORT;
-    let policy_content = crate::codegen::policy::generate_policy(mcp_port, &network_policy, None);
+    let mcp_port = MCP_HTTP_PORT;
+    let policy_content = crate::policy::generate_policy(mcp_port, &network_policy, None);
     write_regenerated(&agent.path.join("policy.yaml"), &policy_content)?;
     tracing::debug!(agent = %agent.name, %network_policy, "wrote policy.yaml");
 
     // Generate mcp.json with right HTTP MCP server entry.
-    let bearer_token = crate::mcp::derive_token(&agent_secret, "right-mcp")?;
+    let bearer_token = right_mcp::derive_token(&agent_secret, "right-mcp")?;
     let right_mcp_url = match agent_sandbox_mode {
         SandboxMode::None => format!("http://127.0.0.1:{mcp_port}/mcp"),
         SandboxMode::Openshell => format!("http://host.openshell.internal:{mcp_port}/mcp"),
     };
-    crate::codegen::generate_mcp_config_http(
-        &agent.path,
-        &agent.name,
-        &right_mcp_url,
-        &bearer_token,
-    )?;
+    crate::generate_mcp_config_http(&agent.path, &agent.name, &right_mcp_url, &bearer_token)?;
     tracing::debug!(agent = %agent.name, "wrote mcp.json with right HTTP MCP entry");
 
     Ok(agent_secret)
@@ -209,7 +208,7 @@ pub fn run_agent_codegen(
     std::fs::create_dir_all(&run_dir)
         .map_err(|e| miette::miette!("failed to create run directory: {e:#}"))?;
 
-    let global_cfg = crate::config::read_global_config(home)?;
+    let global_cfg = right_core::config::read_global_config(home)?;
 
     // Resolve agent secrets for token map.
     // Per-agent codegen is now done by the bot at startup (run_single_agent_codegen).
@@ -227,7 +226,7 @@ pub fn run_agent_codegen(
         let secret = generated_secrets.get(&agent.name).ok_or_else(|| {
             miette::miette!("agent '{}' has no secret after resolution", agent.name)
         })?;
-        let token = crate::mcp::derive_token(secret, "right-mcp")?;
+        let token = right_mcp::derive_token(secret, "right-mcp")?;
         token_map_entries.insert(agent.name.clone(), serde_json::Value::String(token));
     }
     let token_map_path = run_dir.join("agent-tokens.json");
@@ -272,7 +271,7 @@ pub fn run_agent_codegen(
             credentials_file: tunnel_cfg.credentials_file.clone(),
         };
 
-        let cf_config = crate::codegen::cloudflared::generate_cloudflared_config(
+        let cf_config = crate::cloudflared::generate_cloudflared_config(
             &agent_pairs,
             &tunnel_cfg.hostname,
             &creds,
@@ -304,10 +303,10 @@ pub fn run_agent_codegen(
     };
 
     // Generate process-compose.yaml.
-    let pc_config = crate::codegen::generate_process_compose(
+    let pc_config = crate::generate_process_compose(
         all_agents,
         self_exe,
-        &crate::codegen::ProcessComposeConfig {
+        &crate::ProcessComposeConfig {
             debug,
             home,
             cloudflared_script: &cloudflared_script_path,
@@ -322,7 +321,7 @@ pub fn run_agent_codegen(
     // existing state (reload case — token must stay consistent with the running PC).
     let state_path = run_dir.join("state.json");
     let socket_path = run_dir.join("pc.sock");
-    let existing = crate::runtime::read_state(&state_path).ok();
+    let existing = read_state(&state_path).ok();
     let started_at = existing
         .as_ref()
         .map(|s| s.started_at.clone())
@@ -335,20 +334,20 @@ pub fn run_agent_codegen(
     // Reuse existing token on reload; generate a fresh one on first start.
     let pc_api_token = existing
         .and_then(|s| s.pc_api_token)
-        .unwrap_or_else(crate::runtime::generate_pc_api_token);
-    let state = crate::runtime::RuntimeState {
+        .unwrap_or_else(generate_pc_api_token);
+    let state = RuntimeState {
         agents: all_agents
             .iter()
-            .map(|a| crate::runtime::AgentState {
+            .map(|a| AgentState {
                 name: a.name.clone(),
             })
             .collect(),
         socket_path: socket_path.display().to_string(),
         started_at,
-        pc_port: crate::runtime::PC_PORT,
+        pc_port: PC_PORT,
         pc_api_token: Some(pc_api_token),
     };
-    crate::runtime::write_state(&state, &state_path)?;
+    write_state(&state, &state_path)?;
 
     Ok(())
 }
@@ -356,6 +355,7 @@ pub fn run_agent_codegen(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use right_core::agent_types::AgentConfig;
 
     /// Write a minimal valid `config.yaml` (with tunnel block) into the given
     /// home directory. Required because Tasks 1+2 made tunnel config mandatory:
@@ -372,6 +372,32 @@ pub(crate) mod tests {
         fs::write(home.join("config.yaml"), yaml).unwrap();
     }
 
+    fn agent_fixture(agent_dir: &Path) -> AgentDef {
+        let name = agent_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let config = std::fs::read_to_string(agent_dir.join("agent.yaml"))
+            .ok()
+            .map(|yaml| serde_saphyr::from_str::<AgentConfig>(&yaml).unwrap());
+
+        AgentDef {
+            name,
+            path: agent_dir.to_path_buf(),
+            identity_path: agent_dir.join("IDENTITY.md"),
+            config,
+            soul_path: None,
+            user_path: None,
+            tools_path: agent_dir
+                .join("TOOLS.md")
+                .exists()
+                .then(|| agent_dir.join("TOOLS.md")),
+            bootstrap_path: None,
+            heartbeat_path: None,
+        }
+    }
+
     #[test]
     fn run_single_agent_codegen_generates_all_files() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -385,7 +411,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let agent = crate::agent::discover_single_agent(&agent_dir).unwrap();
+        let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
 
         run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
@@ -420,7 +446,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let agent = crate::agent::discover_single_agent(&agent_dir).unwrap();
+        let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
 
         run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
@@ -462,7 +488,7 @@ pub(crate) mod tests {
         let custom_content = "# My Custom Tools\n\nDo not overwrite me.\n";
         std::fs::write(agent_dir.join("TOOLS.md"), custom_content).unwrap();
 
-        let agent = crate::agent::discover_single_agent(&agent_dir).unwrap();
+        let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
         run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
 
@@ -485,7 +511,7 @@ pub(crate) mod tests {
         // No TOOLS.md before codegen
         assert!(!agent_dir.join("TOOLS.md").exists());
 
-        let agent = crate::agent::discover_single_agent(&agent_dir).unwrap();
+        let agent = agent_fixture(&agent_dir);
         let self_exe = std::path::PathBuf::from("/usr/bin/right");
         run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
 

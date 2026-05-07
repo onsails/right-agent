@@ -1,4 +1,4 @@
-use crate::codegen::generate_settings;
+use crate::generate_settings;
 
 #[test]
 fn generates_behavioral_flags() {

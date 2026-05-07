@@ -88,13 +88,14 @@ pub fn write_merged_rmw<F>(path: &Path, merge_fn: F) -> miette::Result<()>
 where
     F: FnOnce(Option<&str>) -> miette::Result<String>,
 {
-    let existing = if path.exists() {
-        Some(std::fs::read_to_string(path).map_err(|e| {
-            miette::miette!("failed to read {} for merge: {e:#}", path.display())
-        })?)
-    } else {
-        None
-    };
+    let existing =
+        if path.exists() {
+            Some(std::fs::read_to_string(path).map_err(|e| {
+                miette::miette!("failed to read {} for merge: {e:#}", path.display())
+            })?)
+        } else {
+            None
+        };
     let content = merge_fn(existing.as_deref())?;
     ensure_parent_dir(path)?;
     std::fs::write(path, content)
@@ -111,12 +112,12 @@ pub async fn write_and_apply_sandbox_policy(
     content: &str,
 ) -> miette::Result<()> {
     write_regenerated(path, content)?;
-    crate::openshell::apply_policy(sandbox, path).await
+    right_core::openshell::apply_policy(sandbox, path).await
 }
 
 /// Per-agent codegen outputs. Source of truth for guard tests.
 ///
-/// Every file produced by [`crate::codegen::run_single_agent_codegen`] MUST
+/// Every file produced by [`crate::run_single_agent_codegen`] MUST
 /// appear here or in the documented `KNOWN_EXCEPTIONS` inside
 /// `registry_covers_all_per_agent_writes`.
 pub fn codegen_registry(agent_dir: &Path) -> Vec<CodegenFile> {
@@ -199,7 +200,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    use crate::agent::AgentDef;
+    use right_core::agent_types::{AgentConfig, AgentDef};
     use std::path::PathBuf;
 
     fn minimal_agent_fixture(home: &Path, name: &str) -> AgentDef {
@@ -211,12 +212,28 @@ mod tests {
             "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: none\n",
         )
         .unwrap();
-        crate::agent::discover_single_agent(&agent_path).unwrap()
+        agent_from_path(&agent_path, name)
+    }
+
+    fn agent_from_path(agent_path: &Path, name: &str) -> AgentDef {
+        let config_yaml = std::fs::read_to_string(agent_path.join("agent.yaml")).unwrap();
+        let config = serde_saphyr::from_str::<AgentConfig>(&config_yaml).unwrap();
+        AgentDef {
+            name: name.to_owned(),
+            path: agent_path.to_path_buf(),
+            identity_path: agent_path.join("IDENTITY.md"),
+            config: Some(config),
+            soul_path: None,
+            user_path: None,
+            tools_path: None,
+            bootstrap_path: None,
+            heartbeat_path: None,
+        }
     }
 
     fn run_codegen_for(home: &Path, agent: &AgentDef) {
         let self_exe = PathBuf::from("/usr/local/bin/right");
-        crate::codegen::run_single_agent_codegen(home, agent, &self_exe, false).unwrap();
+        crate::run_single_agent_codegen(home, agent, &self_exe, false).unwrap();
     }
 
     fn sha256(path: &Path) -> String {
@@ -268,7 +285,10 @@ mod tests {
         let path = dir.path().join("TOOLS.md");
         std::fs::write(&path, "agent-edited content").unwrap();
         write_agent_owned(&path, "# default (should be ignored)").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "agent-edited content");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "agent-edited content"
+        );
     }
 
     #[test]
@@ -310,11 +330,18 @@ mod tests {
         let dir = tempdir().unwrap();
         let reg = codegen_registry(dir.path());
         assert!(reg.iter().any(|f| matches!(f.kind, CodegenKind::MergedRMW)));
-        assert!(reg.iter().any(|f| matches!(f.kind, CodegenKind::AgentOwned)));
-        assert!(reg.iter().any(|f| matches!(f.kind,
-            CodegenKind::Regenerated(HotReload::BotRestart))));
-        assert!(reg.iter().any(|f| matches!(f.kind,
-            CodegenKind::Regenerated(HotReload::SandboxRecreate))));
+        assert!(
+            reg.iter()
+                .any(|f| matches!(f.kind, CodegenKind::AgentOwned))
+        );
+        assert!(
+            reg.iter()
+                .any(|f| matches!(f.kind, CodegenKind::Regenerated(HotReload::BotRestart)))
+        );
+        assert!(
+            reg.iter()
+                .any(|f| matches!(f.kind, CodegenKind::Regenerated(HotReload::SandboxRecreate)))
+        );
     }
 
     #[test]
@@ -329,7 +356,7 @@ mod tests {
         // in-memory `AgentDef` makes `ensure_agent_secret` mint a fresh one on
         // the second run, churning any file derived from it (mcp.json bearer).
         // This matches production: every bot start re-reads `agent.yaml`.
-        let agent = crate::agent::discover_single_agent(&agent.path).unwrap();
+        let agent = agent_from_path(&agent.path, "t1");
 
         let reg = codegen_registry(&agent.path);
         let first: std::collections::HashMap<_, _> = reg
@@ -344,7 +371,8 @@ mod tests {
         for (path, old_hash) in &first {
             let new_hash = sha256(path);
             assert_eq!(
-                &new_hash, old_hash,
+                &new_hash,
+                old_hash,
                 "Regenerated file changed between codegen runs: {}",
                 path.display(),
             );
@@ -505,7 +533,7 @@ mod tests {
         let agent = minimal_agent_fixture(&home, "t5");
 
         // Tunnel config is mandatory — write a minimal one before codegen.
-        crate::codegen::pipeline::tests::write_minimal_global_config(&home);
+        crate::pipeline::tests::write_minimal_global_config(&home);
 
         // Snapshot pre-existing files under home (excluding agents/) — only
         // files created by the codegen call count.
@@ -514,8 +542,7 @@ mod tests {
         let before: std::collections::HashSet<PathBuf> = before.into_iter().collect();
 
         let self_exe = PathBuf::from("/usr/local/bin/right");
-        crate::codegen::run_agent_codegen(&home, std::slice::from_ref(&agent), &self_exe, false)
-            .unwrap();
+        crate::run_agent_codegen(&home, std::slice::from_ref(&agent), &self_exe, false).unwrap();
 
         let reg_paths: std::collections::HashSet<PathBuf> = crossagent_codegen_registry(&home)
             .into_iter()

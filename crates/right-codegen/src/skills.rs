@@ -5,9 +5,10 @@ use miette::{IntoDiagnostic as _, WrapErr as _};
 use minijinja::Environment;
 use minijinja::value::Value as JinjaValue;
 
-use crate::agent::types::MemoryProvider;
-use crate::codegen::contract::{write_agent_owned, write_regenerated_bytes};
-use crate::cron_spec::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
+use right_core::agent_types::MemoryProvider;
+use right_core::time_constants::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
+
+use crate::contract::{write_agent_owned, write_regenerated_bytes};
 
 const SKILL_RIGHTSKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightskills");
 const SKILL_RIGHTCRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightcron");
@@ -69,9 +70,7 @@ fn install_embedded_dir(dir: &Dir, target: &Path) -> miette::Result<()> {
             let rendered = env
                 .render_str(raw, &ctx)
                 .into_diagnostic()
-                .wrap_err_with(|| {
-                    format!("rendering skill template {}", file.path().display())
-                })?;
+                .wrap_err_with(|| format!("rendering skill template {}", file.path().display()))?;
             write_regenerated_bytes(&dest, rendered.as_bytes())?;
         } else {
             write_regenerated_bytes(&dest, file.contents())?;
@@ -132,8 +131,7 @@ mod tests {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         let content =
-            std::fs::read_to_string(dir.path().join(".claude/skills/rightcron/SKILL.md"))
-                .unwrap();
+            std::fs::read_to_string(dir.path().join(".claude/skills/rightcron/SKILL.md")).unwrap();
         // Template tokens must be fully rendered.
         assert!(
             !content.contains("{{"),

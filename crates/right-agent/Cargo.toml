@@ -25,6 +25,7 @@ rand = { workspace = true }
 right-core = { path = "../right-core" }
 right-db = { path = "../right-db" }
 right-mcp = { path = "../right-mcp" }
+right-codegen = { path = "../right-codegen" }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }

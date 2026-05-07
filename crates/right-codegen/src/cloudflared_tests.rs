@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::codegen::cloudflared::{CloudflaredCredentials, generate_cloudflared_config};
+use crate::cloudflared::{CloudflaredCredentials, generate_cloudflared_config};
 
 fn fixture_creds() -> CloudflaredCredentials {
     CloudflaredCredentials {
@@ -21,7 +21,8 @@ fn two_agents_produce_two_ingress_rules_plus_catch_all() {
             PathBuf::from("/home/user/.right/agents/beta"),
         ),
     ];
-    let yaml = generate_cloudflared_config(&agents, "tunnel.example.com", &fixture_creds()).unwrap();
+    let yaml =
+        generate_cloudflared_config(&agents, "tunnel.example.com", &fixture_creds()).unwrap();
     assert!(
         yaml.contains("/oauth/alpha/callback"),
         "missing alpha ingress: {yaml}"
@@ -39,7 +40,8 @@ fn two_agents_produce_two_ingress_rules_plus_catch_all() {
 #[test]
 fn ingress_hostname_matches_tunnel_hostname() {
     let agents = vec![("myagent".to_string(), PathBuf::from("/tmp/agents/myagent"))];
-    let yaml = generate_cloudflared_config(&agents, "my-tunnel.example.com", &fixture_creds()).unwrap();
+    let yaml =
+        generate_cloudflared_config(&agents, "my-tunnel.example.com", &fixture_creds()).unwrap();
     assert!(
         yaml.contains("my-tunnel.example.com"),
         "tunnel URL missing from ingress: {yaml}"
@@ -94,7 +96,8 @@ fn zero_agents_still_produces_catch_all() {
 #[test]
 fn https_scheme_stripped_from_hostname() {
     let agents = vec![("agent".to_string(), PathBuf::from("/tmp/agents/agent"))];
-    let yaml = generate_cloudflared_config(&agents, "https://right.example.com", &fixture_creds()).unwrap();
+    let yaml = generate_cloudflared_config(&agents, "https://right.example.com", &fixture_creds())
+        .unwrap();
     assert!(
         yaml.contains("hostname: right.example.com"),
         "https:// scheme must be stripped: {yaml}"
@@ -108,7 +111,8 @@ fn https_scheme_stripped_from_hostname() {
 #[test]
 fn http_scheme_stripped_from_hostname() {
     let agents = vec![("agent".to_string(), PathBuf::from("/tmp/agents/agent"))];
-    let yaml = generate_cloudflared_config(&agents, "http://right.example.com", &fixture_creds()).unwrap();
+    let yaml =
+        generate_cloudflared_config(&agents, "http://right.example.com", &fixture_creds()).unwrap();
     assert!(
         yaml.contains("hostname: right.example.com"),
         "http:// scheme must be stripped: {yaml}"
@@ -159,7 +163,9 @@ fn webhook_ingress_appears_before_oauth_for_same_agent() {
     let agents = vec![("alpha".to_string(), PathBuf::from("/tmp/agents/alpha"))];
     let yaml = generate_cloudflared_config(&agents, "t.example.com", &creds).unwrap();
     let tg_pos = yaml.find("^/tg/alpha$").expect("missing /tg rule");
-    let oauth_pos = yaml.find("/oauth/alpha/callback").expect("missing /oauth rule");
+    let oauth_pos = yaml
+        .find("/oauth/alpha/callback")
+        .expect("missing /oauth rule");
     assert!(
         tg_pos < oauth_pos,
         "/tg rule must come before /oauth rule for same agent (first match wins). yaml:\n{yaml}"

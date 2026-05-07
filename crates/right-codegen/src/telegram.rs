@@ -1,4 +1,4 @@
-use crate::agent::AgentDef;
+use right_core::agent_types::AgentDef;
 
 /// Generate Telegram channel config for an agent under HOME override.
 ///
@@ -44,7 +44,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
+    use right_core::agent_types::{AgentConfig, AgentDef, RestartPolicy};
     use tempfile::tempdir;
 
     fn make_agent(dir: &Path, config: Option<AgentConfig>) -> AgentDef {

@@ -3,7 +3,7 @@
 /// Injected directly into the system prompt at assembly time.
 /// Source: `templates/right/prompt/OPERATING_INSTRUCTIONS.md`
 pub const OPERATING_INSTRUCTIONS: &str =
-    include_str!("../../templates/right/prompt/OPERATING_INSTRUCTIONS.md");
+    include_str!("../templates/right/prompt/OPERATING_INSTRUCTIONS.md");
 
 /// Bootstrap instructions, compiled into the binary.
 ///
@@ -11,7 +11,7 @@ pub const OPERATING_INSTRUCTIONS: &str =
 /// (BOOTSTRAP.md exists in agent dir). The on-disk file is only
 /// an existence flag — content always comes from this constant.
 /// Source: `templates/right/agent/BOOTSTRAP.md`
-pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../../templates/right/agent/BOOTSTRAP.md");
+pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../templates/right/agent/BOOTSTRAP.md");
 
 /// JSON schema for the structured reply format used by teloxide agents (D-02).
 ///
@@ -49,14 +49,14 @@ pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{
 /// Behavior-specific instructions come from the agent definition (`--agent`).
 pub fn generate_system_prompt(
     agent_name: &str,
-    sandbox_mode: &crate::agent::types::SandboxMode,
+    sandbox_mode: &right_core::agent_types::SandboxMode,
     home_dir: &str,
 ) -> String {
     let sandbox_desc = match sandbox_mode {
-        crate::agent::types::SandboxMode::Openshell => {
+        right_core::agent_types::SandboxMode::Openshell => {
             "OpenShell sandbox (k3s container with network and filesystem policies)"
         }
-        crate::agent::types::SandboxMode::None => "no sandbox (direct host access)",
+        right_core::agent_types::SandboxMode::None => "no sandbox (direct host access)",
     };
 
     let mut prompt = format!(
@@ -93,7 +93,10 @@ your final response.
 "
     );
 
-    if matches!(sandbox_mode, crate::agent::types::SandboxMode::Openshell) {
+    if matches!(
+        sandbox_mode,
+        right_core::agent_types::SandboxMode::Openshell
+    ) {
         prompt.push_str(&format!(
             "
 ## User SSH Access

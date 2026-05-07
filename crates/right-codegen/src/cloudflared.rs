@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use minijinja::{Environment, context};
 use serde::Serialize;
 
-const CF_TEMPLATE: &str = include_str!("../../templates/cloudflared-config.yml.j2");
+const CF_TEMPLATE: &str = include_str!("../templates/cloudflared-config.yml.j2");
 
 /// Serializable agent entry for the cloudflared ingress template.
 #[derive(Debug, Serialize)]
@@ -46,10 +46,7 @@ pub fn generate_cloudflared_config(
         .iter()
         .map(|(name, dir)| CloudflaredAgent {
             name: name.clone(),
-            socket_path: dir
-                .join("bot.sock")
-                .to_string_lossy()
-                .to_string(),
+            socket_path: dir.join("bot.sock").to_string_lossy().to_string(),
         })
         .collect();
 

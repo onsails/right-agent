@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
-use crate::agent::types::{SandboxConfig, SandboxMode};
-use crate::agent::{AgentConfig, AgentDef, RestartPolicy};
-use crate::codegen::{ProcessComposeConfig, generate_process_compose};
+use right_core::agent_types::{AgentConfig, AgentDef, RestartPolicy, SandboxConfig, SandboxMode};
+
+use crate::{ProcessComposeConfig, generate_process_compose};
 
 const EXE_PATH: &str = "/usr/bin/right";
 const CLOUDFLARED_SCRIPT: &str = "/home/user/.right/scripts/cloudflared-start.sh";
@@ -566,8 +566,7 @@ fn mixed_mode_agents_correct_env_vars() {
 
     // reviewer: sandboxed with custom policy
     assert!(
-        output
-            .contains("RC_SANDBOX_POLICY=/home/user/.right/agents/reviewer/custom-policy.yaml")
+        output.contains("RC_SANDBOX_POLICY=/home/user/.right/agents/reviewer/custom-policy.yaml")
     );
 }
 

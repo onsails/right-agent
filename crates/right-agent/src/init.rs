@@ -24,7 +24,7 @@ pub struct InitOverrides {
     pub stt: SttConfig,
 }
 
-const DEFAULT_BOOTSTRAP: &str = include_str!("../templates/right/agent/BOOTSTRAP.md");
+const DEFAULT_BOOTSTRAP: &str = crate::codegen::BOOTSTRAP_INSTRUCTIONS;
 const DEFAULT_TOOLS: &str = include_str!("../templates/right/agent/TOOLS.md");
 const DEFAULT_AGENT_YAML: &str = include_str!("../templates/right/agent/agent.yaml");
 

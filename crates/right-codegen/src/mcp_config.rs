@@ -17,7 +17,7 @@ pub fn generate_mcp_config(
 ) -> miette::Result<()> {
     let mcp_path = agent_path.join("mcp.json");
 
-    crate::codegen::contract::write_merged_rmw(&mcp_path, |existing| {
+    crate::contract::write_merged_rmw(&mcp_path, |existing| {
         let mut root: serde_json::Value = match existing {
             Some(content) => serde_json::from_str(content)
                 .map_err(|e| miette::miette!("failed to parse mcp.json: {e:#}"))?,
@@ -84,7 +84,7 @@ pub fn generate_mcp_config_http(
 
     let output = serde_json::to_string_pretty(&root)
         .map_err(|e| miette::miette!("failed to serialize mcp.json: {e:#}"))?;
-    crate::codegen::contract::write_regenerated(&mcp_path, &output)
+    crate::contract::write_regenerated(&mcp_path, &output)
 }
 
 /// Generate a random 32-byte Bearer token, base64url-encoded (no padding).
