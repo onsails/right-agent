@@ -35,7 +35,7 @@
 ### right-memory
 
 - `hindsight.rs` — Hindsight Cloud API client and DTOs.
-- `resilient.rs`, `circuit.rs`, `classify.rs`, `guard.rs`, `status.rs` — memory failure handling, policy labels, circuit state, classification, and status reporting.
+- `resilient.rs`, `circuit.rs`, `classify.rs`, `status.rs` — memory failure handling, circuit state, classification, and status reporting.
 - `prefetch.rs` — recall prefetch cache.
 - `retain_queue.rs` — SQLite-backed pending-retain queue using `right-db` migrations.
 - `error.rs` — semantic-memory error type and `right-db` boundary.

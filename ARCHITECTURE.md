@@ -439,7 +439,6 @@ Rules:
 - **Credential isolation**: Host credentials never uploaded to sandbox. Each sandbox authenticates independently via OAuth login flow.
 - **Network policy**: Wildcard domain allowlists (*.anthropic.com, *.claude.com, *.claude.ai) + `binaries: "**"`. TLS termination is automatic (OpenShell v0.0.30+).
 - **`--dangerously-skip-permissions`**: Always on for all CC invocations. OpenShell policy is the security layer, not CC's permission system.
-- **Prompt injection detection**: Pattern matching in memory guard before SQLite insert
 - **Chat ID allowlist**: Empty = block all (secure default); per-agent in agent.yaml
 - **Protected MCP**: "right" cannot be removed via `/mcp remove`
 - **MCP tool restriction**: Agents cannot register/remove external MCP servers — `mcp_add`, `mcp_remove`, `mcp_auth` are not exposed as MCP tools. Only the user can manage servers via Telegram `/mcp` commands routed through the internal Unix socket API. This prevents sandbox escape via data exfiltration to attacker-controlled MCP endpoints.
