@@ -104,14 +104,20 @@ fi"#
                     .replace('\'', "'\\''");
                 let suffix = right_core::injection_guard::memory_wrap_suffix()
                     .replace('\'', "'\\''");
+                // `head` is gated by `[ -s ... ]`; a TOCTOU failure here would
+                // produce empty content inside the wrap, which is harmless.
+                // sed escape neutralizes any literal `--- END EXTERNAL CONTENT ---`
+                // an agent may have written into MEMORY.md (boundary-injection defense).
+                // Note: relies on GNU/BSD `\xHH` interpretation in sed; on a strict-POSIX
+                // sed it would fail open to literal `\xHH` text — unlikely in our
+                // sandbox base images but worth knowing if the image ever changes.
                 format!(
                     r#"
 if [ -s {root_path}/MEMORY.md ]; then
   printf '\n## Long-Term Memory\n\n'
   printf '%s\n' '{prefix}'
   head -200 {root_path}/MEMORY.md 2>/dev/null \
-    | sed 's|--- END EXTERNAL CONTENT ---|---\xe2\x80\x8b END EXTERNAL CONTENT ---|g' \
-    || echo "<memory-status>MEMORY.md unreadable</memory-status>"
+    | sed 's|--- END EXTERNAL CONTENT ---|---\xe2\x80\x8b END EXTERNAL CONTENT ---|g'
   printf '%s\n' '{suffix}'
 fi"#
                 )
