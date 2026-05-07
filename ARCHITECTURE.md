@@ -15,6 +15,12 @@ Eight crates in a Cargo workspace:
 | **right** | `crates/right/` | CLI binary (`right`) + MCP Aggregator (HTTP) |
 | **right-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
 
+**Re-export discipline:** The slim `right-agent` does not re-export modules
+from `right-core`, `right-db`, `right-mcp`, `right-codegen`, or `right-memory`.
+Consumers (CLI, bot, and agent internals) import directly from the source crate.
+This keeps the build-cache invariant: an edit inside `right-codegen` rebuilds
+`right-codegen` plus its direct consumers, not `right-agent`.
+
 `right-core` hosts stable platform primitives: error rendering,
 brand-conformant UI atoms, configuration parsing, the OpenShell gRPC client
 and generated proto types, process-group and sandbox-exec helpers,
@@ -275,7 +281,7 @@ protects tests (which run with a `--home=<tempdir>`) from accidentally hitting
 the user's live PC on port 18927 and SIGTERM-ing a same-named process there.
 
 `<home>/run/state.json` carries the port and API token the running PC uses;
-it is written by `codegen::pipeline` during `right up` and read by every
+it is written by `right_codegen::pipeline` during `right up` and read by every
 subsequent command that needs to talk to PC. Older state files without the
 `pc_port` field deserialize to `PC_PORT` via `#[serde(default)]`.
 

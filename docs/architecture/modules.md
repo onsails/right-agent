@@ -22,10 +22,7 @@
 ### right-agent (core)
 
 - `agent/` — agent discovery (presence detected by `agent.yaml`) and compatibility re-exports for shared agent types.
-- `codegen/` — compatibility re-export shim for `right-codegen`.
-- `memory/` — compatibility re-export shim for `right-memory` plus `right-db` open helpers.
 - `runtime/` — process-compose REST client, dependency checks, and compatibility re-exports for runtime state primitives.
-- `mcp/` — compatibility re-export shim for `right-mcp`.
 - Single-file modules: `doctor.rs`, `init.rs`, `rebootstrap.rs`, `cron_spec.rs`, `tunnel/`, `usage/`.
 
 ### right-codegen
