@@ -75,8 +75,37 @@ exactly:
     chore(changelog): humanize v<VERSION>
 
 where `<VERSION>` is the version number from the section's heading.
+Push the commit to the PR branch — `git push` is enough; the action
+has already configured the remote.
 
 If the topmost section already looks humanized (e.g. release-plz did
 not actually regenerate it on this trigger), still rewrite from scratch
 from the commits in range. Output is deterministic from the commits,
 not from the file's current contents.
+
+## Update the PR description too
+
+The release-plz PR body embeds the same cliff-generated section inside
+a `<details><blockquote>` wrapper. Operators read that body, not the
+file, when triaging the release PR — so it must match.
+
+Steps (run via Bash):
+
+1. Find the current PR number from the event:
+   `PR_NUMBER="${GITHUB_REF##*/}"` is wrong on `pull_request`; use
+   `gh pr view --json number --jq '.number'` from the checked-out
+   branch — `gh` infers the PR from the branch.
+2. Fetch the existing body:
+   `gh pr view --json body --jq '.body' > /tmp/pr-body.md`.
+3. Inside that body, find the topmost version block — the lines from
+   `## [<VERSION>] - <DATE>` through (but not including) the closing
+   `</blockquote>` of that release. Replace that block's body with the
+   same humanized bullets you wrote into `CHANGELOG.md`. Keep the
+   heading line and the surrounding `<details>` / `<blockquote>` HTML
+   intact.
+4. Write the result to `/tmp/pr-body.new.md` and apply:
+   `gh pr edit --body-file /tmp/pr-body.new.md`.
+
+If `gh pr edit` fails (e.g. token lacks pull-request write), surface
+the error in the run log and continue — the committed `CHANGELOG.md`
+is the source of truth and will be reflected in the next release.
