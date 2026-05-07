@@ -2,6 +2,7 @@
 name = "right-mcp"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 base64 = { workspace = true }

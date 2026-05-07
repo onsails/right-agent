@@ -2,6 +2,7 @@
 name = "right-memory"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 right-db = { path = "../right-db" }

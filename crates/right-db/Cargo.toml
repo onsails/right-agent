@@ -2,6 +2,7 @@
 name = "right-db"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [dependencies]
 rusqlite = { workspace = true }
