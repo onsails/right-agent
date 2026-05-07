@@ -124,11 +124,26 @@ fi"#
     )
 }
 
-/// Deploy pre-recalled content as composite-memory.md to host (and sandbox if applicable).
-///
-/// Formats `content` into a `<memory-context>` fence with the given `label`,
-/// optionally appends a `<memory-status>` marker, writes to
-/// `agent_dir/.claude/composite-memory.md`, and uploads to sandbox.
+/// Format a composite-memory file body: bot-trusted label note,
+/// ironclaw-wrapped content (untrusted), then bot-trusted status / bg
+/// markers. Pure function — extracted for unit testing.
+pub(crate) fn format_composite_memory(
+    content: &str,
+    label: &str,
+    status_marker: Option<&str>,
+    bg_marker: Option<&str>,
+) -> String {
+    let label_line = format!("[System: recalled memory context, {label}.]\n\n");
+    let wrapped = right_core::injection_guard::wrap_memory_for_prompt(content);
+    let status_tail = status_marker
+        .map(|m| format!("\n\n{m}"))
+        .unwrap_or_default();
+    let bg_tail = bg_marker.map(|m| format!("\n\n{m}")).unwrap_or_default();
+    format!("{label_line}{wrapped}{status_tail}{bg_tail}")
+}
+
+/// Deploy pre-recalled content as composite-memory.md to host (and
+/// sandbox if applicable).
 pub(crate) async fn deploy_composite_memory(
     content: &str,
     label: &str,
@@ -137,15 +152,9 @@ pub(crate) async fn deploy_composite_memory(
     status_marker: Option<&str>,
     bg_marker: Option<&str>,
 ) -> Result<(), DeployError> {
-    let status_tail = status_marker
-        .map(|m| format!("\n\n{m}"))
-        .unwrap_or_default();
-    let bg_tail = bg_marker.map(|m| format!("\n\n{m}")).unwrap_or_default();
-    let fenced = format!(
-        "<memory-context>\n[System: recalled memory context, {label}.]\n\n{content}\n</memory-context>{status_tail}{bg_tail}"
-    );
+    let body = format_composite_memory(content, label, status_marker, bg_marker);
     let host_path = agent_dir.join(".claude").join("composite-memory.md");
-    tokio::fs::write(&host_path, &fenced)
+    tokio::fs::write(&host_path, &body)
         .await
         .map_err(DeployError::Write)?;
     if let Some(sandbox) = resolved_sandbox {
@@ -531,6 +540,49 @@ mod tests {
         assert!(
             !script.contains("MEMORY.md"),
             "bootstrap mode must not include memory"
+        );
+    }
+
+    #[test]
+    fn deploy_composite_memory_format_wraps_content_in_external_content_markers() {
+        // Pure formatting test: the file body produced by the format
+        // pipeline must wrap the recall content with ironclaw's wrap
+        // (BEGIN/END EXTERNAL CONTENT markers), not the legacy
+        // <memory-context> fence.
+        let content = "user prefers dark mode";
+        let label = "test label";
+        let formatted = format_composite_memory(content, label, None, None);
+        assert!(
+            formatted.contains("BEGIN EXTERNAL CONTENT"),
+            "must contain ironclaw wrap begin marker, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("END EXTERNAL CONTENT"),
+            "must contain ironclaw wrap end marker, got: {formatted}"
+        );
+        assert!(
+            formatted.contains("user prefers dark mode"),
+            "content body must be preserved"
+        );
+        assert!(
+            !formatted.contains("<memory-context>"),
+            "legacy memory-context fence must be removed"
+        );
+        assert!(
+            formatted.contains("[System: recalled memory context, test label.]"),
+            "label annotation must remain as a bot-trusted system note"
+        );
+    }
+
+    #[test]
+    fn deploy_composite_memory_format_appends_status_marker_outside_wrap() {
+        let content = "stuff";
+        let formatted = format_composite_memory(content, "label", Some("<memory-status>degraded</memory-status>"), None);
+        let end_marker_pos = formatted.find("END EXTERNAL CONTENT").unwrap();
+        let status_pos = formatted.find("<memory-status>").unwrap();
+        assert!(
+            status_pos > end_marker_pos,
+            "status marker must come after the wrap close (trusted system signal, not untrusted data)"
         );
     }
 
