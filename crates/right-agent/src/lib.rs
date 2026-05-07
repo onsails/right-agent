@@ -1,6 +1,5 @@
 pub mod agent;
 pub mod codegen;
-pub use right_core::config;
 pub mod cron_spec;
 pub mod doctor;
 pub mod init;

@@ -67,7 +67,7 @@ pub enum SandboxStatus {
 ///
 /// Errors if the agent directory is missing.
 pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
-    let agents_dir = crate::config::agents_dir(home);
+    let agents_dir = right_core::config::agents_dir(home);
     let agent_dir = agents_dir.join(agent_name);
     if !agent_dir.exists() {
         return Err(miette::miette!(
@@ -99,7 +99,7 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
     };
 
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-    let backup_dir = crate::config::backups_dir(home, agent_name)
+    let backup_dir = right_core::config::backups_dir(home, agent_name)
         .join(format!("rebootstrap-{timestamp}"));
 
     Ok(RebootstrapPlan {

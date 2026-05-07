@@ -35,7 +35,7 @@ async fn run_backup(
     is_sandboxed: bool,
 ) -> miette::Result<PathBuf> {
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-    let backup_dir = crate::config::backups_dir(home, agent_name).join(&timestamp);
+    let backup_dir = right_core::config::backups_dir(home, agent_name).join(&timestamp);
     std::fs::create_dir_all(&backup_dir).map_err(|e| {
         miette::miette!(
             "failed to create backup dir {}: {e:#}",
@@ -156,7 +156,7 @@ async fn try_sandbox_backup(
 /// Non-fatal steps (stop, sandbox delete, PC reload) warn and continue.
 /// Fatal steps (backup if requested, directory removal) propagate errors.
 pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Result<DestroyResult> {
-    let agents_dir = crate::config::agents_dir(home);
+    let agents_dir = right_core::config::agents_dir(home);
     let agent_dir = agents_dir.join(&options.agent_name);
 
     if !agent_dir.exists() {

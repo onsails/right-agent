@@ -256,7 +256,7 @@ pub fn init_right_home(
     memory_recall_budget: RecallBudget,
     memory_recall_max_tokens: u32,
 ) -> miette::Result<()> {
-    let agents_parent = crate::config::agents_dir(home);
+    let agents_parent = right_core::config::agents_dir(home);
     if agents_parent.join("right").exists() {
         return Err(miette::miette!(
             "Right Agent home already initialized at {}. Use `right config` to change settings.",

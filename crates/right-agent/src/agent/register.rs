@@ -58,7 +58,7 @@ pub async fn register_with_running_pc(
     // (process-compose.yaml, agent-tokens.json, cloudflared config), then ask
     // PC to diff its running config against the new file via POST
     // /project/configuration. PC adds the new agent's processes live.
-    let agents_dir = crate::config::agents_dir(home);
+    let agents_dir = right_core::config::agents_dir(home);
     let all_agents = crate::agent::discover_agents(&agents_dir)?;
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
