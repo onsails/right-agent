@@ -5,6 +5,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::cc::attachments_dto::OutboundAttachment;
 use right_agent::cron_spec::CronSpec;
 
 /// Lock file JSON: {"heartbeat": "2026-...Z"}
@@ -40,7 +41,7 @@ pub struct CronReplyOutput {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct CronNotify {
     pub content: String,
-    pub attachments: Option<Vec<crate::telegram::attachments::OutboundAttachment>>,
+    pub attachments: Option<Vec<OutboundAttachment>>,
 }
 
 /// Extract the filename component from a sandbox attachment path.
@@ -728,7 +729,7 @@ async fn execute_job(
                             content: notify.content.clone(),
                             attachments: Some(
                                 atts.iter()
-                                    .map(|att| crate::telegram::attachments::OutboundAttachment {
+                                    .map(|att| OutboundAttachment {
                                         kind: att.kind,
                                         path: outbox_dir
                                             .join(attachment_filename(&att.path))

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use rusqlite::OptionalExtension as _;
 use teloxide::payloads::SendMessageSetters as _;
 
+use crate::cc::markdown_utils::strip_html_tags;
 use crate::telegram::handler::IdleTimestamp;
 
 /// A pending cron result ready for delivery.
@@ -650,7 +651,7 @@ async fn deliver_through_session(
                     chat_id = target_chat_id,
                     "cron delivery: HTML send failed, retrying plain: {e:#}"
                 );
-                let plain = crate::telegram::markdown::strip_html_tags(part);
+                let plain = strip_html_tags(part);
                 let mut fallback = bot.send_message(chat_id, &plain);
                 if let Some(t) = target_thread_id {
                     fallback = fallback.message_thread_id(ThreadId(MessageId(t as i32)));

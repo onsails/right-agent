@@ -17,6 +17,8 @@ use teloxide::prelude::*;
 use teloxide::types::{CallbackQuery, Message};
 use tokio::sync::mpsc;
 
+use crate::cc::markdown_utils::html_escape;
+
 use super::BotType;
 use super::oauth_callback::PendingAuthMap;
 use super::session::{
@@ -996,7 +998,7 @@ async fn dcr_failure_fallback(
     resolved_sandbox: Option<&str>,
     internal: &right_mcp::internal_client::InternalClient,
 ) -> Result<(), RequestError> {
-    let escaped_detail = super::markdown::html_escape(&dcr_detail);
+    let escaped_detail = html_escape(&dcr_detail);
     send_html_reply(
         bot,
         msg.chat.id,
@@ -1154,10 +1156,10 @@ async fn handle_mcp_add(
             .await
         {
             Ok(resp) => {
-                let escaped = super::markdown::html_escape(name);
+                let escaped = html_escape(name);
                 let mut reply = format!("Added MCP server <b>{escaped}</b> (OAuth detected).");
                 if let Some(ref w) = resp.warning {
-                    reply.push_str(&format!("\n{}", super::markdown::html_escape(w)));
+                    reply.push_str(&format!("\n{}", html_escape(w)));
                 }
                 reply.push_str(&format!(
                     "\nRun <code>/mcp auth {name}</code> to authenticate."
@@ -1166,7 +1168,7 @@ async fn handle_mcp_add(
             }
             Err(e) => {
                 tracing::warn!(server = name, err = %format!("{e:#}"), "mcp add: internal API registration failed");
-                let escaped_err = super::markdown::html_escape(&format!("{e:#}"));
+                let escaped_err = html_escape(&format!("{e:#}"));
                 send_html_reply(
                     bot,
                     msg.chat.id,
@@ -1213,13 +1215,13 @@ async fn handle_mcp_add(
             .await
         {
             Ok(resp) => {
-                let escaped = super::markdown::html_escape(name);
+                let escaped = html_escape(name);
                 let mut reply = format!("Added MCP server <b>{escaped}</b>.");
                 if resp.tools_count > 0 {
                     reply.push_str(&format!(" {} tools available.", resp.tools_count));
                 }
                 if let Some(ref w) = resp.warning {
-                    reply.push_str(&format!("\n{}", super::markdown::html_escape(w)));
+                    reply.push_str(&format!("\n{}", html_escape(w)));
                 }
                 send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
             }
@@ -1374,13 +1376,13 @@ async fn request_token_and_register(
             .await
         {
             Ok(resp) => {
-                let escaped = super::markdown::html_escape(&server_name);
+                let escaped = html_escape(&server_name);
                 let mut reply = format!("Added MCP server <b>{escaped}</b>.");
                 if resp.tools_count > 0 {
                     reply.push_str(&format!(" {} tools available.", resp.tools_count));
                 }
                 if let Some(ref w) = resp.warning {
-                    reply.push_str(&format!("\n{}", super::markdown::html_escape(w)));
+                    reply.push_str(&format!("\n{}", html_escape(w)));
                 }
                 send_html_reply(&bot, chat_id, eff_thread_id, &reply)
                     .await
@@ -1586,7 +1588,7 @@ async fn handle_mcp_remove(
         .unwrap_or("unknown");
 
     let eff_thread_id = effective_thread_id(msg);
-    let escaped_name = super::markdown::html_escape(server_name);
+    let escaped_name = html_escape(server_name);
 
     match internal.mcp_remove(agent_name, server_name).await {
         Ok(_) => {
@@ -1654,10 +1656,10 @@ async fn handle_cron_list(
     for name in names {
         let spec = &specs[name];
         let desc = match &spec.schedule_kind {
-            right_agent::cron_spec::ScheduleKind::RunAt(dt) => super::markdown::html_escape(
+            right_agent::cron_spec::ScheduleKind::RunAt(dt) => html_escape(
                 &format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")),
             ),
-            _ => super::markdown::html_escape(&right_agent::cron_spec::describe_schedule(
+            _ => html_escape(&right_agent::cron_spec::describe_schedule(
                 spec.schedule_kind.cron_schedule().unwrap_or(""),
             )),
         };
@@ -1703,15 +1705,14 @@ async fn handle_cron_detail(
         return Ok(());
     };
 
-    let desc =
-        super::markdown::html_escape(&right_agent::cron_spec::describe_schedule(&detail.schedule));
-    let schedule_escaped = super::markdown::html_escape(&detail.schedule);
+    let desc = html_escape(&right_agent::cron_spec::describe_schedule(&detail.schedule));
+    let schedule_escaped = html_escape(&detail.schedule);
     let mut text = format!(
         "<b>{}</b>\nSchedule: {} (<code>{}</code>)\nBudget: ${:.2}",
         detail.job_name, desc, schedule_escaped, detail.max_budget_usd,
     );
     if let Some(ref ttl) = detail.lock_ttl {
-        let ttl_escaped = super::markdown::html_escape(ttl);
+        let ttl_escaped = html_escape(ttl);
         text.push_str(&format!("\nLock TTL: {ttl_escaped}"));
     }
     if detail.triggered_at.is_some() {

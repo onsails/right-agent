@@ -18,6 +18,7 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::cc::markdown_utils::{html_escape, strip_html_tags};
 pub(crate) use crate::cc::worker_reply::should_accept_bootstrap;
 pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::reflection::FailureKind;
@@ -146,10 +147,6 @@ pub struct WorkerContext {
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
-
-/// Strip HTML tags for plain-text fallback when Telegram rejects HTML.
-/// Also decodes common entities back to their characters.
-use super::markdown::{html_escape, strip_html_tags};
 
 /// Format a CC subprocess error as a Telegram message (D-16).
 ///
