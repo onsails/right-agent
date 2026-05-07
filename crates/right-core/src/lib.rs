@@ -5,6 +5,7 @@
 //! edits to `right-codegen`, `right-memory`, `right-mcp`, or
 //! `right-cc` should not invalidate this crate's build cache.
 
+pub mod agent_types;
 pub mod config;
 pub mod error;
 pub mod openshell;
