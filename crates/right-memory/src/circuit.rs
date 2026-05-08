@@ -82,8 +82,10 @@ impl Breaker {
                 };
                 self.last_open_duration = AUTH_OPEN;
             }
-            Outcome::Failure(ErrorKind::Client) => {
-                // Client errors do not tick the breaker.
+            Outcome::Failure(ErrorKind::Client | ErrorKind::Quota) => {
+                // Client and Quota errors do not tick the breaker.
+                // Quota (402) is a stable known state — every turn should
+                // retry; the first 2xx after top-up clears the status.
             }
             Outcome::Failure(_) => {
                 self.push_failure(Instant::now());
@@ -210,6 +212,15 @@ mod tests {
         let mut b = Breaker::new();
         for _ in 0..(TRIP_THRESHOLD * 2) {
             fail(&mut b, ErrorKind::Client);
+        }
+        assert_eq!(b.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quota_does_not_tick() {
+        let mut b = Breaker::new();
+        for _ in 0..(TRIP_THRESHOLD * 2) {
+            fail(&mut b, ErrorKind::Quota);
         }
         assert_eq!(b.state(), CircuitState::Closed);
     }
