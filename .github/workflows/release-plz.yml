@@ -12,6 +12,9 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    concurrency:
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -41,8 +44,8 @@ jobs:
       contents: write
       pull-requests: write
     concurrency:
-      group: release-plz-${{ github.ref }}
-      cancel-in-progress: false
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
