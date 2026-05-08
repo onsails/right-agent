@@ -11,6 +11,7 @@ pub enum ErrorKind {
     Auth,        // 401, 403
     Client,      // 400, 404, 422 (caller bug or upstream API drift)
     Malformed,   // response body parse error
+    Quota,       // 402 — Hindsight insufficient credits (recoverable on top-up)
 }
 
 impl MemoryError {
@@ -20,6 +21,7 @@ impl MemoryError {
         match self {
             MemoryError::Hindsight { status, .. } => match *status {
                 401 | 403 => ErrorKind::Auth,
+                402 => ErrorKind::Quota,
                 429 => ErrorKind::RateLimited,
                 400 | 404 | 422 => ErrorKind::Client,
                 _ => ErrorKind::Transient,
@@ -96,6 +98,11 @@ mod tests {
             MemoryError::HindsightParse("bad json".into()).classify(),
             ErrorKind::Malformed
         );
+    }
+
+    #[test]
+    fn classify_402_quota() {
+        assert_eq!(h(402).classify(), ErrorKind::Quota);
     }
 
     #[test]
