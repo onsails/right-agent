@@ -174,6 +174,14 @@ where
                 tracing::warn!(id = entry.id, "drain encountered Auth; stopping");
                 break;
             }
+            Err(ErrorKind::Quota) => {
+                // Defensive stop for legacy rows enqueued before Task 4 (which
+                // prevents Quota from ever reaching the queue). A 402 will not
+                // self-heal until the user tops up — retrying every drain cycle
+                // would only produce noise.
+                tracing::warn!(id = entry.id, "drain encountered Quota; stopping until quota is restored");
+                break;
+            }
             Err(_) => {
                 if let Err(e) = conn.execute(
                     "UPDATE pending_retains SET attempts = attempts + 1, \
