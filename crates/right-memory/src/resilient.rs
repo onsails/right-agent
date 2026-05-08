@@ -227,6 +227,25 @@ impl ResilientHindsight {
                         });
                         return Err(ResilientError::Upstream(e));
                     }
+                    if matches!(kind, ErrorKind::Quota) {
+                        // Quota is sticky against itself; AuthFailed (higher
+                        // severity) wins. Cleared on any 2xx — see success arm.
+                        self.status_tx.send_if_modified(|cur| {
+                            if matches!(
+                                *cur,
+                                MemoryStatus::QuotaExhausted { .. }
+                                    | MemoryStatus::AuthFailed { .. }
+                            ) {
+                                false
+                            } else {
+                                *cur = MemoryStatus::QuotaExhausted {
+                                    since: std::time::Instant::now(),
+                                };
+                                true
+                            }
+                        });
+                        return Err(ResilientError::Upstream(e));
+                    }
                     if matches!(kind, ErrorKind::Client | ErrorKind::Malformed) {
                         self.refresh_status().await;
                         return Err(ResilientError::Upstream(e));
@@ -308,8 +327,8 @@ impl ResilientHindsight {
                         );
                     }
                     ErrorKind::Auth | ErrorKind::Quota => {
-                        // Don't enqueue; Auth resets on startup probe success.
-                        // Quota: don't enqueue; recoverable only after top-up.
+                        // Don't enqueue; will not drain until the user fixes
+                        // the root cause (rotate key / top up credits).
                     }
                 },
                 ResilientError::CircuitOpen { .. } => {
@@ -543,6 +562,33 @@ mod tests {
         assert_eq!(cnt, 0, "4xx must not enqueue");
         // Client drop counter must have been bumped.
         assert_eq!(w.client_drops_24h().await, 1);
+    }
+
+    #[tokio::test]
+    async fn retain_402_sets_quota_status_no_enqueue() {
+        let (_h, url) = mock(
+            r#"{"detail":"Insufficient credits. Balance: $-0.01"}"#,
+            402,
+        )
+        .await;
+        let w = wrap(&url);
+        let policy = RetryPolicy {
+            per_attempt: Duration::from_secs(2),
+            attempts: 0,
+        };
+        let err = w
+            .retain("ignored content", None, None, None, None, policy)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ResilientError::Upstream(_)));
+        assert!(
+            matches!(w.status(), MemoryStatus::QuotaExhausted { .. }),
+            "expected QuotaExhausted, got {:?}",
+            w.status()
+        );
+        let conn = open_connection(w.agent_db_path(), false).unwrap();
+        let cnt = crate::retain_queue::count(&conn).unwrap();
+        assert_eq!(cnt, 0, "402 must not enqueue (will never drain)");
     }
 
     /// Mock that captures the POST body of the first request.
