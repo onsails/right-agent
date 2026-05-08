@@ -472,10 +472,11 @@ fn build_memory_marker(
              memory ops will error until the user rotates the API key</memory-status>"
                 .into(),
         ),
-        // TODO(Task 6): replace with quota-specific wording.
         S::QuotaExhausted { .. } => Some(
-            "<memory-status>unavailable — memory provider authentication failed, \
-             memory ops will error until the user rotates the API key</memory-status>"
+            "<memory-status>unavailable — Hindsight Cloud account is out of credits. \
+             Memory ops will fail until the user tops up. \
+             IMPORTANT: tell the user clearly that they need to add credits at \
+             https://hindsight.vectorize.io to restore memory.</memory-status>"
                 .into(),
         ),
         S::Degraded { .. } => Some(
@@ -2548,6 +2549,34 @@ mod tests {
     #[test]
     fn is_auth_error_false_for_empty() {
         assert!(!is_auth_error(""));
+    }
+
+    // build_memory_marker tests
+
+    #[test]
+    fn marker_quota_exhausted_includes_topup_instruction() {
+        let status = right_memory::MemoryStatus::QuotaExhausted {
+            since: std::time::Instant::now(),
+        };
+        let marker = build_memory_marker(status, 0).expect("marker required");
+        assert!(
+            marker.contains("out of credits"),
+            "marker must explain the failure mode: {marker}"
+        );
+        assert!(
+            marker.contains("https://hindsight.vectorize.io"),
+            "marker must include top-up URL: {marker}"
+        );
+        assert!(
+            marker.contains("tell the user"),
+            "marker must instruct the agent to inform the user: {marker}"
+        );
+    }
+
+    #[test]
+    fn marker_healthy_no_drops_returns_none() {
+        let status = right_memory::MemoryStatus::Healthy;
+        assert!(build_memory_marker(status, 0).is_none());
     }
 
     // extract_auth_url tests
