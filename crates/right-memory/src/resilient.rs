@@ -307,8 +307,9 @@ impl ResilientHindsight {
                             &content.chars().take(80).collect::<String>()
                         );
                     }
-                    ErrorKind::Auth => {
+                    ErrorKind::Auth | ErrorKind::Quota => {
                         // Don't enqueue; Auth resets on startup probe success.
+                        // Quota: don't enqueue; recoverable only after top-up.
                     }
                 },
                 ResilientError::CircuitOpen { .. } => {
