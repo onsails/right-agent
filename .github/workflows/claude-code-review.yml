@@ -12,11 +12,12 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Skip release-plz PRs (nothing to review — version bumps + regenerated
+    # changelog) and skip when the synchronize was triggered by claude[bot]
+    # itself (e.g. humanize-changelog's commit) — would fail checkHumanActor.
+    if: |
+      !startsWith(github.event.pull_request.title, 'chore: release') &&
+      github.event.sender.login != 'claude[bot]'
 
     runs-on: ubuntu-latest
     permissions:
