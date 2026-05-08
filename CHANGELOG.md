@@ -1,104 +1,11 @@
 # Changelog
 ## [0.2.11] - 2026-05-08
 
-
-### Bug Fixes
-
-- **right-db**: Add chrono dev dependency for migration tests
-- **stage-b**: Satisfy clippy after right-core extraction
-- **bot**: Separate markdown lists from following paragraph
-- **bot**: Cron picks up /model changes; callback gate fails secure
-- **bot**: Use right-db for startup db open
-- **bot**: Open login token db through right-db
-- **bot**: Clean up right-db callsite leftovers
-- **bot**: Document cc module scaffold
-- **stage-d**: Tighten compatibility re-export visibility
-- **stage-f**: Remove stale right-agent config import
-- **right-bot**: Drop dead fallback in File-mode shell wrap pipeline
-- **stage-b**: Forward right-agent test-support feature
-
-### Documentation
-
-- **template**: Document model field with /model alternative
-- **right-agent**: Clarify staged db error wrapper
-
-### Features
-
-- **right-memory**: Sanitize content via injection_guard before Hindsight POST
-- **right-db**: Scaffold new crate for SQLite plumbing
-- **right-core**: Scaffold new platform-foundation crate
-- **right-core**: Add ironclaw_safety dependency
-- **right-core**: Add injection_guard facade with sanitize_memory_content
-- **right-core**: Add wrap_memory_for_prompt and shell-side helpers
-- **bot**: MODEL_CHOICES + menu rendering for /model
-- **bot**: Handle_model opens the /model menu
-- **bot**: Handle_model_callback persists and hot-swaps
-- **bot**: Wire /model command + callback into dispatcher
-- **bot**: Smart-diff config watcher — hot-reload model-only changes
-- **bot**: Scaffold cc module
-- **right-bot**: Wrap composite-memory content via ironclaw wrap_external_content
-- **right-bot**: Wrap MEMORY.md content with ironclaw markers in file-mode prompt assembly
-- **prompt**: Narrow MCP auth-error rule, trust upstream diagnostics
-- **right-agent**: Write_agent_yaml_model helper
-
-### Miscellaneous
-
-- **stage-f**: Pin publish = false on new internal crates
-
-### Refactor
-
-- **right-core**: Alphabetize injection_guard in lib.rs module list
-- **bot**: AgentSettings/WorkerContext model use ArcSwap
-- **bot**: Address review-loop feedback (2 iterations)
-- **bot**: Switch to right-db and mcp::credentials auth helpers
-- **bot**: Move telegram cc plumbing modules
-- **bot**: Extract outbound attachment dto
-- **bot**: Extract markdown utils to cc
-- **bot**: Extract worker reply parsing to cc
-- **bot**: Point cc shared callsites at cc modules
-- **right-db**: Move SQL migration files from right-agent
-- **right-db**: Move migrations.rs from right-agent::memory
-- **right-agent**: Delegate db plumbing to right-db
-- **right-agent**: Move auth_token helpers to mcp::credentials
-- **right-agent**: Switch internal callsites to right-db
-- **right-core**: Move independent foundation modules
-- **right-core**: Move shared agent type definitions
-- **right-mcp**: Extract mcp subsystem from right-agent
-- **right-core**: Move runtime state primitives
-- **right-codegen**: Extract codegen subsystem from right-agent
-- **right-memory**: Extract memory subsystem from right-agent
-- **stage-f**: Drop unused right-core re-exports from right-agent
-- **stage-f**: Switch right-agent internal callers to right_core::error
-- **stage-f**: Switch right-agent internal callers to right_core::ui
-- **stage-f**: Switch right-agent internal callers to right_core::config
-- **stage-f**: Switch right-agent internal callers to right_core::openshell{,_proto}
-- **stage-f**: Switch right-agent internal callers to right_core::stt
-- **stage-f**: Drop right-agent::mcp shim, switch internal callers to right_mcp
-- **stage-f**: Drop right-agent::codegen shim, switch internal callers to right_codegen
-- **stage-f**: Drop right-agent::memory shim, switch internal callers to right_db/right_memory
-- Enable unreachable_pub lint, privatize internals, drop zombie code
-- **right**: Switch CLI to right-db
-- **right-core**: Move openshell proto and client
-- **right-core**: Move sandbox platform and test support
-- **right-core**: Move stt helpers and shared time constants
-- **stage-b**: Switch direct callsites to right-core
-- **stage-c**: Switch external callsites to leaf crates
-
-### Testing
-
-- **right-db**: Add open + migration smoke tests
-- **right-db**: Cover open_connection invariants
-- **right-db**: Port 8 missed schema/trigger tests from pre-split memory module
-- **right-core**: Round-trip wrap test with close delimiter content
-- **bot**: Integration test for /model flow
-- **right-bot**: Runtime sed escape test verifies actual ZWSP injection
-- **right-agent**: Switch integration tests to right-db
-
-### Deps
-
-- **bot**: Add arc-swap 1.7 for model hot-swap
-- **right-agent**: Add right-db path dep
-- Wire right-core path dep into agent, bot, cli
+- Send `/model` in your agent's Telegram thread to switch between Default, Sonnet, Sonnet 1M, and Haiku without restarting the bot. The new model takes effect on the next message; scheduled cron jobs pick it up at run time.
+- Memory content is now sanitized before being sent to Hindsight Cloud, and recalled memories are wrapped as untrusted external data in the system prompt — defending both Hindsight-mode and file-mode agents against prompt-injection via stored memories.
+- When an MCP server returns an auth error with its own fix instructions (such as Composio's per-app OAuth flow), the agent now follows those instructions instead of overriding them with a generic `/mcp auth` suggestion.
+- Markdown lists in agent replies no longer run the last bullet directly into the following paragraph text in Telegram.
+- In Telegram groups, the `/model` inline keyboard now correctly blocks unauthorized users even when the callback arrives without an associated message.
 
 ## [0.2.10] - 2026-05-06
 
