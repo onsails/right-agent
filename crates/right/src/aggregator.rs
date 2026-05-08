@@ -231,6 +231,14 @@ impl HindsightBackend {
                                     None,
                                 ),
                             ),
+                            // TODO(Task 6): replace with quota-specific response.
+                            right_memory::ErrorKind::Quota => Ok(
+                                tool_error(
+                                    "upstream_auth",
+                                    format!("{e:#}"),
+                                    None,
+                                ),
+                            ),
                             right_memory::ErrorKind::Client
                             | right_memory::ErrorKind::Malformed => Ok(
                                 tool_error(
@@ -330,6 +338,12 @@ impl HindsightBackend {
                     )
                 }
                 right_memory::ErrorKind::Auth => tool_error(
+                    "upstream_auth",
+                    format!("{e:#}"),
+                    None,
+                ),
+                // TODO(Task 6): replace with quota-specific response.
+                right_memory::ErrorKind::Quota => tool_error(
                     "upstream_auth",
                     format!("{e:#}"),
                     None,

@@ -1,7 +1,7 @@
 //! Agent-facing memory status and its watch channel.
 //!
-//! Severity ordering: Healthy < Degraded < AuthFailed. Worker merges the
-//! wrapper-owned status with per-turn local status via `.max()`.
+//! Severity ordering: Healthy < Degraded < QuotaExhausted < AuthFailed. Worker
+//! merges the wrapper-owned status with per-turn local status via `.max()`.
 
 use std::time::Instant;
 
@@ -9,6 +9,7 @@ use std::time::Instant;
 pub enum MemoryStatus {
     Healthy,
     Degraded { since: Instant },
+    QuotaExhausted { since: Instant },
     AuthFailed { since: Instant },
 }
 
@@ -17,7 +18,8 @@ impl MemoryStatus {
         match self {
             MemoryStatus::Healthy => 0,
             MemoryStatus::Degraded { .. } => 1,
-            MemoryStatus::AuthFailed { .. } => 2,
+            MemoryStatus::QuotaExhausted { .. } => 2,
+            MemoryStatus::AuthFailed { .. } => 3,
         }
     }
 }
@@ -49,12 +51,15 @@ mod tests {
         let d = MemoryStatus::Degraded {
             since: Instant::now(),
         };
+        let q = MemoryStatus::QuotaExhausted {
+            since: Instant::now(),
+        };
         let a = MemoryStatus::AuthFailed {
             since: Instant::now(),
         };
         assert!(h < d);
-        assert!(d < a);
-        assert!(h < a);
+        assert!(d < q);
+        assert!(q < a);
     }
 
     #[test]
@@ -63,11 +68,15 @@ mod tests {
         let d = MemoryStatus::Degraded {
             since: Instant::now(),
         };
+        let q = MemoryStatus::QuotaExhausted {
+            since: Instant::now(),
+        };
         let a = MemoryStatus::AuthFailed {
             since: Instant::now(),
         };
         assert_eq!(h.max(d).severity(), d.severity());
-        assert_eq!(d.max(a).severity(), a.severity());
+        assert_eq!(d.max(q).severity(), q.severity());
+        assert_eq!(q.max(a).severity(), a.severity());
         assert_eq!(h.max(a).severity(), a.severity());
     }
 
