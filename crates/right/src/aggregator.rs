@@ -231,10 +231,9 @@ impl HindsightBackend {
                                     None,
                                 ),
                             ),
-                            // TODO(Task 6): replace with quota-specific response.
                             right_memory::ErrorKind::Quota => Ok(
                                 tool_error(
-                                    "upstream_auth",
+                                    "upstream_quota",
                                     format!("{e:#}"),
                                     None,
                                 ),
@@ -342,9 +341,8 @@ impl HindsightBackend {
                     format!("{e:#}"),
                     None,
                 ),
-                // TODO(Task 6): replace with quota-specific response.
                 right_memory::ErrorKind::Quota => tool_error(
-                    "upstream_auth",
+                    "upstream_quota",
                     format!("{e:#}"),
                     None,
                 ),
@@ -599,6 +597,7 @@ impl rmcp::ServerHandler for Aggregator {
                  Cross-cutting codes any tool may emit:\n  \
                  upstream_unreachable — backend service unreachable / transport failure\n  \
                  upstream_auth        — backend authentication required or rejected\n  \
+                 upstream_quota       — backend out of credits / quota exhausted (user must top up)\n  \
                  upstream_invalid     — backend rejected the request (4xx, malformed)\n  \
                  circuit_open         — local circuit breaker open; retry later\n  \
                  invalid_argument     — semantic argument validation failed\n  \
