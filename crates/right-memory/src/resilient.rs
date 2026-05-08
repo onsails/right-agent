@@ -332,10 +332,14 @@ impl ResilientHindsight {
                     }
                 },
                 ResilientError::CircuitOpen { .. } => {
-                    // Don't enqueue when the breaker is open due to Auth — the queue
-                    // would grow with entries that can't drain (drain gates on
-                    // Healthy, which AuthFailed sticks against).
-                    if !matches!(*self.status_tx.borrow(), MemoryStatus::AuthFailed { .. }) {
+                    // Don't enqueue when the breaker is open and a sticky-failure
+                    // status is set — the queue would grow with entries that can't
+                    // drain (drain gates on Healthy; AuthFailed and QuotaExhausted
+                    // both stick against it until the user fixes the root cause).
+                    if !matches!(
+                        *self.status_tx.borrow(),
+                        MemoryStatus::AuthFailed { .. } | MemoryStatus::QuotaExhausted { .. }
+                    ) {
                         self.enqueue_for_retry(content, context, document_id, update_mode, tags)
                             .await;
                     }
