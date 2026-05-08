@@ -139,8 +139,10 @@ impl ResilientHindsight {
             b.state()
         };
         // send_if_modified atomically reads-and-conditionally-writes, closing the
-        // race window between borrow() and send_replace(). AuthFailed is sticky —
-        // only the startup probe reset (or explicit recovery) clears it.
+        // race window between borrow() and send_replace(). AuthFailed and
+        // QuotaExhausted are both sticky — AuthFailed only clears via the startup
+        // probe reset; QuotaExhausted only clears via the success arm (any 2xx).
+        // Neither is overwritten by breaker-state reflection here.
         self.status_tx.send_if_modified(|cur| {
             if matches!(
                 *cur,
