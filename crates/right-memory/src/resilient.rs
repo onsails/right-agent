@@ -142,7 +142,11 @@ impl ResilientHindsight {
         // race window between borrow() and send_replace(). AuthFailed is sticky —
         // only the startup probe reset (or explicit recovery) clears it.
         self.status_tx.send_if_modified(|cur| {
-            if matches!(*cur, MemoryStatus::AuthFailed { .. }) {
+            if matches!(
+                *cur,
+                MemoryStatus::AuthFailed { .. }
+                    | MemoryStatus::QuotaExhausted { .. }
+            ) {
                 return false;
             }
             let new = match st {
@@ -204,6 +208,16 @@ impl ResilientHindsight {
                         let mut b = self.breaker.lock().await;
                         b.record(Outcome::Success);
                     }
+                    // Clear QuotaExhausted on any 2xx — recovery signal after
+                    // the user tops up credits.
+                    self.status_tx.send_if_modified(|cur| {
+                        if matches!(*cur, MemoryStatus::QuotaExhausted { .. }) {
+                            *cur = MemoryStatus::Healthy;
+                            true
+                        } else {
+                            false
+                        }
+                    });
                     self.refresh_status().await;
                     return Ok(val);
                 }
@@ -593,6 +607,84 @@ mod tests {
         let conn = open_connection(w.agent_db_path(), false).unwrap();
         let cnt = crate::retain_queue::count(&conn).unwrap();
         assert_eq!(cnt, 0, "402 must not enqueue (will never drain)");
+    }
+
+    /// Mock that returns N responses with given (status, body) pairs in order.
+    /// After exhausting the list, every further connection returns the last entry.
+    async fn mock_seq(seq: Vec<(u16, &'static str)>) -> (tokio::task::JoinHandle<()>, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}");
+        let handle = tokio::spawn(async move {
+            let mut idx = 0usize;
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    return;
+                };
+                let (status, body) = seq[idx.min(seq.len() - 1)];
+                idx += 1;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 8192];
+                let _ = s.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        (handle, url)
+    }
+
+    #[tokio::test]
+    async fn recall_402_then_200_clears_quota_status() {
+        let (_h, url) = mock_seq(vec![
+            (402, r#"{"detail":"Insufficient credits"}"#),
+            (200, r#"{"results":[]}"#),
+        ])
+        .await;
+        let w = wrap(&url);
+        let policy = RetryPolicy {
+            per_attempt: Duration::from_secs(2),
+            attempts: 0,
+        };
+
+        // First call: 402 → status becomes QuotaExhausted.
+        let err = w.recall("q", None, None, policy).await.unwrap_err();
+        assert!(matches!(err, ResilientError::Upstream(_)));
+        assert!(matches!(w.status(), MemoryStatus::QuotaExhausted { .. }));
+
+        // Second call: 200 → status returns to Healthy.
+        let _ok = w.recall("q", None, None, policy).await.unwrap();
+        assert!(
+            matches!(w.status(), MemoryStatus::Healthy),
+            "expected Healthy after 2xx, got {:?}",
+            w.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_wins_over_quota() {
+        let (_h, url) = mock_seq(vec![
+            (402, r#"{"detail":"Insufficient credits"}"#),
+            (401, r#"{"error":"unauthorized"}"#),
+        ])
+        .await;
+        let w = wrap(&url);
+        let policy = RetryPolicy {
+            per_attempt: Duration::from_secs(2),
+            attempts: 0,
+        };
+
+        let _ = w.recall("q", None, None, policy).await.unwrap_err();
+        assert!(matches!(w.status(), MemoryStatus::QuotaExhausted { .. }));
+
+        let _ = w.recall("q", None, None, policy).await.unwrap_err();
+        assert!(
+            matches!(w.status(), MemoryStatus::AuthFailed { .. }),
+            "401 must override Quota"
+        );
     }
 
     /// Mock that captures the POST body of the first request.
