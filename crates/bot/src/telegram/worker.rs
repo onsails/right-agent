@@ -472,6 +472,12 @@ fn build_memory_marker(
              memory ops will error until the user rotates the API key</memory-status>"
                 .into(),
         ),
+        // TODO(Task 6): replace with quota-specific wording.
+        S::QuotaExhausted { .. } => Some(
+            "<memory-status>unavailable — memory provider authentication failed, \
+             memory ops will error until the user rotates the API key</memory-status>"
+                .into(),
+        ),
         S::Degraded { .. } => Some(
             "<memory-status>degraded — recall may be incomplete or stale, \
              retain may be queued</memory-status>"
