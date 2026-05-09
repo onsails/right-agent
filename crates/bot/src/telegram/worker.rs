@@ -814,7 +814,13 @@ pub fn spawn_worker(
                         action =
                             action.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
                     }
-                    action.await.ok();
+                    if let Err(e) = action.await {
+                        tracing::warn!(
+                            chat_id = tg_chat_id.0,
+                            eff_thread_id,
+                            "send_chat_action failed: {e:#}"
+                        );
+                    }
                     tokio::select! {
                         _ = cancel_clone.cancelled() => break,
                         _ = sleep(Duration::from_secs(4)) => {}
