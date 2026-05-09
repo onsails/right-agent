@@ -5,8 +5,8 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-right-core = { path = "../right-core" }
-right-db = { path = "../right-db" }
+right-core = { path = "../right-core", version = "*" }
+right-db = { path = "../right-db", version = "*" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

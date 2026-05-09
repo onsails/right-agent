@@ -16,7 +16,7 @@ hyper-util = { workspace = true }
 miette = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true }
-right-db = { path = "../right-db" }
+right-db = { path = "../right-db", version = "*" }
 rmcp = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
@@ -32,7 +32,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-right-core = { path = "../right-core", features = ["test-support"] }
+right-core = { path = "../right-core", version = "*", features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { version = "1.52", features = ["test-util"] }
 wiremock = "0.6"
