@@ -5,11 +5,11 @@ edition.workspace = true
 
 [dependencies]
 right-agent = { path = "../right-agent", version = "*" }
-right-codegen = { path = "../right-codegen" }
-right-core = { path = "../right-core" }
-right-db = { path = "../right-db" }
-right-mcp = { path = "../right-mcp" }
-right-memory = { path = "../right-memory" }
+right-codegen = { path = "../right-codegen", version = "*" }
+right-core = { path = "../right-core", version = "*" }
+right-db = { path = "../right-db", version = "*" }
+right-mcp = { path = "../right-mcp", version = "*" }
+right-memory = { path = "../right-memory", version = "*" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -45,6 +45,6 @@ whisper-rs = { version = "0.16", default-features = false, features = ["metal"] 
 
 [dev-dependencies]
 right-agent = { path = "../right-agent", version = "*" }
-right-core = { path = "../right-core", features = ["test-support"] }
+right-core = { path = "../right-core", version = "*", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"
