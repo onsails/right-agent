@@ -360,23 +360,30 @@ impl HindsightBackend {
                 }
             },
             right_memory::ResilientError::CircuitOpen { retry_after } => {
-                if matches!(
-                    self.client.status(),
-                    right_memory::MemoryStatus::AuthFailed { .. }
-                ) {
-                    tool_error(
+                // Sticky-failure states won't recover without user action;
+                // surface them with their root-cause code instead of the
+                // misleading transient `circuit_open`. Mirrors the retain
+                // CircuitOpen path.
+                match self.client.status() {
+                    right_memory::MemoryStatus::AuthFailed { .. } => tool_error(
                         "upstream_auth",
                         format!("{e:#}"),
                         None,
-                    )
-                } else {
-                    let details = retry_after
-                        .map(|d| serde_json::json!({ "retry_after_secs": d.as_secs() }));
-                    tool_error(
-                        "circuit_open",
+                    ),
+                    right_memory::MemoryStatus::QuotaExhausted { .. } => tool_error(
+                        "upstream_quota",
                         format!("{e:#}"),
-                        details,
-                    )
+                        None,
+                    ),
+                    _ => {
+                        let details = retry_after
+                            .map(|d| serde_json::json!({ "retry_after_secs": d.as_secs() }));
+                        tool_error(
+                            "circuit_open",
+                            format!("{e:#}"),
+                            details,
+                        )
+                    }
                 }
             }
         }

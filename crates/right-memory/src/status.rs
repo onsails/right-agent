@@ -22,6 +22,16 @@ impl MemoryStatus {
             MemoryStatus::AuthFailed { .. } => 3,
         }
     }
+
+    /// True for failure states that require user action (rotate key, top up
+    /// credits) and never self-heal. Wrapper code uses this to gate enqueue
+    /// and to preserve status across breaker-state reflection.
+    pub fn is_sticky(&self) -> bool {
+        matches!(
+            self,
+            MemoryStatus::AuthFailed { .. } | MemoryStatus::QuotaExhausted { .. }
+        )
+    }
 }
 
 impl PartialEq for MemoryStatus {

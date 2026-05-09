@@ -175,10 +175,8 @@ where
                 break;
             }
             Err(ErrorKind::Quota) => {
-                // Defensive stop for legacy rows enqueued before Task 4 (which
-                // prevents Quota from ever reaching the queue). A 402 will not
-                // self-heal until the user tops up — retrying every drain cycle
-                // would only produce noise.
+                // Should not happen (Quota never enqueues). Defensive stop:
+                // 402 will not self-heal until the user tops up.
                 tracing::warn!(id = entry.id, "drain encountered Quota; stopping until quota is restored");
                 break;
             }

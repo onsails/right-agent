@@ -139,16 +139,12 @@ impl ResilientHindsight {
             b.state()
         };
         // send_if_modified atomically reads-and-conditionally-writes, closing the
-        // race window between borrow() and send_replace(). AuthFailed and
-        // QuotaExhausted are both sticky — AuthFailed only clears via the startup
-        // probe reset; QuotaExhausted only clears via the success arm (any 2xx).
-        // Neither is overwritten by breaker-state reflection here.
+        // race window between borrow() and send_replace(). Sticky statuses
+        // (AuthFailed only clears via the startup probe reset; QuotaExhausted
+        // only clears via the success arm on any 2xx) are not overwritten by
+        // breaker-state reflection here.
         self.status_tx.send_if_modified(|cur| {
-            if matches!(
-                *cur,
-                MemoryStatus::AuthFailed { .. }
-                    | MemoryStatus::QuotaExhausted { .. }
-            ) {
+            if cur.is_sticky() {
                 return false;
             }
             let new = match st {
@@ -244,14 +240,11 @@ impl ResilientHindsight {
                         return Err(ResilientError::Upstream(e));
                     }
                     if matches!(kind, ErrorKind::Quota) {
-                        // Quota is sticky against itself; AuthFailed (higher
-                        // severity) wins. Cleared on any 2xx — see success arm.
+                        // Skip if any sticky state is already set: same Quota
+                        // is a no-op; AuthFailed (higher severity) wins.
+                        // Cleared on any 2xx — see success arm.
                         self.status_tx.send_if_modified(|cur| {
-                            if matches!(
-                                *cur,
-                                MemoryStatus::QuotaExhausted { .. }
-                                    | MemoryStatus::AuthFailed { .. }
-                            ) {
+                            if cur.is_sticky() {
                                 false
                             } else {
                                 *cur = MemoryStatus::QuotaExhausted {
@@ -348,14 +341,10 @@ impl ResilientHindsight {
                     }
                 },
                 ResilientError::CircuitOpen { .. } => {
-                    // Don't enqueue when the breaker is open and a sticky-failure
-                    // status is set — the queue would grow with entries that can't
-                    // drain (drain gates on Healthy; AuthFailed and QuotaExhausted
-                    // both stick against it until the user fixes the root cause).
-                    if !matches!(
-                        *self.status_tx.borrow(),
-                        MemoryStatus::AuthFailed { .. } | MemoryStatus::QuotaExhausted { .. }
-                    ) {
+                    // Don't enqueue when a sticky-failure status is set — drain
+                    // gates on Healthy, so the queue would grow with entries
+                    // that can't drain until the user fixes the root cause.
+                    if !self.status_tx.borrow().is_sticky() {
                         self.enqueue_for_retry(content, context, document_id, update_mode, tags)
                             .await;
                     }
