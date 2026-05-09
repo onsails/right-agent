@@ -276,6 +276,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
                         agent = %args.agent,
                         "Hindsight AUTH failed at startup: {e:#} — booting in degraded mode"
                     ),
+                    right_memory::ErrorKind::Quota => tracing::error!(
+                        agent = %args.agent,
+                        "Hindsight 402 (out of credits) at startup: {e:#} — \
+                         booting in QuotaExhausted mode; user must top up at \
+                         https://hindsight.vectorize.io"
+                    ),
                     right_memory::ErrorKind::Client => tracing::error!(
                         agent = %args.agent,
                         "Hindsight 4xx at startup: {e:#} — payload or API-drift bug"
