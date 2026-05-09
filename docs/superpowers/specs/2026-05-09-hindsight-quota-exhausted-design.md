@@ -234,9 +234,14 @@ is gone the moment status flips back to `Healthy`.
   `bot::lib.rs` returns 402 → status is `QuotaExhausted` from boot.
   No user notification fires until the user sends a message. Acceptable:
   memory ops aren't being used without activity.
-- **Cron jobs.** `build_memory_marker` is called for cron `claude -p`
-  invocations too, so the cron delivery message will surface the
-  issue to the user via the same marker.
+- **Cron jobs.** Cron `claude -p` invocations skip memory injection
+  entirely (`memory_mode: None` in `cron.rs`), so the marker does NOT
+  reach cron-spawned turns. A cron job running on a quota-exhausted
+  account surfaces the failure indirectly: any MCP retain/recall call
+  inside the job returns `upstream_quota` from the aggregator, and the
+  agent observes the error mid-execution. This is a pre-existing
+  limitation shared by `Degraded` and `AuthFailed`; not addressed by
+  this spec.
 - **Explicit MCP tool calls** (`mcp__right__memory_retain`,
   `memory_recall`, `memory_reflect`). The aggregator returns the
   upstream error to the agent on 402, which the agent already surfaces
