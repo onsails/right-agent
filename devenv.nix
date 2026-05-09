@@ -8,11 +8,14 @@
     grpcurl
     protobuf
     cmake            # required by whisper-rs-sys build script
+    sccache
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];
 
   languages.rust.enable = true;
+
+  env.RUSTC_WRAPPER = "sccache";
 
   enterShell = ''
     echo "Right Agent dev environment"
