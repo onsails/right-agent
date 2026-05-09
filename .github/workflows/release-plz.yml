@@ -48,6 +48,8 @@ jobs:
             release-plz
       - name: Configure git user
         uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
       - name: Run release-plz release
         env:
           GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
@@ -90,6 +92,8 @@ jobs:
             release-plz
       - name: Configure git user
         uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
       - name: Run release-plz release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
