@@ -5,6 +5,15 @@ on:
     branches:
       - master
 
+# Pinned to release-plz PR #2789 (fix for issue #2595): cargo package source-dir
+# fallback in git_only mode. Required because our workspace mixes publish=false
+# libs with binary crates that path-depend on them — the upstream 0.3.157
+# release-plz fails at cargo package's registry-resolution step.
+# Track upstream merge: https://github.com/release-plz/release-plz/pull/2789
+env:
+  RELEASE_PLZ_FORK: structured-world/release-plz
+  RELEASE_PLZ_REV: e8ca8da97dc8f472820a67eece651604887b1c7d
+
 jobs:
   release-plz-release:
     name: Release-plz release
@@ -25,16 +34,27 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz-fork
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Run release-plz
-        uses: release-plz/action@v0.5
-        with:
-          command: release
+      - name: Install release-plz from PR #2789 fork
+        run: |
+          cargo install --locked \
+            --git "https://github.com/${RELEASE_PLZ_FORK}.git" \
+            --rev "${RELEASE_PLZ_REV}" \
+            release-plz
+      - name: Configure git user
+        uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4
+      - name: Run release-plz release
         env:
           GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          release-plz release \
+            --git-token "${GITHUB_TOKEN}" \
+            --repo-url "https://github.com/${GITHUB_REPOSITORY}"
 
   release-plz-pr:
     name: Release-plz PR
@@ -56,13 +76,39 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-plz-fork
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Run release-plz
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
+      - name: Install release-plz from PR #2789 fork
+        run: |
+          cargo install --locked \
+            --git "https://github.com/${RELEASE_PLZ_FORK}.git" \
+            --rev "${RELEASE_PLZ_REV}" \
+            release-plz
+      - name: Configure git user
+        uses: release-plz/git-config@59144859caf016f8b817a2ac9b051578729173c4
+      - name: Run release-plz release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          set +e
+          stderr=$(mktemp)
+          if ! release-plz release-pr \
+              --git-token "${GITHUB_TOKEN}" \
+              --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
+              2>"${stderr}"; then
+            err=$(cat "${stderr}")
+            # GitHub returns 422 for no-op release-pr calls. Treat as success.
+            if [[ "${err}" == *"422"* ]]; then
+              echo "::warning::release-pr returned HTTP 422; treating as no-op."
+              rm -f "${stderr}"
+              exit 0
+            fi
+            echo "${err}" >&2
+            rm -f "${stderr}"
+            exit 1
+          fi
+          rm -f "${stderr}"
