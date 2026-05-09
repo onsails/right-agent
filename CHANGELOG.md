@@ -1,61 +1,9 @@
 # Changelog
 ## [0.2.12] - 2026-05-09
 
-
-### Bug Fixes
-
-- **right-memory**: Handle ErrorKind::Quota in retain_queue::drain
-- **right-memory**: Exclude QuotaExhausted from CircuitOpen enqueue path
-- **release-plz**: Add version requirement to internal path deps
-- **right-db**: Add chrono dev dependency for migration tests
-- **stage-b**: Satisfy clippy after right-core extraction
-- **bot**: Surface send_chat_action errors in worker typing loop
-
-### Documentation
-
-- **right-memory**: Document QuotaExhausted stickiness in refresh_status
-
-### Features
-
-- **right-memory**: Sanitize content via injection_guard before Hindsight POST
-- **right-memory**: Classify HTTP 402 as ErrorKind::Quota
-- **right-memory**: Exempt ErrorKind::Quota from breaker ticks
-- **right-memory**: Add MemoryStatus::QuotaExhausted variant
-- **right-memory**: Set QuotaExhausted status and skip enqueue on 402
-- **right-memory**: Clear QuotaExhausted on any 2xx, preserve on refresh
-- **right-db**: Scaffold new crate for SQLite plumbing
-- **right-core**: Scaffold new platform-foundation crate
-- **right-core**: Add ironclaw_safety dependency
-- **right-core**: Add injection_guard facade with sanitize_memory_content
-- **right-core**: Add wrap_memory_for_prompt and shell-side helpers
-
-### Miscellaneous
-
-- **stage-f**: Pin publish = false on new internal crates
-
-### Refactor
-
-- **right-memory**: Extract memory subsystem from right-agent
-- **right-memory**: Centralize sticky-status predicate and fix aggregator gap
-- **right-codegen**: Extract codegen subsystem from right-agent
-- **right-mcp**: Extract mcp subsystem from right-agent
-- **right-db**: Move SQL migration files from right-agent
-- **right-db**: Move migrations.rs from right-agent::memory
-- **right-core**: Move independent foundation modules
-- **right-core**: Move openshell proto and client
-- **right-core**: Move sandbox platform and test support
-- **right-core**: Move stt helpers and shared time constants
-- **right-core**: Move shared agent type definitions
-- **right-core**: Move runtime state primitives
-- Enable unreachable_pub lint, privatize internals, drop zombie code
-- **right-core**: Alphabetize injection_guard in lib.rs module list
-
-### Testing
-
-- **right-db**: Add open + migration smoke tests
-- **right-db**: Cover open_connection invariants
-- **right-db**: Port 8 missed schema/trigger tests from pre-split memory module
-- **right-core**: Round-trip wrap test with close delimiter content
+- When a Hindsight Cloud account runs out of credits, agents now enter quota-exhausted mode: memory retains pause without tripping the circuit breaker, and the agent tells you to top up at hindsight.vectorize.io in its next reply. Quota clears automatically when credits are restored.
+- When the bot starts with a quota-exhausted Hindsight account, it logs a clear error pointing to the top-up URL instead of falling into an indefinite retry loop.
+- Typing indicator failures in Telegram (for example, in forum supergroup topics) now surface as WARN log entries instead of being silently dropped.
 
 ## [0.2.11] - 2026-05-08
 
