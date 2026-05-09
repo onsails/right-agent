@@ -1,4 +1,10 @@
 # Changelog
+## [0.2.12] - 2026-05-09
+
+- When a Hindsight Cloud account runs out of credits, agents now enter quota-exhausted mode: memory retains pause without tripping the circuit breaker, and the agent tells you to top up at hindsight.vectorize.io in its next reply. Quota clears automatically when credits are restored.
+- When the bot starts with a quota-exhausted Hindsight account, it logs a clear error pointing to the top-up URL instead of falling into an indefinite retry loop.
+- Typing indicator failures in Telegram (for example, in forum supergroup topics) now surface as WARN log entries instead of being silently dropped.
+
 ## [0.2.11] - 2026-05-08
 
 - Send `/model` in your agent's Telegram thread to switch between Default, Sonnet, Sonnet 1M, and Haiku without restarting the bot. The new model takes effect on the next message; scheduled cron jobs pick it up at run time.
