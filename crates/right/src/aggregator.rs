@@ -249,27 +249,31 @@ impl HindsightBackend {
                         }
                     }
                     Err(right_memory::ResilientError::CircuitOpen { retry_after }) => {
-                        // AuthFailed circuits won't recover without user action — queueing
-                        // would grow the backlog indefinitely, so return a hard auth error
-                        // rather than a silent queue. retain() honors the same distinction.
-                        if matches!(
-                            self.client.status(),
-                            right_memory::MemoryStatus::AuthFailed { .. }
-                        ) {
-                            Ok(tool_error(
+                        // Sticky-failure states (AuthFailed, QuotaExhausted) won't recover
+                        // without user action — queueing would grow the backlog indefinitely
+                        // and resilient::retain refuses to enqueue under either status. Return
+                        // a hard error matching the cause instead of a misleading "queued".
+                        match self.client.status() {
+                            right_memory::MemoryStatus::AuthFailed { .. } => Ok(tool_error(
                                 "upstream_auth",
                                 "memory auth failed; retain rejected",
                                 None,
-                            ))
-                        } else {
-                            let json = serde_json::json!({
-                                "status": "queued",
-                                "reason": "circuit breaker open; queued for retry on next drain tick",
-                                "retry_after_secs": retry_after.map(|d| d.as_secs()),
-                            });
-                            Ok(CallToolResult::success(vec![Content::text(
-                                serde_json::to_string_pretty(&json)?,
-                            )]))
+                            )),
+                            right_memory::MemoryStatus::QuotaExhausted { .. } => Ok(tool_error(
+                                "upstream_quota",
+                                "memory quota exhausted; retain rejected",
+                                None,
+                            )),
+                            _ => {
+                                let json = serde_json::json!({
+                                    "status": "queued",
+                                    "reason": "circuit breaker open; queued for retry on next drain tick",
+                                    "retry_after_secs": retry_after.map(|d| d.as_secs()),
+                                });
+                                Ok(CallToolResult::success(vec![Content::text(
+                                    serde_json::to_string_pretty(&json)?,
+                                )]))
+                            }
                         }
                     }
                 }
