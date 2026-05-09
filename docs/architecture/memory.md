@@ -51,10 +51,19 @@ tools are removed from the surface; their backing tables (`memories`,
 
 `memory::resilient::ResilientHindsight` wraps `HindsightClient` with:
 - per-process circuit breaker (closed→open after 5 fails in 30s; 30s initial
-  open with doubling backoff to a 10 min cap; 1h hard open on Auth)
-- classified retries (Transient/RateLimited yes; Auth/Client/Malformed no)
-- SQLite-backed `pending_retains` queue (1000-row cap, 24h age cap)
-- `watch::Sender<MemoryStatus>` signalling Healthy/Degraded/AuthFailed
+  open with doubling backoff to a 10 min cap; 1h hard open on Auth). `Quota`
+  (HTTP 402) and `Client` errors do **not** tick the breaker — 402 is a
+  stable known state and every turn should retry; the first 2xx after top-up
+  is the natural recovery signal.
+- classified retries (Transient/RateLimited yes; Auth/Client/Malformed/Quota no)
+- SQLite-backed `pending_retains` queue (1000-row cap, 24h age cap). Auth and
+  Quota failures bypass the queue entirely (no entry that could only drain
+  after user action).
+- `watch::Sender<MemoryStatus>` signalling
+  Healthy/Degraded/QuotaExhausted/AuthFailed. `QuotaExhausted` is sticky
+  against itself and against `refresh_status`; only an explicit 2xx success
+  flips it back to `Healthy`. `AuthFailed` (higher severity) wins over
+  `QuotaExhausted`.
 
 The bot runs a single drain task (30s interval, batch 20, stop on first
 non-Client failure). The aggregator shares the same SQLite queue via the
@@ -64,6 +73,11 @@ Telegram alerts (`memory_alerts` table, 24h dedup, 1h startup cleanup) fire
 on:
 - `AuthFailed` transition
 - >20 `Client`-kind drops in a 1h rolling window (`client_flood`)
+
+`QuotaExhausted` does **not** trigger a Telegram broadcast. The agent
+informs the user via the `<memory-status>` marker injected into the
+system prompt (see PROMPT_SYSTEM.md), which carries an explicit
+"tell the user" instruction and the top-up URL.
 
 Doctor checks queue size (500/900 row thresholds), oldest-row age (1h/12h
 thresholds), and long-standing (>24h) alerts.
