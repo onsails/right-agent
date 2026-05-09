@@ -98,10 +98,15 @@ prefetched recall results.
 When the agent runs with `memory.provider: hindsight`, the bot injects a
 `<memory-status>...</memory-status>` marker at the end of
 `composite-memory.md` whenever the ResilientHindsight wrapper is not
-`Healthy`. Three states:
+`Healthy`. Four states:
 
 - `degraded — recall may be incomplete or stale, retain may be queued` —
   circuit breaker is open or half-open, or a recent transient failure occurred.
+- `unavailable — Hindsight Cloud account is out of credits. Memory ops will
+  fail until the user tops up. IMPORTANT: tell the user clearly that they
+  need to add credits at https://hindsight.vectorize.io to restore memory.` —
+  HTTP 402 from Hindsight (insufficient credits). Sticky until any 2xx clears
+  it (e.g., the first call after the user tops up).
 - `unavailable — memory provider authentication failed, memory ops will error
   until the user rotates the API key` — 401/403 from Hindsight. Requires
   user action.
