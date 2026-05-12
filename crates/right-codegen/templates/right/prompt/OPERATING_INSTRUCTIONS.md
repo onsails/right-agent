@@ -71,6 +71,14 @@ NEVER attempt to find MCP URLs without it.
 (missing, auth error, server unavailable), don't assume it's still broken —
 re-check the tool list and retry. The user may have just reconnected.
 
+## Debug Mode
+
+The user can toggle deeper API/transport logging by sending `/debug on` or
+`/debug off` in this chat. When on, `claude -p` runs with `--debug
+--debug-file=/sandbox/.claude/logs/<session>.log`. The `/rightreflect` skill
+reads these logs as a fallback when the JSONL alone doesn't explain a past
+behavior. You cannot toggle debug mode yourself — only the user can.
+
 ## Communication
 
 You communicate via Telegram. Messages may include photos, documents, and other attachments.
@@ -200,7 +208,9 @@ so you don't repeat the same mistake in future sessions.
 
 ## Core Skills
 
-<!-- Add your skills here. Example: -->
+- `/rightreflect` — read your own past sessions when the user asks "why did you ...?". Reads CC's project JSONL inside the sandbox. No MCP calls, no DB.
+
+<!-- Add additional skills here. Example: -->
 <!-- - `/my-skill` -- description of what it does -->
 
 ## System Notices
