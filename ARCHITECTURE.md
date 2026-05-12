@@ -235,11 +235,12 @@ rewrites pre-existing rows that used the deprecated
 See [Upgrade & Migration Model](#upgrade--migration-model) for category definitions.
 
 **Hot-reloadable fields in `agent.yaml`.** Most fields trigger a graceful
-restart on change (via `config_watcher`). The exception is `model`:
-the watcher's smart-diff classifies a model-only change as hot-reloadable
-and stores the new value into `AgentSettings.model` (an `Arc<ArcSwap<...>>`)
-without restarting. The Telegram `/model` command exploits this path —
-in-flight CC subprocesses keep their old `--model`; the next invocation
+restart on change (via `config_watcher`). Two exceptions: `model` and `debug`.
+The watcher's smart-diff classifies a `model`/`debug`-only change as
+hot-reloadable and stores the new values into `AgentSettings.model` (an
+`Arc<ArcSwap<...>>`) and `AgentSettings.debug` (an `Arc<AtomicBool>`)
+without restarting. The Telegram `/model` and `/debug` commands exploit this
+path — in-flight CC subprocesses keep their old flags; the next invocation
 in any chat picks up the new value. Adding more hot-reloadable fields
 requires extending the diff in `crates/bot/src/config_watcher.rs::diff_classify`.
 
@@ -498,7 +499,7 @@ theme detection. Do not repeat; migrate existing offenders when touched.
 `~/.right/` is the runtime root (override with `--home`). Critical paths:
 
 - `config.yaml` — global config (tunnel).
-- `agents/<name>/` — per-agent state. Key files: `agent.yaml`, `policy.yaml`, `data.db`, `.claude/.credentials.json` (symlink to `~/.claude/.credentials.json`, host-only — NOT uploaded to sandbox). Subdirs include `crons/`, `inbox/`, `outbox/`, and `tmp/` for staging during attachment transfer.
+- `agents/<name>/` — per-agent state. Key files: `agent.yaml`, `policy.yaml`, `data.db`, `.claude/.credentials.json` (symlink to `~/.claude/.credentials.json`, host-only — NOT uploaded to sandbox). Subdirs include `crons/`, `inbox/`, `outbox/`, and `tmp/` for staging during attachment transfer. Sandbox-internal: `/sandbox/.claude/projects/-sandbox/<sid>.jsonl` (CC project history, agent-readable for self-introspection via the `/rightreflect` skill); `/sandbox/.claude/logs/<sid>.log` (CC debug output, only present when `/debug` is on).
 - `run/process-compose.yaml`, `run/state.json` (carries `pc_port` + `pc_api_token`), `run/internal.sock` (bot↔aggregator UDS), `run/ssh/<agent>.ssh-config`.
 - `backups/<agent>/<YYYYMMDD-HHMM>/` — `sandbox.tar.gz` plus optional `agent.yaml` + `data.db` + `policy.yaml` for full backups.
 - `logs/<agent>.log.<date>` — per-agent daily log rotation. `mcp-aggregator.log` for the shared aggregator.

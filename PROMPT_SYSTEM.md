@@ -54,6 +54,11 @@ use `CRON_SCHEMA_JSON` with no fork.
 the Telegram `/model` command, which writes to `agent.yaml` and hot-reloads
 without restart — the next CC invocation passes `--model <new>`.
 
+**Debug args.** When `agent.yaml::debug` (hot-reloadable via the `/debug`
+Telegram command) is true, `ClaudeInvocation` also appends
+`--debug --debug-file=/sandbox/.claude/logs/<session-uuid>.log`. The
+session UUID matches CC's own JSONL filename. Off by default.
+
 ## Prompt Structure
 
 ### Normal mode
