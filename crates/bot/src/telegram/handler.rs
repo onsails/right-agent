@@ -99,8 +99,11 @@ pub struct AgentSettings {
     pub prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
     /// RwLock gate — upgrade takes write (exclusive), CC invocations take read (shared).
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
-    /// When true, CC subprocesses run with --verbose and stderr is logged at debug level.
-    pub debug: bool,
+    /// Hot-reloadable debug flag. When true, CC subprocesses run with --verbose,
+    /// stderr is logged at debug level, AND `claude` runs with --debug --debug-file=...
+    /// Updated by `/debug` Telegram command and config_watcher (yaml diff). Read on
+    /// every CC invocation.
+    pub debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// STT context — None when stt.enabled=false or whisper model not yet cached.
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
 }
@@ -359,7 +362,7 @@ pub async fn handle_message(
                     agent_name,
                     bot: bot.clone(),
                     agent_db_dir: agent_dir.0.clone(),
-                    debug: settings.debug,
+                    debug: crate::snapshot_debug(&settings.debug),
                     ssh_config_path: ssh_config.0.clone(),
                     resolved_sandbox: settings.resolved_sandbox.clone(),
                     auth_watcher_active: Arc::clone(&intercept_slots.auth_watcher),

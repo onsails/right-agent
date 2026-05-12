@@ -87,7 +87,7 @@ pub async fn run_telegram<L>(
     token: String,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     agent_dir: PathBuf,
-    debug: bool,
+    debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pending_auth: PendingAuthMap,
     home: PathBuf,
     ssh_config_path: Option<PathBuf>,
@@ -546,7 +546,7 @@ mod tests {
             hindsight: None,
             prefetch_cache: Some(PrefetchCache::new()),
             upgrade_lock: Arc::new(RwLock::new(())),
-            debug: false,
+            debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stt: None,
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
