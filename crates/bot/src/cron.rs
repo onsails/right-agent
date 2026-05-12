@@ -334,6 +334,7 @@ async fn execute_job(
     internal_client: &right_mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
+    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
     use std::process::Stdio;
 
@@ -431,6 +432,7 @@ async fn execute_job(
         disallowed_tools,
         extra_args: vec![],
         prompt: Some(prompt_for_cc),
+        debug_flag: debug.clone(),
     };
 
     let claude_args = invocation.into_args();
@@ -827,6 +829,7 @@ async fn execute_job(
                 job_name: job_name.to_string(),
             },
             model: model.map(String::from),
+            debug: debug.clone(),
         };
 
         let reflected_content = match crate::reflection::reflect_on_failure(refl_ctx).await {
@@ -970,6 +973,7 @@ pub(crate) async fn run_cron_task(
     shutdown: CancellationToken,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
+    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -1000,12 +1004,13 @@ pub(crate) async fn run_cron_task(
         &execute_handles,
         &resolved_sandbox,
         &upgrade_lock,
+        &debug,
     );
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock);
+                reconcile_jobs(&mut handles, &mut triggered_handles, &conn, &agent_dir, &agent_name, &model, &ssh_config_path, &internal_client, &execute_handles, &resolved_sandbox, &upgrade_lock, &debug);
             }
             _ = shutdown.cancelled() => {
                 tracing::info!(agent = %agent_name, "cron shutdown: stopping reconciler");
@@ -1106,6 +1111,7 @@ fn fire_one_shot_specs(
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
+    debug: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
     for (name, spec) in specs {
         let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
@@ -1126,6 +1132,7 @@ fn fire_one_shot_specs(
         let ic = Arc::clone(internal_client);
         let rs = resolved_sandbox.clone();
         let ul = Arc::clone(upgrade_lock);
+        let dbg = debug.clone();
         let handle = tokio::spawn(async move {
             execute_job(
                 &jn,
@@ -1137,6 +1144,7 @@ fn fire_one_shot_specs(
                 &ic,
                 rs.as_deref(),
                 ul,
+                dbg,
             )
             .await;
             delete_one_shot_spec(&ad, &jn);
@@ -1163,6 +1171,7 @@ fn reconcile_jobs(
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
+    debug: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -1194,6 +1203,7 @@ fn reconcile_jobs(
         execute_handles,
         resolved_sandbox,
         upgrade_lock,
+        debug,
     );
 
     // Fire Immediate + BackgroundContinuation specs (every tick — they are one-shot)
@@ -1215,6 +1225,7 @@ fn reconcile_jobs(
         execute_handles,
         resolved_sandbox,
         upgrade_lock,
+        debug,
     );
 
     // Abort handles for removed or changed jobs (CRON-06)
@@ -1251,6 +1262,7 @@ fn reconcile_jobs(
         let job_internal_client = Arc::clone(internal_client);
         let job_sandbox = resolved_sandbox.clone();
         let job_upgrade_lock = Arc::clone(upgrade_lock);
+        let job_debug = debug.clone();
 
         let handle = tokio::spawn(async move {
             run_job_loop(
@@ -1264,6 +1276,7 @@ fn reconcile_jobs(
                 job_execute_handles,
                 job_sandbox,
                 job_upgrade_lock,
+                job_debug,
             )
             .await;
         });
@@ -1296,6 +1309,7 @@ fn reconcile_jobs(
             let ic = Arc::clone(internal_client);
             let rs = resolved_sandbox.clone();
             let ul = Arc::clone(upgrade_lock);
+            let dbg = debug.clone();
             tracing::info!(job = %name, "executing triggered job");
             let trigger_name = name.clone();
             let handle = tokio::spawn(async move {
@@ -1309,6 +1323,7 @@ fn reconcile_jobs(
                     &ic,
                     rs.as_deref(),
                     ul,
+                    dbg,
                 )
                 .await;
             });
@@ -1338,6 +1353,7 @@ async fn run_job_loop(
     execute_handles: ExecuteHandles,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
+    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -1386,6 +1402,7 @@ async fn run_job_loop(
         let ic = Arc::clone(&internal_client);
         let rs = resolved_sandbox.clone();
         let ul = Arc::clone(&upgrade_lock);
+        let dbg = debug.clone();
         let handle = tokio::spawn(async move {
             execute_job(
                 &jn,
@@ -1397,6 +1414,7 @@ async fn run_job_loop(
                 &ic,
                 rs.as_deref(),
                 ul,
+                dbg,
             )
             .await;
         });
@@ -1717,6 +1735,7 @@ mod tests {
             shutdown_clone,
             None,
             Arc::new(tokio::sync::RwLock::new(())),
+            None,
         ));
 
         // Give cron engine time to reconcile and spawn the job loop

@@ -75,6 +75,8 @@ pub(crate) struct ReflectionContext {
     pub(crate) resolved_sandbox: Option<String>,
     pub(crate) parent_source: ParentSource,
     pub(crate) model: Option<String>,
+    /// Hot-reloadable debug flag. Forwarded to ClaudeInvocation.debug_flag.
+    pub(crate) debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -218,6 +220,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         },
         extra_args: vec![],
         prompt: None,
+        debug_flag: ctx.debug.clone(),
     };
     let claude_args = invocation.into_args();
 

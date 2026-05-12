@@ -242,6 +242,7 @@ pub(crate) async fn run_delivery_loop(
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
     session_locks: crate::telegram::SessionLocks,
+    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) {
     tracing::info!(agent = %agent_name, "cron delivery loop started");
 
@@ -382,6 +383,7 @@ pub(crate) async fn run_delivery_loop(
             resolved_sandbox.as_deref(),
             &upgrade_lock,
             session_locks.clone(),
+            debug.clone(),
         )
         .await
         {
@@ -451,6 +453,7 @@ async fn deliver_through_session(
     resolved_sandbox: Option<&str>,
     upgrade_lock: &tokio::sync::RwLock<()>,
     session_locks: crate::telegram::SessionLocks,
+    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<(), String> {
     use std::process::Stdio;
 
@@ -495,6 +498,7 @@ async fn deliver_through_session(
         disallowed_tools: crate::cc::invocation::baseline_disallowed_tools(),
         extra_args: vec![],
         prompt: None, // stdin-piped
+        debug_flag: debug,
     };
 
     let claude_args = invocation.into_args();
