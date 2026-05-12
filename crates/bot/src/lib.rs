@@ -202,6 +202,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             max_restarts: 3,
             backoff_seconds: 5,
             model: None,
+            debug: None,
             sandbox: None,
             env: Default::default(),
             secret: None,

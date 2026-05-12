@@ -127,6 +127,7 @@ mod tests {
                 backoff_seconds: 5,
                 network_policy: Default::default(),
                 model: None,
+                debug: None,
                 sandbox: None,
                 telegram_token: None,
                 allowed_chat_ids: vec![],

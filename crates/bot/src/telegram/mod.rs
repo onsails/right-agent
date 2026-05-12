@@ -121,6 +121,7 @@ mod tests {
             max_restarts: 3,
             backoff_seconds: 5,
             model: None,
+            debug: None,
             sandbox: None,
             telegram_token: None,
             allowed_chat_ids: vec![],
