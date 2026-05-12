@@ -63,6 +63,56 @@ pub fn write_agent_yaml_model(
     })
 }
 
+/// Write `agent.yaml::debug` via line-oriented MergedRMW.
+///
+/// `Some(true|false)` replaces or appends a `debug: <value>` line.
+/// `None` removes the existing `debug:` line.
+///
+/// Preserves all unknown fields, comments, and blank lines via
+/// `right_codegen::contract::write_merged_rmw`. Same line-walking pattern
+/// as `write_agent_yaml_model`.
+pub fn write_agent_yaml_debug(
+    path: &std::path::Path,
+    new_value: Option<bool>,
+) -> miette::Result<()> {
+    right_codegen::contract::write_merged_rmw(path, |existing| {
+        let original = existing.unwrap_or("");
+
+        let mut found = false;
+        let mut out = String::with_capacity(original.len() + 32);
+        for line in original.split_inclusive('\n') {
+            let is_top_level_debug = line
+                .strip_prefix("debug:")
+                .map(|rest| {
+                    rest.starts_with(' ')
+                        || rest.starts_with('\t')
+                        || rest.is_empty()
+                        || rest.starts_with('\n')
+                        || rest.starts_with('\r')
+                })
+                .unwrap_or(false);
+            if is_top_level_debug {
+                found = true;
+                if let Some(v) = new_value {
+                    let needs_newline = line.ends_with('\n');
+                    out.push_str(&format!("debug: {v}{}", if needs_newline { "\n" } else { "" }));
+                }
+            } else {
+                out.push_str(line);
+            }
+        }
+
+        if !found && let Some(v) = new_value {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("debug: {v}\n"));
+        }
+
+        Ok(out)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +504,66 @@ sandbox:
         );
         let parsed: AgentConfig = serde_saphyr::from_str(&result).unwrap();
         assert_eq!(parsed.model.as_deref(), Some("claude-sonnet-4-6[1m]"));
+    }
+
+    #[test]
+    fn write_agent_yaml_debug_appends_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "restart: never\nmax_restarts: 5\n").unwrap();
+
+        super::write_agent_yaml_debug(&path, Some(true)).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("restart: never"), "preserve existing fields:\n{result}");
+        assert!(result.contains("max_restarts: 5"), "preserve existing fields:\n{result}");
+        assert!(result.contains("debug: true"), "append debug when absent:\n{result}");
+        let parsed: AgentConfig = serde_saphyr::from_str(&result).unwrap();
+        assert_eq!(parsed.debug, Some(true));
+    }
+
+    #[test]
+    fn write_agent_yaml_debug_replaces_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "restart: never\ndebug: false\nmax_restarts: 5\n").unwrap();
+
+        super::write_agent_yaml_debug(&path, Some(true)).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(!result.contains("debug: false"), "old value gone:\n{result}");
+        assert!(result.contains("debug: true"), "new value present:\n{result}");
+        let restart_pos = result.find("restart:").unwrap();
+        let debug_pos = result.find("debug:").unwrap();
+        assert!(restart_pos < debug_pos, "field order preserved:\n{result}");
+    }
+
+    #[test]
+    fn write_agent_yaml_debug_removes_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "restart: never\ndebug: true\nmax_restarts: 5\n").unwrap();
+
+        super::write_agent_yaml_debug(&path, None).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(!result.contains("debug:"), "debug line removed:\n{result}");
+        assert!(result.contains("restart: never"));
+        let parsed: AgentConfig = serde_saphyr::from_str(&result).unwrap();
+        assert!(parsed.debug.is_none());
+    }
+
+    #[test]
+    fn write_agent_yaml_debug_preserves_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.yaml");
+        std::fs::write(&path, "# header\nrestart: never\n\n# comment\nmax_restarts: 5\n").unwrap();
+
+        super::write_agent_yaml_debug(&path, Some(true)).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("# header"));
+        assert!(result.contains("# comment"));
     }
 }
 
