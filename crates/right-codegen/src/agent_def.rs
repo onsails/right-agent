@@ -13,6 +13,16 @@ pub const OPERATING_INSTRUCTIONS: &str =
 /// Source: `templates/right/agent/BOOTSTRAP.md`
 pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../templates/right/agent/BOOTSTRAP.md");
 
+/// Cron delivery contract, compiled into the binary.
+///
+/// Injected into the system prompt for `PromptMode::Cron` runs
+/// (cron::execute_job — both regular cron jobs and background
+/// continuation). Tells the agent that its structured output IS
+/// the Telegram delivery channel and that the turn has no live user.
+/// Source: `templates/right/prompt/CRON_INSTRUCTIONS.md`
+pub const CRON_INSTRUCTIONS: &str =
+    include_str!("../templates/right/prompt/CRON_INSTRUCTIONS.md");
+
 /// JSON schema for the structured reply format used by teloxide agents (D-02).
 ///
 /// Agents write replies as JSON conforming to this schema.
