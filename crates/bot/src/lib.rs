@@ -23,6 +23,12 @@ pub(crate) fn snapshot_model(cell: &arc_swap::ArcSwap<Option<String>>) -> Option
     (**cell.load()).clone()
 }
 
+/// Read the current debug-flag value with relaxed ordering. Same purpose as
+/// `snapshot_model` for the debug AtomicBool.
+pub(crate) fn snapshot_debug(cell: &std::sync::atomic::AtomicBool) -> bool {
+    cell.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Load `allowlist.yaml` for this agent, migrating from the legacy
 /// `agent.yaml::allowed_chat_ids` field on first boot. Returns a shareable
 /// `AllowlistHandle` ready for the routing filter and command handlers.
@@ -460,6 +466,11 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     use std::sync::atomic::{AtomicBool, Ordering};
     let config_changed = Arc::new(AtomicBool::new(false));
     let agent_yaml_path = agent_dir.join("agent.yaml");
+
+    // Hot-reloadable debug flag. yaml takes precedence; CLI --debug is the fallback.
+    let initial_debug = config.debug.unwrap_or(args.debug);
+    let debug_flag: Arc<AtomicBool> = Arc::new(AtomicBool::new(initial_debug));
+
     // Create the model swap cell here so both the watcher and the telegram
     // dispatcher share the same Arc. The watcher writes; the dispatcher reads.
     let model_arc: Arc<arc_swap::ArcSwap<Option<String>>> =
@@ -469,6 +480,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         shutdown.clone(),
         Arc::clone(&config_changed),
         Arc::clone(&model_arc),
+        Arc::clone(&debug_flag),
     )?;
 
     // Build shared OAuth PendingAuth map
@@ -930,7 +942,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             token,
             allowlist,
             agent_dir,
-            args.debug,
+            Arc::clone(&debug_flag),
             Arc::clone(&pending_auth),
             home.clone(),
             ssh_config_path,
