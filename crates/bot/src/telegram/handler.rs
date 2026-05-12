@@ -26,6 +26,8 @@ use super::session::{
     find_sessions_by_uuid, list_sessions, truncate_label,
 };
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
+#[cfg(test)]
+use super::{ThinkingVisibility, ThinkingVisibilityState};
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
 /// Distinct from RightHome to prevent TypeId collision in dptree.
@@ -1943,6 +1945,44 @@ pub async fn handle_stop_callback(
     Ok(())
 }
 
+fn apply_thinking_toggle_callback(
+    thinking_visibility: &super::ThinkingVisibility,
+    data: &str,
+) -> Option<&'static str> {
+    let (key, action) = super::parse_thinking_toggle_callback(data)?;
+    if super::set_thinking_visibility(thinking_visibility, key, action.expanded()) {
+        Some(match action {
+            super::ThinkingToggleAction::Show => "Showing thinking...",
+            super::ThinkingToggleAction::Hide => "Hiding thinking...",
+        })
+    } else {
+        Some("Already finished")
+    }
+}
+
+/// Handle Show/Hide thinking callback queries from thinking messages.
+///
+/// Callback data format: `think:{chat_id}:{eff_thread_id}:{show|hide}`.
+pub async fn handle_thinking_toggle_callback(
+    bot: BotType,
+    q: CallbackQuery,
+    worker_ctl: super::WorkerControlDeps,
+) -> ResponseResult<()> {
+    let qid = q.id;
+    let text = q
+        .data
+        .as_deref()
+        .and_then(|data| apply_thinking_toggle_callback(&worker_ctl.thinking_visibility, data));
+
+    let mut answer = bot.answer_callback_query(qid);
+    if let Some(t) = text {
+        answer = answer.text(t);
+    }
+    answer.await?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Background button callback query handler
 // ---------------------------------------------------------------------------
@@ -2177,6 +2217,62 @@ mod tests {
                 && parts[2].parse::<i64>().is_ok();
             assert!(!valid, "bad={bad} unexpectedly parsed as valid");
         }
+    }
+
+    #[test]
+    fn thinking_toggle_show_updates_active_visibility() {
+        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let key = (42_i64, 7_i64);
+        map.insert(
+            key,
+            super::ThinkingVisibilityState {
+                expanded: false,
+                version: 0,
+            },
+        );
+
+        let text = apply_thinking_toggle_callback(&map, "think:42:7:show");
+        assert_eq!(text, Some("Showing thinking..."));
+
+        let state = *map.get(&key).unwrap().value();
+        assert!(state.expanded);
+        assert_eq!(state.version, 1);
+    }
+
+    #[test]
+    fn thinking_toggle_hide_updates_active_visibility() {
+        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+        let key = (42_i64, 7_i64);
+        map.insert(
+            key,
+            super::ThinkingVisibilityState {
+                expanded: true,
+                version: 0,
+            },
+        );
+
+        let text = apply_thinking_toggle_callback(&map, "think:42:7:hide");
+        assert_eq!(text, Some("Hiding thinking..."));
+
+        let state = *map.get(&key).unwrap().value();
+        assert!(!state.expanded);
+        assert_eq!(state.version, 1);
+    }
+
+    #[test]
+    fn thinking_toggle_after_finish_reports_already_finished() {
+        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+
+        let text = apply_thinking_toggle_callback(&map, "think:42:7:show");
+        assert_eq!(text, Some("Already finished"));
+    }
+
+    #[test]
+    fn thinking_toggle_malformed_callback_returns_none() {
+        let map: super::ThinkingVisibility = Arc::new(DashMap::new());
+
+        assert_eq!(apply_thinking_toggle_callback(&map, "think:42:7"), None);
+        assert_eq!(apply_thinking_toggle_callback(&map, "stop:42:7"), None);
     }
 
     /// Regression: a stale supersession-cleanup task must NOT clear a freshly
