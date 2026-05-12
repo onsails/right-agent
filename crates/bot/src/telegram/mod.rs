@@ -76,6 +76,79 @@ pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>
 /// stale entries from a previous turn are dropped on exit.
 pub(crate) type BgRequests = Arc<DashMap<(i64, i64), u64>>;
 
+/// Current thinking-preview visibility for an active CC invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ThinkingVisibilityState {
+    pub(crate) expanded: bool,
+    pub(crate) version: u64,
+}
+
+/// User-requested thinking visibility action from an inline callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThinkingToggleAction {
+    Show,
+    Hide,
+}
+
+impl ThinkingToggleAction {
+    pub(crate) fn expanded(self) -> bool {
+        matches!(self, Self::Show)
+    }
+}
+
+/// Per-(chat, thread) thinking-preview visibility for active CC sessions.
+///
+/// Key: (chat_id, eff_thread_id). Value: current visibility and render version.
+/// The worker inserts at run start and removes on run completion.
+pub(crate) type ThinkingVisibility = Arc<DashMap<(i64, i64), ThinkingVisibilityState>>;
+
+/// Initial thinking visibility for a run. Direct chats honor config; groups stay quiet.
+pub(crate) fn initial_thinking_visibility(
+    show_thinking: bool,
+    is_group: bool,
+) -> ThinkingVisibilityState {
+    ThinkingVisibilityState {
+        expanded: show_thinking && !is_group,
+        version: 0,
+    }
+}
+
+/// Parse `think:{chat_id}:{eff_thread_id}:{show|hide}` callback data.
+pub(crate) fn parse_thinking_toggle_callback(
+    data: &str,
+) -> Option<((i64, i64), ThinkingToggleAction)> {
+    let mut parts = data.splitn(4, ':');
+    let prefix = parts.next()?;
+    let chat_id = parts.next()?.parse::<i64>().ok()?;
+    let thread_id = parts.next()?.parse::<i64>().ok()?;
+    let action = match parts.next()? {
+        "show" => ThinkingToggleAction::Show,
+        "hide" => ThinkingToggleAction::Hide,
+        _ => return None,
+    };
+    if prefix != "think" {
+        return None;
+    }
+    Some(((chat_id, thread_id), action))
+}
+
+/// Update active visibility. Returns false when the run already finished.
+pub(crate) fn set_thinking_visibility(
+    map: &ThinkingVisibility,
+    key: (i64, i64),
+    expanded: bool,
+) -> bool {
+    let Some(mut entry) = map.get_mut(&key) else {
+        return false;
+    };
+    let state = entry.value_mut();
+    if state.expanded != expanded {
+        state.expanded = expanded;
+        state.version = state.version.saturating_add(1);
+    }
+    true
+}
+
 /// Bundle of per-session control maps that flow into `WorkerContext` when
 /// `handle_message` spawns a per-session worker. Bundled because dptree
 /// 0.5.1's `Injectable` impl tops out at 12 type params, and the message
@@ -155,5 +228,88 @@ mod tests {
         let mut config = minimal_config();
         config.telegram_token = Some(String::new());
         assert!(resolve_token(&config).is_err());
+    }
+
+    #[test]
+    fn initial_thinking_visibility_respects_context() {
+        for (show_thinking, is_group, expected) in [
+            (true, false, true),
+            (false, false, false),
+            (true, true, false),
+            (false, true, false),
+        ] {
+            let state = initial_thinking_visibility(show_thinking, is_group);
+            assert_eq!(state.expanded, expected);
+            assert_eq!(state.version, 0);
+        }
+    }
+
+    #[test]
+    fn parse_thinking_toggle_callback_accepts_valid_data() {
+        assert_eq!(
+            parse_thinking_toggle_callback("think:12345:678:show"),
+            Some(((12345, 678), ThinkingToggleAction::Show))
+        );
+        assert_eq!(
+            parse_thinking_toggle_callback("think:-100123:0:hide"),
+            Some(((-100123, 0), ThinkingToggleAction::Hide))
+        );
+        assert!(ThinkingToggleAction::Show.expanded());
+        assert!(!ThinkingToggleAction::Hide.expanded());
+    }
+
+    #[test]
+    fn parse_thinking_toggle_callback_rejects_malformed_data() {
+        for bad in [
+            "",
+            "think",
+            "think:1",
+            "think:1:2",
+            "think:1:2:toggle",
+            "think:not-a-chat:2:show",
+            "think:1:not-a-thread:show",
+            "stop:1:2",
+        ] {
+            assert_eq!(parse_thinking_toggle_callback(bad), None, "bad={bad}");
+        }
+    }
+
+    #[test]
+    fn set_thinking_visibility_updates_version_only_on_change() {
+        let map: ThinkingVisibility = Arc::new(DashMap::new());
+        let key = (12345_i64, 0_i64);
+        map.insert(
+            key,
+            ThinkingVisibilityState {
+                expanded: false,
+                version: 0,
+            },
+        );
+
+        assert!(set_thinking_visibility(&map, key, true));
+        assert_eq!(
+            *map.get(&key).unwrap().value(),
+            ThinkingVisibilityState {
+                expanded: true,
+                version: 1
+            }
+        );
+
+        assert!(set_thinking_visibility(&map, key, true));
+        assert_eq!(
+            map.get(&key).unwrap().version,
+            1,
+            "same mode does not bump version"
+        );
+
+        assert!(set_thinking_visibility(&map, key, false));
+        assert_eq!(
+            *map.get(&key).unwrap().value(),
+            ThinkingVisibilityState {
+                expanded: false,
+                version: 2
+            }
+        );
+        assert!(!set_thinking_visibility(&map, (999, 0), true));
     }
 }
