@@ -70,23 +70,6 @@ pub(crate) struct ClaudeInvocation {
 }
 
 impl ClaudeInvocation {
-    /// Returns the session UUID CC will write its JSONL under, matching
-    /// the args `into_args` will emit. Used to compute --debug-file path.
-    ///
-    /// - `--fork-session` + `new_session_id` → CC creates a new file by `new_session_id`.
-    /// - `--resume <id>` (no fork) → CC continues writing to `<id>.jsonl`.
-    /// - `--session-id <id>` (no resume) → CC writes to `<id>.jsonl`.
-    /// - Neither set → CC generates its own UUID; we cannot know in advance.
-    pub(crate) fn effective_session_id(&self) -> Option<&str> {
-        if self.fork_session && let Some(id) = &self.new_session_id {
-            return Some(id.as_str());
-        }
-        if let Some(id) = &self.resume_session_id {
-            return Some(id.as_str());
-        }
-        self.new_session_id.as_deref()
-    }
-
     /// Consume self and produce the full argument list for spawning `claude`.
     pub(crate) fn into_args(self) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
