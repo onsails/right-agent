@@ -8,6 +8,7 @@ pub mod handler;
 pub mod markdown;
 pub mod memory_alerts;
 pub mod mention;
+pub(crate) mod debug_command;
 pub(crate) mod model_command;
 pub mod oauth_callback;
 pub mod session;
