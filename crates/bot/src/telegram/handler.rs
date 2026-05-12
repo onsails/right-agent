@@ -27,7 +27,7 @@ use super::session::{
 };
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
 #[cfg(test)]
-use super::{ThinkingVisibility, ThinkingVisibilityState};
+use super::ThinkingVisibility;
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
 /// Distinct from RightHome to prevent TypeId collision in dptree.
@@ -2224,40 +2224,24 @@ mod tests {
     fn thinking_toggle_show_updates_active_visibility() {
         let map: super::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
-        map.insert(
-            key,
-            super::ThinkingVisibilityState {
-                expanded: false,
-                version: 0,
-            },
-        );
+        map.insert(key, false);
 
         let text = apply_thinking_toggle_callback(&map, "think:42:7:show");
         assert_eq!(text, Some("Showing thinking..."));
 
-        let state = *map.get(&key).unwrap().value();
-        assert!(state.expanded);
-        assert_eq!(state.version, 1);
+        assert!(*map.get(&key).unwrap().value());
     }
 
     #[test]
     fn thinking_toggle_hide_updates_active_visibility() {
         let map: super::ThinkingVisibility = Arc::new(DashMap::new());
         let key = (42_i64, 7_i64);
-        map.insert(
-            key,
-            super::ThinkingVisibilityState {
-                expanded: true,
-                version: 0,
-            },
-        );
+        map.insert(key, true);
 
         let text = apply_thinking_toggle_callback(&map, "think:42:7:hide");
         assert_eq!(text, Some("Hiding thinking..."));
 
-        let state = *map.get(&key).unwrap().value();
-        assert!(!state.expanded);
-        assert_eq!(state.version, 1);
+        assert!(!*map.get(&key).unwrap().value());
     }
 
     #[test]

@@ -76,13 +76,6 @@ pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>
 /// stale entries from a previous turn are dropped on exit.
 pub(crate) type BgRequests = Arc<DashMap<(i64, i64), u64>>;
 
-/// Current thinking-preview visibility for an active CC invocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ThinkingVisibilityState {
-    pub(crate) expanded: bool,
-    pub(crate) version: u64,
-}
-
 /// User-requested thinking visibility action from an inline callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThinkingToggleAction {
@@ -98,19 +91,13 @@ impl ThinkingToggleAction {
 
 /// Per-(chat, thread) thinking-preview visibility for active CC sessions.
 ///
-/// Key: (chat_id, eff_thread_id). Value: current visibility and render version.
+/// Key: (chat_id, eff_thread_id). Value: `true` when the preview is expanded.
 /// The worker inserts at run start and removes on run completion.
-pub(crate) type ThinkingVisibility = Arc<DashMap<(i64, i64), ThinkingVisibilityState>>;
+pub(crate) type ThinkingVisibility = Arc<DashMap<(i64, i64), bool>>;
 
 /// Initial thinking visibility for a run. Direct chats honor config; groups stay quiet.
-pub(crate) fn initial_thinking_visibility(
-    show_thinking: bool,
-    is_group: bool,
-) -> ThinkingVisibilityState {
-    ThinkingVisibilityState {
-        expanded: show_thinking && !is_group,
-        version: 0,
-    }
+pub(crate) fn initial_thinking_visibility(show_thinking: bool, is_group: bool) -> bool {
+    show_thinking && !is_group
 }
 
 /// Parse `think:{chat_id}:{eff_thread_id}:{show|hide}` callback data.
@@ -118,7 +105,9 @@ pub(crate) fn parse_thinking_toggle_callback(
     data: &str,
 ) -> Option<((i64, i64), ThinkingToggleAction)> {
     let mut parts = data.splitn(4, ':');
-    let prefix = parts.next()?;
+    if parts.next()? != "think" {
+        return None;
+    }
     let chat_id = parts.next()?.parse::<i64>().ok()?;
     let thread_id = parts.next()?.parse::<i64>().ok()?;
     let action = match parts.next()? {
@@ -126,9 +115,6 @@ pub(crate) fn parse_thinking_toggle_callback(
         "hide" => ThinkingToggleAction::Hide,
         _ => return None,
     };
-    if prefix != "think" {
-        return None;
-    }
     Some(((chat_id, thread_id), action))
 }
 
@@ -141,11 +127,7 @@ pub(crate) fn set_thinking_visibility(
     let Some(mut entry) = map.get_mut(&key) else {
         return false;
     };
-    let state = entry.value_mut();
-    if state.expanded != expanded {
-        state.expanded = expanded;
-        state.version = state.version.saturating_add(1);
-    }
+    *entry.value_mut() = expanded;
     true
 }
 
@@ -240,9 +222,10 @@ mod tests {
             (true, true, false),
             (false, true, false),
         ] {
-            let state = initial_thinking_visibility(show_thinking, is_group);
-            assert_eq!(state.expanded, expected);
-            assert_eq!(state.version, 0);
+            assert_eq!(
+                initial_thinking_visibility(show_thinking, is_group),
+                expected
+            );
         }
     }
 
@@ -277,41 +260,17 @@ mod tests {
     }
 
     #[test]
-    fn set_thinking_visibility_updates_version_only_on_change() {
+    fn set_thinking_visibility_writes_state_for_active_run() {
         let map: ThinkingVisibility = Arc::new(DashMap::new());
         let key = (12345_i64, 0_i64);
-        map.insert(
-            key,
-            ThinkingVisibilityState {
-                expanded: false,
-                version: 0,
-            },
-        );
+        map.insert(key, false);
 
         assert!(set_thinking_visibility(&map, key, true));
-        assert_eq!(
-            *map.get(&key).unwrap().value(),
-            ThinkingVisibilityState {
-                expanded: true,
-                version: 1
-            }
-        );
-
-        assert!(set_thinking_visibility(&map, key, true));
-        assert_eq!(
-            map.get(&key).unwrap().version,
-            1,
-            "same mode does not bump version"
-        );
+        assert!(*map.get(&key).unwrap().value());
 
         assert!(set_thinking_visibility(&map, key, false));
-        assert_eq!(
-            *map.get(&key).unwrap().value(),
-            ThinkingVisibilityState {
-                expanded: false,
-                version: 2
-            }
-        );
+        assert!(!*map.get(&key).unwrap().value());
+
         assert!(!set_thinking_visibility(&map, (999, 0), true));
     }
 }

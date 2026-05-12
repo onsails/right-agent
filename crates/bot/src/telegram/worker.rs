@@ -1942,15 +1942,15 @@ async fn invoke_cc(
         .insert((chat_id, eff_thread_id), (turn_id, stop_token.clone()));
 
     let visibility_key = (chat_id, eff_thread_id);
-    let fallback_visibility = super::initial_thinking_visibility(ctx.show_thinking, is_group);
+    let fallback_expanded = super::initial_thinking_visibility(ctx.show_thinking, is_group);
     ctx.thinking_visibility
-        .insert(visibility_key, fallback_visibility);
-    let mut last_rendered_visibility_version = fallback_visibility.version;
-    let read_visibility = || {
+        .insert(visibility_key, fallback_expanded);
+    let mut last_rendered_expanded = fallback_expanded;
+    let read_expanded = || {
         ctx.thinking_visibility
             .get(&visibility_key)
             .map(|entry| *entry.value())
-            .unwrap_or(fallback_visibility)
+            .unwrap_or(fallback_expanded)
     };
 
     // Stream stdout line-by-line: log to file, parse events, update thinking message.
@@ -1989,6 +1989,7 @@ async fn invoke_cc(
     let mut api_key_source: Option<String> = None;
     let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
     let mut last_edit = tokio::time::Instant::now();
+    let mut last_rendered_event_count: u32 = 0;
     let mut ui_tick = tokio::time::interval(Duration::from_millis(500));
     ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut total_assistant_events: u32 = 0;
@@ -2063,18 +2064,17 @@ async fn invoke_cc(
                         }
 
                         // Thinking message: always send (Stop button anchor).
-                        // Expanded previews update on the UI tick; collapsed stays static.
                         if crate::cc::stream::format_event(&event).is_some() {
-                            let visibility = read_visibility();
+                            let expanded = read_expanded();
                             let kb = working_keyboard(
                                 chat_id,
                                 eff_thread_id,
-                                thinking_keyboard_mode(visibility.expanded, is_group),
+                                thinking_keyboard_mode(expanded, is_group),
                             );
 
                             if thinking_msg_id.is_none() {
                                 let text = thinking_anchor_text(
-                                    visibility.expanded,
+                                    expanded,
                                     ring_buffer.events(),
                                     &usage,
                                 );
@@ -2088,7 +2088,8 @@ async fn invoke_cc(
                                 }
                                 if let Ok(msg) = send.await {
                                     thinking_msg_id = Some(msg.id);
-                                    last_rendered_visibility_version = visibility.version;
+                                    last_rendered_expanded = expanded;
+                                    last_rendered_event_count = total_assistant_events;
                                 }
                                 last_edit = tokio::time::Instant::now();
                             }
@@ -2102,22 +2103,22 @@ async fn invoke_cc(
                 }
             }
             _ = ui_tick.tick(), if thinking_msg_id.is_some() => {
-                let visibility = read_visibility();
-                let should_edit_for_toggle =
-                    visibility.version != last_rendered_visibility_version;
-                let should_edit_for_live_refresh =
-                    visibility.expanded && last_edit.elapsed() >= Duration::from_secs(2);
+                let expanded = read_expanded();
+                let should_edit_for_toggle = expanded != last_rendered_expanded;
+                let should_edit_for_live_refresh = expanded
+                    && total_assistant_events != last_rendered_event_count
+                    && last_edit.elapsed() >= Duration::from_secs(2);
 
                 if should_edit_for_toggle || should_edit_for_live_refresh {
                     let text = thinking_anchor_text(
-                        visibility.expanded,
+                        expanded,
                         ring_buffer.events(),
                         &usage,
                     );
                     let kb = working_keyboard(
                         chat_id,
                         eff_thread_id,
-                        thinking_keyboard_mode(visibility.expanded, is_group),
+                        thinking_keyboard_mode(expanded, is_group),
                     );
 
                     if let Some(msg_id) = thinking_msg_id {
@@ -2127,7 +2128,8 @@ async fn invoke_cc(
                             .parse_mode(teloxide::types::ParseMode::Html)
                             .reply_markup(kb)
                             .await;
-                        last_rendered_visibility_version = visibility.version;
+                        last_rendered_expanded = expanded;
+                        last_rendered_event_count = total_assistant_events;
                         last_edit = tokio::time::Instant::now();
                     }
                 }
@@ -2202,7 +2204,7 @@ async fn invoke_cc(
     // Remove active controls — session no longer cancellable/toggleable.
     // Done FIRST so callbacks after this point see an empty slot and bail with
     // "Already finished" instead of mutating active-run maps.
-    let final_visibility = read_visibility();
+    let final_expanded = read_expanded();
     ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
     ctx.thinking_visibility.remove(&visibility_key);
 
@@ -2305,7 +2307,7 @@ async fn invoke_cc(
             // it here.
         } else if stopped {
             // Stopped by user — show final state, remove keyboard.
-            let text = if final_visibility.expanded {
+            let text = if final_expanded {
                 let mut msg =
                     crate::cc::stream::format_thinking_message(ring_buffer.events(), &usage);
                 msg.push_str("\n\u{26d4} Stopped");
@@ -2319,7 +2321,7 @@ async fn invoke_cc(
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
-        } else if !will_reflect && final_visibility.expanded {
+        } else if !will_reflect && final_expanded {
             // Normal finish with thinking — final cost/turns, remove keyboard.
             let text = crate::cc::stream::format_thinking_message(ring_buffer.events(), &usage);
             let _ = ctx
