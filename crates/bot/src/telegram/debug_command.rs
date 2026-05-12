@@ -94,8 +94,6 @@ pub(crate) async fn handle_debug(
     agent_dir: std::sync::Arc<super::handler::AgentDir>,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
 ) -> teloxide::prelude::ResponseResult<()> {
-    use teloxide::prelude::*;
-
     if !super::handler::is_private_chat(&msg.chat.kind)
         && !super::allowlist_commands::sender_is_trusted(&msg, &allowlist)
     {
