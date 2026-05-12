@@ -51,6 +51,10 @@ enum BotCommand {
     Doctor,
     #[command(description = "Switch Claude model (menu)")]
     Model,
+    /// Toggle hot-reloadable debug mode. Use `/debug` for status, `/debug on`,
+    /// `/debug off`. When on, claude -p runs with --debug --debug-file=...
+    #[command(description = "Toggle debug mode (on/off/status)")]
+    Debug(String),
     #[command(description = "Cron job status (list or detail)")]
     Cron(String),
     #[command(description = "Add trusted user (reply to user, or /allow <user_id>)")]
@@ -402,6 +406,7 @@ fn build_dispatcher(
         .branch(dptree::case![BotCommand::Mcp(args)].endpoint(handle_mcp))
         .branch(dptree::case![BotCommand::Doctor].endpoint(handle_doctor))
         .branch(dptree::case![BotCommand::Model].endpoint(handle_model))
+        .branch(dptree::case![BotCommand::Debug(args)].endpoint(super::debug_command::handle_debug))
         .branch(dptree::case![BotCommand::Cron(args)].endpoint(handle_cron))
         .branch(dptree::case![BotCommand::Usage(arg)].endpoint(handle_usage))
         .branch(
