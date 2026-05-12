@@ -60,18 +60,56 @@ const POST_BREAK_STDERR_TIMEOUT_SECS: u64 = 2;
 /// Maximum character count for Hindsight recall queries (~530 tokens, safely under the 500-token API limit).
 const RECALL_MAX_CHARS: usize = 800;
 
-/// Build the inline keyboard for thinking messages: Stop + Background.
-fn working_keyboard(chat_id: i64, eff_thread_id: i64) -> teloxide::types::InlineKeyboardMarkup {
-    teloxide::types::InlineKeyboardMarkup::new(vec![vec![
-        teloxide::types::InlineKeyboardButton::callback(
-            "\u{26d4} Stop",
-            format!("stop:{chat_id}:{eff_thread_id}"),
-        ),
-        teloxide::types::InlineKeyboardButton::callback(
-            "\u{1f319} Background",
-            format!("bg:{chat_id}:{eff_thread_id}"),
-        ),
-    ]])
+/// Inline keyboard mode for the active thinking message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingKeyboardMode {
+    Collapsed,
+    ExpandedDirect,
+    ExpandedGroup,
+}
+
+fn thinking_keyboard_mode(expanded: bool, is_group: bool) -> ThinkingKeyboardMode {
+    match (expanded, is_group) {
+        (false, _) => ThinkingKeyboardMode::Collapsed,
+        (true, false) => ThinkingKeyboardMode::ExpandedDirect,
+        (true, true) => ThinkingKeyboardMode::ExpandedGroup,
+    }
+}
+
+/// Build the inline keyboard for thinking messages.
+fn working_keyboard(
+    chat_id: i64,
+    eff_thread_id: i64,
+    mode: ThinkingKeyboardMode,
+) -> teloxide::types::InlineKeyboardMarkup {
+    let mut row = Vec::new();
+
+    match mode {
+        ThinkingKeyboardMode::Collapsed => {
+            row.push(teloxide::types::InlineKeyboardButton::callback(
+                "Show thinking",
+                format!("think:{chat_id}:{eff_thread_id}:show"),
+            ));
+        }
+        ThinkingKeyboardMode::ExpandedDirect => {
+            row.push(teloxide::types::InlineKeyboardButton::callback(
+                "Hide thinking",
+                format!("think:{chat_id}:{eff_thread_id}:hide"),
+            ));
+        }
+        ThinkingKeyboardMode::ExpandedGroup => {}
+    }
+
+    row.push(teloxide::types::InlineKeyboardButton::callback(
+        "\u{26d4} Stop",
+        format!("stop:{chat_id}:{eff_thread_id}"),
+    ));
+    row.push(teloxide::types::InlineKeyboardButton::callback(
+        "\u{1f319} Background",
+        format!("bg:{chat_id}:{eff_thread_id}"),
+    ));
+
+    teloxide::types::InlineKeyboardMarkup::new(vec![row])
 }
 
 /// A single Telegram message queued into the debounce channel.
@@ -2000,7 +2038,11 @@ async fn invoke_cc(
                         // show_thinking=true: update with events every 2s.
                         // show_thinking=false: send static "Working..." once, no updates.
                         if crate::cc::stream::format_event(&event).is_some() {
-                            let kb = working_keyboard(chat_id, eff_thread_id);
+                            let kb = working_keyboard(
+                                chat_id,
+                                eff_thread_id,
+                                thinking_keyboard_mode(ctx.show_thinking && !is_group, is_group),
+                            );
 
                             if thinking_msg_id.is_none() {
                                 // First displayable event — send thinking message.
@@ -2666,24 +2708,83 @@ mod tests {
         assert!(!url.contains(" to continue"));
     }
 
+    fn keyboard_row(kb: teloxide::types::InlineKeyboardMarkup) -> Vec<(String, String)> {
+        let rows = kb.inline_keyboard;
+        assert_eq!(rows.len(), 1, "single row");
+        rows.into_iter()
+            .next()
+            .unwrap()
+            .into_iter()
+            .map(|button| {
+                let data = match button.kind {
+                    teloxide::types::InlineKeyboardButtonKind::CallbackData(data) => data,
+                    _ => panic!("button must use callback data"),
+                };
+                (button.text, data)
+            })
+            .collect()
+    }
+
     #[test]
-    fn working_keyboard_has_stop_and_background() {
-        let kb = working_keyboard(12345, 678);
-        let buttons: Vec<Vec<_>> = kb.inline_keyboard.into_iter().collect();
-        assert_eq!(buttons.len(), 1, "single row");
-        assert_eq!(buttons[0].len(), 2, "two buttons");
-        assert_eq!(buttons[0][0].text, "\u{26d4} Stop");
-        assert_eq!(buttons[0][1].text, "\u{1f319} Background");
-        if let teloxide::types::InlineKeyboardButtonKind::CallbackData(data) = &buttons[0][0].kind {
-            assert_eq!(data, "stop:12345:678");
-        } else {
-            panic!("Stop button must use CallbackData");
+    fn working_keyboard_modes_render_expected_buttons() {
+        for (chat, thread, mode, expected) in [
+            (
+                12345,
+                678,
+                ThinkingKeyboardMode::Collapsed,
+                vec![
+                    ("Show thinking", "think:12345:678:show"),
+                    ("\u{26d4} Stop", "stop:12345:678"),
+                    ("\u{1f319} Background", "bg:12345:678"),
+                ],
+            ),
+            (
+                12345,
+                678,
+                ThinkingKeyboardMode::ExpandedDirect,
+                vec![
+                    ("Hide thinking", "think:12345:678:hide"),
+                    ("\u{26d4} Stop", "stop:12345:678"),
+                    ("\u{1f319} Background", "bg:12345:678"),
+                ],
+            ),
+            (
+                -100123,
+                0,
+                ThinkingKeyboardMode::ExpandedGroup,
+                vec![
+                    ("\u{26d4} Stop", "stop:-100123:0"),
+                    ("\u{1f319} Background", "bg:-100123:0"),
+                ],
+            ),
+        ] {
+            let actual = keyboard_row(working_keyboard(chat, thread, mode));
+            let expected: Vec<(String, String)> = expected
+                .into_iter()
+                .map(|(text, data)| (text.to_string(), data.to_string()))
+                .collect();
+            assert_eq!(actual, expected);
         }
-        if let teloxide::types::InlineKeyboardButtonKind::CallbackData(data) = &buttons[0][1].kind {
-            assert_eq!(data, "bg:12345:678");
-        } else {
-            panic!("Background button must use CallbackData");
-        }
+    }
+
+    #[test]
+    fn thinking_keyboard_mode_maps_visibility_and_chat_type() {
+        assert_eq!(
+            thinking_keyboard_mode(false, false),
+            ThinkingKeyboardMode::Collapsed
+        );
+        assert_eq!(
+            thinking_keyboard_mode(false, true),
+            ThinkingKeyboardMode::Collapsed
+        );
+        assert_eq!(
+            thinking_keyboard_mode(true, false),
+            ThinkingKeyboardMode::ExpandedDirect
+        );
+        assert_eq!(
+            thinking_keyboard_mode(true, true),
+            ThinkingKeyboardMode::ExpandedGroup
+        );
     }
 
     #[test]
