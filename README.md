@@ -65,7 +65,7 @@ full install guide: [docs/INSTALL.md](docs/INSTALL.md).
 
 ### <img src="assets/subsection-mark.svg" height="14" alt=""> multiple agents on one subscription
 
-each agent is a separate claude code session in its own sandbox: separate identity, separate memory, separate telegram thread. no per-agent api key. all of them run on your one claude subscription.
+each agent is a separate claude code session in its own sandbox: separate identity, separate memory, its own telegram bot. dms, groups, and forum topics each get their own session, all sharing one chat-tagged memory. no per-agent api key. all of them run on your one claude subscription.
 
 ### <img src="assets/subsection-mark.svg" height="14" alt=""> memory that survives restarts
 
@@ -192,7 +192,7 @@ the default policy is permissive. one line in `agent.yaml` switches to restricti
 | mcp secrets | copied into every agent | one aggregator, one location |
 | memory | replay full history each turn | append-only; hindsight or local file |
 | identity | system prompt in a config file | agent writes its own identity files |
-| control surface | cli + config + dashboards | one telegram thread |
+| control surface | cli + config + dashboards | one telegram bot per agent |
 | claude billing | api key per agent | one claude subscription |
 | scope | configurable everything | one opinionated path |
 
