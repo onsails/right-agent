@@ -475,6 +475,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         Arc::clone(&config_changed),
         Arc::clone(&model_arc),
         Arc::clone(&debug_flag),
+        args.debug,
     )?;
 
     // Build shared OAuth PendingAuth map
