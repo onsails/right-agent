@@ -27,7 +27,7 @@ use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
     RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_doctor, handle_list,
     handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
-    handle_usage,
+    handle_thinking_toggle_callback, handle_usage,
 };
 use super::model_command::{handle_model, handle_model_callback};
 use super::mention::BotIdentity;
@@ -160,6 +160,7 @@ where
         stt,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
+    let thinking_visibility: super::ThinkingVisibility = Arc::new(DashMap::new());
 
     // Spawn memory-alerts watcher (AuthFailed + client-flood) — only when Hindsight is configured.
     // Pass the live allowlist handle; recipients are resolved at broadcast time so
@@ -187,6 +188,7 @@ where
         Arc::clone(&internal_api_arc),
         Arc::clone(&settings_arc),
         Arc::clone(&stop_tokens),
+        Arc::clone(&thinking_visibility),
         Arc::clone(&idle_ts),
         Arc::clone(&session_locks),
         Arc::clone(&bg_requests),
@@ -385,6 +387,7 @@ fn build_dispatcher(
     internal_api_arc: Arc<InternalApi>,
     settings_arc: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
+    thinking_visibility: super::ThinkingVisibility,
     idle_ts: Arc<IdleTimestamp>,
     session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
@@ -393,6 +396,7 @@ fn build_dispatcher(
         stop_tokens,
         session_locks,
         bg_requests,
+        thinking_visibility,
     };
     let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
 
@@ -465,6 +469,12 @@ fn build_dispatcher(
                 q.data.as_deref().is_some_and(|d| d.starts_with("model:"))
             })
             .endpoint(handle_model_callback),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| {
+                q.data.as_deref().is_some_and(|d| d.starts_with("think:"))
+            })
+            .endpoint(handle_thinking_toggle_callback),
         )
         .branch(
             dptree::filter(|q: CallbackQuery| {
@@ -555,6 +565,7 @@ mod tests {
             stt: None,
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
+        let thinking_visibility: super::super::ThinkingVisibility = Arc::new(DashMap::new());
         let session_locks: super::super::SessionLocks = Arc::new(DashMap::new());
         let bg_requests: super::super::BgRequests = Arc::new(DashMap::new());
         let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
@@ -575,6 +586,7 @@ mod tests {
             internal_api,
             settings,
             stop_tokens,
+            thinking_visibility,
             idle_ts,
             session_locks,
             bg_requests,

@@ -155,15 +155,17 @@ pub(crate) fn set_thinking_visibility(
 /// handler was already at the limit — we cannot inject these as separate
 /// top-level deps without pushing the message handler over.
 ///
-/// All three maps share lifetime and are constructed once in `lib.rs`:
+/// All four maps share bot-process lifetime and are injected together:
 /// - `stop_tokens`: per-(chat, thread) cancellation tokens for in-flight CC subprocesses.
 /// - `session_locks`: per-main-session async mutex map (TOCTOU on session JSONL).
 /// - `bg_requests`: per-(chat, thread) Background-button request flags.
+/// - `thinking_visibility`: per-(chat, thread) Show/Hide thinking state for active runs.
 #[derive(Clone)]
 pub struct WorkerControlDeps {
     pub(crate) stop_tokens: StopTokens,
     pub(crate) session_locks: SessionLocks,
     pub(crate) bg_requests: BgRequests,
+    pub(crate) thinking_visibility: ThinkingVisibility,
 }
 
 use right_agent::agent::types::AgentConfig;
