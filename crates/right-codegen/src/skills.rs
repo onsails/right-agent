@@ -16,6 +16,7 @@ const SKILL_RIGHTMCP: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightmcp");
 const SKILL_RIGHTMEMORY_FILE: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightmemory-file");
 const SKILL_RIGHTMEMORY_HINDSIGHT: Dir =
     include_dir!("$CARGO_MANIFEST_DIR/skills/rightmemory-hindsight");
+const SKILL_RIGHTREFLECT: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightreflect");
 
 /// Install Right Agent built-in skills into an agent's `.claude/skills/` directory.
 ///
@@ -36,6 +37,7 @@ pub fn install_builtin_skills(
         ("rightcron", &SKILL_RIGHTCRON),
         ("rightmcp", &SKILL_RIGHTMCP),
         ("rightmemory", rightmemory_dir),
+        ("rightreflect", &SKILL_RIGHTREFLECT),
     ];
     let claude_skills_dir = agent_path.join(".claude").join("skills");
 
@@ -273,6 +275,7 @@ mod tests {
             ("rightcron", "rightcron"),
             ("rightmcp", "rightmcp"),
             ("rightmemory-file", "rightmemory"),
+            ("rightreflect", "rightreflect"),
         ];
         for (source_name, installed_name) in skills {
             let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -327,6 +330,34 @@ mod tests {
         assert!(
             !content.contains("Edit and Write tools to manage MEMORY.md"),
             "hindsight variant must NOT reference Edit/Write for MEMORY.md"
+        );
+    }
+
+    #[test]
+    fn installs_rightreflect_skill() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        assert!(
+            dir.path()
+                .join(".claude/skills/rightreflect/SKILL.md")
+                .exists(),
+            "rightreflect/SKILL.md should exist"
+        );
+    }
+
+    #[test]
+    fn rightreflect_skill_frontmatter_is_valid() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        let content = std::fs::read_to_string(
+            dir.path().join(".claude/skills/rightreflect/SKILL.md"),
+        )
+        .unwrap();
+        assert!(content.starts_with("---\n"), "frontmatter must start file");
+        assert!(content.contains("name: rightreflect"), "must declare name");
+        assert!(
+            content.contains("/sandbox/.claude/projects/-sandbox/"),
+            "must reference the JSONL path"
         );
     }
 }
