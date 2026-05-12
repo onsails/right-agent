@@ -23,12 +23,6 @@ pub(crate) fn snapshot_model(cell: &arc_swap::ArcSwap<Option<String>>) -> Option
     (**cell.load()).clone()
 }
 
-/// Read the current debug-flag value with relaxed ordering. Same purpose as
-/// `snapshot_model` for the debug AtomicBool.
-pub(crate) fn snapshot_debug(cell: &std::sync::atomic::AtomicBool) -> bool {
-    cell.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Load `allowlist.yaml` for this agent, migrating from the legacy
 /// `agent.yaml::allowed_chat_ids` field on first boot. Returns a shareable
 /// `AllowlistHandle` ready for the routing filter and command handlers.
