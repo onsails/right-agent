@@ -12,9 +12,18 @@ an NDJSON log inside the sandbox at `/sandbox/crons/logs/{job_name}-{run_id}.ndj
 (agents can read these directly via `Read`). Per-job retention keeps the last 10 logs.
 Worker sessions do not write stream logs.
 
-When `show_thinking: true` (default), a live thinking message in Telegram shows
-the last 5 events (tool calls, text) with turn counter and cost. Updated every 2s
-via `editMessageText`. Stays in chat after completion.
+Thinking messages in Telegram are per-run UI anchors with Stop and Background
+buttons. In direct chats, `show_thinking: true` starts expanded and shows the
+last 5 displayable stream events (tool calls, thinking, text) with turn counter
+and cost; `show_thinking: false` starts collapsed as `Working...`. Users can
+toggle the active run with `Show thinking` / `Hide thinking` without changing
+`agent.yaml`.
+
+Group chats always start collapsed as `Working...` to keep shared rooms quiet.
+They include `Show thinking`; after expansion the run shows the same live event
+preview, but no `Hide thinking` button is shown in groups. Live expanded
+messages refresh every 2s via `editMessageText`. Collapsed messages stay static
+until completion, stop, timeout, reflection, or background handoff.
 
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Cron jobs disable `Agent` tool to prevent budget waste on
