@@ -209,6 +209,12 @@ pub struct AgentConfig {
     /// Claude model to use (e.g. "sonnet", "opus", "haiku")
     pub model: Option<String>,
 
+    /// When `Some`, controls whether `claude -p` runs with --debug --debug-file=...
+    /// Hot-reloadable via `/debug` Telegram command. `None` falls back to the
+    /// `right bot --debug` CLI flag at boot time.
+    #[serde(default)]
+    pub debug: Option<bool>,
+
     /// Per-agent sandbox configuration from `sandbox:` section.
     #[serde(default)]
     pub sandbox: Option<SandboxConfig>,
@@ -262,6 +268,7 @@ impl Default for AgentConfig {
             backoff_seconds: default_backoff_seconds(),
             network_policy: NetworkPolicy::default(),
             model: None,
+            debug: None,
             sandbox: None,
             telegram_token: None,
             allowed_chat_ids: Vec::new(),
@@ -380,5 +387,31 @@ impl AgentDef {
             .as_ref()
             .map(|c| c.sandbox_mode())
             .unwrap_or(&SandboxMode::Openshell)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_config_debug_field_defaults_to_none() {
+        let yaml = "{}";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.debug, None);
+    }
+
+    #[test]
+    fn agent_config_debug_true_parses() {
+        let yaml = "debug: true";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.debug, Some(true));
+    }
+
+    #[test]
+    fn agent_config_debug_false_parses() {
+        let yaml = "debug: false";
+        let config: AgentConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.debug, Some(false));
     }
 }
