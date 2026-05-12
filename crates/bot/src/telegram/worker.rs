@@ -108,8 +108,9 @@ pub struct WorkerContext {
     pub bot: super::BotType,
     /// Agent directory, passed separately so worker opens its own DB connection.
     pub agent_db_dir: PathBuf,
-    /// When true, pass --verbose to CC subprocess and log CC stderr at debug level.
-    pub debug: bool,
+    /// Hot-reloadable debug flag. When true, CC subprocesses run with --debug --debug-file=...
+    /// Shared with AgentSettings so /debug Telegram command takes effect immediately.
+    pub debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Path to the SSH config file for this agent's OpenShell sandbox (None when --no-sandbox).
     pub ssh_config_path: Option<PathBuf>,
     /// Guard: true when an auth watcher task is active for this agent. Prevents duplicates.
@@ -1095,6 +1096,7 @@ pub fn spawn_worker(
                             thread_id: eff_thread_id,
                         },
                         model: crate::snapshot_model(&ctx.model),
+                        debug: Some(std::sync::Arc::clone(&ctx.debug)),
                     };
 
                     match crate::reflection::reflect_on_failure(refl_ctx).await {
@@ -1607,6 +1609,7 @@ async fn invoke_cc(
         disallowed_tools,
         extra_args: vec![],
         prompt: None, // stdin-piped
+        debug_flag: Some(std::sync::Arc::clone(&ctx.debug)),
     };
 
     // Session management (resume vs new).

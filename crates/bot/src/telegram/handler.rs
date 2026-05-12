@@ -362,7 +362,7 @@ pub async fn handle_message(
                     agent_name,
                     bot: bot.clone(),
                     agent_db_dir: agent_dir.0.clone(),
-                    debug: crate::snapshot_debug(&settings.debug),
+                    debug: Arc::clone(&settings.debug),
                     ssh_config_path: ssh_config.0.clone(),
                     resolved_sandbox: settings.resolved_sandbox.clone(),
                     auth_watcher_active: Arc::clone(&intercept_slots.auth_watcher),
@@ -1501,6 +1501,7 @@ async fn detect_auth_type_via_haiku(
         disallowed_tools: vec![],
         extra_args: vec![],
         prompt: Some(prompt),
+        debug_flag: None, // Haiku auth-detection is a one-off; debug mode doesn't apply.
     };
     let claude_args = invocation.into_args();
 

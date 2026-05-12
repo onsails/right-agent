@@ -64,12 +64,53 @@ pub(crate) struct ClaudeInvocation {
     pub(crate) disallowed_tools: Vec<String>,
     pub(crate) extra_args: Vec<String>,
     pub(crate) prompt: Option<String>,
+    /// Hot-reloadable debug toggle. None = off (treated as false).
+    /// When true at `into_args()` time, appends `--debug --debug-file=<path>`.
+    pub(crate) debug_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ClaudeInvocation {
+    /// Returns the session UUID CC will write its JSONL under, matching
+    /// the args `into_args` will emit. Used to compute --debug-file path.
+    ///
+    /// - `--fork-session` + `new_session_id` → CC creates a new file by `new_session_id`.
+    /// - `--resume <id>` (no fork) → CC continues writing to `<id>.jsonl`.
+    /// - `--session-id <id>` (no resume) → CC writes to `<id>.jsonl`.
+    /// - Neither set → CC generates its own UUID; we cannot know in advance.
+    pub(crate) fn effective_session_id(&self) -> Option<&str> {
+        if self.fork_session && let Some(id) = &self.new_session_id {
+            return Some(id.as_str());
+        }
+        if let Some(id) = &self.resume_session_id {
+            return Some(id.as_str());
+        }
+        self.new_session_id.as_deref()
+    }
+
     /// Consume self and produce the full argument list for spawning `claude`.
     pub(crate) fn into_args(self) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
+
+        // Pre-compute debug state before session fields are moved below.
+        // `debug_on`: whether to emit --debug at all.
+        // `debug_file_arg`: the --debug-file=<path> value, if we know the session UUID.
+        // Priority matches `effective_session_id`: fork wins, then resume, then new.
+        let debug_on = self
+            .debug_flag
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed));
+        let debug_file_arg: Option<String> = if debug_on {
+            let sid: Option<&str> = if self.fork_session {
+                self.new_session_id.as_deref()
+            } else if self.resume_session_id.is_some() {
+                self.resume_session_id.as_deref()
+            } else {
+                self.new_session_id.as_deref()
+            };
+            sid.map(|s| format!("--debug-file=/sandbox/.claude/logs/{s}.log"))
+        } else {
+            None
+        };
 
         // 1. Base command
         args.extend(["claude", "-p", "--dangerously-skip-permissions"].map(Into::into));
@@ -127,6 +168,15 @@ impl ClaudeInvocation {
 
         // 8. Extra args
         args.extend(self.extra_args);
+
+        // 8.5: Debug flag (hot-reloadable, read at build time).
+        // `debug_on` / `debug_file_arg` were computed at the top before session fields moved.
+        if debug_on {
+            args.push("--debug".into());
+            if let Some(file_arg) = debug_file_arg {
+                args.push(file_arg);
+            }
+        }
 
         // 9. Output format (--verbose only for stream-json)
         match self.output_format {
@@ -232,6 +282,7 @@ mod tests {
             disallowed_tools: vec![],
             extra_args: vec![],
             prompt: Some("hello".into()),
+            debug_flag: None,
         }
     }
 
@@ -423,5 +474,93 @@ mod tests {
         let args = inv.into_args();
         assert!(!args.contains(&"--fork-session".to_string()));
         assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    #[test]
+    fn debug_flag_true_appends_debug_and_debug_file() {
+        let mut inv = minimal();
+        inv.new_session_id = Some("abc-123".into());
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        inv.debug_flag = Some(std::sync::Arc::clone(&flag));
+        let args = inv.into_args();
+        assert!(args.contains(&"--debug".to_string()), "expected --debug:\n{args:?}");
+        assert!(
+            args.iter().any(|a| a == "--debug-file=/sandbox/.claude/logs/abc-123.log"),
+            "expected --debug-file=/sandbox/.claude/logs/abc-123.log:\n{args:?}"
+        );
+    }
+
+    #[test]
+    fn debug_flag_false_omits_debug_and_debug_file() {
+        let mut inv = minimal();
+        inv.new_session_id = Some("abc-123".into());
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        inv.debug_flag = Some(std::sync::Arc::clone(&flag));
+        let args = inv.into_args();
+        assert!(!args.contains(&"--debug".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("--debug-file=")));
+    }
+
+    #[test]
+    fn debug_flag_absent_omits_debug() {
+        // No debug_flag set at all (None) — should behave like false.
+        let mut inv = minimal();
+        inv.new_session_id = Some("abc-123".into());
+        let args = inv.into_args();
+        assert!(!args.contains(&"--debug".to_string()));
+    }
+
+    #[test]
+    fn debug_flag_uses_resume_session_id_when_no_fork() {
+        let mut inv = minimal();
+        inv.resume_session_id = Some("resume-uuid".into());
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        inv.debug_flag = Some(std::sync::Arc::clone(&flag));
+        let args = inv.into_args();
+        assert!(
+            args.iter().any(|a| a == "--debug-file=/sandbox/.claude/logs/resume-uuid.log"),
+            "with --resume (no fork), debug-file should use resume-uuid:\n{args:?}"
+        );
+    }
+
+    #[test]
+    fn debug_flag_uses_new_session_id_when_forking() {
+        let mut inv = minimal();
+        inv.resume_session_id = Some("old-uuid".into());
+        inv.new_session_id = Some("new-uuid".into());
+        inv.fork_session = true;
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        inv.debug_flag = Some(std::sync::Arc::clone(&flag));
+        let args = inv.into_args();
+        assert!(
+            args.iter().any(|a| a == "--debug-file=/sandbox/.claude/logs/new-uuid.log"),
+            "with --fork-session, debug-file should use new session id (CC writes JSONL by new id):\n{args:?}"
+        );
+    }
+
+    #[test]
+    fn debug_flag_runtime_toggle_picked_up_at_build_time() {
+        let mut inv = minimal();
+        inv.new_session_id = Some("abc-123".into());
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        inv.debug_flag = Some(std::sync::Arc::clone(&flag));
+        // Flip after construction.
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        let args = inv.into_args();
+        assert!(args.contains(&"--debug".to_string()), "build-time read must observe the flip");
+    }
+
+    #[test]
+    fn debug_flag_no_session_id_omits_debug_file_but_still_emits_debug() {
+        let mut inv = minimal();
+        // Neither resume nor new session id set.
+        inv.resume_session_id = None;
+        inv.new_session_id = None;
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        inv.debug_flag = Some(std::sync::Arc::clone(&flag));
+        let args = inv.into_args();
+        assert!(args.contains(&"--debug".to_string()));
+        // No --debug-file because we have no session UUID to put in the path.
+        assert!(!args.iter().any(|a| a.starts_with("--debug-file=")));
     }
 }
