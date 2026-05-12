@@ -112,6 +112,18 @@ fn working_keyboard(
     teloxide::types::InlineKeyboardMarkup::new(vec![row])
 }
 
+fn thinking_anchor_text(
+    expanded: bool,
+    events: &VecDeque<crate::cc::stream::StreamEvent>,
+    usage: &crate::cc::stream::StreamUsage,
+) -> String {
+    if expanded {
+        crate::cc::stream::format_thinking_message(events, usage)
+    } else {
+        "\u{23f3} Working...".to_string()
+    }
+}
+
 /// A single Telegram message queued into the debounce channel.
 #[derive(Clone)]
 pub struct DebounceMsg {
@@ -171,6 +183,8 @@ pub struct WorkerContext {
     /// Per-(chat, thread) flag set by the bg callback. Worker checks after kill+wait
     /// to distinguish UserRequested backgrounding from auto-timeout.
     pub bg_requests: super::BgRequests,
+    /// Per-run thinking-preview visibility, mutated by Show/Hide thinking callbacks.
+    pub(crate) thinking_visibility: super::ThinkingVisibility,
     /// Shared idle timestamp — worker updates after each reply sent.
     pub idle_timestamp: Arc<std::sync::atomic::AtomicI64>,
     /// Internal API client for aggregator IPC (Unix socket).
@@ -1927,6 +1941,18 @@ async fn invoke_cc(
     ctx.stop_tokens
         .insert((chat_id, eff_thread_id), (turn_id, stop_token.clone()));
 
+    let visibility_key = (chat_id, eff_thread_id);
+    let fallback_visibility = super::initial_thinking_visibility(ctx.show_thinking, is_group);
+    ctx.thinking_visibility
+        .insert(visibility_key, fallback_visibility);
+    let mut last_rendered_visibility_version = fallback_visibility.version;
+    let read_visibility = || {
+        ctx.thinking_visibility
+            .get(&visibility_key)
+            .map(|entry| *entry.value())
+            .unwrap_or(fallback_visibility)
+    };
+
     // Stream stdout line-by-line: log to file, parse events, update thinking message.
     let stdout = child
         .stdout()
@@ -1963,6 +1989,8 @@ async fn invoke_cc(
     let mut api_key_source: Option<String> = None;
     let mut thinking_msg_id: Option<teloxide::types::MessageId> = None;
     let mut last_edit = tokio::time::Instant::now();
+    let mut ui_tick = tokio::time::interval(Duration::from_millis(500));
+    ui_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut total_assistant_events: u32 = 0;
     let tg_chat_id = ctx.chat_id;
 
@@ -2035,27 +2063,21 @@ async fn invoke_cc(
                         }
 
                         // Thinking message: always send (Stop button anchor).
-                        // show_thinking=true: update with events every 2s.
-                        // show_thinking=false: send static "Working..." once, no updates.
+                        // Expanded previews update on the UI tick; collapsed stays static.
                         if crate::cc::stream::format_event(&event).is_some() {
+                            let visibility = read_visibility();
                             let kb = working_keyboard(
                                 chat_id,
                                 eff_thread_id,
-                                thinking_keyboard_mode(ctx.show_thinking && !is_group, is_group),
+                                thinking_keyboard_mode(visibility.expanded, is_group),
                             );
 
                             if thinking_msg_id.is_none() {
-                                // First displayable event — send thinking message.
-                                // In groups, always fall back to the static "Working..."
-                                // placeholder to avoid noisy live updates.
-                                let text = if ctx.show_thinking && !is_group {
-                                    crate::cc::stream::format_thinking_message(
-                                        ring_buffer.events(),
-                                        &usage,
-                                    )
-                                } else {
-                                    "\u{23f3} Working...".to_string()
-                                };
+                                let text = thinking_anchor_text(
+                                    visibility.expanded,
+                                    ring_buffer.events(),
+                                    &usage,
+                                );
                                 let mut send = ctx.bot.send_message(tg_chat_id, &text)
                                     .parse_mode(teloxide::types::ParseMode::Html)
                                     .reply_markup(kb);
@@ -2066,24 +2088,7 @@ async fn invoke_cc(
                                 }
                                 if let Ok(msg) = send.await {
                                     thinking_msg_id = Some(msg.id);
-                                }
-                                last_edit = tokio::time::Instant::now();
-                            } else if ctx.show_thinking
-                                && !is_group
-                                && last_edit.elapsed() >= Duration::from_secs(2)
-                            {
-                                // Throttled update (show_thinking=true only).
-                                let text = crate::cc::stream::format_thinking_message(
-                                    ring_buffer.events(),
-                                    &usage,
-                                );
-                                if let Some(msg_id) = thinking_msg_id {
-                                    let _ = ctx
-                                        .bot
-                                        .edit_message_text(tg_chat_id, msg_id, &text)
-                                        .parse_mode(teloxide::types::ParseMode::Html)
-                                        .reply_markup(kb)
-                                        .await;
+                                    last_rendered_visibility_version = visibility.version;
                                 }
                                 last_edit = tokio::time::Instant::now();
                             }
@@ -2093,6 +2098,37 @@ async fn invoke_cc(
                     Err(e) => {
                         tracing::warn!(?chat_id, "stream read error: {e:#}");
                         break;
+                    }
+                }
+            }
+            _ = ui_tick.tick(), if thinking_msg_id.is_some() => {
+                let visibility = read_visibility();
+                let should_edit_for_toggle =
+                    visibility.version != last_rendered_visibility_version;
+                let should_edit_for_live_refresh =
+                    visibility.expanded && last_edit.elapsed() >= Duration::from_secs(2);
+
+                if should_edit_for_toggle || should_edit_for_live_refresh {
+                    let text = thinking_anchor_text(
+                        visibility.expanded,
+                        ring_buffer.events(),
+                        &usage,
+                    );
+                    let kb = working_keyboard(
+                        chat_id,
+                        eff_thread_id,
+                        thinking_keyboard_mode(visibility.expanded, is_group),
+                    );
+
+                    if let Some(msg_id) = thinking_msg_id {
+                        let _ = ctx
+                            .bot
+                            .edit_message_text(tg_chat_id, msg_id, &text)
+                            .parse_mode(teloxide::types::ParseMode::Html)
+                            .reply_markup(kb)
+                            .await;
+                        last_rendered_visibility_version = visibility.version;
+                        last_edit = tokio::time::Instant::now();
                     }
                 }
             }
@@ -2163,10 +2199,12 @@ async fn invoke_cc(
         "post-break: child waited",
     );
 
-    // Remove stop token — session no longer cancellable. Done FIRST so any
-    // bg/stop callback that fires after this point sees an empty slot and
-    // bails with "Already finished" instead of inserting into bg_requests.
+    // Remove active controls — session no longer cancellable/toggleable.
+    // Done FIRST so callbacks after this point see an empty slot and bail with
+    // "Already finished" instead of mutating active-run maps.
+    let final_visibility = read_visibility();
     ctx.stop_tokens.remove(&(chat_id, eff_thread_id));
+    ctx.thinking_visibility.remove(&visibility_key);
 
     // User clicked Background — check before treating cancellation as a normal stop.
     // The bg callback inserts a (key -> turn_id) entry and cancels the stop token,
@@ -2267,9 +2305,7 @@ async fn invoke_cc(
             // it here.
         } else if stopped {
             // Stopped by user — show final state, remove keyboard.
-            // In groups we never rendered the thinking view, so reuse the
-            // "Working..." placeholder for consistency with the initial send.
-            let text = if ctx.show_thinking && !is_group {
+            let text = if final_visibility.expanded {
                 let mut msg =
                     crate::cc::stream::format_thinking_message(ring_buffer.events(), &usage);
                 msg.push_str("\n\u{26d4} Stopped");
@@ -2283,7 +2319,7 @@ async fn invoke_cc(
                 .parse_mode(teloxide::types::ParseMode::Html)
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
-        } else if !will_reflect && ctx.show_thinking && !is_group {
+        } else if !will_reflect && final_visibility.expanded {
             // Normal finish with thinking — final cost/turns, remove keyboard.
             let text = crate::cc::stream::format_thinking_message(ring_buffer.events(), &usage);
             let _ = ctx
@@ -2293,7 +2329,7 @@ async fn invoke_cc(
                 .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
                 .await;
         } else if !will_reflect {
-            // Normal finish without thinking (or group chat) — delete the anchor message.
+            // Normal finish without expanded thinking — delete the anchor message.
             let _ = ctx.bot.delete_message(tg_chat_id, msg_id).await;
         }
         // When will_reflect is true, DO NOT touch the thinking message here —
@@ -2785,6 +2821,31 @@ mod tests {
             thinking_keyboard_mode(true, true),
             ThinkingKeyboardMode::ExpandedGroup
         );
+    }
+
+    #[test]
+    fn thinking_anchor_text_collapsed_is_static_working_message() {
+        let events = VecDeque::new();
+        let usage = crate::cc::stream::StreamUsage::default();
+
+        assert_eq!(
+            thinking_anchor_text(false, &events, &usage),
+            "\u{23f3} Working..."
+        );
+    }
+
+    #[test]
+    fn thinking_anchor_text_expanded_uses_stream_formatter() {
+        let mut events = VecDeque::new();
+        events.push_back(crate::cc::stream::StreamEvent::Thinking);
+        let usage = crate::cc::stream::StreamUsage {
+            num_turns: 1,
+            cost_usd: 0.0,
+        };
+
+        let text = thinking_anchor_text(true, &events, &usage);
+        assert!(text.contains("thinking..."));
+        assert!(text.contains("Turn 1"));
     }
 
     #[test]
