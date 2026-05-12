@@ -25,7 +25,11 @@ pub(crate) enum ChangeKind {
     NoChange,
     /// Only `model` and/or `debug` changed — apply in-memory and continue running.
     HotReloadable {
+        /// `Some(v)` = yaml field present with value `v`. `None` = field absent;
+        /// watcher stores `None` into the ArcSwap, meaning "use default model".
         new_model: Option<String>,
+        /// `Some(v)` = yaml field present with value `v`. `None` = field absent;
+        /// watcher reverts the AtomicBool to its boot-time value (the CLI --debug flag).
         new_debug: Option<bool>,
     },
     /// Anything else — graceful restart.
@@ -77,12 +81,16 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
 /// On change:
 /// - `HotReloadable` → store new model into `model_swap`, log info, do not cancel.
 /// - `RestartRequired` → set `config_changed`, cancel `token` (existing path).
+///
+/// `initial_debug` is the value of the `--debug` CLI flag at process start.
+/// When `debug:` is removed from `agent.yaml`, the watcher reverts to this value.
 pub(crate) fn spawn_config_watcher(
     agent_yaml: &Path,
     token: CancellationToken,
     config_changed: Arc<AtomicBool>,
     model_swap: Arc<ArcSwap<Option<String>>>,
     debug_flag: Arc<AtomicBool>,
+    initial_debug: bool,
 ) -> miette::Result<()> {
     use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
     use std::sync::mpsc;
@@ -150,11 +158,9 @@ pub(crate) fn spawn_config_watcher(
                                 "agent.yaml: model/debug-only change — hot-reloading"
                             );
                             model_swap.store(Arc::new(new_model));
-                            // None means "field absent" — preserve current AtomicBool value.
-                            // Some(v) means "set to v".
-                            if let Some(v) = new_debug {
-                                debug_flag.store(v, Ordering::Release);
-                            }
+                            // yaml `debug:` present → use that value; absent → revert to boot-time CLI flag.
+                            let debug_value = new_debug.unwrap_or(initial_debug);
+                            debug_flag.store(debug_value, Ordering::Release);
                             last_yaml = new_yaml;
                         }
                         ChangeKind::RestartRequired => {
@@ -312,5 +318,19 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\ndebug: false\n";
         let new = "restart: always\nmax_restarts: 5\ndebug: true\n";
         assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
+    }
+
+    // diff_classify itself returns None on removal — the watcher handles the fallback to initial_debug.
+    // The diff-level test below documents this contract.
+    #[test]
+    fn diff_debug_removed_returns_none_for_watcher_to_handle() {
+        let old = "restart: never\ndebug: true\n";
+        let new = "restart: never\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_debug, .. } => {
+                assert!(new_debug.is_none(), "removal yields None — watcher uses initial_debug fallback");
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
     }
 }
