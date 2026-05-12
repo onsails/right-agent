@@ -8,6 +8,21 @@ pub(crate) enum MemoryMode {
     Hindsight { composite_memory_path: String },
 }
 
+/// Which composite prompt body to assemble.
+///
+/// `Bootstrap` swaps Operating Instructions for Bootstrap Instructions
+/// and skips identity files (they're being created this turn).
+/// `Cron` keeps Operating Instructions and adds the Cron Delivery
+/// Contract; identity files are still emitted. `Normal` is the
+/// everyday worker/delivery/reflection path.
+pub(crate) enum PromptMode {
+    Normal,
+    Bootstrap,
+    /// Constructed in Task 3 (cron callsites flip from Normal to Cron).
+    #[allow(dead_code)]
+    Cron,
+}
+
 /// Shell-escape a string for safe inclusion in an SSH remote command.
 pub(crate) fn shell_escape(s: &str) -> String {
     shlex::try_quote(s)
@@ -53,7 +68,7 @@ const PROMPT_SECTIONS: &[PromptSection] = &[
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_prompt_assembly_script(
     base_prompt: &str,
-    bootstrap_mode: bool,
+    mode: PromptMode,
     root_path: &str,
     prompt_file: &str,
     workdir: &str,
@@ -65,7 +80,7 @@ pub(crate) fn build_prompt_assembly_script(
     let escaped_args: Vec<String> = claude_args.iter().map(|a| shell_escape(a)).collect();
     let claude_cmd = escaped_args.join(" ");
 
-    let file_sections = if bootstrap_mode {
+    let file_sections = if matches!(mode, PromptMode::Bootstrap) {
         let escaped_bootstrap = right_codegen::BOOTSTRAP_INSTRUCTIONS.replace('\'', "'\\''");
         format!("\nprintf '\\n## Bootstrap Instructions\\n'\nprintf '%s\\n' '{escaped_bootstrap}'")
     } else {
@@ -95,7 +110,7 @@ fi"#
         None => String::new(),
     };
 
-    let memory_section = if bootstrap_mode {
+    let memory_section = if matches!(mode, PromptMode::Bootstrap) {
         String::new()
     } else {
         match memory_mode {
@@ -252,10 +267,10 @@ mod tests {
     use super::*;
 
     /// Helper: build a script with sandbox-like paths for testing.
-    fn test_script(base: &str, bootstrap: bool, args: &[String], mcp: Option<&str>) -> String {
+    fn test_script(base: &str, mode: PromptMode, args: &[String], mcp: Option<&str>) -> String {
         build_prompt_assembly_script(
             base,
-            bootstrap,
+            mode,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -267,7 +282,7 @@ mod tests {
 
     #[test]
     fn script_bootstrap_includes_bootstrap_md() {
-        let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
+        let script = test_script("Base prompt", PromptMode::Bootstrap, &["claude".into(), "-p".into()], None);
         assert!(
             script.contains("Bootstrap Instructions"),
             "must have Bootstrap Instructions header"
@@ -293,7 +308,7 @@ mod tests {
 
     #[test]
     fn script_normal_includes_all_identity_files() {
-        let script = test_script("Base prompt", false, &["claude".into(), "-p".into()], None);
+        let script = test_script("Base prompt", PromptMode::Normal, &["claude".into(), "-p".into()], None);
         assert!(script.contains("IDENTITY.md"));
         assert!(script.contains("SOUL.md"));
         assert!(script.contains("USER.md"));
@@ -310,7 +325,7 @@ mod tests {
 
     #[test]
     fn script_escapes_single_quotes_in_base() {
-        let script = test_script("It's a test", true, &["claude".into()], None);
+        let script = test_script("It's a test", PromptMode::Bootstrap, &["claude".into()], None);
         // Single quote must be escaped for shell: ' → '\''
         assert!(!script.contains("It's"), "raw single quote must be escaped");
         assert!(script.contains("It"), "content must still be present");
@@ -320,7 +335,7 @@ mod tests {
     fn script_shell_escapes_claude_args() {
         let script = test_script(
             "Base",
-            false,
+            PromptMode::Normal,
             &[
                 "claude".into(),
                 "-p".into(),
@@ -336,7 +351,7 @@ mod tests {
 
     #[test]
     fn script_writes_to_prompt_file_and_uses_system_prompt_file() {
-        let script = test_script("X", false, &["claude".into()], None);
+        let script = test_script("X", PromptMode::Normal, &["claude".into()], None);
         assert!(script.contains("/tmp/right-system-prompt.md"));
         assert!(script.contains("--system-prompt-file /tmp/right-system-prompt.md"));
     }
@@ -345,7 +360,7 @@ mod tests {
     fn script_custom_paths() {
         let script = build_prompt_assembly_script(
             "Base\n",
-            false,
+            PromptMode::Normal,
             "/home/agent",
             "/home/agent/.claude/composite-system-prompt.md",
             "/home/agent",
@@ -371,7 +386,7 @@ mod tests {
     fn script_bootstrap_mode_same_regardless_of_paths() {
         let script = build_prompt_assembly_script(
             "Base\n",
-            true,
+            PromptMode::Bootstrap,
             "/home/agent",
             "/home/agent/.claude/composite-system-prompt.md",
             "/home/agent",
@@ -395,7 +410,7 @@ mod tests {
     fn script_includes_mcp_instructions() {
         let script = test_script(
             "Base",
-            false,
+            PromptMode::Normal,
             &["claude".into()],
             Some("# MCP Server Instructions\n\n## composio\n\nConnect with 250+ apps.\n"),
         );
@@ -407,7 +422,7 @@ mod tests {
 
     #[test]
     fn script_none_mcp_instructions_omitted() {
-        let script = test_script("Base", false, &["claude".into()], None);
+        let script = test_script("Base", PromptMode::Normal, &["claude".into()], None);
         assert!(!script.contains("MCP Server Instructions"));
     }
 
@@ -415,7 +430,7 @@ mod tests {
     fn script_mcp_instructions_with_custom_paths() {
         let script = build_prompt_assembly_script(
             "Base\n",
-            false,
+            PromptMode::Normal,
             "/home/agent",
             "/home/agent/.claude/composite-system-prompt.md",
             "/home/agent",
@@ -430,7 +445,7 @@ mod tests {
 
     #[test]
     fn script_bootstrap_uses_compiled_constant() {
-        let script = test_script("Base prompt", true, &["claude".into(), "-p".into()], None);
+        let script = test_script("Base prompt", PromptMode::Bootstrap, &["claude".into(), "-p".into()], None);
         // Bootstrap uses compiled-in constant, NOT cat of file
         assert!(
             !script.contains("cat /sandbox"),
@@ -448,7 +463,7 @@ mod tests {
 
     #[test]
     fn script_normal_has_operating_instructions_before_identity() {
-        let script = test_script("Base prompt", false, &["claude".into()], None);
+        let script = test_script("Base prompt", PromptMode::Normal, &["claude".into()], None);
         let op_instr_pos = script
             .find("Operating Instructions")
             .expect("must have Operating Instructions");
@@ -463,7 +478,7 @@ mod tests {
     fn script_includes_memory_section_for_file_mode() {
         let script = build_prompt_assembly_script(
             "Base",
-            false,
+            PromptMode::Normal,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -489,7 +504,7 @@ mod tests {
         };
         let script = build_prompt_assembly_script(
             "Base",
-            false,
+            PromptMode::Normal,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -508,7 +523,7 @@ mod tests {
     fn script_no_memory_section_when_none() {
         let script = build_prompt_assembly_script(
             "Base",
-            false,
+            PromptMode::Normal,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -524,7 +539,7 @@ mod tests {
     fn script_memory_section_is_last() {
         let script = build_prompt_assembly_script(
             "Base",
-            false,
+            PromptMode::Normal,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -544,7 +559,7 @@ mod tests {
     fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
         let script = build_prompt_assembly_script(
             "Base",
-            false,
+            PromptMode::Normal,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -589,7 +604,7 @@ mod tests {
         let root = dir.path().to_str().unwrap();
         let script = build_prompt_assembly_script(
             "Base",
-            false,
+            PromptMode::Normal,
             root,
             "/tmp/right-test-system-prompt.md",
             root,
@@ -643,7 +658,7 @@ mod tests {
     fn script_bootstrap_no_memory() {
         let script = build_prompt_assembly_script(
             "Base",
-            true,
+            PromptMode::Bootstrap,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -706,7 +721,7 @@ mod tests {
         // appended section of the prompt-assembly script to preserve cache.
         let script = build_prompt_assembly_script(
             "Base",
-            false,
+            PromptMode::Normal,
             "/sandbox",
             "/tmp/prompt.md",
             "/sandbox",

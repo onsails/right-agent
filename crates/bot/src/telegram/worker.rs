@@ -1571,6 +1571,11 @@ async fn invoke_cc(
     if bootstrap_mode {
         tracing::info!(?chat_id, "bootstrap mode: BOOTSTRAP.md present");
     }
+    let prompt_mode = if bootstrap_mode {
+        crate::cc::prompt::PromptMode::Bootstrap
+    } else {
+        crate::cc::prompt::PromptMode::Normal
+    };
 
     // Block harness built-ins that conflict with MCP equivalents or that
     // don't belong in a headless Telegram-driven agent (see invocation.rs).
@@ -1786,7 +1791,7 @@ async fn invoke_cc(
             right_core::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            bootstrap_mode,
+            prompt_mode,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -1826,7 +1831,7 @@ async fn invoke_cc(
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            bootstrap_mode,
+            prompt_mode,
             &agent_dir_str,
             &prompt_path_str,
             &agent_dir_str,
