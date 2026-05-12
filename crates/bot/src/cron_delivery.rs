@@ -540,7 +540,7 @@ async fn deliver_through_session(
     let mut cmd = if let Some(ssh_config) = ssh_config_path {
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            false,
+            crate::cc::prompt::PromptMode::Normal,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -566,7 +566,7 @@ async fn deliver_through_session(
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            false,
+            crate::cc::prompt::PromptMode::Normal,
             &agent_dir_str,
             &prompt_path_str,
             &agent_dir_str,

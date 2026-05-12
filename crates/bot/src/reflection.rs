@@ -244,7 +244,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            false, // not bootstrap mode
+            crate::cc::prompt::PromptMode::Normal,
             "/sandbox",
             &prompt_path,
             "/sandbox",
@@ -272,7 +272,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            false,
+            crate::cc::prompt::PromptMode::Normal,
             &agent_dir_str,
             &prompt_path_str,
             &agent_dir_str,
