@@ -18,6 +18,7 @@ use right_core::test_support::TestSandbox;
 /// the debug file before bailing.
 #[tokio::test]
 async fn cc_debug_file_lands_inside_sandbox() {
+    let _slot = right_core::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rightreflect-debugfile").await;
 
     let session_id = "rightreflect-test-00000000-0000-0000-0000-000000000001";
@@ -86,6 +87,7 @@ async fn cc_debug_file_lands_inside_sandbox() {
 /// this test seeds a synthetic file rather than relying on CC to create one.
 #[tokio::test]
 async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
+    let _slot = right_core::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rightreflect-jsonl").await;
 
     let session_id = "rightreflect-test-00000000-0000-0000-0000-000000000002";
@@ -140,6 +142,7 @@ async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
 /// This test is filesystem-only: no claude binary needed.
 #[tokio::test]
 async fn skill_can_grep_jsonl() {
+    let _slot = right_core::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rightreflect-grep").await;
 
     let (_, exit) = sandbox
