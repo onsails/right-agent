@@ -34,12 +34,13 @@ producing the composite prompt in microseconds. Files are always fresh (no sync 
 
 All three CC invocation paths use `build_prompt_assembly_script()`:
 
-| Caller | Module | bootstrap_mode | Schema | Model |
-|--------|--------|---------------|--------|-------|
-| Worker (Telegram messages) | `telegram/worker.rs` | true/false | reply-schema.json | agent config |
-| Cron (scheduled jobs) | `cron.rs` | false | CRON_SCHEMA_JSON | agent config |
-| Cron (background continuation) | `cron.rs` (`ScheduleKind::BackgroundContinuation`) | false | BG_CONTINUATION_SCHEMA_JSON | agent config |
-| Delivery (cron result relay) | `cron_delivery.rs` | false | reply-schema.json | claude-haiku-4-5-20251001 |
+| Caller | Module | mode | Schema | Model |
+|--------|--------|------|--------|-------|
+| Worker (Telegram messages) | `telegram/worker.rs` | `Normal` or `Bootstrap` | reply-schema.json / bootstrap-schema.json | agent config |
+| Cron (scheduled jobs) | `cron.rs` | `Cron` | CRON_SCHEMA_JSON | agent config |
+| Cron (background continuation) | `cron.rs` (`ScheduleKind::BackgroundContinuation`) | `Cron` | BG_CONTINUATION_SCHEMA_JSON | agent config |
+| Delivery (cron result relay) | `cron_delivery.rs` | `Normal` | reply-schema.json | claude-haiku-4-5-20251001 |
+| Reflection (post-failure summary) | `reflection.rs` | `Normal` | reply-schema.json | agent config |
 
 `cron::execute_job` selects between `CRON_SCHEMA_JSON` and
 `BG_CONTINUATION_SCHEMA_JSON` via `select_schema_and_fork` (in
@@ -126,10 +127,49 @@ prompt cache for all preceding blocks.
 {compiled-in from templates/right/agent/BOOTSTRAP.md}
 ```
 
+### Cron mode
+
+```
+[Base: Right Agent agent description, sandbox info, MCP reference]
+
+## Operating Instructions
+{compiled-in from templates/right/prompt/OPERATING_INSTRUCTIONS.md}
+
+## Cron Delivery Contract
+{compiled-in from templates/right/prompt/CRON_INSTRUCTIONS.md}
+
+## Your Identity
+{IDENTITY.md}
+
+## Your Personality and Values
+{SOUL.md}
+
+## Your User
+{USER.md}
+
+## Environment and Tools
+{TOOLS.md}
+
+## MCP Server Instructions  (if any external MCP servers have instructions)
+{fetched from aggregator via POST /mcp-instructions}
+```
+
+Cron mode is selected by `cron::execute_job` for both regular cron
+runs (`CRON_SCHEMA_JSON`) and background-continuation runs
+(`BG_CONTINUATION_SCHEMA_JSON`). The memory section is intentionally
+omitted — cron jobs are static instructions, not user queries; agents
+that need memory call `memory_recall` explicitly from the cron prompt.
+
+The `## Cron Delivery Contract` block tells the agent that its
+structured output is the Telegram delivery channel and that the turn
+has no live user. See [issue #48](https://github.com/onsails/right-agent/issues/48)
+for the production incidents that motivated this section.
+
 ### Compiled-in Content
 
-Operating instructions and bootstrap content are compiled into the binary via
-`include_str!()` from `templates/right/prompt/` and `templates/right/agent/`.
+Operating instructions, cron-delivery contract, and bootstrap content
+are compiled into the binary via `include_str!()` from
+`templates/right/prompt/` and `templates/right/agent/`.
 Changes to these files take effect on `cargo build` + restart — no file sync needed.
 This eliminates the stale-template problem where changes to platform instructions
 required manual re-init of existing agents.
