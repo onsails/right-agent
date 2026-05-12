@@ -479,7 +479,7 @@ async fn execute_job(
         // Sandbox mode: assemble system prompt via shell script (same as worker).
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
+            crate::cc::prompt::PromptMode::Cron,
             "/sandbox",
             "/tmp/right-system-prompt.md",
             "/sandbox",
@@ -515,7 +515,7 @@ async fn execute_job(
         let prompt_path_str = prompt_path.to_string_lossy();
         let assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
-            crate::cc::prompt::PromptMode::Normal,
+            crate::cc::prompt::PromptMode::Cron,
             &agent_dir_str,
             &prompt_path_str,
             &agent_dir_str,
