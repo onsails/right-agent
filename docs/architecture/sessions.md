@@ -101,3 +101,18 @@ summary of the failure instead of the raw ring-buffer dump.
   it. A one-time startup migration `cron::migrate_legacy_bg_continuation`
   rewrites pre-existing rows that used the deprecated `@immediate` +
   `X-FORK-FROM:` convention into the new encoding.
+
+## Self-introspection
+
+Every CC invocation writes its full conversation graph to
+`/sandbox/.claude/projects/-sandbox/<session-uuid>.jsonl` inside the
+sandbox. The session UUID matches the `--session-id` we pass to
+`claude`, so the bot's session UUIDs (from the `sessions` table) and
+`cron_runs.id` map directly to JSONL filenames.
+
+The `/rightreflect` bundled skill teaches the agent to read these
+files when the user asks "why did you ...?". When `/debug` is on,
+ClaudeInvocation also writes per-session API-layer detail to
+`/sandbox/.claude/logs/<session-uuid>.log` — same UUID, parallel
+sandbox path. The skill consults that file as a fallback when the
+JSONL alone doesn't explain a past behavior.
