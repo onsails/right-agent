@@ -23,19 +23,20 @@ pub(crate) enum ChangeKind {
     /// File contents bytewise unchanged — fs noise (mtime touch, atomic
     /// rename, etc.). Skip silently.
     NoChange,
-    /// Only `model` changed — apply in-memory and continue running.
-    HotReloadable { new_model: Option<String> },
+    /// Only `model` and/or `debug` changed — apply in-memory and continue running.
+    HotReloadable {
+        new_model: Option<String>,
+        new_debug: Option<bool>,
+    },
     /// Anything else — graceful restart.
     RestartRequired,
 }
 
 /// Decide whether a change can be hot-reloaded or requires a restart.
 ///
-/// Compares old + new yaml as parsed `AgentConfig` values with `model`
-/// nulled out on both sides. If the rest is equal, hot-reload; else
-/// restart. Parse failure on either side fails-safe to restart.
-/// `AgentConfig` derives `PartialEq` field-by-field, so HashMap-typed
-/// fields like `env` compare order-insensitively.
+/// Compares old + new yaml as parsed `AgentConfig` values with `model` and
+/// `debug` nulled out on both sides. If the rest is equal, hot-reload;
+/// else restart. Parse failure on either side fails-safe to restart.
 pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
     if old_yaml == new_yaml {
         return ChangeKind::NoChange;
@@ -61,9 +62,11 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
         }
     };
     let new_model = new.model.take();
+    let new_debug = new.debug.take();
     old.model = None;
+    old.debug = None;
     if old == new {
-        ChangeKind::HotReloadable { new_model }
+        ChangeKind::HotReloadable { new_model, new_debug }
     } else {
         ChangeKind::RestartRequired
     }
@@ -79,6 +82,7 @@ pub(crate) fn spawn_config_watcher(
     token: CancellationToken,
     config_changed: Arc<AtomicBool>,
     model_swap: Arc<ArcSwap<Option<String>>>,
+    debug_flag: Arc<AtomicBool>,
 ) -> miette::Result<()> {
     use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
     use std::sync::mpsc;
@@ -139,14 +143,18 @@ pub(crate) fn spawn_config_watcher(
                         ChangeKind::NoChange => {
                             last_yaml = new_yaml;
                         }
-                        ChangeKind::HotReloadable { new_model } => {
+                        ChangeKind::HotReloadable { new_model, new_debug } => {
                             tracing::info!(
                                 model = ?new_model.as_deref().unwrap_or("default"),
-                                "agent.yaml: model-only change — hot-reloading"
+                                debug = ?new_debug,
+                                "agent.yaml: model/debug-only change — hot-reloading"
                             );
-                            // Two writers exist (this watcher + /model callback); both derive
-                            // the value from disk, so last-write-wins converges race-free.
                             model_swap.store(Arc::new(new_model));
+                            // None means "field absent" — preserve current AtomicBool value.
+                            // Some(v) means "set to v".
+                            if let Some(v) = new_debug {
+                                debug_flag.store(v, Ordering::Release);
+                            }
                             last_yaml = new_yaml;
                         }
                         ChangeKind::RestartRequired => {
@@ -182,7 +190,7 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
         let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model } => {
+            ChangeKind::HotReloadable { new_model, new_debug: _ } => {
                 assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
             }
             other => panic!("expected HotReloadable, got {other:?}"),
@@ -194,7 +202,7 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\n";
         let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model } => {
+            ChangeKind::HotReloadable { new_model, new_debug: _ } => {
                 assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
             }
             other => panic!("expected HotReloadable, got {other:?}"),
@@ -206,7 +214,7 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         let new = "restart: never\nmax_restarts: 5\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model } => {
+            ChangeKind::HotReloadable { new_model, new_debug: _ } => {
                 assert!(new_model.is_none());
             }
             other => panic!("expected HotReloadable, got {other:?}"),
@@ -245,5 +253,64 @@ mod tests {
         let a: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
         let b: AgentConfig = serde_saphyr::from_str("restart: never\n").unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn diff_debug_only_is_hot_reloadable() {
+        let old = "restart: never\nmax_restarts: 5\ndebug: false\n";
+        let new = "restart: never\nmax_restarts: 5\ndebug: true\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_model, new_debug } => {
+                assert!(new_model.is_none());
+                assert_eq!(new_debug, Some(true));
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_debug_added_is_hot_reloadable() {
+        let old = "restart: never\nmax_restarts: 5\n";
+        let new = "restart: never\nmax_restarts: 5\ndebug: true\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_model, new_debug } => {
+                assert!(new_model.is_none());
+                assert_eq!(new_debug, Some(true));
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_debug_removed_is_hot_reloadable() {
+        let old = "restart: never\nmax_restarts: 5\ndebug: true\n";
+        let new = "restart: never\nmax_restarts: 5\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_model, new_debug } => {
+                assert!(new_model.is_none());
+                assert!(new_debug.is_none());
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_debug_and_model_combined_is_hot_reloadable() {
+        let old = "restart: never\nmodel: \"claude-sonnet-4-6\"\ndebug: false\n";
+        let new = "restart: never\nmodel: \"claude-haiku-4-5\"\ndebug: true\n";
+        match classify(old, new) {
+            ChangeKind::HotReloadable { new_model, new_debug } => {
+                assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
+                assert_eq!(new_debug, Some(true));
+            }
+            other => panic!("expected HotReloadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_debug_plus_other_field_is_restart_required() {
+        let old = "restart: never\nmax_restarts: 5\ndebug: false\n";
+        let new = "restart: always\nmax_restarts: 5\ndebug: true\n";
+        assert!(matches!(classify(old, new), ChangeKind::RestartRequired));
     }
 }
