@@ -825,7 +825,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             cron_shutdown,
             cron_sandbox,
             cron_upgrade_lock,
-            Some(cron_debug),
+            cron_debug,
         )
         .await;
     });
@@ -890,7 +890,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             delivery_sandbox,
             delivery_upgrade_lock,
             delivery_session_locks,
-            Some(delivery_debug),
+            delivery_debug,
         )
         .await;
     });

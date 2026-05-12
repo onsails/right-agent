@@ -334,7 +334,7 @@ async fn execute_job(
     internal_client: &right_mcp::internal_client::InternalClient,
     resolved_sandbox: Option<&str>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
-    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use std::process::Stdio;
 
@@ -432,7 +432,7 @@ async fn execute_job(
         disallowed_tools,
         extra_args: vec![],
         prompt: Some(prompt_for_cc),
-        debug_flag: debug.clone(),
+        debug_flag: Some(std::sync::Arc::clone(&debug)),
     };
 
     let claude_args = invocation.into_args();
@@ -829,7 +829,7 @@ async fn execute_job(
                 job_name: job_name.to_string(),
             },
             model: model.map(String::from),
-            debug: debug.clone(),
+            debug: Some(std::sync::Arc::clone(&debug)),
         };
 
         let reflected_content = match crate::reflection::reflect_on_failure(refl_ctx).await {
@@ -973,7 +973,7 @@ pub(crate) async fn run_cron_task(
     shutdown: CancellationToken,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
-    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     tracing::info!(agent = %agent_name, "cron task started");
 
@@ -1111,7 +1111,7 @@ fn fire_one_shot_specs(
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
-    debug: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     for (name, spec) in specs {
         let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
@@ -1171,7 +1171,7 @@ fn reconcile_jobs(
     execute_handles: &ExecuteHandles,
     resolved_sandbox: &Option<String>,
     upgrade_lock: &std::sync::Arc<tokio::sync::RwLock<()>>,
-    debug: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Clean up finished triggered handles
     triggered_handles.retain(|h| !h.is_finished());
@@ -1353,7 +1353,7 @@ async fn run_job_loop(
     execute_handles: ExecuteHandles,
     resolved_sandbox: Option<String>,
     upgrade_lock: std::sync::Arc<tokio::sync::RwLock<()>>,
-    debug: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use cron::Schedule;
     use std::str::FromStr;
@@ -1735,7 +1735,7 @@ mod tests {
             shutdown_clone,
             None,
             Arc::new(tokio::sync::RwLock::new(())),
-            None,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         ));
 
         // Give cron engine time to reconcile and spawn the job loop
