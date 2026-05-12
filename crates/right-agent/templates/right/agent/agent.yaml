@@ -28,6 +28,10 @@ backoff_seconds: 10
 # Show live thinking indicator in Telegram during CC execution
 show_thinking: true
 
+# Debug mode: when true, `claude -p` runs with --debug --debug-file=...
+# Toggle live in Telegram via `/debug on` / `/debug off`. Persists here.
+# debug: false
+
 # Claude model. Switch via Telegram /model command, or set explicitly:
 #   model: "claude-sonnet-4-6"        # Sonnet 4.6 — everyday tasks
 #   model: "claude-sonnet-4-6[1m]"    # Sonnet 4.6 with 1M context (extra usage)
