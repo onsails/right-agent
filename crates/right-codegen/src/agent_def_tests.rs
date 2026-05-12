@@ -149,6 +149,38 @@ fn bootstrap_instructions_constant_is_non_empty() {
 }
 
 #[test]
+fn cron_instructions_const_is_nonempty() {
+    assert!(
+        !crate::CRON_INSTRUCTIONS.is_empty(),
+        "CRON_INSTRUCTIONS must not be empty"
+    );
+}
+
+#[test]
+fn cron_instructions_contains_delivery_contract_header() {
+    assert!(
+        crate::CRON_INSTRUCTIONS.contains("## Cron Delivery Contract"),
+        "CRON_INSTRUCTIONS must contain Cron Delivery Contract header"
+    );
+}
+
+#[test]
+fn cron_instructions_contains_delivery_rule_marker() {
+    assert!(
+        crate::CRON_INSTRUCTIONS.contains("structured output IS the Telegram message"),
+        "CRON_INSTRUCTIONS must explain that structured output IS the Telegram message"
+    );
+}
+
+#[test]
+fn cron_instructions_contains_no_clarifying_questions_rule() {
+    assert!(
+        crate::CRON_INSTRUCTIONS.contains("No clarifying questions"),
+        "CRON_INSTRUCTIONS must contain No clarifying questions section"
+    );
+}
+
+#[test]
 fn system_prompt_contains_home_dir() {
     let result = generate_system_prompt(
         "test",
