@@ -5,7 +5,7 @@ description: >-
   and deletes cron specs stored in the agent database. The Rust runtime handles
   scheduling and execution automatically. Use when the user mentions cron
   jobs, scheduled tasks, reminders, one-shot tasks, or recurring tasks.
-version: 3.2.0
+version: 3.3.0
 ---
 
 # /rightcron -- Cron Job Manager
@@ -58,6 +58,25 @@ mcp__right__cron_create(
   prompt: "Remind the user to review PR #42"
 )
 ```
+
+## Writing Cron Prompts
+
+The cron runs as a separate, non-interactive session — its only
+delivery channel is its structured output. Phrase the `prompt:` as a
+**task that produces text**, not as an imperative messaging action.
+Imperative verbs like "send", "tag", "notify", "ping" prime the cron
+agent to look for an external messaging tool.
+
+| User said                            | Store as                                                  |
+|--------------------------------------|-----------------------------------------------------------|
+| "Tag @bob with a reminder about X"   | "Output a reminder about X, mentioning @bob"              |
+| "Send a message to @alice at 9am"    | "Output a heads-up about X, addressed to @alice"          |
+| "Ping me when Y happens"             | "Check Y. If it happened, output a notification about it" |
+| "Notify the channel about Z"         | "Output a notification about Z"                           |
+
+@username is fine as plain text — it ends up in the delivered
+message and Telegram renders it as a mention. Don't strip the user's
+content or schedule; only rephrase the delivery-imperative verbs.
 
 ## Editing a Cron Job
 
