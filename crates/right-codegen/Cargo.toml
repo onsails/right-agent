@@ -11,6 +11,7 @@ include_dir = { workspace = true }
 miette = { workspace = true }
 minijinja = { workspace = true }
 rand = { workspace = true }
+right-config = { path = "../right-config", version = "*" }
 right-core = { path = "../right-core", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }

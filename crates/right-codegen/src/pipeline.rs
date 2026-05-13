@@ -208,7 +208,7 @@ pub fn run_agent_codegen(
     std::fs::create_dir_all(&run_dir)
         .map_err(|e| miette::miette!("failed to create run directory: {e:#}"))?;
 
-    let global_cfg = right_core::config::read_global_config(home)?;
+    let global_cfg = right_config::read_global_config(home)?;
 
     // Resolve agent secrets for token map.
     // Per-agent codegen is now done by the bot at startup (run_single_agent_codegen).

@@ -116,7 +116,7 @@ pub fn run_doctor(home: &Path) -> Vec<DoctorCheck> {
     checks.extend(check_tunnel_state(home));
 
     // Tunnel health check — only when tunnel is configured.
-    if right_core::config::read_global_config(home).is_ok() {
+    if right_config::read_global_config(home).is_ok() {
         checks.push(check_tunnel_health(home));
     }
 
@@ -229,7 +229,7 @@ fn check_sandbox_for_agent(
 /// (directory with IDENTITY.md).
 fn check_agent_structure(home: &Path) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
 
     if !agents_dir.exists() {
         checks.push(DoctorCheck {
@@ -472,12 +472,12 @@ fn check_managed_settings(path: &str) -> Option<DoctorCheck> {
 ///
 /// Agents without a telegram token produce no check (silent skip, PC-05).
 fn check_webhook_info_for_agents(home: &Path) -> Vec<DoctorCheck> {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     if !agents_dir.exists() {
         return vec![];
     }
 
-    let global_cfg = match right_core::config::read_global_config(home) {
+    let global_cfg = match right_config::read_global_config(home) {
         Ok(c) => c,
         Err(_) => return vec![],
     };
@@ -645,7 +645,7 @@ fn fetch_webhook_info(token: &str) -> Result<WebhookInfo, String> {
 /// request to `/healthz`. Pass on 200, Warn on connect/read failure or non-200.
 /// Skipped silently when the socket file doesn't exist (bot not running).
 fn check_bot_healthz_for_agents(home: &Path) -> Vec<DoctorCheck> {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     if !agents_dir.exists() {
         return vec![];
     }
@@ -738,7 +738,7 @@ fn check_cloudflared_binary() -> DoctorCheck {
 /// shows the operator what to fix.
 /// Unified tunnel config + credentials check.
 fn check_tunnel_state(home: &Path) -> Vec<DoctorCheck> {
-    let config = match right_core::config::read_global_config(home) {
+    let config = match right_config::read_global_config(home) {
         Ok(cfg) => cfg,
         Err(e) => {
             return vec![DoctorCheck {
@@ -826,7 +826,7 @@ fn check_tunnel_health(home: &Path) -> DoctorCheck {
 /// Tokens with expires_at=0 (non-expiring) count as ok (REFRESH-04).
 /// Only synchronous file I/O — no HTTP calls.
 fn check_mcp_tokens_impl(home: &Path) -> DoctorCheck {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
 
     if !agents_dir.exists() {
         return DoctorCheck {
@@ -1343,7 +1343,7 @@ pub fn check_memory(agent_dir: &Path) -> Vec<DoctorCheck> {
 /// - Warn "stt-model/<name>" for each agent with `stt.enabled` whose model file is not cached.
 /// - Silent when no agents have `stt.enabled = true`.
 fn check_stt(home: &Path) -> Vec<DoctorCheck> {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     if !agents_dir.exists() {
         return vec![];
     }

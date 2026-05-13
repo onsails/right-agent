@@ -521,7 +521,7 @@ async fn main() -> miette::Result<()> {
         }
     };
 
-    let home = right_core::config::resolve_home(
+    let home = right_config::resolve_home(
         cli.home.as_deref(),
         std::env::var("RIGHT_HOME").ok().as_deref(),
     )?;
@@ -567,7 +567,7 @@ async fn main() -> miette::Result<()> {
             }
             Some(ConfigCommands::StrictSandbox) => cmd_config_strict_sandbox(),
             Some(ConfigCommands::Get { key }) => {
-                let config = right_core::config::read_global_config(&home)?;
+                let config = right_config::read_global_config(&home)?;
                 match key.as_str() {
                     "tunnel.hostname" => println!("{}", config.tunnel.hostname),
                     "tunnel.uuid" => println!("{}", config.tunnel.tunnel_uuid),
@@ -647,7 +647,7 @@ async fn main() -> miette::Result<()> {
                         "user_id cannot be negative (groups/channels use `right agent allow_all`)"
                     );
                 }
-                let dir = right_core::config::agents_dir(&home).join(&name);
+                let dir = right_config::agents_dir(&home).join(&name);
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
@@ -674,7 +674,7 @@ async fn main() -> miette::Result<()> {
                 Ok(())
             }
             AgentCommands::Deny { name, user_id } => {
-                let dir = right_core::config::agents_dir(&home).join(&name);
+                let dir = right_config::agents_dir(&home).join(&name);
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
@@ -698,7 +698,7 @@ async fn main() -> miette::Result<()> {
                 chat_id,
                 label,
             } => {
-                let dir = right_core::config::agents_dir(&home).join(&name);
+                let dir = right_config::agents_dir(&home).join(&name);
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
@@ -725,7 +725,7 @@ async fn main() -> miette::Result<()> {
                 Ok(())
             }
             AgentCommands::DenyAll { name, chat_id } => {
-                let dir = right_core::config::agents_dir(&home).join(&name);
+                let dir = right_config::agents_dir(&home).join(&name);
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
@@ -745,7 +745,7 @@ async fn main() -> miette::Result<()> {
                 Ok(())
             }
             AgentCommands::Allowed { name, json } => {
-                let dir = right_core::config::agents_dir(&home).join(&name);
+                let dir = right_config::agents_dir(&home).join(&name);
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
@@ -817,9 +817,9 @@ async fn main() -> miette::Result<()> {
             port,
             ref token_map,
         } => {
-            let agents_dir = right_core::config::agents_dir(&home);
+            let agents_dir = right_config::agents_dir(&home);
             let token_map_path = token_map.clone();
-            let allowed_hosts = right_core::config::read_global_config(&home)?
+            let allowed_hosts = right_config::read_global_config(&home)?
                 .aggregator
                 .allowed_hosts;
             let token_map_content = std::fs::read_to_string(token_map)
@@ -1485,15 +1485,15 @@ fn cmd_init(
     }
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
     let aggregator = if home.join("config.yaml").exists() {
-        right_core::config::read_global_config(home)?.aggregator
+        right_config::read_global_config(home)?.aggregator
     } else {
-        right_core::config::AggregatorConfig::default()
+        right_config::AggregatorConfig::default()
     };
-    let global_config = right_core::config::GlobalConfig {
+    let global_config = right_config::GlobalConfig {
         tunnel: tunnel_cfg,
         aggregator,
     };
-    right_core::config::write_global_config(home, &global_config)?;
+    right_config::write_global_config(home, &global_config)?;
 
     // Run codegen for the default "right" agent.
     // Per-agent codegen was moved to bot startup (59243d0) but init needs it
@@ -1612,7 +1612,7 @@ fn cmd_agent_init(
     sandbox_mode: Option<right_agent::agent::types::SandboxMode>,
 ) -> miette::Result<()> {
     let interactive = !yes;
-    let agents_parent = right_core::config::agents_dir(home);
+    let agents_parent = right_config::agents_dir(home);
     let agent_dir = agents_parent.join(name);
     let agent_existed = agent_dir.exists();
 
@@ -2208,7 +2208,7 @@ fn cmd_doctor(home: &Path) -> miette::Result<()> {
 }
 
 fn cmd_list(home: &Path) -> miette::Result<()> {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     if !agents_dir.exists() {
         println!("No agents directory found. Run `right init` first.");
         return Ok(());
@@ -2276,7 +2276,7 @@ async fn cmd_up(
     t_phase = std::time::Instant::now();
 
     // Discover agents.
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let all_agents = right_agent::agent::discover_agents(&agents_dir)?;
 
     let agents = filter_agents(&all_agents, agents_filter.as_deref())?;
@@ -2600,7 +2600,7 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
         )
     })?;
 
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let all_agents = right_agent::agent::discover_agents(&agents_dir)?;
 
     if all_agents.is_empty() {
@@ -2786,7 +2786,7 @@ async fn cmd_agent_restore(
     use miette::IntoDiagnostic;
 
     // 1. Validate preconditions.
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let agent_dir = agents_dir.join(agent_name);
 
     if agent_dir.exists() {
@@ -2992,7 +2992,7 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
     use miette::IntoDiagnostic;
 
     // 1. Discover agent and parse config
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let agents = right_agent::agent::discover_agents(&agents_dir)?;
     let _agent = agents
         .iter()
@@ -3013,7 +3013,7 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
 
     // 2. Create backup directory: ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-    let backup_base = right_core::config::backups_dir(home, agent_name);
+    let backup_base = right_config::backups_dir(home, agent_name);
     let backup_dir = backup_base.join(&timestamp);
     std::fs::create_dir_all(&backup_dir)
         .into_diagnostic()
@@ -3173,7 +3173,7 @@ async fn cmd_agent_destroy(
     use inquire::ui::{Color, RenderConfig, Styled};
 
     // Validate agent exists
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let agent_dir = agents_dir.join(agent_name);
     if !agent_dir.exists() {
         return Err(miette::miette!("Agent '{}' not found", agent_name));
@@ -3506,7 +3506,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     use std::os::unix::process::CommandExt;
 
     // 1. Discover agent
-    let agents = right_agent::agent::discover_agents(&right_core::config::agents_dir(home))?;
+    let agents = right_agent::agent::discover_agents(&right_config::agents_dir(home))?;
     let agent = agents
         .iter()
         .find(|a| a.name == agent_name)
@@ -4087,7 +4087,7 @@ fn format_size(bytes: u64) -> String {
 ///
 /// Returns a live `Connection` or a fatal miette error.
 fn resolve_agent_db(home: &Path, agent: &str) -> miette::Result<rusqlite::Connection> {
-    let agent_path = right_core::config::agents_dir(home).join(agent);
+    let agent_path = right_config::agents_dir(home).join(agent);
     if !agent_path.exists() {
         return Err(miette::miette!(
             "agent '{}' not found at {}",
@@ -4200,7 +4200,7 @@ fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> 
     let conn = resolve_agent_db(home, agent)?;
 
     // db_path needed only for fs metadata (file size) — derive from home, not conn.
-    let db_path = right_core::config::agents_dir(home)
+    let db_path = right_config::agents_dir(home)
         .join(agent)
         .join("data.db");
     let db_size = std::fs::metadata(&db_path)
@@ -4386,7 +4386,7 @@ fn cmd_memory_delete(home: &Path, agent: &str, id: i64) -> miette::Result<()> {
 fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
     let agent_name = agent_name.unwrap_or("right");
 
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let all_agents = right_agent::agent::discover_agents(&agents_dir)?;
 
     let agent = all_agents
@@ -4474,7 +4474,7 @@ fn cmd_pair(home: &Path, agent_name: Option<&str>) -> miette::Result<()> {
 }
 
 fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()> {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     // Collect agent dirs -- either all or filtered to one
     let entries: Vec<std::path::PathBuf> = if let Some(name) = agent_filter {
         let dir = agents_dir.join(name);
@@ -4522,7 +4522,7 @@ fn cmd_mcp_status(home: &Path, agent_filter: Option<&str>) -> miette::Result<()>
 /// (backup -> create new -> restore -> delete old). Network-only changes are
 /// applied automatically on next bot restart via hot-reload.
 async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<()> {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let agent_dir = agents_dir.join(agent_name);
 
     // Load config from disk.
@@ -4629,7 +4629,7 @@ async fn perform_migration(
 ) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
     let agent_dir = agents_dir.join(agent_name);
 
     // --- Step 1/6: Backup ---
@@ -4648,7 +4648,7 @@ async fn perform_migration(
     }
 
     let old_ssh_host = right_openshell::openshell::ssh_host_for_sandbox(old_sandbox);
-    let backup_base = right_core::config::backups_dir(home, agent_name);
+    let backup_base = right_config::backups_dir(home, agent_name);
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir = backup_base.join(&timestamp);
     std::fs::create_dir_all(&backup_dir)
