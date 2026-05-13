@@ -403,10 +403,7 @@ async fn execute_job(
         return;
     }
 
-    // Cron extends the baseline (invocation.rs) with `Agent` to prevent
-    // budget waste on parallel subagent branches.
     let mut disallowed_tools = crate::cc::invocation::baseline_disallowed_tools();
-    disallowed_tools.push("Agent".into());
 
     // Schema and (optional) --fork-session source come from spec.schedule_kind.
     // BackgroundContinuation produces both a stricter schema (bg) and a
