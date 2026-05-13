@@ -128,6 +128,33 @@ fn operating_instructions_constant_is_non_empty() {
     );
 }
 
+/// Pin the hardcoded cron-idle minutes in OPERATING_INSTRUCTIONS.md to the
+/// `IDLE_THRESHOLD_MIN` constant. The template is included verbatim via
+/// `include_str!`, so the number cannot be templated — this test fails when
+/// the constant changes without a matching prose update.
+#[test]
+fn operating_instructions_cron_idle_threshold_matches_const() {
+    let needle = format!(
+        "idle for **{} minutes**",
+        right_core::time_constants::IDLE_THRESHOLD_MIN
+    );
+    assert!(
+        crate::OPERATING_INSTRUCTIONS.contains(&needle),
+        "OPERATING_INSTRUCTIONS must mention `idle for **{} minutes**` to match \
+         right_core::time_constants::IDLE_THRESHOLD_MIN",
+        right_core::time_constants::IDLE_THRESHOLD_MIN
+    );
+    let promise_needle = format!(
+        "sooner than {} minutes",
+        right_core::time_constants::IDLE_THRESHOLD_MIN
+    );
+    assert!(
+        crate::OPERATING_INSTRUCTIONS.contains(&promise_needle),
+        "OPERATING_INSTRUCTIONS must spell out the \"never promise sooner than {} minutes\" rule",
+        right_core::time_constants::IDLE_THRESHOLD_MIN
+    );
+}
+
 #[test]
 fn bootstrap_instructions_constant_is_non_empty() {
     assert!(
