@@ -114,20 +114,21 @@ async fn try_sandbox_backup(
         .as_ref()
         .and_then(|c| c.sandbox.as_ref())
         .and_then(|s| s.name.as_deref());
-    let sb_name = right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sb_name =
+        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
     // Check OpenShell availability
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         _ => return false,
     };
 
     // Check sandbox readiness
-    let mut grpc = match right_core::openshell::connect_grpc(&mtls_dir).await {
+    let mut grpc = match right_openshell::openshell::connect_grpc(&mtls_dir).await {
         Ok(g) => g,
         Err(_) => return false,
     };
-    let ready = match right_core::openshell::is_sandbox_ready(&mut grpc, &sb_name).await {
+    let ready = match right_openshell::openshell::is_sandbox_ready(&mut grpc, &sb_name).await {
         Ok(r) => r,
         Err(_) => return false,
     };
@@ -143,10 +144,10 @@ async fn try_sandbox_backup(
         return false;
     }
 
-    let ssh_host = right_core::openshell::ssh_host_for_sandbox(&sb_name);
+    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
     let dest_tar = backup_dir.join("sandbox.tar.gz");
 
-    right_core::openshell::ssh_tar_download(&ssh_config, &ssh_host, "sandbox", &dest_tar, 300)
+    right_openshell::openshell::ssh_tar_download(&ssh_config, &ssh_host, "sandbox", &dest_tar, 300)
         .await
         .is_ok()
 }
@@ -250,9 +251,11 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
             .and_then(|s| s.name.as_deref());
-        let sb_name =
-            right_core::openshell::resolve_sandbox_name(&options.agent_name, explicit_sandbox_name);
-        right_core::openshell::delete_sandbox(&sb_name).await;
+        let sb_name = right_openshell::openshell::resolve_sandbox_name(
+            &options.agent_name,
+            explicit_sandbox_name,
+        );
+        right_openshell::openshell::delete_sandbox(&sb_name).await;
         result.sandbox_deleted = true;
     }
 

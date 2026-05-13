@@ -316,7 +316,7 @@ pub fn spawn_sandbox(
     name: &str,
     policy_path: &Path,
     upload_dir: Option<&Path>,
-) -> miette::Result<crate::process_group::ProcessGroupChild> {
+) -> miette::Result<right_process::ProcessGroupChild> {
     let mut cmd = Command::new("openshell");
     cmd.args(["sandbox", "create", "--name", name, "--policy"]);
     cmd.arg(policy_path);
@@ -330,7 +330,7 @@ pub fn spawn_sandbox(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell sandbox create: {e:#}"))?;
 
     tracing::info!(sandbox = name, "spawned sandbox create process");
@@ -447,7 +447,7 @@ pub async fn generate_ssh_config(name: &str, config_dir: &Path) -> miette::Resul
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell sandbox ssh-config: {e:#}"))?;
 
     let output = child
@@ -486,7 +486,7 @@ pub async fn apply_policy(name: &str, policy_path: &Path) -> miette::Result<()> 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell policy set: {e:#}"))?;
 
     let output = child
@@ -761,7 +761,7 @@ pub async fn ssh_tar_download(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
+    let mut child = right_process::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh for tar download: {e:#}"))?;
 
     let mut stdout = child
@@ -824,7 +824,7 @@ pub async fn ssh_tar_upload(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let mut child = crate::process_group::ProcessGroupChild::spawn(command)
+    let mut child = right_process::ProcessGroupChild::spawn(command)
         .map_err(|e| miette::miette!("failed to spawn ssh for tar upload: {e:#}"))?;
 
     let mut stdin = child
@@ -900,7 +900,7 @@ async fn upload_single_file(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell upload: {e:#}"))?;
 
     let output = child
@@ -1003,7 +1003,7 @@ pub async fn download_file(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = crate::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell download: {e:#}"))?;
 
     let output = child
@@ -1056,7 +1056,7 @@ pub async fn delete_sandbox(name: &str) {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = match crate::process_group::ProcessGroupChild::spawn(cmd) {
+    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(sandbox = name, "failed to spawn openshell delete: {e:#}");

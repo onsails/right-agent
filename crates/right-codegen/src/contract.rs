@@ -112,7 +112,7 @@ pub async fn write_and_apply_sandbox_policy(
     content: &str,
 ) -> miette::Result<()> {
     write_regenerated(path, content)?;
-    right_core::openshell::apply_policy(sandbox, path).await
+    right_openshell::openshell::apply_policy(sandbox, path).await
 }
 
 /// Per-agent codegen outputs. Source of truth for guard tests.

@@ -140,4 +140,3 @@ impl Drop for TestSandbox {
         test_cleanup::delete_sandbox_sync(&self.name);
     }
 }
-

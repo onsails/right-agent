@@ -631,9 +631,11 @@ async fn handle_reload(State(state): State<InternalState>) -> axum::response::Re
             .ok()
             .flatten();
         let mtls_dir = match &agent_config {
-            Some(config) if *config.sandbox_mode() == right_agent::agent::SandboxMode::Openshell => {
-                match right_core::openshell::preflight_check() {
-                    right_core::openshell::OpenShellStatus::Ready(dir) => Some(dir),
+            Some(config)
+                if *config.sandbox_mode() == right_agent::agent::SandboxMode::Openshell =>
+            {
+                match right_openshell::openshell::preflight_check() {
+                    right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
                     _ => None,
                 }
             }

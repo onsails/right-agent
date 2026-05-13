@@ -88,11 +88,7 @@ mod voice_pass_main {
 }
 
 #[derive(Parser)]
-#[command(
-    name = "right",
-    version,
-    about = "Multi-agent runtime for Claude Code"
-)]
+#[command(name = "right", version, about = "Multi-agent runtime for Claude Code")]
 pub struct Cli {
     /// Path to Right Agent home directory
     #[arg(long, env = "RIGHT_HOME")]
@@ -446,7 +442,9 @@ async fn main() -> miette::Result<()> {
 
     if cli.no_color {
         // SAFETY: main is still single-threaded at this point — no readers of NO_COLOR yet.
-        unsafe { std::env::set_var("NO_COLOR", "1"); }
+        unsafe {
+            std::env::set_var("NO_COLOR", "1");
+        }
     }
 
     // Brand-conformant inquire prompt chrome — replaces the default
@@ -653,7 +651,9 @@ async fn main() -> miette::Result<()> {
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
-                use right_agent::agent::allowlist::{self, AddOutcome, AllowedUser, AllowlistState};
+                use right_agent::agent::allowlist::{
+                    self, AddOutcome, AllowedUser, AllowlistState,
+                };
                 let outcome = allowlist::with_lock(&dir, |d| -> Result<AddOutcome, String> {
                     let file = allowlist::read_file(d)?.unwrap_or_default();
                     let mut state = AllowlistState::from_file(file);
@@ -702,7 +702,9 @@ async fn main() -> miette::Result<()> {
                 if !dir.exists() {
                     return Err(miette::miette!("agent not found: {}", dir.display()));
                 }
-                use right_agent::agent::allowlist::{self, AddOutcome, AllowedGroup, AllowlistState};
+                use right_agent::agent::allowlist::{
+                    self, AddOutcome, AllowedGroup, AllowlistState,
+                };
                 let outcome = allowlist::with_lock(&dir, |d| -> Result<AddOutcome, String> {
                     let file = allowlist::read_file(d)?.unwrap_or_default();
                     let mut state = AllowlistState::from_file(file);
@@ -867,8 +869,8 @@ async fn main() -> miette::Result<()> {
                     Some(config)
                         if *config.sandbox_mode() == right_agent::agent::SandboxMode::Openshell =>
                     {
-                        match right_core::openshell::preflight_check() {
-                            right_core::openshell::OpenShellStatus::Ready(dir) => Some(dir),
+                        match right_openshell::openshell::preflight_check() {
+                            right_openshell::openshell::OpenShellStatus::Ready(dir) => Some(dir),
                             _ => None,
                         }
                     }
@@ -977,13 +979,12 @@ async fn main() -> miette::Result<()> {
                                         mem_config.recall_max_tokens,
                                         None,
                                     );
-                                    let wrapper = std::sync::Arc::new(
-                                        right_memory::ResilientHindsight::new(
+                                    let wrapper =
+                                        std::sync::Arc::new(right_memory::ResilientHindsight::new(
                                             client,
                                             agent_dir.clone(),
                                             "aggregator",
-                                        ),
-                                    );
+                                        ));
                                     Some(std::sync::Arc::new(aggregator::HindsightBackend::new(
                                         wrapper,
                                     )))
@@ -1342,7 +1343,8 @@ fn cmd_init(
         } else {
             Step::Sandbox
         };
-        let mut w_sandbox = sandbox_mode.unwrap_or(right_agent::agent::types::SandboxMode::Openshell);
+        let mut w_sandbox =
+            sandbox_mode.unwrap_or(right_agent::agent::types::SandboxMode::Openshell);
         let mut w_network =
             network_policy.unwrap_or(right_agent::agent::types::NetworkPolicy::Permissive);
         let mut w_token: Option<String> = telegram_token.map(|t| t.to_string());
@@ -1515,18 +1517,13 @@ fn cmd_init(
             },
             heartbeat_path: None,
         };
-        right_codegen::run_agent_codegen(
-            home,
-            std::slice::from_ref(&agent_def),
-            &self_exe,
-            false,
-        )?;
+        right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
         right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
 
         // Create sandbox if openshell mode.
         if matches!(sandbox, right_agent::agent::types::SandboxMode::Openshell) {
             let staging = agent_dir.join("staging");
-            right_core::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+            right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
             let policy_path = agent_dir.join("policy.yaml");
             // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
@@ -1546,7 +1543,7 @@ fn cmd_init(
             );
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    right_core::openshell::ensure_sandbox(
+                    right_openshell::openshell::ensure_sandbox(
                         &sb_name,
                         &policy_path,
                         Some(&staging),
@@ -1568,11 +1565,9 @@ fn cmd_init(
             std::fs::create_dir_all(run_dir.join("ssh"))
                 .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(right_core::openshell::generate_ssh_config(
-                        &sb_name,
-                        &run_dir.join("ssh"),
-                    ))
+                tokio::runtime::Handle::current().block_on(
+                    right_openshell::openshell::generate_ssh_config(&sb_name, &run_dir.join("ssh")),
+                )
             })?;
         }
     }
@@ -1624,8 +1619,7 @@ fn cmd_agent_init(
     // Reject if exists and --force-recreate not given.
     if agent_dir.exists() && !force_recreate {
         return Err(miette::miette!(
-            help =
-                "Use --force-recreate to wipe and re-create, or `right agent config` to change settings",
+            help = "Use --force-recreate to wipe and re-create, or `right agent config` to change settings",
             "Agent directory already exists at {}",
             agent_dir.display()
         ));
@@ -1681,7 +1675,7 @@ fn cmd_agent_init(
                 .and_then(|c| c.sandbox.as_ref())
                 .and_then(|s| s.name.as_deref());
             let display_sb =
-                right_core::openshell::resolve_sandbox_name(name, explicit_sandbox_name);
+                right_openshell::openshell::resolve_sandbox_name(name, explicit_sandbox_name);
             println!("  - OpenShell sandbox \"{}\" (if exists)", display_sb);
             print!("Continue? [y/N] ");
             io::stdout()
@@ -1701,10 +1695,10 @@ fn cmd_agent_init(
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
             .and_then(|s| s.name.as_deref());
-        let sb_name = right_core::openshell::resolve_sandbox_name(name, explicit_sandbox_name);
+        let sb_name = right_openshell::openshell::resolve_sandbox_name(name, explicit_sandbox_name);
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                right_core::openshell::delete_sandbox(&sb_name).await;
+                right_openshell::openshell::delete_sandbox(&sb_name).await;
             });
         });
 
@@ -1730,7 +1724,10 @@ fn cmd_agent_init(
     };
 
     let theme = right_ui::detect();
-    println!("{}", right_ui::section(theme, &format!("agent init: {name}")));
+    println!(
+        "{}",
+        right_ui::section(theme, &format!("agent init: {name}"))
+    );
     println!("{}", right_ui::Rail::blank(theme));
 
     // --- Build overrides ---
@@ -1972,12 +1969,7 @@ fn cmd_agent_init(
             },
             heartbeat_path: None,
         };
-        right_codegen::run_agent_codegen(
-            home,
-            std::slice::from_ref(&agent_def),
-            &self_exe,
-            false,
-        )?;
+        right_codegen::run_agent_codegen(home, std::slice::from_ref(&agent_def), &self_exe, false)?;
         right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
     }
 
@@ -1987,7 +1979,7 @@ fn cmd_agent_init(
         right_agent::agent::types::SandboxMode::Openshell
     ) {
         let staging = agent_dir.join("staging");
-        right_core::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+        right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
         let policy_path = agent_dir.join("policy.yaml");
         // Must match `sandbox.name: right-{agent}` written by init_agent into agent.yaml.
@@ -2008,7 +2000,7 @@ fn cmd_agent_init(
         println!("Creating OpenShell sandbox...");
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                right_core::openshell::ensure_sandbox(
+                right_openshell::openshell::ensure_sandbox(
                     &sb_name,
                     &policy_path,
                     Some(&staging),
@@ -2025,11 +2017,9 @@ fn cmd_agent_init(
         std::fs::create_dir_all(run_dir.join("ssh"))
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(right_core::openshell::generate_ssh_config(
-                    &sb_name,
-                    &run_dir.join("ssh"),
-                ))
+            tokio::runtime::Handle::current().block_on(
+                right_openshell::openshell::generate_ssh_config(&sb_name, &run_dir.join("ssh")),
+            )
         })?;
     }
 
@@ -2081,20 +2071,28 @@ fn cmd_agent_init(
     let mut recap = right_ui::Recap::new("ready")
         .ok("agent", &format!("{name} created"))
         .ok("sandbox", &sandbox_with_policy)
-        .ok("telegram", if cfg.telegram_token.is_some() { "configured" } else { "not configured" })
+        .ok(
+            "telegram",
+            if cfg.telegram_token.is_some() {
+                "configured"
+            } else {
+                "not configured"
+            },
+        )
         .ok("chat ids", &chat_ids_detail)
         .ok("stt", &stt_detail)
         .ok("memory", memory_detail);
 
     recap = match register_outcome {
-        Ok(right_agent::agent::RegisterResult { pc_running: false }) => {
-            recap.next("right up")
-        }
+        Ok(right_agent::agent::RegisterResult { pc_running: false }) => recap.next("right up"),
         Ok(right_agent::agent::RegisterResult { pc_running: true }) => {
             recap.next("send /start to your bot in Telegram")
         }
         Err(e) => {
-            tracing::warn!(error = format!("{e:#}"), "PC reload failed during agent init");
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "PC reload failed during agent init"
+            );
             recap
                 .warn("reload", "failed to add to running right")
                 .next("right restart")
@@ -2107,12 +2105,12 @@ fn cmd_agent_init(
 
 /// Check if a sandbox exists via gRPC. Returns Ok(bool).
 async fn check_sandbox_exists_async(sandbox_name: &str) -> miette::Result<bool> {
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         _ => return Ok(false), // OpenShell not available — no sandbox
     };
-    let mut client = right_core::openshell::connect_grpc(&mtls_dir).await?;
-    right_core::openshell::is_sandbox_ready(&mut client, sandbox_name).await
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+    right_openshell::openshell::is_sandbox_ready(&mut client, sandbox_name).await
 }
 
 /// If a sandbox already exists, prompt the user to recreate or abort.
@@ -2201,11 +2199,7 @@ fn cmd_doctor(home: &Path) -> miette::Result<()> {
         }
         format!("{pass}/{total} checks passed ({})", parts.join(", "))
     };
-    println!(
-        "{}{}",
-        right_ui::Rail::prefix(theme),
-        summary
-    );
+    println!("{}{}", right_ui::Rail::prefix(theme), summary);
 
     if fail > 0 {
         return Err(miette::miette!("checks failed — see above for fixes"));
@@ -2255,7 +2249,10 @@ async fn cmd_up(
 
     // Fail fast if required tools are missing.
     right_agent::runtime::verify_dependencies()?;
-    tracing::info!(elapsed_ms = t_phase.elapsed().as_millis() as u64, "up: verify_dependencies");
+    tracing::info!(
+        elapsed_ms = t_phase.elapsed().as_millis() as u64,
+        "up: verify_dependencies"
+    );
     t_phase = std::time::Instant::now();
 
     let run_dir = home.join("run");
@@ -2272,7 +2269,10 @@ async fn cmd_up(
         ));
     }
     check_port_available(right_runtime_state::MCP_HTTP_PORT).await?;
-    tracing::info!(elapsed_ms = t_phase.elapsed().as_millis() as u64, "up: pc_health + port_check");
+    tracing::info!(
+        elapsed_ms = t_phase.elapsed().as_millis() as u64,
+        "up: pc_health + port_check"
+    );
     t_phase = std::time::Instant::now();
 
     // Discover agents.
@@ -2316,9 +2316,9 @@ async fn cmd_up(
     t_phase = std::time::Instant::now();
 
     if any_sandboxed {
-        match right_core::openshell::preflight_check() {
-            right_core::openshell::OpenShellStatus::Ready(_) => {}
-            right_core::openshell::OpenShellStatus::NotInstalled => {
+        match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(_) => {}
+            right_openshell::openshell::OpenShellStatus::NotInstalled => {
                 println!("OpenShell is not installed. Sandbox mode requires OpenShell.");
                 println!();
                 let install = inquire::Confirm::new("install openshell now?")
@@ -2339,9 +2339,9 @@ async fn cmd_up(
                     }
                     // After install, still need a gateway — fall through to gateway check.
                     println!();
-                    match right_core::openshell::preflight_check() {
-                        right_core::openshell::OpenShellStatus::Ready(_) => {}
-                        right_core::openshell::OpenShellStatus::NoGateway(_) => {
+                    match right_openshell::openshell::preflight_check() {
+                        right_openshell::openshell::OpenShellStatus::Ready(_) => {}
+                        right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
                             start_openshell_gateway()?;
                         }
                         other => return Err(openshell_status_error(other)),
@@ -2353,10 +2353,10 @@ async fn cmd_up(
                     ));
                 }
             }
-            right_core::openshell::OpenShellStatus::NoGateway(_) => {
+            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
                 start_openshell_gateway()?;
             }
-            status @ right_core::openshell::OpenShellStatus::BrokenGateway(_) => {
+            status @ right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
                 return Err(openshell_status_error(status));
             }
         }
@@ -2522,8 +2522,8 @@ fn start_openshell_gateway() -> miette::Result<()> {
         ));
     }
     // Verify certs are now present.
-    match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(_) => {
+    match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(_) => {
             println!("OpenShell gateway started successfully.");
             Ok(())
         }
@@ -2532,18 +2532,18 @@ fn start_openshell_gateway() -> miette::Result<()> {
 }
 
 /// Convert an `OpenShellStatus` into a user-facing miette error.
-fn openshell_status_error(status: right_core::openshell::OpenShellStatus) -> miette::Report {
+fn openshell_status_error(status: right_openshell::openshell::OpenShellStatus) -> miette::Report {
     match status {
-        right_core::openshell::OpenShellStatus::Ready(_) => unreachable!(),
-        right_core::openshell::OpenShellStatus::NotInstalled => miette::miette!(
+        right_openshell::openshell::OpenShellStatus::Ready(_) => unreachable!(),
+        right_openshell::openshell::OpenShellStatus::NotInstalled => miette::miette!(
             help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
             "OpenShell is not installed"
         ),
-        right_core::openshell::OpenShellStatus::NoGateway(_) => miette::miette!(
+        right_openshell::openshell::OpenShellStatus::NoGateway(_) => miette::miette!(
             help = "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
             "OpenShell gateway is not running"
         ),
-        right_core::openshell::OpenShellStatus::BrokenGateway(mtls_dir) => miette::miette!(
+        right_openshell::openshell::OpenShellStatus::BrokenGateway(mtls_dir) => miette::miette!(
             help = "Try `openshell gateway destroy && openshell gateway start` to recreate,\n  \
                     or set `sandbox: mode: none` in agent.yaml",
             "OpenShell gateway exists but mTLS certificates are missing at {}\n\n  \
@@ -2715,11 +2715,7 @@ async fn cmd_status(home: &Path) -> miette::Result<()> {
             _ => right_ui::Glyph::Err,
         };
         let verb = format!("{:<6} {}", p.pid, p.system_time);
-        block.push(
-            right_ui::status(glyph)
-                .noun(&p.name)
-                .verb(verb),
-        );
+        block.push(right_ui::status(glyph).noun(&p.name).verb(verb));
     }
     println!("{}", block.render(theme));
     println!("{}", right_ui::Rail::blank(theme));
@@ -2864,7 +2860,7 @@ async fn cmd_agent_restore(
 
         // Prepare staging dir.
         let staging = agent_dir.join("staging");
-        right_core::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+        right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
         // Resolve policy path.
         let policy_path = config
@@ -2882,19 +2878,19 @@ async fn cmd_agent_restore(
         }
 
         // Verify OpenShell is reachable.
-        let mtls_dir = match right_core::openshell::preflight_check() {
-            right_core::openshell::OpenShellStatus::Ready(dir) => dir,
-            right_core::openshell::OpenShellStatus::NotInstalled => {
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+            right_openshell::openshell::OpenShellStatus::NotInstalled => {
                 return Err(miette::miette!(
                     "openshell not installed — required for sandboxed agent restore"
                 ));
             }
-            right_core::openshell::OpenShellStatus::NoGateway(_) => {
+            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
                 return Err(miette::miette!(
                     "openshell gateway not started — start it before restoring"
                 ));
             }
-            right_core::openshell::OpenShellStatus::BrokenGateway(_) => {
+            right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
                 return Err(miette::miette!(
                     "openshell mTLS certs missing or corrupt — try reinstalling openshell"
                 ));
@@ -2903,14 +2899,17 @@ async fn cmd_agent_restore(
 
         // Spawn sandbox.
         println!("Creating sandbox '{new_sandbox_name}'...");
-        let mut child =
-            right_core::openshell::spawn_sandbox(&new_sandbox_name, &policy_path, Some(&staging))?;
+        let mut child = right_openshell::openshell::spawn_sandbox(
+            &new_sandbox_name,
+            &policy_path,
+            Some(&staging),
+        )?;
 
-        let mut grpc = right_core::openshell::connect_grpc(&mtls_dir).await?;
+        let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
 
         // Wait for READY (race with child exit).
         tokio::select! {
-            result = right_core::openshell::wait_for_ready(&mut grpc, &new_sandbox_name, 120, 2) => {
+            result = right_openshell::openshell::wait_for_ready(&mut grpc, &new_sandbox_name, 120, 2) => {
                 result?;
                 drop(child);
             }
@@ -2927,8 +2926,8 @@ async fn cmd_agent_restore(
 
         // Wait for SSH transport.
         let sandbox_id =
-            right_core::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox_name).await?;
-        right_core::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
+            right_openshell::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox_name).await?;
+        right_openshell::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
 
         // Generate SSH config.
         let ssh_config_dir = home.join("run").join("ssh");
@@ -2936,13 +2935,15 @@ async fn cmd_agent_restore(
             .into_diagnostic()
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
         let ssh_config_path =
-            right_core::openshell::generate_ssh_config(&new_sandbox_name, &ssh_config_dir).await?;
+            right_openshell::openshell::generate_ssh_config(&new_sandbox_name, &ssh_config_dir)
+                .await?;
 
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(&new_sandbox_name);
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&new_sandbox_name);
 
         // Upload backup tar.
         println!("Uploading sandbox backup...");
-        right_core::openshell::ssh_tar_upload(&ssh_config_path, &ssh_host, &tar_path, 600).await?;
+        right_openshell::openshell::ssh_tar_upload(&ssh_config_path, &ssh_host, &tar_path, 600)
+            .await?;
         println!("Sandbox files restored");
 
         // Write sandbox.name into agent.yaml.
@@ -3032,31 +3033,31 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
             .and_then(|c| c.sandbox.as_ref())
             .and_then(|s| s.name.as_deref());
         let sb_name =
-            right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+            right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
         // Verify OpenShell is reachable
-        let mtls_dir = match right_core::openshell::preflight_check() {
-            right_core::openshell::OpenShellStatus::Ready(dir) => dir,
-            right_core::openshell::OpenShellStatus::NotInstalled => {
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+            right_openshell::openshell::OpenShellStatus::NotInstalled => {
                 return Err(miette::miette!(
                     "openshell not installed — required for sandboxed agent backup"
                 ));
             }
-            right_core::openshell::OpenShellStatus::NoGateway(_) => {
+            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
                 return Err(miette::miette!(
                     "openshell gateway not started — start it before backing up"
                 ));
             }
-            right_core::openshell::OpenShellStatus::BrokenGateway(_) => {
+            right_openshell::openshell::OpenShellStatus::BrokenGateway(_) => {
                 return Err(miette::miette!(
                     "openshell mTLS certs missing or corrupt — try reinstalling openshell"
                 ));
             }
         };
 
-        let mut grpc = right_core::openshell::connect_grpc(&mtls_dir).await?;
+        let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
 
-        let ready = right_core::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
+        let ready = right_openshell::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
         if !ready {
             return Err(miette::miette!(
                 help = "Start the agent with: right up",
@@ -3077,12 +3078,18 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
             ));
         }
 
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(&sb_name);
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
         let dest_tar = backup_dir.join("sandbox.tar.gz");
 
         tracing::info!(sandbox = %sb_name, dest = %dest_tar.display(), "downloading sandbox via SSH tar");
-        right_core::openshell::ssh_tar_download(&ssh_config, &ssh_host, "sandbox", &dest_tar, 300)
-            .await?;
+        right_openshell::openshell::ssh_tar_download(
+            &ssh_config,
+            &ssh_host,
+            "sandbox",
+            &dest_tar,
+            300,
+        )
+        .await?;
         println!(
             "sandbox.tar.gz written ({} bytes)",
             std::fs::metadata(&dest_tar).map(|m| m.len()).unwrap_or(0)
@@ -3190,7 +3197,7 @@ async fn cmd_agent_destroy(
                 .and_then(|c| c.sandbox.as_ref())
                 .and_then(|s| s.name.as_deref());
             let sb_name =
-                right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+                right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
             println!("  Sandbox: {sb_name}");
         } else {
             println!("  Sandbox: none");
@@ -3276,11 +3283,7 @@ async fn cmd_agent_destroy(
     Ok(())
 }
 
-async fn cmd_agent_rebootstrap(
-    home: &Path,
-    agent_name: &str,
-    yes: bool,
-) -> miette::Result<()> {
+async fn cmd_agent_rebootstrap(home: &Path, agent_name: &str, yes: bool) -> miette::Result<()> {
     use right_ui::{Block, Glyph, Rail, detect, section, status};
 
     let plan = right_agent::rebootstrap::plan(home, agent_name)?;
@@ -3288,10 +3291,7 @@ async fn cmd_agent_rebootstrap(
     let pc_process = format!("{agent_name}-bot");
 
     if !yes {
-        println!(
-            "{}",
-            section(theme, &format!("rebootstrap: {agent_name}"))
-        );
+        println!("{}", section(theme, &format!("rebootstrap: {agent_name}")));
         println!("{}", Rail::blank(theme));
 
         let sandbox_detail = match &plan.sandbox_name {
@@ -3574,7 +3574,8 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
         .as_ref()
         .and_then(|c| c.sandbox.as_ref())
         .and_then(|s| s.name.as_deref());
-    let sb_name = right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sb_name =
+        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
     let ssh_config = home.join(format!("run/ssh/{}.ssh-config", sb_name));
     if !ssh_config.exists() {
         return Err(miette::miette!(
@@ -3585,7 +3586,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
     }
 
     // 5. exec into SSH
-    let ssh_host = right_core::openshell::ssh_host_for_sandbox(&sb_name);
+    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
     let mut cmd = std::process::Command::new("ssh");
     cmd.arg("-F").arg(&ssh_config);
     cmd.arg(&ssh_host);
@@ -4536,8 +4537,8 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
     }
 
     // Check OpenShell availability.
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         _ => {
             println!("OpenShell not available — skipping sandbox migration check.");
             return Ok(());
@@ -4545,9 +4546,10 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
     };
 
     let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-    let sb_name = right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sb_name =
+        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
-    let mut grpc = match right_core::openshell::connect_grpc(&mtls_dir).await {
+    let mut grpc = match right_openshell::openshell::connect_grpc(&mtls_dir).await {
         Ok(g) => g,
         Err(_) => {
             println!("Cannot connect to OpenShell gRPC — skipping sandbox migration check.");
@@ -4556,24 +4558,25 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
     };
 
     // Check if sandbox exists and is READY.
-    let ready = right_core::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
+    let ready = right_openshell::openshell::is_sandbox_ready(&mut grpc, &sb_name).await?;
     if !ready {
         // Sandbox doesn't exist or isn't ready — no migration needed.
         return Ok(());
     }
 
     // Get active policy from sandbox.
-    let active_policy = match right_core::openshell::get_active_policy(&mut grpc, &sb_name).await? {
-        Some(p) => p,
-        None => {
-            println!(
-                "Warning: cannot retrieve active policy for sandbox '{}'. \
+    let active_policy =
+        match right_openshell::openshell::get_active_policy(&mut grpc, &sb_name).await? {
+            Some(p) => p,
+            None => {
+                println!(
+                    "Warning: cannot retrieve active policy for sandbox '{}'. \
                  If you changed filesystem policy, manually back up and recreate the sandbox.",
-                sb_name
-            );
-            return Ok(());
-        }
-    };
+                    sb_name
+                );
+                return Ok(());
+            }
+        };
 
     // Read new policy from disk.
     let policy_path = config
@@ -4590,9 +4593,9 @@ async fn maybe_migrate_sandbox(home: &Path, agent_name: &str) -> miette::Result<
 
     let policy_yaml = std::fs::read_to_string(&policy_path)
         .map_err(|e| miette::miette!("read {}: {e:#}", policy_path.display()))?;
-    let new_policy = right_core::openshell::parse_policy_yaml_filesystem(&policy_yaml)?;
+    let new_policy = right_openshell::openshell::parse_policy_yaml_filesystem(&policy_yaml)?;
 
-    if right_core::openshell::filesystem_policy_changed(&active_policy, &new_policy) {
+    if right_openshell::openshell::filesystem_policy_changed(&active_policy, &new_policy) {
         println!("\nFilesystem policy changed — sandbox migration required.");
         let confirmed =
             inquire::Confirm::new("migrate sandbox now? (backup old, create new, restore data)")
@@ -4644,7 +4647,7 @@ async fn perform_migration(
         ));
     }
 
-    let old_ssh_host = right_core::openshell::ssh_host_for_sandbox(old_sandbox);
+    let old_ssh_host = right_openshell::openshell::ssh_host_for_sandbox(old_sandbox);
     let backup_base = right_core::config::backups_dir(home, agent_name);
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
     let backup_dir = backup_base.join(&timestamp);
@@ -4653,7 +4656,7 @@ async fn perform_migration(
         .map_err(|e| miette::miette!("failed to create backup dir: {e:#}"))?;
 
     let backup_tar = backup_dir.join("sandbox.tar.gz");
-    right_core::openshell::ssh_tar_download(
+    right_openshell::openshell::ssh_tar_download(
         &old_ssh_config,
         &old_ssh_host,
         "sandbox",
@@ -4680,7 +4683,7 @@ async fn perform_migration(
     right_codegen::run_single_agent_codegen(home, &agent_def, &self_exe, false)?;
 
     let staging = agent_dir.join("staging");
-    right_core::openshell::prepare_staging_dir(&agent_dir, &staging)?;
+    right_openshell::openshell::prepare_staging_dir(&agent_dir, &staging)?;
 
     let migration_config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
     let policy_path = migration_config
@@ -4691,13 +4694,13 @@ async fn perform_migration(
         .unwrap_or_else(|| agent_dir.join("policy.yaml"));
 
     let mut child =
-        right_core::openshell::spawn_sandbox(&new_sandbox, &policy_path, Some(&staging))?;
+        right_openshell::openshell::spawn_sandbox(&new_sandbox, &policy_path, Some(&staging))?;
 
-    let mut grpc = right_core::openshell::connect_grpc(mtls_dir).await?;
+    let mut grpc = right_openshell::openshell::connect_grpc(mtls_dir).await?;
 
     // Wait for READY (race with child exit).
     tokio::select! {
-        result = right_core::openshell::wait_for_ready(&mut grpc, &new_sandbox, 120, 2) => {
+        result = right_openshell::openshell::wait_for_ready(&mut grpc, &new_sandbox, 120, 2) => {
             result?;
             drop(child);
         }
@@ -4716,8 +4719,9 @@ async fn perform_migration(
 
     // --- Step 3/6: Wait for SSH ---
     println!("Step 3/6: Waiting for SSH transport...");
-    let sandbox_id = right_core::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox).await?;
-    right_core::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
+    let sandbox_id =
+        right_openshell::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox).await?;
+    right_openshell::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
     println!("  SSH transport ready.");
 
     // --- Step 4/6: Generate SSH config ---
@@ -4727,19 +4731,20 @@ async fn perform_migration(
         .into_diagnostic()
         .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
     let new_ssh_config =
-        right_core::openshell::generate_ssh_config(&new_sandbox, &ssh_config_dir).await?;
+        right_openshell::openshell::generate_ssh_config(&new_sandbox, &ssh_config_dir).await?;
     println!("  SSH config written to {}", new_ssh_config.display());
 
     // --- Step 5/6: Restore data ---
     println!("Step 5/6: Restoring sandbox data...");
-    let new_ssh_host = right_core::openshell::ssh_host_for_sandbox(&new_sandbox);
+    let new_ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&new_sandbox);
     if let Err(e) =
-        right_core::openshell::ssh_tar_upload(&new_ssh_config, &new_ssh_host, &backup_tar, 600).await
+        right_openshell::openshell::ssh_tar_upload(&new_ssh_config, &new_ssh_host, &backup_tar, 600)
+            .await
     {
         // Rollback: delete new sandbox, keep old, report error.
         eprintln!("Restore failed — rolling back: deleting new sandbox '{new_sandbox}'...");
-        right_core::openshell::delete_sandbox(&new_sandbox).await;
-        let _ = right_core::openshell::wait_for_deleted(&mut grpc, &new_sandbox, 60, 2).await;
+        right_openshell::openshell::delete_sandbox(&new_sandbox).await;
+        let _ = right_openshell::openshell::wait_for_deleted(&mut grpc, &new_sandbox, 60, 2).await;
         // Remove new SSH config (best-effort).
         let _ = std::fs::remove_file(&new_ssh_config);
         return Err(miette::miette!(
@@ -4757,11 +4762,11 @@ async fn perform_migration(
 
     // Tear down the old sandbox's ControlMaster before we remove its config.
     // Best-effort — the master may already be dead if the bot exited cleanly.
-    let old_socket = right_core::openshell::control_master_socket_path(
+    let old_socket = right_openshell::openshell::control_master_socket_path(
         &home.join("run").join("ssh"),
         old_sandbox,
     );
-    right_core::openshell::tear_down_control_master(
+    right_openshell::openshell::tear_down_control_master(
         &old_ssh_config,
         &old_ssh_host,
         &old_socket,
@@ -4770,8 +4775,8 @@ async fn perform_migration(
 
     // Delete old sandbox (best-effort).
     println!("  Deleting old sandbox '{old_sandbox}'...");
-    right_core::openshell::delete_sandbox(old_sandbox).await;
-    let _ = right_core::openshell::wait_for_deleted(&mut grpc, old_sandbox, 60, 2).await;
+    right_openshell::openshell::delete_sandbox(old_sandbox).await;
+    let _ = right_openshell::openshell::wait_for_deleted(&mut grpc, old_sandbox, 60, 2).await;
 
     // Remove old SSH config (best-effort).
     let _ = std::fs::remove_file(&old_ssh_config);

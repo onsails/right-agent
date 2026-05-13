@@ -3,8 +3,8 @@
 
 #![cfg(unix)]
 
-use right_core::openshell;
-use right_core::test_support::TestSandbox;
+use right_openshell::openshell;
+use right_openshell::test_support::TestSandbox;
 
 #[tokio::test]
 async fn control_master_engages_after_first_ssh_call() {

@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 rand = { workspace = true }
 right-core = { path = "../right-core", version = "*" }
+right-openshell = { path = "../right-openshell", version = "*" }
 right-ui = { path = "../right-ui", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
@@ -62,11 +63,12 @@ uuid = { workspace = true }
 fastrand = "2"
 
 [features]
-test-support = ["right-core/test-support"]
+test-support = ["right-openshell/test-support"]
 
 [dev-dependencies]
 insta = { workspace = true }
-right-core = { path = "../right-core", version = "*", features = ["test-support"] }
+right-core = { path = "../right-core", version = "*" }
+right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
 right-db = { path = "../right-db", version = "*" }
 tokio = { version = "1.52", features = ["test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }

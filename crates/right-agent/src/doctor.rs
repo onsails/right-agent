@@ -31,7 +31,9 @@ impl DoctorCheck {
             CheckStatus::Warn => Glyph::Warn,
             CheckStatus::Fail => Glyph::Err,
         };
-        let mut line = ui::status(glyph).noun(self.name.clone()).verb(self.detail.clone());
+        let mut line = ui::status(glyph)
+            .noun(self.name.clone())
+            .verb(self.detail.clone());
         if let Some(ref f) = self.fix {
             line = line.fix(f.clone());
         }
@@ -175,15 +177,16 @@ fn check_sandbox_for_agent(
     config: Option<&crate::agent::types::AgentConfig>,
 ) -> Option<DoctorCheck> {
     // Only check if OpenShell is available.
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         _ => return None, // OpenShell not ready — skip sandbox check
     };
 
     let explicit_sandbox_name = config
         .and_then(|c| c.sandbox.as_ref())
         .and_then(|s| s.name.as_deref());
-    let sandbox = right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
+    let sandbox =
+        right_openshell::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name);
 
     // Requires a tokio runtime — skip gracefully in sync test contexts.
     let handle = match tokio::runtime::Handle::try_current() {
@@ -193,8 +196,8 @@ fn check_sandbox_for_agent(
 
     let result = tokio::task::block_in_place(|| {
         handle.block_on(async {
-            let mut client = right_core::openshell::connect_grpc(&mtls_dir).await?;
-            right_core::openshell::is_sandbox_ready(&mut client, &sandbox).await
+            let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+            right_openshell::openshell::is_sandbox_ready(&mut client, &sandbox).await
         })
     });
 
@@ -209,9 +212,7 @@ fn check_sandbox_for_agent(
             name: format!("sandbox/{agent_name}"),
             status: CheckStatus::Fail,
             detail: format!("sandbox '{sandbox}' not found"),
-            fix: Some(format!(
-                "Run `right agent init {agent_name}` to create it"
-            )),
+            fix: Some(format!("Run `right agent init {agent_name}` to create it")),
         }),
         Err(e) => Some(DoctorCheck {
             name: format!("sandbox/{agent_name}"),
@@ -632,9 +633,7 @@ fn fetch_webhook_info(token: &str) -> Result<WebhookInfo, String> {
             Ok(WebhookInfo {
                 url: result["url"].as_str().unwrap_or("").to_string(),
                 pending_update_count: result["pending_update_count"].as_u64().unwrap_or(0),
-                last_error_message: result["last_error_message"]
-                    .as_str()
-                    .map(|s| s.to_string()),
+                last_error_message: result["last_error_message"].as_str().map(|s| s.to_string()),
             })
         })
     })
@@ -944,7 +943,7 @@ See: https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespace
 /// Verifies ca.crt, tls.crt, tls.key in ~/.config/openshell/gateways/openshell/mtls/.
 /// Severity: Fail — without mTLS certs, gRPC connection to OpenShell gateway is impossible.
 fn check_openshell_mtls_certs() -> DoctorCheck {
-    let mtls_dir = right_core::openshell::default_mtls_dir();
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
     let required = ["ca.crt", "tls.crt", "tls.key"];
     let missing: Vec<&str> = required
         .iter()
@@ -977,7 +976,7 @@ fn check_openshell_mtls_certs() -> DoctorCheck {
 /// Connects to 127.0.0.1:8080 with mTLS and calls Health RPC.
 /// Uses block_in_place to run async gRPC call from sync context.
 fn check_openshell_gateway_health() -> DoctorCheck {
-    let mtls_dir = right_core::openshell::default_mtls_dir();
+    let mtls_dir = right_openshell::openshell::default_mtls_dir();
 
     // Skip if certs are missing (the mtls check already flags this)
     if !mtls_dir.join("ca.crt").exists() {
@@ -995,11 +994,11 @@ fn check_openshell_gateway_health() -> DoctorCheck {
             .build()
             .map_err(|e| format!("failed to create runtime: {e}"))?;
         rt.block_on(async {
-            let mut client = right_core::openshell::connect_grpc(&mtls_dir)
+            let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
             let resp = client
-                .health(right_core::openshell_proto::openshell::v1::HealthRequest {})
+                .health(right_openshell::openshell_proto::openshell::v1::HealthRequest {})
                 .await
                 .map_err(|e| format!("Health RPC failed: {e:#}"))?;
             let status = resp.into_inner().status;

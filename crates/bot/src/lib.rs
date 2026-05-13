@@ -1,9 +1,9 @@
 #![warn(unreachable_pub)]
 
+pub(crate) mod cc;
 mod config_watcher;
 pub(crate) mod cron;
 pub(crate) mod cron_delivery;
-pub(crate) mod cc;
 mod keepalive;
 pub(crate) mod login;
 pub(crate) mod reflection;
@@ -187,8 +187,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Per-agent codegen: regenerate all derived files from agent.yaml + identity files.
     // This ensures policy.yaml, settings.json, mcp.json, etc. reflect the current config
     // even after a config change triggered restart.
-    let self_exe =
-        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("right"));
+    let self_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("right"));
     let agent_def = right_agent::agent::discover_single_agent(&agent_dir)?;
     right_codegen::run_single_agent_codegen(&home, &agent_def, &self_exe, args.debug)?;
     tracing::info!(agent = %args.agent, "per-agent codegen complete");
@@ -585,7 +584,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // None when running without sandbox (mode: none).
     let resolved_sandbox: Option<String> = if is_sandboxed {
         let explicit_sandbox_name = config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-        Some(right_core::openshell::resolve_sandbox_name(
+        Some(right_openshell::openshell::resolve_sandbox_name(
             &args.agent,
             explicit_sandbox_name,
         ))
@@ -608,22 +607,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         let sandbox = resolved_sandbox.clone().unwrap();
 
         // Verify OpenShell is ready before attempting gRPC connection.
-        let mtls_dir = match right_core::openshell::preflight_check() {
-            right_core::openshell::OpenShellStatus::Ready(dir) => dir,
-            right_core::openshell::OpenShellStatus::NotInstalled => {
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+            right_openshell::openshell::OpenShellStatus::NotInstalled => {
                 return Err(miette::miette!(
                     help = "Install from https://github.com/NVIDIA/OpenShell, or set `sandbox: mode: none` in agent.yaml",
                     "OpenShell is not installed"
                 ));
             }
-            right_core::openshell::OpenShellStatus::NoGateway(_) => {
+            right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
                 return Err(miette::miette!(
                     help =
                         "Run `openshell gateway start`, or set `sandbox: mode: none` in agent.yaml",
                     "OpenShell gateway is not running"
                 ));
             }
-            right_core::openshell::OpenShellStatus::BrokenGateway(dir) => {
+            right_openshell::openshell::OpenShellStatus::BrokenGateway(dir) => {
                 return Err(miette::miette!(
                     help = "Try `openshell gateway destroy && openshell gateway start`,\n  \
                             or set `sandbox: mode: none` in agent.yaml",
@@ -634,9 +633,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         };
 
         // Check if sandbox already exists and is READY.
-        let mut grpc_client = right_core::openshell::connect_grpc(&mtls_dir).await?;
+        let mut grpc_client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
         let sandbox_exists =
-            right_core::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
+            right_openshell::openshell::is_sandbox_ready(&mut grpc_client, &sandbox).await?;
 
         if !sandbox_exists {
             return Err(miette::miette!(
@@ -651,8 +650,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         // Resolve host IP from inside sandbox for policy allowed_ips.
         let sandbox_id =
-            right_core::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
-        let host_ip = right_core::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
+            right_openshell::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
+        let host_ip =
+            right_openshell::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
 
         // Regenerate policy with resolved host IP and apply.
         let network_policy = config.network_policy;
@@ -667,29 +667,34 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         // cannot be determined (parse failure, gRPC error, missing payload),
         // behave as if drift IS present — skip apply and log WARN. A bot that
         // runs with stale policy is better than one that crash-loops.
-        let desired_filesystem =
-            match right_core::openshell::parse_policy_yaml_filesystem(&policy_content) {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    tracing::warn!(agent = %args.agent, "could not parse generated policy.yaml for drift check: {e:#}");
-                    None
-                }
-            };
-        let active_filesystem =
-            match right_core::openshell::get_active_policy(&mut grpc_client, &sandbox).await {
-                Ok(Some(a)) => Some(a),
-                Ok(None) => {
-                    tracing::warn!(agent = %args.agent, "active policy has no payload; skipping drift check");
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!(agent = %args.agent, "could not fetch active policy for drift check: {e:#}");
-                    None
-                }
-            };
+        let desired_filesystem = match right_openshell::openshell::parse_policy_yaml_filesystem(
+            &policy_content,
+        ) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(agent = %args.agent, "could not parse generated policy.yaml for drift check: {e:#}");
+                None
+            }
+        };
+        let active_filesystem = match right_openshell::openshell::get_active_policy(
+            &mut grpc_client,
+            &sandbox,
+        )
+        .await
+        {
+            Ok(Some(a)) => Some(a),
+            Ok(None) => {
+                tracing::warn!(agent = %args.agent, "active policy has no payload; skipping drift check");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(agent = %args.agent, "could not fetch active policy for drift check: {e:#}");
+                None
+            }
+        };
         let drifted = match (active_filesystem, desired_filesystem) {
             (Some(active), Some(desired)) => {
-                right_core::openshell::filesystem_policy_changed(&active, &desired)
+                right_openshell::openshell::filesystem_policy_changed(&active, &desired)
             }
             _ => true,
         };
@@ -718,15 +723,15 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         std::fs::create_dir_all(&ssh_config_dir)
             .map_err(|e| miette::miette!("failed to create ssh config dir: {e:#}"))?;
         let config_path =
-            right_core::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
+            right_openshell::openshell::generate_ssh_config(&sandbox, &ssh_config_dir).await?;
 
         // Clean up stale ControlMaster socket from a SIGKILL'd previous bot.
         // The next ssh call (inbox/outbox mkdir below) implicitly establishes
         // a fresh master via ControlMaster=auto in the config we just wrote.
         let cm_socket =
-            right_core::openshell::control_master_socket_path(&ssh_config_dir, &sandbox);
-        let cm_host = right_core::openshell::ssh_host_for_sandbox(&sandbox);
-        right_core::openshell::clean_stale_control_master(&config_path, &cm_host, &cm_socket)
+            right_openshell::openshell::control_master_socket_path(&ssh_config_dir, &sandbox);
+        let cm_host = right_openshell::openshell::ssh_host_for_sandbox(&sandbox);
+        right_openshell::openshell::clean_stale_control_master(&config_path, &cm_host, &cm_socket)
             .await?;
 
         tracing::info!(agent = %args.agent, "OpenShell sandbox ready");
@@ -746,8 +751,8 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // appended directives in generate_ssh_config).
     if is_sandboxed && let Some(ref cfg_path) = ssh_config_path {
         let ssh_host =
-            right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
-        right_core::openshell::ssh_exec(
+            right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.as_deref().unwrap());
+        right_openshell::openshell::ssh_exec(
             cfg_path,
             &ssh_host,
             &["mkdir", "-p", "/sandbox/inbox", "/sandbox/outbox"],
@@ -762,7 +767,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // settings.json, etc. before any claude -p invocations.
     let sync_handle = if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
         let sandbox = resolved_sandbox.clone().unwrap();
-        let sbox = right_core::sandbox_exec::SandboxExec::new(
+        let sbox = right_openshell::sandbox_exec::SandboxExec::new(
             mtls_dir.clone(),
             sandbox,
             sandbox_id.clone(),
@@ -988,9 +993,9 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     if let (Some(cfg_path), Some(sandbox_name)) = (shutdown_ssh_config, shutdown_sandbox) {
         let ssh_config_dir = home.join("run").join("ssh");
         let socket =
-            right_core::openshell::control_master_socket_path(&ssh_config_dir, &sandbox_name);
-        let host = right_core::openshell::ssh_host_for_sandbox(&sandbox_name);
-        right_core::openshell::tear_down_control_master(&cfg_path, &host, &socket).await;
+            right_openshell::openshell::control_master_socket_path(&ssh_config_dir, &sandbox_name);
+        let host = right_openshell::openshell::ssh_host_for_sandbox(&sandbox_name);
+        right_openshell::openshell::tear_down_control_master(&cfg_path, &host, &socket).await;
     }
 
     tracing::info!("graceful shutdown complete");
@@ -1026,10 +1031,7 @@ async fn run_drain_loop(
             _ = interval.tick() => {}
             _ = shutdown.cancelled() => return,
         }
-        if !matches!(
-            wrapper.status(),
-            right_memory::MemoryStatus::Healthy
-        ) {
+        if !matches!(wrapper.status(), right_memory::MemoryStatus::Healthy) {
             continue;
         }
         let conn = match right_db::open_connection(&agent_db, false) {
@@ -1054,11 +1056,7 @@ async fn run_drain_loop(
             }
         })
         .await;
-        if report.deleted
-            + report.dropped_age
-            + report.dropped_client
-            + report.bumped_attempts
-            > 0
+        if report.deleted + report.dropped_age + report.dropped_client + report.bumped_attempts > 0
         {
             tracing::debug!(?report, "drain tick");
         }

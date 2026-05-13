@@ -4,38 +4,19 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
-[features]
-test-support = []
-
 [dependencies]
+dirs = { workspace = true }
+futures = { workspace = true }
 miette = { workspace = true }
+right-openshell = { path = "../right-openshell", version = "*" }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-serde-saphyr = { workspace = true }
-chrono = { workspace = true }
-dirs = { workspace = true }
-tokio = { workspace = true }
-url = { workspace = true }
 walkdir = { workspace = true }
-sha2 = { workspace = true }
-fs4 = { workspace = true }
-futures = { workspace = true }
-nix = { workspace = true }
-tempfile = { workspace = true }
-tonic = { workspace = true }
-tonic-prost = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
-which = { workspace = true }
-http = { workspace = true }
-hyper-util = { workspace = true }
-right-process = { path = "../right-process", version = "*" }
-
-[build-dependencies]
-tonic-prost-build = "0.14"
 
 [dev-dependencies]
-right-core = { path = ".", features = ["test-support"] }
-tokio-stream = { version = "0.1", features = ["net"] }
+right-core = { path = "." }

@@ -5,6 +5,7 @@
 //! Agent-owned files live directly in `/sandbox/` and are never overwritten.
 
 use futures::stream::{self, StreamExt};
+use right_openshell::{openshell, sandbox_exec::SandboxExec};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -151,11 +152,7 @@ pub fn build_manifest(agent_dir: &Path) -> miette::Result<Manifest> {
 /// Create an atomic symlink: tmp link → rm old → mv into place.
 ///
 /// Uses `ln -sfn` (works for both files and directories).
-async fn atomic_symlink(
-    sbox: &crate::sandbox_exec::SandboxExec,
-    target: &str,
-    link_path: &str,
-) -> miette::Result<()> {
+async fn atomic_symlink(sbox: &SandboxExec, target: &str, link_path: &str) -> miette::Result<()> {
     // Ensure parent directory exists.
     if let Some(parent) = Path::new(link_path).parent() {
         let parent_str = parent.to_string_lossy();
@@ -192,7 +189,7 @@ async fn atomic_symlink(
 ///
 /// Returns the full platform path (for GC tracking).
 pub async fn deploy_file(
-    sbox: &crate::sandbox_exec::SandboxExec,
+    sbox: &SandboxExec,
     name: &str,
     content: &[u8],
     hash: &str,
@@ -218,7 +215,7 @@ pub async fn deploy_file(
             .map_err(|e| miette::miette!("write temp file {}: {e:#}", tmp_file.display()))?;
 
         let upload_dest = format!("{platform_dir}/");
-        crate::openshell::upload_file(sbox.sandbox_name(), &tmp_file, &upload_dest).await?;
+        openshell::upload_file(sbox.sandbox_name(), &tmp_file, &upload_dest).await?;
 
         let uploaded_path = format!("{platform_dir}/{name}");
         let (_, code) = sbox
@@ -239,7 +236,7 @@ pub async fn deploy_file(
 ///
 /// Returns the full platform path (for GC tracking).
 pub async fn deploy_directory(
-    sbox: &crate::sandbox_exec::SandboxExec,
+    sbox: &SandboxExec,
     name: &str,
     host_dir: &std::path::Path,
     hash: &str,
@@ -307,7 +304,7 @@ pub async fn deploy_directory(
                         }
                         _ => format!("{base}/"),
                     };
-                    crate::openshell::upload_file(&sandbox_name, &host_path, &dest_dir).await?;
+                    openshell::upload_file(&sandbox_name, &host_path, &dest_dir).await?;
                     Ok(())
                 }
             })
@@ -327,10 +324,7 @@ pub async fn deploy_directory(
 /// Garbage-collect stale entries from /platform/.
 ///
 /// Best-effort: logs warnings but does not fail.
-pub async fn gc_platform(
-    sbox: &crate::sandbox_exec::SandboxExec,
-    active_targets: &[String],
-) -> miette::Result<()> {
+pub async fn gc_platform(sbox: &SandboxExec, active_targets: &[String]) -> miette::Result<()> {
     let active_set: std::collections::HashSet<&str> =
         active_targets.iter().map(|s| s.as_str()).collect();
 
@@ -377,10 +371,7 @@ pub async fn gc_platform(
 }
 
 /// Deploy all entries from a manifest, then GC stale entries.
-pub async fn deploy_manifest(
-    sbox: &crate::sandbox_exec::SandboxExec,
-    manifest: &Manifest,
-) -> miette::Result<()> {
+pub async fn deploy_manifest(sbox: &SandboxExec, manifest: &Manifest) -> miette::Result<()> {
     // Ensure /platform/ exists.
     let (_, code) = sbox.exec(&["mkdir", "-p", PLATFORM_DIR]).await?;
     if code != 0 {

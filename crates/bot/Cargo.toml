@@ -8,6 +8,7 @@ right-agent = { path = "../right-agent", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-core = { path = "../right-core", version = "*" }
+right-openshell = { path = "../right-openshell", version = "*" }
 right-process = { path = "../right-process", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
@@ -52,6 +53,7 @@ whisper-rs = { version = "0.16", default-features = false, features = ["metal"] 
 
 [dev-dependencies]
 right-agent = { path = "../right-agent", version = "*" }
-right-core = { path = "../right-core", version = "*", features = ["test-support"] }
+right-core = { path = "../right-core", version = "*" }
+right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"
