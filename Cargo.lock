@@ -2898,6 +2898,7 @@ dependencies = [
  "right-db",
  "right-mcp",
  "right-memory",
+ "right-runtime-state",
  "rmcp",
  "rusqlite",
  "schemars 1.2.1",
@@ -2953,6 +2954,7 @@ dependencies = [
  "right-mcp",
  "right-memory",
  "right-platform-knobs",
+ "right-runtime-state",
  "rmcp",
  "rusqlite",
  "rusqlite_migration",
@@ -3002,6 +3004,7 @@ dependencies = [
  "right-memory",
  "right-platform-knobs",
  "right-prompt-safety",
+ "right-runtime-state",
  "rusqlite",
  "serde",
  "serde-saphyr",
@@ -3035,6 +3038,7 @@ dependencies = [
  "right-db",
  "right-mcp",
  "right-platform-knobs",
+ "right-runtime-state",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3050,7 +3054,6 @@ dependencies = [
 name = "right-core"
 version = "0.2.12"
 dependencies = [
- "base64",
  "chrono",
  "dirs",
  "fs4",
@@ -3063,7 +3066,6 @@ dependencies = [
  "owo-colors",
  "prost",
  "prost-types",
- "rand 0.10.1",
  "reqwest 0.13.3",
  "right-core",
  "serde",

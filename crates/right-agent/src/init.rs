@@ -187,7 +187,7 @@ pub fn init_agent(
     // Generate policy.yaml when sandbox mode is openshell.
     if matches!(ov.sandbox_mode, SandboxMode::Openshell) {
         let policy_yaml = right_codegen::policy::generate_policy(
-            crate::runtime::MCP_HTTP_PORT,
+            right_runtime_state::MCP_HTTP_PORT,
             &ov.network_policy,
             None,
         );

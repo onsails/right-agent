@@ -4,7 +4,7 @@ use minijinja::{Environment, context};
 use serde::Serialize;
 
 use right_core::agent_types::{AgentDef, RestartPolicy, SandboxMode};
-use right_core::runtime_state::{MCP_HTTP_PORT, PC_PORT};
+use right_runtime_state::{MCP_HTTP_PORT, PC_PORT};
 
 const PC_TEMPLATE: &str = include_str!("../templates/process-compose.yaml.j2");
 
