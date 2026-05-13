@@ -13,7 +13,6 @@ right-agent-config = { path = "../right-agent-config", version = "*" }
 right-bot = { path = "../bot", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-config = { path = "../right-config", version = "*" }
-right-core = { path = "../right-core", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
@@ -49,7 +48,6 @@ walkdir = { workspace = true }
 [dev-dependencies]
 assert_cmd = "2.2"
 predicates = "3.1"
-right-core = { path = "../right-core", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
 tempfile = "3.27"
 tower = { version = "0.5", features = ["util"] }

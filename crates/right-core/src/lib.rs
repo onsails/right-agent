@@ -6,5 +6,3 @@
 //! `right-cc` should not invalidate this crate's build cache.
 
 #![warn(unreachable_pub)]
-
-pub mod error;
