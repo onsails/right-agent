@@ -132,14 +132,22 @@ fn operating_instructions_constant_is_non_empty() {
 /// `IDLE_THRESHOLD_MIN` constant. The template is included verbatim via
 /// `include_str!`, so the number cannot be templated — this test fails when
 /// the constant changes without a matching prose update.
+///
+/// Whitespace is normalized before matching so markdown line-wrapping
+/// inside a paragraph doesn't break the check (`"2\nminutes"` still
+/// matches `"2 minutes"`).
 #[test]
 fn operating_instructions_cron_idle_threshold_matches_const() {
+    let normalized: String = crate::OPERATING_INSTRUCTIONS
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let needle = format!(
         "idle for **{} minutes**",
         right_core::time_constants::IDLE_THRESHOLD_MIN
     );
     assert!(
-        crate::OPERATING_INSTRUCTIONS.contains(&needle),
+        normalized.contains(&needle),
         "OPERATING_INSTRUCTIONS must mention `idle for **{} minutes**` to match \
          right_core::time_constants::IDLE_THRESHOLD_MIN",
         right_core::time_constants::IDLE_THRESHOLD_MIN
@@ -149,7 +157,7 @@ fn operating_instructions_cron_idle_threshold_matches_const() {
         right_core::time_constants::IDLE_THRESHOLD_MIN
     );
     assert!(
-        crate::OPERATING_INSTRUCTIONS.contains(&promise_needle),
+        normalized.contains(&promise_needle),
         "OPERATING_INSTRUCTIONS must spell out the \"never promise sooner than {} minutes\" rule",
         right_core::time_constants::IDLE_THRESHOLD_MIN
     );
