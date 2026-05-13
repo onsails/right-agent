@@ -24,6 +24,7 @@ hmac = { workspace = true }
 rand = { workspace = true }
 right-core = { path = "../right-core", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
+right-stt = { path = "../right-stt", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }

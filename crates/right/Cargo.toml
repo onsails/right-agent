@@ -17,6 +17,7 @@ right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
 right-runtime-state = { path = "../right-runtime-state", version = "*" }
+right-stt = { path = "../right-stt", version = "*" }
 clap = { workspace = true }
 dirs = { workspace = true }
 miette = { workspace = true }

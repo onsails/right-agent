@@ -131,7 +131,7 @@ pub(crate) async fn transcribe_or_marker(
 mod transcribe_or_marker_tests {
     use super::*;
     use right_agent_config::WhisperModel;
-    use right_core::stt::model_cache_path;
+    use right_stt::model_cache_path;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -146,7 +146,7 @@ mod transcribe_or_marker_tests {
             .unwrap_or_else(|| dirs::home_dir().unwrap().join(".right"));
         let p = model_cache_path(&home, WhisperModel::Tiny);
         if !p.exists() {
-            right_core::stt::download_model(WhisperModel::Tiny, &p)
+            right_stt::download_model(WhisperModel::Tiny, &p)
                 .await
                 .unwrap();
         }
@@ -225,7 +225,7 @@ mod combine_tests {
 mod tests {
     use super::*;
     use right_agent_config::WhisperModel;
-    use right_core::stt::model_cache_path;
+    use right_stt::model_cache_path;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -240,7 +240,7 @@ mod tests {
             .unwrap_or_else(|| dirs::home_dir().unwrap().join(".right"));
         let p = model_cache_path(&home, WhisperModel::Tiny);
         if !p.exists() {
-            right_core::stt::download_model(WhisperModel::Tiny, &p)
+            right_stt::download_model(WhisperModel::Tiny, &p)
                 .await
                 .unwrap();
         }

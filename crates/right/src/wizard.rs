@@ -1093,7 +1093,7 @@ async fn memory_setup(
 /// Linux: print install instructions only.
 /// Returns true iff ffmpeg is in PATH after this call.
 pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
-    if right_core::stt::ffmpeg_available() {
+    if right_stt::ffmpeg_available() {
         return Ok(true);
     }
 
@@ -1144,7 +1144,7 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 );
                 return Ok(false);
             }
-            if !right_core::stt::ffmpeg_available() {
+            if !right_stt::ffmpeg_available() {
                 println!(
                     "{}",
                     right_core::ui::status(right_core::ui::Glyph::Warn)
