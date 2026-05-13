@@ -169,6 +169,9 @@ The `## Cron Delivery Contract` block tells the agent that its
 structured output is the Telegram delivery channel and that the turn
 has no live user. See [issue #48](https://github.com/onsails/right-agent/issues/48)
 for the production incidents that motivated this section.
+The operating instructions also define the cron idle UX rule: results are
+auto-delivered only after the chat has been idle for 2 minutes, and the
+agent must never promise delivery sooner than 2 minutes.
 
 ### Compiled-in Content
 
