@@ -58,10 +58,10 @@ async fn sync_cycle(
     sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     // Build manifest of platform-managed files
-    let manifest = right_core::platform_store::build_manifest(agent_dir)?;
+    let manifest = right_platform_store::build_manifest(agent_dir)?;
 
     // Deploy to /platform/ with content-addressed names + symlinks
-    right_core::platform_store::deploy_manifest(sbox, &manifest).await?;
+    right_platform_store::deploy_manifest(sbox, &manifest).await?;
 
     // Verify .claude.json (separate flow — not content-addressed)
     verify_claude_json(agent_dir, sbox.sandbox_name()).await?;
