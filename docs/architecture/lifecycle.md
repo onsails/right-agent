@@ -34,12 +34,12 @@ right bot --agent <name>  (spawned by process-compose)
   │   ├─ TOOLS.md, skills install, policy.yaml
   │   └─ data.db init, git init, secret generation
   ├─ Clear Telegram webhook, verify bot identity
-  ├─ Sandbox lifecycle:
+  ├─ Sandbox lifecycle (`right-openshell`):
   │   ├─ Check if sandbox exists via gRPC → reuse with policy hot-reload
   │   ├─ Or create new: prepare staging dir, spawn sandbox, wait for READY
   │   └─ Generate SSH config for sandbox exec
-  ├─ Initial sync (blocking): deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
-  ├─ Start background sync task (every 5 min — re-deploys /sandbox/.platform/, GC stale entries)
+  ├─ Initial sync (blocking): `right-platform-store` deploys platform files to /sandbox/.platform/ (content-addressed + symlinks)
+  ├─ Start background sync task (every 5 min — `right-platform-store` re-deploys /sandbox/.platform/, GC stale entries)
   ├─ Start cron engine, OAuth callback server, refresh scheduler
   └─ Start teloxide long-polling dispatcher
 
@@ -67,7 +67,7 @@ Per message:
 
 Config change (right agent config):
   ├─ Writes agent.yaml
-  ├─ Detects filesystem policy change via gRPC GetSandboxPolicyStatus
+  ├─ Detects filesystem policy change via `right-openshell` gRPC GetSandboxPolicyStatus
   │   ├─ Network-only change: config_watcher → bot restart → hot-reload
   │   └─ Filesystem change: sandbox migration (below)
   ├─ config_watcher detects change (2s debounce)
@@ -95,7 +95,7 @@ right agent rebootstrap <name> [-y]
   ├─ Stop <name>-bot via process-compose REST API (best-effort)
   ├─ Backup IDENTITY.md / SOUL.md / USER.md (host + sandbox copies)
   │   to ~/.right/backups/<agent>/rebootstrap-<YYYYMMDD-HHMM>/
-  ├─ rm -f the same files from /sandbox/ via gRPC exec_in_sandbox
+  ├─ rm -f the same files from /sandbox/ via `right-openshell` gRPC exec_in_sandbox
   ├─ Remove host copies, write fresh BOOTSTRAP.md from BOOTSTRAP_INSTRUCTIONS
   ├─ UPDATE sessions SET is_active = 0 WHERE is_active = 1 in data.db
   └─ Restart <name>-bot if we stopped it

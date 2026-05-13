@@ -2,14 +2,18 @@
 
 ## Workspace
 
-Thirteen crates in a Cargo workspace:
+Seventeen crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
 | **right-platform-knobs** | `crates/right-platform-knobs/` | UX/prose tunables that should not invalidate platform foundations |
 | **right-prompt-safety** | `crates/right-prompt-safety/` | Prompt-injection safety wrappers over `ironclaw_safety` |
 | **right-runtime-state** | `crates/right-runtime-state/` | process-compose ports, runtime state JSON, and API-token generation |
-| **right-core** | `crates/right-core/` | Stable platform foundation: error/ui/config/OpenShell/proto/platform_store/test_support |
+| **right-core** | `crates/right-core/` | Shared config and error primitives pending Phase 4 |
+| **right-ui** | `crates/right-ui/` | Brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection |
+| **right-process** | `crates/right-process/` | Cancel-safe process-group child handling |
+| **right-openshell** | `crates/right-openshell/` | OpenShell gRPC/proto, CLI wrappers, sandbox exec, and live-test support |
+| **right-platform-store** | `crates/right-platform-store/` | Content-addressed platform-managed sandbox file deployment |
 | **right-agent-config** | `crates/right-agent-config/` | Agent configuration DTOs, discovery DTOs, sandbox/memory/STT schema types |
 | **right-stt** | `crates/right-stt/` | Host-side STT model cache paths, ffmpeg detection, model download, cache warming |
 | **right-db** | `crates/right-db/` | Per-agent SQLite plumbing: `open_connection`, central migration registry, `sql/v*.sql` |
@@ -26,32 +30,30 @@ Consumers (CLI, bot, and agent internals) import directly from the source crate.
 This keeps the build-cache invariant: an edit inside `right-codegen` rebuilds
 `right-codegen` plus its direct consumers, not `right-agent`.
 
-**Crate boundaries:** `right-core` is the **stable platform foundation**.
-Bar for adding to it: (1) used by 2+ leaf crates, AND (2) not specific
-to any single subsystem. Anticipating reuse is not a reason — promote
-on demand, not on prediction.
+**Crate boundaries:** `right-core` is limited to shared config and error
+primitives until Phase 4. Bar for adding to it: (1) used by 2+ leaf crates,
+AND (2) not specific to any single subsystem. Anticipating reuse is not a
+reason — promote on demand, not on prediction.
 
 Every other crate has a single responsibility (see workspace table).
 New code that doesn't fit an existing crate's charter gets its own
 crate, not a misfit addition. Default placement for new code is the
 most-specific leaf crate.
 
-`right-core` hosts stable platform primitives: error rendering,
-brand-conformant UI atoms, configuration parsing, the OpenShell gRPC client
-and generated proto types, process-group and sandbox-exec helpers,
-`platform_store`, and `test_support::TestSandbox`.
+Brand-conformant UI lives in `right-ui`; cancel-safe process-group child
+handling lives in `right-process`; OpenShell gRPC/proto, CLI wrappers,
+sandbox exec, and live-test support live in `right-openshell`; platform-store
+deployment lives in `right-platform-store`.
 Agent configuration DTOs live in `right-agent-config`; host-side STT cache and
 download helpers live in `right-stt`. `right-core` must not re-export those
 modules because that would preserve the old rebuild edge.
-These modules change rarely; leaf-crate edits do not invalidate this build
-cache. `tonic-prost-build` lives in
-`crates/right-core/build.rs` and only re-runs when the OpenShell `.proto`
-files change.
+`tonic-prost-build` lives in `crates/right-openshell/build.rs` and only
+re-runs when the OpenShell `.proto` files change.
 
 `right-platform-knobs`, `right-prompt-safety`, and `right-runtime-state`
 are deliberately outside `right-core`: edits to UX/prose constants, memory
 prompt-safety wrappers, or process-compose runtime-state JSON must not
-invalidate OpenShell/proto/UI foundation code.
+invalidate config/error foundation code.
 
 `right-bot` owns two sibling subtrees: `bot::cc::*` for generic Claude Code
 subprocess plumbing (`invocation`, `prompt`, `stream`, `worker_reply`,
@@ -434,7 +436,7 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 ## Integration Tests Using Live Sandboxes
 
 Any test that needs a live OpenShell sandbox MUST create it via
-`right_core::test_support::TestSandbox::create("<test-name>")`. The helper:
+`right_openshell::test_support::TestSandbox::create("<test-name>")`. The helper:
 
 - Generates a unique `right-test-<name>` sandbox with a minimal permissive policy (wildcard `"**.*"` host on port 443, `binaries: "**"`).
 - Registers the sandbox in `test_cleanup` so sandboxes are deleted even under `panic = "abort"` (the panic hook drains the registry and calls `openshell sandbox delete`).
@@ -446,13 +448,13 @@ Consumers outside `right-agent`'s own unit tests depend on the `test-support` fe
 
 ```toml
 [dev-dependencies]
-right-core = { path = "...", features = ["test-support"] }
+right-openshell = { path = "...", features = ["test-support"] }
 ```
 
 Rules:
 
 - Never hardcode sandbox names (no `right-foo-test-lifecycle` fixtures).
-- Never invoke the `openshell` CLI from tests. Use `TestSandbox::exec` or the gRPC helpers in `right_core::openshell`.
+- Never invoke the `openshell` CLI from tests. Use `TestSandbox::exec` or the gRPC helpers in `right_openshell::openshell`.
 - Never add `#[ignore]` to sandbox tests. Dev machines have OpenShell.
 - Parallel caps (`SandboxTestSlot` / `acquire_sandbox_slot`) are unchanged — tests that create multiple sandboxes should still acquire a slot.
 
@@ -476,7 +478,7 @@ Rules:
 ## Brand-conformant CLI output
 
 Every user-facing TUI surface in `right` and `right-bot` MUST go through
-`right_core::ui::*` (see `crates/right-core/src/ui/`). Raw `println!` /
+`right_ui::*` (see `crates/right-ui/src/`). Raw `println!` /
 `eprintln!` of user-facing text is a review-blocking defect. Visual
 contract, atoms, and theme rules: `docs/brand-guidelines.html` and the
 redesign spec at

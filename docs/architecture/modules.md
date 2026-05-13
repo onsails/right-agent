@@ -21,15 +21,31 @@
 - `RuntimeState` / `AgentState` - persisted `<home>/run/state.json` schema.
 - `read_state`, `write_state`, `generate_pc_api_token` - runtime-state IO and process-compose API token generation.
 
-### right-core (stable platform foundation)
+### right-core
 
 - `config/` - `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
-- `ui/` - brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection.
+- `error.rs` - shared error primitives.
+
+### right-ui
+
+- `atoms.rs`, `line.rs`, `header.rs`, `splash.rs`, `writer.rs` - brand-conformant CLI atoms and blocks.
+- `recap.rs` - command recap rendering.
+- `prompts.rs` - interactive prompt helpers.
+- `theme.rs` - terminal theme detection.
+
+### right-process
+
+- `lib.rs` - cancel-safe process-group child handling via `ProcessGroupChild`.
+
+### right-openshell
+
 - `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
-- `platform_store.rs` - content-addressed platform store deployment to `/sandbox/.platform/`.
 - `sandbox_exec.rs` - clonable gRPC sandbox execution handle.
 - `test_cleanup.rs` and `test_support.rs` - live-sandbox test cleanup and `TestSandbox`.
-- Single-file modules: `error.rs`, `process_group.rs`.
+
+### right-platform-store
+
+- `lib.rs` - content-addressed platform-managed sandbox file deployment to `/sandbox/.platform/`.
 
 ### right-agent-config
 
@@ -82,7 +98,7 @@
 - `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
 - `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, and attachment delivery (with STT integration).
 - `login.rs` — token-based Claude login flow (setup-token, env var injection).
-- `sync.rs` — background platform-store sync to `/sandbox/.platform/`.
+- `sync.rs` — background `right-platform-store` sync to `/sandbox/.platform/`.
 - `cron.rs`, `cron_delivery.rs` — cron engine and delivery loop (resumes main session so cron results land in agent context).
 - `reflection.rs` — `reflect_on_failure` primitive (see Reflection Primitive).
 - `stt/` — host-side voice/video_note transcription (ffmpeg + whisper-rs + Russian markers).
