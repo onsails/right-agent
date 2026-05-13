@@ -24,6 +24,19 @@ Cron specs are stored in the agent database. The Rust runtime reconciles specs c
 
 ## Creating a Cron Job
 
+**Minimum delivery latency.** A cron notification is held in the delivery
+queue until the chat has been idle for **{{ idle_threshold_min }} minutes**
+(UX-politeness gate — see "Triggering ≠ delivery" below). Therefore:
+
+- Never promise the user a reminder sooner than {{ idle_threshold_min }}
+  minutes from now. The scheduled `run_at` can be sooner, but the user will
+  not actually see the message until the chat has been quiet for
+  {{ idle_threshold_min }} minutes.
+- If the user requests a reminder in less than {{ idle_threshold_min }}
+  minutes, say so plainly: "I can schedule it, but it won't reach you until
+  ~{{ idle_threshold_min }} minutes after you stop typing — want me to set it
+  for then instead?" Then act on their choice.
+
 `max_budget_usd` caps the dollar spend per invocation — Claude stops gracefully when the budget is reached. The default is `$2.0`, which covers most jobs including multi-step research. Only override it when the user explicitly asks for a different cap or the task is unusually expensive.
 
 Three job types are supported:
@@ -119,8 +132,9 @@ The job is queued for the cron engine. Lock check still applies — if the job i
    `notify` to `null`, no message is sent and the run records a
    `no_notify_reason` instead. Don't promise the user a message will arrive.
 2. If the cron does produce a notification, delivery is held until the chat
-   has been idle for **{{ idle_threshold_min }} minutes** (within CC's prompt
-   cache TTL). While the user is actively chatting, results queue up.
+   has been idle for **{{ idle_threshold_min }} minutes**. This is a
+   UX-politeness gate — cron messages must not interrupt an active
+   conversation. While the user is actively chatting, results queue up.
 
 If the user wants the result without waiting, suggest they call
 `mcp__right__cron_list_runs` after the job finishes — `delivery_status` and
