@@ -130,7 +130,8 @@ pub(crate) async fn transcribe_or_marker(
 #[cfg(test)]
 mod transcribe_or_marker_tests {
     use super::*;
-    use right_core::stt::{WhisperModel, model_cache_path};
+    use right_agent_config::WhisperModel;
+    use right_core::stt::model_cache_path;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
@@ -223,7 +224,8 @@ mod combine_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use right_core::stt::{WhisperModel, model_cache_path};
+    use right_agent_config::WhisperModel;
+    use right_core::stt::model_cache_path;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
