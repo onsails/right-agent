@@ -87,13 +87,13 @@ fn working_keyboard(
     match mode {
         ThinkingKeyboardMode::Collapsed => {
             row.push(teloxide::types::InlineKeyboardButton::callback(
-                "Show thinking",
+                "\u{1f4ad} Show thinking",
                 format!("think:{chat_id}:{eff_thread_id}:show"),
             ));
         }
         ThinkingKeyboardMode::ExpandedDirect => {
             row.push(teloxide::types::InlineKeyboardButton::callback(
-                "Hide thinking",
+                "\u{1f4ad} Hide thinking",
                 format!("think:{chat_id}:{eff_thread_id}:hide"),
             ));
         }
@@ -101,11 +101,11 @@ fn working_keyboard(
     }
 
     row.push(teloxide::types::InlineKeyboardButton::callback(
-        "\u{26d4} Stop",
+        "\u{1f6d1} Stop",
         format!("stop:{chat_id}:{eff_thread_id}"),
     ));
     row.push(teloxide::types::InlineKeyboardButton::callback(
-        "\u{1f319} Background",
+        "\u{2699}\u{fe0f} Background it",
         format!("bg:{chat_id}:{eff_thread_id}"),
     ));
 
@@ -2771,9 +2771,9 @@ mod tests {
                 678,
                 ThinkingKeyboardMode::Collapsed,
                 vec![
-                    ("Show thinking", "think:12345:678:show"),
-                    ("\u{26d4} Stop", "stop:12345:678"),
-                    ("\u{1f319} Background", "bg:12345:678"),
+                    ("\u{1f4ad} Show thinking", "think:12345:678:show"),
+                    ("\u{1f6d1} Stop", "stop:12345:678"),
+                    ("\u{2699}\u{fe0f} Background it", "bg:12345:678"),
                 ],
             ),
             (
@@ -2781,9 +2781,9 @@ mod tests {
                 678,
                 ThinkingKeyboardMode::ExpandedDirect,
                 vec![
-                    ("Hide thinking", "think:12345:678:hide"),
-                    ("\u{26d4} Stop", "stop:12345:678"),
-                    ("\u{1f319} Background", "bg:12345:678"),
+                    ("\u{1f4ad} Hide thinking", "think:12345:678:hide"),
+                    ("\u{1f6d1} Stop", "stop:12345:678"),
+                    ("\u{2699}\u{fe0f} Background it", "bg:12345:678"),
                 ],
             ),
             (
@@ -2791,8 +2791,8 @@ mod tests {
                 0,
                 ThinkingKeyboardMode::ExpandedGroup,
                 vec![
-                    ("\u{26d4} Stop", "stop:-100123:0"),
-                    ("\u{1f319} Background", "bg:-100123:0"),
+                    ("\u{1f6d1} Stop", "stop:-100123:0"),
+                    ("\u{2699}\u{fe0f} Background it", "bg:-100123:0"),
                 ],
             ),
         ] {
