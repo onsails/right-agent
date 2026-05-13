@@ -185,8 +185,8 @@ chat has been idle for **2 minutes** — this is a UX-politeness gate so a cron
 notification never lands in the middle of an active conversation. Do NOT relay
 cron results manually; the delivery loop surfaces them once the user goes idle.
 
-**Promise rule.** Never tell the user a cron will reach them sooner than 2
-minutes from now. Even a `run_at` 30 seconds in the future will sit in the
+**Promise rule.** Never tell the user a cron will reach them sooner than 2 minutes
+from now. Even a `run_at` 30 seconds in the future will sit in the
 delivery queue until the chat has been quiet for 2 minutes. If the user asks
 for a reminder in less than 2 minutes, tell them up front that the soonest you
 can actually deliver is ~2 minutes after they stop typing, and propose a
