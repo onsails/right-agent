@@ -1,0 +1,14 @@
+# Project-level rust-analyzer config. Picked up automatically by any
+# rust-analyzer instance opened against this workspace root, regardless of
+# editor/host (Helix, VS Code, Claude Code's rust-analyzer-lsp plugin, etc.).
+#
+# Why: rust-analyzer runs cargo check in the background. Sharing the default
+# `target/` with manual `cargo build` / `cargo test` runs causes cache
+# thrashing — every RA-driven check rewrites artifacts the build relies on
+# (different feature sets, different sccache keys), forcing recompilation
+# the next time the developer runs cargo. Setting `targetDir = true` makes
+# RA write into `target/rust-analyzer/` instead, so the two never collide.
+# Trade-off: ~duplicate artifacts on disk. Worth it.
+
+[cargo]
+targetDir = true
