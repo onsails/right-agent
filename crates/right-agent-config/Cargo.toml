@@ -1,0 +1,12 @@
+[package]
+name = "right-agent-config"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+miette = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde-saphyr = { workspace = true }
