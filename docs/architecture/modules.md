@@ -24,18 +24,24 @@
 ### right-core (stable platform foundation)
 
 - `config/` - `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
-- `agent_types.rs` - shared agent configuration and discovery DTOs (`AgentConfig`, `AgentDef`, sandbox/memory/STT config types).
 - `ui/` - brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection.
 - `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
 - `platform_store.rs` - content-addressed platform store deployment to `/sandbox/.platform/`.
 - `sandbox_exec.rs` - clonable gRPC sandbox execution handle.
-- `stt.rs` - `WhisperModel`, whisper model cache paths, ffmpeg detection, and model download.
 - `test_cleanup.rs` and `test_support.rs` - live-sandbox test cleanup and `TestSandbox`.
 - Single-file modules: `error.rs`, `process_group.rs`.
 
+### right-agent-config
+
+- `src/lib.rs` - shared agent configuration and discovery DTOs (`AgentConfig`, `AgentDef`, sandbox/memory/STT config types, `WhisperModel`).
+
+### right-stt
+
+- `src/lib.rs` - host-side whisper model cache paths, ffmpeg detection, model download, and cache warming.
+
 ### right-agent (core)
 
-- `agent/` — agent discovery (presence detected by `agent.yaml`) and compatibility re-exports for shared agent types.
+- `agent/` — agent discovery (presence detected by `agent.yaml`) and compatibility re-exports for agent config types from `right-agent-config`.
 - `runtime/` — process-compose REST client and dependency checks. Runtime-state primitives live in `right-runtime-state`.
 - Single-file modules: `doctor.rs`, `init.rs`, `rebootstrap.rs`, `cron_spec.rs`, `tunnel/`, `usage/`.
 

@@ -121,6 +121,10 @@ ffmpeg is present. The transcript is wrapped in a Russian marker
 prepended to the user-message text. The original audio file is dropped on
 the host — it never reaches the sandbox.
 
+The `agent.yaml` STT schema (`right-agent-config::SttConfig` and
+`right-agent-config::WhisperModel`) is owned by `right-agent-config`;
+host-side model cache and ffmpeg helpers are owned by `right-stt`.
+
 Models live at `~/.right/cache/whisper/ggml-<model>.bin` and are
 downloaded at `right up` (skipped if ffmpeg is missing). Default model
 is `small`; per-agent override via `agent.yaml`:
