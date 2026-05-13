@@ -2980,6 +2980,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-agent-config"
+version = "0.2.12"
+dependencies = [
+ "miette",
+ "serde",
+ "serde-saphyr",
+]
+
+[[package]]
 name = "right-bot"
 version = "0.2.12"
 dependencies = [
@@ -3169,6 +3178,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "right-stt"
+version = "0.2.12"
+dependencies = [
+ "futures",
+ "reqwest 0.13.3",
+ "right-agent-config",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "which",
 ]
 
 [[package]]
