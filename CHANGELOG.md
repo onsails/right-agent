@@ -1,91 +1,11 @@
 # Changelog
 ## [0.2.13] - 2026-05-13
 
-
-### Bug Fixes
-
-- **right-memory**: Handle ErrorKind::Quota in retain_queue::drain
-- **right-memory**: Exclude QuotaExhausted from CircuitOpen enqueue path
-- **cron**: Make idle-threshold drift test resilient to line wrap
-- **release-plz**: Add version requirement to internal path deps
-- **right-db**: Add chrono dev dependency for migration tests
-- **stage-b**: Satisfy clippy after right-core extraction
-- **workspace**: Add debug: None to AgentConfig literal construction sites
-- **bot**: Watcher reverts debug flag to CLI default when yaml field removed
-- **bot**: Address review issues (2 iterations)
-- **bot**: Clarify active run button labels
-
-### Documentation
-
-- **right-memory**: Document QuotaExhausted stickiness in refresh_status
-- **rightcron**: Guide agents to write output-oriented cron prompts
-- **prompt**: Introduce /rightreflect skill and /debug command to agents
-- **template**: Add commented debug field to agent.yaml template
-
-### Features
-
-- **right-memory**: Sanitize content via injection_guard before Hindsight POST
-- **right-memory**: Classify HTTP 402 as ErrorKind::Quota
-- **right-memory**: Exempt ErrorKind::Quota from breaker ticks
-- **right-memory**: Add MemoryStatus::QuotaExhausted variant
-- **right-memory**: Set QuotaExhausted status and skip enqueue on 402
-- **right-memory**: Clear QuotaExhausted on any 2xx, preserve on refresh
-- **codegen**: Add CRON_INSTRUCTIONS template
-- **skills**: Add /rightreflect skill content for self-introspection
-- **codegen**: Bundle and install /rightreflect skill
-- **right-db**: Scaffold new crate for SQLite plumbing
-- **right-core**: Scaffold new platform-foundation crate
-- **right-core**: Add ironclaw_safety dependency
-- **right-core**: Add injection_guard facade with sanitize_memory_content
-- **right-core**: Add wrap_memory_for_prompt and shell-side helpers
-- **core**: Add agent.yaml::debug optional field
-- **prompt**: Emit Cron Delivery Contract for cron sessions
-- **bot**: Config_watcher hot-reloads debug flag alongside model
-- **bot**: Hot-reloadable debug flag plumbed through AgentSettings
-- **bot**: ClaudeInvocation emits --debug --debug-file when flag is on
-- **bot**: /debug Telegram command handler with on/off/status
-- **bot**: Register /debug command in dispatch
-- **bot**: Add thinking visibility state
-- **bot**: Add thinking keyboard modes
-- **bot**: Handle thinking toggle callbacks
-- **bot**: Add show thinking toggle
-- **bot**: Add keyed idle tracker
-- **cron**: Allow Agent tool in cron jobs ([#56](https://github.com/onsails/right-agent/pull/56))
-- **right-agent**: Write_agent_yaml_debug line writer for /debug command
-- **cron**: Lower idle threshold to 2 min and teach agent the rule
-
-### Miscellaneous
-
-- **stage-f**: Pin publish = false on new internal crates
-- **bot**: Drop unused snapshot_debug and effective_session_id
-
-### Refactor
-
-- **right-memory**: Extract memory subsystem from right-agent
-- **right-memory**: Centralize sticky-status predicate and fix aggregator gap
-- **right-codegen**: Extract codegen subsystem from right-agent
-- **right-mcp**: Extract mcp subsystem from right-agent
-- **right-db**: Move SQL migration files from right-agent
-- **right-db**: Move migrations.rs from right-agent::memory
-- **right-core**: Move independent foundation modules
-- **right-core**: Move openshell proto and client
-- **right-core**: Move sandbox platform and test support
-- **right-core**: Move stt helpers and shared time constants
-- **right-core**: Move shared agent type definitions
-- **right-core**: Move runtime state primitives
-- Enable unreachable_pub lint, privatize internals, drop zombie code
-- **right-core**: Alphabetize injection_guard in lib.rs module list
-- **prompt**: Introduce PromptMode enum, replace bootstrap_mode bool
-- **bot**: Drop Option wrap on always-Some debug Arc in cron/delivery
-
-### Testing
-
-- **right-db**: Add open + migration smoke tests
-- **right-db**: Cover open_connection invariants
-- **right-db**: Port 8 missed schema/trigger tests from pre-split memory module
-- **right-core**: Round-trip wrap test with close delimiter content
-- **bot**: Integration tests for debug-file, jsonl path, and skill grep mechanic
-- **bot**: Acquire sandbox slot in cc_debug integration tests
+- Cron jobs can now use the Agent tool to spawn sub-agents for parallel research and multi-step orchestration. Budget caps via `max_budget_usd` continue to apply per invocation.
+- Send `/debug on`, `/debug off`, or `/debug status` in any agent's Telegram thread to toggle Claude debug logging without restarting the bot. When on, debug logs appear inside the sandbox at `/sandbox/.claude/logs/` and the setting persists in `agent.yaml`.
+- A Show Thinking button now appears in agent replies, letting you toggle Claude's reasoning trace on or off directly from the Telegram chat.
+- Every agent now ships a `/rightreflect` skill, letting the agent read its own past conversation-history JSONL files inside the sandbox to answer "why did you..." questions and debug wrong decisions.
+- Cron agents now receive an explicit delivery contract in their system prompt: their structured output is the Telegram delivery channel, there is no live user to clarify with, and they must not promise delivery faster than the idle window. The idle window was lowered from 3 minutes to 2 minutes.
 
 ## [0.2.12] - 2026-05-09
 
