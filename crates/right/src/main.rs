@@ -1796,7 +1796,7 @@ fn cmd_agent_init(
             let ffmpeg_ok = right_core::stt::ffmpeg_available();
             let stt = right_agent::agent::types::SttConfig {
                 enabled: ffmpeg_ok,
-                model: right_core::stt::WhisperModel::Small,
+                model: right_agent_config::WhisperModel::Small,
             };
             if !ffmpeg_ok {
                 eprintln!(
@@ -2369,7 +2369,7 @@ async fn cmd_up(
 
     // Download any whisper models needed by STT-enabled agents.
     {
-        use right_core::stt::WhisperModel;
+        use right_agent_config::WhisperModel;
         use std::collections::HashSet;
 
         let mut models: HashSet<WhisperModel> = HashSet::new();
