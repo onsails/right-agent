@@ -3144,6 +3144,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-platform-knobs"
+version = "0.2.12"
+
+[[package]]
+name = "right-prompt-safety"
+version = "0.2.12"
+dependencies = [
+ "ironclaw_safety",
+]
+
+[[package]]
+name = "right-runtime-state"
+version = "0.2.12"
+dependencies = [
+ "base64",
+ "miette",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
