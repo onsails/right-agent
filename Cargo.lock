@@ -2877,7 +2877,7 @@ dependencies = [
 
 [[package]]
 name = "right"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "right-agent"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "base64",
  "chrono",
@@ -2978,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "right-bot"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "arc-swap",
  "axum",
@@ -3020,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "right-codegen"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "base64",
  "dirs",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "right-core"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "base64",
  "chrono",
@@ -3082,7 +3082,7 @@ dependencies = [
 
 [[package]]
 name = "right-db"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3093,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "right-mcp"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "base64",
  "chrono",
@@ -3126,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "right-memory"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "chrono",
  "fastrand",
