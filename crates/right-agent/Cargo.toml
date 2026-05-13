@@ -28,6 +28,7 @@ right-memory = { path = "../right-memory", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-platform-knobs = { path = "../right-platform-knobs", version = "*" }
+right-runtime-state = { path = "../right-runtime-state", version = "*" }
 reqwest = { workspace = true }
 base64 = { workspace = true }
 subtle = { workspace = true }

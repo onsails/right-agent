@@ -657,7 +657,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         // Regenerate policy with resolved host IP and apply.
         let network_policy = config.network_policy;
         let policy_content = right_codegen::policy::generate_policy(
-            right_agent::runtime::MCP_HTTP_PORT,
+            right_runtime_state::MCP_HTTP_PORT,
             &network_policy,
             host_ip,
         );

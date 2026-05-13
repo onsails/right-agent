@@ -12,6 +12,7 @@ right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
 right-prompt-safety = { path = "../right-prompt-safety", version = "*" }
 right-platform-knobs = { path = "../right-platform-knobs", version = "*" }
+right-runtime-state = { path = "../right-runtime-state", version = "*" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

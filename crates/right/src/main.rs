@@ -1661,7 +1661,7 @@ fn cmd_agent_init(
         // breaks `test_agent_init_force_*` which depend on the no-op path.
         let state_path = home.join("run/runtime-state.json");
         if state_path.exists() {
-            let state = right_agent::runtime::read_state(&state_path)?;
+            let state = right_runtime_state::read_state(&state_path)?;
             if state.agents.iter().any(|a| a.name == name) {
                 return Err(miette::miette!(
                     help = "Run `right down` first",
@@ -2271,7 +2271,7 @@ async fn cmd_up(
             "right is already running. Use `right down` first or `right attach` to connect."
         ));
     }
-    check_port_available(right_agent::runtime::MCP_HTTP_PORT).await?;
+    check_port_available(right_runtime_state::MCP_HTTP_PORT).await?;
     tracing::info!(elapsed_ms = t_phase.elapsed().as_millis() as u64, "up: pc_health + port_check");
     t_phase = std::time::Instant::now();
 
@@ -2428,7 +2428,7 @@ async fn cmd_up(
     let config_path = run_dir.join("process-compose.yaml");
     let mut cmd = tokio::process::Command::new("process-compose");
     // Use TCP API (avoids --use-uds which crashes TUI).
-    let pc_port = right_agent::runtime::PC_PORT.to_string();
+    let pc_port = right_runtime_state::PC_PORT.to_string();
     cmd.args([
         "up",
         "-f",
@@ -2441,7 +2441,7 @@ async fn cmd_up(
     // as PC_API_TOKEN env var. process-compose then rejects any unauthenticated
     // REST API request — prevents stray HTTP callers from stopping production bots.
     let state_path = run_dir.join("state.json");
-    if let Ok(state) = right_agent::runtime::read_state(&state_path)
+    if let Ok(state) = right_runtime_state::read_state(&state_path)
         && let Some(token) = &state.pc_api_token
     {
         cmd.env("PC_API_TOKEN", token);
@@ -2765,7 +2765,7 @@ fn cmd_attach(home: &Path) -> miette::Result<()> {
     // Read the recorded PC port for this home. With an isolated --home and no
     // prior `right up`, there is nothing to attach to — fail loudly.
     let state_path = home.join("run").join("state.json");
-    let state = right_agent::runtime::read_state(&state_path).map_err(|e| {
+    let state = right_runtime_state::read_state(&state_path).map_err(|e| {
         miette::miette!(
             help = "Start right first with `right up`",
             "No running instance recorded at {} ({e:#})",
