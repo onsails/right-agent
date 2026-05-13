@@ -106,7 +106,7 @@ async fn ping_claude(
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
 
-    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn failed: {e:#}"))?;
     let status = child
         .wait()

@@ -7,7 +7,7 @@
 
 use owo_colors::OwoColorize;
 
-use crate::ui::theme::Theme;
+use crate::theme::Theme;
 
 pub(crate) const ORANGE: (u8, u8, u8) = (0xE8, 0x63, 0x2A);
 const OK: (u8, u8, u8) = (0x6B, 0xBF, 0x59);

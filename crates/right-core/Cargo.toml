@@ -33,6 +33,7 @@ owo-colors = { workspace = true }
 inquire = { workspace = true }
 http = { workspace = true }
 hyper-util = { workspace = true }
+right-process = { path = "../right-process", version = "*" }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

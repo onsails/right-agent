@@ -1919,7 +1919,7 @@ async fn invoke_cc(
         "invoking claude -p"
     );
 
-    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
 
     // Write input to stdin, then drop to signal EOF.

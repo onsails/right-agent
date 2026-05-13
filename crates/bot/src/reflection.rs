@@ -298,7 +298,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
 
-    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
 
     // Pipe the prompt, then drop stdin to signal EOF.

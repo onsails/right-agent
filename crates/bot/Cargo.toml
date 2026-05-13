@@ -8,6 +8,7 @@ right-agent = { path = "../right-agent", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-core = { path = "../right-core", version = "*" }
+right-process = { path = "../right-process", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
@@ -15,6 +16,7 @@ right-prompt-safety = { path = "../right-prompt-safety", version = "*" }
 right-platform-knobs = { path = "../right-platform-knobs", version = "*" }
 right-runtime-state = { path = "../right-runtime-state", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
+right-ui = { path = "../right-ui", version = "*" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

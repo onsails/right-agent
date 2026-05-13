@@ -129,7 +129,7 @@ async fn cleanup_old_logs(
             .arg(&cleanup_cmd);
         c.stdout(std::process::Stdio::piped());
         c.stderr(std::process::Stdio::piped());
-        let output = match right_core::process_group::ProcessGroupChild::spawn(c) {
+        let output = match right_process::ProcessGroupChild::spawn(c) {
             Ok(mut child) => child.wait_with_output().await,
             Err(e) => Err(e),
         };
@@ -561,7 +561,7 @@ async fn execute_job(
 
     tracing::info!(job = %job_name, run_id = %run_id, "executing cron job");
 
-    let mut child = match right_core::process_group::ProcessGroupChild::spawn(cmd) {
+    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
             update_run_record(&conn, &run_id, None, "failed");

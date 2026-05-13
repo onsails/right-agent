@@ -2901,6 +2901,7 @@ dependencies = [
  "right-memory",
  "right-runtime-state",
  "right-stt",
+ "right-ui",
  "rmcp",
  "rusqlite",
  "schemars 1.2.1",
@@ -2959,6 +2960,7 @@ dependencies = [
  "right-platform-knobs",
  "right-runtime-state",
  "right-stt",
+ "right-ui",
  "rmcp",
  "rusqlite",
  "rusqlite_migration",
@@ -3017,9 +3019,11 @@ dependencies = [
  "right-mcp",
  "right-memory",
  "right-platform-knobs",
+ "right-process",
  "right-prompt-safety",
  "right-runtime-state",
  "right-stt",
+ "right-ui",
  "rusqlite",
  "serde",
  "serde-saphyr",
@@ -3083,6 +3087,7 @@ dependencies = [
  "prost",
  "prost-types",
  "right-core",
+ "right-process",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3210,7 +3215,9 @@ name = "right-process"
 version = "0.2.12"
 dependencies = [
  "nix",
+ "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

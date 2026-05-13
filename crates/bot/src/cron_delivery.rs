@@ -597,7 +597,7 @@ async fn deliver_through_session(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn failed: {e:#}"))?;
 
     if let Some(mut stdin) = child.stdin() {

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use right_core::ui::{self, Glyph};
+use right_ui::{self as ui, Glyph};
 
 const MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 const MCP_ISSUES_PREFIX: &str = "missing: ";

@@ -1,9 +1,9 @@
 //! Completion-frame builder: section header + status block + `next:` pointer.
 
-use crate::ui::atoms::{Glyph, Rail};
-use crate::ui::header::section;
-use crate::ui::line::{Block, status};
-use crate::ui::theme::Theme;
+use crate::atoms::{Glyph, Rail};
+use crate::header::section;
+use crate::line::{Block, status};
+use crate::theme::Theme;
 
 /// Completion-frame builder. Wraps a section header, a column-aligned status
 /// block, and an optional `next: <hint>` pointer.

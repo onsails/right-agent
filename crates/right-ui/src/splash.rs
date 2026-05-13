@@ -1,7 +1,7 @@
 //! Full splash header — `▐✓ right agent vX.Y.Z` + tagline + blank rail.
 
-use crate::ui::atoms::Rail;
-use crate::ui::theme::Theme;
+use crate::atoms::Rail;
+use crate::theme::Theme;
 
 /// Three-line splash: `▐✓ right agent v<version>` / `▐  <tagline>` / `▐`.
 /// No trailing newline after the third line. Reserved for `right init`.
