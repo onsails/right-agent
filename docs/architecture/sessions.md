@@ -42,7 +42,7 @@ foreground turn; delivery acquires before each Haiku-relayed delivery. Cron
 job execution itself does NOT acquire — it runs `--fork-session` against a new
 session ID and does not race the main session JSONL.
 
-`right-platform-knobs::IDLE_THRESHOLD_SECS = 120` remains as UX politeness
+`right_platform_knobs::IDLE_THRESHOLD_SECS = 120` remains as UX politeness
 ("don't interrupt the user mid-conversation"), but correctness now lives in
 the mutex.
 
