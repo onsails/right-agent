@@ -895,15 +895,23 @@ enum SendError {
     Api(teloxide::RequestError),
 }
 
+fn display_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        use std::fmt::Write as _;
+        let _ = write!(out, ": {cause}");
+        source = cause.source();
+    }
+    out
+}
+
 impl SendError {
     /// Format a user-visible error string labelled with the attachment description.
     fn into_user_msg(self, label: &str) -> String {
         match self {
             Self::Skip(msg) => format!("skipped {label}: {msg}"),
-            Self::Api(e) => format!(
-                "failed to send {label}: {}",
-                right_core::error::display_error_chain(&e),
-            ),
+            Self::Api(e) => format!("failed to send {label}: {}", display_error_chain(&e)),
         }
     }
 }
