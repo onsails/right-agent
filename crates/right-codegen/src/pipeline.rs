@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use right_core::agent_types::{AgentDef, MemoryProvider, SandboxMode};
+use right_agent_config::{AgentDef, MemoryProvider, SandboxMode};
 use right_runtime_state::{
     AgentState, MCP_HTTP_PORT, PC_PORT, RuntimeState, generate_pc_api_token, read_state,
     write_state,
@@ -355,7 +355,7 @@ pub fn run_agent_codegen(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use right_core::agent_types::AgentConfig;
+    use right_agent_config::AgentConfig;
 
     /// Write a minimal valid `config.yaml` (with tunnel block) into the given
     /// home directory. Required because Tasks 1+2 made tunnel config mandatory:

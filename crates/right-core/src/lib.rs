@@ -7,7 +7,6 @@
 
 #![warn(unreachable_pub)]
 
-pub mod agent_types;
 pub mod config;
 pub mod error;
 pub mod openshell;
