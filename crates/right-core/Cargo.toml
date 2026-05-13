@@ -6,17 +6,12 @@ publish = false
 
 [dependencies]
 dirs = { workspace = true }
-futures = { workspace = true }
 miette = { workspace = true }
-right-openshell = { path = "../right-openshell", version = "*" }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
-tempfile = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-walkdir = { workspace = true }
 
 [dev-dependencies]
-right-core = { path = "." }
+tempfile = { workspace = true }
