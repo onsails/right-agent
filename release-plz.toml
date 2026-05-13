@@ -25,15 +25,11 @@ name = "right"
 version_group = "workspace"
 changelog_update = true
 changelog_path = "CHANGELOG.md"
-changelog_include = ["right-agent", "right-bot", "right-core", "right-db", "right-mcp", "right-codegen", "right-memory"]
+changelog_include = ["right-agent", "right-bot", "right-db", "right-mcp", "right-codegen", "right-memory"]
 git_release_enable = true
 git_release_name = "v{{ version }}"
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
-
-[[package]]
-name = "right-core"
-version_group = "workspace"
 
 [[package]]
 name = "right-db"
