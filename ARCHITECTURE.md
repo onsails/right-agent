@@ -9,7 +9,7 @@ Seventeen crates in a Cargo workspace:
 | **right-platform-knobs** | `crates/right-platform-knobs/` | UX/prose tunables that should not invalidate platform foundations |
 | **right-prompt-safety** | `crates/right-prompt-safety/` | Prompt-injection safety wrappers over `ironclaw_safety` |
 | **right-runtime-state** | `crates/right-runtime-state/` | process-compose ports, runtime state JSON, and API-token generation |
-| **right-core** | `crates/right-core/` | Shared config and error primitives pending Phase 4 |
+| **right-config** | `crates/right-config/` | RIGHT_HOME resolution, global config YAML, agents/backups directory helpers |
 | **right-ui** | `crates/right-ui/` | Brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection |
 | **right-process** | `crates/right-process/` | Cancel-safe process-group child handling |
 | **right-openshell** | `crates/right-openshell/` | OpenShell gRPC/proto, CLI wrappers, sandbox exec, and live-test support |
@@ -25,35 +25,36 @@ Seventeen crates in a Cargo workspace:
 | **right-bot** | `crates/bot/` | Telegram bot runtime (teloxide) + cron engine + login flow |
 
 **Re-export discipline:** The slim `right-agent` does not re-export modules
-from `right-core`, `right-db`, `right-mcp`, `right-codegen`, or `right-memory`.
+from `right-db`, `right-mcp`, `right-codegen`, or `right-memory`.
 Consumers (CLI, bot, and agent internals) import directly from the source crate.
 This keeps the build-cache invariant: an edit inside `right-codegen` rebuilds
 `right-codegen` plus its direct consumers, not `right-agent`.
 
-**Crate boundaries:** `right-core` is limited to shared config and error
-primitives until Phase 4. Bar for adding to it: (1) used by 2+ leaf crates,
-AND (2) not specific to any single subsystem. Anticipating reuse is not a
-reason — promote on demand, not on prediction.
+**Crate boundaries:** Phase 4 removed the former shared core crate. New shared
+code must go to the most-specific owner crate. Anticipating reuse is not a
+reason to create or centralize a shared abstraction; promote on demand, not on
+prediction.
 
 Every other crate has a single responsibility (see workspace table).
 New code that doesn't fit an existing crate's charter gets its own
 crate, not a misfit addition. Default placement for new code is the
 most-specific leaf crate.
 
+Global configuration lives in `right-config`: RIGHT_HOME resolution, global
+config YAML IO, and agents/backups directory helpers.
 Brand-conformant UI lives in `right-ui`; cancel-safe process-group child
 handling lives in `right-process`; OpenShell gRPC/proto, CLI wrappers,
 sandbox exec, and live-test support live in `right-openshell`; platform-store
 deployment lives in `right-platform-store`.
 Agent configuration DTOs live in `right-agent-config`; host-side STT cache and
-download helpers live in `right-stt`. `right-core` must not re-export those
-modules because that would preserve the old rebuild edge.
+download helpers live in `right-stt`.
 `tonic-prost-build` lives in `crates/right-openshell/build.rs`, alongside
 the OpenShell `.proto` files it compiles.
 
-`right-platform-knobs`, `right-prompt-safety`, and `right-runtime-state`
-are deliberately outside `right-core`: edits to UX/prose constants, memory
-prompt-safety wrappers, or process-compose runtime-state JSON must not
-invalidate config/error foundation code.
+`right-platform-knobs` owns UX/prose constants, `right-prompt-safety` owns
+memory prompt-safety wrappers, and `right-runtime-state` owns process-compose
+runtime-state JSON. Edits in those domains must stay in their owner crates and
+must not invalidate global config code.
 
 `right-bot` owns two sibling subtrees: `bot::cc::*` for generic Claude Code
 subprocess plumbing (`invocation`, `prompt`, `stream`, `worker_reply`,
