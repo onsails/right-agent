@@ -10,6 +10,7 @@ right-core = { path = "../right-core", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
 right-memory = { path = "../right-memory", version = "*" }
+right-prompt-safety = { path = "../right-prompt-safety", version = "*" }
 right-platform-knobs = { path = "../right-platform-knobs", version = "*" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
