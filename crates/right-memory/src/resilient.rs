@@ -296,7 +296,7 @@ impl ResilientHindsight {
         tags: Option<&[String]>,
         policy: RetryPolicy,
     ) -> Result<RetainResponse, ResilientError> {
-        let sanitized = right_core::injection_guard::sanitize_memory_content(content);
+        let sanitized = right_prompt_safety::sanitize_memory_content(content);
         if sanitized.was_modified {
             tracing::warn!(
                 warnings = sanitized.warnings.len(),

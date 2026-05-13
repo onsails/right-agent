@@ -34,7 +34,6 @@ prost-types = { workspace = true }
 which = { workspace = true }
 owo-colors = { workspace = true }
 inquire = { workspace = true }
-ironclaw_safety = "0.2"
 http = { workspace = true }
 hyper-util = { workspace = true }
 

@@ -121,10 +121,8 @@ fi"#
     } else {
         match memory_mode {
             Some(MemoryMode::File) => {
-                let prefix = right_core::injection_guard::memory_wrap_prefix()
-                    .replace('\'', "'\\''");
-                let suffix = right_core::injection_guard::memory_wrap_suffix()
-                    .replace('\'', "'\\''");
+                let prefix = right_prompt_safety::memory_wrap_prefix().replace('\'', "'\\''");
+                let suffix = right_prompt_safety::memory_wrap_suffix().replace('\'', "'\\''");
                 // `head` is gated by `[ -s ... ]`; a TOCTOU failure here would
                 // produce empty content inside the wrap, which is harmless.
                 // sed escape neutralizes any literal `--- END EXTERNAL CONTENT ---`
@@ -170,7 +168,7 @@ pub(crate) fn format_composite_memory(
     bg_marker: Option<&str>,
 ) -> String {
     let label_line = format!("[System: recalled memory context, {label}.]\n\n");
-    let wrapped = right_core::injection_guard::wrap_memory_for_prompt(content);
+    let wrapped = right_prompt_safety::wrap_memory_for_prompt(content);
     let status_tail = status_marker
         .map(|m| format!("\n\n{m}"))
         .unwrap_or_default();
