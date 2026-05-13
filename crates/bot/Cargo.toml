@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 right-agent = { path = "../right-agent", version = "*" }
+right-agent-config = { path = "../right-agent-config", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
 right-core = { path = "../right-core", version = "*" }
 right-db = { path = "../right-db", version = "*" }
@@ -13,6 +14,7 @@ right-memory = { path = "../right-memory", version = "*" }
 right-prompt-safety = { path = "../right-prompt-safety", version = "*" }
 right-platform-knobs = { path = "../right-platform-knobs", version = "*" }
 right-runtime-state = { path = "../right-runtime-state", version = "*" }
+right-stt = { path = "../right-stt", version = "*" }
 teloxide = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -48,7 +50,6 @@ whisper-rs = { version = "0.16", default-features = false, features = ["metal"] 
 
 [dev-dependencies]
 right-agent = { path = "../right-agent", version = "*" }
-right-agent-config = { path = "../right-agent-config", version = "*" }
 right-core = { path = "../right-core", version = "*", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"
