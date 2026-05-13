@@ -3076,6 +3076,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-config"
+version = "0.2.12"
+dependencies = [
+ "dirs",
+ "miette",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "right-core"
 version = "0.2.12"
 dependencies = [
