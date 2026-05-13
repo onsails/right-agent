@@ -14,6 +14,7 @@ rand = { workspace = true }
 right-core = { path = "../right-core", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
+right-platform-knobs = { path = "../right-platform-knobs", version = "*" }
 serde = { workspace = true }
 serde-saphyr = { workspace = true }
 serde_json = { workspace = true }

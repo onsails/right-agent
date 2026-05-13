@@ -136,22 +136,22 @@ fn operating_instructions_constant_is_non_empty() {
 fn operating_instructions_cron_idle_threshold_matches_const() {
     let needle = format!(
         "idle for **{} minutes**",
-        right_core::time_constants::IDLE_THRESHOLD_MIN
+        right_platform_knobs::IDLE_THRESHOLD_MIN
     );
     assert!(
         crate::OPERATING_INSTRUCTIONS.contains(&needle),
         "OPERATING_INSTRUCTIONS must mention `idle for **{} minutes**` to match \
-         right_core::time_constants::IDLE_THRESHOLD_MIN",
-        right_core::time_constants::IDLE_THRESHOLD_MIN
+         right_platform_knobs::IDLE_THRESHOLD_MIN",
+        right_platform_knobs::IDLE_THRESHOLD_MIN
     );
     let promise_needle = format!(
         "sooner than {} minutes",
-        right_core::time_constants::IDLE_THRESHOLD_MIN
+        right_platform_knobs::IDLE_THRESHOLD_MIN
     );
     assert!(
         crate::OPERATING_INSTRUCTIONS.contains(&promise_needle),
         "OPERATING_INSTRUCTIONS must spell out the \"never promise sooner than {} minutes\" rule",
-        right_core::time_constants::IDLE_THRESHOLD_MIN
+        right_platform_knobs::IDLE_THRESHOLD_MIN
     );
 }
 
