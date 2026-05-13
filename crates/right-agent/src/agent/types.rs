@@ -1,4 +1,4 @@
-pub use right_core::agent_types::*;
+pub use right_agent_config::*;
 
 /// Write `agent.yaml::model` via line-oriented MergedRMW.
 ///
@@ -118,10 +118,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_agent_types_are_available_from_core_and_agent_paths() {
-        let config: right_core::agent_types::AgentConfig = AgentConfig::default();
+    fn shared_agent_types_are_available_from_config_and_agent_paths() {
+        let config: right_agent_config::AgentConfig = AgentConfig::default();
         let _: AgentConfig = config;
-        let _: right_core::agent_types::AgentDef = AgentDef {
+        let _: right_agent_config::AgentDef = AgentDef {
             name: "demo".to_owned(),
             path: std::path::PathBuf::from("/agents/demo"),
             identity_path: std::path::PathBuf::from("/agents/demo/IDENTITY.md"),
@@ -132,7 +132,7 @@ mod tests {
             bootstrap_path: None,
             heartbeat_path: None,
         };
-        let _: right_core::agent_types::WhisperModel = WhisperModel::Small;
+        let _: right_agent_config::WhisperModel = WhisperModel::Small;
     }
 
     #[test]

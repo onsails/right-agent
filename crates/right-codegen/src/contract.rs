@@ -200,7 +200,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    use right_core::agent_types::{AgentConfig, AgentDef};
+    use right_agent_config::{AgentConfig, AgentDef};
     use std::path::PathBuf;
 
     fn minimal_agent_fixture(home: &Path, name: &str) -> AgentDef {

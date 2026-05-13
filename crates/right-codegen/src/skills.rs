@@ -5,7 +5,7 @@ use miette::{IntoDiagnostic as _, WrapErr as _};
 use minijinja::Environment;
 use minijinja::value::Value as JinjaValue;
 
-use right_core::agent_types::MemoryProvider;
+use right_agent_config::MemoryProvider;
 use right_platform_knobs::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
 
 use crate::contract::{write_agent_owned, write_regenerated_bytes};

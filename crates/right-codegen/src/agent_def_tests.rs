@@ -37,7 +37,7 @@ fn bootstrap_schema_has_bootstrap_complete_field() {
 fn system_prompt_contains_agent_name() {
     let result = generate_system_prompt(
         "mybot",
-        &right_core::agent_types::SandboxMode::Openshell,
+        &right_agent_config::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(result.contains("mybot"));
@@ -47,7 +47,7 @@ fn system_prompt_contains_agent_name() {
 fn system_prompt_contains_right_description() {
     let result = generate_system_prompt(
         "test",
-        &right_core::agent_types::SandboxMode::Openshell,
+        &right_agent_config::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(result.contains("Right Agent"));
@@ -58,14 +58,14 @@ fn system_prompt_contains_right_description() {
 fn system_prompt_contains_sandbox_mode() {
     let openshell = generate_system_prompt(
         "test",
-        &right_core::agent_types::SandboxMode::Openshell,
+        &right_agent_config::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(openshell.contains("OpenShell"));
 
     let none = generate_system_prompt(
         "test",
-        &right_core::agent_types::SandboxMode::None,
+        &right_agent_config::SandboxMode::None,
         "/test/agent/home",
     );
     assert!(none.contains("no sandbox"));
@@ -75,7 +75,7 @@ fn system_prompt_contains_sandbox_mode() {
 fn system_prompt_mentions_right_mcp() {
     let result = generate_system_prompt(
         "test",
-        &right_core::agent_types::SandboxMode::Openshell,
+        &right_agent_config::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(result.contains("right"));
@@ -86,7 +86,7 @@ fn system_prompt_mentions_right_mcp() {
 fn system_prompt_contains_ssh_block_for_openshell() {
     let result = generate_system_prompt(
         "mybot",
-        &right_core::agent_types::SandboxMode::Openshell,
+        &right_agent_config::SandboxMode::Openshell,
         "/sandbox",
     );
     assert!(
@@ -103,7 +103,7 @@ fn system_prompt_contains_ssh_block_for_openshell() {
 fn system_prompt_no_ssh_block_for_no_sandbox() {
     let result = generate_system_prompt(
         "mybot",
-        &right_core::agent_types::SandboxMode::None,
+        &right_agent_config::SandboxMode::None,
         "/test/agent/home",
     );
     assert!(
@@ -211,7 +211,7 @@ fn cron_instructions_contains_no_clarifying_questions_rule() {
 fn system_prompt_contains_home_dir() {
     let result = generate_system_prompt(
         "test",
-        &right_core::agent_types::SandboxMode::Openshell,
+        &right_agent_config::SandboxMode::Openshell,
         "/my/custom/home",
     );
     assert!(

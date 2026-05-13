@@ -9,6 +9,7 @@ test-support = []
 
 [dependencies]
 miette = { workspace = true }
+right-agent-config = { path = "../right-agent-config", version = "*" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
