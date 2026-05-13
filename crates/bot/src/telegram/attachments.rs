@@ -2257,4 +2257,59 @@ mod group_format_tests {
             "skipped Photo attachment /bad/path.jpg: path outside outbox — skipping",
         );
     }
+
+    #[test]
+    fn display_error_chain_includes_sources() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Inner;
+
+        impl fmt::Display for Inner {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("root cause")
+            }
+        }
+
+        impl Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+
+        impl fmt::Display for Outer {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("top-level failure")
+            }
+        }
+
+        impl Error for Outer {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let err = Outer(Inner);
+        assert_eq!(display_error_chain(&err), "top-level failure: root cause");
+    }
+
+    #[test]
+    fn display_error_chain_handles_no_source() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Standalone;
+
+        impl fmt::Display for Standalone {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("top-level failure")
+            }
+        }
+
+        impl Error for Standalone {}
+
+        let err = Standalone;
+        assert_eq!(display_error_chain(&err), "top-level failure");
+    }
 }
