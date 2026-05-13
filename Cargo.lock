@@ -3164,8 +3164,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-openshell"
+version = "0.2.12"
+dependencies = [
+ "dirs",
+ "fs4",
+ "futures",
+ "http",
+ "hyper-util",
+ "miette",
+ "prost",
+ "prost-types",
+ "right-process",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "walkdir",
+ "which",
+]
+
+[[package]]
 name = "right-platform-knobs"
 version = "0.2.12"
+
+[[package]]
+name = "right-platform-store"
+version = "0.2.12"
+dependencies = [
+ "futures",
+ "miette",
+ "right-openshell",
+ "sha2",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
+name = "right-process"
+version = "0.2.12"
+dependencies = [
+ "nix",
+ "tokio",
+]
 
 [[package]]
 name = "right-prompt-safety"
@@ -3197,6 +3243,15 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "which",
+]
+
+[[package]]
+name = "right-ui"
+version = "0.2.12"
+dependencies = [
+ "inquire",
+ "miette",
+ "owo-colors",
 ]
 
 [[package]]

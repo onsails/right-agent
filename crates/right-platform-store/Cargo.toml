@@ -1,0 +1,13 @@
+[package]
+name = "right-platform-store"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+futures = { workspace = true }
+miette = { workspace = true }
+right-openshell = { path = "../right-openshell", version = "*" }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }

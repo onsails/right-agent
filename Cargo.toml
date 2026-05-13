@@ -13,6 +13,10 @@ members = [
     "crates/right-runtime-state",
     "crates/right-agent-config",
     "crates/right-stt",
+    "crates/right-ui",
+    "crates/right-process",
+    "crates/right-openshell",
+    "crates/right-platform-store",
 ]
 resolver = "3"
 
