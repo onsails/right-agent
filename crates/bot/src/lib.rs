@@ -151,7 +151,7 @@ pub async fn run(args: BotArgs) -> miette::Result<bool> {
 
 async fn run_async(args: BotArgs) -> miette::Result<bool> {
     use right_agent::agent::discovery::{parse_agent_config, validate_agent_name};
-    use right_core::config::resolve_home;
+    use right_config::resolve_home;
     use std::path::PathBuf;
 
     // Resolve RIGHT_HOME
@@ -167,7 +167,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let agent_dir: PathBuf = if let Ok(dir) = std::env::var("RC_AGENT_DIR") {
         PathBuf::from(dir)
     } else {
-        let dir = right_core::config::agents_dir(&home).join(&args.agent);
+        let dir = right_config::agents_dir(&home).join(&args.agent);
         if !dir.exists() {
             return Err(miette::miette!(
                 "agent directory not found: {}",
@@ -516,7 +516,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // `/tg/<agent>` exactly (inner sees `/`) but does NOT rewrite
     // `/tg/<agent>/` to `/`, so a trailing slash here would yield 404.
     // The cloudflared ingress rule is anchored to match this exact path.
-    let global_cfg = right_core::config::read_global_config(&home)?;
+    let global_cfg = right_config::read_global_config(&home)?;
     let webhook_url = url::Url::parse(&format!(
         "https://{}/tg/{}",
         global_cfg.tunnel.hostname.trim_end_matches('/'),

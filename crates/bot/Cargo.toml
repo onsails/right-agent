@@ -7,6 +7,7 @@ edition.workspace = true
 right-agent = { path = "../right-agent", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
+right-config = { path = "../right-config", version = "*" }
 right-core = { path = "../right-core", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }
 right-process = { path = "../right-process", version = "*" }

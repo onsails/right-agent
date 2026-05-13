@@ -7,5 +7,4 @@
 
 #![warn(unreachable_pub)]
 
-pub mod config;
 pub mod error;

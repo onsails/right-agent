@@ -824,7 +824,7 @@ async fn handle_mcp_auth(
     };
 
     // 2. Read tunnel config
-    let global_config = match right_core::config::read_global_config(home) {
+    let global_config = match right_config::read_global_config(home) {
         Ok(c) => c,
         Err(e) => {
             bot.send_message(msg.chat.id, format!("Cannot read config.yaml: {e:#}"))

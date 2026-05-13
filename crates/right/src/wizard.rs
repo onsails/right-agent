@@ -5,7 +5,7 @@ use std::process::Command;
 use serde::Deserialize;
 
 use right_agent::agent::discover_agents;
-use right_core::config::{TunnelConfig, read_global_config, write_global_config};
+use right_config::{TunnelConfig, read_global_config, write_global_config};
 use right_agent::init::validate_telegram_token;
 
 /// Every user-visible string from every prompt in the wizard — labels, Select
@@ -616,7 +616,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
             &config.tunnel.tunnel_uuid[..8.min(config.tunnel.tunnel_uuid.len())]
         );
 
-        let agents_dir = right_core::config::agents_dir(home);
+        let agents_dir = right_config::agents_dir(home);
         let agents = if agents_dir.exists() {
             discover_agents(&agents_dir).unwrap_or_default()
         } else {
@@ -673,7 +673,7 @@ pub async fn combined_setting_menu(home: &Path) -> miette::Result<()> {
 /// If `agent_name` is `None`, presents a picker to choose from discovered agents.
 /// Returns the chosen agent name so callers can act on it (e.g. sandbox migration).
 pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette::Result<String> {
-    let agents_dir = right_core::config::agents_dir(home);
+    let agents_dir = right_config::agents_dir(home);
 
     let chosen_name = match agent_name {
         Some(name) => name.to_string(),

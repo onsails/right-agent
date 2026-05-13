@@ -12,6 +12,7 @@ right-agent = { path = "../right-agent", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-bot = { path = "../bot", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
+right-config = { path = "../right-config", version = "*" }
 right-core = { path = "../right-core", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
