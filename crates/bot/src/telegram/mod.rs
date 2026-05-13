@@ -5,6 +5,7 @@ pub mod bot;
 pub mod dispatch;
 pub mod filter;
 pub mod handler;
+pub(crate) mod idle;
 pub mod markdown;
 pub mod memory_alerts;
 pub mod mention;
