@@ -1034,8 +1034,8 @@ fn test_name_lock_acquire_and_release() {
 
 #[test]
 fn test_name_lock_blocks_when_held() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -1074,8 +1074,8 @@ fn test_name_lock_sanitizes_name() {
 
 #[tokio::test]
 async fn test_sandbox_holds_name_lock() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     let _slot = super::acquire_sandbox_slot();
@@ -1108,12 +1108,16 @@ fn control_master_directives_block_content() {
     // builds the appended snippet.
     let dir = std::path::Path::new("/var/lib/right/run/ssh");
     let block = control_master_directives(dir, "rightclaw-brain-20260415");
-    assert!(block.contains("\nControlMaster auto\n"), "missing ControlMaster auto: {block}");
     assert!(
-        block.contains(
-            "\nControlPath /var/lib/right/run/ssh/rightclaw-brain-20260415.cm\n"
-        ),
+        block.contains("\nControlMaster auto\n"),
+        "missing ControlMaster auto: {block}"
+    );
+    assert!(
+        block.contains("\nControlPath /var/lib/right/run/ssh/rightclaw-brain-20260415.cm\n"),
         "missing ControlPath: {block}",
     );
-    assert!(block.contains("\nControlPersist yes\n"), "missing ControlPersist: {block}");
+    assert!(
+        block.contains("\nControlPersist yes\n"),
+        "missing ControlPersist: {block}"
+    );
 }

@@ -6,7 +6,7 @@
 //! All tests run against a live OpenShell sandbox — no #[ignore].
 //! Requires a running OpenShell gateway (dev machines have it).
 
-use right_core::test_support::TestSandbox;
+use right_openshell::test_support::TestSandbox;
 
 /// Confirm that `claude -p --debug --debug-file=<path>` creates a non-empty
 /// file inside the sandbox at the specified path.
@@ -18,7 +18,7 @@ use right_core::test_support::TestSandbox;
 /// the debug file before bailing.
 #[tokio::test]
 async fn cc_debug_file_lands_inside_sandbox() {
-    let _slot = right_core::openshell::acquire_sandbox_slot();
+    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rightreflect-debugfile").await;
 
     let session_id = "rightreflect-test-00000000-0000-0000-0000-000000000001";
@@ -87,7 +87,7 @@ async fn cc_debug_file_lands_inside_sandbox() {
 /// this test seeds a synthetic file rather than relying on CC to create one.
 #[tokio::test]
 async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
-    let _slot = right_core::openshell::acquire_sandbox_slot();
+    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rightreflect-jsonl").await;
 
     let session_id = "rightreflect-test-00000000-0000-0000-0000-000000000002";
@@ -97,9 +97,7 @@ async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
 
     // Seed the project directory with a synthetic JSONL file, simulating a
     // file that CC would have written in a real (authenticated) session.
-    let (_, mkdir_exit) = sandbox
-        .exec(&["mkdir", "-p", project_dir])
-        .await;
+    let (_, mkdir_exit) = sandbox.exec(&["mkdir", "-p", project_dir]).await;
     assert_eq!(mkdir_exit, 0, "mkdir {project_dir} failed");
 
     let write_cmd = format!(
@@ -142,7 +140,7 @@ async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
 /// This test is filesystem-only: no claude binary needed.
 #[tokio::test]
 async fn skill_can_grep_jsonl() {
-    let _slot = right_core::openshell::acquire_sandbox_slot();
+    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rightreflect-grep").await;
 
     let (_, exit) = sandbox
@@ -168,9 +166,7 @@ async fn skill_can_grep_jsonl() {
     assert_eq!(write_exit, 0, "write synthetic jsonl failed: {write_out}");
 
     // grep -l returns the filename when the pattern is found.
-    let grep_cmd = format!(
-        "grep -l {marker} /sandbox/.claude/projects/-sandbox/*.jsonl"
-    );
+    let grep_cmd = format!("grep -l {marker} /sandbox/.claude/projects/-sandbox/*.jsonl");
     let (grep_out, grep_exit) = sandbox.exec(&["sh", "-c", &grep_cmd]).await;
     assert_eq!(
         grep_exit, 0,

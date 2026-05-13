@@ -529,16 +529,12 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             if !r.attachments.is_empty() {
                 out.push_str("      attachments:\n");
                 for att in &r.attachments {
-                    writeln!(out, "        - type: {}", att.kind.as_str())
-                        .expect("infallible");
-                    writeln!(out, "          path: {}", att.path.display())
-                        .expect("infallible");
-                    writeln!(out, "          mime_type: {}", att.mime_type)
-                        .expect("infallible");
+                    writeln!(out, "        - type: {}", att.kind.as_str()).expect("infallible");
+                    writeln!(out, "          path: {}", att.path.display()).expect("infallible");
+                    writeln!(out, "          mime_type: {}", att.mime_type).expect("infallible");
                     if let Some(ref fname) = att.filename {
                         let escaped = yaml_escape_string(fname);
-                        writeln!(out, "          filename: \"{escaped}\"")
-                            .expect("infallible");
+                        writeln!(out, "          filename: \"{escaped}\"").expect("infallible");
                     }
                 }
             }
@@ -766,7 +762,7 @@ pub async fn download_attachments(
         let final_path = if sandboxed {
             // Upload to sandbox, then clean up host temp file
             let sandbox = resolved_sandbox.unwrap();
-            right_core::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
+            right_openshell::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
             if let Err(e) = tokio::fs::remove_file(&host_path).await {
                 tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
             }
@@ -949,7 +945,7 @@ async fn resolve_host_path(
             .into_owned();
         let dest = tmp_dir.join(&file_name);
         let sandbox = ctx.resolved_sandbox.unwrap();
-        if let Err(e) = right_core::openshell::download_file(sandbox, &att.path, &dest).await {
+        if let Err(e) = right_openshell::openshell::download_file(sandbox, &att.path, &dest).await {
             let msg = format!(
                 "download_file failed for {}: {:#} — {log_suffix}",
                 att.path, e
@@ -1272,10 +1268,10 @@ async fn run_cleanup(
     retention_days: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mtime_arg = format!("+{retention_days}");
         // Use find to delete files older than retention_days in sandbox inbox/outbox
-        right_core::openshell::ssh_exec(
+        right_openshell::openshell::ssh_exec(
             ssh_config,
             &ssh_host,
             &[

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use tonic::transport::Channel;
 
 use crate::agent::types::{AgentConfig, SandboxMode};
-use right_core::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
+use right_openshell::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 
 /// Identity files that bootstrap (re)creates and that this command rewinds.
 pub const IDENTITY_FILES: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md"];
@@ -90,7 +90,7 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
                 .as_ref()
                 .and_then(|c| c.sandbox.as_ref())
                 .and_then(|s| s.name.as_deref());
-            Some(right_core::openshell::resolve_sandbox_name(
+            Some(right_openshell::openshell::resolve_sandbox_name(
                 agent_name,
                 explicit_sandbox_name,
             ))
@@ -99,8 +99,8 @@ pub fn plan(home: &Path, agent_name: &str) -> miette::Result<RebootstrapPlan> {
     };
 
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
-    let backup_dir = right_core::config::backups_dir(home, agent_name)
-        .join(format!("rebootstrap-{timestamp}"));
+    let backup_dir =
+        right_core::config::backups_dir(home, agent_name).join(format!("rebootstrap-{timestamp}"));
 
     Ok(RebootstrapPlan {
         agent_name: agent_name.to_string(),
@@ -124,8 +124,7 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
 
     let host_backed_up = backup_host_files(&plan.agent_dir, &plan.backup_dir)?;
 
-    let (mut session, sandbox_status) =
-        open_sandbox_session(plan.sandbox_name.as_deref()).await?;
+    let (mut session, sandbox_status) = open_sandbox_session(plan.sandbox_name.as_deref()).await?;
     let sandbox_backed_up = backup_sandbox_files(session.as_mut(), &plan.backup_dir).await?;
 
     // Delete from sandbox first — failure here would otherwise let
@@ -150,15 +149,15 @@ pub async fn execute(plan: &RebootstrapPlan) -> miette::Result<RebootstrapReport
 ///
 /// `backup_dir` must already exist. Missing source files are skipped at
 /// DEBUG level (not errors).
-fn backup_host_files(
-    agent_dir: &Path,
-    backup_dir: &Path,
-) -> miette::Result<Vec<&'static str>> {
+fn backup_host_files(agent_dir: &Path, backup_dir: &Path) -> miette::Result<Vec<&'static str>> {
     let mut copied = Vec::new();
     for &name in IDENTITY_FILES {
         let src = agent_dir.join(name);
         if !src.exists() {
-            tracing::debug!(file = name, "rebootstrap: host file absent, skipping backup");
+            tracing::debug!(
+                file = name,
+                "rebootstrap: host file absent, skipping backup"
+            );
             continue;
         }
         let dst = backup_dir.join(name);
@@ -197,8 +196,8 @@ async fn open_sandbox_session(
         return Ok((None, SandboxStatus::NoneMode));
     };
 
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(d) => d,
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(d) => d,
         other => {
             tracing::info!(
                 ?other,
@@ -208,12 +207,15 @@ async fn open_sandbox_session(
         }
     };
 
-    let mut client = right_core::openshell::connect_grpc(&mtls_dir).await?;
-    if !right_core::openshell::sandbox_exists(&mut client, sandbox).await? {
-        tracing::info!(sandbox, "rebootstrap: sandbox absent, skipping sandbox-side ops");
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+    if !right_openshell::openshell::sandbox_exists(&mut client, sandbox).await? {
+        tracing::info!(
+            sandbox,
+            "rebootstrap: sandbox absent, skipping sandbox-side ops"
+        );
         return Ok((None, SandboxStatus::Skipped("sandbox absent")));
     }
-    let id = right_core::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
+    let id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox).await?;
     Ok((
         Some(SandboxSession {
             name: sandbox.to_string(),
@@ -248,19 +250,22 @@ async fn backup_sandbox_files(
     let mut copied = Vec::new();
     for &name in IDENTITY_FILES {
         let sandbox_path = format!("/sandbox/{name}");
-        let (_stdout, exit) = right_core::openshell::exec_in_sandbox(
+        let (_stdout, exit) = right_openshell::openshell::exec_in_sandbox(
             &mut session.client,
             &session.id,
             &["test", "-f", &sandbox_path],
-            right_core::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+            right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
         )
         .await?;
         if exit != 0 {
-            tracing::debug!(file = name, "rebootstrap: sandbox file absent, skipping backup");
+            tracing::debug!(
+                file = name,
+                "rebootstrap: sandbox file absent, skipping backup"
+            );
             continue;
         }
         let dst = sandbox_backup_dir.join(name);
-        right_core::openshell::download_file(&session.name, &sandbox_path, &dst).await?;
+        right_openshell::openshell::download_file(&session.name, &sandbox_path, &dst).await?;
         copied.push(name);
     }
     Ok(copied)
@@ -270,9 +275,8 @@ async fn backup_sandbox_files(
 /// Overwrites any existing file.
 fn write_bootstrap_md(agent_dir: &Path) -> miette::Result<()> {
     let path = agent_dir.join("BOOTSTRAP.md");
-    std::fs::write(&path, right_codegen::BOOTSTRAP_INSTRUCTIONS).map_err(|e| {
-        miette::miette!("failed to write BOOTSTRAP.md at {}: {e:#}", path.display())
-    })
+    std::fs::write(&path, right_codegen::BOOTSTRAP_INSTRUCTIONS)
+        .map_err(|e| miette::miette!("failed to write BOOTSTRAP.md at {}: {e:#}", path.display()))
 }
 
 /// Mark all active `sessions` rows in the agent's `data.db` as inactive.
@@ -326,9 +330,7 @@ fn delete_identity_from_host(agent_dir: &Path) -> miette::Result<()> {
 ///
 /// Skipped (returns `Ok`) when `session` is `None`. `rm -f` makes missing
 /// files non-fatal, so this is naturally idempotent.
-async fn delete_identity_from_sandbox(
-    session: Option<&mut SandboxSession>,
-) -> miette::Result<()> {
+async fn delete_identity_from_sandbox(session: Option<&mut SandboxSession>) -> miette::Result<()> {
     let Some(session) = session else {
         return Ok(());
     };
@@ -340,11 +342,11 @@ async fn delete_identity_from_sandbox(
     let mut cmd: Vec<&str> = vec!["rm", "-f"];
     cmd.extend(paths.iter().map(|s| s.as_str()));
 
-    let (stdout, exit) = right_core::openshell::exec_in_sandbox(
+    let (stdout, exit) = right_openshell::openshell::exec_in_sandbox(
         &mut session.client,
         &session.id,
         &cmd,
-        right_core::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await?;
     if exit != 0 {
@@ -427,7 +429,8 @@ mod tests {
         assert_eq!(p.sandbox_mode, SandboxMode::Openshell);
         assert!(p.sandbox_name.is_some());
         assert!(
-            p.backup_dir.starts_with(home.path().join("backups").join("alice")),
+            p.backup_dir
+                .starts_with(home.path().join("backups").join("alice")),
             "backup_dir under <home>/backups/alice/: {}",
             p.backup_dir.display()
         );

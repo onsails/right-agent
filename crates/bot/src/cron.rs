@@ -82,7 +82,11 @@ pub(crate) fn parse_lock_ttl(s: &str) -> Result<chrono::Duration, CronError> {
 ///
 /// Returns `true` if the previous run is still considered active (skip this run).
 /// Returns `false` if no lock file, lock is unparseable, or heartbeat is stale.
-pub(crate) fn is_lock_fresh(agent_dir: &std::path::Path, job_name: &str, lock_ttl_str: &str) -> bool {
+pub(crate) fn is_lock_fresh(
+    agent_dir: &std::path::Path,
+    job_name: &str,
+    lock_ttl_str: &str,
+) -> bool {
     let lock_path = agent_dir
         .join("crons")
         .join(".locks")
@@ -114,7 +118,7 @@ async fn cleanup_old_logs(
         return;
     }
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         // List matching files sorted newest-first, skip `keep`, delete the rest.
         // Using find+stat avoids ls parsing pitfalls with special characters in filenames.
         let cleanup_cmd = format!(
@@ -283,9 +287,8 @@ pub(crate) fn migrate_legacy_bg_continuation(
     use right_agent::cron_spec::{IMMEDIATE_SENTINEL, ScheduleKind};
 
     let candidates: Vec<(String, String)> = {
-        let mut stmt = conn.prepare(
-            "SELECT job_name, prompt FROM cron_specs WHERE schedule = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT job_name, prompt FROM cron_specs WHERE schedule = ?1")?;
         stmt.query_map([IMMEDIATE_SENTINEL], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?
     };
@@ -390,14 +393,7 @@ async fn execute_job(
             return;
         }
     };
-    if let Err(e) = insert_running_run(
-        &conn,
-        &run_id,
-        job_name,
-        &started_at,
-        &log_path_str,
-        spec,
-    ) {
+    if let Err(e) = insert_running_run(&conn, &run_id, job_name, &started_at, &log_path_str, spec) {
         tracing::error!(job = %job_name, "DB insert failed: {e:#}");
         std::fs::remove_file(&lock_path).ok();
         return;
@@ -449,8 +445,7 @@ async fn execute_job(
             agent_dir.to_string_lossy().into_owned(),
         )
     };
-    let base_prompt =
-        right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = right_codegen::generate_system_prompt(agent_name, &sandbox_mode, &home_dir);
 
     // Fetch MCP instructions from aggregator (non-fatal).
     let mcp_instructions: Option<String> = match internal_client.mcp_instructions(agent_name).await
@@ -497,7 +492,7 @@ async fn execute_job(
         assembly_script = format!(
             "set -o pipefail\nmkdir -p /sandbox/crons/logs\n{assembly_script} | tee /sandbox/crons/logs/{log_filename}"
         );
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
         // Opt out of multiplexing — see worker.rs `invoke_cc` for the
@@ -708,9 +703,10 @@ async fn execute_job(
                             let sandbox = resolved_sandbox.unwrap();
                             for att in atts {
                                 let dest = outbox_dir.join(attachment_filename(&att.path));
-                                if let Err(e) =
-                                    right_core::openshell::download_file(sandbox, &att.path, &dest)
-                                        .await
+                                if let Err(e) = right_openshell::openshell::download_file(
+                                    sandbox, &att.path, &dest,
+                                )
+                                .await
                                 {
                                     tracing::error!(
                                         job = %job_name,
@@ -870,7 +866,8 @@ async fn execute_job(
                     .iter()
                     .find_map(|l| crate::cc::stream::parse_api_key_source(l))
                     .unwrap_or_else(|| "none".into());
-                if let Err(e) = right_agent::usage::insert::insert_cron(&conn, &breakdown, job_name) {
+                if let Err(e) = right_agent::usage::insert::insert_cron(&conn, &breakdown, job_name)
+                {
                     tracing::warn!(job = %job_name, "usage insert failed: {e:#}");
                 }
             }
@@ -1915,9 +1912,16 @@ mod tests {
         assert_eq!(migrated, 0);
 
         let schedule: String = conn
-            .query_row("SELECT schedule FROM cron_specs WHERE job_name = 'bg-bad'", [], |r| r.get(0))
+            .query_row(
+                "SELECT schedule FROM cron_specs WHERE job_name = 'bg-bad'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(schedule, "@immediate", "row with invalid UUID must be untouched");
+        assert_eq!(
+            schedule, "@immediate",
+            "row with invalid UUID must be untouched"
+        );
     }
 
     #[test]

@@ -9,31 +9,4 @@
 
 pub mod config;
 pub mod error;
-// Private owner-crate alias for OpenShell internals until that module moves.
-extern crate right_process as process_group;
-pub mod openshell;
-/// Generated protobuf types for the OpenShell gRPC API.
-#[allow(clippy::large_enum_variant)]
-pub mod openshell_proto {
-    pub mod openshell {
-        pub mod v1 {
-            tonic::include_proto!("openshell.v1");
-        }
-        pub mod datamodel {
-            pub mod v1 {
-                tonic::include_proto!("openshell.datamodel.v1");
-            }
-        }
-        pub mod sandbox {
-            pub mod v1 {
-                tonic::include_proto!("openshell.sandbox.v1");
-            }
-        }
-    }
-}
 pub mod platform_store;
-pub mod sandbox_exec;
-#[cfg(unix)]
-pub mod test_cleanup;
-#[cfg(all(unix, any(test, feature = "test-support")))]
-pub mod test_support;

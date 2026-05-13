@@ -134,21 +134,21 @@ async fn bootstrap_done_with_files() {
 async fn create_test_sandbox(
     mtls_dir: &std::path::Path,
     sandbox_name: &str,
-) -> right_core::sandbox_exec::SandboxExec {
-    right_core::test_cleanup::pkill_test_orphans(sandbox_name);
-    right_core::test_cleanup::register_test_sandbox(sandbox_name);
+) -> right_openshell::sandbox_exec::SandboxExec {
+    right_openshell::test_cleanup::pkill_test_orphans(sandbox_name);
+    right_openshell::test_cleanup::register_test_sandbox(sandbox_name);
 
-    let mut grpc_client = right_core::openshell::connect_grpc(mtls_dir)
+    let mut grpc_client = right_openshell::openshell::connect_grpc(mtls_dir)
         .await
         .expect("gRPC connect");
 
     // Clean up leftover from a previous failed run.
-    if right_core::openshell::sandbox_exists(&mut grpc_client, sandbox_name)
+    if right_openshell::openshell::sandbox_exists(&mut grpc_client, sandbox_name)
         .await
         .unwrap()
     {
-        right_core::openshell::delete_sandbox(sandbox_name).await;
-        right_core::openshell::wait_for_deleted(&mut grpc_client, sandbox_name, 60, 2)
+        right_openshell::openshell::delete_sandbox(sandbox_name).await;
+        right_openshell::openshell::wait_for_deleted(&mut grpc_client, sandbox_name, 60, 2)
             .await
             .expect("cleanup of leftover sandbox failed");
     }
@@ -181,18 +181,18 @@ network_policies:
     )
     .unwrap();
 
-    let mut child = right_core::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+    let mut child = right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
         .expect("failed to spawn sandbox");
-    right_core::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
+    right_openshell::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
         .await
         .expect("sandbox did not become READY");
     let _ = child.kill().await;
 
-    let sandbox_id = right_core::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
+    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
         .await
         .expect("resolve sandbox_id");
 
-    let sbox = right_core::sandbox_exec::SandboxExec::new(
+    let sbox = right_openshell::sandbox_exec::SandboxExec::new(
         mtls_dir.to_path_buf(),
         sandbox_name.to_owned(),
         sandbox_id,
@@ -212,11 +212,11 @@ network_policies:
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_present() {
-    let _slot = right_core::openshell::acquire_sandbox_slot();
+    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-present";
 
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
@@ -256,17 +256,17 @@ async fn bootstrap_done_sandbox_files_present() {
         "BOOTSTRAP.md should be removed from host"
     );
 
-    right_core::openshell::delete_sandbox(sandbox_name).await;
-    right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_openshell::openshell::delete_sandbox(sandbox_name).await;
+    right_openshell::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
 #[tokio::test]
 async fn bootstrap_done_sandbox_files_missing() {
-    let _slot = right_core::openshell::acquire_sandbox_slot();
+    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-missing";
 
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
@@ -306,8 +306,8 @@ async fn bootstrap_done_sandbox_files_missing() {
         "should mention USER.md as missing, got: {text}"
     );
 
-    right_core::openshell::delete_sandbox(sandbox_name).await;
-    right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_openshell::openshell::delete_sandbox(sandbox_name).await;
+    right_openshell::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,12 +328,13 @@ fn write_allowlist(agent_dir: &std::path::Path, users: &[i64], groups: &[i64]) {
         });
     }
     for &id in groups {
-        file.groups.push(right_agent::agent::allowlist::AllowedGroup {
-            id,
-            label: None,
-            opened_by: None,
-            opened_at: now,
-        });
+        file.groups
+            .push(right_agent::agent::allowlist::AllowedGroup {
+                id,
+                label: None,
+                opened_by: None,
+                opened_at: now,
+            });
     }
     right_agent::agent::allowlist::write_file(agent_dir, &file).unwrap();
 }
@@ -591,7 +592,12 @@ async fn bootstrap_done_returns_tool_error_when_files_missing() {
 
     let backend = RightBackend::new(agents_dir, None);
     let result = backend
-        .tools_call("test-agent", &agent_dir, "bootstrap_done", serde_json::json!({}))
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "bootstrap_done",
+            serde_json::json!({}),
+        )
         .await
         .expect("dispatch should be Ok with operation error");
 
@@ -602,7 +608,10 @@ async fn bootstrap_done_returns_tool_error_when_files_missing() {
         .as_array()
         .expect("details.missing must be an array");
     let names: Vec<&str> = missing.iter().filter_map(|v| v.as_str()).collect();
-    assert!(names.contains(&"IDENTITY.md"), "missing IDENTITY.md: {names:?}");
+    assert!(
+        names.contains(&"IDENTITY.md"),
+        "missing IDENTITY.md: {names:?}"
+    );
     assert!(names.contains(&"SOUL.md"));
     assert!(names.contains(&"USER.md"));
 }

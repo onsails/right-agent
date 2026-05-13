@@ -12,6 +12,7 @@ miette = { workspace = true }
 minijinja = { workspace = true }
 rand = { workspace = true }
 right-core = { path = "../right-core", version = "*" }
+right-openshell = { path = "../right-openshell", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-db = { path = "../right-db", version = "*" }
 right-mcp = { path = "../right-mcp", version = "*" }
@@ -25,7 +26,7 @@ walkdir = { workspace = true }
 which = { workspace = true }
 
 [dev-dependencies]
-right-core = { path = "../right-core", version = "*", features = ["test-support"] }
+right-core = { path = "../right-core", version = "*" }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { version = "1.52", features = ["test-util"] }
