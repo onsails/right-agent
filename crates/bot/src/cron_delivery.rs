@@ -198,7 +198,7 @@ pub(crate) fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> Str
     output
 }
 
-use right_agent::cron_spec::IDLE_THRESHOLD_SECS;
+use right_platform_knobs::IDLE_THRESHOLD_SECS;
 
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 
