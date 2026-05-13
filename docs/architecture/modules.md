@@ -21,10 +21,9 @@
 - `RuntimeState` / `AgentState` - persisted `<home>/run/state.json` schema.
 - `read_state`, `write_state`, `generate_pc_api_token` - runtime-state IO and process-compose API token generation.
 
-### right-core
+### right-config
 
-- `config/` - `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
-- `error.rs` - shared error primitives.
+- `src/lib.rs` - `GlobalConfig`, `TunnelConfig`, `AggregatorConfig`, `RIGHT_HOME` resolution, global config YAML IO, and agents/backups path helpers.
 
 ### right-ui
 

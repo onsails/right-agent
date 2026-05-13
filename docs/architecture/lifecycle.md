@@ -12,6 +12,7 @@ right init  /  right agent init <name>
   │   telegram, chat IDs, stt, memory) and writes sandbox config + policy.yaml
   │   to the agent dir. `init` skips the wizard and also writes
   │   ~/.right/config.yaml + detects Telegram token / cloudflared tunnel.
+  │   `right-config` owns global config loading, saving, and path helpers.
   ├─ Create ~/.right/agents/<name>/ with template files
   ├─ Write BOOTSTRAP.md, TOOLS.md, agent.yaml
   │   (IDENTITY.md, SOUL.md, USER.md created later by bootstrap CC session)
