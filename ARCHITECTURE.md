@@ -2,11 +2,14 @@
 
 ## Workspace
 
-Eight crates in a Cargo workspace:
+Eleven crates in a Cargo workspace:
 
 | Crate | Path | Role |
 |-------|------|------|
-| **right-core** | `crates/right-core/` | Stable platform foundation: error/ui/config/OpenShell/proto/platform_store/stt/test_support, time constants |
+| **right-platform-knobs** | `crates/right-platform-knobs/` | UX/prose tunables that should not invalidate platform foundations |
+| **right-prompt-safety** | `crates/right-prompt-safety/` | Prompt-injection safety wrappers over `ironclaw_safety` |
+| **right-runtime-state** | `crates/right-runtime-state/` | process-compose ports, runtime state JSON, and API-token generation |
+| **right-core** | `crates/right-core/` | Stable platform foundation: error/ui/config/OpenShell/proto/platform_store/stt/test_support |
 | **right-db** | `crates/right-db/` | Per-agent SQLite plumbing: `open_connection`, central migration registry, `sql/v*.sql` |
 | **right-mcp** | `crates/right-mcp/` | MCP aggregator backend, proxy, reconnect, credentials, token derivation, auth tokens |
 | **right-codegen** | `crates/right-codegen/` | Per-agent codegen: settings.json, .mcp.json, prompts, process-compose, cloudflared, sandbox policy, bundled skills |
@@ -35,11 +38,16 @@ most-specific leaf crate.
 brand-conformant UI atoms, configuration parsing, the OpenShell gRPC client
 and generated proto types, process-group and sandbox-exec helpers,
 `platform_store`, STT model-download helpers with `WhisperModel`, shared
-agent data types, runtime-state primitives, and `test_support::TestSandbox`.
+agent data types, and `test_support::TestSandbox`.
 These modules change rarely; leaf-crate edits do not invalidate this build
 cache. `tonic-prost-build` lives in
 `crates/right-core/build.rs` and only re-runs when the OpenShell `.proto`
 files change.
+
+`right-platform-knobs`, `right-prompt-safety`, and `right-runtime-state`
+are deliberately outside `right-core`: edits to UX/prose constants, memory
+prompt-safety wrappers, or process-compose runtime-state JSON must not
+invalidate OpenShell/proto/UI/STT foundation code.
 
 `right-bot` owns two sibling subtrees: `bot::cc::*` for generic Claude Code
 subprocess plumbing (`invocation`, `prompt`, `stream`, `worker_reply`,

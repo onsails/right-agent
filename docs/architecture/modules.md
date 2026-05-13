@@ -6,23 +6,37 @@
 
 ## Module Map
 
+### right-platform-knobs
+
+- `IDLE_THRESHOLD_SECS` / `IDLE_THRESHOLD_MIN` - UX-politeness gate for cron delivery and matching agent-facing prose.
+
+### right-prompt-safety
+
+- `sanitize_memory_content` - write-side Hindsight memory sanitization.
+- `wrap_memory_for_prompt`, `memory_wrap_prefix`, `memory_wrap_suffix`, `escape_memory_close_delimiter` - read-side untrusted-content wrapping for memory prompt assembly.
+
+### right-runtime-state
+
+- `PC_PORT` and `MCP_HTTP_PORT` - process-compose and MCP HTTP default ports.
+- `RuntimeState` / `AgentState` - persisted `<home>/run/state.json` schema.
+- `read_state`, `write_state`, `generate_pc_api_token` - runtime-state IO and process-compose API token generation.
+
 ### right-core (stable platform foundation)
 
 - `config/` - `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
 - `agent_types.rs` - shared agent configuration and discovery DTOs (`AgentConfig`, `AgentDef`, sandbox/memory/STT config types).
-- `runtime_state.rs` - process-compose ports, runtime state JSON, and API-token generation.
 - `ui/` - brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection.
 - `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
 - `platform_store.rs` - content-addressed platform store deployment to `/sandbox/.platform/`.
 - `sandbox_exec.rs` - clonable gRPC sandbox execution handle.
 - `stt.rs` - `WhisperModel`, whisper model cache paths, ffmpeg detection, and model download.
 - `test_cleanup.rs` and `test_support.rs` - live-sandbox test cleanup and `TestSandbox`.
-- Single-file modules: `error.rs`, `process_group.rs`, `time_constants.rs`.
+- Single-file modules: `error.rs`, `process_group.rs`.
 
 ### right-agent (core)
 
 - `agent/` — agent discovery (presence detected by `agent.yaml`) and compatibility re-exports for shared agent types.
-- `runtime/` — process-compose REST client, dependency checks, and compatibility re-exports for runtime state primitives.
+- `runtime/` — process-compose REST client and dependency checks. Runtime-state primitives live in `right-runtime-state`.
 - Single-file modules: `doctor.rs`, `init.rs`, `rebootstrap.rs`, `cron_spec.rs`, `tunnel/`, `usage/`.
 
 ### right-codegen

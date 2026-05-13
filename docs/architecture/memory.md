@@ -84,8 +84,8 @@ thresholds), and long-standing (>24h) alerts.
 
 ## Prompt-injection defense
 
-Two layers, both routing through `right_core::injection_guard` (a
-thin facade over the `ironclaw_safety` crate):
+Two layers, both routing through `right_prompt_safety` (a thin facade
+over the `ironclaw_safety` crate):
 
 **Phase 1 (write-side hygiene).** Every call to
 `right_memory::resilient::ResilientHindsight::retain` runs the content
@@ -114,8 +114,8 @@ file mode is positioned as fallback/dev; production runs Hindsight.
 
 **Pattern set ownership.** All injection patterns, severity tiers, and
 the wrap text itself are owned by `ironclaw_safety` and tracked
-through that crate's releases. The `right_core::injection_guard`
-facade exists to centralize the source label (`"memory"`), expose
+through that crate's releases. The `right-prompt-safety` crate exists
+to centralize the source label (`"memory"`), expose
 shell-composable prefix/suffix accessors for the file-mode runtime
 wrap, and provide a single swap point if the dependency is ever
 replaced.
