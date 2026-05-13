@@ -1,0 +1,8 @@
+[package]
+name = "right-prompt-safety"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+ironclaw_safety = "0.2"
