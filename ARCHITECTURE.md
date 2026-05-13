@@ -47,8 +47,8 @@ deployment lives in `right-platform-store`.
 Agent configuration DTOs live in `right-agent-config`; host-side STT cache and
 download helpers live in `right-stt`. `right-core` must not re-export those
 modules because that would preserve the old rebuild edge.
-`tonic-prost-build` lives in `crates/right-openshell/build.rs` and only
-re-runs when the OpenShell `.proto` files change.
+`tonic-prost-build` lives in `crates/right-openshell/build.rs`, alongside
+the OpenShell `.proto` files it compiles.
 
 `right-platform-knobs`, `right-prompt-safety`, and `right-runtime-state`
 are deliberately outside `right-core`: edits to UX/prose constants, memory
