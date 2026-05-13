@@ -9,6 +9,8 @@
 
 pub mod config;
 pub mod error;
+// Private owner-crate alias for OpenShell internals until that module moves.
+extern crate right_process as process_group;
 pub mod openshell;
 /// Generated protobuf types for the OpenShell gRPC API.
 #[allow(clippy::large_enum_variant)]
@@ -30,11 +32,8 @@ pub mod openshell_proto {
     }
 }
 pub mod platform_store;
-#[cfg(unix)]
-pub mod process_group;
 pub mod sandbox_exec;
 #[cfg(unix)]
 pub mod test_cleanup;
 #[cfg(all(unix, any(test, feature = "test-support")))]
 pub mod test_support;
-pub mod ui;

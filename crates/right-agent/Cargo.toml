@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 rand = { workspace = true }
 right-core = { path = "../right-core", version = "*" }
+right-ui = { path = "../right-ui", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-stt = { path = "../right-stt", version = "*" }
 right-db = { path = "../right-db", version = "*" }

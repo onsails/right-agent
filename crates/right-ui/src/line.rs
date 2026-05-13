@@ -1,7 +1,7 @@
 //! Status-line builder. Canonical shape: `▐  {glyph} {noun:<width}  {verb} [({detail})]`.
 
-use crate::ui::atoms::{Glyph, Rail};
-use crate::ui::theme::Theme;
+use crate::atoms::{Glyph, Rail};
+use crate::theme::Theme;
 
 /// Start a new status line for the given glyph.
 pub fn status(glyph: Glyph) -> Line {

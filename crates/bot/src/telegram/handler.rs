@@ -1518,7 +1518,7 @@ async fn detect_auth_type_via_haiku(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format!("spawn haiku failed: {e:#}"))?;
 
     let output = tokio::time::timeout(
@@ -1785,8 +1785,8 @@ pub async fn handle_doctor(
     }
     tracing::info!("handle_doctor: running diagnostics");
     let checks = right_agent::doctor::run_doctor(&home.0);
-    let theme = right_core::ui::Theme::Mono;
-    let mut block = right_core::ui::Block::new();
+    let theme = right_ui::Theme::Mono;
+    let mut block = right_ui::Block::new();
     for check in &checks {
         block.push(check.to_ui_line());
     }

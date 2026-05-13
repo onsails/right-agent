@@ -429,7 +429,7 @@ pub enum Commands {
 /// explaining the failure.
 fn handle_dispatch(result: miette::Result<()>) -> miette::Result<()> {
     if let Err(ref e) = result
-        && e.downcast_ref::<right_core::ui::BlockAlreadyRendered>().is_some()
+        && e.downcast_ref::<right_ui::BlockAlreadyRendered>().is_some()
     {
         std::process::exit(1);
     }
@@ -452,7 +452,7 @@ async fn main() -> miette::Result<()> {
     // Brand-conformant inquire prompt chrome — replaces the default
     // LightGreen `?` and LightCyan answers/highlighted-options with subtle
     // DarkGrey (or no styling at all on Mono/Ascii themes).
-    right_core::ui::install_prompt_render_config();
+    right_ui::install_prompt_render_config();
 
     // memory-server manages its own tracing (stderr-only for MCP compatibility).
     // Dispatch BEFORE the default tracing_subscriber init which writes to stdout.
@@ -1206,29 +1206,29 @@ fn cmd_init(
 
     // Brand: splash + dependency probe.
     {
-        let theme = right_core::ui::detect();
+        let theme = right_ui::detect();
         let version = env!("CARGO_PKG_VERSION");
         println!(
             "{}",
-            right_core::ui::splash(theme, version, "sandboxed multi-agent runtime")
+            right_ui::splash(theme, version, "sandboxed multi-agent runtime")
         );
-        println!("{}", right_core::ui::section(theme, "dependencies"));
-        println!("{}", right_core::ui::Rail::blank(theme));
+        println!("{}", right_ui::section(theme, "dependencies"));
+        println!("{}", right_ui::Rail::blank(theme));
 
-        let mut block = right_core::ui::Block::new();
+        let mut block = right_ui::Block::new();
         let mut fatal = false;
 
         // process-compose (fatal)
         match which::which("process-compose") {
             Ok(_) => block.push(
-                right_core::ui::status(right_core::ui::Glyph::Ok)
+                right_ui::status(right_ui::Glyph::Ok)
                     .noun("process-compose")
                     .verb("in PATH"),
             ),
             Err(_) => {
                 fatal = true;
                 block.push(
-                    right_core::ui::status(right_core::ui::Glyph::Err)
+                    right_ui::status(right_ui::Glyph::Err)
                         .noun("process-compose")
                         .verb("not in PATH")
                         .fix("https://f1bonacc1.github.io/process-compose/installation/"),
@@ -1239,14 +1239,14 @@ fn cmd_init(
         // claude (fatal)
         match which::which("claude") {
             Ok(_) => block.push(
-                right_core::ui::status(right_core::ui::Glyph::Ok)
+                right_ui::status(right_ui::Glyph::Ok)
                     .noun("claude")
                     .verb("in PATH"),
             ),
             Err(_) => {
                 fatal = true;
                 block.push(
-                    right_core::ui::status(right_core::ui::Glyph::Err)
+                    right_ui::status(right_ui::Glyph::Err)
                         .noun("claude")
                         .verb("not in PATH")
                         .fix("https://docs.anthropic.com/en/docs/claude-code"),
@@ -1257,12 +1257,12 @@ fn cmd_init(
         // openshell (warn)
         match which::which("openshell") {
             Ok(_) => block.push(
-                right_core::ui::status(right_core::ui::Glyph::Ok)
+                right_ui::status(right_ui::Glyph::Ok)
                     .noun("openshell")
                     .verb("in PATH"),
             ),
             Err(_) => block.push(
-                right_core::ui::status(right_core::ui::Glyph::Warn)
+                right_ui::status(right_ui::Glyph::Warn)
                     .noun("openshell")
                     .verb("not in PATH (optional, sandbox mode)"),
             ),
@@ -1271,22 +1271,22 @@ fn cmd_init(
         // cloudflared (warn)
         match which::which("cloudflared") {
             Ok(_) => block.push(
-                right_core::ui::status(right_core::ui::Glyph::Ok)
+                right_ui::status(right_ui::Glyph::Ok)
                     .noun("cloudflared")
                     .verb("in PATH"),
             ),
             Err(_) => block.push(
-                right_core::ui::status(right_core::ui::Glyph::Warn)
+                right_ui::status(right_ui::Glyph::Warn)
                     .noun("cloudflared")
                     .verb("not in PATH (optional, tunnel)"),
             ),
         }
 
         println!("{}", block.render(theme));
-        println!("{}", right_core::ui::Rail::blank(theme));
+        println!("{}", right_ui::Rail::blank(theme));
 
         if fatal {
-            return Err(right_core::ui::BlockAlreadyRendered.into());
+            return Err(right_ui::BlockAlreadyRendered.into());
         }
     }
 
@@ -1333,9 +1333,9 @@ fn cmd_init(
             Done,
         }
 
-        let theme = right_core::ui::detect();
-        println!("{}", right_core::ui::section(theme, "agent"));
-        println!("{}", right_core::ui::Rail::blank(theme));
+        let theme = right_ui::detect();
+        println!("{}", right_ui::section(theme, "agent"));
+        println!("{}", right_ui::Rail::blank(theme));
 
         let mut step = if sandbox_mode.is_some() {
             Step::Network
@@ -1477,9 +1477,9 @@ fn cmd_init(
     // Tunnel setup BEFORE codegen — codegen reads config.yaml (mandatory tunnel),
     // so we must write it first.
     {
-        let theme = right_core::ui::detect();
-        println!("{}", right_core::ui::section(theme, "tunnel"));
-        println!("{}", right_core::ui::Rail::blank(theme));
+        let theme = right_ui::detect();
+        println!("{}", right_ui::section(theme, "tunnel"));
+        println!("{}", right_ui::Rail::blank(theme));
     }
     let tunnel_cfg = crate::wizard::tunnel_setup(tunnel_name, tunnel_hostname, interactive)?;
     let aggregator = if home.join("config.yaml").exists() {
@@ -1536,10 +1536,10 @@ fn cmd_init(
             } else {
                 prompt_sandbox_recreate_if_exists(&sb_name, interactive)?
             };
-            let theme = right_core::ui::detect();
+            let theme = right_ui::detect();
             println!(
                 "{}",
-                right_core::ui::status(right_core::ui::Glyph::Info)
+                right_ui::status(right_ui::Glyph::Info)
                     .noun("sandbox")
                     .verb("creating")
                     .render(theme)
@@ -1557,7 +1557,7 @@ fn cmd_init(
             })?;
             println!(
                 "{}",
-                right_core::ui::status(right_core::ui::Glyph::Ok)
+                right_ui::status(right_ui::Glyph::Ok)
                     .noun("sandbox")
                     .verb("ready")
                     .detail(&sb_name)
@@ -1577,7 +1577,7 @@ fn cmd_init(
         }
     }
 
-    let theme = right_core::ui::detect();
+    let theme = right_ui::detect();
     let mode = format!("{} ({})", sandbox, network_policy_val);
     let chat_ids_detail = if chat_ids.is_empty() {
         "0 allowed (blocks all)".to_string()
@@ -1590,7 +1590,7 @@ fn cmd_init(
         "not configured".to_string()
     };
 
-    let mut recap = right_core::ui::Recap::new("ready")
+    let mut recap = right_ui::Recap::new("ready")
         .ok("agent", &format!("right ({mode})"))
         .ok("tunnel", &global_config.tunnel.hostname);
     recap = if token.is_some() {
@@ -1729,9 +1729,9 @@ fn cmd_agent_init(
         None
     };
 
-    let theme = right_core::ui::detect();
-    println!("{}", right_core::ui::section(theme, &format!("agent init: {name}")));
-    println!("{}", right_core::ui::Rail::blank(theme));
+    let theme = right_ui::detect();
+    println!("{}", right_ui::section(theme, &format!("agent init: {name}")));
+    println!("{}", right_ui::Rail::blank(theme));
 
     // --- Build overrides ---
     let overrides = if let Some(config) = saved_overrides {
@@ -2078,7 +2078,7 @@ fn cmd_agent_init(
         })
     });
 
-    let mut recap = right_core::ui::Recap::new("ready")
+    let mut recap = right_ui::Recap::new("ready")
         .ok("agent", &format!("{name} created"))
         .ok("sandbox", &sandbox_with_policy)
         .ok("telegram", if cfg.telegram_token.is_some() { "configured" } else { "not configured" })
@@ -2162,18 +2162,18 @@ fn prompt_sandbox_recreate_if_exists(
 }
 
 fn cmd_doctor(home: &Path) -> miette::Result<()> {
-    let theme = right_core::ui::detect();
+    let theme = right_ui::detect();
     let checks = right_agent::doctor::run_doctor(home);
 
-    println!("{}", right_core::ui::section(theme, "diagnostics"));
-    println!("{}", right_core::ui::Rail::blank(theme));
+    println!("{}", right_ui::section(theme, "diagnostics"));
+    println!("{}", right_ui::Rail::blank(theme));
 
-    let mut block = right_core::ui::Block::new();
+    let mut block = right_ui::Block::new();
     for check in &checks {
         block.push(check.to_ui_line());
     }
     println!("{}", block.render(theme));
-    println!("{}", right_core::ui::Rail::blank(theme));
+    println!("{}", right_ui::Rail::blank(theme));
 
     let pass = checks
         .iter()
@@ -2203,7 +2203,7 @@ fn cmd_doctor(home: &Path) -> miette::Result<()> {
     };
     println!(
         "{}{}",
-        right_core::ui::Rail::prefix(theme),
+        right_ui::Rail::prefix(theme),
         summary
     );
 
@@ -2670,59 +2670,59 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
 }
 
 async fn cmd_status(home: &Path) -> miette::Result<()> {
-    let theme = right_core::ui::detect();
+    let theme = right_ui::detect();
 
-    println!("{}", right_core::ui::section(theme, "status"));
-    println!("{}", right_core::ui::Rail::blank(theme));
+    println!("{}", right_ui::section(theme, "status"));
+    println!("{}", right_ui::Rail::blank(theme));
 
     let Some(client) = right_agent::runtime::PcClient::from_home(home)? else {
-        let line = right_core::ui::status(right_core::ui::Glyph::Err)
+        let line = right_ui::status(right_ui::Glyph::Err)
             .noun("right agent")
             .verb("not running")
             .fix("right up")
             .render(theme);
         println!("{line}");
-        return Err(right_core::ui::BlockAlreadyRendered.into());
+        return Err(right_ui::BlockAlreadyRendered.into());
     };
 
     if client.health_check().await.is_err() {
-        let line = right_core::ui::status(right_core::ui::Glyph::Err)
+        let line = right_ui::status(right_ui::Glyph::Err)
             .noun("right agent")
             .verb("not running")
             .fix("right up")
             .render(theme);
         println!("{line}");
-        return Err(right_core::ui::BlockAlreadyRendered.into());
+        return Err(right_ui::BlockAlreadyRendered.into());
     }
 
     let processes = client.list_processes().await?;
 
     if processes.is_empty() {
-        let line = right_core::ui::status(right_core::ui::Glyph::Err)
+        let line = right_ui::status(right_ui::Glyph::Err)
             .noun("right agent")
             .verb("no processes")
             .fix("right up")
             .render(theme);
         println!("{line}");
-        return Err(right_core::ui::BlockAlreadyRendered.into());
+        return Err(right_ui::BlockAlreadyRendered.into());
     }
 
-    let mut block = right_core::ui::Block::new();
+    let mut block = right_ui::Block::new();
     for p in &processes {
         let glyph = match p.status.as_str() {
-            "Running" => right_core::ui::Glyph::Ok,
-            "Restarting" | "Pending" => right_core::ui::Glyph::Warn,
-            _ => right_core::ui::Glyph::Err,
+            "Running" => right_ui::Glyph::Ok,
+            "Restarting" | "Pending" => right_ui::Glyph::Warn,
+            _ => right_ui::Glyph::Err,
         };
         let verb = format!("{:<6} {}", p.pid, p.system_time);
         block.push(
-            right_core::ui::status(glyph)
+            right_ui::status(glyph)
                 .noun(&p.name)
                 .verb(verb),
         );
     }
     println!("{}", block.render(theme));
-    println!("{}", right_core::ui::Rail::blank(theme));
+    println!("{}", right_ui::Rail::blank(theme));
 
     let warn = processes
         .iter()
@@ -2745,7 +2745,7 @@ async fn cmd_status(home: &Path) -> miette::Result<()> {
         }
         format!("{total} processes ({})", parts.join(", "))
     };
-    println!("{}{}", right_core::ui::Rail::prefix(theme), summary);
+    println!("{}{}", right_ui::Rail::prefix(theme), summary);
 
     Ok(())
 }
@@ -3281,7 +3281,7 @@ async fn cmd_agent_rebootstrap(
     agent_name: &str,
     yes: bool,
 ) -> miette::Result<()> {
-    use right_core::ui::{Block, Glyph, Rail, detect, section, status};
+    use right_ui::{Block, Glyph, Rail, detect, section, status};
 
     let plan = right_agent::rebootstrap::plan(home, agent_name)?;
     let theme = detect();

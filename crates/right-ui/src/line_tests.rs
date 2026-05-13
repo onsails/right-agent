@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::Glyph;
+use crate::Glyph;
 
 #[test]
 fn single_line_mono_basic() {

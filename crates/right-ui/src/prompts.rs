@@ -10,8 +10,8 @@
 
 use inquire::ui::{Color, RenderConfig, Styled};
 
-use crate::ui::Theme;
-use crate::ui::atoms::ORANGE;
+use crate::Theme;
+use crate::atoms::ORANGE;
 
 const BRAND_ORANGE: Color = Color::Rgb {
     r: ORANGE.0,
@@ -35,7 +35,7 @@ pub fn render_config(theme: Theme) -> RenderConfig<'static> {
 /// `inquire::set_global_render_config`. Idempotent — safe to call repeatedly,
 /// though one call early in `main` is sufficient.
 pub fn install_global() {
-    inquire::set_global_render_config(render_config(crate::ui::detect()));
+    inquire::set_global_render_config(render_config(crate::detect()));
 }
 
 #[cfg(test)]

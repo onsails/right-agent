@@ -3,8 +3,8 @@
 //! `─` becomes `-` under `Ascii`. Header is preceded by a blank rail row
 //! when used inside a flow (callers add the `\n` before/after themselves).
 
-use crate::ui::atoms::Rail;
-use crate::ui::theme::Theme;
+use crate::atoms::Rail;
+use crate::theme::Theme;
 
 const TARGET_COL: usize = 48;
 

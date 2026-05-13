@@ -4,7 +4,7 @@
 //! These exist so that future hardening (e.g. piping all UI through a `Sink`
 //! trait for capture in tests) has one chokepoint.
 
-use crate::ui::theme::Theme;
+use crate::theme::Theme;
 
 /// Write a line to stdout. `theme` is currently unused but kept in the
 /// signature so future captures don't need a callsite shape change.
