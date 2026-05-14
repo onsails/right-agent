@@ -236,7 +236,6 @@ pub async fn run_refresh_scheduler(
 
                 match result {
                     Ok((new_entry, access_token)) => {
-                        // Reset retry counter on success.
                         retry_attempts.remove(&name);
 
                         let was_needs_auth =
@@ -246,17 +245,14 @@ pub async fn run_refresh_scheduler(
                                 false
                             };
 
-                        // Write token directly to ProxyBackend's shared state
                         if let Some(token_arc) = token_handles.get(&name) {
                             *token_arc.write().await = Some(access_token.clone());
                             tracing::info!(server = %name, "token refreshed in-memory");
                         }
 
-                        // Schedule next refresh based on new expiry.
                         let due = refresh_due_in(&new_entry);
                         timers.insert(name.clone(), tokio::time::Instant::now() + due);
 
-                        // Persist refreshed token to SQLite
                         match right_db::open_connection(&agent_dir, false) {
                             Ok(conn) => {
                                 let expires_at = new_entry.expires_at.to_rfc3339();
@@ -313,11 +309,10 @@ pub async fn run_refresh_scheduler(
                                     "marked NeedsAuth after permanent refresh failure"
                                 );
                             }
-                            // Do not reschedule — user must re-OAuth.
+                            // User must re-OAuth — no reschedule.
                             timers.remove(&name);
                             retry_attempts.remove(&name);
                         } else {
-                            // Transient — bump retry count and reschedule.
                             let attempt = retry_attempts
                                 .entry(name.clone())
                                 .and_modify(|n| *n += 1)
@@ -336,19 +331,17 @@ pub async fn run_refresh_scheduler(
                         }
                     }
                     Err(other) => {
-                        // Cancelled / PersistFailed / Connect — none should occur in this
-                        // path (we pass a never-cancelled token and don't call backend.connect).
-                        // Treat as transient to be safe.
-                        tracing::warn!(server = %name, "unexpected refresh outcome: {other:#}");
-                        let attempt = retry_attempts
-                            .entry(name.clone())
-                            .and_modify(|n| *n += 1)
-                            .or_insert(1);
-                        let delay = transient_backoff_secs(*attempt);
-                        timers.insert(
-                            name.clone(),
-                            tokio::time::Instant::now() + Duration::from_secs(delay),
+                        // do_refresh_cancellable with a fresh never-cancelled token
+                        // cannot return Cancelled/Connect/PersistFailed here. Treat as a
+                        // contract violation: log loudly, drop the server from the
+                        // scheduler so the bug is visible in mcp_list (Unreachable) rather
+                        // than masked by an infinite retry loop.
+                        tracing::error!(
+                            server = %name,
+                            "scheduler contract violation: do_refresh_cancellable returned unexpected variant: {other:#}"
                         );
+                        timers.remove(&name);
+                        retry_attempts.remove(&name);
                     }
                 }
             }
