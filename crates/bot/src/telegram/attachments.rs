@@ -193,6 +193,7 @@ pub(crate) enum OutboundSend {
     Group {
         kind: GroupKind,
         items: Vec<OutboundAttachment>,
+        fallback_items: Vec<OutboundAttachment>,
     },
 }
 
@@ -253,6 +254,10 @@ pub(crate) fn partition_sends(
                 let plan = classify_media_group(&group_items);
                 match plan {
                     GroupPlan::SendAsGroup(kind) => {
+                        let fallback_items: Vec<OutboundAttachment> = indices
+                            .iter()
+                            .map(|&idx| attachments[idx].clone())
+                            .collect();
                         let mut items: Vec<OutboundAttachment> = indices
                             .iter()
                             .map(|&idx| attachments[idx].clone())
@@ -263,7 +268,11 @@ pub(crate) fn partition_sends(
                         for (it, c) in items.iter_mut().zip(caps.into_iter()) {
                             it.caption = c;
                         }
-                        sends.push(OutboundSend::Group { kind, items });
+                        sends.push(OutboundSend::Group {
+                            kind,
+                            items,
+                            fallback_items,
+                        });
                     }
                     GroupPlan::Split {
                         chunks,
@@ -279,6 +288,10 @@ pub(crate) fn partition_sends(
                                 let src_idx = indices[chunk[0]];
                                 sends.push(OutboundSend::Single(attachments[src_idx].clone()));
                             } else {
+                                let fallback_items: Vec<OutboundAttachment> = chunk
+                                    .iter()
+                                    .map(|&local| attachments[indices[local]].clone())
+                                    .collect();
                                 let mut items: Vec<OutboundAttachment> = chunk
                                     .iter()
                                     .map(|&local| attachments[indices[local]].clone())
@@ -289,7 +302,11 @@ pub(crate) fn partition_sends(
                                 for (it, c) in items.iter_mut().zip(caps.into_iter()) {
                                     it.caption = c;
                                 }
-                                sends.push(OutboundSend::Group { kind, items });
+                                sends.push(OutboundSend::Group {
+                                    kind,
+                                    items,
+                                    fallback_items,
+                                });
                             }
                         }
                     }
@@ -842,22 +859,39 @@ pub async fn send_attachments(
 
     let mut errors: Vec<String> = Vec::new();
     for send in &sends {
-        let result: Result<(), SendError> = match send {
-            OutboundSend::Single(att) => send_single(att, &ctx).await,
-            OutboundSend::Group { kind: _, items } => send_group(items, &ctx).await,
-        };
-        if let Err(e) = result {
-            let label = match send {
-                OutboundSend::Single(att) => format!("{:?} attachment {}", att.kind, att.path),
-                OutboundSend::Group { kind, items } => {
-                    format!("{kind:?} media group of {} items", items.len())
+        match send {
+            OutboundSend::Single(att) => {
+                let label = attachment_error_label(att);
+                if let Err(e) = send_single(att, &ctx).await {
+                    if matches!(&e, SendError::Api(_)) {
+                        tracing::error!("failed to send {label}: see SendError::Api");
+                    }
+                    errors.push(e.into_user_msg(&label));
                 }
-            };
-            // Api failures are ERROR-level; Skip reasons were already WARN'd in resolve_host_path.
-            if matches!(e, SendError::Api(_)) {
-                tracing::error!("failed to send {label}: see SendError::Api");
             }
-            errors.push(e.into_user_msg(&label));
+            OutboundSend::Group {
+                kind,
+                items,
+                fallback_items,
+            } => match send_group(items, &ctx).await {
+                Ok(()) => {}
+                Err(SendError::FallbackToSingles { reason }) => {
+                    tracing::warn!(
+                        group_kind = ?kind,
+                        item_count = items.len(),
+                        reason = %reason,
+                        "media group cannot be sent as an album; falling back to individual sends",
+                    );
+                    send_group_items_as_singles(fallback_items, &ctx, &mut errors).await;
+                }
+                Err(e) => {
+                    let label = format!("{kind:?} media group of {} items", items.len());
+                    if matches!(&e, SendError::Api(_)) {
+                        tracing::error!("failed to send {label}: see SendError::Api");
+                    }
+                    errors.push(e.into_user_msg(&label));
+                }
+            },
         }
     }
 
@@ -865,6 +899,26 @@ pub async fn send_attachments(
         Ok(())
     } else {
         Err(errors.join("; ").into())
+    }
+}
+
+fn attachment_error_label(att: &OutboundAttachment) -> String {
+    format!("{:?} attachment {}", att.kind, att.path)
+}
+
+async fn send_group_items_as_singles(
+    items: &[OutboundAttachment],
+    ctx: &SendCtx<'_>,
+    errors: &mut Vec<String>,
+) {
+    for att in items {
+        let label = attachment_error_label(att);
+        if let Err(e) = send_single(att, ctx).await {
+            if matches!(&e, SendError::Api(_)) {
+                tracing::error!("failed to send {label}: see SendError::Api");
+            }
+            errors.push(e.into_user_msg(&label));
+        }
     }
 }
 
@@ -893,6 +947,8 @@ enum SendError {
     Skip(String),
     /// Telegram API call failed — always ERROR.
     Api(teloxide::RequestError),
+    /// Media group cannot be sent as an album and should be retried item-by-item.
+    FallbackToSingles { reason: String },
 }
 
 fn display_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
@@ -906,12 +962,29 @@ fn display_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     out
 }
 
+fn is_webp_file_header(header: &[u8]) -> bool {
+    header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP"
+}
+
+fn is_media_group_validation_error_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    (lower.contains("failed to send message")
+        && lower.contains("wrong file identifier/http url specified"))
+        || lower.contains("media_group_invalid")
+        || (lower.contains("media group")
+            && lower.contains("bad request")
+            && (lower.contains("file identifier") || lower.contains("http url")))
+}
+
 impl SendError {
     /// Format a user-visible error string labelled with the attachment description.
     fn into_user_msg(self, label: &str) -> String {
         match self {
             Self::Skip(msg) => format!("skipped {label}: {msg}"),
             Self::Api(e) => format!("failed to send {label}: {}", display_error_chain(&e)),
+            Self::FallbackToSingles { reason } => {
+                format!("media group fallback requested for {label}: {reason}")
+            }
         }
     }
 }
@@ -1138,13 +1211,99 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
     send_result.map_err(SendError::Api)
 }
 
+async fn document_group_preflight_fallback_reason(
+    items: &[OutboundAttachment],
+    host_paths: &[PathBuf],
+) -> Option<String> {
+    for (att, host_path) in items.iter().zip(host_paths.iter()) {
+        if att.kind == OutboundKind::Document && file_has_webp_header(host_path).await {
+            return Some(format!(
+                "document media group contains WebP file {}",
+                att.path
+            ));
+        }
+    }
+    None
+}
+
+async fn file_has_webp_header(path: &std::path::Path) -> bool {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::warn!("failed to open {} for media sniffing: {e}", path.display());
+            return false;
+        }
+    };
+
+    let mut header = [0_u8; 12];
+    match file.read_exact(&mut header).await {
+        Ok(_) => is_webp_file_header(&header),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => false,
+        Err(e) => {
+            tracing::warn!("failed to read {} for media sniffing: {e}", path.display());
+            false
+        }
+    }
+}
+
+fn build_group_input_media(
+    att: &OutboundAttachment,
+    host_path: &std::path::Path,
+) -> teloxide::types::InputMedia {
+    use teloxide::types::{
+        InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
+        InputMediaVideo,
+    };
+
+    let file = InputFile::file(host_path.to_path_buf());
+    let cap = att.caption.clone();
+    match att.kind {
+        OutboundKind::Photo => {
+            let mut media = InputMediaPhoto::new(file);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Photo(media)
+        }
+        OutboundKind::Video => {
+            let mut media = InputMediaVideo::new(file);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Video(media)
+        }
+        OutboundKind::Document => {
+            let mut media = InputMediaDocument::new(file);
+            media.disable_content_type_detection = Some(true);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Document(media)
+        }
+        OutboundKind::Audio => {
+            let mut media = InputMediaAudio::new(file);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Audio(media)
+        }
+        _ => {
+            tracing::error!(
+                "send_group received ungroupable kind {:?} for {} - classifier bug",
+                att.kind,
+                att.path,
+            );
+            InputMedia::Document(InputMediaDocument::new(file))
+        }
+    }
+}
+
 async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(), SendError> {
     use teloxide::payloads::SendMediaGroupSetters;
     use teloxide::requests::Requester;
-    use teloxide::types::{
-        InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
-        InputMediaVideo, MessageId, ThreadId,
-    };
+    use teloxide::types::{InputMedia, MessageId, ThreadId};
 
     // All-or-nothing: Telegram's sendMediaGroup requires the full set in one
     // call. If any member fails path validation, download, metadata read, or
@@ -1164,55 +1323,15 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
         }
     }
 
+    if let Some(reason) = document_group_preflight_fallback_reason(items, &host_paths).await {
+        cleanup_host_paths(&host_paths, ctx.sandboxed).await;
+        return Err(SendError::FallbackToSingles { reason });
+    }
+
     let media: Vec<InputMedia> = items
         .iter()
         .zip(host_paths.iter())
-        .map(|(att, host)| {
-            let file = InputFile::file(host);
-            let cap = att.caption.clone();
-            match att.kind {
-                OutboundKind::Photo => {
-                    let mut m = InputMediaPhoto::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Photo(m)
-                }
-                OutboundKind::Video => {
-                    let mut m = InputMediaVideo::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Video(m)
-                }
-                OutboundKind::Document => {
-                    let mut m = InputMediaDocument::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Document(m)
-                }
-                OutboundKind::Audio => {
-                    let mut m = InputMediaAudio::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Audio(m)
-                }
-                // Classifier rejects these kinds from groups, so this branch is
-                // unreachable in practice. Log a loud error and fall back to a
-                // Document to keep the bot alive if the classifier is ever
-                // changed. This MUST NOT silently swallow data.
-                _ => {
-                    tracing::error!(
-                        "send_group received ungroupable kind {:?} for {} — classifier bug",
-                        att.kind,
-                        att.path,
-                    );
-                    InputMedia::Document(InputMediaDocument::new(file))
-                }
-            }
-        })
+        .map(|(att, host)| build_group_input_media(att, host))
         .collect();
 
     let thread_id = if ctx.eff_thread_id != 0 {
@@ -1225,7 +1344,17 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
     if let Some(tid) = thread_id {
         req = req.message_thread_id(tid);
     }
-    let result = req.await.map(|_| ()).map_err(SendError::Api);
+    let result = match req.await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let reason = display_error_chain(&e);
+            if is_media_group_validation_error_text(&reason) {
+                Err(SendError::FallbackToSingles { reason })
+            } else {
+                Err(SendError::Api(e))
+            }
+        }
+    };
 
     cleanup_host_paths(&host_paths, ctx.sandboxed).await;
     result
@@ -1374,6 +1503,47 @@ mod tests {
     fn mime_to_extension_unknown_fallback() {
         assert_eq!(mime_to_extension("application/x-unknown-thing"), "bin");
         assert_eq!(mime_to_extension(""), "bin");
+    }
+
+    #[test]
+    fn webp_magic_header_detects_riff_webp() {
+        assert!(is_webp_file_header(b"RIFF\x00\x00\x00\x00WEBPVP8 "));
+    }
+
+    #[test]
+    fn webp_magic_header_rejects_png_and_short_input() {
+        assert!(!is_webp_file_header(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d"));
+        assert!(!is_webp_file_header(b"RIFF"));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_matches_wrong_file_identifier() {
+        let err = "Bad Request: failed to send message #1 with the error message \"Wrong file identifier/HTTP URL specified\"";
+        assert!(is_media_group_validation_error_text(err));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_matches_media_group_invalid() {
+        assert!(is_media_group_validation_error_text(
+            "Bad Request: MEDIA_GROUP_INVALID",
+        ));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_rejects_non_album_errors() {
+        assert!(!is_media_group_validation_error_text(
+            "Too Many Requests: retry after 5",
+        ));
+        assert!(!is_media_group_validation_error_text(
+            "Bad Request: message text is empty",
+        ));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_rejects_bare_wrong_file_identifier() {
+        assert!(!is_media_group_validation_error_text(
+            "Bad Request: Wrong file identifier/HTTP URL specified",
+        ));
     }
 
     #[test]
@@ -1943,13 +2113,101 @@ mod tests {
             kind,
             path: format!(
                 "/sandbox/outbox/{}-{}.bin",
-                kind_to_ext(kind),
+                match kind {
+                    OutboundKind::Document => "document",
+                    _ => kind_to_ext(kind),
+                },
                 caption.unwrap_or("x")
             ),
             filename: None,
             caption: caption.map(str::to_owned),
             media_group_id: group.map(str::to_owned),
         }
+    }
+
+    #[tokio::test]
+    async fn document_group_preflight_requests_fallback_for_webp_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let webp = dir.path().join("mark.webp");
+        let png = dir.path().join("mark.png");
+        tokio::fs::write(&webp, b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+            .await
+            .unwrap();
+        tokio::fs::write(&png, b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d")
+            .await
+            .unwrap();
+
+        let items = vec![
+            att_with(OutboundKind::Document, Some("logos"), Some("webp")),
+            att_with(OutboundKind::Document, Some("logos"), Some("png")),
+        ];
+        let host_paths = vec![webp, png];
+
+        let reason = document_group_preflight_fallback_reason(&items, &host_paths).await;
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("document media group contains WebP file /sandbox/outbox/document-webp.bin"),
+        );
+    }
+
+    #[tokio::test]
+    async fn document_group_preflight_allows_png_document_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.png");
+        let b = dir.path().join("b.txt");
+        tokio::fs::write(&a, b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d")
+            .await
+            .unwrap();
+        tokio::fs::write(&b, b"plain text").await.unwrap();
+
+        let items = vec![
+            att_with(OutboundKind::Document, Some("docs"), Some("a")),
+            att_with(OutboundKind::Document, Some("docs"), Some("b")),
+        ];
+        let host_paths = vec![a, b];
+
+        assert!(
+            document_group_preflight_fallback_reason(&items, &host_paths)
+                .await
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn build_group_input_media_document_disables_content_type_detection() {
+        let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
+        let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"));
+
+        match media {
+            teloxide::types::InputMedia::Document(document) => {
+                assert_eq!(document.disable_content_type_detection, Some(true));
+            }
+            _ => panic!("expected document media"),
+        }
+    }
+
+    #[test]
+    fn fallback_to_singles_error_message_contains_reason_if_leaked() {
+        let msg = SendError::FallbackToSingles {
+            reason: "preflight rejected WebP document group".to_owned(),
+        }
+        .into_user_msg("Document media group of 2 items");
+
+        assert_eq!(
+            msg,
+            "media group fallback requested for Document media group of 2 items: preflight rejected WebP document group",
+        );
+    }
+
+    #[test]
+    fn attachment_error_label_names_kind_and_path() {
+        let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
+
+        assert_eq!(
+            attachment_error_label(&att),
+            "Document attachment /sandbox/outbox/document-report.bin",
+        );
     }
 
     #[test]
@@ -1975,11 +2233,37 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(sends.len(), 1);
         match &sends[0] {
-            OutboundSend::Group { kind, items } => {
+            OutboundSend::Group { kind, items, .. } => {
                 assert_eq!(*kind, GroupKind::PhotoVideo);
                 assert_eq!(items.len(), 2);
                 assert_eq!(items[0].caption.as_deref(), Some("a\n\nb"));
                 assert!(items[1].caption.is_none());
+            }
+            other => panic!("expected OutboundSend::Group, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partition_group_preserves_original_captions_for_fallback_singles() {
+        let atts = vec![
+            att_with(OutboundKind::Document, Some("docs"), Some("first")),
+            att_with(OutboundKind::Document, Some("docs"), Some("second")),
+        ];
+
+        let (sends, warnings) = partition_sends(&atts);
+        assert!(warnings.is_empty());
+        assert_eq!(sends.len(), 1);
+
+        match &sends[0] {
+            OutboundSend::Group {
+                items,
+                fallback_items,
+                ..
+            } => {
+                assert_eq!(items[0].caption.as_deref(), Some("first\n\nsecond"));
+                assert!(items[1].caption.is_none());
+                assert_eq!(fallback_items[0].caption.as_deref(), Some("first"));
+                assert_eq!(fallback_items[1].caption.as_deref(), Some("second"));
             }
             other => panic!("expected OutboundSend::Group, got {other:?}"),
         }
