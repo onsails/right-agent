@@ -86,6 +86,7 @@ pub async fn register_with_running_pc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::setup_crypto;
 
     #[tokio::test]
     async fn returns_pc_running_false_when_state_json_absent() {
@@ -104,7 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_pc_running_false_when_state_json_points_at_closed_port() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        setup_crypto();
         let dir = tempfile::TempDir::new().unwrap();
         let run = dir.path().join("run");
         std::fs::create_dir_all(&run).unwrap();
