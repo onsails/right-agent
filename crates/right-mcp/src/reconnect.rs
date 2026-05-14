@@ -387,7 +387,7 @@ mod tests {
                 async move { do_refresh_cancellable(&client, &entry, &cancel_clone).await },
             );
 
-        // Let the first attempt complete (it hits the MockServer and gets 401).
+        // Let the first attempt complete (it hits the MockServer and gets 503).
         // Then advance time slightly — not enough to expire the 30s backoff,
         // just enough to confirm we are inside the backoff sleep.
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -586,5 +586,66 @@ mod tests {
             }
             other => panic!("expected NewEntry, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_classifies_5xx_as_transient() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream broke"))
+            .mount(&server)
+            .await;
+
+        let entry = make_entry(format!("{}/token", server.uri()));
+        let client = reqwest::Client::new();
+        let cancel = CancellationToken::new();
+
+        tokio::time::pause();
+        let handle = tokio::spawn(async move {
+            do_refresh_cancellable(&client, &entry, &cancel).await
+        });
+        // Burn through all backoffs deterministically.
+        for _ in 0..MAX_RETRIES {
+            tokio::time::advance(Duration::from_secs(200)).await;
+            tokio::task::yield_now().await;
+        }
+        let result = handle.await.expect("task panicked");
+        assert!(
+            matches!(
+                result,
+                Err(ReconnectError::Refresh(RefreshFailure::Transient(_)))
+            ),
+            "expected Transient for 5xx, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_classifies_network_error_as_transient() {
+        // Use a URL that fails DNS / TCP — port 1 on 127.0.0.1 should be closed.
+        let entry = make_entry("http://127.0.0.1:1/token".into());
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(100))
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+
+        tokio::time::pause();
+        let handle = tokio::spawn(async move {
+            do_refresh_cancellable(&client, &entry, &cancel).await
+        });
+        for _ in 0..MAX_RETRIES {
+            tokio::time::advance(Duration::from_secs(200)).await;
+            tokio::task::yield_now().await;
+        }
+        let result = handle.await.expect("task panicked");
+        assert!(
+            matches!(
+                result,
+                Err(ReconnectError::Refresh(RefreshFailure::Transient(_)))
+            ),
+            "expected Transient for network error, got {result:?}"
+        );
     }
 }
