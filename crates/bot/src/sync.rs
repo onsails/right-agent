@@ -58,7 +58,8 @@ async fn sync_cycle(
     sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     // Build manifest of platform-managed files
-    let manifest = right_platform_store::build_manifest(agent_dir)?;
+    let manifest =
+        right_platform_store::build_manifest(agent_dir, right_codegen::BUILTIN_SKILL_NAMES)?;
 
     // Deploy to /platform/ with content-addressed names + symlinks
     right_platform_store::deploy_manifest(sbox, &manifest).await?;

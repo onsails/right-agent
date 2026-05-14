@@ -24,4 +24,4 @@ pub use pipeline::run_agent_codegen;
 pub use pipeline::run_single_agent_codegen;
 pub use process_compose::{ProcessComposeConfig, generate_process_compose};
 pub use settings::generate_settings;
-pub use skills::install_builtin_skills;
+pub use skills::{BUILTIN_SKILL_NAMES, install_builtin_skills};
