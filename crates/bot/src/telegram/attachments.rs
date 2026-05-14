@@ -1344,7 +1344,17 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
     if let Some(tid) = thread_id {
         req = req.message_thread_id(tid);
     }
-    let result = req.await.map(|_| ()).map_err(SendError::Api);
+    let result = match req.await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let reason = display_error_chain(&e);
+            if is_media_group_validation_error_text(&reason) {
+                Err(SendError::FallbackToSingles { reason })
+            } else {
+                Err(SendError::Api(e))
+            }
+        }
+    };
 
     cleanup_host_paths(&host_paths, ctx.sandboxed).await;
     result
