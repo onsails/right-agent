@@ -16,6 +16,8 @@
 
   languages.rust.enable = true;
 
+  git-hooks.hooks.rustfmt.enable = true;
+
   env.RUSTC_WRAPPER = "sccache";
 
   enterShell = ''
