@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::Path;
 
 use include_dir::{Dir, include_dir};
@@ -8,24 +9,33 @@ use minijinja::value::Value as JinjaValue;
 use right_agent_config::MemoryProvider;
 use right_platform_knobs::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
 
-use crate::contract::{write_agent_owned, write_regenerated_bytes};
+use crate::contract::{write_agent_owned, write_merged_rmw, write_regenerated_bytes};
 
-const SKILL_RIGHTSKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightskills");
-const SKILL_RIGHTCRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightcron");
-const SKILL_RIGHTMCP: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightmcp");
-const SKILL_RIGHTMEMORY_FILE: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightmemory-file");
-const SKILL_RIGHTMEMORY_HINDSIGHT: Dir =
-    include_dir!("$CARGO_MANIFEST_DIR/skills/rightmemory-hindsight");
-const SKILL_RIGHTREFLECT: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightreflect");
+const SKILL_RIGHT_SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-skills");
+const SKILL_RIGHT_CRON: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-cron");
+const SKILL_RIGHT_MCP: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-mcp");
+const SKILL_RIGHT_MEMORY_FILE: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-memory-file");
+const SKILL_RIGHT_MEMORY_HINDSIGHT: Dir =
+    include_dir!("$CARGO_MANIFEST_DIR/skills/right-memory-hindsight");
+const SKILL_RIGHT_REFLECT: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-reflect");
 
 /// Canonical names of Right Agent built-in skills under `.claude/skills/`.
 ///
 /// Single source of truth shared by the installer (`install_builtin_skills`) and
 /// the sandbox deployer (`right_platform_store::build_manifest`). Past drift —
 /// adding a skill to the installer without updating the deployer — caused
-/// rightmemory and rightreflect to ship on the host but never reach the sandbox.
+/// right-memory and right-reflect to ship on the host but never reach the sandbox.
 /// Both ends now iterate this list; drift is impossible by construction.
 pub const BUILTIN_SKILL_NAMES: &[&str] = &[
+    "right-skills",
+    "right-cron",
+    "right-mcp",
+    "right-memory",
+    "right-reflect",
+];
+
+/// Legacy built-in skill directory names removed during host and sandbox upgrade.
+pub const BUILTIN_SKILL_LEGACY_NAMES: &[&str] = &[
     "rightskills",
     "rightcron",
     "rightmcp",
@@ -38,15 +48,15 @@ fn builtin_skill_dir(
     memory_provider: &MemoryProvider,
 ) -> miette::Result<&'static Dir<'static>> {
     match name {
-        "rightskills" => Ok(&SKILL_RIGHTSKILLS),
-        "rightcron" => Ok(&SKILL_RIGHTCRON),
-        "rightmcp" => Ok(&SKILL_RIGHTMCP),
-        "rightmemory" => Ok(if *memory_provider == MemoryProvider::Hindsight {
-            &SKILL_RIGHTMEMORY_HINDSIGHT
+        "right-skills" => Ok(&SKILL_RIGHT_SKILLS),
+        "right-cron" => Ok(&SKILL_RIGHT_CRON),
+        "right-mcp" => Ok(&SKILL_RIGHT_MCP),
+        "right-memory" => Ok(if *memory_provider == MemoryProvider::Hindsight {
+            &SKILL_RIGHT_MEMORY_HINDSIGHT
         } else {
-            &SKILL_RIGHTMEMORY_FILE
+            &SKILL_RIGHT_MEMORY_FILE
         }),
-        "rightreflect" => Ok(&SKILL_RIGHTREFLECT),
+        "right-reflect" => Ok(&SKILL_RIGHT_REFLECT),
         _ => Err(miette::miette!(
             "unknown builtin skill {name:?} — add an arm to builtin_skill_dir"
         )),
@@ -63,6 +73,7 @@ pub fn install_builtin_skills(
     memory_provider: &MemoryProvider,
 ) -> miette::Result<()> {
     let claude_skills_dir = agent_path.join(".claude").join("skills");
+    remove_legacy_builtin_skills(&claude_skills_dir)?;
 
     for name in BUILTIN_SKILL_NAMES {
         let dir = builtin_skill_dir(name, memory_provider)?;
@@ -73,7 +84,64 @@ pub fn install_builtin_skills(
     // Create-if-absent: preserve user-installed skill registry across restarts
     let installed_json_path = claude_skills_dir.join("installed.json");
     write_agent_owned(&installed_json_path, "{}")?;
+    prune_legacy_installed_json_entries(&installed_json_path)?;
     Ok(())
+}
+
+fn remove_legacy_builtin_skills(claude_skills_dir: &Path) -> miette::Result<()> {
+    for legacy_name in BUILTIN_SKILL_LEGACY_NAMES {
+        remove_path_if_exists(&claude_skills_dir.join(legacy_name))?;
+    }
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> miette::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(miette::miette!(
+                "failed to inspect legacy builtin skill path {}: {e:#}",
+                path.display()
+            ));
+        }
+    };
+
+    let result = if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    result.map_err(|e| {
+        miette::miette!(
+            "failed to remove legacy builtin skill path {}: {e:#}",
+            path.display()
+        )
+    })
+}
+
+fn prune_legacy_installed_json_entries(installed_json_path: &Path) -> miette::Result<()> {
+    write_merged_rmw(installed_json_path, |existing| {
+        let content = existing.unwrap_or("{}");
+        let mut value: serde_json::Value = serde_json::from_str(content).map_err(|e| {
+            miette::miette!("failed to parse installed.json: {}", format!("{:#}", e))
+        })?;
+        let mut removed = false;
+        if let Some(object) = value.as_object_mut() {
+            for legacy_name in BUILTIN_SKILL_LEGACY_NAMES {
+                removed |= object.remove(*legacy_name).is_some();
+            }
+        }
+        if !removed {
+            return Ok(content.to_owned());
+        }
+        serde_json::to_string(&value).map_err(|e| {
+            miette::miette!(
+                "failed to serialize pruned installed.json: {}",
+                format!("{:#}", e)
+            )
+        })
+    })
 }
 
 /// Recursively write all files from an embedded directory to `target`.
@@ -134,30 +202,30 @@ mod tests {
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         assert!(
             dir.path()
-                .join(".claude/skills/rightskills/SKILL.md")
+                .join(".claude/skills/right-skills/SKILL.md")
                 .exists(),
-            "rightskills/SKILL.md should exist"
+            "right-skills/SKILL.md should exist"
         );
     }
 
     #[test]
-    fn installs_rightcron_skill() {
+    fn installs_right_cron_skill() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         assert!(
             dir.path()
-                .join(".claude/skills/rightcron/SKILL.md")
+                .join(".claude/skills/right-cron/SKILL.md")
                 .exists(),
-            "rightcron/SKILL.md should exist"
+            "right-cron/SKILL.md should exist"
         );
     }
 
     #[test]
-    fn rightcron_skill_interpolates_idle_threshold() {
+    fn right_cron_skill_interpolates_idle_threshold() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         let content =
-            std::fs::read_to_string(dir.path().join(".claude/skills/rightcron/SKILL.md")).unwrap();
+            std::fs::read_to_string(dir.path().join(".claude/skills/right-cron/SKILL.md")).unwrap();
         // Template tokens must be fully rendered.
         assert!(
             !content.contains("{{"),
@@ -172,7 +240,7 @@ mod tests {
         // The buggy "Confirm:" directives must be gone.
         assert!(
             !content.contains("Confirm:"),
-            "Confirm: directives should be removed from rightcron SKILL.md"
+            "Confirm: directives should be removed from right-cron SKILL.md"
         );
         // The stale ~60-second claim must be gone.
         assert!(
@@ -182,22 +250,24 @@ mod tests {
     }
 
     #[test]
-    fn installs_rightmcp_skill() {
+    fn installs_right_mcp_skill() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         assert!(
-            dir.path().join(".claude/skills/rightmcp/SKILL.md").exists(),
-            "rightmcp/SKILL.md should exist"
+            dir.path()
+                .join(".claude/skills/right-mcp/SKILL.md")
+                .exists(),
+            "right-mcp/SKILL.md should exist"
         );
     }
 
     #[test]
-    fn rightmcp_includes_known_endpoints_yaml() {
+    fn right_mcp_includes_known_endpoints_yaml() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         let yaml_path = dir
             .path()
-            .join(".claude/skills/rightmcp/known-endpoints.yaml");
+            .join(".claude/skills/right-mcp/known-endpoints.yaml");
         assert!(yaml_path.exists(), "known-endpoints.yaml should exist");
         let content = std::fs::read_to_string(&yaml_path).unwrap();
         assert!(
@@ -223,12 +293,12 @@ mod tests {
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         assert!(
             dir.path()
-                .join(".claude/skills/rightskills/SKILL.md")
+                .join(".claude/skills/right-skills/SKILL.md")
                 .exists()
         );
         assert!(
             dir.path()
-                .join(".claude/skills/rightcron/SKILL.md")
+                .join(".claude/skills/right-cron/SKILL.md")
                 .exists()
         );
     }
@@ -249,6 +319,25 @@ mod tests {
         assert_eq!(
             content, r#"{"my-skill":"1.0"}"#,
             "installed.json must not be overwritten on subsequent install_builtin_skills calls"
+        );
+    }
+
+    #[test]
+    fn installed_json_preserves_existing_format_when_no_legacy_entries_exist() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join(".claude/skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        let installed_path = skills_dir.join("installed.json");
+        let installed_content = "{\n  \"my-skill\": \"1.0\"\n}\n";
+        std::fs::write(&installed_path, installed_content).unwrap();
+
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&installed_path).unwrap(),
+            installed_content,
+            "installed.json must not be rewritten when no legacy entries are present"
         );
     }
 
@@ -286,6 +375,107 @@ mod tests {
         );
     }
 
+    #[test]
+    fn install_removes_legacy_builtin_skill_dirs_and_preserves_user_content() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join(".claude/skills");
+
+        let legacy_names = [
+            "rightskills",
+            "rightcron",
+            "rightmcp",
+            "rightmemory",
+            "rightreflect",
+        ];
+        for legacy_name in legacy_names {
+            let legacy_dir = skills_dir.join(legacy_name);
+            std::fs::create_dir_all(&legacy_dir).unwrap();
+            std::fs::write(legacy_dir.join("SKILL.md"), "legacy built-in").unwrap();
+        }
+
+        let user_skill_dir = skills_dir.join("my-custom-skill");
+        std::fs::create_dir_all(&user_skill_dir).unwrap();
+        std::fs::write(user_skill_dir.join("SKILL.md"), "user skill").unwrap();
+
+        let installed_json = skills_dir.join("installed.json");
+        let installed_content = r#"{"my-custom-skill":"1.0"}"#;
+        std::fs::write(&installed_json, installed_content).unwrap();
+
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+
+        for builtin_name in BUILTIN_SKILL_NAMES {
+            assert!(
+                skills_dir.join(builtin_name).join("SKILL.md").exists(),
+                "new builtin skill dir must exist: {builtin_name}"
+            );
+        }
+        for legacy_name in legacy_names {
+            assert!(
+                !skills_dir.join(legacy_name).exists(),
+                "legacy builtin skill dir must be removed: {legacy_name}"
+            );
+        }
+        assert!(
+            user_skill_dir.join("SKILL.md").exists(),
+            "user skill dir must be preserved"
+        );
+        assert_eq!(
+            std::fs::read_to_string(installed_json).unwrap(),
+            installed_content,
+            "installed.json user content must be preserved"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_removes_legacy_builtin_skill_symlinks_without_removing_target() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join(".claude/skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        let target_dir = dir.path().join("legacy-target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("SKILL.md"), "legacy symlink target").unwrap();
+        std::os::unix::fs::symlink(&target_dir, skills_dir.join("rightcron")).unwrap();
+
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+
+        assert!(
+            !skills_dir.join("rightcron").exists(),
+            "legacy symlink path must be removed"
+        );
+        assert!(
+            target_dir.join("SKILL.md").exists(),
+            "removing a legacy symlink must not remove its target"
+        );
+        assert!(
+            skills_dir.join("right-cron/SKILL.md").exists(),
+            "new right-cron skill must be installed"
+        );
+    }
+
+    #[test]
+    fn install_prunes_legacy_builtin_entries_from_installed_json() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join(".claude/skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            skills_dir.join("installed.json"),
+            r#"{"rightcron":"builtin","my-custom-skill":"1.0","rightmcp":"builtin"}"#,
+        )
+        .unwrap();
+
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+
+        let content = std::fs::read_to_string(skills_dir.join("installed.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({"my-custom-skill":"1.0"}),
+            "obsolete builtin entries must be removed without dropping user entries"
+        );
+    }
+
     /// Contract: every name in `BUILTIN_SKILL_NAMES` must be installed to disk,
     /// and `builtin_skill_dir` must recognize each name (no `unknown builtin skill`
     /// error). This is the single point that prevents drift between the installer
@@ -319,11 +509,11 @@ mod tests {
 
         // (source_dir_name, installed_dir_name)
         let skills: &[(&str, &str)] = &[
-            ("rightskills", "rightskills"),
-            ("rightcron", "rightcron"),
-            ("rightmcp", "rightmcp"),
-            ("rightmemory-file", "rightmemory"),
-            ("rightreflect", "rightreflect"),
+            ("right-skills", "right-skills"),
+            ("right-cron", "right-cron"),
+            ("right-mcp", "right-mcp"),
+            ("right-memory-file", "right-memory"),
+            ("right-reflect", "right-reflect"),
         ];
         for (source_name, installed_name) in skills {
             let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -348,11 +538,11 @@ mod tests {
     }
 
     #[test]
-    fn installs_rightmemory_file_variant() {
+    fn installs_right_memory_file_variant() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         let content =
-            std::fs::read_to_string(dir.path().join(".claude/skills/rightmemory/SKILL.md"))
+            std::fs::read_to_string(dir.path().join(".claude/skills/right-memory/SKILL.md"))
                 .unwrap();
         assert!(
             content.contains("MEMORY.md"),
@@ -365,11 +555,11 @@ mod tests {
     }
 
     #[test]
-    fn installs_rightmemory_hindsight_variant() {
+    fn installs_right_memory_hindsight_variant() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::Hindsight).unwrap();
         let content =
-            std::fs::read_to_string(dir.path().join(".claude/skills/rightmemory/SKILL.md"))
+            std::fs::read_to_string(dir.path().join(".claude/skills/right-memory/SKILL.md"))
                 .unwrap();
         assert!(
             content.contains("memory_retain"),
@@ -382,27 +572,26 @@ mod tests {
     }
 
     #[test]
-    fn installs_rightreflect_skill() {
+    fn installs_right_reflect_skill() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
         assert!(
             dir.path()
-                .join(".claude/skills/rightreflect/SKILL.md")
+                .join(".claude/skills/right-reflect/SKILL.md")
                 .exists(),
-            "rightreflect/SKILL.md should exist"
+            "right-reflect/SKILL.md should exist"
         );
     }
 
     #[test]
-    fn rightreflect_skill_frontmatter_is_valid() {
+    fn right_reflect_skill_frontmatter_is_valid() {
         let dir = tempdir().unwrap();
         install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
-        let content = std::fs::read_to_string(
-            dir.path().join(".claude/skills/rightreflect/SKILL.md"),
-        )
-        .unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/skills/right-reflect/SKILL.md"))
+                .unwrap();
         assert!(content.starts_with("---\n"), "frontmatter must start file");
-        assert!(content.contains("name: rightreflect"), "must declare name");
+        assert!(content.contains("name: right-reflect"), "must declare name");
         assert!(
             content.contains("/sandbox/.claude/projects/-sandbox/"),
             "must reference the JSONL path"

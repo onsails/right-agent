@@ -228,7 +228,7 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 | TOOLS.md | `/sandbox/TOOLS.md` | Agent (editable) |
 | settings.json | `/sandbox/.claude/settings.json` → `/platform/settings.json.<hash>` | Platform (symlink) |
 | reply-schema.json | `/sandbox/.claude/reply-schema.json` → `/platform/...` | Platform (symlink) |
-| skills/ | `/sandbox/.claude/skills/rightmcp` → `/platform/skills/rightmcp.<hash>` | Platform (symlink) |
+| skills/ | `/sandbox/.claude/skills/right-mcp` → `/platform/skills/right-mcp.<hash>` | Platform (symlink) |
 | BOOTSTRAP.md | N/A (not synced to sandbox) | Content from compiled-in constant; on-disk file is host-side flag only |
 
 ### Host (`agent_dir/`)

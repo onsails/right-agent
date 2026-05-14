@@ -173,7 +173,10 @@ pub(crate) fn format_event(event: &StreamEvent) -> Option<String> {
 }
 
 /// Format the full thinking message: events on top, status footer at bottom.
-pub(crate) fn format_thinking_message(events: &VecDeque<StreamEvent>, usage: &StreamUsage) -> String {
+pub(crate) fn format_thinking_message(
+    events: &VecDeque<StreamEvent>,
+    usage: &StreamUsage,
+) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     for event in events {
@@ -446,14 +449,14 @@ mod tests {
 
     #[test]
     fn skill_tool_shows_skill_name() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"rightcron","args":"big prompt..."}}]}}"#;
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"right-cron","args":"big prompt..."}}]}}"#;
         match parse_stream_event(line) {
             StreamEvent::ToolUse {
                 tool,
                 input_summary,
             } => {
                 assert_eq!(tool, "Skill");
-                assert_eq!(input_summary, "/rightcron");
+                assert_eq!(input_summary, "/right-cron");
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }

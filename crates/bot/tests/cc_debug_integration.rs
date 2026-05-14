@@ -1,5 +1,5 @@
 //! Integration tests confirming that Claude Code produces the per-session
-//! files that the /rightreflect skill depends on.
+//! files that the /right-reflect skill depends on.
 //!
 //! Tests 14-16 of the self-introspection implementation plan.
 //!
@@ -11,7 +11,7 @@ use right_openshell::test_support::TestSandbox;
 /// Confirm that `claude -p --debug --debug-file=<path>` creates a non-empty
 /// file inside the sandbox at the specified path.
 ///
-/// This is the load-bearing assumption of /rightreflect: that enabling debug
+/// This is the load-bearing assumption of /right-reflect: that enabling debug
 /// mode produces an agent-readable per-session log at a known path.
 ///
 /// Claude will exit non-zero (no auth token), but it should still create
@@ -19,9 +19,9 @@ use right_openshell::test_support::TestSandbox;
 #[tokio::test]
 async fn cc_debug_file_lands_inside_sandbox() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
-    let sandbox = TestSandbox::create("rightreflect-debugfile").await;
+    let sandbox = TestSandbox::create("right-reflect-debugfile").await;
 
-    let session_id = "rightreflect-test-00000000-0000-0000-0000-000000000001";
+    let session_id = "right-reflect-test-00000000-0000-0000-0000-000000000001";
     let log_path = format!("/sandbox/.claude/logs/{session_id}.log");
 
     // Pre-create the logs directory; CC will write to it.
@@ -75,7 +75,7 @@ async fn cc_debug_file_lands_inside_sandbox() {
 /// JSONL files on unauthenticated startup).
 ///
 /// Background: CC uses the working directory to derive the project path:
-/// `/sandbox` → `/sandbox/.claude/projects/-sandbox/`. The /rightreflect
+/// `/sandbox` → `/sandbox/.claude/projects/-sandbox/`. The /right-reflect
 /// skill reads JSONL files from this directory. This test verifies:
 ///
 /// 1. The path is writable (the agent can write JSONL there if needed).
@@ -88,9 +88,9 @@ async fn cc_debug_file_lands_inside_sandbox() {
 #[tokio::test]
 async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
-    let sandbox = TestSandbox::create("rightreflect-jsonl").await;
+    let sandbox = TestSandbox::create("right-reflect-jsonl").await;
 
-    let session_id = "rightreflect-test-00000000-0000-0000-0000-000000000002";
+    let session_id = "right-reflect-test-00000000-0000-0000-0000-000000000002";
     let project_dir = "/sandbox/.claude/projects/-sandbox";
     let jsonl_path = format!("{project_dir}/{session_id}.jsonl");
     let marker = "RIGHTREFLECT-PRESERVED-MARKER";
@@ -135,13 +135,13 @@ async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
 
 /// Confirm that a synthetic JSONL file in the projects directory can be
 /// located and grepped from inside the sandbox — the filesystem-access
-/// primitive that /rightreflect relies on.
+/// primitive that /right-reflect relies on.
 ///
 /// This test is filesystem-only: no claude binary needed.
 #[tokio::test]
 async fn skill_can_grep_jsonl() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
-    let sandbox = TestSandbox::create("rightreflect-grep").await;
+    let sandbox = TestSandbox::create("right-reflect-grep").await;
 
     let (_, exit) = sandbox
         .exec(&["mkdir", "-p", "/sandbox/.claude/projects/-sandbox"])

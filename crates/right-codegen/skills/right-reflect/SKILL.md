@@ -1,5 +1,5 @@
 ---
-name: rightreflect
+name: right-reflect
 description: >-
   Inspects this agent's own past reasoning by reading the conversation-history
   JSONL files Claude Code writes inside the sandbox. Use when the user asks
@@ -9,7 +9,7 @@ description: >-
   Filesystem-only — no MCP calls, no DB.
 ---
 
-# /rightreflect — Read Your Own Past Reasoning
+# /right-reflect — Read Your Own Past Reasoning
 
 You are reflecting on your own past sessions to answer "why did you ...?"
 The data exists. Your job is to find the right file, read it efficiently,

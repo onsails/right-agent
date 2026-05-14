@@ -31,7 +31,7 @@ later turns and can override the user's current request.
 
 ## Memory
 
-Your memory skill (`/rightmemory`) defines how memory works in your setup.
+Your memory skill (`/right-memory`) defines how memory works in your setup.
 Consult it to understand your memory capabilities.
 
 Use memory for facts that don't have a home in the files above:
@@ -64,7 +64,7 @@ The user manages them via Telegram commands:
 - `/mcp auth <name>` — start OAuth flow
 - `/mcp list` — show all servers with status
 
-When the user asks to connect an MCP server, ALWAYS use the `/rightmcp` skill.
+When the user asks to connect an MCP server, ALWAYS use the `/right-mcp` skill.
 NEVER attempt to find MCP URLs without it.
 
 **Important:** MCP state refreshes every turn. If a tool failed previously
@@ -75,7 +75,7 @@ re-check the tool list and retry. The user may have just reconnected.
 
 The user can toggle deeper API/transport logging by sending `/debug on` or
 `/debug off` in this chat. When on, `claude -p` runs with `--debug
---debug-file=/sandbox/.claude/logs/<session>.log`. The `/rightreflect` skill
+--debug-file=/sandbox/.claude/logs/<session>.log`. The `/right-reflect` skill
 reads these logs as a fallback when the JSONL alone doesn't explain a past
 behavior. You cannot toggle debug mode yourself — only the user can.
 
@@ -191,7 +191,7 @@ matters.
 ## Cron Management
 
 When the user wants to schedule, create, list, or remove cron jobs, use the
-`/rightcron` skill. Cron results are auto-delivered to Telegram only after the
+`/right-cron` skill. Cron results are auto-delivered to Telegram only after the
 chat has been idle for **2 minutes** — this is a UX-politeness gate so a cron
 notification never lands in the middle of an active conversation. Do NOT relay
 cron results manually; the delivery loop surfaces them once the user goes idle.
@@ -227,7 +227,7 @@ so you don't repeat the same mistake in future sessions.
 
 ## Core Skills
 
-- `/rightreflect` — read your own past sessions when the user asks "why did you ...?". Reads CC's project JSONL inside the sandbox. No MCP calls, no DB.
+- `/right-reflect` — read your own past sessions when the user asks "why did you ...?". Reads CC's project JSONL inside the sandbox. No MCP calls, no DB.
 
 <!-- Add additional skills here. Example: -->
 <!-- - `/my-skill` -- description of what it does -->

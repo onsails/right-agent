@@ -783,16 +783,16 @@ async fn upload_file_rejects_non_directory_dest() {
 }
 
 /// Regression test: upload_file with a directory (not a single file) as source.
-/// This is how sync.rs uploads builtin skills (e.g. rightcron/, rightmcp/).
+/// This is how sync.rs uploads builtin skills (e.g. right-cron/, right-mcp/).
 /// OpenShell has a known bug where directory uploads silently drop small files.
 /// Also tests overwrite: sync runs every 5 min, so repeated uploads must work.
 #[tokio::test]
 async fn upload_directory_preserves_files_and_overwrites() {
     let sbox = shared_test_sandbox().await;
 
-    // Create a directory tree mimicking a skill: rightmcp/SKILL.md
+    // Create a directory tree mimicking a skill: right-mcp/SKILL.md
     let tmp = tempfile::tempdir().unwrap();
-    let skill_dir = tmp.path().join("rightmcp");
+    let skill_dir = tmp.path().join("right-mcp");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "# version 1\n").unwrap();
 
@@ -802,7 +802,7 @@ async fn upload_directory_preserves_files_and_overwrites() {
         .expect("first directory upload should succeed");
 
     let (content, code) = sbox
-        .exec(&["cat", "/sandbox/.claude/skills/rightmcp/SKILL.md"])
+        .exec(&["cat", "/sandbox/.claude/skills/right-mcp/SKILL.md"])
         .await;
     assert_eq!(code, 0, "SKILL.md must exist after first upload");
     assert_eq!(content, "# version 1\n");
@@ -814,7 +814,7 @@ async fn upload_directory_preserves_files_and_overwrites() {
         .expect("second directory upload (overwrite) should succeed");
 
     let (content, code) = sbox
-        .exec(&["cat", "/sandbox/.claude/skills/rightmcp/SKILL.md"])
+        .exec(&["cat", "/sandbox/.claude/skills/right-mcp/SKILL.md"])
         .await;
     assert_eq!(code, 0, "SKILL.md must exist after overwrite");
     assert_eq!(content, "# version 2\n", "overwrite must update content");

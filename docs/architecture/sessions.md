@@ -142,7 +142,7 @@ sandbox. The session UUID matches the `--session-id` we pass to
 `claude`, so the bot's session UUIDs (from the `sessions` table) and
 `cron_runs.id` map directly to JSONL filenames.
 
-The `/rightreflect` bundled skill teaches the agent to read these
+The `/right-reflect` bundled skill teaches the agent to read these
 files when the user asks "why did you ...?". When `/debug` is on,
 ClaudeInvocation also writes per-session API-layer detail to
 `/sandbox/.claude/logs/<session-uuid>.log` — same UUID, parallel
