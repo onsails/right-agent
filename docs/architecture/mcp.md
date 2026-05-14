@@ -64,6 +64,31 @@ dead. The `was_needs_auth` branch in `refresh.rs::run_refresh_scheduler`
 spawns `backend.connect(http)` in the background to re-establish the
 session before the next tool call.
 
+### Scheduler concurrency
+
+`refresh.rs::run_refresh_scheduler` is a single `tokio::select!` loop with
+three arms: inbound `rx.recv()`, an in-flight `JoinSet::join_next()`, and a
+timer wake-up. Refresh attempts are **spawned** into the `JoinSet`, not
+awaited inline — this keeps the `rx.recv()` arm responsive while a refresh
+runs. An exhausting-backoff path (~210s) on one server would otherwise
+starve `RemoveServer` for a different server, or block a `NewEntry`
+arriving from a just-completed `/mcp auth` for minutes.
+
+Two correctness handles keep stale results from polluting state:
+
+1. **Per-server `CancellationToken`s** (`cancel_tokens`): both
+   `RemoveServer` and a superseding `NewEntry` cancel the in-flight
+   refresh, so `do_refresh_cancellable` aborts at its next pre-attempt
+   check or interrupts a backoff sleep.
+2. **Per-server generation counters** (`generations`): `NewEntry` bumps
+   the counter; each spawned task is tagged with the generation it saw
+   at spawn time. The join_next handler discards results whose tag
+   doesn't match the current generation. This defends against the
+   `do_refresh_cancellable` Ok path, which returns immediately on a
+   successful HTTP response without re-checking the cancel token — so
+   a NewEntry that races a near-completion refresh could otherwise see
+   the stale Ok overwrite the freshly-rotated credentials.
+
 ### `ProxyBackend` status transitions
 
 `BackendStatus` is `Connected | NeedsAuth | Unreachable`. Refresh- and
