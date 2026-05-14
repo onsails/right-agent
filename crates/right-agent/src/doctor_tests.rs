@@ -123,7 +123,7 @@ fn run_doctor_reports_missing_identity() {
 
 #[test]
 fn doctor_check_to_ui_line_shows_name_status_detail() {
-    use right_core::ui::Theme;
+    use right_ui::Theme;
     let check = DoctorCheck {
         name: "test-binary".to_string(),
         status: CheckStatus::Pass,
@@ -138,7 +138,7 @@ fn doctor_check_to_ui_line_shows_name_status_detail() {
 
 #[test]
 fn doctor_check_to_ui_line_shows_fix_on_failure() {
-    use right_core::ui::Theme;
+    use right_ui::Theme;
     let check = DoctorCheck {
         name: "missing".to_string(),
         status: CheckStatus::Fail,
@@ -604,15 +604,15 @@ fn tunnel_state_credentials_present_passes() {
     let dir = tempdir().unwrap();
     let creds_file = dir.path().join("creds.json");
     std::fs::write(&creds_file, "{}").unwrap();
-    let config = right_core::config::GlobalConfig {
-        tunnel: right_core::config::TunnelConfig {
+    let config = right_config::GlobalConfig {
+        tunnel: right_config::TunnelConfig {
             tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
             credentials_file: creds_file,
             hostname: "example.com".to_string(),
         },
-        aggregator: right_core::config::AggregatorConfig::default(),
+        aggregator: right_config::AggregatorConfig::default(),
     };
-    right_core::config::write_global_config(dir.path(), &config).unwrap();
+    right_config::write_global_config(dir.path(), &config).unwrap();
     let checks = check_tunnel_state(dir.path());
     let creds_check = checks
         .iter()
@@ -629,15 +629,15 @@ fn tunnel_state_credentials_present_passes() {
 #[test]
 fn tunnel_state_credentials_missing_fails() {
     let dir = tempdir().unwrap();
-    let config = right_core::config::GlobalConfig {
-        tunnel: right_core::config::TunnelConfig {
+    let config = right_config::GlobalConfig {
+        tunnel: right_config::TunnelConfig {
             tunnel_uuid: "aaaabbbb-0000-1111-2222-ccccddddeeee".to_string(),
             credentials_file: std::path::PathBuf::from("/nonexistent/creds.json"),
             hostname: "example.com".to_string(),
         },
-        aggregator: right_core::config::AggregatorConfig::default(),
+        aggregator: right_config::AggregatorConfig::default(),
     };
-    right_core::config::write_global_config(dir.path(), &config).unwrap();
+    right_config::write_global_config(dir.path(), &config).unwrap();
     let checks = check_tunnel_state(dir.path());
     let creds_check = checks
         .iter()

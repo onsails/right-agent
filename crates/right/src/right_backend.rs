@@ -161,11 +161,7 @@ impl RightBackend {
         let params: CronCreateParams =
             serde_json::from_value(args.clone()).context("invalid cron_create params")?;
         if let Err(msg) = validate_target_against_allowlist(agent_dir, params.target_chat_id) {
-            return Ok(tool_error(
-                "chat_id_not_in_allowlist",
-                msg,
-                None,
-            ));
+            return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
@@ -199,11 +195,7 @@ impl RightBackend {
         if let Some(chat) = params.target_chat_id
             && let Err(msg) = validate_target_against_allowlist(agent_dir, chat)
         {
-            return Ok(tool_error(
-                "chat_id_not_in_allowlist",
-                msg,
-                None,
-            ));
+            return Ok(tool_error("chat_id_not_in_allowlist", msg, None));
         }
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
@@ -243,7 +235,8 @@ impl RightBackend {
     fn call_cron_list(&self, agent_name: &str) -> Result<CallToolResult, anyhow::Error> {
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
-        let output = right_agent::cron_spec::list_specs(&conn).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let output =
+            right_agent::cron_spec::list_specs(&conn).map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
     }
 
@@ -380,27 +373,31 @@ impl RightBackend {
                 Ok(Some(config)) => {
                     let explicit_sandbox_name =
                         config.sandbox.as_ref().and_then(|s| s.name.as_deref());
-                    right_core::openshell::resolve_sandbox_name(agent_name, explicit_sandbox_name)
+                    right_openshell::openshell::resolve_sandbox_name(
+                        agent_name,
+                        explicit_sandbox_name,
+                    )
                 }
-                _ => right_core::openshell::resolve_sandbox_name(agent_name, None),
+                _ => right_openshell::openshell::resolve_sandbox_name(agent_name, None),
             };
-            let mut client = right_core::openshell::connect_grpc(mtls_dir)
+            let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))
                 .context("bootstrap_done: failed to connect to OpenShell gRPC")?;
-            let sandbox_id = right_core::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e:#}"))
-                .context("bootstrap_done: failed to resolve sandbox ID")?;
+            let sandbox_id =
+                right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))
+                    .context("bootstrap_done: failed to resolve sandbox ID")?;
 
             let mut missing = Vec::new();
             for &file in &required {
                 let path = format!("/sandbox/{file}");
-                let (_, exit_code) = right_core::openshell::exec_in_sandbox(
+                let (_, exit_code) = right_openshell::openshell::exec_in_sandbox(
                     &mut client,
                     &sandbox_id,
                     &["test", "-f", &path],
-                    right_core::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+                    right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e:#}"))

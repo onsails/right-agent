@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use right_core::agent_types::{AgentDef, MemoryProvider, SandboxMode};
-use right_core::runtime_state::{
+use right_agent_config::{AgentDef, MemoryProvider, SandboxMode};
+use right_runtime_state::{
     AgentState, MCP_HTTP_PORT, PC_PORT, RuntimeState, generate_pc_api_token, read_state,
     write_state,
 };
@@ -208,7 +208,7 @@ pub fn run_agent_codegen(
     std::fs::create_dir_all(&run_dir)
         .map_err(|e| miette::miette!("failed to create run directory: {e:#}"))?;
 
-    let global_cfg = right_core::config::read_global_config(home)?;
+    let global_cfg = right_config::read_global_config(home)?;
 
     // Resolve agent secrets for token map.
     // Per-agent codegen is now done by the bot at startup (run_single_agent_codegen).
@@ -355,7 +355,7 @@ pub fn run_agent_codegen(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use right_core::agent_types::AgentConfig;
+    use right_agent_config::AgentConfig;
 
     /// Write a minimal valid `config.yaml` (with tunnel block) into the given
     /// home directory. Required because Tasks 1+2 made tunnel config mandatory:

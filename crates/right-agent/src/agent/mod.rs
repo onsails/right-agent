@@ -1,6 +1,7 @@
 pub mod allowlist;
 pub mod destroy;
 pub mod discovery;
+pub mod error;
 pub mod register;
 pub mod types;
 

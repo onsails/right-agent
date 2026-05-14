@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use right_core::runtime_state::read_state;
+use right_runtime_state::read_state;
 
 /// Status information for a single process managed by process-compose.
 #[derive(Debug, Clone, Deserialize, PartialEq)]

@@ -187,7 +187,7 @@ pub fn init_agent(
     // Generate policy.yaml when sandbox mode is openshell.
     if matches!(ov.sandbox_mode, SandboxMode::Openshell) {
         let policy_yaml = right_codegen::policy::generate_policy(
-            crate::runtime::MCP_HTTP_PORT,
+            right_runtime_state::MCP_HTTP_PORT,
             &ov.network_policy,
             None,
         );
@@ -256,7 +256,7 @@ pub fn init_right_home(
     memory_recall_budget: RecallBudget,
     memory_recall_max_tokens: u32,
 ) -> miette::Result<()> {
-    let agents_parent = right_core::config::agents_dir(home);
+    let agents_parent = right_config::agents_dir(home);
     if agents_parent.join("right").exists() {
         return Err(miette::miette!(
             "Right Agent home already initialized at {}. Use `right config` to change settings.",

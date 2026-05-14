@@ -1,0 +1,16 @@
+[package]
+name = "right-config"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+dirs = { workspace = true }
+miette = { workspace = true }
+serde = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

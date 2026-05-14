@@ -88,9 +88,7 @@ pub(crate) fn build_prompt_assembly_script(
 
         if matches!(mode, PromptMode::Cron) {
             let escaped_cron = right_codegen::CRON_INSTRUCTIONS.replace('\'', "'\\''");
-            sections.push_str(&format!(
-                "\nprintf '\\n'\nprintf '%s\\n' '{escaped_cron}'"
-            ));
+            sections.push_str(&format!("\nprintf '\\n'\nprintf '%s\\n' '{escaped_cron}'"));
         }
 
         for s in PROMPT_SECTIONS {
@@ -121,10 +119,8 @@ fi"#
     } else {
         match memory_mode {
             Some(MemoryMode::File) => {
-                let prefix = right_core::injection_guard::memory_wrap_prefix()
-                    .replace('\'', "'\\''");
-                let suffix = right_core::injection_guard::memory_wrap_suffix()
-                    .replace('\'', "'\\''");
+                let prefix = right_prompt_safety::memory_wrap_prefix().replace('\'', "'\\''");
+                let suffix = right_prompt_safety::memory_wrap_suffix().replace('\'', "'\\''");
                 // `head` is gated by `[ -s ... ]`; a TOCTOU failure here would
                 // produce empty content inside the wrap, which is harmless.
                 // sed escape neutralizes any literal `--- END EXTERNAL CONTENT ---`
@@ -170,7 +166,7 @@ pub(crate) fn format_composite_memory(
     bg_marker: Option<&str>,
 ) -> String {
     let label_line = format!("[System: recalled memory context, {label}.]\n\n");
-    let wrapped = right_core::injection_guard::wrap_memory_for_prompt(content);
+    let wrapped = right_prompt_safety::wrap_memory_for_prompt(content);
     let status_tail = status_marker
         .map(|m| format!("\n\n{m}"))
         .unwrap_or_default();
@@ -194,7 +190,7 @@ pub(crate) async fn deploy_composite_memory(
         .await
         .map_err(DeployError::Write)?;
     if let Some(sandbox) = resolved_sandbox {
-        right_core::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
+        right_openshell::openshell::upload_file(sandbox, &host_path, "/sandbox/.claude/")
             .await
             .map_err(|e| DeployError::Upload(format!("{e:#}")))?;
     }
@@ -237,7 +233,7 @@ pub(crate) async fn remove_composite_memory(
         return;
     };
 
-    let ssh_host = right_core::openshell::ssh_host_for_sandbox(sb.sandbox_name);
+    let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sb.sandbox_name);
     let mut cmd = tokio::process::Command::new("ssh");
     cmd.arg("-F").arg(sb.ssh_config);
     cmd.arg(&ssh_host);

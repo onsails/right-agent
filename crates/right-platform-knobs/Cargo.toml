@@ -1,0 +1,7 @@
+[package]
+name = "right-platform-knobs"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]

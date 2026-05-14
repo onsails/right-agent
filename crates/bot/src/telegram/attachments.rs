@@ -529,16 +529,12 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
             if !r.attachments.is_empty() {
                 out.push_str("      attachments:\n");
                 for att in &r.attachments {
-                    writeln!(out, "        - type: {}", att.kind.as_str())
-                        .expect("infallible");
-                    writeln!(out, "          path: {}", att.path.display())
-                        .expect("infallible");
-                    writeln!(out, "          mime_type: {}", att.mime_type)
-                        .expect("infallible");
+                    writeln!(out, "        - type: {}", att.kind.as_str()).expect("infallible");
+                    writeln!(out, "          path: {}", att.path.display()).expect("infallible");
+                    writeln!(out, "          mime_type: {}", att.mime_type).expect("infallible");
                     if let Some(ref fname) = att.filename {
                         let escaped = yaml_escape_string(fname);
-                        writeln!(out, "          filename: \"{escaped}\"")
-                            .expect("infallible");
+                        writeln!(out, "          filename: \"{escaped}\"").expect("infallible");
                     }
                 }
             }
@@ -766,7 +762,7 @@ pub async fn download_attachments(
         let final_path = if sandboxed {
             // Upload to sandbox, then clean up host temp file
             let sandbox = resolved_sandbox.unwrap();
-            right_core::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
+            right_openshell::openshell::upload_file(sandbox, &host_path, SANDBOX_INBOX).await?;
             if let Err(e) = tokio::fs::remove_file(&host_path).await {
                 tracing::warn!("Failed to remove temp file {}: {e}", host_path.display());
             }
@@ -899,15 +895,23 @@ enum SendError {
     Api(teloxide::RequestError),
 }
 
+fn display_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        use std::fmt::Write as _;
+        let _ = write!(out, ": {cause}");
+        source = cause.source();
+    }
+    out
+}
+
 impl SendError {
     /// Format a user-visible error string labelled with the attachment description.
     fn into_user_msg(self, label: &str) -> String {
         match self {
             Self::Skip(msg) => format!("skipped {label}: {msg}"),
-            Self::Api(e) => format!(
-                "failed to send {label}: {}",
-                right_core::error::display_error_chain(&e),
-            ),
+            Self::Api(e) => format!("failed to send {label}: {}", display_error_chain(&e)),
         }
     }
 }
@@ -949,7 +953,7 @@ async fn resolve_host_path(
             .into_owned();
         let dest = tmp_dir.join(&file_name);
         let sandbox = ctx.resolved_sandbox.unwrap();
-        if let Err(e) = right_core::openshell::download_file(sandbox, &att.path, &dest).await {
+        if let Err(e) = right_openshell::openshell::download_file(sandbox, &att.path, &dest).await {
             let msg = format!(
                 "download_file failed for {}: {:#} — {log_suffix}",
                 att.path, e
@@ -1272,10 +1276,10 @@ async fn run_cleanup(
     retention_days: u32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mtime_arg = format!("+{retention_days}");
         // Use find to delete files older than retention_days in sandbox inbox/outbox
-        right_core::openshell::ssh_exec(
+        right_openshell::openshell::ssh_exec(
             ssh_config,
             &ssh_host,
             &[
@@ -2252,5 +2256,60 @@ mod group_format_tests {
             msg,
             "skipped Photo attachment /bad/path.jpg: path outside outbox — skipping",
         );
+    }
+
+    #[test]
+    fn display_error_chain_includes_sources() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Inner;
+
+        impl fmt::Display for Inner {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("root cause")
+            }
+        }
+
+        impl Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+
+        impl fmt::Display for Outer {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("top-level failure")
+            }
+        }
+
+        impl Error for Outer {
+            fn source(&self) -> Option<&(dyn Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let err = Outer(Inner);
+        assert_eq!(display_error_chain(&err), "top-level failure: root cause");
+    }
+
+    #[test]
+    fn display_error_chain_handles_no_source() {
+        use std::error::Error;
+        use std::fmt;
+
+        #[derive(Debug)]
+        struct Standalone;
+
+        impl fmt::Display for Standalone {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("top-level failure")
+            }
+        }
+
+        impl Error for Standalone {}
+
+        let err = Standalone;
+        assert_eq!(display_error_chain(&err), "top-level failure");
     }
 }

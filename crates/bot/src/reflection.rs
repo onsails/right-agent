@@ -196,10 +196,8 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     let reply_schema = std::fs::read_to_string(&schema_path)?;
 
     // 3. MCP config path (reuse worker's helper).
-    let mcp_path = crate::cc::invocation::mcp_config_path(
-        ctx.ssh_config_path.as_deref(),
-        &ctx.agent_dir,
-    );
+    let mcp_path =
+        crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
 
     // 4. ClaudeInvocation — resume, stream-json, tight caps, no Agent tool.
     let invocation = ClaudeInvocation {
@@ -243,7 +241,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         let sandbox_name = ctx.resolved_sandbox.as_deref().ok_or_else(|| {
             ReflectionError::Spawn("ssh_config_path set but resolved_sandbox is None".into())
         })?;
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(sandbox_name);
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
         let prompt_path = format!("/tmp/right-reflection-prompt-{}.md", ctx.session_uuid);
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
@@ -298,7 +296,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
 
-    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| ReflectionError::Spawn(format!("{:#}", e)))?;
 
     // Pipe the prompt, then drop stdin to signal EOF.

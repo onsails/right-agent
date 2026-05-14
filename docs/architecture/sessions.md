@@ -42,8 +42,9 @@ foreground turn; delivery acquires before each Haiku-relayed delivery. Cron
 job execution itself does NOT acquire — it runs `--fork-session` against a new
 session ID and does not race the main session JSONL.
 
-`IDLE_THRESHOLD_SECS = 120` remains as UX politeness ("don't interrupt the
-user mid-conversation"), but correctness now lives in the mutex.
+`right_platform_knobs::IDLE_THRESHOLD_SECS = 120` remains as UX politeness
+("don't interrupt the user mid-conversation"), but correctness now lives in
+the mutex.
 
 Sweep: a periodic task in `lib.rs` (every hour) drops entries whose Arc has no
 external strong references — protects against unbounded growth on long-lived
