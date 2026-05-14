@@ -648,4 +648,63 @@ mod tests {
             "expected Transient for network error, got {result:?}"
         );
     }
+
+    #[tokio::test]
+    async fn refresh_classifies_400_as_permanent_no_retry() {
+        let server = MockServer::start().await;
+        // 400 invalid_grant — refresh token revoked.
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error":"invalid_grant"}"#),
+            )
+            .expect(1) // must NOT retry — first response is enough
+            .mount(&server)
+            .await;
+
+        let entry = make_entry(format!("{}/token", server.uri()));
+        let client = reqwest::Client::new();
+        let cancel = CancellationToken::new();
+        let result = do_refresh_cancellable(&client, &entry, &cancel).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(ReconnectError::Refresh(RefreshFailure::Permanent(_)))
+            ),
+            "expected Permanent for 400 invalid_grant, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_classifies_429_as_transient() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .mount(&server)
+            .await;
+
+        let entry = make_entry(format!("{}/token", server.uri()));
+        let client = reqwest::Client::new();
+        let cancel = CancellationToken::new();
+
+        tokio::time::pause();
+        let handle = tokio::spawn(async move {
+            do_refresh_cancellable(&client, &entry, &cancel).await
+        });
+        for _ in 0..MAX_RETRIES {
+            tokio::time::advance(Duration::from_secs(200)).await;
+            tokio::task::yield_now().await;
+        }
+        let result = handle.await.expect("task panicked");
+        assert!(
+            matches!(
+                result,
+                Err(ReconnectError::Refresh(RefreshFailure::Transient(_)))
+            ),
+            "expected Transient for 429, got {result:?}"
+        );
+    }
 }
