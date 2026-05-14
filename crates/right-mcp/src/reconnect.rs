@@ -247,6 +247,7 @@ pub async fn reconnect_task(
             server_name: server_name.clone(),
             state: new_state,
             token: token_arc.clone(),
+            backend: backend.clone(),
         })
         .await
         .map_err(|e| {
@@ -575,7 +576,10 @@ mod tests {
             .expect("expected RefreshMessage::NewEntry on refresh_rx");
         match msg {
             RefreshMessage::NewEntry {
-                server_name, state, ..
+                server_name,
+                state,
+                backend: _,
+                ..
             } => {
                 assert_eq!(server_name, "composio");
                 assert_eq!(

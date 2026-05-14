@@ -22,7 +22,6 @@ pub struct OAuthServerState {
 }
 
 /// Message sent to refresh scheduler (new token or removal).
-#[derive(Debug)]
 pub enum RefreshMessage {
     /// New or updated OAuth token — schedule refresh timer.
     NewEntry {
@@ -30,9 +29,30 @@ pub enum RefreshMessage {
         state: OAuthServerState,
         /// Shared token handle — scheduler writes new tokens here.
         token: Arc<tokio::sync::RwLock<Option<String>>>,
+        /// Backend handle — scheduler updates status on permanent failure
+        /// and triggers reconnect after recovery.
+        backend: Arc<crate::proxy::ProxyBackend>,
     },
     /// Server removed — cancel timer and clean up state.
     RemoveServer { server_name: String },
+}
+
+impl std::fmt::Debug for RefreshMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NewEntry {
+                server_name, state, ..
+            } => f
+                .debug_struct("NewEntry")
+                .field("server_name", server_name)
+                .field("state", state)
+                .finish_non_exhaustive(),
+            Self::RemoveServer { server_name } => f
+                .debug_struct("RemoveServer")
+                .field("server_name", server_name)
+                .finish(),
+        }
+    }
 }
 
 /// Load OAuth server entries from SQLite for refresh scheduling.
@@ -110,6 +130,7 @@ pub async fn run_refresh_scheduler(
     let mut entries: HashMap<String, OAuthServerState> = HashMap::new();
     let mut token_handles: HashMap<String, Arc<tokio::sync::RwLock<Option<String>>>> =
         HashMap::new();
+    let mut backend_handles: HashMap<String, Arc<crate::proxy::ProxyBackend>> = HashMap::new();
     let mut timers: HashMap<String, tokio::time::Instant> = HashMap::new();
 
     loop {
@@ -120,7 +141,7 @@ pub async fn run_refresh_scheduler(
             // Message from handler or OAuth callback
             Some(msg) = rx.recv() => {
                 match msg {
-                    RefreshMessage::NewEntry { server_name, state: entry_state, token } => {
+                    RefreshMessage::NewEntry { server_name, state: entry_state, token, backend } => {
                         let due = refresh_due_in(&entry_state);
                         timers.insert(server_name.clone(), tokio::time::Instant::now() + due);
 
@@ -158,11 +179,13 @@ pub async fn run_refresh_scheduler(
                         );
                         entries.insert(server_name.clone(), entry_state);
                         token_handles.insert(server_name.clone(), token);
+                        backend_handles.insert(server_name.clone(), backend);
                     }
                     RefreshMessage::RemoveServer { server_name } => {
                         timers.remove(&server_name);
                         entries.remove(&server_name);
                         token_handles.remove(&server_name);
+                        backend_handles.remove(&server_name);
                         tracing::info!(server = %server_name, "refresh cancelled — server removed");
                     }
                 }
