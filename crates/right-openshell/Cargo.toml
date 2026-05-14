@@ -9,10 +9,7 @@ test-support = []
 
 [dependencies]
 dirs = { workspace = true }
-fs4 = { workspace = true }
 futures = { workspace = true }
-http = { workspace = true }
-hyper-util = { workspace = true }
 miette = { workspace = true }
 nix = { workspace = true }
 prost = { workspace = true }
