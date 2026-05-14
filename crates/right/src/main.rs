@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 pub(crate) mod aggregator;
 pub(crate) mod internal_api;
 mod memory_server;
+pub(crate) mod progress;
 pub(crate) mod right_backend;
 mod wizard;
 
@@ -4200,9 +4201,7 @@ fn cmd_memory_stats(home: &Path, agent: &str, json: bool) -> miette::Result<()> 
     let conn = resolve_agent_db(home, agent)?;
 
     // db_path needed only for fs metadata (file size) — derive from home, not conn.
-    let db_path = right_config::agents_dir(home)
-        .join(agent)
-        .join("data.db");
+    let db_path = right_config::agents_dir(home).join(agent).join("data.db");
     let db_size = std::fs::metadata(&db_path)
         .map_err(|e| miette::miette!("failed to stat data.db: {e:#}"))?
         .len();

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+anyhow = { workspace = true }
 right-agent = { path = "../right-agent", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
 right-codegen = { path = "../right-codegen", version = "*" }
@@ -47,6 +48,7 @@ signal-hook = { workspace = true }
 url = { workspace = true }
 rand = { workspace = true }
 futures = { workspace = true }
+subtle = { workspace = true }
 whisper-rs = { version = "0.16", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]

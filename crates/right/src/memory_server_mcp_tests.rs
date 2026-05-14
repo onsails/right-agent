@@ -256,6 +256,22 @@ async fn test_mcp_list_empty() {
     assert_eq!(parsed, serde_json::json!([]), "empty list should return []");
 }
 
+#[tokio::test]
+async fn stdio_send_progress_returns_progress_unavailable() {
+    let (server, _dir) = setup_server();
+    let result = server
+        .send_progress(Parameters(crate::progress::SendProgressParams {
+            message: "hello".to_string(),
+        }))
+        .await
+        .expect("send_progress dispatch should be Ok with operation error");
+
+    assert_eq!(result.is_error, Some(true));
+    let text = call_result_text(result);
+    let body: serde_json::Value = serde_json::from_str(&text).expect("body must be valid JSON");
+    assert_eq!(body["error"]["code"], "progress_unavailable");
+}
+
 #[test]
 fn test_get_info_mentions_cron_and_mcp_tools() {
     let (server, _dir) = setup_server_with_dir();

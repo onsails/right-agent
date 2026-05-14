@@ -286,7 +286,8 @@ worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
 
 The `right` MCP server provides `with_instructions()` describing all tools:
 memory (memory_retain/memory_recall/memory_reflect — Hindsight mode only),
-cron (list/show runs), MCP management (add/remove/list/auth), and bootstrap
+cron (list/show runs), MCP management (add/remove/list/auth), foreground
+progress (mcp__right__send_progress), and bootstrap
 (mcp__right__bootstrap_done).
 
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
@@ -307,6 +308,13 @@ Cross-cutting codes any tool may emit: `upstream_unreachable`, `upstream_auth`,
 `upstream_invalid`, `circuit_open`, `invalid_argument`, `tool_failed`,
 `server_not_found`. Tool-specific codes are listed in each tool's
 description.
+
+`mcp__right__send_progress` is available only for foreground Telegram
+invocations. It sends a separate Telegram message (max 2000 characters), is
+rate limited to one message every 30 seconds per invocation, and returns
+tool-level errors such as `progress_unavailable`, `progress_forbidden`,
+`progress_rate_limited`, or `progress_send_failed`. Cron, delivery, reflection,
+and background-continuation turns deny this tool via `--disallowedTools`.
 
 ## Upstream MCP Server Instructions
 

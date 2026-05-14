@@ -19,6 +19,11 @@ Do not use external messaging tools or a browser to send Telegram
 messages — the runtime is the only delivery path. Every such attempt
 wastes budget and never reaches the user.
 
+You must not send progress with `mcp__right__send_progress` during cron,
+delivery, reflection, or background-continuation turns. There is no live
+foreground invocation for progress; put user-visible results in
+`notify.content`.
+
 `@username` inside `notify.content` is plain text. The runtime sends
 the message; the Telegram client renders the mention.
 

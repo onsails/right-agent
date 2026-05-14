@@ -35,11 +35,11 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 bootstrap = 9
+    // 7 cron + 1 mcp + 1 progress + 1 bootstrap = 10
     assert_eq!(
         tools.len(),
-        9,
-        "expected 9 tools, got {}: {:?}",
+        10,
+        "expected 10 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -75,7 +75,13 @@ async fn unknown_tool_returns_error() {
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
 
     let result = backend
-        .tools_call("test-agent", &agent_dir, "nonexistent_tool", json!({}))
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "nonexistent_tool",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
         .await;
 
     assert!(result.is_err(), "unknown tool should return Err");
@@ -89,7 +95,13 @@ async fn bootstrap_done_missing_files() {
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
 
     let result = backend
-        .tools_call("test-agent", &agent_dir, "bootstrap_done", json!({}))
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "bootstrap_done",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
         .await
         .expect("bootstrap_done should return Ok");
 
@@ -113,7 +125,13 @@ async fn bootstrap_done_with_files() {
     std::fs::write(agent_dir.join("BOOTSTRAP.md"), "bootstrap").expect("write bootstrap");
 
     let result = backend
-        .tools_call("test-agent", &agent_dir, "bootstrap_done", json!({}))
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "bootstrap_done",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
         .await
         .expect("bootstrap_done should succeed");
 
@@ -242,7 +260,13 @@ async fn bootstrap_done_sandbox_files_present() {
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend
-        .tools_call(agent_name, &agent_dir, "bootstrap_done", json!({}))
+        .tools_call(
+            agent_name,
+            &agent_dir,
+            "bootstrap_done",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
         .await
         .expect("bootstrap_done should succeed");
 
@@ -288,7 +312,13 @@ async fn bootstrap_done_sandbox_files_missing() {
 
     let backend = RightBackend::new(agents_dir, Some(mtls_dir.clone()));
     let result = backend
-        .tools_call(agent_name, &agent_dir, "bootstrap_done", json!({}))
+        .tools_call(
+            agent_name,
+            &agent_dir,
+            "bootstrap_done",
+            json!({}),
+            crate::progress::ToolCallContext::default(),
+        )
         .await
         .expect("bootstrap_done should return Ok (tool-level error)");
 
@@ -357,7 +387,13 @@ async fn cron_create_rejects_target_not_in_allowlist() {
         "target_chat_id": -999_i64,
     });
     let result = backend
-        .tools_call("a1", &agent_dir, "cron_create", args)
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            args,
+            crate::progress::ToolCallContext::default(),
+        )
         .await
         .unwrap();
     let text = result
@@ -390,7 +426,13 @@ async fn cron_create_accepts_target_in_allowlist_group() {
         "target_thread_id": 7_i64,
     });
     let result = backend
-        .tools_call("a1", &agent_dir, "cron_create", args)
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            args,
+            crate::progress::ToolCallContext::default(),
+        )
         .await
         .unwrap();
     let text = result
@@ -419,7 +461,13 @@ async fn cron_create_rejects_missing_target_chat_id() {
         // target_chat_id deliberately omitted
     });
     let result = backend
-        .tools_call("a1", &agent_dir, "cron_create", args)
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            args,
+            crate::progress::ToolCallContext::default(),
+        )
         .await;
     assert!(
         result.is_err(),
@@ -444,7 +492,13 @@ async fn cron_create_rejects_when_allowlist_missing() {
         "target_chat_id": -200_i64,
     });
     let result = backend
-        .tools_call("a1", &agent_dir, "cron_create", args)
+        .tools_call(
+            "a1",
+            &agent_dir,
+            "cron_create",
+            args,
+            crate::progress::ToolCallContext::default(),
+        )
         .await
         .unwrap();
     let text = result
@@ -484,6 +538,7 @@ async fn cron_update_changes_target_chat_id_with_validation() {
                 "prompt": "p",
                 "target_chat_id": -200,
             }),
+            crate::progress::ToolCallContext::default(),
         )
         .await
         .unwrap();
@@ -497,6 +552,7 @@ async fn cron_update_changes_target_chat_id_with_validation() {
                 "job_name": "j1",
                 "target_chat_id": -300,
             }),
+            crate::progress::ToolCallContext::default(),
         )
         .await
         .unwrap();
@@ -518,6 +574,7 @@ async fn cron_update_changes_target_chat_id_with_validation() {
                 "job_name": "j1",
                 "target_chat_id": -999,
             }),
+            crate::progress::ToolCallContext::default(),
         )
         .await
         .unwrap();
@@ -555,6 +612,7 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
                 "target_chat_id": -200,
                 "target_thread_id": 7,
             }),
+            crate::progress::ToolCallContext::default(),
         )
         .await
         .unwrap();
@@ -568,6 +626,7 @@ async fn cron_update_clears_target_thread_id_with_explicit_null() {
                 "job_name": "j1",
                 "target_thread_id": null,
             }),
+            crate::progress::ToolCallContext::default(),
         )
         .await
         .unwrap();
@@ -597,6 +656,7 @@ async fn bootstrap_done_returns_tool_error_when_files_missing() {
             &agent_dir,
             "bootstrap_done",
             serde_json::json!({}),
+            crate::progress::ToolCallContext::default(),
         )
         .await
         .expect("dispatch should be Ok with operation error");

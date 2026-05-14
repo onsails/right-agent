@@ -1,7 +1,7 @@
 //! Internal REST API served on a Unix domain socket for bot→aggregator IPC.
 //!
-//! Exposes endpoints for MCP server management (add/remove/set-token) that are
-//! accessible only to the Telegram bot process, not to agents.
+//! Exposes endpoints for MCP server management and foreground progress plumbing
+//! that are accessible only to the Telegram bot process, not to agents.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::aggregator::{
     AgentInfo, AgentTokenMap, ReconnectManagers, RefreshSenders, ToolDispatcher,
+};
+use right_mcp::internal_client::{
+    ProgressInvocationKindDto, ProgressRegisterRequest, ProgressRegisterResponse,
+    ProgressUnregisterRequest, ProgressUnregisterResponse,
 };
 use right_mcp::refresh::{OAuthServerState, RefreshMessage};
 
@@ -148,6 +152,8 @@ pub(crate) fn internal_router(
         .route("/mcp-list", post(handle_mcp_list))
         .route("/mcp-instructions", post(handle_mcp_instructions))
         .route("/reload", post(handle_reload))
+        .route("/progress/register", post(handle_progress_register))
+        .route("/progress/unregister", post(handle_progress_unregister))
         .with_state(state)
 }
 
@@ -384,6 +390,57 @@ async fn handle_mcp_remove(
     }
 
     (StatusCode::OK, Json(McpRemoveResponse { removed: true })).into_response()
+}
+
+async fn handle_progress_register(
+    State(state): State<InternalState>,
+    Json(req): Json<ProgressRegisterRequest>,
+) -> axum::response::Response {
+    let (progress, bot_socket_path) = {
+        let Some(registry) = state.dispatcher.agents.get(&req.agent) else {
+            return not_found(format!("agent '{}' not found", req.agent)).into_response();
+        };
+        (
+            registry.right.progress_registry(),
+            registry.agent_dir.join("bot.sock"),
+        )
+    };
+
+    let kind = match req.kind {
+        ProgressInvocationKindDto::Foreground => {
+            crate::progress::ProgressInvocationKind::Foreground
+        }
+    };
+    progress
+        .register(crate::progress::ProgressRegistration {
+            invocation_id: req.invocation_id,
+            kind,
+            bot_socket_path,
+            bot_send_token: req.bot_send_token,
+        })
+        .await;
+
+    (StatusCode::OK, Json(ProgressRegisterResponse { ok: true })).into_response()
+}
+
+async fn handle_progress_unregister(
+    State(state): State<InternalState>,
+    Json(req): Json<ProgressUnregisterRequest>,
+) -> axum::response::Response {
+    let progress = {
+        let Some(registry) = state.dispatcher.agents.get(&req.agent) else {
+            return not_found(format!("agent '{}' not found", req.agent)).into_response();
+        };
+        registry.right.progress_registry()
+    };
+
+    progress.unregister(&req.invocation_id).await;
+
+    (
+        StatusCode::OK,
+        Json(ProgressUnregisterResponse { ok: true }),
+    )
+        .into_response()
 }
 
 async fn handle_set_token(
@@ -735,7 +792,7 @@ mod tests {
         Arc::new(ToolDispatcher { agents })
     }
 
-    fn make_test_router(tmp: &std::path::Path) -> Router {
+    fn make_test_router_and_dispatcher(tmp: &std::path::Path) -> (Router, Arc<ToolDispatcher>) {
         let dispatcher = make_test_dispatcher(tmp);
         let refresh_senders: RefreshSenders = Arc::new(std::collections::HashMap::new());
         let reconnect_managers: ReconnectManagers = Arc::new(std::collections::HashMap::new());
@@ -760,14 +817,19 @@ mod tests {
             std::sync::Arc::new(tokio::sync::RwLock::new(map))
         };
 
-        internal_router(
-            dispatcher,
+        let router = internal_router(
+            Arc::clone(&dispatcher),
             refresh_senders,
             reconnect_managers,
             token_map,
             token_map_path,
             tmp.join("agents"),
-        )
+        );
+        (router, dispatcher)
+    }
+
+    fn make_test_router(tmp: &std::path::Path) -> Router {
+        make_test_router_and_dispatcher(tmp).0
     }
 
     async fn send_json(
@@ -812,6 +874,99 @@ mod tests {
             body["error"].as_str().unwrap().contains("reserved"),
             "expected reserved name error, got: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn progress_register_adds_foreground_invocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+
+        let (status, body) = send_json(
+            app,
+            "/progress/register",
+            serde_json::json!({
+                "agent": "test-agent",
+                "invocation_id": "inv-1",
+                "kind": "foreground",
+                "bot_send_token": "send-token"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        let progress = dispatcher
+            .agents
+            .get("test-agent")
+            .expect("test-agent registered")
+            .right
+            .progress_registry();
+        let target = progress.get("inv-1").await.expect("invocation registered");
+        assert_eq!(target.bot_send_token, "send-token");
+        assert_eq!(
+            target.bot_socket_path,
+            tmp.path().join("agents/test-agent/bot.sock")
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_unregister_removes_invocation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, dispatcher) = make_test_router_and_dispatcher(tmp.path());
+
+        let (status, _) = send_json(
+            app.clone(),
+            "/progress/register",
+            serde_json::json!({
+                "agent": "test-agent",
+                "invocation_id": "inv-1",
+                "kind": "foreground",
+                "bot_send_token": "send-token"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = send_json(
+            app,
+            "/progress/unregister",
+            serde_json::json!({
+                "agent": "test-agent",
+                "invocation_id": "inv-1"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        let progress = dispatcher
+            .agents
+            .get("test-agent")
+            .expect("test-agent registered")
+            .right
+            .progress_registry();
+        let err = progress.get("inv-1").await.unwrap_err();
+        assert_eq!(err, crate::progress::ProgressError::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn progress_register_rejects_unknown_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path());
+
+        let (status, _) = send_json(
+            app,
+            "/progress/register",
+            serde_json::json!({
+                "agent": "missing-agent",
+                "invocation_id": "inv-1",
+                "kind": "foreground",
+                "bot_send_token": "send-token"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -283,7 +283,7 @@ In `crates/right/src/right_backend.rs`:
 Behavior:
 
 - Parse `SendProgressParams`.
-- `message.trim()` must be non-empty and at most 3900 chars; otherwise return an `invalid_argument` tool error.
+- `message.trim()` must be non-empty and at most 2000 chars; otherwise return an `invalid_argument` tool error.
 - Missing invocation id returns a `progress_unavailable` tool error.
 - Registry errors map to:
   - `Unavailable` -> `progress_unavailable`
@@ -358,7 +358,7 @@ Handler behavior:
 
 - Unknown invocation returns `404`.
 - Token mismatch returns `403`.
-- Empty or >3900-char message returns `400`.
+- Empty or >2000-char message returns `400`.
 - Send plain Telegram text through `bot.send_message(ChatId(target.chat_id), trimmed_message)`.
 - If `target.thread_id != 0`, set `message_thread_id(ThreadId(MessageId(target.thread_id as i32)))`.
 - Telegram success returns `ProgressSendResponse { ok: true, message_id: Some(message.id.0) }`.
