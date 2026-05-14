@@ -350,13 +350,6 @@ pub async fn run_refresh_scheduler(
                             Ok((new_entry, access_token)) => {
                                 retry_attempts.remove(&name);
 
-                                let was_needs_auth =
-                                    if let Some(backend) = backend_handles.get(&name) {
-                                        backend.status().await == crate::proxy::BackendStatus::NeedsAuth
-                                    } else {
-                                        false
-                                    };
-
                                 if let Some(token_arc) = token_handles.get(&name) {
                                     *token_arc.write().await = Some(access_token.clone());
                                     tracing::info!(server = %name, "token refreshed in-memory");
@@ -386,10 +379,23 @@ pub async fn run_refresh_scheduler(
                                 }
                                 entries.insert(name.clone(), new_entry);
 
-                                // If backend was NeedsAuth (set by a 401 at tool-call time or by a
+                                // Re-read status AFTER the token write so a concurrent
+                                // tool_call 401 that flipped the backend to NeedsAuth
+                                // during persistence is still observed here. Snapshotting
+                                // before the write would create a TOCTOU window where a
+                                // post-snapshot 401 leaves the backend stuck in NeedsAuth
+                                // despite a fresh token.
+                                let needs_reconnect =
+                                    if let Some(backend) = backend_handles.get(&name) {
+                                        backend.status().await == crate::proxy::BackendStatus::NeedsAuth
+                                    } else {
+                                        false
+                                    };
+
+                                // If backend is NeedsAuth (set by a 401 at tool-call time or by a
                                 // previous permanent failure that has since cleared), the rmcp
                                 // session is probably dead. Spawn a background reconnect.
-                                if was_needs_auth
+                                if needs_reconnect
                                     && let Some(backend) = backend_handles.get(&name).cloned()
                                 {
                                     let http = http_client.clone();
