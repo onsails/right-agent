@@ -60,6 +60,17 @@ pub enum ProxyError {
     NoSession { server: String },
 }
 
+/// Detect whether an rmcp error string indicates upstream OAuth/auth failure.
+///
+/// rmcp surfaces 401-style failures from `StreamableHttpClient` as
+/// `ServiceError::TransportSend(DynamicTransportError)` whose `Display`
+/// includes `"Auth required"` (from `StreamableHttpError::AuthRequired`).
+/// We match on the substring rather than downcasting through `Box<dyn Error>`
+/// generic transports.
+pub(crate) fn is_upstream_auth_error(msg: &str) -> bool {
+    msg.contains("Auth required")
+}
+
 /// Status of a ProxyBackend connection to an upstream MCP server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendStatus {
@@ -378,18 +389,29 @@ impl ProxyBackend {
         let params = CallToolRequestParams::new(tool_name.to_owned())
             .with_arguments(arguments.unwrap_or_default());
 
-        let result =
-            client
-                .peer()
-                .call_tool(params)
-                .await
-                .map_err(|e| ProxyError::CallToolFailed {
+        let result = client.peer().call_tool(params).await;
+        match result {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if is_upstream_auth_error(&msg) {
+                    tracing::warn!(
+                        server = %self.server_name,
+                        tool = tool_name,
+                        "upstream returned auth-required; flipping backend to NeedsAuth"
+                    );
+                    *self.status.write().await = BackendStatus::NeedsAuth;
+                    return Err(ProxyError::NeedsAuth {
+                        server: self.server_name.clone(),
+                    });
+                }
+                Err(ProxyError::CallToolFailed {
                     server: self.server_name.clone(),
                     tool: tool_name.to_owned(),
                     source: e,
-                })?;
-
-        Ok(result)
+                })
+            }
+        }
     }
 
     /// Get cached tool list.
@@ -444,6 +466,25 @@ mod tests {
         // install_default returns Err(existing provider Arc) when already
         // installed by another test in the same binary — that's not a failure.
         let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    #[test]
+    fn is_upstream_auth_error_matches_rmcp_auth_required_surface() {
+        // The exact wording produced by ServiceError::TransportSend wrapping
+        // StreamableHttpError::AuthRequired (rmcp 1.3, `#[error("Auth required")]`).
+        let real = "Transport send error: Transport [\
+            rmcp::transport::worker::WorkerTransport<\
+            rmcp::transport::streamable_http_client::StreamableHttpClientWorker<\
+            right_mcp::proxy::DynamicAuthClient>>\
+        ] error: Auth required";
+        assert!(is_upstream_auth_error(real));
+
+        // Negative cases — must NOT be misclassified as auth.
+        assert!(!is_upstream_auth_error("connection refused"));
+        assert!(!is_upstream_auth_error(
+            "Transport send error: Transport [foo] error: timeout"
+        ));
+        assert!(!is_upstream_auth_error("Mcp error: invalid_params"));
     }
 
     #[test]

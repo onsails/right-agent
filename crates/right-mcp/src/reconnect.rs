@@ -65,7 +65,7 @@ pub enum ReconnectError {
 ///
 /// Returns `(updated_state, new_access_token)` on success.
 ///
-/// Differences from [`crate::refresh::do_refresh`]:
+/// Cancellable refresh:
 /// - Accepts a [`CancellationToken`] and checks it before each attempt.
 /// - During backoff sleeps, races the sleep against `cancel.cancelled()` so
 ///   cancellation wakes up immediately rather than waiting the full delay.
