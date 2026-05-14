@@ -1152,13 +1152,99 @@ async fn send_single(att: &OutboundAttachment, ctx: &SendCtx<'_>) -> Result<(), 
     send_result.map_err(SendError::Api)
 }
 
+async fn document_group_preflight_fallback_reason(
+    items: &[OutboundAttachment],
+    host_paths: &[PathBuf],
+) -> Option<String> {
+    for (att, host_path) in items.iter().zip(host_paths.iter()) {
+        if att.kind == OutboundKind::Document && file_has_webp_header(host_path).await {
+            return Some(format!(
+                "document media group contains WebP file {}",
+                att.path
+            ));
+        }
+    }
+    None
+}
+
+async fn file_has_webp_header(path: &std::path::Path) -> bool {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::warn!("failed to open {} for media sniffing: {e}", path.display());
+            return false;
+        }
+    };
+
+    let mut header = [0_u8; 12];
+    match file.read_exact(&mut header).await {
+        Ok(_) => is_webp_file_header(&header),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => false,
+        Err(e) => {
+            tracing::warn!("failed to read {} for media sniffing: {e}", path.display());
+            false
+        }
+    }
+}
+
+fn build_group_input_media(
+    att: &OutboundAttachment,
+    host_path: &std::path::Path,
+) -> teloxide::types::InputMedia {
+    use teloxide::types::{
+        InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
+        InputMediaVideo,
+    };
+
+    let file = InputFile::file(host_path.to_path_buf());
+    let cap = att.caption.clone();
+    match att.kind {
+        OutboundKind::Photo => {
+            let mut media = InputMediaPhoto::new(file);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Photo(media)
+        }
+        OutboundKind::Video => {
+            let mut media = InputMediaVideo::new(file);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Video(media)
+        }
+        OutboundKind::Document => {
+            let mut media = InputMediaDocument::new(file);
+            media.disable_content_type_detection = Some(true);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Document(media)
+        }
+        OutboundKind::Audio => {
+            let mut media = InputMediaAudio::new(file);
+            if let Some(caption) = cap {
+                media = media.caption(caption);
+            }
+            InputMedia::Audio(media)
+        }
+        _ => {
+            tracing::error!(
+                "send_group received ungroupable kind {:?} for {} - classifier bug",
+                att.kind,
+                att.path,
+            );
+            InputMedia::Document(InputMediaDocument::new(file))
+        }
+    }
+}
+
 async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(), SendError> {
     use teloxide::payloads::SendMediaGroupSetters;
     use teloxide::requests::Requester;
-    use teloxide::types::{
-        InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto,
-        InputMediaVideo, MessageId, ThreadId,
-    };
+    use teloxide::types::{InputMedia, MessageId, ThreadId};
 
     // All-or-nothing: Telegram's sendMediaGroup requires the full set in one
     // call. If any member fails path validation, download, metadata read, or
@@ -1181,52 +1267,7 @@ async fn send_group(items: &[OutboundAttachment], ctx: &SendCtx<'_>) -> Result<(
     let media: Vec<InputMedia> = items
         .iter()
         .zip(host_paths.iter())
-        .map(|(att, host)| {
-            let file = InputFile::file(host);
-            let cap = att.caption.clone();
-            match att.kind {
-                OutboundKind::Photo => {
-                    let mut m = InputMediaPhoto::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Photo(m)
-                }
-                OutboundKind::Video => {
-                    let mut m = InputMediaVideo::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Video(m)
-                }
-                OutboundKind::Document => {
-                    let mut m = InputMediaDocument::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Document(m)
-                }
-                OutboundKind::Audio => {
-                    let mut m = InputMediaAudio::new(file);
-                    if let Some(c) = cap {
-                        m = m.caption(c);
-                    }
-                    InputMedia::Audio(m)
-                }
-                // Classifier rejects these kinds from groups, so this branch is
-                // unreachable in practice. Log a loud error and fall back to a
-                // Document to keep the bot alive if the classifier is ever
-                // changed. This MUST NOT silently swallow data.
-                _ => {
-                    tracing::error!(
-                        "send_group received ungroupable kind {:?} for {} — classifier bug",
-                        att.kind,
-                        att.path,
-                    );
-                    InputMedia::Document(InputMediaDocument::new(file))
-                }
-            }
-        })
+        .map(|(att, host)| build_group_input_media(att, host))
         .collect();
 
     let thread_id = if ctx.eff_thread_id != 0 {
@@ -1998,12 +2039,77 @@ mod tests {
             kind,
             path: format!(
                 "/sandbox/outbox/{}-{}.bin",
-                kind_to_ext(kind),
+                match kind {
+                    OutboundKind::Document => "document",
+                    _ => kind_to_ext(kind),
+                },
                 caption.unwrap_or("x")
             ),
             filename: None,
             caption: caption.map(str::to_owned),
             media_group_id: group.map(str::to_owned),
+        }
+    }
+
+    #[tokio::test]
+    async fn document_group_preflight_requests_fallback_for_webp_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let webp = dir.path().join("mark.webp");
+        let png = dir.path().join("mark.png");
+        tokio::fs::write(&webp, b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+            .await
+            .unwrap();
+        tokio::fs::write(&png, b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d")
+            .await
+            .unwrap();
+
+        let items = vec![
+            att_with(OutboundKind::Document, Some("logos"), Some("webp")),
+            att_with(OutboundKind::Document, Some("logos"), Some("png")),
+        ];
+        let host_paths = vec![webp, png];
+
+        let reason = document_group_preflight_fallback_reason(&items, &host_paths).await;
+
+        assert_eq!(
+            reason.as_deref(),
+            Some("document media group contains WebP file /sandbox/outbox/document-webp.bin"),
+        );
+    }
+
+    #[tokio::test]
+    async fn document_group_preflight_allows_png_document_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.png");
+        let b = dir.path().join("b.txt");
+        tokio::fs::write(&a, b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d")
+            .await
+            .unwrap();
+        tokio::fs::write(&b, b"plain text").await.unwrap();
+
+        let items = vec![
+            att_with(OutboundKind::Document, Some("docs"), Some("a")),
+            att_with(OutboundKind::Document, Some("docs"), Some("b")),
+        ];
+        let host_paths = vec![a, b];
+
+        assert!(
+            document_group_preflight_fallback_reason(&items, &host_paths)
+                .await
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn build_group_input_media_document_disables_content_type_detection() {
+        let att = att_with(OutboundKind::Document, Some("docs"), Some("report"));
+        let media = build_group_input_media(&att, std::path::Path::new("/tmp/report.pdf"));
+
+        match media {
+            teloxide::types::InputMedia::Document(document) => {
+                assert_eq!(document.disable_content_type_detection, Some(true));
+            }
+            _ => panic!("expected document media"),
         }
     }
 
