@@ -19,7 +19,14 @@ use crate::refresh::{OAuthServerState, RefreshMessage};
 const MAX_RETRIES: u32 = 3;
 
 /// Backoff delays between retry attempts, in seconds.
+///
+/// The last entry equals [`BACKOFF_FALLBACK_SECS`] so that exhausting the
+/// schedule plateaus instead of regressing on the boundary.
 const BACKOFFS: [u64; 3] = [30, 60, 120];
+
+/// Fallback delay used when `BACKOFFS` is indexed past its end. MUST equal the
+/// last entry of `BACKOFFS` (asserted by a unit test).
+const BACKOFF_FALLBACK_SECS: u64 = 120;
 
 /// Classification of a token endpoint refresh failure.
 #[derive(Debug, thiserror::Error)]
@@ -162,7 +169,10 @@ pub async fn do_refresh_cancellable(
 
         // Backoff before next attempt — unless this was the last one.
         if attempt < MAX_RETRIES - 1 {
-            let delay = BACKOFFS.get(attempt as usize).copied().unwrap_or(120);
+            let delay = BACKOFFS
+                .get(attempt as usize)
+                .copied()
+                .unwrap_or(BACKOFF_FALLBACK_SECS);
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
                 _ = cancel.cancelled() => {
@@ -345,6 +355,14 @@ mod tests {
         // install_default returns Err(existing provider Arc) when already
         // installed by another test in the same binary — that's not a failure.
         let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    #[test]
+    fn in_burst_fallback_matches_last_backoff() {
+        assert_eq!(
+            *BACKOFFS.last().expect("backoffs not empty"),
+            BACKOFF_FALLBACK_SECS,
+        );
     }
 
     fn make_entry(token_endpoint: String) -> OAuthServerState {

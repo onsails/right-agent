@@ -115,16 +115,26 @@ pub fn refresh_due_in(entry: &OAuthServerState) -> Duration {
     remaining.saturating_sub(margin)
 }
 
+/// Exponential-style backoff schedule for transient refresh failures (seconds).
+///
+/// Entry `i` is the delay before retry attempt `i+1` (1-indexed externally).
+/// The last entry equals [`TRANSIENT_BACKOFF_CAP_SECS`] so that exhausting the
+/// schedule plateaus instead of regressing on the boundary.
+const TRANSIENT_BACKOFF_SECS: &[u64] = &[60, 120, 300, 600, 1200, 1800];
+
+/// Plateau delay used once [`TRANSIENT_BACKOFF_SECS`] is exhausted. MUST equal
+/// the last entry of `TRANSIENT_BACKOFF_SECS` (asserted by a unit test).
+const TRANSIENT_BACKOFF_CAP_SECS: u64 = 1800;
+
 /// Compute the delay before the next transient-retry attempt.
 ///
 /// `attempt` is 1-indexed (1 = first retry after initial failure).
 /// Sequence: 60, 120, 300, 600, 1200, 1800, 1800, ... (cap at 30 min).
 pub(crate) fn transient_backoff_secs(attempt: u32) -> u64 {
-    const STEPS: &[u64] = &[60, 120, 300, 600, 1200, 1800];
-    STEPS
+    TRANSIENT_BACKOFF_SECS
         .get((attempt.saturating_sub(1)) as usize)
         .copied()
-        .unwrap_or(1800)
+        .unwrap_or(TRANSIENT_BACKOFF_CAP_SECS)
 }
 
 /// Result of a single in-flight refresh task: the server name, a per-server
@@ -519,6 +529,15 @@ pub async fn run_refresh_scheduler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backoff_cap_matches_last_step() {
+        assert_eq!(
+            *TRANSIENT_BACKOFF_SECS.last().expect("steps not empty"),
+            TRANSIENT_BACKOFF_CAP_SECS,
+            "cap must equal last step or backoff regresses on the boundary"
+        );
+    }
 
     #[test]
     fn load_oauth_entries_from_db_test() {
