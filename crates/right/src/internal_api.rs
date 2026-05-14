@@ -487,6 +487,7 @@ async fn handle_set_token(
                 server_name: req.server.clone(),
                 state: entry,
                 token: handle.token().clone(),
+                backend: handle.clone(),
             })
             .await
         {

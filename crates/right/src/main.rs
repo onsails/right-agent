@@ -1033,14 +1033,21 @@ async fn main() -> miette::Result<()> {
 
                 // Send NewEntry for non-expired OAuth servers. Expired tokens
                 // are handled by the reconnect task which sends NewEntry after refresh.
+                let proxies_by_name: std::collections::HashMap<
+                    String,
+                    std::sync::Arc<right_mcp::proxy::ProxyBackend>,
+                > = proxies_snapshot.iter().cloned().collect();
                 for (name, (state, token_arc)) in &oauth_map {
                     if state.refresh_token.is_some() {
                         let due_in = right_mcp::refresh::refresh_due_in(state);
-                        if due_in > std::time::Duration::ZERO {
+                        if due_in > std::time::Duration::ZERO
+                            && let Some(backend) = proxies_by_name.get(name)
+                        {
                             let msg = right_mcp::refresh::RefreshMessage::NewEntry {
                                 server_name: name.clone(),
                                 state: state.clone(),
                                 token: token_arc.clone(),
+                                backend: backend.clone(),
                             };
                             if let Err(e) = refresh_tx.send(msg).await {
                                 tracing::warn!(
