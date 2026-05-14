@@ -9,6 +9,7 @@
     protobuf
     cmake            # required by whisper-rs-sys build script
     sccache
+    actionlint
   ] ++ lib.optionals pkgs.stdenv.isLinux [
     pkgs.bubblewrap
   ];
