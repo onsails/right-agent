@@ -7,8 +7,13 @@ use std::time::Duration;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-/// Refresh margin: refresh token 10 minutes before expiry.
-const REFRESH_MARGIN: Duration = Duration::from_secs(600);
+/// Maximum refresh margin: refresh tokens up to 1 hour before expiry so
+/// transient network outages (which can last minutes on laptops) have time
+/// to resolve via exponential-backoff retries before the token actually dies.
+///
+/// Used as an upper bound — actual margin is `min(MAX, remaining_lifetime / 2)`
+/// to avoid busy-looping the scheduler on short-lived tokens.
+const REFRESH_MARGIN_MAX: Duration = Duration::from_secs(3600);
 
 /// Per-server OAuth state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,20 +98,34 @@ pub fn load_oauth_entries_from_db(
     Ok(entries)
 }
 
-/// Maximum retry attempts for token refresh.
-const MAX_RETRIES: u32 = 3;
-
 /// Calculate how long until refresh should fire.
-/// Returns Duration::ZERO if already expired or past margin.
+///
+/// Margin = `min(REFRESH_MARGIN_MAX, remaining_lifetime / 2)`. This gives
+/// long-lived tokens (1h+) a full 1-hour buffer for retry recovery while
+/// keeping short-lived tokens from busy-looping (refresh fires no sooner
+/// than half-life).
+///
+/// Returns `Duration::ZERO` if the token is already past margin.
 pub fn refresh_due_in(entry: &OAuthServerState) -> Duration {
     let now = chrono::Utc::now();
-    let margin = chrono::Duration::from_std(REFRESH_MARGIN).unwrap();
-    let refresh_at = entry.expires_at - margin;
-    if refresh_at <= now {
-        Duration::ZERO
-    } else {
-        (refresh_at - now).to_std().unwrap_or(Duration::ZERO)
+    let remaining = (entry.expires_at - now).to_std().unwrap_or(Duration::ZERO);
+    if remaining.is_zero() {
+        return Duration::ZERO;
     }
+    let margin = std::cmp::min(REFRESH_MARGIN_MAX, remaining / 2);
+    remaining.saturating_sub(margin)
+}
+
+/// Compute the delay before the next transient-retry attempt.
+///
+/// `attempt` is 1-indexed (1 = first retry after initial failure).
+/// Sequence: 60, 120, 300, 600, 1200, 1800, 1800, ... (cap at 30 min).
+pub(crate) fn transient_backoff_secs(attempt: u32) -> u64 {
+    const STEPS: &[u64] = &[60, 120, 300, 600, 1200, 1800];
+    STEPS
+        .get((attempt.saturating_sub(1)) as usize)
+        .copied()
+        .unwrap_or(1800)
 }
 
 /// Run the OAuth token refresh scheduler.
@@ -132,6 +151,7 @@ pub async fn run_refresh_scheduler(
         HashMap::new();
     let mut backend_handles: HashMap<String, Arc<crate::proxy::ProxyBackend>> = HashMap::new();
     let mut timers: HashMap<String, tokio::time::Instant> = HashMap::new();
+    let mut retry_attempts: HashMap<String, u32> = HashMap::new();
 
     loop {
         // Find the next timer to fire
@@ -186,6 +206,7 @@ pub async fn run_refresh_scheduler(
                         entries.remove(&server_name);
                         token_handles.remove(&server_name);
                         backend_handles.remove(&server_name);
+                        retry_attempts.remove(&server_name);
                         tracing::info!(server = %server_name, "refresh cancelled — server removed");
                     }
                 }
@@ -206,15 +227,32 @@ pub async fn run_refresh_scheduler(
 
                 tracing::info!(server = %name, "refreshing OAuth token");
 
-                match do_refresh(&http_client, &entry, MAX_RETRIES).await {
+                let result = crate::reconnect::do_refresh_cancellable(
+                    &http_client,
+                    &entry,
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await;
+
+                match result {
                     Ok((new_entry, access_token)) => {
+                        // Reset retry counter on success.
+                        retry_attempts.remove(&name);
+
+                        let was_needs_auth =
+                            if let Some(backend) = backend_handles.get(&name) {
+                                backend.status().await == crate::proxy::BackendStatus::NeedsAuth
+                            } else {
+                                false
+                            };
+
                         // Write token directly to ProxyBackend's shared state
                         if let Some(token_arc) = token_handles.get(&name) {
                             *token_arc.write().await = Some(access_token.clone());
                             tracing::info!(server = %name, "token refreshed in-memory");
                         }
 
-                        // Schedule next refresh
+                        // Schedule next refresh based on new expiry.
                         let due = refresh_due_in(&new_entry);
                         timers.insert(name.clone(), tokio::time::Instant::now() + due);
 
@@ -233,35 +271,89 @@ pub async fn run_refresh_scheduler(
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("failed to open memory DB for token refresh persistence: {e:#}");
+                                tracing::error!(
+                                    "failed to open memory DB for token refresh persistence: {e:#}"
+                                );
                             }
                         }
                         entries.insert(name.clone(), new_entry);
+
+                        // If backend was NeedsAuth (set by a 401 at tool-call time or by a
+                        // previous permanent failure that has since cleared), the rmcp
+                        // session is probably dead. Spawn a background reconnect.
+                        if was_needs_auth
+                            && let Some(backend) = backend_handles.get(&name).cloned()
+                        {
+                            let http = http_client.clone();
+                            let name_owned = name.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = backend.connect(http).await {
+                                    tracing::warn!(
+                                        server = %name_owned,
+                                        "post-refresh reconnect failed: {e:#}"
+                                    );
+                                }
+                            });
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(server = %name, "token refresh failed after retries: {e:#}");
-                        timers.remove(&name);
+                    Err(crate::reconnect::ReconnectError::Refresh(failure)) => {
+                        let permanent = failure.is_permanent();
+                        tracing::warn!(
+                            server = %name,
+                            %permanent,
+                            "token refresh failed: {failure:#}"
+                        );
+                        if permanent {
+                            if let Some(backend) = backend_handles.get(&name) {
+                                backend
+                                    .set_status(crate::proxy::BackendStatus::NeedsAuth)
+                                    .await;
+                                tracing::warn!(
+                                    server = %name,
+                                    "marked NeedsAuth after permanent refresh failure"
+                                );
+                            }
+                            // Do not reschedule — user must re-OAuth.
+                            timers.remove(&name);
+                            retry_attempts.remove(&name);
+                        } else {
+                            // Transient — bump retry count and reschedule.
+                            let attempt = retry_attempts
+                                .entry(name.clone())
+                                .and_modify(|n| *n += 1)
+                                .or_insert(1);
+                            let delay = transient_backoff_secs(*attempt);
+                            tracing::info!(
+                                server = %name,
+                                attempt = *attempt,
+                                delay_secs = delay,
+                                "scheduling transient retry"
+                            );
+                            timers.insert(
+                                name.clone(),
+                                tokio::time::Instant::now() + Duration::from_secs(delay),
+                            );
+                        }
+                    }
+                    Err(other) => {
+                        // Cancelled / PersistFailed / Connect — none should occur in this
+                        // path (we pass a never-cancelled token and don't call backend.connect).
+                        // Treat as transient to be safe.
+                        tracing::warn!(server = %name, "unexpected refresh outcome: {other:#}");
+                        let attempt = retry_attempts
+                            .entry(name.clone())
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1);
+                        let delay = transient_backoff_secs(*attempt);
+                        timers.insert(
+                            name.clone(),
+                            tokio::time::Instant::now() + Duration::from_secs(delay),
+                        );
                     }
                 }
             }
         }
     }
-}
-
-/// Attempt token refresh with retries.
-/// Returns (updated_state, new_access_token).
-///
-/// Delegates to [`crate::reconnect::do_refresh_cancellable`] with a
-/// never-cancelled token. See that function for the retry/backoff logic.
-pub async fn do_refresh(
-    client: &reqwest::Client,
-    entry: &OAuthServerState,
-    _max_retries: u32,
-) -> miette::Result<(OAuthServerState, String)> {
-    let cancel = tokio_util::sync::CancellationToken::new();
-    crate::reconnect::do_refresh_cancellable(client, entry, &cancel)
-        .await
-        .map_err(|e| miette::miette!("{e}"))
 }
 
 #[cfg(test)]
@@ -298,11 +390,11 @@ mod tests {
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
             server_url: "https://example.com/mcp".into(),
         };
-        // Should refresh 10 minutes before expiry = ~20 minutes from now
+        // Margin = min(MAX=3600s, 1800s/2=900s) = 900s. due ≈ 1800s - 900s = 900s.
         let due = refresh_due_in(&entry);
         assert!(
-            due.as_secs() > 1100 && due.as_secs() < 1300,
-            "expected ~1200s, got {}s",
+            due.as_secs() > 850 && due.as_secs() < 950,
+            "expected ~900s, got {}s",
             due.as_secs()
         );
     }
@@ -322,21 +414,225 @@ mod tests {
     }
 
     #[test]
-    fn refresh_due_in_within_margin() {
+    fn refresh_due_in_uses_half_lifetime_for_short_tokens() {
         let entry = OAuthServerState {
             refresh_token: Some("rt".into()),
             token_endpoint: "https://example.com/token".into(),
             client_id: "c".into(),
             client_secret: None,
-            // Expires in 5 minutes -- within 10-minute margin
+            // 5-minute lifetime — far shorter than 1-hour MAX margin.
+            // Margin must clamp to lifetime/2 = 150s; due = 300s - 150s = 150s.
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
             server_url: "https://example.com/mcp".into(),
         };
         let due = refresh_due_in(&entry);
-        assert_eq!(
-            due,
-            Duration::ZERO,
-            "should return zero when within refresh margin"
+        assert!(
+            due.as_secs() > 120 && due.as_secs() < 180,
+            "expected ~150s (half of 5-min lifetime), got {}s",
+            due.as_secs()
         );
+    }
+
+    #[test]
+    fn refresh_due_in_caps_at_max_for_long_tokens() {
+        let entry = OAuthServerState {
+            refresh_token: Some("rt".into()),
+            token_endpoint: "https://example.com/token".into(),
+            client_id: "c".into(),
+            client_secret: None,
+            // 24-hour lifetime — half is 12 hours, but MAX caps margin at 1 hour.
+            // due = 24h - 1h = 23h.
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+            server_url: "https://example.com/mcp".into(),
+        };
+        let due = refresh_due_in(&entry);
+        // 23 hours = 82800s. Allow a few seconds of clock skew.
+        assert!(
+            due.as_secs() > 82700 && due.as_secs() < 82900,
+            "expected ~82800s (24h - 1h MAX margin), got {}s",
+            due.as_secs()
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_retries_transient_indefinitely() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // First scheduler fire: do_refresh_cancellable internally retries 3
+        // times. We want all 3 of those to see 503, then later attempts see
+        // 200. up_to_n_times caps the first mock at 3 hits; subsequent hits
+        // fall through to the second mock.
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("temporarily down"))
+            .up_to_n_times(3)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-tok",
+                "refresh_token": "new-rt",
+                "expires_in": 3600,
+                "token_type": "Bearer"
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        conn.execute(
+            "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('s', 'https://x/mcp', 'oauth')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let entry_state = OAuthServerState {
+            refresh_token: Some("rt".into()),
+            token_endpoint: format!("{}/token", server.uri()),
+            client_id: "c".into(),
+            client_secret: None,
+            // Already past margin → fires immediately
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            server_url: "https://x/mcp".into(),
+        };
+        let token_arc: Arc<tokio::sync::RwLock<Option<String>>> =
+            Arc::new(tokio::sync::RwLock::new(Some("old".into())));
+        let backend = Arc::new(crate::proxy::ProxyBackend::new(
+            "s".into(),
+            tmp.path().to_path_buf(),
+            "https://x/mcp".into(),
+            token_arc.clone(),
+            crate::proxy::AuthMethod::Bearer,
+        ));
+
+        tokio::time::pause();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
+
+        tx.send(RefreshMessage::NewEntry {
+            server_name: "s".into(),
+            state: entry_state,
+            token: token_arc.clone(),
+            backend: backend.clone(),
+        })
+        .await
+        .unwrap();
+
+        // First scheduler fire calls do_refresh_cancellable, which retries
+        // internally 3 times with 30/60s backoff (~90s virtual). All return
+        // 503 → Transient. Scheduler reschedules in 60s. Second fire's first
+        // attempt hits the 200 mock → success.
+        //
+        // Drive virtual time forward until token_arc updates or we time out.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            if *token_arc.read().await == Some("new-tok".to_string()) {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "scheduler did not refresh in time; received_requests={}",
+                    server.received_requests().await.unwrap().len()
+                );
+            }
+        }
+
+        let n_requests = server.received_requests().await.unwrap().len();
+        assert!(
+            n_requests >= 4,
+            "scheduler must keep retrying transient failures; got {n_requests} requests"
+        );
+
+        scheduler.abort();
+    }
+
+    #[tokio::test]
+    async fn scheduler_marks_needs_auth_on_permanent_failure() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_grant"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        conn.execute(
+            "INSERT INTO mcp_servers (name, url, auth_type) VALUES ('s', 'https://x/mcp', 'oauth')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let entry_state = OAuthServerState {
+            refresh_token: Some("rt".into()),
+            token_endpoint: format!("{}/token", server.uri()),
+            client_id: "c".into(),
+            client_secret: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            server_url: "https://x/mcp".into(),
+        };
+        let token_arc: Arc<tokio::sync::RwLock<Option<String>>> =
+            Arc::new(tokio::sync::RwLock::new(Some("old".into())));
+        let backend = Arc::new(crate::proxy::ProxyBackend::new(
+            "s".into(),
+            tmp.path().to_path_buf(),
+            "https://x/mcp".into(),
+            token_arc.clone(),
+            crate::proxy::AuthMethod::Bearer,
+        ));
+        // Pre-set to Unreachable so the permanent flip is observable.
+        backend
+            .set_status(crate::proxy::BackendStatus::Unreachable)
+            .await;
+
+        tokio::time::pause();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
+
+        tx.send(RefreshMessage::NewEntry {
+            server_name: "s".into(),
+            state: entry_state,
+            token: token_arc.clone(),
+            backend: backend.clone(),
+        })
+        .await
+        .unwrap();
+
+        // Allow the timer to fire and the permanent response to be processed.
+        // Margin is min(MAX=3600s, 300s/2=150s) = 150s, so due ≈ 150s. Drive
+        // virtual time forward until status flips or we time out.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tokio::task::yield_now().await;
+            if backend.status().await == crate::proxy::BackendStatus::NeedsAuth {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+        }
+
+        assert_eq!(
+            backend.status().await,
+            crate::proxy::BackendStatus::NeedsAuth,
+            "permanent refresh failure must flip backend to NeedsAuth"
+        );
+
+        scheduler.abort();
     }
 }
