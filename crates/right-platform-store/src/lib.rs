@@ -79,7 +79,12 @@ pub const PLATFORM_DIR: &str = "/sandbox/.platform";
 /// Scan agent directory, build manifest of platform-managed files.
 /// Excludes agent-owned files (IDENTITY.md, SOUL.md, USER.md, TOOLS.md).
 /// File content is cached in the manifest to avoid double-reads during deploy.
-pub fn build_manifest(agent_dir: &Path) -> miette::Result<Manifest> {
+///
+/// `builtin_skill_names` enumerates the platform-managed skill directories
+/// to deploy (host `.claude/skills/<name>/` → sandbox `/sandbox/.claude/skills/<name>/`).
+/// The list is owned by `right-codegen` (`BUILTIN_SKILL_NAMES`) so the installer
+/// and the deployer share a single source of truth.
+pub fn build_manifest(agent_dir: &Path, builtin_skill_names: &[&str]) -> miette::Result<Manifest> {
     let claude_dir = agent_dir.join(".claude");
     let mut entries = Vec::new();
 
@@ -132,7 +137,7 @@ pub fn build_manifest(agent_dir: &Path) -> miette::Result<Manifest> {
 
     // Builtin skills (directories)
     let skills_dir = claude_dir.join("skills");
-    for skill_name in &["rightskills", "rightcron", "rightmcp"] {
+    for skill_name in builtin_skill_names {
         let skill_path = skills_dir.join(skill_name);
         if skill_path.exists() && skill_path.is_dir() {
             let hash = directory_hash(&skill_path)?;

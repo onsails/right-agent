@@ -18,6 +18,41 @@ const SKILL_RIGHTMEMORY_HINDSIGHT: Dir =
     include_dir!("$CARGO_MANIFEST_DIR/skills/rightmemory-hindsight");
 const SKILL_RIGHTREFLECT: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/rightreflect");
 
+/// Canonical names of Right Agent built-in skills under `.claude/skills/`.
+///
+/// Single source of truth shared by the installer (`install_builtin_skills`) and
+/// the sandbox deployer (`right_platform_store::build_manifest`). Past drift —
+/// adding a skill to the installer without updating the deployer — caused
+/// rightmemory and rightreflect to ship on the host but never reach the sandbox.
+/// Both ends now iterate this list; drift is impossible by construction.
+pub const BUILTIN_SKILL_NAMES: &[&str] = &[
+    "rightskills",
+    "rightcron",
+    "rightmcp",
+    "rightmemory",
+    "rightreflect",
+];
+
+fn builtin_skill_dir(
+    name: &str,
+    memory_provider: &MemoryProvider,
+) -> miette::Result<&'static Dir<'static>> {
+    match name {
+        "rightskills" => Ok(&SKILL_RIGHTSKILLS),
+        "rightcron" => Ok(&SKILL_RIGHTCRON),
+        "rightmcp" => Ok(&SKILL_RIGHTMCP),
+        "rightmemory" => Ok(if *memory_provider == MemoryProvider::Hindsight {
+            &SKILL_RIGHTMEMORY_HINDSIGHT
+        } else {
+            &SKILL_RIGHTMEMORY_FILE
+        }),
+        "rightreflect" => Ok(&SKILL_RIGHTREFLECT),
+        _ => Err(miette::miette!(
+            "unknown builtin skill {name:?} — add an arm to builtin_skill_dir"
+        )),
+    }
+}
+
 /// Install Right Agent built-in skills into an agent's `.claude/skills/` directory.
 ///
 /// Writes all files from each embedded skill directory (SKILL.md, YAML configs, etc.).
@@ -27,21 +62,10 @@ pub fn install_builtin_skills(
     agent_path: &Path,
     memory_provider: &MemoryProvider,
 ) -> miette::Result<()> {
-    let rightmemory_dir: &Dir = if *memory_provider == MemoryProvider::Hindsight {
-        &SKILL_RIGHTMEMORY_HINDSIGHT
-    } else {
-        &SKILL_RIGHTMEMORY_FILE
-    };
-    let skills: &[(&str, &Dir)] = &[
-        ("rightskills", &SKILL_RIGHTSKILLS),
-        ("rightcron", &SKILL_RIGHTCRON),
-        ("rightmcp", &SKILL_RIGHTMCP),
-        ("rightmemory", rightmemory_dir),
-        ("rightreflect", &SKILL_RIGHTREFLECT),
-    ];
     let claude_skills_dir = agent_path.join(".claude").join("skills");
 
-    for (name, dir) in skills {
+    for name in BUILTIN_SKILL_NAMES {
+        let dir = builtin_skill_dir(name, memory_provider)?;
         let target = claude_skills_dir.join(name);
         install_embedded_dir(dir, &target)?;
     }
@@ -260,6 +284,30 @@ mod tests {
                 .exists(),
             "user skills should be preserved"
         );
+    }
+
+    /// Contract: every name in `BUILTIN_SKILL_NAMES` must be installed to disk,
+    /// and `builtin_skill_dir` must recognize each name (no `unknown builtin skill`
+    /// error). This is the single point that prevents drift between the installer
+    /// and the platform-store deployer (which both iterate `BUILTIN_SKILL_NAMES`).
+    #[test]
+    fn installer_covers_every_builtin_skill_name() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        for name in BUILTIN_SKILL_NAMES {
+            assert!(
+                builtin_skill_dir(name, &MemoryProvider::File).is_ok(),
+                "builtin_skill_dir missing arm for {name}"
+            );
+            assert!(
+                dir.path()
+                    .join(".claude/skills")
+                    .join(name)
+                    .join("SKILL.md")
+                    .exists(),
+                "{name}/SKILL.md not installed — BUILTIN_SKILL_NAMES out of sync with installer"
+            );
+        }
     }
 
     /// Verify every file in the source skills/ directories is embedded and installed.

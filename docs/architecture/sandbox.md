@@ -35,7 +35,9 @@ Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platfor
 
 Platform store (/sandbox/.platform/ inside sandbox):
   ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>, ...
-  ├─ Content-addressed skill dirs: skills/rightmcp.<hash>/, skills/rightcron.<hash>/
+  ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`):
+  │     skills/rightskills.<hash>/, skills/rightcron.<hash>/, skills/rightmcp.<hash>/,
+  │     skills/rightmemory.<hash>/, skills/rightreflect.<hash>/
   ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
   ├─ Read-only (chmod a-w after deploy)
   └─ GC removes stale entries after each sync cycle

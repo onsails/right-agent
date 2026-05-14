@@ -77,7 +77,7 @@ fn build_manifest_from_files() {
     std::fs::write(claude_dir.join("settings.json"), r#"{"key":"val"}"#).unwrap();
     std::fs::write(claude_dir.join("skills/rightmcp/SKILL.md"), "# skill").unwrap();
     std::fs::write(dir.path().join("mcp.json"), "{}").unwrap();
-    let manifest = build_manifest(dir.path()).unwrap();
+    let manifest = build_manifest(dir.path(), &["rightmcp"]).unwrap();
     assert!(
         manifest
             .entries
@@ -121,7 +121,7 @@ fn build_manifest_excludes_agent_owned_md_files() {
         std::fs::write(claude_dir.join(name), format!("# claude/{name}\n")).unwrap();
     }
 
-    let manifest = build_manifest(dir.path()).unwrap();
+    let manifest = build_manifest(dir.path(), &[]).unwrap();
 
     for &name in agent_owned {
         assert!(
@@ -141,7 +141,7 @@ fn build_manifest_caches_file_content() {
     let claude_dir = dir.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(claude_dir.join("settings.json"), r#"{"cached": true}"#).unwrap();
-    let manifest = build_manifest(dir.path()).unwrap();
+    let manifest = build_manifest(dir.path(), &[]).unwrap();
     let entry = manifest
         .entries
         .iter()
@@ -151,13 +151,36 @@ fn build_manifest_caches_file_content() {
     assert_eq!(entry.content.as_ref().unwrap(), br#"{"cached": true}"#);
 }
 
+/// Regression: every builtin skill on disk must end up in the deployment manifest.
+/// Bug history: rightmemory and rightreflect were added to the installer
+/// (`right_codegen::install_builtin_skills`) but were never added to
+/// `build_manifest`'s hardcoded list, so they silently never reached the sandbox.
+#[test]
+fn build_manifest_deploys_all_listed_builtin_skills() {
+    let dir = tempdir().unwrap();
+    let skills_root = dir.path().join(".claude/skills");
+    let names = ["rightskills", "rightcron", "rightmcp", "rightmemory", "rightreflect"];
+    for name in names {
+        let path = skills_root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("SKILL.md"), format!("# {name}")).unwrap();
+    }
+    let manifest = build_manifest(dir.path(), &names).unwrap();
+    for name in names {
+        assert!(
+            manifest.entries.iter().any(|e| e.name == name && e.is_dir),
+            "manifest must include skill dir: {name}"
+        );
+    }
+}
+
 #[test]
 fn build_manifest_dirs_have_no_cached_content() {
     let dir = tempdir().unwrap();
     let skills_dir = dir.path().join(".claude/skills/rightcron");
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(skills_dir.join("SKILL.md"), "# cron").unwrap();
-    let manifest = build_manifest(dir.path()).unwrap();
+    let manifest = build_manifest(dir.path(), &["rightcron"]).unwrap();
     let entry = manifest
         .entries
         .iter()
