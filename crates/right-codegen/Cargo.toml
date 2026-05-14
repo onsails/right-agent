@@ -5,12 +5,10 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-base64 = { workspace = true }
 dirs = { workspace = true }
 include_dir = { workspace = true }
 miette = { workspace = true }
 minijinja = { workspace = true }
-rand = { workspace = true }
 right-config = { path = "../right-config", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*" }
 right-agent-config = { path = "../right-agent-config", version = "*" }
@@ -28,4 +26,3 @@ which = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 tempfile = { workspace = true }
-tokio = { version = "1.52", features = ["test-util"] }
