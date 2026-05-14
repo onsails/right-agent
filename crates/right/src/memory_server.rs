@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use right_mcp::tool_error::tool_error;
 use rmcp::{
     ErrorData as McpError, ServiceExt,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
@@ -410,6 +411,20 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "DO NOT CALL — stdio mode cannot route progress to Telegram. This stub exists only so the schema matches the HTTP server's tool list; every call returns progress_unavailable and wastes budget. Reachable only when the agent is talking to this server directly (no aggregator). Available in HTTP mode for the current foreground Telegram invocation only (max 2000 characters)."
+    )]
+    async fn send_progress(
+        &self,
+        Parameters(_params): Parameters<crate::progress::SendProgressParams>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(tool_error(
+            "progress_unavailable",
+            "send_progress requires foreground HTTP aggregator context",
+            None,
+        ))
+    }
+
+    #[tool(
         description = "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist."
     )]
     async fn bootstrap_done(&self) -> Result<CallToolResult, McpError> {
@@ -459,6 +474,8 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__cron_trigger: Trigger a cron job for immediate execution\n\n\
                  ## MCP Management\n\
                  - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\
+                 ## Progress\n\
+                 - mcp__right__send_progress: Foreground-only progress messages (max 2000 characters). DO NOT call in stdio mode — always returns progress_unavailable and wastes budget. Available only when routed via the HTTP aggregator.\n\n\
                  ## Bootstrap\n\
                  - mcp__right__bootstrap_done: Signal onboarding completion. Verifies IDENTITY.md, SOUL.md, USER.md exist. Call AFTER creating all three files.",
             )
@@ -538,9 +555,7 @@ pub async fn run_memory_server() -> miette::Result<()> {
     let right_home = match std::env::var("RC_RIGHT_HOME") {
         Ok(p) if !p.is_empty() => std::path::PathBuf::from(p),
         _ => {
-            tracing::warn!(
-                "RC_RIGHT_HOME not set — mcp_auth tunnel commands will be unavailable"
-            );
+            tracing::warn!("RC_RIGHT_HOME not set — mcp_auth tunnel commands will be unavailable");
             std::path::PathBuf::from(".")
         }
     };

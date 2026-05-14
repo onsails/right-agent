@@ -1,19 +1,27 @@
 //! Standalone dispatch layer for Right Agent's built-in MCP tools.
 //!
 //! [`RightBackend`] extracts the tool logic from [`HttpMemoryServer`] into a
-//! struct that accepts `(agent_name, agent_dir, tool_name, args)` and dispatches
-//! manually — no rmcp macro-generated parameter parsing required.
+//! struct that accepts `(agent_name, agent_dir, tool_name, args, context)` and
+//! dispatches manually — no rmcp macro-generated parameter parsing required.
 //! The Aggregator uses this to expose right-agent tools alongside proxied external
 //! MCP servers.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
+use right_mcp::internal_client::{InternalClient, ProgressSendRequest};
 use right_mcp::tool_error::tool_error;
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{CallToolResult, Content, Tool};
+
+/// End-to-end timeout for `mcp__right__send_progress`. Bounds the wait on the
+/// bot UDS round-trip (which in turn awaits Telegram). Keeps the
+/// per-invocation rate-limit slot from being held indefinitely if Telegram
+/// stalls.
+const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::memory_server::{
     CronCreateParams, CronDeleteParams, CronListParams, CronListRunsParams, CronShowRunParams,
@@ -27,6 +35,7 @@ pub struct RightBackend {
     conn_cache: ConnCache,
     agents_dir: PathBuf,
     mtls_dir: Option<PathBuf>,
+    progress: crate::progress::ProgressRegistry,
 }
 
 impl RightBackend {
@@ -35,7 +44,12 @@ impl RightBackend {
             conn_cache: Arc::new(DashMap::new()),
             agents_dir,
             mtls_dir,
+            progress: crate::progress::ProgressRegistry::default(),
         }
+    }
+
+    pub(crate) fn progress_registry(&self) -> crate::progress::ProgressRegistry {
+        self.progress.clone()
     }
 
     /// Return static tool definitions for all built-in tools.
@@ -85,6 +99,11 @@ impl RightBackend {
                 "List all registered MCP servers for this agent. Shows name, URL, and optional instructions.",
                 schema_for_type::<McpListParams>(),
             ),
+            Tool::new(
+                crate::progress::SEND_PROGRESS_TOOL,
+                "Send an occasional standalone progress message to the current Telegram chat for the current foreground invocation only. Use for complex or long-running work, not routine short tasks. Rate limited to one message per 30 seconds per invocation. Max 2000 characters.",
+                schema_for_type::<crate::progress::SendProgressParams>(),
+            ),
             // Bootstrap
             Tool::new(
                 "bootstrap_done",
@@ -105,6 +124,7 @@ impl RightBackend {
         agent_dir: &Path,
         tool_name: &str,
         args: serde_json::Value,
+        context: crate::progress::ToolCallContext,
     ) -> Result<CallToolResult, anyhow::Error> {
         match tool_name {
             "cron_create" => self.call_cron_create(agent_name, agent_dir, &args),
@@ -115,6 +135,7 @@ impl RightBackend {
             "cron_show_run" => self.call_cron_show_run(agent_name, &args),
             "cron_trigger" => self.call_cron_trigger(agent_name, &args),
             "mcp_list" => self.call_mcp_list(agent_name),
+            crate::progress::SEND_PROGRESS_TOOL => self.call_send_progress(context, &args).await,
             "bootstrap_done" => self.call_bootstrap_done(agent_name).await,
             other => bail!("unknown tool: {other}"),
         }
@@ -358,6 +379,105 @@ impl RightBackend {
             .collect();
         let output = serde_json::to_string_pretty(&items)?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
+    }
+
+    async fn call_send_progress(
+        &self,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: crate::progress::SendProgressParams = match serde_json::from_value(args.clone())
+        {
+            Ok(params) => params,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid send_progress params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        let message = params.message.trim();
+        if message.is_empty() {
+            return Ok(tool_error(
+                "invalid_argument",
+                "progress message must not be empty",
+                None,
+            ));
+        }
+        if message.chars().count() > crate::progress::PROGRESS_MESSAGE_MAX_CHARS {
+            return Ok(tool_error(
+                "invalid_argument",
+                format!(
+                    "progress message must be at most {} characters",
+                    crate::progress::PROGRESS_MESSAGE_MAX_CHARS
+                ),
+                None,
+            ));
+        }
+
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(tool_error(
+                "progress_unavailable",
+                "progress is available only for the current foreground invocation",
+                None,
+            ));
+        };
+
+        let target = match self.progress.begin_send(&invocation_id).await {
+            Ok(target) => target,
+            Err(crate::progress::ProgressError::Unavailable) => {
+                return Ok(tool_error(
+                    "progress_unavailable",
+                    "progress is unavailable for this invocation",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Forbidden) => {
+                return Ok(tool_error(
+                    "progress_forbidden",
+                    "progress is forbidden for this invocation",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::RateLimited { retry_after }) => {
+                return Ok(tool_error(
+                    "progress_rate_limited",
+                    "progress messages are rate limited",
+                    Some(serde_json::json!({
+                        "retry_after_secs": retry_after.as_secs(),
+                    })),
+                ));
+            }
+        };
+
+        let client = InternalClient::new(target.bot_socket_path);
+        let request = ProgressSendRequest {
+            invocation_id: invocation_id.clone(),
+            token: target.bot_send_token,
+            message: message.to_owned(),
+        };
+        let send_fut = client.progress_send(&request);
+        match tokio::time::timeout(PROGRESS_SEND_TIMEOUT, send_fut).await {
+            Ok(Ok(_)) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::json!({ "status": "sent" }).to_string(),
+            )])),
+            Ok(Err(e)) => {
+                self.progress.mark_send_failed(&invocation_id).await;
+                Ok(tool_error("progress_send_failed", format!("{e:#}"), None))
+            }
+            Err(_) => {
+                self.progress.mark_send_failed(&invocation_id).await;
+                Ok(tool_error(
+                    "progress_send_failed",
+                    format!(
+                        "progress send timed out after {}s",
+                        PROGRESS_SEND_TIMEOUT.as_secs()
+                    ),
+                    None,
+                ))
+            }
+        }
     }
 
     // ------------------------------------------------------------------

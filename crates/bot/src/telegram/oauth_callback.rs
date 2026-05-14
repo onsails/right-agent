@@ -53,17 +53,24 @@ pub struct OAuthCallbackState {
 
 /// Build the axum router for the bot UDS server.
 ///
-/// Composes three sub-routers (each carrying its own state):
+/// Composes four sub-routers (each carrying its own state):
 /// - `/oauth/{agent_name}/callback` — OAuth callback handler.
+/// - `/progress/send` — foreground progress delivery handler.
 /// - `/tg/{agent_name}/...` — Telegram webhook (nested at `/`).
 /// - `/healthz` — bot-status JSON.
 fn build_router(
     state: OAuthCallbackState,
+    progress_state: super::progress::ProgressState,
     webhook_router: Router,
     agent_name: String,
     started_at: std::time::Instant,
     webhook_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Router {
+    let progress_router =
+        super::progress::build_progress_router(super::progress::ProgressEndpointState {
+            bot: state.bot.clone(),
+            progress: progress_state,
+        });
     let oauth_router = Router::new()
         .route("/oauth/{agent_name}/callback", get(handle_oauth_callback))
         .with_state(state);
@@ -79,6 +86,7 @@ fn build_router(
 
     Router::new()
         .merge(oauth_router)
+        .merge(progress_router)
         .merge(healthz_router)
         .nest(&format!("/tg/{}", agent_name), webhook_router)
 }
@@ -90,9 +98,7 @@ struct HealthzState {
     webhook_set: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-async fn handle_healthz(
-    State(state): State<HealthzState>,
-) -> axum::Json<serde_json::Value> {
+async fn handle_healthz(State(state): State<HealthzState>) -> axum::Json<serde_json::Value> {
     use std::sync::atomic::Ordering;
     axum::Json(serde_json::json!({
         "agent": state.agent_name,
@@ -319,9 +325,10 @@ use super::broadcast_to_chats as notify_telegram;
 /// - `/healthz` JSON
 ///
 /// Removes any stale socket first; signals `ready_tx` after bind.
-pub async fn run_bot_uds_server(
+pub(crate) async fn run_bot_uds_server(
     socket_path: PathBuf,
     state: OAuthCallbackState,
+    progress_state: super::progress::ProgressState,
     webhook_router: Router,
     agent_name: String,
     started_at: std::time::Instant,
@@ -333,9 +340,8 @@ pub async fn run_bot_uds_server(
             .map_err(|e| miette::miette!("remove stale UDS socket: {e:#}"))?;
     }
 
-    let listener = UnixListener::bind(&socket_path).map_err(|e| {
-        miette::miette!("bind bot UDS socket {}: {e:#}", socket_path.display())
-    })?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|e| miette::miette!("bind bot UDS socket {}: {e:#}", socket_path.display()))?;
 
     tracing::info!(path = %socket_path.display(), "bot UDS server listening");
 
@@ -343,7 +349,14 @@ pub async fn run_bot_uds_server(
         let _ = tx.send(());
     }
 
-    let router = build_router(state, webhook_router, agent_name, started_at, webhook_set);
+    let router = build_router(
+        state,
+        progress_state,
+        webhook_router,
+        agent_name,
+        started_at,
+        webhook_set,
+    );
     axum::serve(listener, router)
         .await
         .map_err(|e| miette::miette!("axum serve error: {e:#}"))

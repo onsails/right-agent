@@ -4,7 +4,7 @@
 //! live infrastructure and are covered by code review pattern only.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -189,6 +189,8 @@ pub struct WorkerContext {
     pub idle_timestamp: Arc<std::sync::atomic::AtomicI64>,
     /// Internal API client for aggregator IPC (Unix socket).
     pub internal_client: std::sync::Arc<right_mcp::internal_client::InternalClient>,
+    /// Bot-local progress state for the current foreground invocation.
+    pub(crate) progress_state: super::progress::ProgressState,
     /// Hindsight client for auto-retain/recall (None when memory.provider=file).
     pub hindsight: Option<std::sync::Arc<right_memory::ResilientHindsight>>,
     /// Prefetch cache for auto-recall results (None when memory.provider=file).
@@ -1582,6 +1584,256 @@ pub(crate) struct CcReply {
     pub(crate) is_first_call: bool,
 }
 
+#[derive(Debug)]
+struct ActiveProgressInvocation {
+    invocation_id: String,
+    local_mcp_config_path: PathBuf,
+    claude_mcp_config_path: String,
+    /// `Some(path)` only after a successful sandbox upload — the file at
+    /// `/sandbox/.claude/mcp-<inv>.json` must be removed during cleanup so
+    /// per-turn UUID-named files do not accumulate inside long-lived
+    /// sandboxes. The file's `Authorization: Bearer` is the same
+    /// long-lived agent token already at `/sandbox/mcp.json`, so this is
+    /// hygiene, not a credential-rotation concern. `None` when running
+    /// without a sandbox (host-only).
+    sandbox_mcp_config_path: Option<String>,
+}
+
+fn progress_sandbox_mcp_path(invocation_id: &str) -> String {
+    format!("/sandbox/.claude/mcp-{invocation_id}.json")
+}
+
+async fn start_progress_invocation(
+    ctx: &WorkerContext,
+    chat_id: i64,
+    eff_thread_id: i64,
+) -> Option<ActiveProgressInvocation> {
+    let invocation_id = Uuid::new_v4().to_string();
+    let bot_send_token = right_runtime_state::generate_pc_api_token();
+    ctx.progress_state
+        .register(super::progress::ProgressTarget {
+            invocation_id: invocation_id.clone(),
+            token: bot_send_token.clone(),
+            chat_id,
+            thread_id: eff_thread_id,
+        });
+
+    let register_req = right_mcp::internal_client::ProgressRegisterRequest {
+        agent: ctx.agent_name.clone(),
+        invocation_id: invocation_id.clone(),
+        kind: right_mcp::internal_client::ProgressInvocationKindDto::Foreground,
+        bot_send_token,
+    };
+    if let Err(e) = ctx.internal_client.progress_register(&register_req).await {
+        tracing::warn!(invocation_id, "progress register failed: {e:#}");
+        ctx.progress_state.unregister(&invocation_id);
+        return None;
+    }
+
+    let local_mcp_config_path =
+        match crate::cc::invocation::write_invocation_mcp_config(&ctx.agent_dir, &invocation_id) {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(invocation_id, "progress MCP config write failed: {e:#}");
+                cleanup_partial_progress(ctx, &invocation_id, None).await;
+                return None;
+            }
+        };
+
+    let (claude_mcp_config_path, sandbox_mcp_config_path) = if ctx.ssh_config_path.is_some() {
+        let Some(sandbox) = ctx.resolved_sandbox.as_deref() else {
+            tracing::warn!(
+                invocation_id,
+                "progress disabled: sandbox name is unresolved"
+            );
+            cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
+            return None;
+        };
+        if let Err(e) = right_openshell::openshell::upload_file(
+            sandbox,
+            &local_mcp_config_path,
+            "/sandbox/.claude/",
+        )
+        .await
+        {
+            tracing::warn!(invocation_id, "progress MCP config upload failed: {e:#}");
+            // Upload failed → no sandbox-side file landed; only the host
+            // file needs cleanup.
+            cleanup_partial_progress(ctx, &invocation_id, Some(&local_mcp_config_path)).await;
+            return None;
+        }
+        let sandbox_path = progress_sandbox_mcp_path(&invocation_id);
+        (sandbox_path.clone(), Some(sandbox_path))
+    } else {
+        (local_mcp_config_path.to_string_lossy().into_owned(), None)
+    };
+
+    Some(ActiveProgressInvocation {
+        invocation_id,
+        local_mcp_config_path,
+        claude_mcp_config_path,
+        sandbox_mcp_config_path,
+    })
+}
+
+async fn cleanup_partial_progress(
+    ctx: &WorkerContext,
+    invocation_id: &str,
+    local_mcp_config_path: Option<&Path>,
+) {
+    // Partial cleanup runs only when sandbox upload hasn't landed (write
+    // failed, sandbox name unresolved, or upload failed). There is no
+    // sandbox-side file to remove here — that path lives in
+    // `finish_progress_invocation`.
+    unregister_progress(ctx, invocation_id).await;
+    if let Some(path) = local_mcp_config_path {
+        remove_progress_config_file(path);
+    }
+}
+
+async fn finish_progress_invocation(ctx: &WorkerContext, active: ActiveProgressInvocation) {
+    unregister_progress(ctx, &active.invocation_id).await;
+    remove_progress_config_file(&active.local_mcp_config_path);
+    if let Some(sandbox_path) = active.sandbox_mcp_config_path {
+        spawn_sandbox_progress_cleanup(
+            active.invocation_id,
+            ctx.resolved_sandbox.clone(),
+            sandbox_path,
+        );
+    }
+}
+
+/// Detach the sandbox-side progress MCP config cleanup onto a background task.
+///
+/// The sandbox-side `rm -f` requires a fresh gRPC connection + TLS handshake +
+/// sandbox-id resolve before exec — slow enough (hundreds of ms) to noticeably
+/// delay the next worker turn if awaited inline. Cleanup is documented as
+/// best-effort, so we spawn-and-forget and log failures via `tracing::warn!`.
+fn spawn_sandbox_progress_cleanup(
+    invocation_id: String,
+    sandbox_name: Option<String>,
+    sandbox_path: String,
+) {
+    let _ = tokio::spawn(async move {
+        remove_sandbox_progress_config_file(invocation_id, sandbox_name, sandbox_path).await;
+    });
+}
+
+async fn unregister_progress(ctx: &WorkerContext, invocation_id: &str) {
+    let unregister_req = right_mcp::internal_client::ProgressUnregisterRequest {
+        agent: ctx.agent_name.clone(),
+        invocation_id: invocation_id.to_owned(),
+    };
+    if let Err(e) = ctx
+        .internal_client
+        .progress_unregister(&unregister_req)
+        .await
+    {
+        tracing::warn!(invocation_id, "progress unregister failed: {e:#}");
+    }
+    ctx.progress_state.unregister(invocation_id);
+}
+
+fn remove_progress_config_file(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                "progress MCP config cleanup failed: {e:#}"
+            );
+        }
+    }
+}
+
+/// Best-effort removal of the per-invocation MCP config file inside the
+/// sandbox at `sandbox_path`. Files are UUID-named (one per foreground turn)
+/// and would otherwise accumulate indefinitely inside long-lived sandboxes.
+/// The `Authorization: Bearer` value inside is identical to the one already
+/// at `/sandbox/mcp.json`, so this is hygiene — not credential rotation.
+///
+/// Errors are logged (`warn!`) but never propagated — cleanup is documented
+/// as best-effort per the progress-tool design. Takes owned arguments so it
+/// can run inside a detached `tokio::spawn` without borrowing `WorkerContext`.
+async fn remove_sandbox_progress_config_file(
+    invocation_id: String,
+    sandbox_name: Option<String>,
+    sandbox_path: String,
+) {
+    let Some(sandbox_name) = sandbox_name else {
+        tracing::warn!(
+            invocation_id,
+            sandbox_path,
+            "sandbox progress MCP config cleanup skipped: sandbox name unresolved"
+        );
+        return;
+    };
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+        status => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                ?status,
+                "sandbox progress MCP config cleanup skipped: OpenShell preflight not Ready"
+            );
+            return;
+        }
+    };
+    let mut client = match right_openshell::openshell::connect_grpc(&mtls_dir).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                "sandbox progress MCP config cleanup gRPC connect failed: {e:#}"
+            );
+            return;
+        }
+    };
+    // `exec_in_sandbox` wants a sandbox id, not a name — resolve it via gRPC.
+    let sandbox_id =
+        match right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    invocation_id,
+                    sandbox_path,
+                    sandbox_name,
+                    "sandbox progress MCP config cleanup sandbox-id resolve failed: {e:#}"
+                );
+                return;
+            }
+        };
+    match right_openshell::openshell::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &["rm", "-f", &sandbox_path],
+        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+    {
+        Ok((_, 0)) => {}
+        Ok((stdout, exit_code)) => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                exit_code,
+                stdout = %stdout,
+                "sandbox progress MCP config cleanup exited non-zero"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                invocation_id,
+                sandbox_path,
+                "sandbox progress MCP config cleanup exec failed: {e:#}"
+            );
+        }
+    }
+}
+
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
 ///
 /// Returns `Ok(CcReply { output, session_uuid, is_first_call })` whenever no
@@ -1652,9 +1904,14 @@ async fn invoke_cc(
 
     let mcp_path =
         crate::cc::invocation::mcp_config_path(ctx.ssh_config_path.as_deref(), &ctx.agent_dir);
+    let mut active_progress = start_progress_invocation(ctx, chat_id, eff_thread_id).await;
+    let invocation_mcp_path = active_progress
+        .as_ref()
+        .map(|active| active.claude_mcp_config_path.clone())
+        .unwrap_or(mcp_path);
 
     let mut invocation = crate::cc::invocation::ClaudeInvocation {
-        mcp_config_path: Some(mcp_path),
+        mcp_config_path: Some(invocation_mcp_path),
         json_schema: Some(reply_schema),
         output_format: crate::cc::invocation::OutputFormat::StreamJson,
         model: crate::snapshot_model(&ctx.model),
@@ -1926,16 +2183,25 @@ async fn invoke_cc(
         "invoking claude -p"
     );
 
-    let mut child = right_process::ProcessGroupChild::spawn(cmd)
-        .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
+    let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
+        Ok(child) => child,
+        Err(e) => {
+            if let Some(active) = active_progress.take() {
+                finish_progress_invocation(ctx, active).await;
+            }
+            return Err(format_error_reply(-1, &format!("spawn failed: {:#}", e)).into());
+        }
+    };
 
     // Write input to stdin, then drop to signal EOF.
     if let Some(mut stdin) = child.stdin() {
         use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(input.as_bytes())
-            .await
-            .map_err(|e| format_error_reply(-1, &format!("stdin write failed: {:#}", e)))?;
+        if let Err(e) = stdin.write_all(input.as_bytes()).await {
+            if let Some(active) = active_progress.take() {
+                finish_progress_invocation(ctx, active).await;
+            }
+            return Err(format_error_reply(-1, &format!("stdin write failed: {:#}", e)).into());
+        }
     }
 
     // Insert stop token so callback handler can kill this CC session.
@@ -1961,9 +2227,15 @@ async fn invoke_cc(
     };
 
     // Stream stdout line-by-line: log to file, parse events, update thinking message.
-    let stdout = child
-        .stdout()
-        .ok_or_else(|| format_error_reply(-1, "no stdout handle"))?;
+    let stdout = match child.stdout() {
+        Some(stdout) => stdout,
+        None => {
+            if let Some(active) = active_progress.take() {
+                finish_progress_invocation(ctx, active).await;
+            }
+            return Err(format_error_reply(-1, "no stdout handle").into());
+        }
+    };
 
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut lines = BufReader::new(stdout).lines();
@@ -2274,6 +2546,10 @@ async fn invoke_cc(
 
     if !stderr_str.is_empty() {
         tracing::warn!(?chat_id, stderr = %stderr_str, "CC stderr");
+    }
+
+    if let Some(active) = active_progress.take() {
+        finish_progress_invocation(ctx, active).await;
     }
 
     let stdout_str = result_line.unwrap_or_default();
@@ -2649,6 +2925,26 @@ mod tests {
     #[test]
     fn is_auth_error_false_for_empty() {
         assert!(!is_auth_error(""));
+    }
+
+    #[test]
+    fn progress_sandbox_mcp_path_points_inside_sandbox_claude_dir() {
+        assert_eq!(
+            progress_sandbox_mcp_path("inv-1"),
+            "/sandbox/.claude/mcp-inv-1.json"
+        );
+    }
+
+    #[test]
+    fn progress_registration_target_uses_effective_thread_id() {
+        let target = crate::telegram::progress::ProgressTarget {
+            invocation_id: "inv-1".to_owned(),
+            token: "token".to_owned(),
+            chat_id: 42,
+            thread_id: 7,
+        };
+
+        assert_eq!(target.thread_id, 7);
     }
 
     // build_memory_marker tests

@@ -20,14 +20,14 @@ use tokio::sync::mpsc;
 use crate::cc::markdown_utils::html_escape;
 
 use super::BotType;
+#[cfg(test)]
+use super::ThinkingVisibility;
 use super::oauth_callback::PendingAuthMap;
 use super::session::{
     activate_session, create_session, deactivate_current, effective_thread_id,
     find_sessions_by_uuid, list_sessions, truncate_label,
 };
 use super::worker::{DebounceMsg, SessionKey, WorkerContext, spawn_worker};
-#[cfg(test)]
-use super::ThinkingVisibility;
 
 /// Newtype wrapper for the agent directory passed via dptree dependencies.
 /// Distinct from RightHome to prevent TypeId collision in dptree.
@@ -377,6 +377,7 @@ pub async fn handle_message(
                     thinking_visibility: Arc::clone(&worker_ctl.thinking_visibility),
                     idle_timestamp: Arc::clone(&idle_ts.0),
                     internal_client: Arc::clone(&internal_api.0),
+                    progress_state: worker_ctl.progress.clone(),
                     hindsight: settings.hindsight.clone(),
                     prefetch_cache: settings.prefetch_cache.clone(),
                     upgrade_lock: Arc::clone(&settings.upgrade_lock),
@@ -1291,8 +1292,7 @@ async fn request_token_and_register(
     .await?;
 
     let (tx, rx) = tokio::sync::oneshot::channel::<String>();
-    let req_id =
-        NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let req_id = NEXT_TOKEN_REQ_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let prev = {
         let mut slot = pending_token_slot.0.lock().await;
         let prev = slot.take();
@@ -1314,9 +1314,9 @@ async fn request_token_and_register(
             "Previous MCP token request superseded by a new /mcp command.",
         );
         if prev_thread_id != 0 {
-            send = send.message_thread_id(teloxide::types::ThreadId(
-                teloxide::types::MessageId(prev_thread_id as i32),
-            ));
+            send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+                prev_thread_id as i32,
+            )));
         }
         send.await.ok();
         drop(prev); // explicit — closes the oneshot
@@ -1663,9 +1663,9 @@ async fn handle_cron_list(
     for name in names {
         let spec = &specs[name];
         let desc = match &spec.schedule_kind {
-            right_agent::cron_spec::ScheduleKind::RunAt(dt) => html_escape(
-                &format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")),
-            ),
+            right_agent::cron_spec::ScheduleKind::RunAt(dt) => {
+                html_escape(&format!("once at {}", dt.format("%Y-%m-%d %H:%M UTC")))
+            }
             _ => html_escape(&right_agent::cron_spec::describe_schedule(
                 spec.schedule_kind.cron_schedule().unwrap_or(""),
             )),
@@ -1774,11 +1774,7 @@ fn format_duration(start_iso: &str, end_iso: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Handle the /doctor command -- run all doctor checks and return results.
-pub async fn handle_doctor(
-    bot: BotType,
-    msg: Message,
-    home: Arc<RightHome>,
-) -> ResponseResult<()> {
+pub async fn handle_doctor(bot: BotType, msg: Message, home: Arc<RightHome>) -> ResponseResult<()> {
     if !is_private_chat(&msg.chat.kind) {
         tracing::debug!(cmd = "doctor", "ignoring command in group chat (DM-only)");
         return Ok(());
@@ -1807,8 +1803,12 @@ pub async fn handle_doctor(
         format!("{pass_count}/{total} checks passed")
     } else {
         let mut parts = Vec::new();
-        if warn_count > 0 { parts.push(format!("{warn_count} warn")); }
-        if fail_count > 0 { parts.push(format!("{fail_count} fail")); }
+        if warn_count > 0 {
+            parts.push(format!("{warn_count} warn"));
+        }
+        if fail_count > 0 {
+            parts.push(format!("{fail_count} fail"));
+        }
         format!("{pass_count}/{total} checks passed ({})", parts.join(", "))
     };
     let body = format!("{}\n\n{}", block.render(theme), summary);
@@ -2071,7 +2071,6 @@ mod tests {
             TypeId::of::<AgentDir>(),
             TypeId::of::<RightHome>(),
             "AgentDir and RightHome must be distinct types to avoid dptree TypeId collision"
-
         );
     }
 

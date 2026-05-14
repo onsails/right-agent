@@ -216,6 +216,35 @@ fn cron_instructions_contains_no_clarifying_questions_rule() {
 }
 
 #[test]
+fn operating_instructions_teach_sparse_progress_updates() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+
+    for needle in [
+        "mcp__right__send_progress",
+        "30 seconds",
+        "complex, long-running",
+        "parallel or sequential subagents",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must mention {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn cron_instructions_forbid_progress_updates() {
+    let cron = crate::CRON_INSTRUCTIONS;
+
+    for needle in ["mcp__right__send_progress", "must not send progress"] {
+        assert!(
+            cron.contains(needle),
+            "CRON_INSTRUCTIONS must mention {needle:?}"
+        );
+    }
+}
+
+#[test]
 fn system_prompt_contains_home_dir() {
     let result = generate_system_prompt(
         "test",

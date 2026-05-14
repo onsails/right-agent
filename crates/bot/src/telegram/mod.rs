@@ -2,6 +2,7 @@ pub mod allowlist_commands;
 pub mod attachments;
 pub(crate) mod bootstrap_photo;
 pub mod bot;
+pub(crate) mod debug_command;
 pub mod dispatch;
 pub mod filter;
 pub mod handler;
@@ -9,15 +10,15 @@ pub(crate) mod idle;
 pub mod markdown;
 pub mod memory_alerts;
 pub mod mention;
-pub(crate) mod debug_command;
 pub(crate) mod model_command;
 pub mod oauth_callback;
+pub(crate) mod progress;
 pub mod session;
 pub mod shutdown_listener;
 pub mod webhook;
 pub mod worker;
 
-pub use dispatch::run_telegram;
+pub(crate) use dispatch::run_telegram;
 pub use session::effective_thread_id;
 
 /// Bot adaptor type alias used by WorkerContext and dispatch logic.
@@ -138,17 +139,19 @@ pub(crate) fn set_thinking_visibility(
 /// handler was already at the limit — we cannot inject these as separate
 /// top-level deps without pushing the message handler over.
 ///
-/// All four maps share bot-process lifetime and are injected together:
+/// These shared control maps share bot-process lifetime and are injected together:
 /// - `stop_tokens`: per-(chat, thread) cancellation tokens for in-flight CC subprocesses.
 /// - `session_locks`: per-main-session async mutex map (TOCTOU on session JSONL).
 /// - `bg_requests`: per-(chat, thread) Background-button request flags.
 /// - `thinking_visibility`: per-(chat, thread) Show/Hide thinking state for active runs.
+/// - `progress`: per-foreground-invocation Telegram progress targets.
 #[derive(Clone)]
 pub struct WorkerControlDeps {
     pub(crate) stop_tokens: StopTokens,
     pub(crate) session_locks: SessionLocks,
     pub(crate) bg_requests: BgRequests,
     pub(crate) thinking_visibility: ThinkingVisibility,
+    pub(crate) progress: progress::ProgressState,
 }
 
 use right_agent::agent::types::AgentConfig;

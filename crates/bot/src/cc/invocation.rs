@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Built-in CC harness tools blocked for every agent-driven `claude -p` call.
 ///
@@ -7,8 +7,8 @@ use std::path::Path;
 /// worktree juggling, push notifications, in-process Monitor) that don't
 /// belong in a headless Telegram-driven agent.
 ///
-/// `Agent` is NOT in this list — workers use subagents legitimately. Cron
-/// and reflection extend this baseline with `Agent` themselves.
+/// `Agent` is NOT in this list — foreground workers use subagents legitimately.
+/// Callsites layer on additional denies when needed.
 pub(crate) const BASELINE_DISALLOWED_TOOLS: &[&str] = &[
     // Right Agent provides MCP equivalents — block harness versions.
     "CronCreate",
@@ -39,6 +39,53 @@ pub(crate) fn baseline_disallowed_tools() -> Vec<String> {
         .iter()
         .map(|s| (*s).to_owned())
         .collect()
+}
+
+pub(crate) use right_mcp::internal_client::PROGRESS_MCP_TOOL as SEND_PROGRESS_MCP_TOOL;
+
+pub(crate) fn disallow_send_progress(mut tools: Vec<String>) -> Vec<String> {
+    if !tools.iter().any(|tool| tool == SEND_PROGRESS_MCP_TOOL) {
+        tools.push(SEND_PROGRESS_MCP_TOOL.to_owned());
+    }
+    tools
+}
+
+pub(crate) fn with_progress_invocation_header(
+    mut config: serde_json::Value,
+    invocation_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let headers = config
+        .get_mut("mcpServers")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|servers| servers.get_mut("right"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|right| right.get_mut("headers"))
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("mcp config missing mcpServers.right.headers object"))?;
+
+    headers.insert(
+        right_mcp::internal_client::PROGRESS_INVOCATION_HEADER.to_owned(),
+        serde_json::Value::String(invocation_id.to_owned()),
+    );
+    Ok(config)
+}
+
+pub(crate) fn write_invocation_mcp_config(
+    agent_dir: &Path,
+    invocation_id: &str,
+) -> anyhow::Result<PathBuf> {
+    let base_path = agent_dir.join("mcp.json");
+    let config: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&base_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e:#}", base_path.display()))?,
+    )?;
+    let config = with_progress_invocation_header(config, invocation_id)?;
+
+    let claude_dir = agent_dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir)?;
+    let output_path = claude_dir.join(format!("mcp-{invocation_id}.json"));
+    std::fs::write(&output_path, serde_json::to_string(&config)?)?;
+    Ok(output_path)
 }
 
 /// CC output format flag.
@@ -364,6 +411,82 @@ mod tests {
                 "baseline must NOT block {kept}"
             );
         }
+    }
+
+    #[test]
+    fn invocation_mcp_config_adds_progress_header_and_preserves_authorization() {
+        let config = serde_json::json!({
+            "mcpServers": {
+                "right": {
+                    "command": "right-mcp",
+                    "headers": {
+                        "Authorization": "Bearer existing-token"
+                    }
+                }
+            },
+            "other": true
+        });
+
+        let updated = with_progress_invocation_header(config, "inv-1").unwrap();
+
+        let headers = &updated["mcpServers"]["right"]["headers"];
+        assert_eq!(headers["Authorization"], "Bearer existing-token");
+        assert_eq!(headers["X-Right-Invocation"], "inv-1");
+        assert_eq!(updated["other"], true);
+    }
+
+    #[test]
+    fn disallow_progress_adds_full_mcp_tool_name() {
+        let tools = disallow_send_progress(vec!["Agent".to_owned()]);
+
+        assert!(tools.iter().any(|tool| tool == SEND_PROGRESS_MCP_TOOL));
+        assert!(tools.iter().any(|tool| tool == "Agent"));
+    }
+
+    #[test]
+    fn disallow_send_progress_is_idempotent() {
+        let tools = disallow_send_progress(disallow_send_progress(Vec::new()));
+        let count = tools
+            .iter()
+            .filter(|tool| tool.as_str() == SEND_PROGRESS_MCP_TOOL)
+            .count();
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn write_invocation_mcp_config_writes_agent_scoped_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            temp.path().join("mcp.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "right": {
+                        "headers": {
+                            "Authorization": "Bearer existing-token"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let path = write_invocation_mcp_config(temp.path(), "inv-1").unwrap();
+
+        assert_eq!(path, claude_dir.join("mcp-inv-1.json"));
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            written["mcpServers"]["right"]["headers"]["Authorization"],
+            "Bearer existing-token"
+        );
+        assert_eq!(
+            written["mcpServers"]["right"]["headers"]["X-Right-Invocation"],
+            "inv-1"
+        );
     }
 
     #[test]
