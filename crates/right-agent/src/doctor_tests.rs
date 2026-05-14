@@ -516,6 +516,7 @@ fn make_webhook_check_warn_when_http_error() {
 /// After the fix: returns a Result without panicking.
 #[tokio::test(flavor = "multi_thread")]
 async fn fetch_webhook_info_does_not_panic_in_async_context() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let _result = fetch_webhook_info("invalid-token-for-test");
     // If we reach here without panicking, the fix works.
 }

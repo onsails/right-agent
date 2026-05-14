@@ -69,6 +69,7 @@ test-support = ["right-openshell/test-support"]
 insta = { workspace = true }
 right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
 right-db = { path = "../right-db", version = "*" }
+rustls = { workspace = true }
 tokio = { version = "1.52", features = ["test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 wiremock = "0.6"

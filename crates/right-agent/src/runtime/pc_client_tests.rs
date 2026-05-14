@@ -1,12 +1,19 @@
 use super::*;
 use right_runtime_state::PC_PORT;
 
+/// Install ring as the rustls process-level crypto provider. Idempotent —
+/// safe to call from multiple tests in the same binary.
+fn setup_crypto() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Regression: process-compose v1.94+ reads the API token from header
 /// `X-PC-Token-Key`. Sending `Authorization: Bearer …` (the previous
 /// implementation) caused every REST call to 401 silently — see the
 /// rebootstrap-skipped-the-bot incident.
 #[tokio::test]
 async fn health_check_sends_x_pc_token_key_header() {
+    setup_crypto();
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -30,6 +37,7 @@ async fn health_check_sends_x_pc_token_key_header() {
 
 #[tokio::test]
 async fn health_check_fails_when_token_missing() {
+    setup_crypto();
     use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -58,6 +66,7 @@ async fn health_check_fails_when_token_missing() {
 
 #[test]
 fn pc_client_constructs_with_port() {
+    setup_crypto();
     let client = PcClient::new(PC_PORT, None);
     assert!(client.is_ok(), "PcClient::new should succeed with any port");
 }
@@ -75,6 +84,7 @@ fn from_home_returns_none_when_state_absent() {
 
 #[test]
 fn from_home_reads_port_from_state() {
+    setup_crypto();
     use right_runtime_state::{AgentState, RuntimeState, write_state};
 
     let dir = tempfile::tempdir().unwrap();

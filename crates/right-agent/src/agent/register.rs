@@ -104,6 +104,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_pc_running_false_when_state_json_points_at_closed_port() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let dir = tempfile::TempDir::new().unwrap();
         let run = dir.path().join("run");
         std::fs::create_dir_all(&run).unwrap();

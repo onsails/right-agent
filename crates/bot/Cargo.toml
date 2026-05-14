@@ -55,5 +55,6 @@ whisper-rs = { version = "0.16", default-features = false, features = ["metal"] 
 [dev-dependencies]
 right-agent = { path = "../right-agent", version = "*" }
 right-openshell = { path = "../right-openshell", version = "*", features = ["test-support"] }
+rustls = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"
