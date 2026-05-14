@@ -1,5 +1,5 @@
 ---
-name: rightcron
+name: right-cron
 description: >-
   Manages cron jobs for this Right Agent agent via MCP tools. Creates, updates,
   and deletes cron specs stored in the agent database. The Rust runtime handles
@@ -8,12 +8,12 @@ description: >-
 version: 3.3.0
 ---
 
-# /rightcron -- Cron Job Manager
+# /right-cron -- Cron Job Manager
 
 ## When to Activate
 
 Activate this skill when:
-- The user mentions "cron", "cron jobs", "scheduled tasks", "reminders", or "RightCron"
+- The user mentions "cron", "cron jobs", "scheduled tasks", "reminders", or "Right Cron"
 - The user asks to schedule, create, remove, or change a recurring or one-shot task
 - The user asks to run something at a specific time or after a delay
 - The user asks about cron run history or why a job failed

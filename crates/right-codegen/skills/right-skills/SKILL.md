@@ -1,5 +1,5 @@
 ---
-name: rightskills
+name: right-skills
 description: >-
   Manages Agent Skills for this Right Agent agent via skills.sh (Vercel's Agent Skills directory).
   Searches the skills.sh registry, installs skills by owner/repo slug, removes installed skills,
@@ -9,7 +9,7 @@ version: 0.3.0
 compatibility: Requires Node.js (npx), internet access to skills.sh and npmjs.org
 ---
 
-# /rightskills -- Agent Skills Manager (skills.sh)
+# /right-skills -- Agent Skills Manager (skills.sh)
 
 You are the skill manager for this Right Agent agent, powered by [skills.sh](https://skills.sh) (Vercel's Agent Skills directory).
 
@@ -303,7 +303,7 @@ Present a single table covering all skills:
 
 | Skill | Source | Bins | Env Vars | Network | Status |
 |-------|--------|------|----------|---------|--------|
-| rightcron | skills.sh | — | — | — | PASS |
+| right-cron | skills.sh | — | — | — | PASS |
 | my-skill | skills.sh | git ✓ | API_KEY ✗ | api.example.com ✗ | WARN |
 | custom-tool | manual | docker ✓ | — | api.custom.com ✗ | BLOCK |
 
