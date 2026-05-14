@@ -25,9 +25,31 @@ preview, but no `Hide thinking` button is shown in groups. Live expanded
 messages refresh every 2s via `editMessageText`. Collapsed messages stay static
 until completion, stop, timeout, reflection, or background handoff.
 
+Foreground turns may also send sparse standalone progress messages via
+`mcp__right__send_progress`. These are separate Telegram messages, not edits to
+the thinking anchor. The worker registers a fresh invocation ID for the current
+turn, injects it into the MCP config as `X-Right-Invocation`, and unregisters it
+on completion, spawn/write failure, timeout, stop, or background handoff.
+
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
-per-message from agent.yaml). Cron jobs disable `Agent` tool to prevent budget waste on
-subagent branches. Process timeout (600s) is a safety net only.
+per-message from agent.yaml). Process timeout (600s) is a safety net only.
+
+Per-callsite `--disallowedTools`:
+
+- **Foreground** (`bot::telegram::worker`): baseline only. `Agent` is allowed —
+  foreground turns can spawn subagents legitimately.
+- **Cron** (`bot::cron`): baseline + `mcp__right__send_progress`. `Agent`
+  intentionally remains allowed; cron jobs may legitimately fan out to
+  subagents. Progress is denied because cron turns have no live foreground
+  invocation registered.
+- **Reflection** (`bot::reflection`): baseline + `Agent` + `mcp__right__send_progress`.
+  Reflection is a single follow-up turn — subagents would waste budget — and
+  it is not a foreground turn, so progress is unavailable.
+- **Delivery** / **background continuation**: baseline + `mcp__right__send_progress`,
+  same rationale as cron.
+
+The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
+and explicitly excludes `Agent`.
 
 ## Per-session mutex on --resume
 

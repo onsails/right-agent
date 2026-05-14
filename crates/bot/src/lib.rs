@@ -485,6 +485,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     };
 
     let pending_auth: PendingAuthMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let progress_state = telegram::progress::ProgressState::default();
 
     let notify_bot = teloxide::Bot::new(token.clone());
     let agent_name = args.agent.clone();
@@ -544,10 +545,12 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let axum_socket = socket_path.clone();
     let agent_name_for_uds = args.agent.clone();
     let webhook_set_for_axum = webhook_set_flag.clone();
+    let progress_state_for_uds = progress_state.clone();
     let axum_handle = tokio::spawn(async move {
         run_bot_uds_server(
             axum_socket,
             oauth_state,
+            progress_state_for_uds,
             webhook_router,
             agent_name_for_uds,
             started_at,
@@ -962,6 +965,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             stt,
             Arc::clone(&session_locks),
             Arc::clone(&bg_requests),
+            progress_state,
             update_listener,
         ) => result,
         result = axum_handle => result

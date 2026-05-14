@@ -2904,6 +2904,7 @@ dependencies = [
 name = "right-bot"
 version = "0.2.13"
 dependencies = [
+ "anyhow",
  "arc-swap",
  "axum",
  "chrono",
@@ -2939,6 +2940,7 @@ dependencies = [
  "serde_json",
  "shlex",
  "signal-hook 0.4.4",
+ "subtle",
  "teloxide",
  "tempfile",
  "thiserror 2.0.18",

@@ -20,8 +20,7 @@ pub const BOOTSTRAP_INSTRUCTIONS: &str = include_str!("../templates/right/agent/
 /// continuation). Tells the agent that its structured output IS
 /// the Telegram delivery channel and that the turn has no live user.
 /// Source: `templates/right/prompt/CRON_INSTRUCTIONS.md`
-pub const CRON_INSTRUCTIONS: &str =
-    include_str!("../templates/right/prompt/CRON_INSTRUCTIONS.md");
+pub const CRON_INSTRUCTIONS: &str = include_str!("../templates/right/prompt/CRON_INSTRUCTIONS.md");
 
 /// JSON schema for the structured reply format used by teloxide agents (D-02).
 ///
@@ -88,7 +87,8 @@ Source: https://github.com/onsails/right-agent
 ## MCP
 
 You are connected to the `right` MCP server for persistent memory, cron job management, \
-and external MCP server management. Use `mcp__right__mcp_list` to see all configured servers.\n\
+external MCP server management, and foreground progress updates. Use `mcp__right__mcp_list` \
+to see all configured servers.\n\
 \n\
 **Call `right` MCP tools directly by name (e.g. `mcp__right__mcp_list`). \
 Do NOT use ToolSearch to find them — ToolSearch does not index MCP tools. \

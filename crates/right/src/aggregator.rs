@@ -224,28 +224,16 @@ impl HindsightBackend {
                                     serde_json::to_string_pretty(&json)?,
                                 )]))
                             }
-                            right_memory::ErrorKind::Auth => Ok(
-                                tool_error(
-                                    "upstream_auth",
-                                    format!("{e:#}"),
-                                    None,
-                                ),
-                            ),
-                            right_memory::ErrorKind::Quota => Ok(
-                                tool_error(
-                                    "upstream_quota",
-                                    format!("{e:#}"),
-                                    None,
-                                ),
-                            ),
+                            right_memory::ErrorKind::Auth => {
+                                Ok(tool_error("upstream_auth", format!("{e:#}"), None))
+                            }
+                            right_memory::ErrorKind::Quota => {
+                                Ok(tool_error("upstream_quota", format!("{e:#}"), None))
+                            }
                             right_memory::ErrorKind::Client
-                            | right_memory::ErrorKind::Malformed => Ok(
-                                tool_error(
-                                    "upstream_invalid",
-                                    format!("{e:#}"),
-                                    None,
-                                ),
-                            ),
+                            | right_memory::ErrorKind::Malformed => {
+                                Ok(tool_error("upstream_invalid", format!("{e:#}"), None))
+                            }
                         }
                     }
                     Err(right_memory::ResilientError::CircuitOpen { retry_after }) => {
@@ -326,37 +314,20 @@ impl HindsightBackend {
     /// Map a `ResilientError` from `recall` / `reflect` to a structured
     /// operation error. The `retain` path has its own queueing semantics and
     /// does not use this helper.
-    fn classify_resilient_error(
-        &self,
-        e: right_memory::ResilientError,
-    ) -> CallToolResult {
+    fn classify_resilient_error(&self, e: right_memory::ResilientError) -> CallToolResult {
         match e {
             right_memory::ResilientError::Upstream(ref inner) => match inner.classify() {
-                right_memory::ErrorKind::Transient
-                | right_memory::ErrorKind::RateLimited => {
-                    tool_error(
-                        "upstream_unreachable",
-                        format!("{e:#}"),
-                        None,
-                    )
+                right_memory::ErrorKind::Transient | right_memory::ErrorKind::RateLimited => {
+                    tool_error("upstream_unreachable", format!("{e:#}"), None)
                 }
-                right_memory::ErrorKind::Auth => tool_error(
-                    "upstream_auth",
-                    format!("{e:#}"),
-                    None,
-                ),
-                right_memory::ErrorKind::Quota => tool_error(
-                    "upstream_quota",
-                    format!("{e:#}"),
-                    None,
-                ),
-                right_memory::ErrorKind::Client
-                | right_memory::ErrorKind::Malformed => {
-                    tool_error(
-                        "upstream_invalid",
-                        format!("{e:#}"),
-                        None,
-                    )
+                right_memory::ErrorKind::Auth => {
+                    tool_error("upstream_auth", format!("{e:#}"), None)
+                }
+                right_memory::ErrorKind::Quota => {
+                    tool_error("upstream_quota", format!("{e:#}"), None)
+                }
+                right_memory::ErrorKind::Client | right_memory::ErrorKind::Malformed => {
+                    tool_error("upstream_invalid", format!("{e:#}"), None)
                 }
             },
             right_memory::ResilientError::CircuitOpen { retry_after } => {
@@ -365,24 +336,16 @@ impl HindsightBackend {
                 // misleading transient `circuit_open`. Mirrors the retain
                 // CircuitOpen path.
                 match self.client.status() {
-                    right_memory::MemoryStatus::AuthFailed { .. } => tool_error(
-                        "upstream_auth",
-                        format!("{e:#}"),
-                        None,
-                    ),
-                    right_memory::MemoryStatus::QuotaExhausted { .. } => tool_error(
-                        "upstream_quota",
-                        format!("{e:#}"),
-                        None,
-                    ),
+                    right_memory::MemoryStatus::AuthFailed { .. } => {
+                        tool_error("upstream_auth", format!("{e:#}"), None)
+                    }
+                    right_memory::MemoryStatus::QuotaExhausted { .. } => {
+                        tool_error("upstream_quota", format!("{e:#}"), None)
+                    }
                     _ => {
                         let details = retry_after
                             .map(|d| serde_json::json!({ "retry_after_secs": d.as_secs() }));
-                        tool_error(
-                            "circuit_open",
-                            format!("{e:#}"),
-                            details,
-                        )
+                        tool_error("circuit_open", format!("{e:#}"), details)
                     }
                 }
             }
@@ -480,6 +443,7 @@ impl ToolDispatcher {
         agent_name: &str,
         tool_name: &str,
         args: serde_json::Value,
+        context: crate::progress::ToolCallContext,
     ) -> Result<CallToolResult, anyhow::Error> {
         let registry = self
             .agents
@@ -499,7 +463,7 @@ impl ToolDispatcher {
                 }
                 registry
                     .right
-                    .tools_call(agent_name, &registry.agent_dir, tool_name, args)
+                    .tools_call(agent_name, &registry.agent_dir, tool_name, args, context)
                     .await
             }
             Some(("rightmeta", tool)) => {
@@ -588,6 +552,24 @@ impl Aggregator {
             McpError::internal_error("agent context not found in request extensions", None)
         })
     }
+
+    fn invocation_from_context(
+        context: &RequestContext<RoleServer>,
+    ) -> crate::progress::ToolCallContext {
+        let invocation_id = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| {
+                parts
+                    .headers
+                    .get(crate::progress::PROGRESS_INVOCATION_HEADER)
+            })
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        crate::progress::ToolCallContext { invocation_id }
+    }
 }
 
 impl rmcp::ServerHandler for Aggregator {
@@ -602,6 +584,12 @@ impl rmcp::ServerHandler for Aggregator {
                  - memory_recall: Search memory by relevance\n\
                  - memory_reflect: Synthesize reasoned answers from memory\n\
                  (Errors follow the aggregator-level error convention; see below.)\n\n\
+                 Progress:\n\
+                 - mcp__right__send_progress: Send an occasional standalone Telegram \
+                 progress message (max 2000 characters) for the current foreground \
+                 invocation only. Use for complex or long-running work, not routine \
+                 short tasks. Rate limited to one message every 30 seconds. Cron, \
+                 delivery, reflection, and background-continuation turns must not use it.\n\n\
                  Error convention (operation errors):\n\
                  On operation failure, tools return is_error: true with content\n  \
                  { \"error\": { \"code\": \"<code>\", \"message\": \"<human readable>\", \"details\"?: {...} } }\n\
@@ -614,6 +602,8 @@ impl rmcp::ServerHandler for Aggregator {
                  invalid_argument     — semantic argument validation failed\n  \
                  tool_failed          — upstream tool returned its own error (see details)\n  \
                  server_not_found     — referenced MCP server is not registered\n\
+                 Progress-specific codes: progress_unavailable, progress_forbidden, \
+                 progress_rate_limited, progress_send_failed.\n\
                  Tool-specific codes are documented in each tool's description.",
             )
     }
@@ -652,9 +642,10 @@ impl rmcp::ServerHandler for Aggregator {
                 .arguments
                 .map(serde_json::Value::Object)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let context = Self::invocation_from_context(&context);
 
             self.dispatcher
-                .dispatch(&agent.name, tool_name, args)
+                .dispatch(&agent.name, tool_name, args, context)
                 .await
                 .map_err(|e| McpError::internal_error(format!("{e:#}"), None))
         }
@@ -854,6 +845,10 @@ mod tests {
 
         // RightBackend tools present (unprefixed)
         assert!(names.contains(&"cron_create"), "missing cron_create");
+        assert!(
+            names.contains(&crate::progress::SEND_PROGRESS_TOOL),
+            "missing send_progress"
+        );
         assert!(names.contains(&"bootstrap_done"), "missing bootstrap_done");
 
         // Meta tool present
@@ -874,7 +869,12 @@ mod tests {
         // exercises RightBackend dispatch. bootstrap_done checks files — should
         // return a tool-level error (missing files), not an infrastructure error.
         let result = dispatcher
-            .dispatch("test-agent", "bootstrap_done", serde_json::json!({}))
+            .dispatch(
+                "test-agent",
+                "bootstrap_done",
+                serde_json::json!({}),
+                crate::progress::ToolCallContext::default(),
+            )
             .await;
 
         assert!(result.is_ok(), "dispatch should succeed: {result:?}");
@@ -889,7 +889,12 @@ mod tests {
         let dispatcher = make_dispatcher(tmp.path());
 
         let result = dispatcher
-            .dispatch("test-agent", "notion__search", serde_json::json!({}))
+            .dispatch(
+                "test-agent",
+                "notion__search",
+                serde_json::json!({}),
+                crate::progress::ToolCallContext::default(),
+            )
             .await
             .expect("dispatch should return Ok with operation error");
         assert_eq!(result.is_error, Some(true));
@@ -902,6 +907,69 @@ mod tests {
                 .contains("Server 'notion' not found"),
             "unexpected message: {body:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn send_progress_without_invocation_header_returns_tool_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_dispatcher(tmp.path());
+
+        let result = dispatcher
+            .dispatch(
+                "test-agent",
+                crate::progress::SEND_PROGRESS_TOOL,
+                serde_json::json!({ "message": "still working" }),
+                crate::progress::ToolCallContext::default(),
+            )
+            .await
+            .expect("dispatch should return Ok with operation error");
+
+        assert_eq!(result.is_error, Some(true));
+        let body = aggregator_test_body(&result);
+        assert_eq!(body["error"]["code"], "progress_unavailable");
+    }
+
+    #[tokio::test]
+    async fn send_progress_rolls_back_rate_limit_on_send_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dispatcher = make_dispatcher(tmp.path());
+        let progress = dispatcher
+            .agents
+            .get("test-agent")
+            .expect("test-agent registered")
+            .right
+            .progress_registry();
+        progress
+            .register(crate::progress::ProgressRegistration {
+                invocation_id: "inv-1".to_owned(),
+                kind: crate::progress::ProgressInvocationKind::Foreground,
+                bot_socket_path: tmp.path().join("missing-bot.sock"),
+                bot_send_token: "send-token".to_owned(),
+            })
+            .await;
+
+        let context = crate::progress::ToolCallContext {
+            invocation_id: Some("inv-1".to_owned()),
+        };
+        // Both calls fail at the UDS hop (no bot listening). The rate-limit
+        // slot reserved by the first call must be released on send failure,
+        // so the second call is still `progress_send_failed` — not
+        // `progress_rate_limited`. Rate-limit semantics are unit-tested in
+        // `crate::progress::tests`.
+        for _ in 0..2 {
+            let result = dispatcher
+                .dispatch(
+                    "test-agent",
+                    crate::progress::SEND_PROGRESS_TOOL,
+                    serde_json::json!({ "message": "still working" }),
+                    context.clone(),
+                )
+                .await
+                .expect("dispatch should return Ok with operation error");
+            assert_eq!(result.is_error, Some(true));
+            let body = aggregator_test_body(&result);
+            assert_eq!(body["error"]["code"], "progress_send_failed");
+        }
     }
 
     // ---- inputSchema validation ----
@@ -1021,9 +1089,7 @@ mod tests {
         (handle, url)
     }
 
-    fn make_hindsight_backend(
-        url: &str,
-    ) -> (tempfile::TempDir, std::sync::Arc<HindsightBackend>) {
+    fn make_hindsight_backend(url: &str) -> (tempfile::TempDir, std::sync::Arc<HindsightBackend>) {
         setup_crypto();
         use right_memory::ResilientHindsight;
         use right_memory::hindsight::HindsightClient;
@@ -1040,10 +1106,7 @@ mod tests {
         let (_h, url) = mock_hindsight(r#"{"error": "unauthorized"}"#, 401).await;
         let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
-            .tools_call(
-                "memory_retain",
-                serde_json::json!({ "content": "x" }),
-            )
+            .tools_call("memory_retain", serde_json::json!({ "content": "x" }))
             .await
             .expect("Ok with operation error");
         assert_eq!(result.is_error, Some(true));
@@ -1056,10 +1119,7 @@ mod tests {
         let (_h, url) = mock_hindsight(r#"{"error": "bad request"}"#, 400).await;
         let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
-            .tools_call(
-                "memory_retain",
-                serde_json::json!({ "content": "x" }),
-            )
+            .tools_call("memory_retain", serde_json::json!({ "content": "x" }))
             .await
             .expect("Ok with operation error");
         let body = aggregator_test_body(&result);
@@ -1071,10 +1131,7 @@ mod tests {
         let (_h, url) = mock_hindsight(r#"{"error": "bad gateway"}"#, 502).await;
         let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
-            .tools_call(
-                "memory_retain",
-                serde_json::json!({ "content": "x" }),
-            )
+            .tools_call("memory_retain", serde_json::json!({ "content": "x" }))
             .await
             .expect("Ok success with queued status");
         // is_error is either None or Some(false) — both are acceptable success
@@ -1088,10 +1145,7 @@ mod tests {
         let (_h, url) = mock_hindsight(r#"{"error": "unauthorized"}"#, 401).await;
         let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
-            .tools_call(
-                "memory_recall",
-                serde_json::json!({ "query": "test" }),
-            )
+            .tools_call("memory_recall", serde_json::json!({ "query": "test" }))
             .await
             .expect("Ok with operation error");
         let body = aggregator_test_body(&result);
@@ -1103,10 +1157,7 @@ mod tests {
         let (_h, url) = mock_hindsight(r#"{"error": "bad gateway"}"#, 502).await;
         let (_tmp, backend) = make_hindsight_backend(&url);
         let result = backend
-            .tools_call(
-                "memory_recall",
-                serde_json::json!({ "query": "test" }),
-            )
+            .tools_call("memory_recall", serde_json::json!({ "query": "test" }))
             .await
             .expect("Ok with operation error");
         let body = aggregator_test_body(&result);
