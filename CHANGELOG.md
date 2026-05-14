@@ -1,4 +1,12 @@
 # Changelog
+## [0.2.13] - 2026-05-13
+
+- Cron jobs can now use the Agent tool to spawn sub-agents for parallel research and multi-step orchestration. Budget caps via `max_budget_usd` continue to apply per invocation.
+- Send `/debug on`, `/debug off`, or `/debug status` in any agent's Telegram thread to toggle Claude debug logging without restarting the bot. When on, debug logs appear inside the sandbox at `/sandbox/.claude/logs/` and the setting persists in `agent.yaml`.
+- A Show Thinking button now appears in agent replies, letting you toggle Claude's reasoning trace on or off directly from the Telegram chat.
+- Every agent now ships a `/rightreflect` skill, letting the agent read its own past conversation-history JSONL files inside the sandbox to answer "why did you..." questions and debug wrong decisions.
+- Cron agents now receive an explicit delivery contract in their system prompt: their structured output is the Telegram delivery channel, there is no live user to clarify with, and they must not promise delivery faster than the idle window. The idle window was lowered from 3 minutes to 2 minutes.
+
 ## [0.2.12] - 2026-05-09
 
 - When a Hindsight Cloud account runs out of credits, agents now enter quota-exhausted mode: memory retains pause without tripping the circuit breaker, and the agent tells you to top up at hindsight.vectorize.io in its next reply. Quota clears automatically when credits are restored.
