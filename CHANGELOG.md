@@ -1,75 +1,11 @@
 # Changelog
 ## [0.2.14] - 2026-05-14
 
-
-### Bug Fixes
-
-- **right-memory**: Handle ErrorKind::Quota in retain_queue::drain
-- **right-memory**: Exclude QuotaExhausted from CircuitOpen enqueue path
-- **workspace**: Add debug: None to AgentConfig literal construction sites
-- Keep cron idle promise wording testable
-- **release-plz**: Add version requirement to internal path deps
-- **right-db**: Add chrono dev dependency for migration tests
-- **deps-audit**: Consolidate test-crypto helper, document let-discard intent
-- **deps-audit**: Install ring provider in missing test sites
-- **config**: Update whisper model call sites
-
-### Documentation
-
-- **right-memory**: Document QuotaExhausted stickiness in refresh_status
-- **rightcron**: Guide agents to write output-oriented cron prompts
-- **prompt**: Introduce /rightreflect skill and /debug command to agents
-
-### Features
-
-- **right-memory**: Sanitize content via injection_guard before Hindsight POST
-- **right-memory**: Classify HTTP 402 as ErrorKind::Quota
-- **right-memory**: Exempt ErrorKind::Quota from breaker ticks
-- **right-memory**: Add MemoryStatus::QuotaExhausted variant
-- **right-memory**: Set QuotaExhausted status and skip enqueue on 402
-- **right-memory**: Clear QuotaExhausted on any 2xx, preserve on refresh
-- **codegen**: Add CRON_INSTRUCTIONS template
-- **skills**: Add /rightreflect skill content for self-introspection
-- **codegen**: Bundle and install /rightreflect skill
-- **cron**: Lower idle threshold to 2 min and teach agent the rule
-- **right-db**: Scaffold new crate for SQLite plumbing
-- **bot**: Send_progress MCP tool
-
-### Miscellaneous
-
-- **stage-f**: Pin publish = false on new internal crates
-
-### Refactor
-
-- **right-memory**: Extract memory subsystem from right-agent
-- **right-memory**: Centralize sticky-status predicate and fix aggregator gap
-- **right-codegen**: Extract codegen subsystem from right-agent
-- **right-mcp**: Extract mcp subsystem from right-agent
-- **right-db**: Move SQL migration files from right-agent
-- **right-db**: Move migrations.rs from right-agent::memory
-- Enable unreachable_pub lint, privatize internals, drop zombie code
-- **memory**: Move prompt safety out of right-core
-- **platform**: Move platform store out of right-core
-- **workspace**: Move platform knobs out of right-core
-- **config**: Move agent config out of right-core
-- **runtime**: Move runtime state out of right-core
-- **stt**: Move stt helpers out of right-core
-- **ui**: Move ui and process helpers out of right-core
-- **openshell**: Move openshell stack out of right-core
-- **config**: Move global config out of right-core
-- **errors**: Localize remaining right-core errors
-
-### Testing
-
-- **right-db**: Add open + migration smoke tests
-- **right-db**: Cover open_connection invariants
-- **right-db**: Port 8 missed schema/trigger tests from pre-split memory module
-- **bot**: Cover localized error chain display
-
-### Build
-
-- **deps**: Drop aws-lc-rs, unify on ring crypto provider
-- **deps**: Prune unused per-crate dependencies
+- Agents can now send mid-turn progress messages to Telegram via the new `mcp__right__send_progress` tool — for example "fetching your data..." while the main response is still running. Rate-limited to one message per 30 seconds per foreground turn; cron, delivery, and reflection invocations do not have access to this tool.
+- OAuth token refresh now survives transient network failures: the scheduler retries with exponential backoff instead of permanently stopping after the first blip. When a token expires mid-tool-call, the MCP server now correctly reports needs-auth with a `/mcp auth` hint rather than falsely showing connected status. Slow in-flight refresh operations no longer block `/mcp auth` commands from being processed.
+- Agents sending a batch of attachments that Telegram rejects as a media group (for example, WebP images) now fall back to sending each file individually instead of failing.
+- The `/right-memory` and `/right-reflect` built-in skills were deployed to the host but not uploaded to agent sandboxes, so agents could not invoke them. Fixed: the deployer now uses the canonical skill name list as its source of truth.
+- Built-in Right skills are renamed from concatenated names (`rightcron`, `rightmcp`, `rightmemory`, `rightreflect`, `rightskills`) to hyphenated names (`right-cron`, `right-mcp`, `right-memory`, `right-reflect`, `right-skills`). Existing agent sandboxes are migrated automatically on bot startup.
 
 ## [0.2.13] - 2026-05-13
 
