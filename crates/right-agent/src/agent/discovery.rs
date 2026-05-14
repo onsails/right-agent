@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use crate::agent::error::AgentError;
 use crate::agent::types::{AgentConfig, AgentDef};
-use right_core::error::AgentError;
 
 /// Validate that an agent directory name contains only allowed characters.
 ///

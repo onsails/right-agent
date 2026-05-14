@@ -13,7 +13,7 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(300);
 /// ensuring sandbox has correct config before any `claude -p` invocations.
 pub(crate) async fn initial_sync(
     agent_dir: &Path,
-    sbox: &right_core::sandbox_exec::SandboxExec,
+    sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     tracing::info!(
         sandbox = sbox.sandbox_name(),
@@ -30,7 +30,7 @@ pub(crate) async fn initial_sync(
 /// Run the periodic sync loop (spawned as background task after initial_sync).
 pub(crate) async fn run_sync_task(
     agent_dir: PathBuf,
-    sbox: right_core::sandbox_exec::SandboxExec,
+    sbox: right_openshell::sandbox_exec::SandboxExec,
     shutdown: CancellationToken,
 ) {
     let mut tick = interval(SYNC_INTERVAL);
@@ -55,13 +55,13 @@ pub(crate) async fn run_sync_task(
 
 async fn sync_cycle(
     agent_dir: &Path,
-    sbox: &right_core::sandbox_exec::SandboxExec,
+    sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     // Build manifest of platform-managed files
-    let manifest = right_core::platform_store::build_manifest(agent_dir)?;
+    let manifest = right_platform_store::build_manifest(agent_dir)?;
 
     // Deploy to /platform/ with content-addressed names + symlinks
-    right_core::platform_store::deploy_manifest(sbox, &manifest).await?;
+    right_platform_store::deploy_manifest(sbox, &manifest).await?;
 
     // Verify .claude.json (separate flow — not content-addressed)
     verify_claude_json(agent_dir, sbox.sandbox_name()).await?;
@@ -92,7 +92,7 @@ pub(crate) async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> mie
         let sandbox_path = format!("/sandbox/{filename}");
         join_set.spawn(async move {
             let result =
-                right_core::openshell::download_file(&sandbox, &sandbox_path, &dl_path).await;
+                right_openshell::openshell::download_file(&sandbox, &sandbox_path, &dl_path).await;
             (filename, dl_path, result)
         });
     }
@@ -203,13 +203,14 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
 
     // Download .claude.json from sandbox
     if let Err(e) =
-        right_core::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded).await
+        right_openshell::openshell::download_file(sandbox, "/sandbox/.claude.json", &downloaded)
+            .await
     {
         tracing::warn!("sync: failed to download .claude.json (may not exist yet): {e:#}");
         // Upload host version as baseline
         let host_claude_json = agent_dir.join(".claude.json");
         if host_claude_json.exists() {
-            right_core::openshell::upload_file(sandbox, &host_claude_json, "/sandbox/")
+            right_openshell::openshell::upload_file(sandbox, &host_claude_json, "/sandbox/")
                 .await
                 .map_err(|e| miette::miette!("sync: upload .claude.json baseline: {e:#}"))?;
         }
@@ -265,7 +266,7 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
         let fixed_path = tmp_dir.path().join(".claude.json");
         std::fs::write(&fixed_path, &fixed)
             .map_err(|e| miette::miette!("failed to write fixed .claude.json: {e:#}"))?;
-        right_core::openshell::upload_file(sandbox, &fixed_path, "/sandbox/")
+        right_openshell::openshell::upload_file(sandbox, &fixed_path, "/sandbox/")
             .await
             .map_err(|e| miette::miette!("sync: re-upload fixed .claude.json: {e:#}"))?;
         tracing::info!("sync: fixed and re-uploaded .claude.json (right-agent keys were modified)");
@@ -279,7 +280,7 @@ async fn verify_claude_json(agent_dir: &Path, sandbox: &str) -> miette::Result<(
 /// Agents install CLI tools (gh extensions, etc.) to `$HOME/.local/bin` which maps
 /// to `/sandbox/.local/bin`. This is already writable, but not in PATH by default.
 async fn ensure_local_bin_in_path(
-    sbox: &right_core::sandbox_exec::SandboxExec,
+    sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
     let (bashrc, code) = sbox.exec(&["cat", "/sandbox/.bashrc"]).await?;
 

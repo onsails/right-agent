@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use right_agent::rebootstrap::{self, IDENTITY_FILES, RebootstrapPlan};
-use right_core::test_support::TestSandbox;
+use right_openshell::test_support::TestSandbox;
 
 /// Write a host-side agent dir with `agent.yaml` pointing at `sandbox_name`,
 /// the three identity files, and a stamped active session row in data.db.
@@ -37,7 +37,7 @@ async fn assert_absent_in_sandbox(sandbox: &TestSandbox, path: &str) {
 
 #[tokio::test]
 async fn execute_against_live_sandbox() {
-    let _slot = right_core::openshell::acquire_sandbox_slot();
+    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rebootstrap").await;
 
     // Seed sandbox-side identity files via in-sandbox shell. echo into
@@ -75,10 +75,7 @@ async fn execute_against_live_sandbox() {
 
     // Host: identity files removed
     for &f in IDENTITY_FILES {
-        assert!(
-            !agent_dir.join(f).exists(),
-            "host {f} should be removed"
-        );
+        assert!(!agent_dir.join(f).exists(), "host {f} should be removed");
     }
     // Host: BOOTSTRAP.md created
     let bootstrap = std::fs::read_to_string(agent_dir.join("BOOTSTRAP.md")).unwrap();

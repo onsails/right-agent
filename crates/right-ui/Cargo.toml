@@ -1,0 +1,10 @@
+[package]
+name = "right-ui"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+inquire = { workspace = true }
+miette = { workspace = true }
+owo-colors = { workspace = true }

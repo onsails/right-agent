@@ -59,14 +59,14 @@ pub const BG_CONTINUATION_SCHEMA_JSON: &str = r#"{"type":"object","properties":{
 /// Behavior-specific instructions come from the agent definition (`--agent`).
 pub fn generate_system_prompt(
     agent_name: &str,
-    sandbox_mode: &right_core::agent_types::SandboxMode,
+    sandbox_mode: &right_agent_config::SandboxMode,
     home_dir: &str,
 ) -> String {
     let sandbox_desc = match sandbox_mode {
-        right_core::agent_types::SandboxMode::Openshell => {
+        right_agent_config::SandboxMode::Openshell => {
             "OpenShell sandbox (k3s container with network and filesystem policies)"
         }
-        right_core::agent_types::SandboxMode::None => "no sandbox (direct host access)",
+        right_agent_config::SandboxMode::None => "no sandbox (direct host access)",
     };
 
     let mut prompt = format!(
@@ -103,10 +103,7 @@ your final response.
 "
     );
 
-    if matches!(
-        sandbox_mode,
-        right_core::agent_types::SandboxMode::Openshell
-    ) {
+    if matches!(sandbox_mode, right_agent_config::SandboxMode::Openshell) {
         prompt.push_str(&format!(
             "
 ## User SSH Access

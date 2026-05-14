@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use right_core::agent_types::AgentDef;
+use right_agent_config::AgentDef;
 
 /// Generate a per-agent `.claude.json` file with workspace trust and onboarding state.
 ///
@@ -114,7 +114,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use right_core::agent_types::{AgentConfig, AgentDef, RestartPolicy};
+    use right_agent_config::{AgentConfig, AgentDef, RestartPolicy};
 
     fn make_test_agent(dir: &std::path::Path, name: &str) -> AgentDef {
         AgentDef {

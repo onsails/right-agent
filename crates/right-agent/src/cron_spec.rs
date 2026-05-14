@@ -3,6 +3,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use right_platform_knobs::IDLE_THRESHOLD_MIN;
 use uuid::Uuid;
 
 /// Default budget cap per cron invocation (USD).
@@ -35,8 +36,6 @@ pub const IMMEDIATE_SENTINEL: &str = "@immediate";
 /// Sentinel prefix for `BackgroundContinuation` schedule encoding.
 /// Stored as `@bg:<fork_from-uuid>` in the `schedule` column.
 pub(crate) const BG_SENTINEL_PREFIX: &str = "@bg:";
-
-pub use right_core::time_constants::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
 
 /// Description string for the `cron_trigger` MCP tool. Built at compile time
 /// from `IDLE_THRESHOLD_MIN` so the number cannot drift from the runtime.

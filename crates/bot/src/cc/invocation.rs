@@ -193,7 +193,7 @@ impl ClaudeInvocation {
 /// Resolve MCP config path: sandbox path when SSH is configured, local path otherwise.
 pub(crate) fn mcp_config_path(ssh_config_path: Option<&Path>, agent_dir: &Path) -> String {
     if ssh_config_path.is_some() {
-        right_core::openshell::SANDBOX_MCP_JSON_PATH.to_string()
+        right_openshell::openshell::SANDBOX_MCP_JSON_PATH.to_string()
     } else {
         agent_dir.join("mcp.json").to_string_lossy().into_owned()
     }
@@ -216,7 +216,7 @@ pub(crate) fn build_claude_command(
     resolved_sandbox: Option<&str>,
 ) -> tokio::process::Command {
     if let Some(ssh_config) = ssh_config_path {
-        let ssh_host = right_core::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(resolved_sandbox.unwrap());
         let mut script = String::new();
         if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
@@ -421,7 +421,7 @@ mod tests {
             Some(Path::new("/tmp/ssh.config")),
             Path::new("/home/user/agents/foo"),
         );
-        assert_eq!(path, right_core::openshell::SANDBOX_MCP_JSON_PATH);
+        assert_eq!(path, right_openshell::openshell::SANDBOX_MCP_JSON_PATH);
     }
 
     #[test]
@@ -439,12 +439,27 @@ mod tests {
         inv.fork_session = true;
         let args = inv.into_args();
 
-        let resume_pos = args.iter().position(|a| a == "--resume").expect("--resume missing");
-        let fork_pos = args.iter().position(|a| a == "--fork-session").expect("--fork-session missing");
-        let session_pos = args.iter().position(|a| a == "--session-id").expect("--session-id missing");
+        let resume_pos = args
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("--resume missing");
+        let fork_pos = args
+            .iter()
+            .position(|a| a == "--fork-session")
+            .expect("--fork-session missing");
+        let session_pos = args
+            .iter()
+            .position(|a| a == "--session-id")
+            .expect("--session-id missing");
 
-        assert!(resume_pos < fork_pos, "--resume must precede --fork-session");
-        assert!(fork_pos < session_pos, "--fork-session must precede --session-id");
+        assert!(
+            resume_pos < fork_pos,
+            "--resume must precede --fork-session"
+        );
+        assert!(
+            fork_pos < session_pos,
+            "--fork-session must precede --session-id"
+        );
         assert_eq!(args[resume_pos + 1], "main-uuid");
         assert_eq!(args[session_pos + 1], "fork-uuid");
     }
@@ -466,9 +481,13 @@ mod tests {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         inv.debug_flag = Some(std::sync::Arc::clone(&flag));
         let args = inv.into_args();
-        assert!(args.contains(&"--debug".to_string()), "expected --debug:\n{args:?}");
         assert!(
-            args.iter().any(|a| a == "--debug-file=/sandbox/.claude/logs/abc-123.log"),
+            args.contains(&"--debug".to_string()),
+            "expected --debug:\n{args:?}"
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == "--debug-file=/sandbox/.claude/logs/abc-123.log"),
             "expected --debug-file=/sandbox/.claude/logs/abc-123.log:\n{args:?}"
         );
     }
@@ -501,7 +520,8 @@ mod tests {
         inv.debug_flag = Some(std::sync::Arc::clone(&flag));
         let args = inv.into_args();
         assert!(
-            args.iter().any(|a| a == "--debug-file=/sandbox/.claude/logs/resume-uuid.log"),
+            args.iter()
+                .any(|a| a == "--debug-file=/sandbox/.claude/logs/resume-uuid.log"),
             "with --resume (no fork), debug-file should use resume-uuid:\n{args:?}"
         );
     }
@@ -516,7 +536,8 @@ mod tests {
         inv.debug_flag = Some(std::sync::Arc::clone(&flag));
         let args = inv.into_args();
         assert!(
-            args.iter().any(|a| a == "--debug-file=/sandbox/.claude/logs/new-uuid.log"),
+            args.iter()
+                .any(|a| a == "--debug-file=/sandbox/.claude/logs/new-uuid.log"),
             "with --fork-session, debug-file should use new session id (CC writes JSONL by new id):\n{args:?}"
         );
     }
@@ -530,7 +551,10 @@ mod tests {
         // Flip after construction.
         flag.store(true, std::sync::atomic::Ordering::Release);
         let args = inv.into_args();
-        assert!(args.contains(&"--debug".to_string()), "build-time read must observe the flip");
+        assert!(
+            args.contains(&"--debug".to_string()),
+            "build-time read must observe the flip"
+        );
     }
 
     #[test]

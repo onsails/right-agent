@@ -112,7 +112,7 @@ pub async fn write_and_apply_sandbox_policy(
     content: &str,
 ) -> miette::Result<()> {
     write_regenerated(path, content)?;
-    right_core::openshell::apply_policy(sandbox, path).await
+    right_openshell::openshell::apply_policy(sandbox, path).await
 }
 
 /// Per-agent codegen outputs. Source of truth for guard tests.
@@ -200,7 +200,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    use right_core::agent_types::{AgentConfig, AgentDef};
+    use right_agent_config::{AgentConfig, AgentDef};
     use std::path::PathBuf;
 
     fn minimal_agent_fixture(home: &Path, name: &str) -> AgentDef {

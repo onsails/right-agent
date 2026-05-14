@@ -2892,12 +2892,17 @@ dependencies = [
  "predicates",
  "reqwest 0.13.3",
  "right-agent",
+ "right-agent-config",
  "right-bot",
  "right-codegen",
- "right-core",
+ "right-config",
  "right-db",
  "right-mcp",
  "right-memory",
+ "right-openshell",
+ "right-runtime-state",
+ "right-stt",
+ "right-ui",
  "rmcp",
  "rusqlite",
  "schemars 1.2.1",
@@ -2947,11 +2952,17 @@ dependencies = [
  "prost-types",
  "rand 0.10.1",
  "reqwest 0.13.3",
+ "right-agent-config",
  "right-codegen",
- "right-core",
+ "right-config",
  "right-db",
  "right-mcp",
  "right-memory",
+ "right-openshell",
+ "right-platform-knobs",
+ "right-runtime-state",
+ "right-stt",
+ "right-ui",
  "rmcp",
  "rusqlite",
  "rusqlite_migration",
@@ -2977,6 +2988,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "right-agent-config"
+version = "0.2.13"
+dependencies = [
+ "miette",
+ "serde",
+ "serde-saphyr",
+]
+
+[[package]]
 name = "right-bot"
 version = "0.2.13"
 dependencies = [
@@ -2994,11 +3014,20 @@ dependencies = [
  "rand 0.10.1",
  "reqwest 0.13.3",
  "right-agent",
+ "right-agent-config",
  "right-codegen",
- "right-core",
+ "right-config",
  "right-db",
  "right-mcp",
  "right-memory",
+ "right-openshell",
+ "right-platform-knobs",
+ "right-platform-store",
+ "right-process",
+ "right-prompt-safety",
+ "right-runtime-state",
+ "right-stt",
+ "right-ui",
  "rusqlite",
  "serde",
  "serde-saphyr",
@@ -3028,9 +3057,13 @@ dependencies = [
  "miette",
  "minijinja",
  "rand 0.10.1",
- "right-core",
+ "right-agent-config",
+ "right-config",
  "right-db",
  "right-mcp",
+ "right-openshell",
+ "right-platform-knobs",
+ "right-runtime-state",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3043,41 +3076,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "right-core"
+name = "right-config"
 version = "0.2.13"
 dependencies = [
- "base64",
- "chrono",
  "dirs",
- "fs4",
- "futures",
- "http",
- "hyper-util",
- "inquire",
- "ironclaw_safety",
  "miette",
- "nix",
- "owo-colors",
- "prost",
- "prost-types",
- "rand 0.10.1",
- "reqwest 0.13.3",
- "right-core",
  "serde",
  "serde-saphyr",
  "serde_json",
- "sha2",
  "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
  "tracing",
- "url",
- "walkdir",
- "which",
 ]
 
 [[package]]
@@ -3106,7 +3114,6 @@ dependencies = [
  "miette",
  "rand 0.10.1",
  "reqwest 0.13.3",
- "right-core",
  "right-db",
  "rmcp",
  "rusqlite",
@@ -3131,8 +3138,8 @@ dependencies = [
  "chrono",
  "fastrand",
  "reqwest 0.13.3",
- "right-core",
  "right-db",
+ "right-prompt-safety",
  "rusqlite",
  "rusqlite_migration",
  "serde",
@@ -3141,6 +3148,101 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "right-openshell"
+version = "0.2.13"
+dependencies = [
+ "dirs",
+ "fs4",
+ "futures",
+ "http",
+ "hyper-util",
+ "miette",
+ "nix",
+ "prost",
+ "prost-types",
+ "right-process",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "walkdir",
+ "which",
+]
+
+[[package]]
+name = "right-platform-knobs"
+version = "0.2.13"
+
+[[package]]
+name = "right-platform-store"
+version = "0.2.13"
+dependencies = [
+ "futures",
+ "miette",
+ "right-openshell",
+ "sha2",
+ "tempfile",
+ "tracing",
+ "walkdir",
+]
+
+[[package]]
+name = "right-process"
+version = "0.2.13"
+dependencies = [
+ "nix",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "right-prompt-safety"
+version = "0.2.13"
+dependencies = [
+ "ironclaw_safety",
+]
+
+[[package]]
+name = "right-runtime-state"
+version = "0.2.13"
+dependencies = [
+ "base64",
+ "miette",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "right-stt"
+version = "0.2.13"
+dependencies = [
+ "futures",
+ "reqwest 0.13.3",
+ "right-agent-config",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "which",
+]
+
+[[package]]
+name = "right-ui"
+version = "0.2.13"
+dependencies = [
+ "inquire",
+ "miette",
+ "owo-colors",
 ]
 
 [[package]]

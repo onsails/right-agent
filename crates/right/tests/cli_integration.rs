@@ -490,7 +490,11 @@ fn agent_init_recap_suggests_right_up() {
 
     // Create minimal home structure.
     std::fs::create_dir_all(dir.path().join("agents")).unwrap();
-    std::fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
+    std::fs::write(
+        dir.path().join("config.yaml"),
+        minimal_config_yaml(dir.path()),
+    )
+    .unwrap();
 
     right()
         .args([
@@ -517,7 +521,11 @@ fn test_agent_init_force_recreates_agent() {
 
     // Create minimal home structure.
     fs::create_dir_all(dir.path().join("agents")).unwrap();
-    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
+    fs::write(
+        dir.path().join("config.yaml"),
+        minimal_config_yaml(dir.path()),
+    )
+    .unwrap();
 
     // Create agent.
     right()
@@ -588,7 +596,11 @@ fn test_agent_init_force_recreate_preserves_config() {
 
     // Create minimal home structure.
     fs::create_dir_all(dir.path().join("agents")).unwrap();
-    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
+    fs::write(
+        dir.path().join("config.yaml"),
+        minimal_config_yaml(dir.path()),
+    )
+    .unwrap();
 
     // Create agent with specific config.
     right()
@@ -635,7 +647,11 @@ fn test_agent_init_force_recreate_on_nonexistent_agent() {
 
     // Create minimal home structure.
     fs::create_dir_all(dir.path().join("agents")).unwrap();
-    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
+    fs::write(
+        dir.path().join("config.yaml"),
+        minimal_config_yaml(dir.path()),
+    )
+    .unwrap();
 
     // --force-recreate on non-existent agent should just create it.
     right()
@@ -733,32 +749,34 @@ fn test_agent_list() {
 /// Creates an ephemeral sandbox via `ensure_sandbox`, applies the policy, then destroys it.
 #[tokio::test]
 async fn test_policy_validates_against_openshell() {
-    let _slot = right_core::openshell::acquire_sandbox_slot();
-    let mtls_dir = match right_core::openshell::preflight_check() {
-        right_core::openshell::OpenShellStatus::Ready(dir) => dir,
+    let _slot = right_openshell::openshell::acquire_sandbox_slot();
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
         other => panic!("OpenShell not ready: {other:?}"),
     };
 
     let sandbox_name = "right-test-policy-validate";
 
-    right_core::test_cleanup::pkill_test_orphans(sandbox_name);
-    right_core::test_cleanup::register_test_sandbox(sandbox_name);
+    right_openshell::test_cleanup::pkill_test_orphans(sandbox_name);
+    right_openshell::test_cleanup::register_test_sandbox(sandbox_name);
 
     // Clean up leftover from a previous failed run.
-    let mut client = right_core::openshell::connect_grpc(&mtls_dir).await.unwrap();
-    if right_core::openshell::sandbox_exists(&mut client, sandbox_name)
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .unwrap();
+    if right_openshell::openshell::sandbox_exists(&mut client, sandbox_name)
         .await
         .unwrap()
     {
-        right_core::openshell::delete_sandbox(sandbox_name).await;
-        right_core::openshell::wait_for_deleted(&mut client, sandbox_name, 60, 2)
+        right_openshell::openshell::delete_sandbox(sandbox_name).await;
+        right_openshell::openshell::wait_for_deleted(&mut client, sandbox_name, 60, 2)
             .await
             .expect("cleanup of leftover sandbox failed");
     }
 
     // Generate the policy under test.
     let policy_yaml = right_codegen::policy::generate_policy(
-        right_agent::runtime::MCP_HTTP_PORT,
+        right_runtime_state::MCP_HTTP_PORT,
         &right_agent::agent::types::NetworkPolicy::Permissive,
         None,
     );
@@ -767,14 +785,14 @@ async fn test_policy_validates_against_openshell() {
     fs::write(&policy_path, &policy_yaml).unwrap();
 
     // Create sandbox with the generated policy — this validates the YAML is accepted.
-    let mut child = right_core::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
+    let mut child = right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
         .expect("failed to spawn sandbox");
-    let ready = right_core::openshell::wait_for_ready(&mut client, sandbox_name, 120, 2).await;
+    let ready = right_openshell::openshell::wait_for_ready(&mut client, sandbox_name, 120, 2).await;
     let _ = child.kill().await;
 
     // Cleanup regardless of outcome.
-    right_core::openshell::delete_sandbox(sandbox_name).await;
-    right_core::test_cleanup::unregister_test_sandbox(sandbox_name);
+    right_openshell::openshell::delete_sandbox(sandbox_name).await;
+    right_openshell::test_cleanup::unregister_test_sandbox(sandbox_name);
 
     ready.expect("sandbox did not become READY — generated policy may be invalid");
 }
@@ -848,7 +866,11 @@ fn test_agent_backup_and_restore_no_sandbox() {
 
     // Restore to new agent name via agent init --from-backup.
     // Needs agents dir and config.yaml to exist (home structure).
-    fs::write(home.path().join("config.yaml"), minimal_config_yaml(home.path())).unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
 
     right()
         .args([
@@ -1070,7 +1092,11 @@ fn test_agent_init_bare_force_rejected() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
     fs::create_dir_all(dir.path().join("agents")).unwrap();
-    fs::write(dir.path().join("config.yaml"), minimal_config_yaml(dir.path())).unwrap();
+    fs::write(
+        dir.path().join("config.yaml"),
+        minimal_config_yaml(dir.path()),
+    )
+    .unwrap();
 
     right()
         .args([

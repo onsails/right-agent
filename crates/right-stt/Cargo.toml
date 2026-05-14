@@ -1,0 +1,16 @@
+[package]
+name = "right-stt"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+right-agent-config = { path = "../right-agent-config", version = "*" }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+which = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

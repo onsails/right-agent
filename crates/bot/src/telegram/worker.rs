@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
-pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::cc::worker_reply::should_accept_bootstrap;
+pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::reflection::FailureKind;
 
 use super::session::{
@@ -371,7 +371,11 @@ fn recall_tags(chat_id: i64) -> Vec<String> {
 /// through `--resume <main>` does not auto-retain (cron sessions skip memory),
 /// so this is the only chance to record the user turn before recall on the
 /// next foreground message would otherwise return a context hole.
-fn build_retain_content(user_text: &str, assistant_text: Option<&str>, now_rfc3339: &str) -> String {
+fn build_retain_content(
+    user_text: &str,
+    assistant_text: Option<&str>,
+    now_rfc3339: &str,
+) -> String {
     let mut items = vec![serde_json::json!({
         "role": "user",
         "content": user_text,
@@ -497,7 +501,11 @@ fn enqueue_background_job(
         );
         format!("main_session_id '{main_session_id}' is not a UUID: {e:#}")
     })?;
-    let target_thread = if thread_id == 0 { None } else { Some(thread_id) };
+    let target_thread = if thread_id == 0 {
+        None
+    } else {
+        Some(thread_id)
+    };
     right_agent::cron_spec::insert_background_continuation(
         conn,
         &job_name,
@@ -800,11 +808,7 @@ pub fn spawn_worker(
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            tracing::error!(
-                                ?key,
-                                "reply_to attachment download failed: {:#}",
-                                e
-                            );
+                            tracing::error!(?key, "reply_to attachment download failed: {:#}", e);
                             let _ = send_tg(
                                 &ctx.bot,
                                 tg_chat_id,
@@ -889,18 +893,20 @@ pub fn spawn_worker(
             let first_text = batch.first().and_then(|m| m.text.as_deref());
             let (reply_result, session_uuid, is_first_call) =
                 match invoke_cc(&input, first_text, chat_id, eff_thread_id, is_group, &ctx).await {
-                    Ok(CcReply { output, session_uuid, is_first_call }) => {
-                        (Ok(output), session_uuid, is_first_call)
-                    }
+                    Ok(CcReply {
+                        output,
+                        session_uuid,
+                        is_first_call,
+                    }) => (Ok(output), session_uuid, is_first_call),
                     Err(failure) => {
                         let uuid = match &failure {
                             InvokeCcFailure::Reflectable { session_uuid, .. } => {
                                 session_uuid.clone()
                             }
                             InvokeCcFailure::NonReflectable { .. } => String::new(),
-                            InvokeCcFailure::Backgrounded { main_session_id, .. } => {
-                                main_session_id.clone()
-                            }
+                            InvokeCcFailure::Backgrounded {
+                                main_session_id, ..
+                            } => main_session_id.clone(),
                         };
                         // is_first_call=false: failures don't produce a normal
                         // reply, so the bootstrap welcome photo should not fire.
@@ -1842,8 +1848,9 @@ async fn invoke_cc(
     let mut cmd = if let Some(ref ssh_config) = ctx.ssh_config_path {
         // OpenShell sandbox: composite system prompt assembled IN the sandbox
         // from fresh files — single SSH command, no extra roundtrips.
-        let ssh_host =
-            right_core::openshell::ssh_host_for_sandbox(ctx.resolved_sandbox.as_deref().unwrap());
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(
+            ctx.resolved_sandbox.as_deref().unwrap(),
+        );
         let mut assembly_script = crate::cc::prompt::build_prompt_assembly_script(
             &base_prompt,
             prompt_mode,
@@ -1919,7 +1926,7 @@ async fn invoke_cc(
         "invoking claude -p"
     );
 
-    let mut child = right_core::process_group::ProcessGroupChild::spawn(cmd)
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| format_error_reply(-1, &format!("spawn failed: {:#}", e)))?;
 
     // Write input to stdin, then drop to signal EOF.
@@ -2279,8 +2286,7 @@ async fn invoke_cc(
     // `consume_bg_request`, so dropping the flag here cannot leak.
     let bg_click_after_success =
         was_bg_request && !timed_out && exit_code == 0 && !stdout_str.is_empty();
-    let was_bg_request =
-        should_honor_bg_request(was_bg_request, timed_out, exit_code, &stdout_str);
+    let was_bg_request = should_honor_bg_request(was_bg_request, timed_out, exit_code, &stdout_str);
     if bg_click_after_success {
         // bg click landed on a normally-finished turn — drop the flag so the
         // real reply still gets delivered.
@@ -3456,7 +3462,12 @@ mod auto_retain_tests {
 
         let user_text = "what is 2+2?".to_string();
         let main_session_id = "main-session-uuid-bg".to_string();
-        let tags = retain_tags(/*chat_id*/ 4242, /*sender_id*/ Some(7), /*thread_id*/ 0, /*is_group*/ false);
+        let tags = retain_tags(
+            /*chat_id*/ 4242,
+            /*sender_id*/ Some(7),
+            /*thread_id*/ 0,
+            /*is_group*/ false,
+        );
 
         // Mirrors the call inside the Backgrounded arm.
         spawn_auto_retain(
@@ -3472,7 +3483,10 @@ mod auto_retain_tests {
             .await
             .expect("mock server timed out — retain was not invoked")
             .expect("mock task panicked");
-        assert!(first_line.starts_with("POST"), "expected POST, got: {first_line}");
+        assert!(
+            first_line.starts_with("POST"),
+            "expected POST, got: {first_line}"
+        );
 
         let parsed: serde_json::Value = serde_json::from_str(&body)
             .unwrap_or_else(|e| panic!("body is not JSON: {e} body={body}"));
@@ -3484,10 +3498,16 @@ mod auto_retain_tests {
         assert_eq!(item["tags"][0], "chat:4242");
 
         // Inner content array: user-only.
-        let content_str = item["content"].as_str().expect("content is JSON-encoded string");
+        let content_str = item["content"]
+            .as_str()
+            .expect("content is JSON-encoded string");
         let inner: serde_json::Value = serde_json::from_str(content_str).unwrap();
         let arr = inner.as_array().unwrap();
-        assert_eq!(arr.len(), 1, "bg retain must contain exactly one entry (user)");
+        assert_eq!(
+            arr.len(),
+            1,
+            "bg retain must contain exactly one entry (user)"
+        );
         assert_eq!(arr[0]["role"], "user");
         assert_eq!(arr[0]["content"], user_text);
     }

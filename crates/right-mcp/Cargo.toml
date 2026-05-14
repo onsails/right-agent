@@ -32,7 +32,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-right-core = { path = "../right-core", version = "*", features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { version = "1.52", features = ["test-util"] }
 wiremock = "0.6"

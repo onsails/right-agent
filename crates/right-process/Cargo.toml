@@ -1,0 +1,13 @@
+[package]
+name = "right-process"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+nix = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -27,10 +27,10 @@ use std::path::Path;
 
 use right_agent::agent::types::NetworkPolicy;
 use right_codegen::policy::generate_policy;
-use right_core::openshell::{
-    self, DEFAULT_EXEC_TIMEOUT_SECS, acquire_sandbox_slot, OpenShellStatus,
+use right_openshell::openshell::{
+    self, DEFAULT_EXEC_TIMEOUT_SECS, OpenShellStatus, acquire_sandbox_slot,
 };
-use right_core::test_cleanup;
+use right_openshell::test_cleanup;
 
 /// Spawn a sandbox using `policy_yaml` as its startup policy and return its
 /// name once READY. Registers panic-hook cleanup so `panic = "abort"` still

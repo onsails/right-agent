@@ -5,8 +5,8 @@ use miette::{IntoDiagnostic as _, WrapErr as _};
 use minijinja::Environment;
 use minijinja::value::Value as JinjaValue;
 
-use right_core::agent_types::MemoryProvider;
-use right_core::time_constants::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
+use right_agent_config::MemoryProvider;
+use right_platform_knobs::{IDLE_THRESHOLD_MIN, IDLE_THRESHOLD_SECS};
 
 use crate::contract::{write_agent_owned, write_regenerated_bytes};
 
@@ -56,7 +56,7 @@ pub fn install_builtin_skills(
 ///
 /// Markdown files are rendered through minijinja so platform timings (e.g.
 /// `idle_threshold_min`) interpolate from the single source of truth in
-/// `cron_spec`. Files without `{{ }}` syntax pass through unchanged.
+/// `right-platform-knobs`. Files without `{{ }}` syntax pass through unchanged.
 fn install_embedded_dir(dir: &Dir, target: &Path) -> miette::Result<()> {
     let env = skill_template_env();
     let ctx = skill_template_context();

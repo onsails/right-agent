@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use tempfile::tempdir;
 
-use right_core::agent_types::{AgentConfig, AgentDef, RestartPolicy, SandboxConfig, SandboxMode};
+use right_agent_config::{AgentConfig, AgentDef, RestartPolicy, SandboxConfig, SandboxMode};
 
 use crate::{ProcessComposeConfig, generate_process_compose};
 

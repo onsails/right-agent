@@ -1,5 +1,5 @@
 use super::*;
-use crate::runtime::PC_PORT;
+use right_runtime_state::PC_PORT;
 
 /// Regression: process-compose v1.94+ reads the API token from header
 /// `X-PC-Token-Key`. Sending `Authorization: Bearer …` (the previous
@@ -75,7 +75,7 @@ fn from_home_returns_none_when_state_absent() {
 
 #[test]
 fn from_home_reads_port_from_state() {
-    use crate::runtime::state::{AgentState, RuntimeState, write_state};
+    use right_runtime_state::{AgentState, RuntimeState, write_state};
 
     let dir = tempfile::tempdir().unwrap();
     let run_dir = dir.path().join("run");

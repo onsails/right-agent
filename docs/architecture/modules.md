@@ -6,23 +6,58 @@
 
 ## Module Map
 
-### right-core (stable platform foundation)
+### right-platform-knobs
 
-- `config/` - `GlobalConfig` (tunnel) and `RIGHT_HOME` resolution.
-- `agent_types.rs` - shared agent configuration and discovery DTOs (`AgentConfig`, `AgentDef`, sandbox/memory/STT config types).
-- `runtime_state.rs` - process-compose ports, runtime state JSON, and API-token generation.
-- `ui/` - brand-conformant CLI atoms, blocks, recaps, prompts, and theme detection.
+- `IDLE_THRESHOLD_SECS` / `IDLE_THRESHOLD_MIN` - UX-politeness gate for cron delivery and matching agent-facing prose.
+
+### right-prompt-safety
+
+- `sanitize_memory_content` - write-side Hindsight memory sanitization.
+- `wrap_memory_for_prompt`, `memory_wrap_prefix`, `memory_wrap_suffix`, `escape_memory_close_delimiter` - read-side untrusted-content wrapping for memory prompt assembly.
+
+### right-runtime-state
+
+- `PC_PORT` and `MCP_HTTP_PORT` - process-compose and MCP HTTP default ports.
+- `RuntimeState` / `AgentState` - persisted `<home>/run/state.json` schema.
+- `read_state`, `write_state`, `generate_pc_api_token` - runtime-state IO and process-compose API token generation.
+
+### right-config
+
+- `src/lib.rs` - `GlobalConfig`, `TunnelConfig`, `AggregatorConfig`, `RIGHT_HOME` resolution, global config YAML IO, and agents/backups path helpers.
+
+### right-ui
+
+- `atoms.rs`, `line.rs`, `header.rs`, `splash.rs`, `writer.rs` - brand-conformant CLI atoms and blocks.
+- `recap.rs` - command recap rendering.
+- `prompts.rs` - interactive prompt helpers.
+- `theme.rs` - terminal theme detection.
+
+### right-process
+
+- `lib.rs` - cancel-safe process-group child handling via `ProcessGroupChild`.
+
+### right-openshell
+
 - `openshell.rs` and `openshell_proto` - OpenShell gRPC mTLS client, generated proto types, sandbox lifecycle wrappers, SSH helpers, and policy helpers.
-- `platform_store.rs` - content-addressed platform store deployment to `/sandbox/.platform/`.
 - `sandbox_exec.rs` - clonable gRPC sandbox execution handle.
-- `stt.rs` - `WhisperModel`, whisper model cache paths, ffmpeg detection, and model download.
 - `test_cleanup.rs` and `test_support.rs` - live-sandbox test cleanup and `TestSandbox`.
-- Single-file modules: `error.rs`, `process_group.rs`, `time_constants.rs`.
+
+### right-platform-store
+
+- `lib.rs` - content-addressed platform-managed sandbox file deployment to `/sandbox/.platform/`.
+
+### right-agent-config
+
+- `src/lib.rs` - shared agent configuration and discovery DTOs (`AgentConfig`, `AgentDef`, sandbox/memory/STT config types, `WhisperModel`).
+
+### right-stt
+
+- `src/lib.rs` - host-side whisper model cache paths, ffmpeg detection, model download, and cache warming.
 
 ### right-agent (core)
 
-- `agent/` — agent discovery (presence detected by `agent.yaml`) and compatibility re-exports for shared agent types.
-- `runtime/` — process-compose REST client, dependency checks, and compatibility re-exports for runtime state primitives.
+- `agent/` — agent discovery (presence detected by `agent.yaml`) and compatibility re-exports for agent config types from `right-agent-config`.
+- `runtime/` — process-compose REST client and dependency checks. Runtime-state primitives live in `right-runtime-state`.
 - Single-file modules: `doctor.rs`, `init.rs`, `rebootstrap.rs`, `cron_spec.rs`, `tunnel/`, `usage/`.
 
 ### right-codegen
@@ -62,7 +97,7 @@
 - `cc/` — generic Claude Code subprocess plumbing: invocation builder, prompt assembly, stream parser, structured-reply parser, outbound DTOs, and shared markdown helpers.
 - `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, and attachment delivery (with STT integration).
 - `login.rs` — token-based Claude login flow (setup-token, env var injection).
-- `sync.rs` — background platform-store sync to `/sandbox/.platform/`.
+- `sync.rs` — background `right-platform-store` sync to `/sandbox/.platform/`.
 - `cron.rs`, `cron_delivery.rs` — cron engine and delivery loop (resumes main session so cron results land in agent context).
 - `reflection.rs` — `reflect_on_failure` primitive (see Reflection Primitive).
 - `stt/` — host-side voice/video_note transcription (ffmpeg + whisper-rs + Russian markers).
