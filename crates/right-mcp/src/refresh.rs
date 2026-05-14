@@ -109,9 +109,6 @@ pub fn load_oauth_entries_from_db(
 pub fn refresh_due_in(entry: &OAuthServerState) -> Duration {
     let now = chrono::Utc::now();
     let remaining = (entry.expires_at - now).to_std().unwrap_or(Duration::ZERO);
-    if remaining.is_zero() {
-        return Duration::ZERO;
-    }
     let margin = std::cmp::min(REFRESH_MARGIN_MAX, remaining / 2);
     remaining.saturating_sub(margin)
 }
@@ -200,6 +197,11 @@ pub async fn run_refresh_scheduler(
                         entries.insert(server_name.clone(), entry_state);
                         token_handles.insert(server_name.clone(), token);
                         backend_handles.insert(server_name.clone(), backend);
+                        // Reset retry counter: a fresh NewEntry (e.g. after
+                        // /mcp auth) supersedes any in-flight retry cycle. Without
+                        // this, a stale counter from prior transient failures
+                        // would push the next backoff well past the 60s first step.
+                        retry_attempts.remove(&server_name);
                     }
                     RefreshMessage::RemoveServer { server_name } => {
                         timers.remove(&server_name);
