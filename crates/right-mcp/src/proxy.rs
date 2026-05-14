@@ -438,6 +438,12 @@ impl ProxyBackend {
 mod tests {
     use super::*;
 
+    /// Install ring as the rustls process-level crypto provider. Idempotent —
+    /// safe to call from multiple tests in the same binary.
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn auth_method_default_is_bearer() {
         assert_eq!(AuthMethod::default(), AuthMethod::Bearer);
@@ -539,6 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_auth_bearer_reads_from_shared_state() {
+        setup_crypto();
         let token = Arc::new(RwLock::new(Some("initial-token".to_string())));
         let client =
             DynamicAuthClient::new(reqwest::Client::new(), token.clone(), AuthMethod::Bearer);
@@ -558,6 +565,7 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_auth_header_injects_custom_header() {
+        setup_crypto();
         let token = Arc::new(RwLock::new(Some("my-api-key".to_string())));
         let client = DynamicAuthClient::new(
             reqwest::Client::new(),
@@ -574,6 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_auth_header_no_token_no_header() {
+        setup_crypto();
         let token = Arc::new(RwLock::new(None));
         let client = DynamicAuthClient::new(
             reqwest::Client::new(),
@@ -588,6 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_auth_query_string_no_injection() {
+        setup_crypto();
         let token = Arc::new(RwLock::new(Some("key-in-url".to_string())));
         let client = DynamicAuthClient::new(reqwest::Client::new(), token, AuthMethod::QueryString);
 

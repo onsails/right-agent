@@ -39,7 +39,8 @@ dirs = "6.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "form"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio = { version = "1.52", features = ["full"] }
 which = "8.0"
 rusqlite = { version = "0.39", features = ["bundled"] }

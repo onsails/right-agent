@@ -171,6 +171,12 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Install ring as the rustls process-level crypto provider. Idempotent —
+    /// safe to call from multiple tests in the same binary.
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn model_cache_path_layout() {
         let home = Path::new("/tmp/.right");
@@ -216,6 +222,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_url_to_path_bad_status_returns_bad_status_error() {
+        setup_crypto();
         let tmp = TempDir::new().unwrap();
         let dest = tmp.path().join("out.bin");
         // httpbin.org/status/404 reliably returns 404; if the dev machine is

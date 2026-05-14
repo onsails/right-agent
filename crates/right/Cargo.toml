@@ -33,6 +33,7 @@ serde-saphyr = { workspace = true }
 which = { workspace = true }
 rmcp = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
 schemars = { workspace = true }
 rusqlite = { workspace = true }
 axum = { workspace = true }

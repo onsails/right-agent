@@ -550,6 +550,12 @@ pub async fn exchange_token(
 mod tests {
     use super::*;
 
+    /// Install ring as the rustls process-level crypto provider. Idempotent —
+    /// safe to call from multiple tests in the same binary.
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     #[test]
     fn generate_pkce_verifier_is_43_chars() {
         let (verifier, _) = generate_pkce();
@@ -683,6 +689,7 @@ mod tests {
     // Task 1: discover_as integration tests using mock HTTP server
     #[tokio::test]
     async fn discover_as_rfc9728_success_returns_as_metadata() {
+        setup_crypto();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -742,6 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_as_5xx_skips_and_continues() {
+        setup_crypto();
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -778,6 +786,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_as_all_non_2xx_returns_discovery_failed() {
+        setup_crypto();
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -801,6 +810,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_as_all_404_returns_discovery_failed() {
+        setup_crypto();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -889,6 +899,7 @@ mod tests {
     // Task 2: register_client tests
     #[tokio::test]
     async fn register_client_posts_correct_body_and_returns_client_id() {
+        setup_crypto();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -928,6 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_client_non_2xx_returns_dcr_failed() {
+        setup_crypto();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1005,6 +1017,7 @@ mod tests {
     // Task 2: exchange_token tests
     #[tokio::test]
     async fn exchange_token_posts_form_and_returns_token_response() {
+        setup_crypto();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1056,6 +1069,7 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_token_non_2xx_returns_token_exchange_failed() {
+        setup_crypto();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -1240,6 +1254,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_as_uses_www_authenticate_resource_metadata() {
+        setup_crypto();
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 

@@ -3383,6 +3383,12 @@ mod auto_retain_tests {
     use right_memory::ResilientHindsight;
     use right_memory::hindsight::HindsightClient;
 
+    /// Install ring as the rustls process-level crypto provider. Idempotent —
+    /// safe to call from multiple tests in the same binary.
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     /// Spawn a one-shot mock Hindsight server that captures the first POST's
     /// request line and body, then returns a 200. Mirrors the helper in
     /// right-agent's hindsight tests but is private to this module so the bot
@@ -3457,6 +3463,7 @@ mod auto_retain_tests {
     ///   - tag chat:<chat_id> is present.
     #[tokio::test]
     async fn backgrounded_arm_retains_user_message_only() {
+        setup_crypto();
         let (handle, url) = mock_one_shot().await;
         let hs = make_resilient(&url);
 

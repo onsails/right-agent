@@ -303,6 +303,12 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Install ring as the rustls process-level crypto provider. Idempotent —
+    /// safe to call from multiple tests in the same binary.
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     fn make_entry(token_endpoint: String) -> OAuthServerState {
         OAuthServerState {
             refresh_token: Some("old-refresh-token".into()),
@@ -318,6 +324,7 @@ mod tests {
     /// without waiting the full backoff duration.
     #[tokio::test]
     async fn cancellation_aborts_refresh_during_backoff() {
+        setup_crypto();
         // MockServer that always returns 401 — forces retry with backoff.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -366,6 +373,7 @@ mod tests {
     /// `NeedsAuth` if it was already `Connected` — defense-in-depth guard.
     #[tokio::test]
     async fn exhausted_retries_do_not_overwrite_connected_status() {
+        setup_crypto();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
@@ -446,6 +454,7 @@ mod tests {
     /// to the refresh scheduler.
     #[tokio::test]
     async fn successful_refresh_writes_token_and_sends_new_entry() {
+        setup_crypto();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

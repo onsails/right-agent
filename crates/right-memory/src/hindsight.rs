@@ -332,6 +332,12 @@ impl HindsightClient {
 mod tests {
     use super::*;
 
+    /// Install ring as the rustls process-level crypto provider. Idempotent —
+    /// safe to call from multiple tests in the same binary.
+    fn setup_crypto() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
     async fn mock_hindsight_server(
         response_body: &str,
         response_status: u16,
@@ -370,6 +376,7 @@ mod tests {
     }
 
     fn test_client(base_url: &str) -> HindsightClient {
+        setup_crypto();
         HindsightClient::new("hs_testkey", "test-bank", "high", 8192, Some(base_url))
     }
 
@@ -721,6 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn retain_timeout_maps_to_timeout_variant() {
+        setup_crypto();
         // Mock server accepts the TCP connection and holds the stream open so
         // the client waits for a response body that never comes. The code's
         // per-request `.timeout(RETAIN_TIMEOUT)` fires and produces a timeout
@@ -756,6 +764,7 @@ mod tests {
 
     #[tokio::test]
     async fn retain_connect_failure_maps_to_connect_variant() {
+        setup_crypto();
         // Port 1 is unprivileged-closed on typical dev machines.
         let client = HindsightClient::new("hs_x", "b", "high", 1024, Some("http://127.0.0.1:1"));
         let err = client

@@ -434,6 +434,10 @@ fn handle_dispatch(result: miette::Result<()>) -> miette::Result<()> {
 
 #[tokio::main]
 async fn main() -> miette::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| miette::miette!("rustls ring crypto provider already installed"))?;
+
     miette::set_hook(Box::new(|_| {
         Box::new(miette::MietteHandlerOpts::new().build())
     }))?;
