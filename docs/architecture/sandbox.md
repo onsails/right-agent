@@ -16,6 +16,7 @@ Bot startup:
   ├─ generate_ssh_config (on every startup, host-side file)
   ├─ initial_sync (blocking — before teloxide starts)
   │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
+  │   ├─ Remove obsolete legacy built-in skill links from /sandbox/.claude/skills/
   │   └─ Download .claude.json, verify trust keys, fix if CC overwrote them
   └─ Background sync (every 5 min, re-deploys /sandbox/.platform/, GC stale entries)
 
@@ -36,8 +37,8 @@ Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platfor
 Platform store (/sandbox/.platform/ inside sandbox):
   ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>, ...
   ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`):
-  │     skills/rightskills.<hash>/, skills/rightcron.<hash>/, skills/rightmcp.<hash>/,
-  │     skills/rightmemory.<hash>/, skills/rightreflect.<hash>/
+  │     skills/right-skills.<hash>/, skills/right-cron.<hash>/, skills/right-mcp.<hash>/,
+  │     skills/right-memory.<hash>/, skills/right-reflect.<hash>/
   ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
   ├─ Read-only (chmod a-w after deploy)
   └─ GC removes stale entries after each sync cycle

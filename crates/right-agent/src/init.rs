@@ -284,8 +284,8 @@ pub fn init_right_home(
     println!("  agents/right/BOOTSTRAP.md");
     println!("  agents/right/TOOLS.md");
     println!("  agents/right/agent.yaml");
-    println!("  agents/right/.claude/skills/rightskills/SKILL.md  (skills.sh manager)");
-    println!("  agents/right/.claude/skills/rightcron/SKILL.md");
+    println!("  agents/right/.claude/skills/right-skills/SKILL.md  (skills.sh manager)");
+    println!("  agents/right/.claude/skills/right-cron/SKILL.md");
 
     if telegram_token.is_some() {
         println!("  Telegram bot token saved");
@@ -681,15 +681,15 @@ mod tests {
         );
         assert!(
             agents_dir
-                .join(".claude/skills/rightskills/SKILL.md")
+                .join(".claude/skills/right-skills/SKILL.md")
                 .exists(),
-            "rightskills skill should be installed"
+            "right-skills skill should be installed"
         );
         assert!(
             agents_dir
-                .join(".claude/skills/rightcron/SKILL.md")
+                .join(".claude/skills/right-cron/SKILL.md")
                 .exists(),
-            "rightcron skill should be installed"
+            "right-cron skill should be installed"
         );
     }
 

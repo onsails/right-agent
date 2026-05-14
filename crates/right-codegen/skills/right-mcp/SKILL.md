@@ -1,5 +1,5 @@
 ---
-name: rightmcp
+name: right-mcp
 description: >-
   Finds and adds MCP servers for this Right Agent agent. Searches for OAuth-capable
   endpoints first (Claude Code / Codex integration docs), falls back to API-key
@@ -11,7 +11,7 @@ version: 0.1.0
 
 @known-endpoints.yaml
 
-# /rightmcp -- Add MCP Server
+# /right-mcp -- Add MCP Server
 
 ## When to Activate
 

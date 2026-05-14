@@ -21,6 +21,10 @@ pub(crate) async fn initial_sync(
     );
     sync_cycle(agent_dir, sbox).await?;
 
+    // One-shot migration: clear legacy built-in skill paths from the sandbox.
+    // Kept out of `sync_cycle` so it does not re-exec every 5 minutes forever.
+    cleanup_obsolete_builtin_skill_paths(sbox).await?;
+
     // Ensure /sandbox/.local/bin is in PATH for agent-installed CLI tools.
     ensure_local_bin_in_path(sbox).await?;
 
@@ -69,6 +73,55 @@ async fn sync_cycle(
 
     tracing::debug!("sync: cycle complete");
     Ok(())
+}
+
+fn obsolete_builtin_skill_paths() -> Vec<String> {
+    right_codegen::BUILTIN_SKILL_LEGACY_NAMES
+        .iter()
+        .map(|legacy_name| format!("/sandbox/.claude/skills/{legacy_name}"))
+        .collect()
+}
+
+async fn cleanup_obsolete_builtin_skill_paths(
+    sbox: &right_openshell::sandbox_exec::SandboxExec,
+) -> miette::Result<()> {
+    let paths = obsolete_builtin_skill_paths();
+    let mut args = vec!["rm", "-rf"];
+    args.extend(paths.iter().map(String::as_str));
+
+    let (output, code) = sbox.exec(&args).await?;
+    if code != 0 {
+        return Err(obsolete_builtin_skill_cleanup_error(
+            sbox.sandbox_name(),
+            &paths,
+            &output,
+            code,
+        ));
+    }
+
+    tracing::debug!(
+        sandbox = %sbox.sandbox_name(),
+        count = paths.len(),
+        "sync: removed obsolete builtin skill paths"
+    );
+    Ok(())
+}
+
+fn obsolete_builtin_skill_cleanup_error(
+    sandbox_name: &str,
+    paths: &[String],
+    output: &str,
+    code: i32,
+) -> miette::Report {
+    let output = if output.trim().is_empty() {
+        "<empty>"
+    } else {
+        output.trim()
+    };
+    miette::miette!(
+        "sync: failed to remove obsolete builtin skill paths in sandbox {sandbox_name}: \
+         rm exited with {code}; paths={paths:?}; output={output}"
+    )
 }
 
 /// Files that CC creates/modifies inside the sandbox and should be synced back to host.
@@ -301,4 +354,76 @@ async fn ensure_local_bin_in_path(
     sbox.exec(&["mkdir", "-p", "/sandbox/.local/bin"]).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn obsolete_builtin_skill_paths_are_exact_legacy_sandbox_paths() {
+        let expected = [
+            "/sandbox/.claude/skills/rightskills",
+            "/sandbox/.claude/skills/rightcron",
+            "/sandbox/.claude/skills/rightmcp",
+            "/sandbox/.claude/skills/rightmemory",
+            "/sandbox/.claude/skills/rightreflect",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+        assert_eq!(obsolete_builtin_skill_paths(), expected);
+    }
+
+    #[test]
+    fn obsolete_builtin_skill_cleanup_error_includes_context() {
+        let paths = obsolete_builtin_skill_paths();
+        let error = obsolete_builtin_skill_cleanup_error("right-test-sync", &paths, "denied", 13);
+        let message = error.to_string();
+
+        assert!(message.contains("right-test-sync"));
+        assert!(message.contains("rightskills"));
+        assert!(message.contains("denied"));
+        assert!(message.contains("13"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_obsolete_builtin_skill_paths_removes_legacy_paths_in_sandbox() {
+        let sandbox =
+            right_openshell::test_support::TestSandbox::create("obsolete-skills-cleanup").await;
+        let mtls_dir = match right_openshell::openshell::preflight_check() {
+            right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+            other => panic!("OpenShell not ready: {other:?}"),
+        };
+        let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+            .await
+            .unwrap();
+        let sandbox_id =
+            right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox.name())
+                .await
+                .unwrap();
+        let sbox = right_openshell::sandbox_exec::SandboxExec::new(
+            mtls_dir,
+            sandbox.name().to_owned(),
+            sandbox_id,
+        );
+
+        let paths = obsolete_builtin_skill_paths();
+        for path in &paths {
+            let (output, code) = sandbox.exec(&["mkdir", "-p", path]).await;
+            assert_eq!(code, 0, "failed to create {path}: {output}");
+            let marker = format!("{path}/SKILL.md");
+            let (output, code) = sandbox.exec(&["touch", &marker]).await;
+            assert_eq!(code, 0, "failed to touch {marker}: {output}");
+        }
+
+        cleanup_obsolete_builtin_skill_paths(&sbox).await.unwrap();
+        cleanup_obsolete_builtin_skill_paths(&sbox).await.unwrap();
+
+        for path in &paths {
+            let (output, code) = sandbox.exec(&["test", "!", "-e", path]).await;
+            assert_eq!(code, 0, "obsolete path still exists: {path}; {output}");
+        }
+    }
 }

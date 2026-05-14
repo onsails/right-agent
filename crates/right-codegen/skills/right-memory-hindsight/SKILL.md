@@ -1,5 +1,5 @@
 ---
-name: rightmemory
+name: right-memory
 description: Manage your long-term memory powered by Hindsight
 ---
 
