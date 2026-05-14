@@ -32,7 +32,16 @@ pub mod mock {
     }
 }
 
+/// Install ring as the rustls process-level crypto provider. Idempotent —
+/// safe to call from multiple tests in the same binary.
+pub fn setup_crypto() {
+    // install_default returns Err(existing provider Arc) when already
+    // installed by another test in the same binary — that's not a failure.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub async fn wrap(url: &str, source: &str) -> ResilientHindsight {
+    setup_crypto();
     // `into_path()` is deprecated in current tempfile; use `.keep()`.
     let dir = tempfile::tempdir().unwrap().keep();
     let _ = right_db::open_connection(&dir, true).unwrap();
