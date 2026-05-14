@@ -36,7 +36,7 @@ pub enum RefreshFailure {
 }
 
 impl RefreshFailure {
-    pub fn is_permanent(&self) -> bool {
+    pub(crate) fn is_permanent(&self) -> bool {
         matches!(self, Self::Permanent(_))
     }
 }

@@ -10,12 +10,75 @@
 OAuth callback (bot) → POST /set-token to Aggregator (Unix socket)
   → Aggregator updates DynamicAuthClient.token in-memory
   → Aggregator saves to mcp_servers SQLite table (auth_token, expires_at, etc.)
-  → Aggregator starts refresh timer (expires_at - 10 min)
+  → Aggregator schedules refresh timer (see "Refresh margin" below)
   → on timer: POST refresh_token to token_endpoint
-  → update DynamicAuthClient.token in-memory
-  → save refreshed token to SQLite (db_update_oauth_token)
+  → classify outcome (success / Transient / Permanent)
+  → on success: update DynamicAuthClient.token in-memory, persist to SQLite
+    (db_update_oauth_token), reset retry counter, reschedule next refresh
   → no .mcp.json writes, no sandbox uploads
 ```
+
+### Refresh margin
+
+`refresh.rs::refresh_due_in` schedules each refresh at
+`expires_at - min(1h, remaining_lifetime / 2)`. The 1-hour upper bound (vs.
+the previous flat 10 min) gives long-lived tokens room for transient
+outages — laptops dropping Wi-Fi for a few minutes still get multiple retry
+windows before the token actually dies. The `lifetime / 2` clamp keeps
+short-lived tokens (TTL under ~2h) from busy-looping the scheduler.
+
+### Failure classification
+
+`reconnect.rs::do_refresh_cancellable` classifies every token-endpoint
+failure into one of two variants of `RefreshFailure`:
+
+| Class | Triggered by | Scheduler response |
+|-------|--------------|--------------------|
+| `Transient` | Network error, 5xx, 408, 429 | Reschedule with exponential backoff, retry indefinitely. Backend status unchanged (stays `Connected` from the user's perspective). |
+| `Permanent` | Non-recoverable 4xx (typically `invalid_grant` / `invalid_client`) | Flip backend to `NeedsAuth`, drop the timer, clear retry counter. User must re-OAuth via `/mcp auth <server>`. |
+
+Transient backoff schedule (`refresh.rs::transient_backoff_secs`,
+1-indexed): `60, 120, 300, 600, 1200, 1800` seconds, capped at 1800s
+(30 min) for all subsequent attempts. The counter resets on success and
+on any new `RefreshMessage::NewEntry` (e.g. after `/mcp auth`), so a
+stale counter from prior failures can't push the next retry past the
+60-second first step.
+
+### Tool-call 401 detection
+
+A token can also die mid-session: the upstream MCP rejects a tool call
+even though the local refresh timer hasn't fired yet (clock skew, server-
+side revocation, etc.). `proxy.rs::ProxyBackend::tools_call` catches this
+by inspecting the rmcp error string via `proxy.rs::is_upstream_auth_error`
+— rmcp surfaces 401s from `StreamableHttpClient` as a `TransportSend`
+error whose `Display` contains `"Auth required"`. On match the backend
+flips to `NeedsAuth` and returns `ProxyError::NeedsAuth` (not opaque
+`tool_failed`), so `mcp_list` reports the truth instead of `connected`.
+
+### Post-refresh reconnect
+
+When the scheduler completes a successful refresh while the backend was
+`NeedsAuth` (set by either a permanent-failure flip that has since
+recovered, or a tool-call 401), the rmcp session is almost certainly
+dead. The `was_needs_auth` branch in `refresh.rs::run_refresh_scheduler`
+spawns `backend.connect(http)` in the background to re-establish the
+session before the next tool call.
+
+### `ProxyBackend` status transitions
+
+`BackendStatus` is `Connected | NeedsAuth | Unreachable`. Refresh- and
+tool-call-driven transitions:
+
+| Trigger | From | To |
+|---------|------|----|
+| Transient refresh failure | `Connected` | `Connected` (unchanged; retry pending) |
+| Permanent refresh failure | any | `NeedsAuth` |
+| Tool-call upstream 401 (`Auth required`) | `Connected` | `NeedsAuth` |
+| Successful refresh | `NeedsAuth` | `NeedsAuth` → background `connect()` → `Connected` |
+| Successful refresh | `Connected` | `Connected` (no reconnect needed) |
+
+(Initial connect-time transitions — `Unreachable` → `Connected` on
+successful `connect()` — are unchanged from before this branch.)
 
 ## MCP Aggregator
 

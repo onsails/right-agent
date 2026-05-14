@@ -15,7 +15,7 @@ use rmcp::transport::streamable_http_client::{
 };
 use sse_stream::{Error as SseError, Sse};
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Errors from proxy backend operations.
 // allocator churn outweighs memory savings for the hot path
@@ -259,6 +259,9 @@ pub struct ProxyBackend {
     token: Arc<RwLock<Option<String>>>,
     /// Active MCP client session handle.
     client: RwLock<Option<RunningService<RoleClient, ()>>>,
+    /// Serializes concurrent `connect()` calls so refresh-driven reconnects and
+    /// `/mcp auth`-driven reconnects can't race on `client`/`cached_tools`/`status`.
+    connect_mutex: Mutex<()>,
 }
 
 impl ProxyBackend {
@@ -278,6 +281,7 @@ impl ProxyBackend {
             status: RwLock::new(BackendStatus::Unreachable),
             token,
             client: RwLock::new(None),
+            connect_mutex: Mutex::new(()),
         }
     }
 
@@ -288,6 +292,10 @@ impl ProxyBackend {
         &self,
         http_client: reqwest::Client,
     ) -> Result<Option<String>, ProxyError> {
+        // Hold this guard for the full body — serializes concurrent `connect()` calls
+        // so refresh-driven reconnects and `/mcp auth`-driven reconnects can't
+        // interleave writes to `client`/`cached_tools`/`status`.
+        let _guard = self.connect_mutex.lock().await;
         let dynamic =
             DynamicAuthClient::new(http_client, self.token.clone(), self.auth_method.clone());
         let config = StreamableHttpClientTransportConfig::with_uri(self.url.clone());
