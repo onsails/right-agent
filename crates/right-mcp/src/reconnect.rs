@@ -21,20 +21,40 @@ const MAX_RETRIES: u32 = 3;
 /// Backoff delays between retry attempts, in seconds.
 const BACKOFFS: [u64; 3] = [30, 60, 120];
 
-/// Errors returned by [`do_refresh_cancellable`].
+/// Classification of a token endpoint refresh failure.
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshFailure {
+    /// Transient — network error, 5xx, 408, or 429. Retry later.
+    #[error("transient refresh failure: {0}")]
+    Transient(String),
+
+    /// Permanent — token endpoint returned a non-recoverable 4xx (typically
+    /// `invalid_grant` / `invalid_client`). Refresh token is dead; user must
+    /// re-authenticate via `/mcp auth <server>`.
+    #[error("permanent refresh failure: {0}")]
+    Permanent(String),
+}
+
+impl RefreshFailure {
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Permanent(_))
+    }
+}
+
+/// Errors returned by [`do_refresh_cancellable`] and [`reconnect_task`].
 #[derive(Debug, thiserror::Error)]
 pub enum ReconnectError {
     /// The operation was cancelled via the [`CancellationToken`].
     #[error("refresh cancelled")]
     Cancelled,
 
-    /// The token endpoint returned errors on all attempts.
-    #[error("token refresh failed after {0} attempts")]
-    RefreshFailed(u32),
+    /// The token endpoint refresh step failed (classified).
+    #[error("refresh failed: {0}")]
+    Refresh(#[from] RefreshFailure),
 
-    /// Could not connect to the token endpoint (network error on all attempts).
-    #[error("token endpoint unreachable: {0}")]
-    ConnectFailed(String),
+    /// Post-refresh `backend.connect()` (to the MCP server) failed.
+    #[error("backend connect failed: {0}")]
+    Connect(String),
 
     /// Refresh succeeded but the result could not be persisted.
     #[error("failed to persist refreshed token: {0}")]
@@ -55,12 +75,13 @@ pub async fn do_refresh_cancellable(
     entry: &OAuthServerState,
     cancel: &CancellationToken,
 ) -> Result<(OAuthServerState, String), ReconnectError> {
-    let refresh_token = entry
-        .refresh_token
-        .as_deref()
-        .ok_or(ReconnectError::RefreshFailed(0))?;
+    let refresh_token = entry.refresh_token.as_deref().ok_or_else(|| {
+        ReconnectError::Refresh(RefreshFailure::Permanent(
+            "no refresh_token available".into(),
+        ))
+    })?;
 
-    let mut last_connect_error: Option<String> = None;
+    let mut last_error: Option<String> = None;
 
     for attempt in 0..MAX_RETRIES {
         // Check cancellation before each attempt.
@@ -83,7 +104,9 @@ pub async fn do_refresh_cancellable(
             Ok(r) if r.status().is_success() => {
                 let token_resp: crate::oauth::TokenResponse = r.json().await.map_err(|e| {
                     tracing::warn!(attempt, "failed to parse token response: {e:#}");
-                    ReconnectError::RefreshFailed(attempt + 1)
+                    ReconnectError::Refresh(RefreshFailure::Transient(format!(
+                        "malformed token response: {e:#}"
+                    )))
                 })?;
 
                 let expires_in = token_resp.expires_in.unwrap_or(3600);
@@ -116,13 +139,24 @@ pub async fn do_refresh_cancellable(
             Ok(r) => {
                 let status = r.status();
                 let body = r.text().await.unwrap_or_default();
-                tracing::warn!(attempt, %status, %body, "cancellable refresh attempt failed");
-                last_connect_error = None; // HTTP-level failure, not network
+                let is_transient_http = status == http::StatusCode::REQUEST_TIMEOUT
+                    || status == http::StatusCode::TOO_MANY_REQUESTS
+                    || status.is_server_error();
+                if is_transient_http {
+                    tracing::warn!(attempt, %status, %body, "cancellable refresh attempt failed (transient http)");
+                    last_error = Some(format!("HTTP {status}: {body}"));
+                    // fall through to backoff
+                } else {
+                    tracing::warn!(attempt, %status, %body, "cancellable refresh attempt failed (permanent http)");
+                    return Err(ReconnectError::Refresh(RefreshFailure::Permanent(
+                        format!("HTTP {status}: {body}"),
+                    )));
+                }
             }
             Err(e) => {
                 let msg = format!("{e:#}");
                 tracing::warn!(attempt, "cancellable refresh request error: {msg}");
-                last_connect_error = Some(msg);
+                last_error = Some(msg);
             }
         }
 
@@ -138,11 +172,8 @@ pub async fn do_refresh_cancellable(
         }
     }
 
-    if let Some(err) = last_connect_error {
-        Err(ReconnectError::ConnectFailed(err))
-    } else {
-        Err(ReconnectError::RefreshFailed(MAX_RETRIES))
-    }
+    let detail = last_error.unwrap_or_else(|| format!("exhausted {MAX_RETRIES} attempts"));
+    Err(ReconnectError::Refresh(RefreshFailure::Transient(detail)))
 }
 
 /// Perform a full OAuth reconnect for a single MCP server:
@@ -155,9 +186,9 @@ pub async fn do_refresh_cancellable(
 /// 4. Send [`RefreshMessage::NewEntry`] to the refresh scheduler.
 /// 5. Call [`ProxyBackend::connect`] to re-establish the MCP session.
 ///
-/// On connect failure: returns [`ReconnectError::ConnectFailed`].
+/// On connect failure: returns [`ReconnectError::Connect`].
 /// On cancellation: returns [`ReconnectError::Cancelled`] immediately.
-/// On all other errors: if backend is not already `Connected`, sets status to `NeedsAuth`.
+/// On permanent refresh failure: if backend is not already `Connected`, sets status to `NeedsAuth`.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub async fn reconnect_task(
@@ -178,13 +209,18 @@ pub async fn reconnect_task(
             tracing::debug!(server = %server_name, "reconnect cancelled during refresh");
             return Err(ReconnectError::Cancelled);
         }
-        Err(e) => {
-            tracing::warn!(server = %server_name, "reconnect refresh failed: {e:#}");
-            // Defense-in-depth: only set NeedsAuth if we're not already Connected
-            // (a concurrent path may have authenticated successfully).
-            if backend.status().await != BackendStatus::Connected {
+        Err(ReconnectError::Refresh(failure)) => {
+            tracing::warn!(server = %server_name, "reconnect refresh failed: {failure:#}");
+            // Defense-in-depth: only set NeedsAuth on permanent failures, and
+            // only if we're not already Connected (a concurrent path may have
+            // authenticated successfully).
+            if failure.is_permanent() && backend.status().await != BackendStatus::Connected {
                 backend.set_status(BackendStatus::NeedsAuth).await;
             }
+            return Err(ReconnectError::Refresh(failure));
+        }
+        Err(e) => {
+            tracing::warn!(server = %server_name, "reconnect refresh errored: {e:#}");
             return Err(e);
         }
     };
@@ -222,7 +258,7 @@ pub async fn reconnect_task(
     backend
         .connect(http_client)
         .await
-        .map_err(|e| ReconnectError::ConnectFailed(format!("{e:#}")))?;
+        .map_err(|e| ReconnectError::Connect(format!("{e:#}")))?;
 
     Ok(())
 }
@@ -327,11 +363,13 @@ mod tests {
     #[tokio::test]
     async fn cancellation_aborts_refresh_during_backoff() {
         setup_crypto();
-        // MockServer that always returns 401 — forces retry with backoff.
+        // MockServer that always returns 503 — classified as transient, so the
+        // inner loop enters its backoff sleep where cancellation can take effect.
+        // (A 4xx would short-circuit as permanent and never reach the backoff.)
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/token"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream broke"))
             .expect(1) // exactly one attempt before cancellation fires
             .mount(&server)
             .await;
@@ -377,8 +415,11 @@ mod tests {
     async fn exhausted_retries_do_not_overwrite_connected_status() {
         setup_crypto();
         let server = MockServer::start().await;
+        // 503 → Transient. Exhausts all retries without short-circuiting on a
+        // permanent 4xx, so the `is_permanent && status != Connected` guard
+        // never fires and backend stays Connected.
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream broke"))
             .mount(&server)
             .await;
 
@@ -517,7 +558,7 @@ mod tests {
         // We only care that token and refresh scheduler were updated before connect was attempted.
         match &result {
             Ok(()) => {} // Unexpected success — still fine for our assertions
-            Err(ReconnectError::ConnectFailed(_)) => {} // Expected
+            Err(ReconnectError::Connect(_)) => {} // Expected — fake URL fails to connect
             Err(other) => panic!("unexpected error: {other:?}"),
         }
 
