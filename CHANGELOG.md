@@ -1,4 +1,76 @@
 # Changelog
+## [0.2.14] - 2026-05-14
+
+
+### Bug Fixes
+
+- **right-memory**: Handle ErrorKind::Quota in retain_queue::drain
+- **right-memory**: Exclude QuotaExhausted from CircuitOpen enqueue path
+- **workspace**: Add debug: None to AgentConfig literal construction sites
+- Keep cron idle promise wording testable
+- **release-plz**: Add version requirement to internal path deps
+- **right-db**: Add chrono dev dependency for migration tests
+- **deps-audit**: Consolidate test-crypto helper, document let-discard intent
+- **deps-audit**: Install ring provider in missing test sites
+- **config**: Update whisper model call sites
+
+### Documentation
+
+- **right-memory**: Document QuotaExhausted stickiness in refresh_status
+- **rightcron**: Guide agents to write output-oriented cron prompts
+- **prompt**: Introduce /rightreflect skill and /debug command to agents
+
+### Features
+
+- **right-memory**: Sanitize content via injection_guard before Hindsight POST
+- **right-memory**: Classify HTTP 402 as ErrorKind::Quota
+- **right-memory**: Exempt ErrorKind::Quota from breaker ticks
+- **right-memory**: Add MemoryStatus::QuotaExhausted variant
+- **right-memory**: Set QuotaExhausted status and skip enqueue on 402
+- **right-memory**: Clear QuotaExhausted on any 2xx, preserve on refresh
+- **codegen**: Add CRON_INSTRUCTIONS template
+- **skills**: Add /rightreflect skill content for self-introspection
+- **codegen**: Bundle and install /rightreflect skill
+- **cron**: Lower idle threshold to 2 min and teach agent the rule
+- **right-db**: Scaffold new crate for SQLite plumbing
+- **bot**: Send_progress MCP tool
+
+### Miscellaneous
+
+- **stage-f**: Pin publish = false on new internal crates
+
+### Refactor
+
+- **right-memory**: Extract memory subsystem from right-agent
+- **right-memory**: Centralize sticky-status predicate and fix aggregator gap
+- **right-codegen**: Extract codegen subsystem from right-agent
+- **right-mcp**: Extract mcp subsystem from right-agent
+- **right-db**: Move SQL migration files from right-agent
+- **right-db**: Move migrations.rs from right-agent::memory
+- Enable unreachable_pub lint, privatize internals, drop zombie code
+- **memory**: Move prompt safety out of right-core
+- **platform**: Move platform store out of right-core
+- **workspace**: Move platform knobs out of right-core
+- **config**: Move agent config out of right-core
+- **runtime**: Move runtime state out of right-core
+- **stt**: Move stt helpers out of right-core
+- **ui**: Move ui and process helpers out of right-core
+- **openshell**: Move openshell stack out of right-core
+- **config**: Move global config out of right-core
+- **errors**: Localize remaining right-core errors
+
+### Testing
+
+- **right-db**: Add open + migration smoke tests
+- **right-db**: Cover open_connection invariants
+- **right-db**: Port 8 missed schema/trigger tests from pre-split memory module
+- **bot**: Cover localized error chain display
+
+### Build
+
+- **deps**: Drop aws-lc-rs, unify on ring crypto provider
+- **deps**: Prune unused per-crate dependencies
+
 ## [0.2.13] - 2026-05-13
 
 - Cron jobs can now use the Agent tool to spawn sub-agents for parallel research and multi-step orchestration. Budget caps via `max_budget_usd` continue to apply per invocation.
