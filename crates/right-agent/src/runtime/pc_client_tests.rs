@@ -1,11 +1,6 @@
 use super::*;
+use crate::test_support::setup_crypto;
 use right_runtime_state::PC_PORT;
-
-/// Install ring as the rustls process-level crypto provider. Idempotent —
-/// safe to call from multiple tests in the same binary.
-fn setup_crypto() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
 
 /// Regression: process-compose v1.94+ reads the API token from header
 /// `X-PC-Token-Key`. Sending `Authorization: Bearer …` (the previous
