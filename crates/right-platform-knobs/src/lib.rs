@@ -11,7 +11,7 @@
 //! "remind me in N minutes" reminder) cannot arrive sooner than
 //! `IDLE_THRESHOLD_SECS` of chat idle, regardless of `run_at`. The agent
 //! must not promise faster delivery — see `OPERATING_INSTRUCTIONS.md` and
-//! the `/rightcron` skill.
+//! the `/right-cron` skill.
 
 #![warn(unreachable_pub)]
 

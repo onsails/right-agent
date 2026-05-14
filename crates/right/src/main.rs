@@ -3943,10 +3943,10 @@ mod tests {
         .expect("install_builtin_skills should succeed");
 
         let skills_dir = agent_dir.join(".claude").join("skills");
-        let skills_skill = skills_dir.join("rightskills").join("SKILL.md");
+        let skills_skill = skills_dir.join("right-skills").join("SKILL.md");
         assert!(
             skills_skill.exists(),
-            "rightskills/SKILL.md should be installed"
+            "right-skills/SKILL.md should be installed"
         );
     }
 

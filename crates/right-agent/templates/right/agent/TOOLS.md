@@ -11,7 +11,7 @@ Rules for which tool to prefer when several can do the job.
 Example:
 - For interactive browser sessions (logins, forms, multi-step flows)
   use browser-use. For simple fetches of public pages use WebFetch.
-- For cron / scheduled tasks use the /rightcron skill.
+- For cron / scheduled tasks use the /right-cron skill.
 -->
 
 ## Environment

@@ -66,18 +66,18 @@ fn platform_name_for_file() {
 
 #[test]
 fn platform_name_for_directory() {
-    assert_eq!(platform_path("rightmcp", "abcd1234"), "rightmcp.abcd1234");
+    assert_eq!(platform_path("right-mcp", "abcd1234"), "right-mcp.abcd1234");
 }
 
 #[test]
 fn build_manifest_from_files() {
     let dir = tempdir().unwrap();
     let claude_dir = dir.path().join(".claude");
-    std::fs::create_dir_all(claude_dir.join("skills/rightmcp")).unwrap();
+    std::fs::create_dir_all(claude_dir.join("skills/right-mcp")).unwrap();
     std::fs::write(claude_dir.join("settings.json"), r#"{"key":"val"}"#).unwrap();
-    std::fs::write(claude_dir.join("skills/rightmcp/SKILL.md"), "# skill").unwrap();
+    std::fs::write(claude_dir.join("skills/right-mcp/SKILL.md"), "# skill").unwrap();
     std::fs::write(dir.path().join("mcp.json"), "{}").unwrap();
-    let manifest = build_manifest(dir.path(), &["rightmcp"]).unwrap();
+    let manifest = build_manifest(dir.path(), &["right-mcp"]).unwrap();
     assert!(
         manifest
             .entries
@@ -94,7 +94,7 @@ fn build_manifest_from_files() {
         manifest
             .entries
             .iter()
-            .any(|e| e.name == "rightmcp" && e.is_dir)
+            .any(|e| e.name == "right-mcp" && e.is_dir)
     );
 }
 
@@ -110,12 +110,7 @@ fn build_manifest_excludes_agent_owned_md_files() {
 
     // Agent-owned files at root and inside .claude/. None of these are in the
     // platform allowlist, so build_manifest must not include them.
-    let agent_owned: &[&str] = &[
-        "IDENTITY.md",
-        "SOUL.md",
-        "USER.md",
-        "TOOLS.md",
-    ];
+    let agent_owned: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md", "TOOLS.md"];
     for &name in agent_owned {
         std::fs::write(dir.path().join(name), format!("# {name}\n")).unwrap();
         std::fs::write(claude_dir.join(name), format!("# claude/{name}\n")).unwrap();
@@ -152,14 +147,20 @@ fn build_manifest_caches_file_content() {
 }
 
 /// Regression: every builtin skill on disk must end up in the deployment manifest.
-/// Bug history: rightmemory and rightreflect were added to the installer
+/// Bug history: right-memory and right-reflect were added to the installer
 /// (`right_codegen::install_builtin_skills`) but were never added to
 /// `build_manifest`'s hardcoded list, so they silently never reached the sandbox.
 #[test]
 fn build_manifest_deploys_all_listed_builtin_skills() {
     let dir = tempdir().unwrap();
     let skills_root = dir.path().join(".claude/skills");
-    let names = ["rightskills", "rightcron", "rightmcp", "rightmemory", "rightreflect"];
+    let names = [
+        "right-skills",
+        "right-cron",
+        "right-mcp",
+        "right-memory",
+        "right-reflect",
+    ];
     for name in names {
         let path = skills_root.join(name);
         std::fs::create_dir_all(&path).unwrap();
@@ -177,14 +178,14 @@ fn build_manifest_deploys_all_listed_builtin_skills() {
 #[test]
 fn build_manifest_dirs_have_no_cached_content() {
     let dir = tempdir().unwrap();
-    let skills_dir = dir.path().join(".claude/skills/rightcron");
+    let skills_dir = dir.path().join(".claude/skills/right-cron");
     std::fs::create_dir_all(&skills_dir).unwrap();
     std::fs::write(skills_dir.join("SKILL.md"), "# cron").unwrap();
-    let manifest = build_manifest(dir.path(), &["rightcron"]).unwrap();
+    let manifest = build_manifest(dir.path(), &["right-cron"]).unwrap();
     let entry = manifest
         .entries
         .iter()
-        .find(|e| e.name == "rightcron")
+        .find(|e| e.name == "right-cron")
         .unwrap();
     assert!(entry.is_dir);
     assert!(
