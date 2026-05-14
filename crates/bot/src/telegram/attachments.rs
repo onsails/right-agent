@@ -906,6 +906,20 @@ fn display_error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     out
 }
 
+fn is_webp_file_header(header: &[u8]) -> bool {
+    header.len() >= 12 && &header[0..4] == b"RIFF" && &header[8..12] == b"WEBP"
+}
+
+fn is_media_group_validation_error_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    (lower.contains("failed to send message")
+        && lower.contains("wrong file identifier/http url specified"))
+        || lower.contains("media_group_invalid")
+        || (lower.contains("media group")
+            && lower.contains("bad request")
+            && (lower.contains("file identifier") || lower.contains("http url")))
+}
+
 impl SendError {
     /// Format a user-visible error string labelled with the attachment description.
     fn into_user_msg(self, label: &str) -> String {
@@ -1374,6 +1388,47 @@ mod tests {
     fn mime_to_extension_unknown_fallback() {
         assert_eq!(mime_to_extension("application/x-unknown-thing"), "bin");
         assert_eq!(mime_to_extension(""), "bin");
+    }
+
+    #[test]
+    fn webp_magic_header_detects_riff_webp() {
+        assert!(is_webp_file_header(b"RIFF\x00\x00\x00\x00WEBPVP8 "));
+    }
+
+    #[test]
+    fn webp_magic_header_rejects_png_and_short_input() {
+        assert!(!is_webp_file_header(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d"));
+        assert!(!is_webp_file_header(b"RIFF"));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_matches_wrong_file_identifier() {
+        let err = "Bad Request: failed to send message #1 with the error message \"Wrong file identifier/HTTP URL specified\"";
+        assert!(is_media_group_validation_error_text(err));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_matches_media_group_invalid() {
+        assert!(is_media_group_validation_error_text(
+            "Bad Request: MEDIA_GROUP_INVALID",
+        ));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_rejects_non_album_errors() {
+        assert!(!is_media_group_validation_error_text(
+            "Too Many Requests: retry after 5",
+        ));
+        assert!(!is_media_group_validation_error_text(
+            "Bad Request: message text is empty",
+        ));
+    }
+
+    #[test]
+    fn media_group_validation_error_text_rejects_bare_wrong_file_identifier() {
+        assert!(!is_media_group_validation_error_text(
+            "Bad Request: Wrong file identifier/HTTP URL specified",
+        ));
     }
 
     #[test]
