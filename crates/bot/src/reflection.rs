@@ -214,7 +214,7 @@ pub(crate) async fn reflect_on_failure(ctx: ReflectionContext) -> Result<String,
         disallowed_tools: {
             let mut d = crate::cc::invocation::baseline_disallowed_tools();
             d.push("Agent".into());
-            d
+            crate::cc::invocation::disallow_send_progress(d)
         },
         extra_args: vec![],
         prompt: None,

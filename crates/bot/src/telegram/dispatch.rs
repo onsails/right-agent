@@ -29,8 +29,8 @@ use super::handler::{
     handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
     handle_thinking_toggle_callback, handle_usage,
 };
-use super::model_command::{handle_model, handle_model_callback};
 use super::mention::BotIdentity;
+use super::model_command::{handle_model, handle_model_callback};
 use super::oauth_callback::PendingAuthMap;
 use super::worker::{DebounceMsg, SessionKey};
 
@@ -87,7 +87,7 @@ enum BotCommand {
 /// Rationale: Arc<Mutex<Vec<Child>>> was rejected because invoke_cc never added children
 /// to the registry, making the kill loop dead code. kill_on_drop is sufficient.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_telegram<L>(
+pub(crate) async fn run_telegram<L>(
     token: String,
     allowlist: right_agent::agent::allowlist::AllowlistHandle,
     agent_dir: PathBuf,
@@ -107,12 +107,11 @@ pub async fn run_telegram<L>(
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
+    progress_state: super::progress::ProgressState,
     update_listener: L,
 ) -> miette::Result<()>
 where
-    L: teloxide::update_listeners::UpdateListener<Err = std::convert::Infallible>
-        + Send
-        + 'static,
+    L: teloxide::update_listeners::UpdateListener<Err = std::convert::Infallible> + Send + 'static,
 {
     let bot = build_bot(token);
 
@@ -192,6 +191,7 @@ where
         Arc::clone(&idle_ts),
         Arc::clone(&session_locks),
         Arc::clone(&bg_requests),
+        progress_state,
     );
 
     let shutdown_token = dispatcher.shutdown_token();
@@ -391,12 +391,14 @@ fn build_dispatcher(
     idle_ts: Arc<IdleTimestamp>,
     session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
+    progress_state: super::progress::ProgressState,
 ) -> teloxide::dispatching::Dispatcher<BotType, RequestError, DefaultKey> {
     let worker_ctl = super::WorkerControlDeps {
         stop_tokens,
         session_locks,
         bg_requests,
         thinking_visibility,
+        progress: progress_state,
     };
     let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
 
@@ -568,6 +570,7 @@ mod tests {
         let thinking_visibility: super::super::ThinkingVisibility = Arc::new(DashMap::new());
         let session_locks: super::super::SessionLocks = Arc::new(DashMap::new());
         let bg_requests: super::super::BgRequests = Arc::new(DashMap::new());
+        let progress_state = super::super::progress::ProgressState::default();
         let idle_ts = Arc::new(IdleTimestamp(Arc::new(AtomicI64::new(0))));
 
         // The call under test. If dptree type_check fails, this aborts the
@@ -590,6 +593,7 @@ mod tests {
             idle_ts,
             session_locks,
             bg_requests,
+            progress_state,
         );
     }
 }

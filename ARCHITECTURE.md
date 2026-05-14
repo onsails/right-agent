@@ -123,8 +123,15 @@ per-agent Bearer-token auth. Tool routing rules:
 
 Internal REST API on Unix socket (`~/.right/run/internal.sock`):
 `POST /mcp-add`, `POST /mcp-remove`, `POST /set-token`, `POST /mcp-list`,
-`POST /mcp-instructions`. Telegram bot uses `InternalClient` (hyper UDS).
+`POST /mcp-instructions`, `POST /progress/register`,
+`POST /progress/unregister`. Telegram bot uses `InternalClient` (hyper UDS).
 Agents cannot reach the Unix socket from inside the sandbox.
+
+Foreground progress uses the built-in `mcp__right__send_progress` tool. The
+worker creates a per-invocation MCP config with `X-Right-Invocation`, registers
+that invocation with the aggregator, and exposes a bot-local UDS
+`POST /progress/send` guarded by a separate send token. Cron, delivery,
+reflection, and background-continuation invocations disallow the tool.
 
 See: `docs/architecture/mcp.md` for dispatch detail and rationale.
 

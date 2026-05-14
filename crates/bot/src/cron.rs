@@ -399,7 +399,9 @@ async fn execute_job(
         return;
     }
 
-    let disallowed_tools = crate::cc::invocation::baseline_disallowed_tools();
+    let disallowed_tools = crate::cc::invocation::disallow_send_progress(
+        crate::cc::invocation::baseline_disallowed_tools(),
+    );
 
     // Schema and (optional) --fork-session source come from spec.schedule_kind.
     // BackgroundContinuation produces both a stricter schema (bg) and a

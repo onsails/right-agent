@@ -1,12 +1,40 @@
-//! Hyper-based Unix domain socket client for bot→aggregator IPC.
+//! Hyper-based Unix domain socket client for Right Agent internal IPC.
 //!
 //! Uses raw `hyper` with `tokio::net::UnixStream` to POST JSON to the
-//! internal API served on a Unix domain socket. `reqwest` doesn't support
+//! internal APIs served on Unix domain sockets. `reqwest` doesn't support
 //! UDS natively, so we use hyper's low-level HTTP/1.1 client directly.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+/// HTTP header set on per-invocation MCP requests so the aggregator can route
+/// `send_progress` calls back to the correct in-flight invocation.
+///
+/// Single source of truth — the bot writes this header key into the
+/// per-invocation `.mcp.json` and the aggregator reads it off incoming
+/// requests. HTTP-header case-insensitive, but keeping one constant prevents
+/// drift between writer and reader.
+pub const PROGRESS_INVOCATION_HEADER: &str = "X-Right-Invocation";
+
+/// Base name of the `send_progress` MCP tool exposed by `RightBackend`.
+/// Agents see the CC-prefixed form `mcp__right__send_progress` (see
+/// `PROGRESS_MCP_TOOL`).
+pub const SEND_PROGRESS_TOOL: &str = "send_progress";
+
+/// CC-prefixed form of the `send_progress` tool, as seen by agents in
+/// `--disallowedTools` and any user-facing prose.
+pub const PROGRESS_MCP_TOOL: &str = "mcp__right__send_progress";
+
+/// Maximum length (in Unicode scalar values) of a `send_progress` message.
+///
+/// Single source of truth for: the JSON-schema `maxLength` advertised in
+/// `tools/list`, server-side validation in `RightBackend::call_send_progress`,
+/// and the bot-side guard in `telegram::progress::handle_progress_send`. Chosen
+/// well below Telegram's 4096-UTF-16 hard limit to discourage agents from
+/// dumping verbose output as "progress" — the tool is for short, factual
+/// status updates.
+pub const PROGRESS_MESSAGE_MAX_CHARS: usize = 2000;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -169,10 +197,34 @@ impl InternalClient {
     pub async fn reload(&self) -> Result<ReloadResponse, InternalClientError> {
         self.post("/reload", &serde_json::json!({})).await
     }
+
+    /// Register a foreground Telegram invocation for progress messages.
+    pub async fn progress_register(
+        &self,
+        request: &ProgressRegisterRequest,
+    ) -> Result<ProgressRegisterResponse, InternalClientError> {
+        self.post("/progress/register", request).await
+    }
+
+    /// Unregister a foreground Telegram invocation for progress messages.
+    pub async fn progress_unregister(
+        &self,
+        request: &ProgressUnregisterRequest,
+    ) -> Result<ProgressUnregisterResponse, InternalClientError> {
+        self.post("/progress/unregister", request).await
+    }
+
+    /// Ask the bot-local UDS endpoint to send a progress message.
+    pub async fn progress_send(
+        &self,
+        request: &ProgressSendRequest,
+    ) -> Result<ProgressSendResponse, InternalClientError> {
+        self.post("/progress/send", request).await
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Response types (must match internal_api.rs on the server side)
+// Response types (must match the internal UDS handlers on the server side)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -232,6 +284,70 @@ pub struct ReloadResponse {
     pub added: Vec<String>,
     pub removed: Vec<String>,
     pub total: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressInvocationKindDto {
+    Foreground,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProgressRegisterRequest {
+    pub agent: String,
+    pub invocation_id: String,
+    pub kind: ProgressInvocationKindDto,
+    pub bot_send_token: String,
+}
+
+impl std::fmt::Debug for ProgressRegisterRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgressRegisterRequest")
+            .field("agent", &self.agent)
+            .field("invocation_id", &self.invocation_id)
+            .field("kind", &self.kind)
+            .field("bot_send_token", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProgressRegisterResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressUnregisterRequest {
+    pub agent: String,
+    pub invocation_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProgressUnregisterResponse {
+    pub ok: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProgressSendRequest {
+    pub invocation_id: String,
+    pub token: String,
+    pub message: String,
+}
+
+impl std::fmt::Debug for ProgressSendRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgressSendRequest")
+            .field("invocation_id", &self.invocation_id)
+            .field("token", &"<redacted>")
+            .field("message", &self.message)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProgressSendResponse {
+    pub ok: bool,
+    pub message_id: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -310,5 +426,76 @@ mod tests {
         assert!(resp.added.is_empty());
         assert!(resp.removed.is_empty());
         assert_eq!(resp.total, 2);
+    }
+
+    #[test]
+    fn progress_register_request_serializes_expected_fields() {
+        let request = ProgressRegisterRequest {
+            agent: "agent-1".to_owned(),
+            invocation_id: "inv-1".to_owned(),
+            kind: ProgressInvocationKindDto::Foreground,
+            bot_send_token: "send-token".to_owned(),
+        };
+
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["agent"], "agent-1");
+        assert_eq!(json["invocation_id"], "inv-1");
+        assert_eq!(json["kind"], "foreground");
+        assert_eq!(json["bot_send_token"], "send-token");
+    }
+
+    #[test]
+    fn mcp_tool_name_is_prefixed_base_name() {
+        // Invariant: the CC-prefixed form must match `mcp__right__<base>`.
+        // A drift between these (e.g. server-side rename) would silently
+        // make `--disallowedTools` ineffective for cron/delivery/reflection.
+        assert_eq!(
+            PROGRESS_MCP_TOOL,
+            format!("mcp__right__{SEND_PROGRESS_TOOL}")
+        );
+    }
+
+    #[test]
+    fn progress_send_request_serializes_expected_fields() {
+        let request = ProgressSendRequest {
+            invocation_id: "inv-1".to_owned(),
+            token: "send-token".to_owned(),
+            message: "Still working".to_owned(),
+        };
+
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["invocation_id"], "inv-1");
+        assert_eq!(json["token"], "send-token");
+        assert_eq!(json["message"], "Still working");
+    }
+
+    #[test]
+    fn progress_register_request_debug_redacts_token() {
+        let request = ProgressRegisterRequest {
+            agent: "agent-1".to_owned(),
+            invocation_id: "inv-1".to_owned(),
+            kind: ProgressInvocationKindDto::Foreground,
+            bot_send_token: "supersecret".to_owned(),
+        };
+        let s = format!("{request:?}");
+        assert!(
+            !s.contains("supersecret"),
+            "Debug must redact bot_send_token: {s}"
+        );
+        assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
+    }
+
+    #[test]
+    fn progress_send_request_debug_redacts_token() {
+        let request = ProgressSendRequest {
+            invocation_id: "inv-1".to_owned(),
+            token: "supersecret".to_owned(),
+            message: "Still working".to_owned(),
+        };
+        let s = format!("{request:?}");
+        assert!(!s.contains("supersecret"), "Debug must redact token: {s}");
+        assert!(s.contains("<redacted>"), "Debug must mark redaction: {s}");
     }
 }
