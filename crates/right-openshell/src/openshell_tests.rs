@@ -171,6 +171,59 @@ fn sandbox_tar_download_args_include_rebuildable_has_no_rebuildable_excludes() {
     }
 }
 
+#[test]
+fn sandbox_tar_download_args_preserves_relative_symlink_targets() {
+    use std::os::unix::fs::{MetadataExt, symlink};
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let tar_version = Command::new("tar")
+        .arg("--version")
+        .output()
+        .expect("tar --version should run");
+    if !String::from_utf8_lossy(&tar_version.stdout).contains("GNU tar") {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    let out = tmp.path().join("out");
+    let archive = tmp.path().join("archive.tar.gz");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(src.join("target"), "data").unwrap();
+    symlink("./target", src.join("link")).unwrap();
+    std::fs::hard_link(src.join("target"), src.join("hard")).unwrap();
+
+    let mut args = sandbox_tar_download_args("sandbox", true).unwrap();
+    assert_eq!(args.remove(0), "tar");
+    let archive_arg = args.iter().position(|arg| arg == "-").unwrap();
+    args[archive_arg] = archive.to_string_lossy().into_owned();
+    let source_arg = args.iter().position(|arg| arg == "/sandbox").unwrap();
+    args[source_arg] = src.to_string_lossy().into_owned();
+
+    let status = Command::new("tar").args(&args).status().unwrap();
+    assert!(status.success(), "tar create failed with {status}");
+
+    let status = Command::new("tar")
+        .arg("xzpf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "tar extract failed with {status}");
+
+    assert_eq!(
+        std::fs::read_link(out.join("sandbox/link")).unwrap(),
+        PathBuf::from("./target")
+    );
+    assert_eq!(
+        std::fs::metadata(out.join("sandbox/target")).unwrap().ino(),
+        std::fs::metadata(out.join("sandbox/hard")).unwrap().ino(),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Mock gRPC server for is_sandbox_ready / wait_for_ready tests
 // ---------------------------------------------------------------------------
