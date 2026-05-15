@@ -58,6 +58,8 @@ mcp__right__skill_learning_start
 
 Use `action: "create"` for new `rl-*` skills and `action: "update"` for existing non-core skills. Include a short localized message that tells the user what is being learned or updated.
 
+Only write or patch skill files after the start call succeeds. If the start call is rejected or unavailable, do not write or patch package files; report the rejection or defer learning until the protocol is available.
+
 Do not call mcp__right__send_progress just to announce learning. The learning start tool sends the user-visible progress message.
 
 After the write succeeds or fails, call:
@@ -84,7 +86,16 @@ Use the full Agent Skills format:
 
 Include `scripts/`, `references/`, or `assets/` only when they remove real complexity from future use.
 
-Update `.claude/skills/installed.json` for new learned skills with `source: "learned"` and `path: ".claude/skills/rl-<slug>"`.
+Update `.claude/skills/installed.json` for new learned skills. Read the existing file first and treat a missing file as `{}`. Preserve all existing installed.json entries, write a valid object entry for the new learned skill, and never rewrite or delete unrelated registry data. The entry must use `source: "learned"` and `path: ".claude/skills/rl-<slug>"`.
+
+```json
+{
+  "rl-<slug>": {
+    "source": "learned",
+    "path": ".claude/skills/rl-<slug>"
+  }
+}
+```
 
 ## Skill Quality
 
