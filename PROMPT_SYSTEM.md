@@ -325,7 +325,10 @@ invocations. It sends a separate Telegram message (max 2000 characters), is
 rate limited to one message every 30 seconds per invocation, and returns
 tool-level errors such as `progress_unavailable`, `progress_forbidden`,
 `progress_rate_limited`, or `progress_send_failed`. Cron, delivery, reflection,
-and background-continuation turns deny this tool via `--disallowedTools`.
+and background-continuation turns deny foreground-only tools via
+`--disallowedTools`: `mcp__right__send_progress`,
+`mcp__right__skill_learning_start`, and
+`mcp__right__skill_learning_finish`.
 
 `mcp__right__skill_learning_start` and
 `mcp__right__skill_learning_finish` are metadata/progress/receipt tools for
