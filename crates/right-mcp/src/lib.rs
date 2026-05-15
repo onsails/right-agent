@@ -12,6 +12,10 @@ pub mod tool_error;
 /// Protected from `/mcp remove` - required for core functionality.
 pub const PROTECTED_MCP_SERVER: &str = "right";
 
+pub(crate) fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Generate a random 32-byte agent secret, base64url-encoded (no padding).
 ///
 /// Stored persistently in `agent.yaml`. Used to derive Bearer tokens for

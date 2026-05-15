@@ -14,18 +14,15 @@ jobs:
     name: workspace tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config ffmpeg
-
-      - name: Provide cloudflared test stub
+      - name: Provide external-tool test stubs
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           cat > "$RUNNER_TEMP/bin/cloudflared" <<'SH'
@@ -33,26 +30,29 @@ jobs:
           echo "cloudflared test stub" >&2
           exit 0
           SH
-          chmod +x "$RUNNER_TEMP/bin/cloudflared"
+          cat > "$RUNNER_TEMP/bin/claude" <<'SH'
+          #!/bin/sh
+          echo "claude test stub" >&2
+          exit 0
+          SH
+          chmod +x "$RUNNER_TEMP/bin/cloudflared" "$RUNNER_TEMP/bin/claude"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Test workspace serially
-        run: cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+        run: |
+          devenv shell -- env PATH="$RUNNER_TEMP/bin:$PATH" cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
 
   stt:
     name: stt ignored tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config ffmpeg
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
 
       - uses: actions/cache@v4
         with:
@@ -61,22 +61,37 @@ jobs:
 
       - name: Run STT ignored tests serially
         run: |
-          cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
+          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
 
   openshell:
     name: openshell ignored tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: dtolnay/rust-toolchain@stable
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - name: Start Podman socket
+        run: |
+          systemctl --user enable --now podman.socket
+          for attempt in $(seq 1 30); do
+            if test -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"; then
+              podman info
+              exit 0
+            fi
+            echo "waiting for Podman socket ($attempt/30)"
+            sleep 1
+          done
+          systemctl --user status podman.socket --no-pager || true
+          journalctl --user -u podman.socket --no-pager -n 80 || true
+          exit 1
 
       - name: Install OpenShell
         run: |
@@ -108,22 +123,37 @@ jobs:
 
       - name: Run OpenShell ignored tests serially
         run: |
-          cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
+          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
 
   claude-openshell:
     name: claude ignored tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: dtolnay/rust-toolchain@stable
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - name: Start Podman socket
+        run: |
+          systemctl --user enable --now podman.socket
+          for attempt in $(seq 1 30); do
+            if test -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"; then
+              podman info
+              exit 0
+            fi
+            echo "waiting for Podman socket ($attempt/30)"
+            sleep 1
+          done
+          systemctl --user status podman.socket --no-pager || true
+          journalctl --user -u podman.socket --no-pager -n 80 || true
+          exit 1
 
       - name: Install OpenShell
         run: |
@@ -155,4 +185,4 @@ jobs:
 
       - name: Run Claude/OpenShell ignored tests serially
         run: |
-          cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
+          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1

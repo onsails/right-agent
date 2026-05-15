@@ -161,6 +161,8 @@ pub async fn run_refresh_scheduler(
     agent_dir: std::path::PathBuf,
     mut rx: tokio::sync::mpsc::Receiver<RefreshMessage>,
 ) {
+    crate::ensure_crypto_provider();
+
     let http_client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
