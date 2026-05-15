@@ -68,9 +68,14 @@ async fn spawn_with_policy(test_name: &str, policy_yaml: &str) -> String {
 
     let mut child = openshell::spawn_sandbox(&name, &policy_path, None)
         .expect("codegen policy must be accepted at sandbox creation");
-    openshell::wait_for_ready(&mut client, &name, 180, 2)
-        .await
-        .expect("sandbox with codegen policy did not become READY");
+    openshell::wait_for_ready(
+        &mut client,
+        &name,
+        right_openshell::test_support::sandbox_ready_timeout_secs(180),
+        2,
+    )
+    .await
+    .expect("sandbox with codegen policy did not become READY");
 
     // Kill the create process — it doesn't exit on its own after READY.
     let _ = child.kill().await;
