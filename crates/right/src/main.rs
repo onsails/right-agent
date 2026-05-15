@@ -3203,6 +3203,14 @@ async fn cmd_agent_backup(
                 std::fs::metadata(&backup_db).map(|m| m.len()).unwrap_or(0)
             );
         }
+
+        let manifest = restore::build_backup_manifest(
+            agent_name,
+            config.as_ref(),
+            Some(&backup_dir.join("data.db")),
+        )?;
+        restore::write_backup_manifest(&backup_dir, &manifest)?;
+        println!("backup.json written");
     }
 
     println!("Backup complete: {}", backup_dir.display());
