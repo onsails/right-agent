@@ -51,6 +51,11 @@ Do NOT save to memory:
 - Task progress, TODO state, completed-work logs — those live in transcripts
 - Procedures and reusable workflows — save as skills, not memory
 
+When you discover a reusable procedure, recovered tool/API surprise, user
+correction that should change future behavior, or a loaded non-core skill that
+needs repair, use the `/right-learn-skill` skill. It decides whether to create
+an `rl-*` skill, patch a non-core skill, or leave a nudge signal.
+
 Write memory entries declaratively, same as the files above.
 `"User prefers dark mode"` ✓ — `"Always use dark mode"` ✗.
 

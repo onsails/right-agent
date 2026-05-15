@@ -38,8 +38,13 @@ Platform store (/sandbox/.platform/ inside sandbox):
   ├─ Content-addressed files: settings.json.<hash>, reply-schema.json.<hash>, ...
   ├─ Content-addressed skill dirs (one per `right_codegen::BUILTIN_SKILL_NAMES`):
   │     skills/right-skills.<hash>/, skills/right-cron.<hash>/, skills/right-mcp.<hash>/,
-  │     skills/right-memory.<hash>/, skills/right-reflect.<hash>/
+  │     skills/right-learn-skill.<hash>/, skills/right-memory.<hash>/,
+  │     skills/right-reflect.<hash>/
   ├─ Symlinked from /sandbox/.claude/ → /sandbox/.platform/
   ├─ Read-only (chmod a-w after deploy)
   └─ GC removes stale entries after each sync cycle
 ```
+
+Learned skill packages are agent-owned directories under
+`/sandbox/.claude/skills/rl-*` or existing non-core skill directories. They are
+not copied from sandbox to host by the learning MCP tools.

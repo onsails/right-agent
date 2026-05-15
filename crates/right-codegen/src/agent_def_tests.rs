@@ -209,6 +209,21 @@ fn operating_instructions_constant_is_non_empty() {
     );
 }
 
+#[test]
+fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [
+        "/right-learn-skill",
+        "Procedures and reusable workflows",
+        "save as skills, not memory",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must mention {needle:?}"
+        );
+    }
+}
+
 /// Pin the hardcoded cron-idle minutes in OPERATING_INSTRUCTIONS.md to the
 /// `IDLE_THRESHOLD_MIN` constant. The template is included verbatim via
 /// `include_str!`, so the number cannot be templated — this test fails when
