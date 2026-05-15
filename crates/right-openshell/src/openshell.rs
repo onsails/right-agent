@@ -742,10 +742,28 @@ pub async fn tear_down_control_master(config_path: &Path, host: &str, socket_pat
     }
 }
 
+fn sandbox_tar_download_args(sandbox_path: &str) -> miette::Result<Vec<String>> {
+    let archive_root = sandbox_path.trim_matches('/');
+    if archive_root.is_empty() {
+        miette::bail!("sandbox path must not be empty");
+    }
+
+    Ok(vec![
+        "tar".to_string(),
+        "czpf".to_string(),
+        "-".to_string(),
+        "-C".to_string(),
+        format!("/{archive_root}"),
+        format!("--transform=s,^\\.$,{archive_root},"),
+        format!("--transform=s,^\\./,{archive_root}/,"),
+        ".".to_string(),
+    ])
+}
+
 /// Stream `tar czpf -` from inside the sandbox to a local file via SSH.
 ///
-/// Runs `tar czpf - -C / sandbox` on the remote host, piping stdout directly
-/// to `dest_path` without buffering in memory.
+/// Archives `/sandbox` while preserving `sandbox/...` paths in the tarball,
+/// piping stdout directly to `dest_path` without buffering in memory.
 pub async fn ssh_tar_download(
     config_path: &Path,
     ssh_host: &str,
@@ -757,7 +775,7 @@ pub async fn ssh_tar_download(
     command.arg("-F").arg(config_path);
     command.arg(ssh_host);
     command.arg("--");
-    command.args(["tar", "czpf", "-", "-C", "/", sandbox_path]);
+    command.args(sandbox_tar_download_args(sandbox_path)?);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
@@ -767,6 +785,9 @@ pub async fn ssh_tar_download(
     let mut stdout = child
         .stdout()
         .ok_or_else(|| miette::miette!("no stdout handle from ssh tar download"))?;
+    let mut stderr = child
+        .stderr()
+        .ok_or_else(|| miette::miette!("no stderr handle from ssh tar download"))?;
 
     let mut file = tokio::fs::File::create(dest_path).await.map_err(|e| {
         miette::miette!(
@@ -791,13 +812,31 @@ pub async fn ssh_tar_download(
             .map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
     };
 
-    let timeout_dur = Duration::from_secs(timeout_secs);
-    let ((), child_result) =
-        tokio::time::timeout(timeout_dur, async { tokio::try_join!(copy_fut, wait_fut) })
+    let stderr_fut = async {
+        use tokio::io::AsyncReadExt;
+
+        let mut stderr_buf = Vec::new();
+        stderr
+            .read_to_end(&mut stderr_buf)
             .await
-            .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
+            .map_err(|e| miette::miette!("I/O error reading ssh tar stderr: {e:#}"))?;
+        Ok::<_, miette::Error>(String::from_utf8_lossy(&stderr_buf).into_owned())
+    };
+
+    let timeout_dur = Duration::from_secs(timeout_secs);
+    let ((), child_result, stderr) = tokio::time::timeout(timeout_dur, async {
+        tokio::try_join!(copy_fut, wait_fut, stderr_fut)
+    })
+    .await
+    .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
 
     if !child_result.success() {
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            return Err(miette::miette!(
+                "ssh tar download failed (exit {child_result}): {stderr}"
+            ));
+        }
         return Err(miette::miette!(
             "ssh tar download failed (exit {child_result})"
         ));
@@ -963,6 +1002,40 @@ async fn upload_directory(sandbox: &str, host_dir: &Path, sandbox_dir: &str) -> 
     Ok(())
 }
 
+fn ensure_download_parent(host_dest: &Path) -> miette::Result<()> {
+    let parent = host_dest.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| {
+        miette::miette!(
+            "failed to create parent directory {}: {e:#}",
+            parent.display()
+        )
+    })
+}
+
+fn remove_stale_directory_at_dest(host_dest: &Path) -> miette::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(host_dest)
+        && meta.is_dir()
+    {
+        std::fs::remove_dir_all(host_dest).map_err(|e| {
+            miette::miette!(
+                "failed to remove stale directory at {}: {e:#}",
+                host_dest.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn move_downloaded_file_into_place(staged: &Path, host_dest: &Path) -> miette::Result<()> {
+    remove_stale_directory_at_dest(host_dest)?;
+    std::fs::rename(staged, host_dest).map_err(|e| {
+        miette::miette!(
+            "failed to move downloaded file to {}: {e:#}",
+            host_dest.display()
+        )
+    })
+}
+
 /// Download a file or directory from a sandbox to the host.
 /// Download a single file from the sandbox, placing it at exactly `host_dest`.
 ///
@@ -980,13 +1053,8 @@ pub async fn download_file(
         .file_name()
         .ok_or_else(|| miette::miette!("sandbox_path has no file name: {sandbox_path}"))?;
 
+    ensure_download_parent(host_dest)?;
     let parent = host_dest.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent).map_err(|e| {
-        miette::miette!(
-            "failed to create parent directory {}: {e:#}",
-            parent.display()
-        )
-    })?;
 
     // Stage the download in a temp dir alongside host_dest so the final
     // rename stays on the same filesystem (atomic rename, no cross-device copy).
@@ -1024,26 +1092,7 @@ pub async fn download_file(
         ));
     }
 
-    // Clear any stale directory at host_dest left behind by the earlier
-    // buggy version of this function (which treated host_dest as a dir).
-    // `fs::rename` would otherwise fail with EISDIR on such paths.
-    if let Ok(meta) = std::fs::symlink_metadata(host_dest)
-        && meta.is_dir()
-    {
-        std::fs::remove_dir_all(host_dest).map_err(|e| {
-            miette::miette!(
-                "failed to remove stale directory at {}: {e:#}",
-                host_dest.display()
-            )
-        })?;
-    }
-
-    std::fs::rename(&staged, host_dest).map_err(|e| {
-        miette::miette!(
-            "failed to move downloaded file to {}: {e:#}",
-            host_dest.display()
-        )
-    })?;
+    move_downloaded_file_into_place(&staged, host_dest)?;
 
     Ok(())
 }

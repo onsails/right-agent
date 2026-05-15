@@ -6,6 +6,7 @@
 use right_openshell::openshell;
 use right_openshell::test_support::TestSandbox;
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn control_master_engages_after_first_ssh_call() {
     let _slot = openshell::acquire_sandbox_slot();

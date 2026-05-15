@@ -34,6 +34,76 @@ fn ssh_host_for_sandbox_formats_correctly() {
 }
 
 #[test]
+fn sandbox_tar_download_args_reads_sandbox_dir_and_preserves_archive_root() {
+    assert_eq!(
+        sandbox_tar_download_args("sandbox").unwrap(),
+        vec![
+            "tar",
+            "czpf",
+            "-",
+            "-C",
+            "/sandbox",
+            "--transform=s,^\\.$,sandbox,",
+            "--transform=s,^\\./,sandbox/,",
+            ".",
+        ]
+    );
+}
+
+#[test]
+fn ensure_download_parent_creates_missing_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dest = tmp.path().join("a/b/c/file.txt");
+
+    ensure_download_parent(&host_dest).unwrap();
+
+    assert!(host_dest.parent().unwrap().is_dir());
+    assert!(!host_dest.exists());
+}
+
+#[test]
+fn remove_stale_directory_at_dest_removes_directory_collision() {
+    let tmp = tempfile::tempdir().unwrap();
+    let host_dest = tmp.path().join("collision.txt");
+    std::fs::create_dir(&host_dest).unwrap();
+    std::fs::write(host_dest.join("collision.txt"), "old junk").unwrap();
+
+    remove_stale_directory_at_dest(&host_dest).unwrap();
+
+    assert!(!host_dest.exists());
+}
+
+#[test]
+fn move_downloaded_file_into_place_overwrites_existing_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staged = tmp.path().join("downloaded.txt");
+    let host_dest = tmp.path().join("existing.txt");
+    std::fs::write(&staged, "new\n").unwrap();
+    std::fs::write(&host_dest, "stale\n").unwrap();
+
+    move_downloaded_file_into_place(&staged, &host_dest).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&host_dest).unwrap(), "new\n");
+    assert!(!staged.exists());
+}
+
+#[test]
+fn move_downloaded_file_into_place_replaces_stale_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let staged = tmp.path().join("downloaded.txt");
+    let host_dest = tmp.path().join("collision.txt");
+    std::fs::write(&staged, "fresh\n").unwrap();
+    std::fs::create_dir(&host_dest).unwrap();
+    std::fs::write(host_dest.join("collision.txt"), "old junk").unwrap();
+
+    move_downloaded_file_into_place(&staged, &host_dest).unwrap();
+
+    assert!(host_dest.is_file());
+    assert_eq!(std::fs::read_to_string(&host_dest).unwrap(), "fresh\n");
+    assert!(!staged.exists());
+}
+
+#[test]
 fn control_master_socket_path_uses_sandbox_name() {
     use std::path::Path;
     let dir = Path::new("/tmp/foo/run/ssh");
@@ -508,6 +578,7 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 // Live sandbox integration tests (require running OpenShell)
 // ---------------------------------------------------------------------------
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn verify_sandbox_files_detects_missing_and_reuploads() {
     let sbox = shared_test_sandbox().await;
@@ -534,6 +605,7 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
 ///
 /// This is the scenario where gRPC reports READY but SSH transport
 /// may not be up yet, causing "Connection reset by peer".
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
     let _slot = super::acquire_sandbox_slot();
@@ -675,6 +747,7 @@ network_policies:
     );
 }
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn verify_sandbox_files_passes_when_all_present() {
     let sbox = shared_test_sandbox().await;
@@ -696,6 +769,7 @@ async fn verify_sandbox_files_passes_when_all_present() {
 // upload_file integration tests
 // ---------------------------------------------------------------------------
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn upload_file_to_directory() {
     let sbox = shared_test_sandbox().await;
@@ -710,50 +784,6 @@ async fn upload_file_to_directory() {
     let (content, code) = sbox.exec(&["cat", "/sandbox/hello.txt"]).await;
     assert_eq!(code, 0);
     assert_eq!(content, "hello sandbox\n");
-}
-
-#[tokio::test]
-async fn upload_file_overwrites_existing() {
-    let sbox = shared_test_sandbox().await;
-
-    let tmp = tempfile::tempdir().unwrap();
-    let file = tmp.path().join("data.txt");
-
-    // First upload.
-    std::fs::write(&file, "version 1\n").unwrap();
-    super::upload_file(sbox.name(), &file, "/sandbox/")
-        .await
-        .unwrap();
-
-    // Second upload with different content.
-    std::fs::write(&file, "version 2\n").unwrap();
-    super::upload_file(sbox.name(), &file, "/sandbox/")
-        .await
-        .unwrap();
-
-    let (content, _) = sbox.exec(&["cat", "/sandbox/data.txt"]).await;
-    assert_eq!(content, "version 2\n", "second upload should overwrite");
-}
-
-#[tokio::test]
-async fn upload_file_to_nested_dir() {
-    let sbox = shared_test_sandbox().await;
-
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::write(tmp.path().join("nested.txt"), "deep\n").unwrap();
-
-    // Upload to a directory that doesn't exist yet — openshell should create it.
-    super::upload_file(
-        sbox.name(),
-        &tmp.path().join("nested.txt"),
-        "/sandbox/a/b/c/",
-    )
-    .await
-    .expect("upload to nested dir should succeed");
-
-    let (content, code) = sbox.exec(&["cat", "/sandbox/a/b/c/nested.txt"]).await;
-    assert_eq!(code, 0);
-    assert_eq!(content, "deep\n");
 }
 
 /// Regression test: upload_file must reject non-directory destination.
@@ -786,6 +816,7 @@ async fn upload_file_rejects_non_directory_dest() {
 /// This is how sync.rs uploads builtin skills (e.g. right-cron/, right-mcp/).
 /// OpenShell has a known bug where directory uploads silently drop small files.
 /// Also tests overwrite: sync runs every 5 min, so repeated uploads must work.
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn upload_directory_preserves_files_and_overwrites() {
     let sbox = shared_test_sandbox().await;
@@ -794,7 +825,9 @@ async fn upload_directory_preserves_files_and_overwrites() {
     let tmp = tempfile::tempdir().unwrap();
     let skill_dir = tmp.path().join("right-mcp");
     std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::create_dir_all(skill_dir.join("nested")).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "# version 1\n").unwrap();
+    std::fs::write(skill_dir.join("nested/TOOL.md"), "nested\n").unwrap();
 
     // First upload
     super::upload_file(sbox.name(), &skill_dir, "/sandbox/.claude/skills/")
@@ -806,6 +839,11 @@ async fn upload_directory_preserves_files_and_overwrites() {
         .await;
     assert_eq!(code, 0, "SKILL.md must exist after first upload");
     assert_eq!(content, "# version 1\n");
+    let (content, code) = sbox
+        .exec(&["cat", "/sandbox/.claude/skills/right-mcp/nested/TOOL.md"])
+        .await;
+    assert_eq!(code, 0, "nested TOOL.md must exist after first upload");
+    assert_eq!(content, "nested\n");
 
     // Second upload with updated content (simulates sync overwrite)
     std::fs::write(skill_dir.join("SKILL.md"), "# version 2\n").unwrap();
@@ -827,6 +865,7 @@ async fn upload_directory_preserves_files_and_overwrites() {
 /// Regression test for the photo-send bug: `openshell sandbox download` always
 /// writes to DEST as a directory. `download_file` must hide that and deliver
 /// the file at exactly the caller's `host_dest` path.
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn download_file_writes_to_exact_dest_path() {
     let sbox = shared_test_sandbox().await;
@@ -859,80 +898,6 @@ async fn download_file_writes_to_exact_dest_path() {
         content, "payload\n",
         "downloaded content must match sandbox file"
     );
-}
-
-#[tokio::test]
-async fn download_file_overwrites_existing_file() {
-    let sbox = shared_test_sandbox().await;
-
-    let (_, code) = sbox
-        .exec(&["sh", "-c", "printf 'new\\n' > /sandbox/overwrite_test.txt"])
-        .await;
-    assert_eq!(code, 0);
-
-    let tmp = tempfile::tempdir().unwrap();
-    let host_dest = tmp.path().join("existing.txt");
-    std::fs::write(&host_dest, "stale").unwrap();
-
-    super::download_file(sbox.name(), "/sandbox/overwrite_test.txt", &host_dest)
-        .await
-        .expect("download should overwrite existing file");
-
-    let content = std::fs::read_to_string(&host_dest).unwrap();
-    assert_eq!(
-        content, "new\n",
-        "existing file must be replaced with new content"
-    );
-}
-
-/// Upgrade path: agents deployed before the fix accumulated directories at
-/// `tmp/outbox/<basename>/` (with the file buried inside). New downloads with
-/// the same dest path must not be blocked by that stale state.
-#[tokio::test]
-async fn download_file_replaces_stale_directory_at_dest() {
-    let sbox = shared_test_sandbox().await;
-
-    let (_, code) = sbox
-        .exec(&["sh", "-c", "printf 'fresh\\n' > /sandbox/stale_test.txt"])
-        .await;
-    assert_eq!(code, 0);
-
-    // Simulate the stale state produced by the pre-fix code: a directory at
-    // host_dest containing a file of the same basename.
-    let tmp = tempfile::tempdir().unwrap();
-    let host_dest = tmp.path().join("collision.txt");
-    std::fs::create_dir(&host_dest).unwrap();
-    std::fs::write(host_dest.join("collision.txt"), "old junk").unwrap();
-
-    super::download_file(sbox.name(), "/sandbox/stale_test.txt", &host_dest)
-        .await
-        .expect("download should recover from stale directory");
-
-    assert!(
-        host_dest.is_file(),
-        "host_dest must be a regular file after recovery"
-    );
-    assert_eq!(std::fs::read_to_string(&host_dest).unwrap(), "fresh\n");
-}
-
-#[tokio::test]
-async fn download_file_creates_parent_directory() {
-    let sbox = shared_test_sandbox().await;
-
-    let (_, code) = sbox
-        .exec(&["sh", "-c", "printf 'deep\\n' > /sandbox/parent_test.txt"])
-        .await;
-    assert_eq!(code, 0);
-
-    let tmp = tempfile::tempdir().unwrap();
-    let host_dest = tmp.path().join("a/b/c/file.txt");
-
-    super::download_file(sbox.name(), "/sandbox/parent_test.txt", &host_dest)
-        .await
-        .expect("download should create missing parent dirs");
-
-    assert!(host_dest.is_file());
-    assert_eq!(std::fs::read_to_string(&host_dest).unwrap(), "deep\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1037,7 @@ fn test_name_lock_sanitizes_name() {
     let _b = super::acquire_test_name_lock("foo_bar_baz_other");
 }
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn test_sandbox_holds_name_lock() {
     use std::sync::Arc;

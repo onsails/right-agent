@@ -88,7 +88,10 @@ pub struct SttContext {
 
 /// Build the final text for a message: prepend each marker on its own line,
 /// blank line, then the user text (if any).
-pub(crate) fn combine_markers_with_text(markers: &[String], user_text: Option<&str>) -> Option<String> {
+pub(crate) fn combine_markers_with_text(
+    markers: &[String],
+    user_text: Option<&str>,
+) -> Option<String> {
     if markers.is_empty() {
         return user_text.map(str::to_owned);
     }
@@ -156,6 +159,7 @@ mod transcribe_or_marker_tests {
         }
     }
 
+    #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
     async fn voice_success_returns_success_marker() {
         let ctx = tiny_ctx(true).await;
@@ -166,7 +170,10 @@ mod transcribe_or_marker_tests {
 
     #[tokio::test]
     async fn ffmpeg_unavailable_returns_error_marker_without_running_ffmpeg() {
-        let ctx = tiny_ctx(false).await;
+        let ctx = SttContext {
+            transcriber: Transcriber::new(PathBuf::from("/nonexistent/not-used.bin")),
+            ffmpeg_available: false,
+        };
         let m = transcribe_or_marker(&ctx, markers::VoiceKind::Voice, &fixture("hello.oga")).await;
         assert!(m.contains("не установлен ffmpeg"));
     }
@@ -247,6 +254,7 @@ mod tests {
         p
     }
 
+    #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
     async fn transcribe_voice_end_to_end() {
         let t = Transcriber::new(tiny_path().await);
@@ -254,6 +262,7 @@ mod tests {
         assert!(res.text.to_lowercase().contains("test"));
     }
 
+    #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
     async fn transcribe_video_note_end_to_end() {
         let t = Transcriber::new(tiny_path().await);

@@ -3,8 +3,8 @@
 //!
 //! Tests 14-16 of the self-introspection implementation plan.
 //!
-//! All tests run against a live OpenShell sandbox — no #[ignore].
-//! Requires a running OpenShell gateway (dev machines have it).
+//! These are CI-explicit ignored tests because they require a live OpenShell
+//! sandbox and the Claude Code binary inside it.
 
 use right_openshell::test_support::TestSandbox;
 
@@ -16,6 +16,7 @@ use right_openshell::test_support::TestSandbox;
 ///
 /// Claude will exit non-zero (no auth token), but it should still create
 /// the debug file before bailing.
+#[ignore = "ci-claude: requires live OpenShell sandbox and claude binary"]
 #[tokio::test]
 async fn cc_debug_file_lands_inside_sandbox() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
@@ -85,6 +86,7 @@ async fn cc_debug_file_lands_inside_sandbox() {
 /// Note: CC only writes its own JSONL transcript after a successful session;
 /// it exits before writing anything when there is no auth token. That is why
 /// this test seeds a synthetic file rather than relying on CC to create one.
+#[ignore = "ci-claude: requires live OpenShell sandbox and claude binary"]
 #[tokio::test]
 async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
@@ -130,50 +132,5 @@ async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
     assert!(
         cat_out.contains(marker),
         "file content was modified or wiped by CC; expected marker '{marker}' in: {cat_out}"
-    );
-}
-
-/// Confirm that a synthetic JSONL file in the projects directory can be
-/// located and grepped from inside the sandbox — the filesystem-access
-/// primitive that /right-reflect relies on.
-///
-/// This test is filesystem-only: no claude binary needed.
-#[tokio::test]
-async fn skill_can_grep_jsonl() {
-    let _slot = right_openshell::openshell::acquire_sandbox_slot();
-    let sandbox = TestSandbox::create("right-reflect-grep").await;
-
-    let (_, exit) = sandbox
-        .exec(&["mkdir", "-p", "/sandbox/.claude/projects/-sandbox"])
-        .await;
-    assert_eq!(exit, 0, "mkdir projects dir failed");
-
-    let marker = "RIGHTREFLECT-MARKER-XYZZY";
-    // A realistic JSONL line with a tool_use call referencing the marker.
-    let jsonl_line = format!(
-        r#"{{"type":"assistant","uuid":"abc","message":{{"content":[{{"type":"tool_use","name":"mcp__right__cron_create","input":{{"job_name":"{marker}"}}}}]}}}}"#
-    );
-    let target = "/sandbox/.claude/projects/-sandbox/synthetic-session.jsonl";
-
-    // Write the synthetic JSONL file via a shell printf.
-    // Single quotes in the line are escaped using '\''.
-    let write_cmd = format!(
-        "printf '%s\\n' '{}' > {}",
-        jsonl_line.replace('\'', "'\\''"),
-        target
-    );
-    let (write_out, write_exit) = sandbox.exec(&["sh", "-c", &write_cmd]).await;
-    assert_eq!(write_exit, 0, "write synthetic jsonl failed: {write_out}");
-
-    // grep -l returns the filename when the pattern is found.
-    let grep_cmd = format!("grep -l {marker} /sandbox/.claude/projects/-sandbox/*.jsonl");
-    let (grep_out, grep_exit) = sandbox.exec(&["sh", "-c", &grep_cmd]).await;
-    assert_eq!(
-        grep_exit, 0,
-        "grep did not find marker '{marker}' in jsonl files: {grep_out}"
-    );
-    assert!(
-        grep_out.contains("synthetic-session.jsonl"),
-        "grep output didn't contain expected filename: {grep_out}"
     );
 }

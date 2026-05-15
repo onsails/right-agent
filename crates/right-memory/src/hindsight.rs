@@ -113,6 +113,7 @@ pub struct HindsightClient {
     bank_id: String,
     budget: String,
     max_tokens: u32,
+    retain_timeout: Duration,
 }
 
 impl HindsightClient {
@@ -140,12 +141,19 @@ impl HindsightClient {
             bank_id: bank_id.to_owned(),
             budget: budget.to_owned(),
             max_tokens,
+            retain_timeout: RETAIN_TIMEOUT,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_http_client(mut self, http: reqwest::Client) -> Self {
         self.http = http;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_retain_timeout(mut self, timeout: Duration) -> Self {
+        self.retain_timeout = timeout;
         self
     }
 
@@ -184,7 +192,7 @@ impl HindsightClient {
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&body)
-            .timeout(RETAIN_TIMEOUT)
+            .timeout(self.retain_timeout)
             .send()
             .await
             .map_err(MemoryError::from_reqwest)?;
@@ -748,12 +756,14 @@ mod tests {
         // Client-level timeout is ignored once the method sets its own
         // `.timeout(RETAIN_TIMEOUT)` per-request — this test tolerates the
         // real 10s wait as the tradeoff for exercising the real code path.
-        let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(&url)).with_http_client(
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_millis(200))
-                .build()
-                .unwrap(),
-        );
+        let client = HindsightClient::new("hs_x", "b", "high", 1024, Some(&url))
+            .with_http_client(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_millis(200))
+                    .build()
+                    .unwrap(),
+            )
+            .with_retain_timeout(std::time::Duration::from_millis(100));
         let err = client
             .retain("x", None, None, None, None)
             .await
@@ -814,7 +824,7 @@ mod tests {
             }
         });
 
-        let client = test_client(&url);
+        let client = test_client(&url).with_retain_timeout(std::time::Duration::from_millis(100));
         let err = client
             .retain("x", None, None, None, None)
             .await

@@ -80,6 +80,7 @@ mod tests {
     // hello.oga is ~0.85s → ~13.6k samples at 16 kHz.
     // We use 5_000 as the threshold (>0.3s) to catch "no samples" bugs
     // while working with the actual fixture duration.
+    #[ignore = "ci-stt: runs real ffmpeg decoding"]
     #[tokio::test]
     async fn decode_voice_oga_yields_samples() {
         let samples = decode_to_pcm_f32(&fixture("hello.oga"))
@@ -92,6 +93,7 @@ mod tests {
         );
     }
 
+    #[ignore = "ci-stt: runs real ffmpeg decoding"]
     #[tokio::test]
     async fn decode_video_note_mp4_yields_samples() {
         let samples = decode_to_pcm_f32(&fixture("circle.mp4"))
@@ -104,6 +106,7 @@ mod tests {
         );
     }
 
+    #[ignore = "ci-stt: runs real ffmpeg decoding"]
     #[tokio::test]
     async fn decode_corrupted_input_returns_error() {
         let tmp = tempfile::NamedTempFile::new().unwrap();

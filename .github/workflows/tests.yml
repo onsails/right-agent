@@ -1,0 +1,154 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: ["master"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  workspace:
+    name: workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+
+      - name: Test workspace serially
+        run: cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+
+  stt:
+    name: stt ignored tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config ffmpeg
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.right/cache/whisper
+          key: whisper-ggml-tiny-v1
+
+      - name: Run STT ignored tests serially
+        run: |
+          cargo test -p right-bot stt:: -- --ignored --test-threads=1
+
+  openshell:
+    name: openshell ignored tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+
+      - name: Install OpenShell
+        run: |
+          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/openshell" --help
+
+      - name: Start OpenShell gateway
+        run: |
+          nohup "$HOME/.local/bin/openshell" gateway start --recreate --port 8080 > "$RUNNER_TEMP/openshell-gateway.log" 2>&1 &
+          for attempt in $(seq 1 90); do
+            if "$HOME/.local/bin/openshell" gateway info >/dev/null 2>&1 \
+              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
+              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
+              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
+              exit 0
+            fi
+            echo "waiting for OpenShell gateway ($attempt/90)"
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/openshell-gateway.log"
+          exit 1
+
+      - name: OpenShell doctor
+        run: openshell doctor check
+
+      - name: Run right-openshell live tests serially
+        run: |
+          cargo test -p right-openshell verify_sandbox_files_ -- --ignored --test-threads=1
+          cargo test -p right-openshell exec_immediately_after_sandbox_create_reproduces_init_flow -- --ignored --test-threads=1
+          cargo test -p right-openshell upload_file_to_directory -- --ignored --test-threads=1
+          cargo test -p right-openshell upload_directory_preserves_files_and_overwrites -- --ignored --test-threads=1
+          cargo test -p right-openshell download_file_writes_to_exact_dest_path -- --ignored --test-threads=1
+          cargo test -p right-openshell test_sandbox_holds_name_lock -- --ignored --test-threads=1
+
+      - name: Run right-agent live tests serially
+        run: |
+          cargo test -p right-agent --test control_master -- --ignored --test-threads=1
+          cargo test -p right-agent --test policy_apply -- --ignored --test-threads=1
+          cargo test -p right-agent --test rebootstrap_sandbox -- --ignored --test-threads=1
+          cargo test -p right --test cli_integration test_policy_validates_against_openshell -- --ignored --test-threads=1
+
+  claude-openshell:
+    name: claude ignored tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+
+      - name: Install OpenShell
+        run: |
+          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/openshell" --help
+
+      - name: Start OpenShell gateway
+        run: |
+          nohup "$HOME/.local/bin/openshell" gateway start --recreate --port 8080 > "$RUNNER_TEMP/openshell-gateway.log" 2>&1 &
+          for attempt in $(seq 1 90); do
+            if "$HOME/.local/bin/openshell" gateway info >/dev/null 2>&1 \
+              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
+              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
+              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
+              exit 0
+            fi
+            echo "waiting for OpenShell gateway ($attempt/90)"
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/openshell-gateway.log"
+          exit 1
+
+      - name: OpenShell doctor
+        run: openshell doctor check
+
+      - name: Run Claude/OpenShell ignored tests serially
+        run: |
+          cargo test -p right-bot --test cc_debug_integration -- --ignored --test-threads=1
+          cargo test -p right-bot --test sandbox_upgrade -- --ignored --test-threads=1

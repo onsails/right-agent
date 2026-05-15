@@ -1714,9 +1714,9 @@ fn spawn_sandbox_progress_cleanup(
     sandbox_name: Option<String>,
     sandbox_path: String,
 ) {
-    let _ = tokio::spawn(async move {
+    std::mem::drop(tokio::spawn(async move {
         remove_sandbox_progress_config_file(invocation_id, sandbox_name, sandbox_path).await;
-    });
+    }));
 }
 
 async fn unregister_progress(ctx: &WorkerContext, invocation_id: &str) {

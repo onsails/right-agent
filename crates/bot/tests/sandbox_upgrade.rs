@@ -2,7 +2,8 @@
 //!
 //! Creates an ephemeral sandbox via `right_openshell::test_support::TestSandbox`,
 //! runs `claude upgrade`, and asserts the full post-upgrade state.
-//! Requires a running OpenShell gateway (dev machines have it — no #[ignore]).
+//! CI-explicit ignored test because it requires a live OpenShell gateway and
+//! runs real `claude upgrade` over the network.
 
 use right_openshell::test_support::TestSandbox;
 
@@ -16,7 +17,7 @@ use right_openshell::test_support::TestSandbox;
 /// TODO: replace with a per-host binary cache so the steady-state path hits
 /// the idempotent "Current version" branch in seconds and `#[ignore]` can
 /// be removed.
-#[ignore = "slow: runs real `claude upgrade` over the network (~30-60s)"]
+#[ignore = "ci-claude: runs real claude upgrade inside live OpenShell sandbox"]
 #[tokio::test]
 async fn claude_upgrade_lifecycle() {
     let sbox = TestSandbox::create("claude-upgrade").await;

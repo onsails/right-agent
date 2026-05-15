@@ -35,6 +35,7 @@ async fn assert_absent_in_sandbox(sandbox: &TestSandbox, path: &str) {
     assert_ne!(exit, 0, "expected {path} to be absent in sandbox");
 }
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn execute_against_live_sandbox() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
