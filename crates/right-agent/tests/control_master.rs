@@ -9,7 +9,6 @@ use right_openshell::test_support::TestSandbox;
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn ci_openshell_control_master_engages_after_first_ssh_call() {
-    let _slot = openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("controlmaster").await;
 
     // Use /tmp directly so the ControlPath stays within the Unix domain socket

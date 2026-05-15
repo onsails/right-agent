@@ -392,7 +392,7 @@ pub fn spawn_sandbox(
 
 /// Test-only concurrency limiter for live OpenShell sandbox tests.
 ///
-/// Holds one of [`MAX_CONCURRENT_SANDBOX_TESTS`] exclusive file locks so the
+/// Holds one of [`max_concurrent_sandbox_tests`] exclusive file locks so the
 /// total number of concurrently running sandbox-creating tests across the
 /// entire workspace — including tests in separate test binaries — is capped.
 ///
@@ -401,11 +401,30 @@ pub struct SandboxTestSlot {
     _file: std::fs::File,
 }
 
-/// Maximum number of live OpenShell sandbox tests allowed to run in parallel.
+/// Default maximum number of live OpenShell sandbox tests allowed in parallel.
 /// See [`acquire_sandbox_slot`].
-pub const MAX_CONCURRENT_SANDBOX_TESTS: u8 = 30;
+pub const DEFAULT_MAX_CONCURRENT_SANDBOX_TESTS: u8 = 30;
 
-/// Acquire one of [`MAX_CONCURRENT_SANDBOX_TESTS`] parallel-sandbox-test slots.
+const SANDBOX_SLOT_LIMIT_ENV: &str = "RIGHT_MAX_CONCURRENT_SANDBOX_TESTS";
+
+fn sandbox_slot_limit_from_env_value(value: Option<&str>) -> u8 {
+    value
+        .and_then(|value| value.parse::<u8>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_SANDBOX_TESTS)
+}
+
+/// Maximum number of live OpenShell sandbox tests allowed to run in parallel.
+///
+/// Defaults to [`DEFAULT_MAX_CONCURRENT_SANDBOX_TESTS`]. CI jobs can set
+/// `RIGHT_MAX_CONCURRENT_SANDBOX_TESTS=1` to serialize only live sandbox
+/// creation while preserving normal Cargo test parallelism for the rest of the
+/// workspace.
+pub fn max_concurrent_sandbox_tests() -> u8 {
+    sandbox_slot_limit_from_env_value(std::env::var(SANDBOX_SLOT_LIMIT_ENV).ok().as_deref())
+}
+
+/// Acquire one of [`max_concurrent_sandbox_tests`] parallel-sandbox-test slots.
 ///
 /// Blocks (polling every 200ms) until a slot is free. Cross-process via
 /// `fs4` advisory file locks on `$TMPDIR/right-sandbox-slot-{N}.lock`.
@@ -416,7 +435,7 @@ pub const MAX_CONCURRENT_SANDBOX_TESTS: u8 = 30;
 /// multiple test binaries run in parallel, each starting Docker/k3s containers.
 pub fn acquire_sandbox_slot() -> SandboxTestSlot {
     loop {
-        for slot in 1..=MAX_CONCURRENT_SANDBOX_TESTS {
+        for slot in 1..=max_concurrent_sandbox_tests() {
             let path = std::env::temp_dir().join(format!("right-sandbox-slot-{slot}.lock"));
             let file = std::fs::OpenOptions::new()
                 .create(true)

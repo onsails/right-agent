@@ -803,7 +803,7 @@ mod tests {
             token_endpoint: format!("{}/token", server.uri()),
             client_id: "c".into(),
             client_secret: None,
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/mcp".into(),
         };
         let token_arc: Arc<tokio::sync::RwLock<Option<String>>> =
@@ -834,17 +834,19 @@ mod tests {
         .await
         .unwrap();
 
-        // Allow the timer to fire and the permanent response to be processed.
-        // Margin is min(MAX=3600s, 300s/2=150s) = 150s, so due ≈ 150s. Drive
-        // virtual time forward until status flips or we time out.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
+        wait_for_scheduler_entry(tmp.path(), "s").await;
+
+        // Already-expired tokens fire immediately. Drive virtual time until the
+        // spawned refresh task processes the permanent response.
+        for _ in 0..200 {
             tokio::time::advance(Duration::from_secs(5)).await;
-            tokio::task::yield_now().await;
-            if backend.status().await == crate::proxy::BackendStatus::NeedsAuth {
-                break;
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+                if backend.status().await == crate::proxy::BackendStatus::NeedsAuth {
+                    break;
+                }
             }
-            if std::time::Instant::now() > deadline {
+            if backend.status().await == crate::proxy::BackendStatus::NeedsAuth {
                 break;
             }
         }
@@ -852,7 +854,8 @@ mod tests {
         assert_eq!(
             backend.status().await,
             crate::proxy::BackendStatus::NeedsAuth,
-            "permanent refresh failure must flip backend to NeedsAuth"
+            "permanent refresh failure must flip backend to NeedsAuth; received_requests={}",
+            request_count(&server).await
         );
 
         scheduler.abort();

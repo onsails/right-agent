@@ -430,22 +430,16 @@ use crate::test_support::TestSandbox;
 /// upload/download/verify suite from ~50s to ~10s. The shared sandbox
 /// persists at process exit (statics never drop) — the next run cleans
 /// the leftover at `TestSandbox::create("shared").await` time.
-///
-/// The acquire_sandbox_slot guard is held for the lifetime of the process,
-/// counting against MAX_CONCURRENT_SANDBOX_TESTS as one slot total for this
-/// binary's shared sandbox (not one per test).
 async fn shared_test_sandbox() -> &'static TestSandbox {
     use tokio::sync::OnceCell;
     struct Shared {
         sandbox: TestSandbox,
-        _slot: super::SandboxTestSlot,
     }
     static SHARED: OnceCell<Shared> = OnceCell::const_new();
     let shared = SHARED
         .get_or_init(|| async {
-            let _slot = super::acquire_sandbox_slot();
             let sandbox = TestSandbox::create("shared").await;
-            Shared { sandbox, _slot }
+            Shared { sandbox }
         })
         .await;
     &shared.sandbox
@@ -1303,6 +1297,28 @@ network_policies:
 }
 
 #[test]
+fn sandbox_slot_limit_defaults_on_absent_or_invalid_env() {
+    assert_eq!(
+        super::sandbox_slot_limit_from_env_value(None),
+        super::DEFAULT_MAX_CONCURRENT_SANDBOX_TESTS
+    );
+    assert_eq!(
+        super::sandbox_slot_limit_from_env_value(Some("0")),
+        super::DEFAULT_MAX_CONCURRENT_SANDBOX_TESTS
+    );
+    assert_eq!(
+        super::sandbox_slot_limit_from_env_value(Some("abc")),
+        super::DEFAULT_MAX_CONCURRENT_SANDBOX_TESTS
+    );
+}
+
+#[test]
+fn sandbox_slot_limit_uses_positive_env_value() {
+    assert_eq!(super::sandbox_slot_limit_from_env_value(Some("1")), 1);
+    assert_eq!(super::sandbox_slot_limit_from_env_value(Some("2")), 2);
+}
+
+#[test]
 fn test_name_lock_acquire_and_release() {
     let lock = super::acquire_test_name_lock("unit-test-acquire-release");
     drop(lock);
@@ -1357,7 +1373,6 @@ async fn ci_openshell_test_sandbox_holds_name_lock() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    let _slot = super::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("name-lock-holds").await;
 
     // While `sandbox` is alive, acquire_test_name_lock with the same logical

@@ -19,7 +19,6 @@ use right_openshell::test_support::TestSandbox;
 #[ignore = "ci-claude: requires live OpenShell sandbox and claude binary"]
 #[tokio::test]
 async fn ci_claude_cc_debug_file_lands_inside_sandbox() {
-    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("right-reflect-debugfile").await;
 
     let session_id = "right-reflect-test-00000000-0000-0000-0000-000000000001";
@@ -89,7 +88,6 @@ async fn ci_claude_cc_debug_file_lands_inside_sandbox() {
 #[ignore = "ci-claude: requires live OpenShell sandbox and claude binary"]
 #[tokio::test]
 async fn ci_claude_jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
-    let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("right-reflect-jsonl").await;
 
     let session_id = "right-reflect-test-00000000-0000-0000-0000-000000000002";
