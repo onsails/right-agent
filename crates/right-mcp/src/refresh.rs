@@ -574,6 +574,48 @@ mod tests {
         }
     }
 
+    async fn advance_until_request_count(server: &wiremock::MockServer, expected: usize) {
+        for _ in 0..200 {
+            if request_count(server).await >= expected {
+                return;
+            }
+            tokio::time::advance(Duration::from_secs(5)).await;
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+                if request_count(server).await >= expected {
+                    return;
+                }
+            }
+        }
+        panic!(
+            "server received {} requests, expected at least {expected}",
+            request_count(server).await
+        );
+    }
+
+    async fn advance_until_token(
+        token: &Arc<tokio::sync::RwLock<Option<String>>>,
+        expected: &str,
+        server: &wiremock::MockServer,
+    ) {
+        for _ in 0..200 {
+            if token.read().await.as_deref() == Some(expected) {
+                return;
+            }
+            tokio::time::advance(Duration::from_secs(5)).await;
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+                if token.read().await.as_deref() == Some(expected) {
+                    return;
+                }
+            }
+        }
+        panic!(
+            "token did not update to {expected}; received_requests={}",
+            request_count(server).await
+        );
+    }
+
     #[test]
     fn backoff_cap_matches_last_step() {
         assert_eq!(
@@ -924,8 +966,8 @@ mod tests {
             token_endpoint: format!("{}/a/token", server.uri()),
             client_id: "c".into(),
             client_secret: None,
-            // Short lifetime → fires immediately.
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            // Already expired -> fires immediately.
+            expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/a/mcp".into(),
         };
         let entry_b = OAuthServerState {
@@ -933,7 +975,7 @@ mod tests {
             token_endpoint: format!("{}/b/token", server.uri()),
             client_id: "c".into(),
             client_secret: None,
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/b/mcp".into(),
         };
         let token_a: Arc<tokio::sync::RwLock<Option<String>>> =
@@ -971,13 +1013,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Advance virtual time so the timer fires and the refresh task
-        // is spawned. ~150s due (5-min lifetime → half-lifetime margin)
-        // plus a few extra seconds of slack.
-        for _ in 0..40 {
-            tokio::time::advance(Duration::from_secs(5)).await;
-            tokio::task::yield_now().await;
-        }
+        wait_for_scheduler_entry(tmp.path(), "a").await;
+        advance_until_request_count(&server, 1).await;
 
         // Remove server "a" — must cancel the in-flight refresh. Then
         // immediately register server "b". If rx.recv were starved, this
@@ -997,23 +1034,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Drive virtual time forward until token "b" updates. Should
-        // happen within a few hundred virtual seconds (just the refresh
-        // margin for the 5-minute lifetime, ~150s).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            tokio::time::advance(Duration::from_secs(5)).await;
-            tokio::task::yield_now().await;
-            if *token_b.read().await == Some("b-tok".to_string()) {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                panic!(
-                    "scheduler did not process NewEntry for 'b' — rx.recv \
-                     appears starved by the in-flight refresh for 'a'"
-                );
-            }
-        }
+        wait_for_scheduler_entry(tmp.path(), "b").await;
+        advance_until_token(&token_b, "b-tok", &server).await;
 
         // Token "a" must NOT have been refreshed (the slow mock never
         // returns a real token; cancellation should drop the task).
