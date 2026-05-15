@@ -531,6 +531,7 @@ pub async fn run_refresh_scheduler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn request_count(server: &wiremock::MockServer) -> usize {
         server.received_requests().await.unwrap().len()
@@ -570,6 +571,49 @@ mod tests {
                     request_count(server).await
                 );
             }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn wait_for_backend_status(
+        backend: &crate::proxy::ProxyBackend,
+        expected: crate::proxy::BackendStatus,
+        server: &wiremock::MockServer,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if backend.status().await == expected {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "backend status did not update to {expected:?}; current={:?}; received_requests={}",
+                    backend.status().await,
+                    request_count(server).await
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn wait_for_response_count(count: &AtomicUsize, expected: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if count.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "mock only produced {} responses, expected at least {expected}",
+                    count.load(Ordering::SeqCst)
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn let_scheduler_process_response() {
+        for _ in 0..20 {
             tokio::task::yield_now().await;
         }
     }
@@ -727,22 +771,27 @@ mod tests {
         let server = MockServer::start().await;
         // First scheduler fire: do_refresh_cancellable internally retries 3
         // times. We want all 3 of those to see 503, then later attempts see
-        // 200. up_to_n_times caps the first mock at 3 hits; subsequent hits
-        // fall through to the second mock.
+        // 200. Use one stateful responder instead of overlapping mocks so
+        // response order is explicit.
+        let responses = Arc::new(AtomicUsize::new(0));
         Mock::given(method("POST"))
             .and(path("/token"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("temporarily down"))
-            .up_to_n_times(3)
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "new-tok",
-                "refresh_token": "new-rt",
-                "expires_in": 3600,
-                "token_type": "Bearer"
-            })))
+            .respond_with({
+                let responses_for_mock = responses.clone();
+                move |_: &wiremock::Request| {
+                    let index = responses_for_mock.fetch_add(1, Ordering::SeqCst);
+                    if index < 3 {
+                        ResponseTemplate::new(503).set_body_string("temporarily down")
+                    } else {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                            "access_token": "new-tok",
+                            "refresh_token": "new-rt",
+                            "expires_in": 3600,
+                            "token_type": "Bearer"
+                        }))
+                    }
+                }
+            })
             .mount(&server)
             .await;
 
@@ -794,18 +843,20 @@ mod tests {
         // internally 3 times with 30/60s backoff (~90s virtual). All return
         // 503 → Transient. Scheduler reschedules in 60s. Second fire's first
         // attempt hits the 200 mock → success.
-        for _ in 0..200 {
-            tokio::time::advance(Duration::from_secs(5)).await;
-            for _ in 0..5 {
-                tokio::task::yield_now().await;
-                if token_arc.read().await.as_deref() == Some("new-tok") {
-                    break;
-                }
-            }
-            if token_arc.read().await.as_deref() == Some("new-tok") {
-                break;
-            }
-        }
+        advance_until_request_count(&server, 1).await;
+        wait_for_response_count(&responses, 1).await;
+        let_scheduler_process_response().await;
+
+        advance_until_request_count(&server, 2).await;
+        wait_for_response_count(&responses, 2).await;
+        let_scheduler_process_response().await;
+
+        advance_until_request_count(&server, 3).await;
+        wait_for_response_count(&responses, 3).await;
+        let_scheduler_process_response().await;
+
+        advance_until_request_count(&server, 4).await;
+        wait_for_response_count(&responses, 4).await;
         wait_for_token(&token_arc, "new-tok", &server).await;
 
         let n_requests = server.received_requests().await.unwrap().len();
@@ -878,27 +929,17 @@ mod tests {
 
         wait_for_scheduler_entry(tmp.path(), "s").await;
 
-        // Already-expired tokens fire immediately. Drive virtual time until the
-        // spawned refresh task processes the permanent response.
-        for _ in 0..200 {
-            tokio::time::advance(Duration::from_secs(5)).await;
-            for _ in 0..5 {
-                tokio::task::yield_now().await;
-                if backend.status().await == crate::proxy::BackendStatus::NeedsAuth {
-                    break;
-                }
-            }
-            if backend.status().await == crate::proxy::BackendStatus::NeedsAuth {
-                break;
-            }
-        }
-
-        assert_eq!(
-            backend.status().await,
+        // Already-expired tokens fire immediately. Once the request reaches
+        // wiremock, do not advance virtual time again; on slow CI that can
+        // trip reqwest's timeout before the real mock response is processed.
+        advance_until_request_count(&server, 1).await;
+        let_scheduler_process_response().await;
+        wait_for_backend_status(
+            &backend,
             crate::proxy::BackendStatus::NeedsAuth,
-            "permanent refresh failure must flip backend to NeedsAuth; received_requests={}",
-            request_count(&server).await
-        );
+            &server,
+        )
+        .await;
 
         scheduler.abort();
     }
