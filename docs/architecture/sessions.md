@@ -30,6 +30,10 @@ Foreground turns may also send sparse standalone progress messages via
 the thinking anchor. The worker registers a fresh invocation ID for the current
 turn, injects it into the MCP config as `X-Right-Invocation`, and unregisters it
 on completion, spawn/write failure, timeout, stop, or background handoff.
+Foreground turns may also call learned-skill start/finish tools. These use the
+same per-invocation `X-Right-Invocation` registration as progress, but they are
+not generic progress calls: start sends the learning/update notice, successful
+finish sends the learned/updated receipt, and both calls persist provenance.
 
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Process timeout (600s) is a safety net only.

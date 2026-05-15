@@ -228,7 +228,7 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 | TOOLS.md | `/sandbox/TOOLS.md` | Agent (editable) |
 | settings.json | `/sandbox/.claude/settings.json` → `/platform/settings.json.<hash>` | Platform (symlink) |
 | reply-schema.json | `/sandbox/.claude/reply-schema.json` → `/platform/...` | Platform (symlink) |
-| skills/ | `/sandbox/.claude/skills/right-mcp` → `/platform/skills/right-mcp.<hash>` | Platform (symlink) |
+| skills/ | `/sandbox/.claude/skills/{right-skills,right-cron,right-mcp,right-learn-skill,right-memory,right-reflect}` → `/platform/skills/<name>.<hash>` | Platform (symlink) |
 | BOOTSTRAP.md | N/A (not synced to sandbox) | Content from compiled-in constant; on-disk file is host-side flag only |
 
 ### Host (`agent_dir/`)
@@ -296,7 +296,9 @@ worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
 The `right` MCP server provides `with_instructions()` describing all tools:
 memory (memory_retain/memory_recall/memory_reflect — Hindsight mode only),
 cron (list/show runs), MCP management (add/remove/list/auth), foreground
-progress (mcp__right__send_progress), and bootstrap
+progress (mcp__right__send_progress), learned-skill metadata/progress/receipt
+tools (mcp__right__skill_learning_start and
+mcp__right__skill_learning_finish), and bootstrap
 (mcp__right__bootstrap_done).
 
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
@@ -324,6 +326,13 @@ rate limited to one message every 30 seconds per invocation, and returns
 tool-level errors such as `progress_unavailable`, `progress_forbidden`,
 `progress_rate_limited`, or `progress_send_failed`. Cron, delivery, reflection,
 and background-continuation turns deny this tool via `--disallowedTools`.
+
+`mcp__right__skill_learning_start` and
+`mcp__right__skill_learning_finish` are metadata/progress/receipt tools for
+the `/right-learn-skill` built-in skill. They validate skill-learning
+provenance, record events, and send foreground learning receipts; they do not
+move skill files from sandbox to host. The active agent writes skill package
+files under `.claude/skills/<skill_name>/`.
 
 ## Upstream MCP Server Instructions
 
