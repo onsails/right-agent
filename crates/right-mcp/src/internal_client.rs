@@ -203,7 +203,7 @@ impl InternalClient {
         self.post("/reload", &serde_json::json!({})).await
     }
 
-    /// Register a foreground Telegram invocation for progress messages.
+    /// Register an invocation that may send progress or learning messages.
     pub async fn progress_register(
         &self,
         request: &ProgressRegisterRequest,
@@ -211,7 +211,7 @@ impl InternalClient {
         self.post("/progress/register", request).await
     }
 
-    /// Unregister a foreground Telegram invocation for progress messages.
+    /// Unregister a progress/learning-capable invocation.
     pub async fn progress_unregister(
         &self,
         request: &ProgressUnregisterRequest,

@@ -213,6 +213,8 @@ async fn skill_learning_start_rejects_core_skill_update() {
 async fn skill_learning_start_allows_non_core_update_until_delivery() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+        .expect("write agent config");
     let skill_dir = agent_dir.join(".claude/skills/custom-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# Custom skill").expect("write skill");
@@ -254,6 +256,8 @@ async fn skill_learning_start_allows_non_core_update_until_delivery() {
 async fn skill_learning_start_rejects_update_when_package_missing() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+        .expect("write agent config");
 
     let result = backend
         .tools_call(
@@ -304,6 +308,8 @@ async fn skill_learning_finish_requires_receipt_message_for_success() {
 async fn skill_learning_finish_rejects_success_when_package_missing() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+        .expect("write agent config");
 
     let result = backend
         .tools_call(
@@ -326,6 +332,169 @@ async fn skill_learning_finish_rejects_success_when_package_missing() {
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "skill_package_missing");
+}
+
+#[tokio::test]
+async fn skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    std::fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  mode: openshell\n",
+    )
+    .expect("write agent config");
+    let skill_dir = agent_dir.join(".claude/skills/rl-demo");
+    std::fs::create_dir_all(&skill_dir).expect("create host skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "# RL demo").expect("write host skill");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": "rl-demo",
+                "status": "created",
+                "message": "I learned rl-demo and will use it for this workflow.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-1".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_package_check_failed");
+}
+
+#[tokio::test]
+async fn skill_learning_start_rejects_malformed_installed_json() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let skills_dir = agent_dir.join(".claude/skills");
+    std::fs::create_dir_all(skills_dir.join("custom-skill")).expect("create skill dir");
+    std::fs::write(skills_dir.join("custom-skill/SKILL.md"), "# Custom skill")
+        .expect("write skill");
+    std::fs::write(skills_dir.join("installed.json"), "{not json").expect("write registry");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "update",
+                "skill_name": "custom-skill",
+                "reason": "try to update while registry is malformed",
+                "message": "I am checking the registry before updating custom-skill.",
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_registry_invalid");
+}
+
+#[tokio::test]
+async fn skill_learning_start_rejects_bundled_or_codegen_owned_update() {
+    for (skill_name, source) in [
+        ("bundled-skill", "bundled"),
+        ("codegen-owned-skill", "codegen-owned"),
+    ] {
+        let (backend, agents_dir, _tmp) = make_backend();
+        let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+        let skills_dir = agent_dir.join(".claude/skills");
+        std::fs::create_dir_all(skills_dir.join(skill_name)).expect("create skill dir");
+        std::fs::write(
+            skills_dir.join(skill_name).join("SKILL.md"),
+            "# Owned skill",
+        )
+        .expect("write skill");
+        std::fs::write(
+            skills_dir.join("installed.json"),
+            serde_json::json!({ skill_name: { "source": source } }).to_string(),
+        )
+        .expect("write registry");
+
+        let result = backend
+            .tools_call(
+                "test-agent",
+                &agent_dir,
+                "skill_learning_start",
+                json!({
+                    "action": "update",
+                    "skill_name": skill_name,
+                    "reason": "try to update an owned skill",
+                    "message": "I am checking whether this skill is mutable.",
+                }),
+                crate::progress::ToolCallContext::default(),
+            )
+            .await
+            .expect("tool errors should be returned as CallToolResult");
+
+        assert_eq!(result.is_error, Some(true), "{skill_name}");
+        let body = extract_error_body(&result);
+        assert_eq!(body["error"]["code"], "skill_core_readonly", "{skill_name}");
+    }
+}
+
+#[tokio::test]
+async fn skill_learning_start_rejects_empty_message_before_insert() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
+        .expect("write agent config");
+    let skill_dir = agent_dir.join(".claude/skills/custom-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "# Custom skill").expect("write skill");
+
+    backend
+        .progress_registry()
+        .register(crate::progress::ProgressRegistration {
+            invocation_id: "inv-empty".to_owned(),
+            kind: crate::progress::ProgressInvocationKind::Foreground,
+            bot_socket_path: agent_dir.join("missing-bot.sock"),
+            bot_send_token: "send-token".to_owned(),
+        })
+        .await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "update",
+                "skill_name": "custom-skill",
+                "reason": "try empty start message",
+                "message": "   ",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-empty".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+
+    let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM skill_learning_events WHERE invocation_id='inv-empty'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count learning events");
+    assert_eq!(count, 0, "empty start message must not insert event");
 }
 
 // ---------------------------------------------------------------------------

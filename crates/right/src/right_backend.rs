@@ -548,6 +548,35 @@ impl RightBackend {
                 None,
             ));
         };
+        let (kind, _) = match self.progress.learning_send_target(&invocation_id).await {
+            Ok(target) => target,
+            Err(crate::progress::ProgressError::Unavailable) => {
+                return Ok(tool_error(
+                    "learning_unavailable",
+                    "learning is available only for a registered invocation",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Forbidden) => {
+                return Ok(tool_error(
+                    "learning_unavailable",
+                    "learning is unavailable for this invocation kind",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::RateLimited { .. }) => {
+                return Ok(tool_error(
+                    "learning_send_failed",
+                    "internal error: learning target was rate limited",
+                    None,
+                ));
+            }
+        };
+        if let Err(result) =
+            crate::learning::validate_start_message(kind, params.message.as_deref())
+        {
+            return Ok(result);
+        }
 
         {
             let conn_arc = self.get_conn(agent_name)?;
