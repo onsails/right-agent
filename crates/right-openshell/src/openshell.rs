@@ -8,11 +8,17 @@ use std::time::Duration;
 use tokio::process::Command;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
+use crate::openshell_proto::openshell::datamodel::v1::{
+    Sandbox, SandboxCondition, SandboxPhase, SandboxStatus,
+};
 use crate::openshell_proto::openshell::v1::open_shell_client::OpenShellClient;
 use crate::openshell_proto::openshell::v1::{ExecSandboxRequest, GetSandboxRequest};
 
 /// SANDBOX_PHASE_READY value from openshell.datamodel.v1.SandboxPhase.
-const SANDBOX_PHASE_READY: i32 = 2;
+const SANDBOX_PHASE_READY: i32 = SandboxPhase::Ready as i32;
+
+/// SANDBOX_PHASE_ERROR value from openshell.datamodel.v1.SandboxPhase.
+const SANDBOX_PHASE_ERROR: i32 = SandboxPhase::Error as i32;
 
 /// Timeout for SSH ControlMaster probe and control operations (`-O check`, `-O exit`).
 ///
@@ -300,31 +306,10 @@ pub async fn is_sandbox_ready(
     client: &mut OpenShellClient<Channel>,
     name: &str,
 ) -> miette::Result<bool> {
-    let resp = match client
-        .get_sandbox(GetSandboxRequest {
-            name: name.to_owned(),
-        })
-        .await
-    {
-        Ok(r) => r,
-        Err(status) if status.code() == tonic::Code::NotFound => {
-            tracing::debug!(
-                sandbox = name,
-                "sandbox not found yet (expected during creation)"
-            );
-            return Ok(false);
-        }
-        Err(e) => {
-            return Err(miette::miette!("GetSandbox RPC failed for '{name}': {e:#}"));
-        }
+    let Some(readiness) = get_sandbox_readiness(client, name).await? else {
+        return Ok(false);
     };
-
-    let sandbox = resp
-        .into_inner()
-        .sandbox
-        .ok_or_else(|| miette::miette!("GetSandbox returned empty response for '{name}'"))?;
-
-    Ok(sandbox.phase == SANDBOX_PHASE_READY)
+    Ok(readiness.is_ready())
 }
 
 /// Poll until a sandbox reaches READY phase, or timeout.
@@ -336,16 +321,44 @@ pub async fn wait_for_ready(
 ) -> miette::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
     let interval = Duration::from_secs(poll_interval_secs);
+    let mut last_readiness = None;
 
     loop {
-        if is_sandbox_ready(client, name).await? {
-            tracing::info!(sandbox = name, "sandbox is READY");
-            return Ok(());
+        match get_sandbox_readiness(client, name).await? {
+            Some(readiness) if readiness.is_ready() => {
+                tracing::info!(sandbox = name, "sandbox is READY");
+                return Ok(());
+            }
+            Some(readiness) if readiness.is_error() => {
+                return Err(miette::miette!(
+                    "sandbox '{name}' entered ERROR while waiting for READY: {}",
+                    readiness.describe()
+                ));
+            }
+            Some(readiness) => {
+                tracing::debug!(
+                    sandbox = name,
+                    phase = sandbox_phase_name(readiness.phase),
+                    status = %readiness.status_summary,
+                    "sandbox not ready"
+                );
+                last_readiness = Some(readiness);
+            }
+            None => {
+                tracing::debug!(
+                    sandbox = name,
+                    "sandbox not found yet (expected during creation)"
+                );
+            }
         }
 
         if tokio::time::Instant::now() + interval > deadline {
+            let last_status = last_readiness
+                .as_ref()
+                .map(SandboxReadiness::describe)
+                .unwrap_or_else(|| "sandbox was not found".to_owned());
             return Err(miette::miette!(
-                "sandbox '{name}' did not become READY within {timeout_secs}s"
+                "sandbox '{name}' did not become READY within {timeout_secs}s ({last_status})"
             ));
         }
 
@@ -355,6 +368,159 @@ pub async fn wait_for_ready(
         );
         tokio::time::sleep(interval).await;
     }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct SandboxReadiness {
+    phase: i32,
+    status_summary: String,
+}
+
+impl SandboxReadiness {
+    fn from_sandbox(sandbox: Sandbox) -> Self {
+        Self {
+            phase: sandbox.phase,
+            status_summary: summarize_sandbox_status(sandbox.status.as_ref()),
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.phase == SANDBOX_PHASE_READY
+    }
+
+    fn is_error(&self) -> bool {
+        self.phase == SANDBOX_PHASE_ERROR
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "phase={} status={}",
+            sandbox_phase_name(self.phase),
+            self.status_summary
+        )
+    }
+}
+
+async fn get_sandbox_readiness(
+    client: &mut OpenShellClient<Channel>,
+    name: &str,
+) -> miette::Result<Option<SandboxReadiness>> {
+    let resp = match client
+        .get_sandbox(GetSandboxRequest {
+            name: name.to_owned(),
+        })
+        .await
+    {
+        Ok(r) => r,
+        Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(miette::miette!("GetSandbox RPC failed for '{name}': {e:#}"));
+        }
+    };
+
+    let sandbox = resp
+        .into_inner()
+        .sandbox
+        .ok_or_else(|| miette::miette!("GetSandbox returned empty response for '{name}'"))?;
+
+    Ok(Some(SandboxReadiness::from_sandbox(sandbox)))
+}
+
+fn sandbox_phase_name(phase: i32) -> &'static str {
+    match SandboxPhase::try_from(phase) {
+        Ok(SandboxPhase::Unspecified) => "UNSPECIFIED",
+        Ok(SandboxPhase::Provisioning) => "PROVISIONING",
+        Ok(SandboxPhase::Ready) => "READY",
+        Ok(SandboxPhase::Error) => "ERROR",
+        Ok(SandboxPhase::Deleting) => "DELETING",
+        Ok(SandboxPhase::Unknown) => "UNKNOWN",
+        Err(_) => "UNRECOGNIZED",
+    }
+}
+
+fn summarize_sandbox_status(status: Option<&SandboxStatus>) -> String {
+    let Some(status) = status else {
+        return "unavailable".to_owned();
+    };
+
+    let mut parts = Vec::new();
+    push_status_field(&mut parts, "sandbox_name", &status.sandbox_name);
+    push_status_field(&mut parts, "agent_pod", &status.agent_pod);
+    push_status_field(&mut parts, "agent_fd", &status.agent_fd);
+    push_status_field(&mut parts, "sandbox_fd", &status.sandbox_fd);
+
+    if status.conditions.is_empty() {
+        parts.push("conditions=[]".to_owned());
+    } else {
+        let mut conditions = status
+            .conditions
+            .iter()
+            .take(5)
+            .map(summarize_sandbox_condition)
+            .collect::<Vec<_>>();
+        if status.conditions.len() > 5 {
+            conditions.push(format!("... {} more", status.conditions.len() - 5));
+        }
+        parts.push(format!("conditions=[{}]", conditions.join("; ")));
+    }
+
+    if parts.is_empty() {
+        "empty".to_owned()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn summarize_sandbox_condition(condition: &SandboxCondition) -> String {
+    let mut parts = Vec::new();
+    match (
+        condition.r#type.trim().is_empty(),
+        condition.status.trim().is_empty(),
+    ) {
+        (false, false) => parts.push(format!(
+            "{}={}",
+            compact_status_field(&condition.r#type),
+            compact_status_field(&condition.status)
+        )),
+        (false, true) => parts.push(compact_status_field(&condition.r#type)),
+        (true, false) => parts.push(format!(
+            "status={}",
+            compact_status_field(&condition.status)
+        )),
+        (true, true) => {}
+    }
+    push_status_field(&mut parts, "reason", &condition.reason);
+    push_status_field(&mut parts, "message", &condition.message);
+    push_status_field(
+        &mut parts,
+        "last_transition_time",
+        &condition.last_transition_time,
+    );
+
+    if parts.is_empty() {
+        "empty".to_owned()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn push_status_field(parts: &mut Vec<String>, name: &str, value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    parts.push(format!("{name}={}", compact_status_field(value)));
+}
+
+fn compact_status_field(value: &str) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 180;
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+
+    let mut truncated = compact.chars().take(MAX_CHARS).collect::<String>();
+    truncated.push_str("...");
+    truncated
 }
 
 /// Spawn an OpenShell sandbox. Returns a [`ProcessGroupChild`] handle.
