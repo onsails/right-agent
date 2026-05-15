@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use dashmap::DashMap;
-use right_mcp::internal_client::{InternalClient, ProgressSendRequest};
+use right_mcp::internal_client::{
+    InternalClient, ProgressSendRequest, SKILL_LEARNING_FINISH_TOOL, SKILL_LEARNING_START_TOOL,
+};
 use right_mcp::tool_error::tool_error;
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{CallToolResult, Content, Tool};
@@ -23,6 +25,10 @@ use rmcp::model::{CallToolResult, Content, Tool};
 /// stalls.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
+use crate::learning::{
+    LearningMessagePhase, SkillLearningFinishParams, SkillLearningStartParams,
+    SkillPackageExpectation,
+};
 use crate::memory_server::{
     CronCreateParams, CronDeleteParams, CronListParams, CronListRunsParams, CronShowRunParams,
     CronTriggerParams, CronUpdateParams, McpListParams, cron_run_to_json,
@@ -104,6 +110,16 @@ impl RightBackend {
                 "Send an occasional standalone progress message to the current Telegram chat for the current foreground invocation only. Use for complex or long-running work, not routine short tasks. Rate limited to one message per 30 seconds per invocation. Max 2000 characters.",
                 schema_for_type::<crate::progress::SendProgressParams>(),
             ),
+            Tool::new(
+                SKILL_LEARNING_START_TOOL,
+                "Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.",
+                schema_for_type::<SkillLearningStartParams>(),
+            ),
+            Tool::new(
+                SKILL_LEARNING_FINISH_TOOL,
+                "Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files.",
+                schema_for_type::<SkillLearningFinishParams>(),
+            ),
             // Bootstrap
             Tool::new(
                 "bootstrap_done",
@@ -136,6 +152,14 @@ impl RightBackend {
             "cron_trigger" => self.call_cron_trigger(agent_name, &args),
             "mcp_list" => self.call_mcp_list(agent_name),
             crate::progress::SEND_PROGRESS_TOOL => self.call_send_progress(context, &args).await,
+            SKILL_LEARNING_START_TOOL => {
+                self.call_skill_learning_start(agent_name, agent_dir, context, &args)
+                    .await
+            }
+            SKILL_LEARNING_FINISH_TOOL => {
+                self.call_skill_learning_finish(agent_name, agent_dir, context, &args)
+                    .await
+            }
             "bootstrap_done" => self.call_bootstrap_done(agent_name).await,
             other => bail!("unknown tool: {other}"),
         }
@@ -478,6 +502,202 @@ impl RightBackend {
                 ))
             }
         }
+    }
+
+    async fn call_skill_learning_start(
+        &self,
+        agent_name: &str,
+        agent_dir: &Path,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: SkillLearningStartParams = match serde_json::from_value(args.clone()) {
+            Ok(params) => params,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid skill_learning_start params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        if let Err(result) =
+            crate::learning::validate_learning_target(agent_dir, params.action, &params.skill_name)
+        {
+            return Ok(result);
+        }
+        let expectation = match params.action {
+            crate::learning::LearningActionParam::Create => SkillPackageExpectation::MustNotExist,
+            crate::learning::LearningActionParam::Update => SkillPackageExpectation::MustExist,
+        };
+        if let Err(result) = crate::learning::validate_skill_package_state(
+            agent_name,
+            self.mtls_dir.as_deref(),
+            agent_dir,
+            &params.skill_name,
+            expectation,
+        )
+        .await
+        {
+            return Ok(result);
+        }
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(tool_error(
+                "learning_unavailable",
+                "learning is available only for a registered invocation",
+                None,
+            ));
+        };
+        let (kind, _) = match self.progress.learning_send_target(&invocation_id).await {
+            Ok(target) => target,
+            Err(crate::progress::ProgressError::Unavailable) => {
+                return Ok(tool_error(
+                    "learning_unavailable",
+                    "learning is available only for a registered invocation",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::Forbidden) => {
+                return Ok(tool_error(
+                    "learning_unavailable",
+                    "learning is unavailable for this invocation kind",
+                    None,
+                ));
+            }
+            Err(crate::progress::ProgressError::RateLimited { .. }) => {
+                return Ok(tool_error(
+                    "learning_send_failed",
+                    "internal error: learning target was rate limited",
+                    None,
+                ));
+            }
+        };
+        if let Err(result) =
+            crate::learning::validate_start_message(kind, params.message.as_deref())
+        {
+            return Ok(result);
+        }
+
+        {
+            let conn_arc = self.get_conn(agent_name)?;
+            let conn = Self::lock_conn(&conn_arc)?;
+            right_agent::learned_skills::insert_learning_event(
+                &conn,
+                &right_agent::learned_skills::LearningEvent {
+                    invocation_id: invocation_id.clone(),
+                    agent_name: agent_name.to_owned(),
+                    action: params.action.as_domain(),
+                    skill_name: params.skill_name.clone(),
+                    phase: right_agent::learned_skills::LearningPhase::Start,
+                    status: None,
+                    reason: params.reason.clone(),
+                    message: params.message.clone(),
+                    summary: None,
+                    event_refs: params.event_refs.clone().unwrap_or_default(),
+                },
+            )?;
+        }
+
+        if let Err(result) = crate::learning::send_learning_message(
+            &self.progress,
+            &invocation_id,
+            LearningMessagePhase::Start,
+            params.message.as_deref(),
+        )
+        .await
+        {
+            return Ok(result);
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::learning::success_json("started", &params.skill_name),
+        )]))
+    }
+
+    async fn call_skill_learning_finish(
+        &self,
+        agent_name: &str,
+        agent_dir: &Path,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: SkillLearningFinishParams = match serde_json::from_value(args.clone()) {
+            Ok(params) => params,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid skill_learning_finish params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        if let Err(result) =
+            crate::learning::validate_learning_target(agent_dir, params.action, &params.skill_name)
+        {
+            return Ok(result);
+        }
+        if let Err(result) = crate::learning::validate_finish_receipt_message(
+            params.status,
+            params.message.as_deref(),
+        ) {
+            return Ok(result);
+        }
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(tool_error(
+                "learning_unavailable",
+                "learning is available only for a registered invocation",
+                None,
+            ));
+        };
+
+        if params.status.is_success()
+            && let Err(result) = crate::learning::validate_skill_package_state(
+                agent_name,
+                self.mtls_dir.as_deref(),
+                agent_dir,
+                &params.skill_name,
+                SkillPackageExpectation::MustExist,
+            )
+            .await
+        {
+            return Ok(result);
+        }
+
+        {
+            let conn_arc = self.get_conn(agent_name)?;
+            let conn = Self::lock_conn(&conn_arc)?;
+            right_agent::learned_skills::insert_learning_event(
+                &conn,
+                &right_agent::learned_skills::LearningEvent {
+                    invocation_id: invocation_id.clone(),
+                    agent_name: agent_name.to_owned(),
+                    action: params.action.as_domain(),
+                    skill_name: params.skill_name.clone(),
+                    phase: right_agent::learned_skills::LearningPhase::Finish,
+                    status: Some(params.status.as_domain()),
+                    reason: None,
+                    message: params.message.clone(),
+                    summary: params.summary.clone(),
+                    event_refs: params.event_refs.clone().unwrap_or_default(),
+                },
+            )?;
+        }
+
+        if params.status.is_success()
+            && let Err(result) = crate::learning::send_learning_message(
+                &self.progress,
+                &invocation_id,
+                LearningMessagePhase::FinishSuccess,
+                params.message.as_deref(),
+            )
+            .await
+        {
+            return Ok(result);
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            crate::learning::success_json(params.status.as_str(), &params.skill_name),
+        )]))
     }
 
     // ------------------------------------------------------------------

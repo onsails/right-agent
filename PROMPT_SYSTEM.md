@@ -228,7 +228,7 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 | TOOLS.md | `/sandbox/TOOLS.md` | Agent (editable) |
 | settings.json | `/sandbox/.claude/settings.json` → `/platform/settings.json.<hash>` | Platform (symlink) |
 | reply-schema.json | `/sandbox/.claude/reply-schema.json` → `/platform/...` | Platform (symlink) |
-| skills/ | `/sandbox/.claude/skills/right-mcp` → `/platform/skills/right-mcp.<hash>` | Platform (symlink) |
+| skills/ | `/sandbox/.claude/skills/{right-skills,right-cron,right-mcp,right-learn-skill,right-memory,right-reflect}` → `/platform/skills/<name>.<hash>` | Platform (symlink) |
 | BOOTSTRAP.md | N/A (not synced to sandbox) | Content from compiled-in constant; on-disk file is host-side flag only |
 
 ### Host (`agent_dir/`)
@@ -245,7 +245,8 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 
 ### reply-schema.json (normal mode)
 Required: `content` (string|null).
-Optional: `reply_to_message_id`, `attachments`.
+Optional: `reply_to_message_id`, `attachments`, `used_skill_receipts`,
+`learning_signal`, `skill_issue_signal`.
 
 **Attachments.** Each item in `attachments` accepts an optional `media_group_id`
 (nullable string). Items sharing the same value are delivered as a single
@@ -253,13 +254,24 @@ Telegram media group (album). Validation and degradation rules match Telegram's
 `sendMediaGroup` constraints — see `### Media Groups (Albums)` in
 `OPERATING_INSTRUCTIONS.md` for the full rules shown to the agent.
 
+**Learned-skill metadata.** `used_skill_receipts` is an optional nullable array
+of `{ package_name, message }`; receipt messages are appended to the Telegram
+reply. `learning_signal` is an optional nullable `create_candidate` object for
+candidate skill creation, and `skill_issue_signal` is an optional nullable
+`update_candidate` object for candidate skill updates. Both signals require
+non-empty `event_refs` and enum-constrained reason/type fields; the bot may
+drop ambiguous or low-evidence signals without affecting reply delivery.
+
 ### bootstrap-schema.json (bootstrap mode)
-Same as reply-schema plus required `bootstrap_complete` (boolean).
+Required: `content` (string|null) and `bootstrap_complete` (boolean).
+Optional: `reply_to_message_id`, `attachments`. Bootstrap mode does not include
+normal-mode learned-skill fields (`used_skill_receipts`, `learning_signal`,
+`skill_issue_signal`).
 Server-side validation: `bootstrap_complete: true` is ignored unless IDENTITY.md,
 SOUL.md, USER.md all exist on the host after reverse_sync.
 
 ### CRON_SCHEMA_JSON (cron jobs — default)
-Defined in `crates/right-agent/src/codegen/agent_def.rs`. Required:
+Defined in `crates/right-codegen/src/agent_def.rs`. Required:
 `summary` (string). Optional: `notify` (object | null) and
 `no_notify_reason` (string | null). When `notify` is non-null, its
 `content` field is required. `notify: null` is the silent-output path
@@ -267,7 +279,7 @@ Defined in `crates/right-agent/src/codegen/agent_def.rs`. Required:
 carry a short factual explanation.
 
 ### BG_CONTINUATION_SCHEMA_JSON (cron jobs — background continuation)
-Defined in `crates/right-agent/src/codegen/agent_def.rs`. Selected by
+Defined in `crates/right-codegen/src/agent_def.rs`. Selected by
 `cron::execute_job` via `select_schema_and_fork` for
 `ScheduleKind::BackgroundContinuation` runs (foreground turns the
 worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
@@ -286,8 +298,11 @@ worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
 
 The `right` MCP server provides `with_instructions()` describing all tools:
 memory (memory_retain/memory_recall/memory_reflect — Hindsight mode only),
-cron (list/show runs), MCP management (add/remove/list/auth), foreground
-progress (mcp__right__send_progress), and bootstrap
+cron (list/show runs), MCP management (`mcp__right__mcp_list` read-only;
+add/remove/auth stay in the Telegram `/mcp` control plane), foreground
+progress (mcp__right__send_progress), learned-skill metadata/progress/receipt
+tools (mcp__right__skill_learning_start and
+mcp__right__skill_learning_finish), and bootstrap
 (mcp__right__bootstrap_done).
 
 Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs`
@@ -314,7 +329,18 @@ invocations. It sends a separate Telegram message (max 2000 characters), is
 rate limited to one message every 30 seconds per invocation, and returns
 tool-level errors such as `progress_unavailable`, `progress_forbidden`,
 `progress_rate_limited`, or `progress_send_failed`. Cron, delivery, reflection,
-and background-continuation turns deny this tool via `--disallowedTools`.
+and background-continuation turns deny foreground-only tools via
+`--disallowedTools`: `mcp__right__send_progress`,
+`mcp__right__skill_learning_start`, and
+`mcp__right__skill_learning_finish`.
+
+`mcp__right__skill_learning_start` and
+`mcp__right__skill_learning_finish` are metadata/progress/receipt tools for
+the `/right-learn-skill` built-in skill. They validate skill-learning
+provenance, record events, and send foreground learning receipts; they do not
+move skill files from sandbox to host. The active agent writes skill package
+files under `.claude/skills/<skill_name>/`. Create and update both require
+`rightx-*` skill package names.
 
 ## Upstream MCP Server Instructions
 

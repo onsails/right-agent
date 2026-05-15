@@ -19,9 +19,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::cc::markdown_utils::{html_escape, strip_html_tags};
-use crate::cc::worker_reply::should_accept_bootstrap;
 pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
+use crate::cc::worker_reply::{append_used_skill_receipts, should_accept_bootstrap};
 use crate::reflection::FailureKind;
+use right_agent::learned_skills::{
+    NudgeSignalRecord, increment_turn_nudge_counters, record_nudge_signal, select_reply_signal,
+};
 
 use super::session::{
     SessionRow, create_session, deactivate_current, get_active_session, touch_session,
@@ -995,7 +998,11 @@ pub fn spawn_worker(
                 batch.first().map(|m| m.message_id)
             };
             match reply_result {
-                Ok(Some(output)) => {
+                Ok(Some(mut output)) => {
+                    output.content = append_used_skill_receipts(
+                        output.content,
+                        output.used_skill_receipts.as_deref(),
+                    );
                     let reply_to = if is_group {
                         // Always reply-to the triggering message in groups,
                         // regardless of batch size.
@@ -2548,6 +2555,9 @@ async fn invoke_cc(
         tracing::warn!(?chat_id, stderr = %stderr_str, "CC stderr");
     }
 
+    let learning_invocation_id = active_progress
+        .as_ref()
+        .map(|active| active.invocation_id.clone());
     if let Some(active) = active_progress.take() {
         finish_progress_invocation(ctx, active).await;
     }
@@ -2788,6 +2798,82 @@ async fn invoke_cc(
 
             // Bootstrap completion is now detected by file presence after
             // reverse_sync in spawn_worker — no bootstrap_complete field needed.
+
+            if let Err(e) =
+                increment_turn_nudge_counters(&conn, &ctx.agent_name, i64::from(usage.num_turns))
+            {
+                tracing::warn!(
+                    ?chat_id,
+                    agent = %ctx.agent_name,
+                    "skill nudge counter increment failed: {e:#}"
+                );
+            }
+
+            if let Some(invocation_id) = learning_invocation_id.as_deref() {
+                let learning_signal_json = match reply_output.learning_signal.as_ref() {
+                    Some(signal) => match serde_json::to_value(signal) {
+                        Ok(value) => Some(value),
+                        Err(e) => {
+                            tracing::warn!(
+                                ?chat_id,
+                                invocation_id,
+                                "learning signal JSON conversion failed: {e:#}"
+                            );
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                let skill_issue_signal_json = match reply_output.skill_issue_signal.as_ref() {
+                    Some(signal) => match serde_json::to_value(signal) {
+                        Ok(value) => Some(value),
+                        Err(e) => {
+                            tracing::warn!(
+                                ?chat_id,
+                                invocation_id,
+                                "skill issue signal JSON conversion failed: {e:#}"
+                            );
+                            None
+                        }
+                    },
+                    None => None,
+                };
+
+                match select_reply_signal(
+                    &conn,
+                    invocation_id,
+                    learning_signal_json,
+                    skill_issue_signal_json,
+                ) {
+                    Ok(Some((signal_kind, payload_json))) => {
+                        let record = NudgeSignalRecord {
+                            invocation_id: invocation_id.to_owned(),
+                            agent_name: ctx.agent_name.clone(),
+                            root_session_id: Some(session_uuid.clone()),
+                            chat_id: Some(chat_id),
+                            thread_id: Some(eff_thread_id),
+                            signal_kind,
+                            payload_json,
+                        };
+                        if let Err(e) = record_nudge_signal(&conn, &record) {
+                            tracing::warn!(
+                                ?chat_id,
+                                invocation_id,
+                                signal_kind = signal_kind.as_str(),
+                                "skill nudge signal record failed: {e:#}"
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            ?chat_id,
+                            invocation_id,
+                            "skill nudge signal selection failed: {e:#}"
+                        );
+                    }
+                }
+            }
 
             Ok(CcReply {
                 output: Some(reply_output),

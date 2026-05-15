@@ -111,28 +111,26 @@ non-built-in skill directories. Existing code already preserves custom skill
 directories under `.claude/skills/`; learned skills should use the same
 preservation rule.
 
-New skills created by Right learning must use an `rl-` prefix:
+New skills created by Right learning must use a `rightx-` prefix:
 
 ```text
-.claude/skills/rl-<slug>/
+.claude/skills/rightx-<slug>/
 ```
 
-`rl-` means "Right learned" and gives the platform a cheap way to distinguish
+`rightx-` means "Right extension" and gives the platform a cheap way to distinguish
 agent-created skills from user-installed hub/custom skills. The learning MCP
-tools must reject foreground create attempts whose `skill_name` does not match
-that prefix.
+tools must reject foreground create or update attempts whose `skill_name` does
+not match that prefix.
 
 Learned skills should also update `.claude/skills/installed.json` using the
 existing registry convention, with `source: "learned"` and
-`path: ".claude/skills/rl-<slug>"`. Host metadata records provenance and nudge
+`path: ".claude/skills/rightx-<slug>"`. Host metadata records provenance and nudge
 state; `installed.json` remains the agent-local skill registry.
 
-Existing non-core skills may be patched by the learning flow even when they are
-not `rl-*`: custom skills, manually installed skills, and hub-installed skills
-are fair game. Core/platform/bundled/codegen-owned skills are excluded. The
-`right-learn-skill` instructions must teach this boundary, and the learning MCP
-tools should reject known core skill names or sources when they can identify
-them. Codegen re-sync remains a repair fallback, not the primary guard.
+Existing non-`rightx-*` skills must not be patched by the learning flow,
+including custom, manually installed, hub-installed, core/platform/bundled, and
+codegen-owned skills. If a non-`rightx-*` skill is wrong, the agent should create
+a corrective `rightx-*` learned skill or leave a deferred learning signal.
 
 Host metadata may record that a skill exists, who created it, and which
 invocation produced it. Host code must not copy arbitrary files from sandbox
@@ -159,7 +157,7 @@ The skill teaches the agent:
 - when to use `scripts/`, `references/`, and `assets/`;
 - how to keep activation descriptions specific and non-noisy;
 - how to emit receipts and nudge signals;
-- that new learned skills must use the `rl-` prefix;
+- that new learned skills must use the `rightx-` prefix;
 - that it must call `mcp__right__skill_learning_start` before any create/update
   file write;
 - that it must call `mcp__right__skill_learning_finish` after the create/update
@@ -182,8 +180,8 @@ conditions is true and the result is reusable across future sessions:
 - `repeated_tool_pattern`: the agent discovered a tool/API usage pattern likely
   to recur.
 
-The foreground agent should update an existing non-core skill when a loaded
-skill is materially wrong or incomplete:
+The foreground agent should update an existing `rightx-*` learned skill when it
+is materially wrong or incomplete:
 
 - `missing_step`
 - `stale_command`
@@ -199,7 +197,7 @@ The foreground agent must not create a skill for:
 - facts better stored as memory;
 - failed attempts that were not verified;
 - generic advice not tied to a concrete Right Agent workflow;
-- platform, bundled, or codegen-owned core skill changes.
+- non-`rightx-*` skill changes.
 
 ## Learning MCP Calls and Receipts
 
@@ -218,7 +216,7 @@ Start call shape:
 ```json
 {
   "action": "create",
-  "skill_name": "rl-notion-database-filters",
+  "skill_name": "rightx-notion-database-filters",
   "reason": "recovered_surprise",
   "event_refs": ["e17", "e19", "e21"],
   "message": "Learning a reusable skill for Notion database filters."
@@ -232,10 +230,10 @@ Allowed `action` values:
 
 Validation:
 
-- `action=create` requires `skill_name` to match `rl-*`.
-- `action=update` may target any non-core skill, including custom, manually
-  installed, hub-installed, and `rl-*` learned skills.
-- core/platform/bundled/codegen-owned skills are rejected when identifiable.
+- `action=create` and `action=update` both require `skill_name` to match
+  `rightx-*`.
+- non-`rightx-*` custom, manual, hub-installed, core/platform/bundled, and
+  codegen-owned skills are not patched by this flow.
 - absolute paths are never accepted.
 
 After a successful or failed create/update attempt, the agent must call:
@@ -249,7 +247,7 @@ Finish call shape:
 ```json
 {
   "action": "create",
-  "skill_name": "rl-notion-database-filters",
+  "skill_name": "rightx-notion-database-filters",
   "status": "created",
   "message": "<localized learned-skill receipt>",
   "summary": "Captured the reusable Notion filter schema rule."
@@ -440,7 +438,7 @@ Allowed actions:
 
 - decide whether a reusable workflow exists;
 - create learned skill package for `learning_signal`;
-- patch non-core skill package for `skill_issue_signal`;
+- patch an existing `rightx-*` learned skill package for `skill_issue_signal`;
 - write only under `.claude/skills/<skill_name>/`;
 - call learning start/finish MCP tools for metadata and receipt delivery.
 
@@ -484,11 +482,10 @@ therefore treats them as agent-owned code inside the agent sandbox.
 
 Boundaries:
 
-- New learned skills must be created as `rl-*`.
-- Learning flows may patch any non-core skill: custom, manually installed,
-  hub-installed, or `rl-*`.
-- Platform, bundled, and codegen-owned core skills are read-only to
-  learning flows.
+- New learned skills must be created as `rightx-*`.
+- Learning flows may patch only existing `rightx-*` learned skills.
+- Custom, manual, hub-installed, platform, bundled, and codegen-owned skills are
+  read-only to learning flows.
 - No API accepts an absolute sandbox path for host ingestion.
 - Learning MCP APIs accept skill names only and validate derived paths under
   `.claude/skills/`.
@@ -565,10 +562,9 @@ Targeted tests:
 - signal validation requires allowed defer reason and event refs;
 - learning instructions mention `mcp__right__skill_learning_start` before skill
   writes and `mcp__right__skill_learning_finish` after writes;
-- start rejects create skill names without `rl-`;
-- start/finish reject known core skill names or sources;
-- start allows update of non-core custom, manual, hub-installed, and `rl-*`
-  skills;
+- start rejects create and update skill names without `rightx-`;
+- start/finish reject non-`rightx-*` skills and known core skill names or sources;
+- start allows update of existing `rightx-*` learned skills;
 - cron/reflection paths cannot use learning start/finish tools;
 - background review can use learning start/finish tools only in silent-start
   mode;

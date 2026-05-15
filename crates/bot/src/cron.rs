@@ -399,7 +399,7 @@ async fn execute_job(
         return;
     }
 
-    let disallowed_tools = crate::cc::invocation::disallow_send_progress(
+    let disallowed_tools = crate::cc::invocation::disallow_foreground_only_tools(
         crate::cc::invocation::baseline_disallowed_tools(),
     );
 

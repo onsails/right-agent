@@ -3,11 +3,92 @@ use crate::{
     generate_system_prompt,
 };
 
+fn enum_values(field: &serde_json::Value) -> Vec<&str> {
+    field["enum"]
+        .as_array()
+        .expect("field enum must be an array")
+        .iter()
+        .map(|value| value.as_str().expect("enum value must be a string"))
+        .collect()
+}
+
 #[test]
 fn reply_schema_json_is_valid() {
     let parsed: serde_json::Value =
         serde_json::from_str(REPLY_SCHEMA_JSON).expect("REPLY_SCHEMA_JSON must be valid JSON");
     assert!(parsed.get("required").is_some());
+}
+
+#[test]
+fn reply_schema_contains_learned_skill_fields() {
+    let parsed: serde_json::Value =
+        serde_json::from_str(REPLY_SCHEMA_JSON).expect("REPLY_SCHEMA_JSON must be valid JSON");
+    let properties = parsed["properties"]
+        .as_object()
+        .expect("schema properties must be an object");
+    assert!(
+        properties.contains_key("used_skill_receipts"),
+        "schema must include used_skill_receipts"
+    );
+    assert!(
+        properties.contains_key("learning_signal"),
+        "schema must include learning_signal"
+    );
+    assert!(
+        properties.contains_key("skill_issue_signal"),
+        "schema must include skill_issue_signal"
+    );
+
+    let required = parsed["required"]
+        .as_array()
+        .expect("schema required must be an array");
+    let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert!(required_strs.contains(&"content"), "must require content");
+    assert!(
+        !required_strs.contains(&"used_skill_receipts"),
+        "used_skill_receipts must be optional"
+    );
+
+    for path in [
+        &["learning_signal", "trigger"][..],
+        &["learning_signal", "reason_not_written"][..],
+        &["skill_issue_signal", "issue"][..],
+        &["skill_issue_signal", "reason_not_patched"][..],
+        &["skill_issue_signal", "observed_effect"][..],
+    ] {
+        let field = &properties[path[0]]["properties"][path[1]];
+        assert!(
+            field.get("enum").and_then(|v| v.as_array()).is_some(),
+            "{}.{} must use a JSON Schema enum",
+            path[0],
+            path[1]
+        );
+    }
+
+    let trigger_enum = enum_values(&properties["learning_signal"]["properties"]["trigger"]);
+    assert_eq!(
+        trigger_enum,
+        vec![
+            "explicit_user_request",
+            "multi_step_workflow",
+            "recovered_surprise",
+            "user_correction",
+            "repeated_tool_pattern",
+        ]
+    );
+
+    let issue_enum = enum_values(&properties["skill_issue_signal"]["properties"]["issue"]);
+    assert_eq!(
+        issue_enum,
+        vec![
+            "missing_step",
+            "stale_command",
+            "wrong_api_assumption",
+            "overbroad_activation",
+            "broken_script",
+            "unsafe_instruction",
+        ]
+    );
 }
 
 #[test]
@@ -126,6 +207,80 @@ fn operating_instructions_constant_is_non_empty() {
         crate::OPERATING_INSTRUCTIONS.contains("## MCP Management"),
         "OPERATING_INSTRUCTIONS must contain MCP Management section"
     );
+}
+
+#[test]
+fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [
+        "/right-learn-skill",
+        "Procedures and reusable workflows",
+        "save as skills, not memory",
+        right_mcp::LEARNED_SKILL_PREFIX,
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must mention {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn operating_instructions_teach_used_learned_skill_receipts() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [
+        right_mcp::LEARNED_SKILL_PREFIX,
+        "used_skill_receipts",
+        "materially guides your answer",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must teach learned-skill receipt rule: missing {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn right_learn_skill_prompt_uses_current_prefix_and_exact_signal_rules() {
+    let skill = include_str!("../skills/right-learn-skill/SKILL.md");
+    assert!(
+        skill.contains("description: >-\n  Use when"),
+        "right-learn-skill description should start with Use when"
+    );
+    assert!(
+        skill.contains(right_mcp::LEARNED_SKILL_PREFIX),
+        "right-learn-skill must mention learned-skill prefix {:?}",
+        right_mcp::LEARNED_SKILL_PREFIX
+    );
+    for needle in [
+        "used_skill_receipts",
+        "at most one",
+        "successful `mcp__right__skill_learning_finish`",
+        "1 non-empty event ref",
+        "2+ non-empty event refs",
+    ] {
+        assert!(
+            skill.contains(needle),
+            "right-learn-skill must mention {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn learned_skill_prompt_text_has_no_old_or_invalid_prefixes() {
+    let learn_skill = include_str!("../skills/right-learn-skill/SKILL.md");
+    let agent_texts = [
+        ("OPERATING_INSTRUCTIONS", crate::OPERATING_INSTRUCTIONS),
+        ("right-learn-skill", learn_skill),
+    ];
+    for (name, text) in agent_texts {
+        for forbidden in ["rl-", "_right-"] {
+            assert!(
+                !text.contains(forbidden),
+                "{name} must not mention old or invalid learned-skill prefix {forbidden:?}"
+            );
+        }
+    }
 }
 
 /// Pin the hardcoded cron-idle minutes in OPERATING_INSTRUCTIONS.md to the

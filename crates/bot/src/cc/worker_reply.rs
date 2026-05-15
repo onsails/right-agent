@@ -2,12 +2,42 @@ use std::path::Path;
 
 use crate::cc::attachments_dto::OutboundAttachment;
 
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+pub struct UsedSkillReceipt {
+    pub package_name: String,
+    pub message: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+pub struct LearningSignal {
+    pub kind: String,
+    pub package_name_hint: String,
+    pub trigger: String,
+    pub reason_not_written: String,
+    pub event_refs: Vec<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
+pub struct SkillIssueSignal {
+    pub kind: String,
+    pub skill_name: String,
+    pub issue: String,
+    pub reason_not_patched: String,
+    pub observed_effect: String,
+    pub event_refs: Vec<String>,
+    pub patch_hint: String,
+}
+
 /// Parsed output from CC structured JSON response (`result` field per D-03).
 #[derive(Debug, serde::Deserialize)]
 pub struct ReplyOutput {
     pub content: Option<String>,
     pub reply_to_message_id: Option<i32>,
     pub attachments: Option<Vec<OutboundAttachment>>,
+    pub used_skill_receipts: Option<Vec<UsedSkillReceipt>>,
+    pub learning_signal: Option<LearningSignal>,
+    pub skill_issue_signal: Option<SkillIssueSignal>,
     /// Bootstrap mode: `true` signals agent claims onboarding is complete.
     /// Server-side file check (`should_accept_bootstrap`) gates actual completion.
     pub bootstrap_complete: Option<bool>,
@@ -62,6 +92,9 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
             },
             reply_to_message_id: None,
             attachments: None,
+            used_skill_receipts: None,
+            learning_signal: None,
+            skill_issue_signal: None,
             bootstrap_complete: None,
         }
     } else {
@@ -70,6 +103,33 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
     };
 
     Ok((output, session_id))
+}
+
+pub(crate) fn append_used_skill_receipts(
+    content: Option<String>,
+    receipts: Option<&[UsedSkillReceipt]>,
+) -> Option<String> {
+    let Some(receipts) = receipts else {
+        return content;
+    };
+    if receipts.is_empty() {
+        return content;
+    }
+
+    let messages = receipts
+        .iter()
+        .map(|receipt| receipt.message.trim())
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if messages.is_empty() {
+        return content.filter(|content| !content.is_empty());
+    }
+
+    match content {
+        Some(content) if !content.is_empty() => Some(format!("{content}\n\n{messages}")),
+        _ => Some(messages),
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +249,111 @@ mod tests {
         let (output, _) = parse_reply_output(json).unwrap();
         assert_eq!(output.content.as_deref(), Some("plain text fallback"));
         assert!(output.attachments.is_none());
+    }
+
+    #[test]
+    fn parse_reply_output_accepts_used_skill_receipts() {
+        let json = r#"{"result":{"content":"done","used_skill_receipts":[{"package_name":"right-mcp","message":"Used skill: right-mcp"}]}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        let receipts = output.used_skill_receipts.unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].package_name, "right-mcp");
+        assert_eq!(receipts[0].message, "Used skill: right-mcp");
+    }
+
+    #[test]
+    fn parse_reply_output_accepts_learning_signal() {
+        let json = r#"{"result":{"content":"done","learning_signal":{"kind":"create_candidate","package_name_hint":"right-demo","trigger":"explicit_user_request","reason_not_written":"needs_full_context_review","event_refs":["event-1"],"summary":"Capture this workflow."}}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        let signal = output.learning_signal.unwrap();
+        assert_eq!(signal.kind, "create_candidate");
+        assert_eq!(signal.package_name_hint, "right-demo");
+        assert_eq!(signal.trigger, "explicit_user_request");
+        assert_eq!(signal.reason_not_written, "needs_full_context_review");
+        assert_eq!(signal.event_refs, vec!["event-1"]);
+        assert_eq!(signal.summary, "Capture this workflow.");
+    }
+
+    #[test]
+    fn parse_reply_output_keeps_skill_fields_optional() {
+        let json = r#"{"result":{"content":"hello"}}"#;
+        let (output, _) = parse_reply_output(json).unwrap();
+        assert!(output.used_skill_receipts.is_none());
+        assert!(output.learning_signal.is_none());
+        assert!(output.skill_issue_signal.is_none());
+    }
+
+    #[test]
+    fn append_used_skill_receipts_adds_messages_after_content() {
+        let receipts = vec![
+            UsedSkillReceipt {
+                package_name: "right-mcp".to_owned(),
+                message: "Used skill: right-mcp".to_owned(),
+            },
+            UsedSkillReceipt {
+                package_name: "right-memory".to_owned(),
+                message: "Used skill: right-memory".to_owned(),
+            },
+        ];
+
+        let content =
+            append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice()));
+
+        assert_eq!(
+            content.as_deref(),
+            Some("Done\n\nUsed skill: right-mcp\nUsed skill: right-memory")
+        );
+    }
+
+    #[test]
+    fn append_used_skill_receipts_none_content_blank_receipts_returns_none() {
+        let receipts = vec![
+            UsedSkillReceipt {
+                package_name: "right-mcp".to_owned(),
+                message: "   ".to_owned(),
+            },
+            UsedSkillReceipt {
+                package_name: "right-memory".to_owned(),
+                message: "\n\t".to_owned(),
+            },
+        ];
+
+        let content = append_used_skill_receipts(None, Some(receipts.as_slice()));
+
+        assert_eq!(content, None);
+    }
+
+    #[test]
+    fn append_used_skill_receipts_appends_only_nonblank_trimmed_messages() {
+        let receipts = vec![
+            UsedSkillReceipt {
+                package_name: "right-mcp".to_owned(),
+                message: "  Used skill: right-mcp  ".to_owned(),
+            },
+            UsedSkillReceipt {
+                package_name: "right-memory".to_owned(),
+                message: "\n".to_owned(),
+            },
+            UsedSkillReceipt {
+                package_name: "right-codegen".to_owned(),
+                message: "\tUsed skill: right-codegen\n".to_owned(),
+            },
+        ];
+
+        let content =
+            append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice()));
+
+        assert_eq!(
+            content.as_deref(),
+            Some("Done\n\nUsed skill: right-mcp\nUsed skill: right-codegen")
+        );
+    }
+
+    #[test]
+    fn append_used_skill_receipts_empty_receipts_leaves_content_unchanged() {
+        let content = append_used_skill_receipts(Some("Done".to_owned()), Some(&[]));
+
+        assert_eq!(content.as_deref(), Some("Done"));
     }
 
     // bootstrap mode tests

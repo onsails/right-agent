@@ -142,5 +142,23 @@ limit, then calls the bot's `POST /progress/send` endpoint. Telegram send
 failures surface as tool-level `progress_send_failed` errors.
 
 Cron, delivery, reflection, and background-continuation calls pass
-`mcp__right__send_progress` via `--disallowedTools`; they have no live
+foreground-only tools (`mcp__right__send_progress`,
+`mcp__right__skill_learning_start`, and
+`mcp__right__skill_learning_finish`) via `--disallowedTools`; they have no live
 foreground invocation and must use their structured output delivery path.
+
+## Learned Skill MCP Tools
+
+`mcp__right__skill_learning_start` and
+`mcp__right__skill_learning_finish` are built-in RightBackend tools. They are
+metadata/progress/receipt tools: the active agent writes skill package files
+directly under `.claude/skills/<skill_name>/`; MCP validates the skill name,
+records learning events in `data.db`, verifies successful finishes by checking
+`.claude/skills/<skill_name>/SKILL.md`, and sends foreground learning messages
+through the existing bot UDS delivery path. In OpenShell mode that existence
+check runs inside the sandbox; in `sandbox: none` mode it checks the host agent
+directory. The receipt text is authored by the LLM and passed as the
+`message` argument to `mcp__right__skill_learning_finish`.
+
+Create and update both require `rightx-*`. The learning flow never patches
+custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.

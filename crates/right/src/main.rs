@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 pub(crate) mod aggregator;
 pub(crate) mod internal_api;
+pub(crate) mod learning;
 mod memory_server;
 pub(crate) mod progress;
 pub(crate) mod right_backend;
@@ -1047,8 +1048,7 @@ async fn main() -> miette::Result<()> {
                     if due_in == std::time::Duration::ZERO {
                         continue;
                     }
-                    let Some((_, backend)) =
-                        proxies_snapshot.iter().find(|(n, _)| n == name)
+                    let Some((_, backend)) = proxies_snapshot.iter().find(|(n, _)| n == name)
                     else {
                         tracing::warn!(
                             agent = agent_name.as_str(),

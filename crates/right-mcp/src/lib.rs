@@ -16,6 +16,9 @@ pub(crate) fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Prefix for Right-owned learned Agent Skill packages.
+pub const LEARNED_SKILL_PREFIX: &str = "rightx-";
+
 /// Generate a random 32-byte agent secret, base64url-encoded (no padding).
 ///
 /// Stored persistently in `agent.yaml`. Used to derive Bearer tokens for
