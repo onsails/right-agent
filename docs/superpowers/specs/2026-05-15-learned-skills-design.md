@@ -24,7 +24,7 @@ The design therefore needs two layers from the start:
 - Let the foreground agent create and update learned Agent Skills packages.
 - Support full skill packages: `SKILL.md`, `scripts/`, `references/`, and
   `assets/`.
-- Require `mcp__right__send_progress` before foreground skill file writes.
+- Use dedicated learning MCP calls to announce learning start and finish.
 - Show user-visible learned/updated/used receipts without approval prompts.
 - Persist provenance and nudge signals for future background review.
 - Keep learned skill content sandbox-local in stage 1.
@@ -39,8 +39,8 @@ The design therefore needs two layers from the start:
 - No approval queue.
 - No host import of arbitrary sandbox paths.
 - No background review worker required for the first usable release.
-- No mutation of platform, bundled, hub-installed, or codegen-owned skills.
 - No new MCP write primitive for moving skill package files.
+- No core/platform/bundled/codegen-owned skill mutation.
 
 ## Decision
 
@@ -51,9 +51,11 @@ The foreground agent owns immediate learning:
 
 1. It solves the user's task.
 2. If the experience is reusable, it loads `right-learn-skill`.
-3. It calls `mcp__right__send_progress` before writing or patching skill files.
-4. It writes or updates a learned skill package in the agent-owned skills tree.
-5. It returns a localized receipt in structured output.
+3. It calls `mcp__right__skill_learning_start` before writing or patching skill
+   files.
+4. It writes or updates a skill package in the agent-owned skills tree.
+5. It calls `mcp__right__skill_learning_finish` after the write succeeds or
+   fails.
 
 The nudge foundation owns reliability:
 
@@ -109,18 +111,35 @@ non-built-in skill directories. Existing code already preserves custom skill
 directories under `.claude/skills/`; learned skills should use the same
 preservation rule.
 
+New skills created by Right learning must use an `rl-` prefix:
+
+```text
+.claude/skills/rl-<slug>/
+```
+
+`rl-` means "Right learned" and gives the platform a cheap way to distinguish
+agent-created skills from user-installed hub/custom skills. The learning MCP
+tools must reject foreground create attempts whose `skill_name` does not match
+that prefix.
+
 Learned skills should also update `.claude/skills/installed.json` using the
 existing registry convention, with `source: "learned"` and
-`path: ".claude/skills/<package_name>"`. Host metadata records provenance and
-nudge state; `installed.json` remains the agent-local skill registry.
+`path: ".claude/skills/rl-<slug>"`. Host metadata records provenance and nudge
+state; `installed.json` remains the agent-local skill registry.
+
+Existing non-core skills may be patched by the learning flow even when they are
+not `rl-*`: custom skills, manually installed skills, and hub-installed skills
+are fair game. Core/platform/bundled/codegen-owned skills are excluded. The
+`right-learn-skill` instructions must teach this boundary, and the learning MCP
+tools should reject known core skill names or sources when they can identify
+them. Codegen re-sync remains a repair fallback, not the primary guard.
 
 Host metadata may record that a skill exists, who created it, and which
 invocation produced it. Host code must not copy arbitrary files from sandbox
 paths into host-controlled locations in stage 1.
 
-If a future MCP metadata hook is added, it accepts `package_name` only. It must
-derive and validate the package path itself and never accept an absolute path
-from the model.
+Learning MCP calls accept skill names only. They must derive the package path
+themselves and never accept an absolute path from the model.
 
 ## Built-in `right-learn-skill`
 
@@ -140,8 +159,11 @@ The skill teaches the agent:
 - when to use `scripts/`, `references/`, and `assets/`;
 - how to keep activation descriptions specific and non-noisy;
 - how to emit receipts and nudge signals;
-- that it must call `mcp__right__send_progress` before any create/update file
-  write.
+- that new learned skills must use the `rl-` prefix;
+- that it must call `mcp__right__skill_learning_start` before any create/update
+  file write;
+- that it must call `mcp__right__skill_learning_finish` after the create/update
+  succeeds or fails.
 
 The built-in skill must be installed alongside existing built-ins such as
 `right-skills`, `right-cron`, and `right-mcp`.
@@ -160,8 +182,8 @@ conditions is true and the result is reusable across future sessions:
 - `repeated_tool_pattern`: the agent discovered a tool/API usage pattern likely
   to recur.
 
-The foreground agent should update an existing learned skill when a loaded
-learned skill is materially wrong or incomplete:
+The foreground agent should update an existing non-core skill when a loaded
+skill is materially wrong or incomplete:
 
 - `missing_step`
 - `stale_command`
@@ -177,45 +199,80 @@ The foreground agent must not create a skill for:
 - facts better stored as memory;
 - failed attempts that were not verified;
 - generic advice not tied to a concrete Right Agent workflow;
-- platform, bundled, or hub skill changes.
+- platform, bundled, or codegen-owned core skill changes.
 
-## Progress and Receipts
+## Learning MCP Calls and Receipts
 
 Before creating or updating package files, the agent must call:
 
 ```text
-mcp__right__send_progress(message: string)
+mcp__right__skill_learning_start
 ```
 
-The message should be short and user-visible, for example:
+Foreground start calls send the user-visible "learning/updating" progress
+message. The agent must not call `mcp__right__send_progress` separately just to
+announce learning.
 
-```text
-Learning a reusable skill for Notion database filters.
-```
-
-This is not an approval prompt. It only shows that value is being created.
-
-If the progress call returns `rate_limited`, the agent may continue if a recent
-progress message already exists for the invocation. If progress is unavailable
-or any other progress error occurs, the agent should avoid writing the skill
-and emit a nudge signal instead. The user's main task must still complete.
-
-After a successful create/update, structured output includes `skill_receipt`:
+Start call shape:
 
 ```json
 {
-  "skill_receipt": {
-    "kind": "created",
-    "package_name": "notion-database-filters",
-    "message": "<localized learned-skill receipt>"
-  }
+  "action": "create",
+  "skill_name": "rl-notion-database-filters",
+  "reason": "recovered_surprise",
+  "event_refs": ["e17", "e19", "e21"],
+  "message": "Learning a reusable skill for Notion database filters."
 }
 ```
 
-Allowed `kind` values:
+Allowed `action` values:
+
+- `create`
+- `update`
+
+Validation:
+
+- `action=create` requires `skill_name` to match `rl-*`.
+- `action=update` may target any non-core skill, including custom, manually
+  installed, hub-installed, and `rl-*` learned skills.
+- core/platform/bundled/codegen-owned skills are rejected when identifiable.
+- absolute paths are never accepted.
+
+After a successful or failed create/update attempt, the agent must call:
+
+```text
+mcp__right__skill_learning_finish
+```
+
+Finish call shape:
+
+```json
+{
+  "action": "create",
+  "skill_name": "rl-notion-database-filters",
+  "status": "created",
+  "message": "<localized learned-skill receipt>",
+  "summary": "Captured the reusable Notion filter schema rule."
+}
+```
+
+Allowed successful `status` values:
 
 - `created`
 - `updated`
+
+Failure statuses:
+
+- `aborted`
+- `failed`
+
+Successful finish calls send the learned/updated receipt to the user and record
+provenance. Failure finish calls record the failed attempt and may become nudge
+evidence; they do not send a learned/updated receipt.
+
+These tools are metadata/progress/receipt tools. They do not move skill files
+from sandbox to host. The agent still writes the package files directly in the
+agent-owned skills tree.
 
 When a learned skill materially guides a later answer, the agent should return
 `used_skill_receipts`:
@@ -243,17 +300,16 @@ Extend the foreground reply schema with optional fields:
   "content": "Done.",
   "attachments": null,
   "reply_to_message_id": null,
-  "skill_receipt": null,
   "used_skill_receipts": [],
   "learning_signal": null,
   "skill_issue_signal": null
 }
 ```
 
-`skill_receipt` and background signals are mutually exclusive:
+Learning MCP finish records and background signals are mutually exclusive:
 
-- If `skill_receipt` is present, ignore `learning_signal` and
-  `skill_issue_signal`.
+- If a successful `mcp__right__skill_learning_finish` exists for the invocation,
+  ignore `learning_signal` and `skill_issue_signal`.
 - If both `learning_signal` and `skill_issue_signal` are present, drop both and
   log a schema violation.
 - Most turns should set all skill fields to null or empty arrays.
@@ -265,7 +321,7 @@ learning/update candidate but does not publish a skill.
 
 All signals require:
 
-- no `skill_receipt`;
+- no successful learning finish call;
 - exactly one of `learning_signal` or `skill_issue_signal`;
 - one create/update trigger from the foreground learn criteria;
 - an allowed defer reason;
@@ -326,8 +382,8 @@ For each foreground invocation, record:
 - Telegram chat/thread identity as internal ids, not exposed to the agent;
 - started/finished timestamps;
 - tool iteration count;
-- whether any learned skill was loaded or used;
-- whether `skill_receipt` was present;
+- any `mcp__right__skill_learning_start` call;
+- any `mcp__right__skill_learning_finish` call and its status;
 - whether `used_skill_receipts` were present;
 - any accepted `learning_signal` or `skill_issue_signal`;
 - stable event refs for evidence.
@@ -377,29 +433,30 @@ Inputs:
 - timeline index with stable event ids;
 - salient events selected by reason, not line count;
 - one accepted `learning_signal` or `skill_issue_signal` when present;
-- existing learned skill names;
+- existing skill names and their source/core classification when available;
 - `right-learn-skill` authoring guidance.
 
 Allowed actions:
 
 - decide whether a reusable workflow exists;
 - create learned skill package for `learning_signal`;
-- patch learned skill package for `skill_issue_signal`;
-- write only under the learned skill package path;
-- return structured receipt text in the user's language.
+- patch non-core skill package for `skill_issue_signal`;
+- write only under `.claude/skills/<skill_name>/`;
+- call learning start/finish MCP tools for metadata and receipt delivery.
 
 Forbidden actions:
 
 - ask the user questions;
 - send user-facing progress messages;
-- edit project files outside the learned skill package;
-- edit platform, bundled, or hub skills;
+- edit project files outside the target skill package;
+- edit core/platform/bundled/codegen-owned skills;
 - trigger another learning review;
 - learn from its own review output.
 
 The background worker sends no user-visible message unless it creates or
-updates a skill. If it does create or update a skill, the bot sends the same
-receipt style used by foreground learning.
+updates a skill. Background start calls are silent; successful background
+finish calls send the same learned/updated receipt style used by foreground
+learning.
 
 ## Nudge Cost Controls
 
@@ -427,11 +484,13 @@ therefore treats them as agent-owned code inside the agent sandbox.
 
 Boundaries:
 
-- Learned skills may create/update only non-built-in package directories.
-- Platform, bundled, hub-installed, and codegen-owned skills are read-only to
-  learned-skill flows.
+- New learned skills must be created as `rl-*`.
+- Learning flows may patch any non-core skill: custom, manually installed,
+  hub-installed, or `rl-*`.
+- Platform, bundled, and codegen-owned core skills are read-only to
+  learning flows.
 - No API accepts an absolute sandbox path for host ingestion.
-- Any future metadata API accepts package names only and validates paths under
+- Learning MCP APIs accept skill names only and validate derived paths under
   `.claude/skills/`.
 - Background review, when enabled, gets a restricted tool surface.
 - Background review must not have progress delivery.
@@ -444,19 +503,19 @@ No approvals.
 
 Foreground create/update:
 
-1. Agent sends one progress message before writing.
-2. Agent completes the user's task.
-3. Final response includes normal answer content.
-4. Bot appends the learned/updated receipt as a compact line in the same final
-   Telegram message when formatting allows.
-5. If Telegram splitting makes same-message display awkward, the bot may send a
-   single adjacent receipt message. It must not ask for approval.
+1. Agent calls `mcp__right__skill_learning_start`; the bot sends one progress
+   message.
+2. Agent writes or patches the skill package.
+3. Agent calls `mcp__right__skill_learning_finish`; successful finish sends the
+   learned/updated receipt.
+4. Agent completes the user's task with normal final answer content.
 
 Future background create/update:
 
 1. User already received the main answer.
 2. Background review runs silently.
-3. If it learns or repairs a skill, bot sends one standalone receipt message.
+3. If it learns or repairs a skill, successful finish sends one standalone
+   receipt message.
 4. If it does nothing, user sees nothing.
 
 Used-skill notification:
@@ -475,6 +534,8 @@ Expected implementation areas:
 - `crates/right-codegen/src/skills.rs`
 - `crates/right-codegen/src/agent_def.rs`
 - `crates/right-codegen/src/agent_def_tests.rs`
+- `mcp__right__skill_learning_start`
+- `mcp__right__skill_learning_finish`
 - foreground structured reply schema generation
 - foreground structured reply parsing in `crates/bot/src/cc/worker_reply.rs`
 - Telegram delivery path for receipts
@@ -498,14 +559,19 @@ Targeted tests:
 - built-in skill installer includes `right-learn-skill`;
 - installer preserves non-built-in learned skill directories;
 - reply schema accepts absent skill fields;
-- reply schema accepts valid `skill_receipt`;
 - reply schema accepts `used_skill_receipts`;
 - reply schema drops/logs both background signals when both are present;
-- `skill_receipt` causes background signals to be ignored;
+- successful learning finish causes background signals to be ignored;
 - signal validation requires allowed defer reason and event refs;
-- progress instructions mention `mcp__right__send_progress` before skill writes;
-- background/cron/reflection paths do not have progress available for learned
-  skill authoring;
+- learning instructions mention `mcp__right__skill_learning_start` before skill
+  writes and `mcp__right__skill_learning_finish` after writes;
+- start rejects create skill names without `rl-`;
+- start/finish reject known core skill names or sources;
+- start allows update of non-core custom, manual, hub-installed, and `rl-*`
+  skills;
+- cron/reflection paths cannot use learning start/finish tools;
+- background review can use learning start/finish tools only in silent-start
+  mode;
 - nudge counters update from foreground invocations without running a worker;
 - learned skill receipts are delivered without approval prompts.
 
@@ -513,8 +579,8 @@ Integration tests where practical:
 
 - create a temporary agent directory with `.claude/skills/custom-skill`, run
   built-in skill installation, verify the custom skill remains;
-- simulate a foreground structured response with `skill_receipt`, verify user
-  delivery includes the receipt;
+- simulate foreground start/finish learning calls, verify progress and receipt
+  delivery;
 - simulate a foreground response with `learning_signal`, verify metadata is
   persisted but no user message is sent when worker is disabled.
 
@@ -534,6 +600,8 @@ On upgrade:
 - preserve all existing `.claude/skills/<name>/` directories not owned by
   platform/codegen;
 - initialize new metadata/counter storage with empty defaults;
+- expose learning start/finish MCP tools before teaching the built-in skill to
+  call them;
 - keep background review disabled until explicitly enabled by a later feature;
 - allow foreground learning immediately after the built-in skill is synced.
 
@@ -547,8 +615,8 @@ criteria, and default structured output is no skill and no signal.
 Risk: prompt injection persists into learned skills.
 
 Mitigation: write boundaries are enforced by package path and source type;
-background worker has a restricted tool surface when enabled; no platform or
-hub skill mutation.
+background worker has a restricted tool surface when enabled; no platform,
+bundled, or codegen-owned core skill mutation.
 
 Risk: foreground learning blocks the user's answer.
 
@@ -565,6 +633,12 @@ Risk: receipts become noisy.
 
 Mitigation: only show create/update receipts after successful publish, and only
 show used-skill receipts when a learned skill materially guided the answer.
+
+Risk: start/finish MCP tools imply host-side file movement.
+
+Mitigation: the learning MCP tools are metadata, progress, and receipt tools
+only. They validate skill names and record provenance; they do not ingest files
+from sandbox paths or copy skill content to the host.
 
 ## Open Questions Deferred to Implementation
 
