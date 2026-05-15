@@ -172,6 +172,32 @@ fn sandbox_tar_download_args_include_rebuildable_has_no_rebuildable_excludes() {
 }
 
 #[test]
+fn sandbox_tar_download_remote_command_quotes_transform_semicolons_for_shell() {
+    use std::process::Command;
+
+    let args = sandbox_tar_download_args("sandbox", false).unwrap();
+    let remote_command = ssh_remote_command(&args).unwrap();
+    let probe = format!(
+        "tar() {{ for arg in \"$@\"; do printf '<%s>\\n' \"$arg\"; done; }}; {remote_command}"
+    );
+
+    let output = Command::new("sh").arg("-c").arg(&probe).output().unwrap();
+    assert!(
+        output.status.success(),
+        "remote command must not be split at transform semicolons; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed_args: Vec<String> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let expected_args: Vec<String> = args[1..].iter().map(|arg| format!("<{arg}>")).collect();
+    assert_eq!(parsed_args, expected_args);
+}
+
+#[test]
 fn sandbox_tar_download_args_preserves_relative_symlink_targets() {
     use std::os::unix::fs::{MetadataExt, symlink};
     use std::path::PathBuf;

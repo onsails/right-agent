@@ -3069,6 +3069,7 @@ dependencies = [
  "right-process",
  "serde-saphyr",
  "serde_json",
+ "shlex",
  "tempfile",
  "tokio",
  "tokio-stream",
