@@ -50,6 +50,22 @@ pub(crate) fn disallow_send_progress(mut tools: Vec<String>) -> Vec<String> {
     tools
 }
 
+pub(crate) fn disallow_learning_tools(mut tools: Vec<String>) -> Vec<String> {
+    for tool_name in [
+        right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL,
+        right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL,
+    ] {
+        if !tools.iter().any(|tool| tool == tool_name) {
+            tools.push(tool_name.to_owned());
+        }
+    }
+    tools
+}
+
+pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> {
+    disallow_learning_tools(disallow_send_progress(tools))
+}
+
 pub(crate) fn with_progress_invocation_header(
     mut config: serde_json::Value,
     invocation_id: &str,
@@ -452,6 +468,40 @@ mod tests {
             .count();
 
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn disallow_learning_tools_adds_full_mcp_tool_names() {
+        let tools = disallow_learning_tools(vec!["Agent".to_owned()]);
+
+        assert!(
+            tools
+                .iter()
+                .any(|tool| { tool == right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL })
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| { tool == right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL })
+        );
+        assert!(tools.iter().any(|tool| tool == "Agent"));
+    }
+
+    #[test]
+    fn disallow_foreground_only_tools_is_idempotent() {
+        let tools = disallow_foreground_only_tools(disallow_foreground_only_tools(Vec::new()));
+
+        for tool_name in [
+            SEND_PROGRESS_MCP_TOOL,
+            right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL,
+            right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL,
+        ] {
+            let count = tools
+                .iter()
+                .filter(|tool| tool.as_str() == tool_name)
+                .count();
+            assert_eq!(count, 1, "{tool_name} should be present once");
+        }
     }
 
     #[test]

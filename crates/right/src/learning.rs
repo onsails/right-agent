@@ -146,10 +146,10 @@ pub(crate) async fn skill_package_exists(
         .with_context(|| format!("failed to parse agent config for {agent_name}"))?;
     let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
 
-    if let Some(mtls_dir) = mtls_dir
-        && mtls_dir.exists()
-        && is_sandboxed
-    {
+    if is_sandboxed {
+        let mtls_dir = mtls_dir.filter(|path| path.exists()).ok_or_else(|| {
+            anyhow::anyhow!("sandboxed agent requires OpenShell mTLS for skill package checks")
+        })?;
         let explicit_sandbox_name = config
             .as_ref()
             .and_then(|c| c.sandbox.as_ref())
@@ -189,21 +189,36 @@ pub(crate) fn is_known_core_skill(skill_name: &str) -> bool {
         || right_codegen::BUILTIN_SKILL_LEGACY_NAMES.contains(&skill_name)
 }
 
-pub(crate) fn installed_json_marks_core(agent_dir: &Path, skill_name: &str) -> bool {
+pub(crate) fn installed_json_marks_core(
+    agent_dir: &Path,
+    skill_name: &str,
+) -> Result<bool, CallToolResult> {
     let path = agent_dir
         .join(".claude")
         .join("skills")
         .join("installed.json");
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(tool_error(
+                "skill_registry_invalid",
+                format!("failed to read skill registry {}: {e:#}", path.display()),
+                None,
+            ));
+        }
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
-        return false;
-    };
+    let value = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
+        tool_error(
+            "skill_registry_invalid",
+            format!("failed to parse skill registry {}: {e:#}", path.display()),
+            None,
+        )
+    })?;
     let Some(entry) = value.get(skill_name) else {
-        return false;
+        return Ok(false);
     };
-    source_marks_core(entry)
+    Ok(source_marks_core(entry))
 }
 
 fn source_marks_core(value: &serde_json::Value) -> bool {
@@ -213,7 +228,10 @@ fn source_marks_core(value: &serde_json::Value) -> bool {
             .and_then(|object| object.get("source"))
             .and_then(|source| source.as_str())
     });
-    matches!(source, Some("builtin" | "platform" | "core" | "codegen"))
+    matches!(
+        source,
+        Some("builtin" | "platform" | "core" | "codegen" | "bundled" | "codegen-owned")
+    )
 }
 
 pub(crate) fn validate_learning_target(
@@ -229,9 +247,8 @@ pub(crate) fn validate_learning_target(
             None,
         ));
     }
-    if matches!(action, LearningActionParam::Update)
-        && (is_known_core_skill(skill_name) || installed_json_marks_core(agent_dir, skill_name))
-    {
+    let registry_marks_core = installed_json_marks_core(agent_dir, skill_name)?;
+    if is_known_core_skill(skill_name) || registry_marks_core {
         return Err(tool_error(
             "skill_core_readonly",
             "core/platform/codegen skill packages are read-only",
@@ -239,6 +256,19 @@ pub(crate) fn validate_learning_target(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_start_message(
+    kind: crate::progress::ProgressInvocationKind,
+    message: Option<&str>,
+) -> Result<(), CallToolResult> {
+    if matches!(
+        kind,
+        crate::progress::ProgressInvocationKind::BackgroundReview
+    ) {
+        return Ok(());
+    }
+    validate_nonempty_message("learning start message", message)
 }
 
 pub(crate) async fn validate_skill_package_state(
@@ -280,10 +310,14 @@ pub(crate) fn validate_finish_receipt_message(
     if !status.is_success() {
         return Ok(());
     }
+    validate_nonempty_message("successful skill_learning_finish message", message)
+}
+
+fn validate_nonempty_message(label: &str, message: Option<&str>) -> Result<(), CallToolResult> {
     let Some(message) = message.map(str::trim).filter(|m| !m.is_empty()) else {
         return Err(tool_error(
             "invalid_argument",
-            "successful skill_learning_finish calls require a non-empty message",
+            format!("{label} must not be empty"),
             None,
         ));
     };
