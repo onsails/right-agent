@@ -147,9 +147,16 @@ async fn try_sandbox_backup(
     let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
     let dest_tar = backup_dir.join("sandbox.tar.gz");
 
-    right_openshell::openshell::ssh_tar_download(&ssh_config, &ssh_host, "sandbox", &dest_tar, 300)
-        .await
-        .is_ok()
+    right_openshell::openshell::ssh_tar_download(
+        &ssh_config,
+        &ssh_host,
+        "sandbox",
+        &dest_tar,
+        true,
+        300,
+    )
+    .await
+    .is_ok()
 }
 
 /// Destroy an agent: stop process, optionally backup, delete sandbox, remove directory, reload PC.
