@@ -280,6 +280,18 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
 
+        let payload_json: String = conn
+            .query_row("SELECT payload_json FROM skill_nudge_signals", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload_json).unwrap();
+        assert_eq!(
+            payload,
+            serde_json::json!({"kind":"update_candidate"}),
+            "payload_json should persist the accepted signal payload"
+        );
+
         let hints: i64 = conn
             .query_row(
                 "SELECT skill_issue_hints_since_review FROM skill_nudge_state WHERE agent_name='right'",
