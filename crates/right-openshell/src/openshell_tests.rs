@@ -139,6 +139,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use crate::openshell_proto::openshell::datamodel::v1::{Sandbox, SandboxCondition, SandboxStatus};
 use crate::test_support::TestSandbox;
 
 /// Shared sandbox for upload / download / verify tests that need a generic
@@ -171,18 +172,28 @@ async fn shared_test_sandbox() -> &'static TestSandbox {
 /// Set to -1 to return `NotFound` instead of a sandbox.
 struct MockOpenShell {
     get_sandbox_phase: Arc<AtomicI32>,
+    get_sandbox_status: Option<SandboxStatus>,
 }
 
 impl MockOpenShell {
     fn not_found() -> Self {
         Self {
             get_sandbox_phase: Arc::new(AtomicI32::new(-1)),
+            get_sandbox_status: None,
         }
     }
 
     fn with_phase(phase: i32) -> Self {
         Self {
             get_sandbox_phase: Arc::new(AtomicI32::new(phase)),
+            get_sandbox_status: None,
+        }
+    }
+
+    fn with_phase_and_status(phase: i32, status: SandboxStatus) -> Self {
+        Self {
+            get_sandbox_phase: Arc::new(AtomicI32::new(phase)),
+            get_sandbox_status: Some(status),
         }
     }
 
@@ -190,6 +201,7 @@ impl MockOpenShell {
     fn with_shared_phase(phase: Arc<AtomicI32>) -> Self {
         Self {
             get_sandbox_phase: phase,
+            get_sandbox_status: None,
         }
     }
 }
@@ -212,8 +224,9 @@ impl open_shell_server::OpenShell for MockOpenShell {
             return Err(tonic::Status::not_found("sandbox not found"));
         }
         Ok(tonic::Response::new(proto::SandboxResponse {
-            sandbox: Some(crate::openshell_proto::openshell::datamodel::v1::Sandbox {
+            sandbox: Some(Sandbox {
                 phase,
+                status: self.get_sandbox_status.clone(),
                 ..Default::default()
             }),
         }))
@@ -514,6 +527,71 @@ async fn wait_for_ready_times_out_when_not_found() {
         msg.contains("did not become READY"),
         "unexpected error: {msg}"
     );
+}
+
+#[tokio::test]
+async fn wait_for_ready_timeout_reports_last_sandbox_status() {
+    let status = SandboxStatus {
+        sandbox_name: "right-test-stuck".to_owned(),
+        agent_pod: "right-test-stuck-agent-0".to_owned(),
+        conditions: vec![SandboxCondition {
+            r#type: "ContainersReady".to_owned(),
+            status: "False".to_owned(),
+            reason: "ContainersNotReady".to_owned(),
+            message: "containers with unready status: [agent]".to_owned(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (addr, _shutdown) =
+        start_mock_server(MockOpenShell::with_phase_and_status(1, status)).await;
+    let mut client = mock_client(addr).await;
+
+    let result = wait_for_ready(&mut client, "right-test-stuck", 0, 1).await;
+    assert!(result.is_err(), "should timeout");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("phase=PROVISIONING"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains("agent_pod=right-test-stuck-agent-0"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains("ContainersReady=False"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains("ContainersNotReady"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn wait_for_ready_fails_immediately_on_error_phase() {
+    let status = SandboxStatus {
+        conditions: vec![SandboxCondition {
+            r#type: "Ready".to_owned(),
+            status: "False".to_owned(),
+            reason: "PodFailed".to_owned(),
+            message: "sandbox pod failed before SSH was available".to_owned(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (addr, _shutdown) =
+        start_mock_server(MockOpenShell::with_phase_and_status(3, status)).await;
+    let mut client = mock_client(addr).await;
+
+    let result = wait_for_ready(&mut client, "right-test-error", 30, 1).await;
+    assert!(result.is_err(), "ERROR phase should not wait for timeout");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("entered ERROR while waiting for READY"),
+        "unexpected error: {msg}"
+    );
+    assert!(msg.contains("PodFailed"), "unexpected error: {msg}");
 }
 
 // ---------------------------------------------------------------------------
