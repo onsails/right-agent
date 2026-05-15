@@ -1431,7 +1431,7 @@ fn remove_agent_yaml_memory(path: &Path) -> miette::Result<()> {
 /// Replace the `memory:` block in an agent.yaml file with a freshly
 /// serialized version of `cfg`. Emits only non-default recall fields to
 /// keep the yaml tidy.
-fn update_agent_yaml_memory(
+pub(crate) fn update_agent_yaml_memory(
     path: &Path,
     cfg: &right_agent::agent::types::MemoryConfig,
 ) -> miette::Result<()> {
