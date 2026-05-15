@@ -410,6 +410,9 @@ async fn handle_progress_register(
         ProgressInvocationKindDto::Foreground => {
             crate::progress::ProgressInvocationKind::Foreground
         }
+        ProgressInvocationKindDto::BackgroundReview => {
+            crate::progress::ProgressInvocationKind::BackgroundReview
+        }
     };
     progress
         .register(crate::progress::ProgressRegistration {

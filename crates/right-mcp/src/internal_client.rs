@@ -26,6 +26,11 @@ pub const SEND_PROGRESS_TOOL: &str = "send_progress";
 /// `--disallowedTools` and any user-facing prose.
 pub const PROGRESS_MCP_TOOL: &str = "mcp__right__send_progress";
 
+pub const SKILL_LEARNING_START_TOOL: &str = "skill_learning_start";
+pub const SKILL_LEARNING_FINISH_TOOL: &str = "skill_learning_finish";
+pub const SKILL_LEARNING_START_MCP_TOOL: &str = "mcp__right__skill_learning_start";
+pub const SKILL_LEARNING_FINISH_MCP_TOOL: &str = "mcp__right__skill_learning_finish";
+
 /// Maximum length (in Unicode scalar values) of a `send_progress` message.
 ///
 /// Single source of truth for: the JSON-schema `maxLength` advertised in
@@ -290,6 +295,7 @@ pub struct ReloadResponse {
 #[serde(rename_all = "snake_case")]
 pub enum ProgressInvocationKindDto {
     Foreground,
+    BackgroundReview,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
