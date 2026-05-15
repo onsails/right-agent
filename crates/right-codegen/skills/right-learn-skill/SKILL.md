@@ -66,7 +66,7 @@ After the write succeeds or fails, call:
 mcp__right__skill_learning_finish
 ```
 
-Use `status: "created"` or `status: "updated"` only after the package files are written. Use `status: "failed"` or `status: "aborted"` when the write did not complete.
+Use `status: "created"` or `status: "updated"` only after the package files are written. Successful `created`/`updated` calls must include an LLM-authored receipt message in the `message` argument; this is the user-visible learned/updated receipt. Use `status: "failed"` or `status: "aborted"` when the write did not complete.
 
 Successful finish calls send the learned/updated receipt. Failure finish calls record evidence and do not send a success receipt.
 
