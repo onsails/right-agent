@@ -28,6 +28,23 @@ const BACKOFFS: [u64; 3] = [30, 60, 120];
 /// last entry of `BACKOFFS` (asserted by a unit test).
 const BACKOFF_FALLBACK_SECS: u64 = 120;
 
+fn refresh_retry_delay(attempt: u32) -> Duration {
+    #[cfg(test)]
+    {
+        let _ = attempt;
+        Duration::from_millis(10)
+    }
+
+    #[cfg(not(test))]
+    {
+        let delay = BACKOFFS
+            .get(attempt as usize)
+            .copied()
+            .unwrap_or(BACKOFF_FALLBACK_SECS);
+        Duration::from_secs(delay)
+    }
+}
+
 /// Classification of a token endpoint refresh failure.
 #[derive(Debug, thiserror::Error)]
 pub enum RefreshFailure {
@@ -169,12 +186,8 @@ pub async fn do_refresh_cancellable(
 
         // Backoff before next attempt — unless this was the last one.
         if attempt < MAX_RETRIES - 1 {
-            let delay = BACKOFFS
-                .get(attempt as usize)
-                .copied()
-                .unwrap_or(BACKOFF_FALLBACK_SECS);
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
+                _ = tokio::time::sleep(refresh_retry_delay(attempt)) => {}
                 _ = cancel.cancelled() => {
                     return Err(ReconnectError::Cancelled);
                 }
