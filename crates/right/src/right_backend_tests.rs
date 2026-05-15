@@ -568,9 +568,14 @@ network_policies:
 
     let mut child = right_openshell::openshell::spawn_sandbox(sandbox_name, &policy_path, None)
         .expect("failed to spawn sandbox");
-    right_openshell::openshell::wait_for_ready(&mut grpc_client, sandbox_name, 120, 2)
-        .await
-        .expect("sandbox did not become READY");
+    right_openshell::openshell::wait_for_ready(
+        &mut grpc_client,
+        sandbox_name,
+        right_openshell::test_support::sandbox_ready_timeout_secs(120),
+        2,
+    )
+    .await
+    .expect("sandbox did not become READY");
     let _ = child.kill().await;
 
     let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut grpc_client, sandbox_name)
