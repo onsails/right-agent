@@ -1,68 +1,9 @@
 # Changelog
 ## [0.2.15] - 2026-05-15
 
-
-### Bug Fixes
-
-- **right-memory**: Handle ErrorKind::Quota in retain_queue::drain
-- **right-memory**: Exclude QuotaExhausted from CircuitOpen enqueue path
-- **deps-audit**: Consolidate test-crypto helper, document let-discard intent
-- **workspace**: Add debug: None to AgentConfig literal construction sites
-- Keep cron idle promise wording testable
-- **release-plz**: Add version requirement to internal path deps
-- **right-db**: Add chrono dev dependency for migration tests
-
-### Documentation
-
-- **right-memory**: Document QuotaExhausted stickiness in refresh_status
-- **rightcron**: Guide agents to write output-oriented cron prompts
-- **prompt**: Introduce /rightreflect skill and /debug command to agents
-
-### Features
-
-- **right-memory**: Sanitize content via injection_guard before Hindsight POST
-- **right-memory**: Classify HTTP 402 as ErrorKind::Quota
-- **right-memory**: Exempt ErrorKind::Quota from breaker ticks
-- **right-memory**: Add MemoryStatus::QuotaExhausted variant
-- **right-memory**: Set QuotaExhausted status and skip enqueue on 402
-- **right-memory**: Clear QuotaExhausted on any 2xx, preserve on refresh
-- **codegen**: Add CRON_INSTRUCTIONS template
-- **skills**: Add /rightreflect skill content for self-introspection
-- **codegen**: Bundle and install /rightreflect skill
-- **cron**: Lower idle threshold to 2 min and teach agent the rule
-- **bot**: Send_progress MCP tool
-- **right-db**: Scaffold new crate for SQLite plumbing
-
-### Miscellaneous
-
-- **stage-f**: Pin publish = false on new internal crates
-
-### Refactor
-
-- **right-memory**: Extract memory subsystem from right-agent
-- **right-memory**: Centralize sticky-status predicate and fix aggregator gap
-- **memory**: Move prompt safety out of right-core
-- **right-codegen**: Extract codegen subsystem from right-agent
-- **workspace**: Move platform knobs out of right-core
-- **runtime**: Move runtime state out of right-core
-- **config**: Move agent config out of right-core
-- **errors**: Localize remaining right-core errors
-- **right-mcp**: Extract mcp subsystem from right-agent
-- **openshell**: Move openshell stack out of right-core
-- **config**: Move global config out of right-core
-- **right-db**: Move SQL migration files from right-agent
-- **right-db**: Move migrations.rs from right-agent::memory
-- Enable unreachable_pub lint, privatize internals, drop zombie code
-
-### Testing
-
-- **right-db**: Add open + migration smoke tests
-- **right-db**: Cover open_connection invariants
-- **right-db**: Port 8 missed schema/trigger tests from pre-split memory module
-
-### Build
-
-- **deps**: Drop aws-lc-rs, unify on ring crypto provider
+- The generated sandbox policy no longer emits the deprecated `tls:` field removed in OpenShell v0.0.30+, eliminating per-request deprecation warnings from sandbox supervisor logs.
+- `network_policy: permissive` now generates a valid policy with an explicit allowlist of common developer endpoints (GitHub, npm, PyPI, NVIDIA, OpenAI, GitHub Copilot) instead of a top-level wildcard that OpenShell rejects — permissive-mode agents can now actually reach those hosts. The updated policy takes effect after `right restart <agent>`.
+- Updated dependencies: rustls 0.23.40, tokio 1.52.3, rmcp 1.7.0, nix 0.31.3.
 
 ## [0.2.14] - 2026-05-14
 
