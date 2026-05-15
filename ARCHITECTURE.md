@@ -452,7 +452,9 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 Any test that needs a live OpenShell sandbox MUST create it via
 `right_openshell::test_support::TestSandbox::create("<test-name>")`. The helper:
 
-- Generates a unique `right-test-<name>` sandbox with a minimal permissive policy (wildcard `"**.*"` host on port 443, `binaries: "**"`).
+- Generates a unique `right-test-<name>` sandbox with a minimal policy using
+  explicit OpenShell-safe agent endpoints; top-level host wildcards such as
+  `"**.*"` are invalid in current OpenShell.
 - Registers the sandbox in `test_cleanup` so sandboxes are deleted even under `panic = "abort"` (the panic hook drains the registry and calls `openshell sandbox delete`).
 - Cleans up leftovers from prior SIGKILLed runs via `pkill_test_orphans`.
 - Exposes `.exec(&[...])` which goes through gRPC — the project bans the `openshell sandbox exec` CLI from tests.

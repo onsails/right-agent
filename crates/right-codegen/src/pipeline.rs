@@ -428,8 +428,12 @@ pub(crate) mod tests {
         assert!(agent_dir.join("policy.yaml").exists());
         let policy = std::fs::read_to_string(agent_dir.join("policy.yaml")).unwrap();
         assert!(
-            policy.contains(r#"host: "**.*""#),
-            "permissive policy must allow all HTTPS"
+            policy.contains(r#"host: "*.anthropic.com""#),
+            "permissive policy must include common agent endpoints"
+        );
+        assert!(
+            !policy.contains(r#"host: "**.*""#),
+            "permissive policy must not use OpenShell-rejected TLD wildcards"
         );
     }
 

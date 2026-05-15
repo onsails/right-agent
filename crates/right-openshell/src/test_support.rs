@@ -82,7 +82,8 @@ impl TestSandbox {
                 .expect("cleanup of leftover sandbox failed");
         }
 
-        // Minimal policy — fast startup, permissive network (wildcard 443).
+        // Minimal policy — fast startup, plus current OpenShell-safe network
+        // entries for Claude tests that invoke the bundled CLI.
         let tmp = tempfile::tempdir().unwrap();
         let policy_path = tmp.path().join("policy.yaml");
         let policy = "\
@@ -98,7 +99,31 @@ process:
 network_policies:
   outbound:
     endpoints:
-      - host: \"**.*\"
+      - host: \"*.anthropic.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"anthropic.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"*.claude.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"claude.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"*.claude.ai\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"claude.ai\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"storage.googleapis.com\"
         port: 443
         protocol: rest
         access: full

@@ -97,7 +97,7 @@ fn default_show_thinking() -> bool {
 pub enum NetworkPolicy {
     /// Only allow Anthropic/Claude domains.
     Restrictive,
-    /// Allow all outbound HTTPS (default for backwards compat).
+    /// Allow common agent/developer HTTPS endpoints.
     #[default]
     Permissive,
 }
@@ -106,7 +106,7 @@ impl std::fmt::Display for NetworkPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NetworkPolicy::Restrictive => write!(f, "restrictive (Anthropic/Claude only)"),
-            NetworkPolicy::Permissive => write!(f, "permissive (all HTTPS)"),
+            NetworkPolicy::Permissive => write!(f, "permissive (common agent/dev HTTPS)"),
         }
     }
 }
@@ -266,7 +266,7 @@ pub struct AgentConfig {
     #[serde(default = "default_backoff_seconds")]
     pub backoff_seconds: u32,
 
-    /// Network access policy: restrictive (Anthropic only) or permissive (all HTTPS).
+    /// Network access policy: restrictive (Anthropic only) or permissive (common agent/dev HTTPS).
     #[serde(default)]
     pub network_policy: NetworkPolicy,
 

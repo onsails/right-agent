@@ -47,7 +47,7 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     // network policy — label + options
     "network policy:",
     "restrictive — anthropic/claude domains only (recommended)",
-    "permissive — all https domains (needed for external mcp servers)",
+    "permissive — common agent/developer https",
     // memory_setup
     "switching memory provider does not migrate existing memory. continue?",
     // hindsight api key source — label + options
@@ -834,7 +834,7 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         } else if selection == opt_network_policy {
             let options = vec![
                 "restrictive — anthropic/claude domains only (recommended)",
-                "permissive — all https domains (needed for external mcp servers)",
+                "permissive — common agent/developer https",
             ];
             let choice = inquire::Select::new("network policy:", options)
                 .prompt()

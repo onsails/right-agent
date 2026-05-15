@@ -189,7 +189,31 @@ process:
 network_policies:
   outbound:
     endpoints:
-      - host: \"**.*\"
+      - host: \"*.anthropic.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"anthropic.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"*.claude.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"claude.com\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"*.claude.ai\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"claude.ai\"
+        port: 443
+        protocol: rest
+        access: full
+      - host: \"storage.googleapis.com\"
         port: 443
         protocol: rest
         access: full

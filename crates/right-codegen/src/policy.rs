@@ -13,8 +13,45 @@ const RESTRICTIVE_DOMAINS: &[&str] = &[
     "storage.googleapis.com",
 ];
 
-fn restrictive_endpoints() -> String {
-    RESTRICTIVE_DOMAINS
+/// Broad built-in endpoints for `network_policy: permissive`.
+///
+/// OpenShell rejects top-level host wildcards such as `**.*`; permissive mode
+/// therefore means "common agent/developer endpoints" rather than literal
+/// internet-wide egress.
+const PERMISSIVE_DOMAINS: &[&str] = &[
+    "*.anthropic.com",
+    "anthropic.com",
+    "*.claude.com",
+    "claude.com",
+    "*.claude.ai",
+    "claude.ai",
+    "storage.googleapis.com",
+    "raw.githubusercontent.com",
+    "github.com",
+    "api.github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "registry.npmjs.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "downloads.python.org",
+    "opencode.ai",
+    "integrate.api.nvidia.com",
+    "api.openai.com",
+    "auth.openai.com",
+    "chatgpt.com",
+    "api.githubcopilot.com",
+    "api.individual.githubcopilot.com",
+    "api.business.githubcopilot.com",
+    "api.enterprise.githubcopilot.com",
+    "copilot-proxy.githubusercontent.com",
+    "origin-tracker.githubusercontent.com",
+    "telemetry.enterprise.githubcopilot.com",
+    "default.exp-tas.com",
+];
+
+fn endpoints_for_domains(domains: &[&str]) -> String {
+    domains
         .iter()
         .map(|host| {
             format!(
@@ -48,23 +85,16 @@ pub fn generate_policy(
     host_ip: Option<std::net::IpAddr>,
 ) -> String {
     let network_section = match network_policy {
-        NetworkPolicy::Permissive => r#"  outbound:
-    endpoints:
-      - host: "**.*"
-        port: 443
-        protocol: rest
-        access: full
-      - host: "**.*"
-        port: 80
-        protocol: rest
-        access: full
-    binaries:
-      - path: "**""#
-            .to_owned(),
+        NetworkPolicy::Permissive => {
+            format!(
+                "  outbound:\n    endpoints:\n{}\n    binaries:\n      - path: \"**\"",
+                endpoints_for_domains(PERMISSIVE_DOMAINS)
+            )
+        }
         NetworkPolicy::Restrictive => {
             format!(
                 "  anthropic:\n    endpoints:\n{}\n    binaries:\n      - path: \"**\"",
-                restrictive_endpoints()
+                endpoints_for_domains(RESTRICTIVE_DOMAINS)
             )
         }
     };
@@ -136,11 +166,17 @@ mod tests {
     }
 
     #[test]
-    fn allows_all_outbound_https_and_http() {
+    fn permissive_policy_uses_openshell_safe_allowlist() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        assert!(policy.contains(r#"host: "**.*""#));
+        assert!(
+            !policy.contains(r#"host: "**.*""#),
+            "OpenShell rejects top-level wildcards like **.*"
+        );
+        assert!(policy.contains(r#"host: "*.anthropic.com""#));
+        assert!(policy.contains(r#"host: "api.openai.com""#));
+        assert!(policy.contains(r#"host: "api.github.com""#));
+        assert!(policy.contains(r#"host: "registry.npmjs.org""#));
         assert!(policy.contains("port: 443"));
-        assert!(policy.contains("port: 80"));
         assert!(policy.contains("outbound:"));
     }
 
@@ -167,7 +203,8 @@ mod tests {
         assert!(!policy.contains("8100"));
     }
 
-    /// OpenShell rejects bare `*` host wildcards — must use `*.example.com` or `*.*` patterns.
+    /// OpenShell rejects bare `*` host wildcards; use scoped subdomain
+    /// wildcards such as `*.example.com`.
     #[test]
     fn no_bare_star_host_wildcards() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
@@ -177,7 +214,7 @@ mod tests {
                 let host_val = trimmed.trim_start_matches("host:").trim().trim_matches('"');
                 assert_ne!(
                     host_val, "*",
-                    "bare '*' wildcard rejected by OpenShell — use '*.*' or '*.domain.com'"
+                    "bare '*' wildcard rejected by OpenShell — use '*.domain.com'"
                 );
             }
         }
@@ -214,18 +251,16 @@ mod tests {
         assert!(policy.contains(r#"host: "storage.googleapis.com""#));
         assert!(
             !policy.contains(r#"host: "**.*""#),
-            "restrictive must not contain wildcard"
+            "restrictive must not contain top-level wildcard"
         );
     }
 
     #[test]
-    fn permissive_policy_allows_all_https() {
+    fn permissive_policy_includes_common_agent_and_developer_hosts() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        assert!(policy.contains(r#"host: "**.*""#));
-        assert!(
-            !policy.contains(r#"host: "*.anthropic.com""#),
-            "permissive uses wildcard, not explicit domains"
-        );
+        assert!(policy.contains(r#"host: "*.anthropic.com""#));
+        assert!(policy.contains(r#"host: "chatgpt.com""#));
+        assert!(policy.contains(r#"host: "github.com""#));
     }
 
     #[test]

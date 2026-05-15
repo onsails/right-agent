@@ -383,7 +383,7 @@ pub fn prompt_network_policy() -> miette::Result<Option<NetworkPolicy>> {
         inquire::Select::new(
             "network policy:",
             vec![
-                "permissive — all https domains (recommended)",
+                "permissive — common agent/developer https",
                 "restrictive — anthropic/claude domains only",
             ],
         )
@@ -596,7 +596,7 @@ pub const PROMPT_LABELS: &[&str] = &[
     "none — direct host access (computer-use, chrome)",
     // prompt_network_policy — label + options
     "network policy:",
-    "permissive — all https domains (recommended)",
+    "permissive — common agent/developer https",
     "restrictive — anthropic/claude domains only",
     // prompt_memory_provider — label + options
     "memory provider:",

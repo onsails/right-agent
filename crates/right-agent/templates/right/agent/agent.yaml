@@ -15,7 +15,7 @@ backoff_seconds: 10
 #   mode: openshell
 #   policy_file: policy.yaml
 
-# Network policy: restrictive = Anthropic/Claude only, permissive = all HTTPS
+# Network policy: restrictive = Anthropic/Claude only, permissive = common agent/dev HTTPS
 # network_policy: restrictive
 
 # Per-agent environment variables injected before exec claude.

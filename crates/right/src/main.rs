@@ -330,7 +330,7 @@ pub enum Commands {
         /// Non-interactive mode — skip all prompts (requires --tunnel-hostname when cloudflared login detected)
         #[arg(short = 'y', long)]
         yes: bool,
-        /// Network policy: restrictive (Anthropic/Claude only) or permissive (all HTTPS)
+        /// Network policy: restrictive (Anthropic/Claude only) or permissive (common agent/dev HTTPS)
         #[arg(long)]
         network_policy: Option<right_agent::agent::types::NetworkPolicy>,
         /// Sandbox mode: openshell or none
