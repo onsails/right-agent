@@ -20,6 +20,7 @@
   git-hooks.hooks.rustfmt.enable = true;
 
   env.RUSTC_WRAPPER = "sccache";
+  env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
   # Keep devenv builds separate from system-profile Cargo calls, which
   # otherwise frequently invalidate the shared target cache.
   env.CARGO_TARGET_DIR = "target/devenv";

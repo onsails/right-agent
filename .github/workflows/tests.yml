@@ -40,7 +40,7 @@ jobs:
 
       - name: Test workspace serially
         run: |
-          devenv shell -- env PATH="$RUNNER_TEMP/bin:$PATH" cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
 
   stt:
     name: stt ignored tests
@@ -61,7 +61,7 @@ jobs:
 
       - name: Run STT ignored tests serially
         run: |
-          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1"
 
   openshell:
     name: openshell ignored tests
@@ -123,7 +123,7 @@ jobs:
 
       - name: Run OpenShell ignored tests serially
         run: |
-          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"/usr/bin:\$PATH\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1"
 
   claude-openshell:
     name: claude ignored tests
@@ -185,4 +185,4 @@ jobs:
 
       - name: Run Claude/OpenShell ignored tests serially
         run: |
-          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"/usr/bin:\$PATH\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1"
