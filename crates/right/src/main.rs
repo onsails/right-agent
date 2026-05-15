@@ -178,6 +178,9 @@ pub enum AgentCommands {
         /// Only back up sandbox files (skip agent.yaml, data.db, policy.yaml)
         #[arg(long)]
         sandbox_only: bool,
+        /// Include rebuildable sandbox dependency/cache directories (.cache, .venv, .npm, .uv)
+        #[arg(long)]
+        include_rebuildable: bool,
     },
     /// Destroy an agent (stop, optionally backup, delete sandbox and files)
     Destroy {
@@ -631,9 +634,11 @@ async fn main() -> miette::Result<()> {
                 Ok(())
             }
             AgentCommands::Ssh { name, command } => cmd_agent_ssh(&home, &name, &command).await,
-            AgentCommands::Backup { name, sandbox_only } => {
-                cmd_agent_backup(&home, &name, sandbox_only).await
-            }
+            AgentCommands::Backup {
+                name,
+                sandbox_only,
+                include_rebuildable,
+            } => cmd_agent_backup(&home, &name, sandbox_only, include_rebuildable).await,
             AgentCommands::Destroy {
                 name,
                 backup,
@@ -3007,7 +3012,12 @@ async fn cmd_agent_restore(
     Ok(())
 }
 
-async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> miette::Result<()> {
+async fn cmd_agent_backup(
+    home: &Path,
+    agent_name: &str,
+    sandbox_only: bool,
+    include_rebuildable: bool,
+) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
     // 1. Discover agent and parse config
@@ -3106,7 +3116,7 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
             &ssh_host,
             "sandbox",
             &dest_tar,
-            true,
+            include_rebuildable,
             300,
         )
         .await?;
@@ -3118,21 +3128,35 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
         // No-sandbox: tar the agent dir (excluding data.db — backed up separately via VACUUM)
         let dest_tar = backup_dir.join("sandbox.tar.gz");
         tracing::info!(agent_dir = %agent_dir.display(), dest = %dest_tar.display(), "archiving agent directory");
+        let mut tar_args = vec![
+            "czpf".to_string(),
+            dest_tar
+                .to_str()
+                .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?
+                .to_string(),
+            "--exclude=data.db".to_string(),
+        ];
+
+        if !include_rebuildable {
+            for path in right_openshell::openshell::DEFAULT_REBUILDABLE_BACKUP_EXCLUDES {
+                tar_args.push(format!("--exclude={agent_name}/{path}"));
+                tar_args.push(format!("--exclude={agent_name}/{path}/*"));
+            }
+        }
+
+        tar_args.push("-C".to_string());
+        tar_args.push(
+            agent_dir
+                .parent()
+                .ok_or_else(|| miette::miette!("agent_dir has no parent"))?
+                .to_str()
+                .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?
+                .to_string(),
+        );
+        tar_args.push(agent_name.to_string());
+
         let status = std::process::Command::new("tar")
-            .args([
-                "czpf",
-                dest_tar
-                    .to_str()
-                    .ok_or_else(|| miette::miette!("non-UTF-8 backup path"))?,
-                "--exclude=data.db",
-                "-C",
-                agent_dir
-                    .parent()
-                    .ok_or_else(|| miette::miette!("agent_dir has no parent"))?
-                    .to_str()
-                    .ok_or_else(|| miette::miette!("non-UTF-8 agents_dir"))?,
-                agent_name,
-            ])
+            .args(&tar_args)
             .status()
             .into_diagnostic()
             .map_err(|e| miette::miette!("failed to spawn tar: {e:#}"))?;
