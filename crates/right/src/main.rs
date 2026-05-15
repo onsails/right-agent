@@ -2428,6 +2428,12 @@ async fn cmd_up(
             "no agents found. Run `right agent init <name>` to create one."
         ));
     }
+
+    // Validate mandatory tunnel config before optional sandbox dependency
+    // prompts. Otherwise a missing OpenShell install can hide the config error
+    // and prompt in non-interactive CI/test runs.
+    let _global_cfg = right_config::read_global_config(home)?;
+
     tracing::info!(
         elapsed_ms = t_phase.elapsed().as_millis() as u64,
         agents = agents.len(),
