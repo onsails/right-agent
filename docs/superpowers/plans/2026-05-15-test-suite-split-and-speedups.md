@@ -6,7 +6,7 @@
 
 **Architecture:** Split tests by dependency boundary. Pure Rust, local filesystem, mock HTTP, and mock OpenShell-gRPC tests remain in the default `cargo test` path. Tests that require a live OpenShell gateway, a sandbox image with Claude Code, OpenShell file transfer, or real ffmpeg/Whisper inference become `#[ignore]` with stable `ci-*` reasons and are invoked by named workflow jobs. Slow tests that do not truly require external services are rewritten, not ignored.
 
-**Tech Stack:** Rust 2024, Cargo/libtest `--test-threads=1`, GitHub Actions, `devenv shell` for the Rust/toolchain environment, direct NVIDIA OpenShell installer, rootless Podman socket for the OpenShell gateway, ffmpeg, libclang for bindgen, Whisper tiny model cache, existing `devenv.nix`.
+**Tech Stack:** Rust 2024, GitHub Actions, `devenv shell` for the Rust/toolchain environment, direct NVIDIA OpenShell installer, rootless Podman socket for the OpenShell gateway, ffmpeg, libclang for bindgen, Whisper tiny model cache, existing `devenv.nix`.
 
 **Timing source:** `/tmp/rightclaw-test-timing-stats.md` from the serial run on 2026-05-15.
 
@@ -35,14 +35,14 @@ File: `.github/workflows/tests.yml`
 File: `.github/workflows/tests.yml`
 
 ```yaml
-run: devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+run: devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast --locked
 ```
 
 - Exclude doc tests from the measured/default workflow path for this cleanup. The timing run was explicitly finalized without doc tests.
-- Final local verification after code changes still uses the workspace test path with one runtime thread:
+- Final local verification after code changes still uses the workspace test path:
 
 ```sh
-devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast -- --test-threads=1
+devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast
 ```
 
 ---
@@ -78,7 +78,7 @@ Live OpenShell coverage is CI-explicit: tests that create real sandboxes or rely
 **Verification:**
 
 ```sh
-devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast -- --test-threads=1
+devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast
 ```
 
 Expected: default workspace tests do not try to create OpenShell sandboxes.
@@ -115,13 +115,13 @@ async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right-bot --test cc_debug_integration -- --test-threads=1
+devenv shell -- cargo test -p right-bot --test cc_debug_integration
 ```
 
 Expected: 0 passed, 0 failed, 2 ignored.
 
 ```sh
-devenv shell -- cargo test -p right-bot --test cc_debug_integration -- --ignored --test-threads=1
+devenv shell -- cargo test -p right-bot --test cc_debug_integration -- --ignored
 ```
 
 Expected on a machine with OpenShell and Claude: both retained tests pass.
@@ -181,10 +181,10 @@ async fn claude_upgrade_lifecycle() {
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right-agent --test control_master -- --test-threads=1
-devenv shell -- cargo test -p right-agent --test policy_apply -- --test-threads=1
-devenv shell -- cargo test -p right-agent --test rebootstrap_sandbox -- --test-threads=1
-devenv shell -- cargo test -p right --test cli_integration test_policy_validates_against_openshell -- --test-threads=1
+devenv shell -- cargo test -p right-agent --test control_master
+devenv shell -- cargo test -p right-agent --test policy_apply
+devenv shell -- cargo test -p right-agent --test rebootstrap_sandbox
+devenv shell -- cargo test -p right --test cli_integration test_policy_validates_against_openshell
 ```
 
 Expected: each command reports the live tests as ignored, not failed.
@@ -266,14 +266,14 @@ fn remove_stale_directory_at_dest(host_dest: &Path) -> miette::Result<()> {
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right-openshell -- --test-threads=1
+devenv shell -- cargo test -p right-openshell
 ```
 
 Expected: local helper tests pass; live OpenShell tests are ignored by default.
 
 ```sh
-devenv shell -- cargo test -p right-openshell upload_directory_preserves_files_and_overwrites -- --ignored --test-threads=1
-devenv shell -- cargo test -p right-openshell download_file_writes_to_exact_dest_path -- --ignored --test-threads=1
+devenv shell -- cargo test -p right-openshell upload_directory_preserves_files_and_overwrites -- --ignored
+devenv shell -- cargo test -p right-openshell download_file_writes_to_exact_dest_path -- --ignored
 ```
 
 Expected on a machine with OpenShell: retained live transfer coverage passes.
@@ -345,14 +345,14 @@ let ctx = SttContext {
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right-bot stt::ffmpeg_unavailable_returns_error_marker_without_running_ffmpeg -- --test-threads=1
-devenv shell -- cargo test -p right-bot stt:: -- --test-threads=1
+devenv shell -- cargo test -p right-bot stt::ffmpeg_unavailable_returns_error_marker_without_running_ffmpeg
+devenv shell -- cargo test -p right-bot stt::
 ```
 
 Expected: cheap STT tests pass locally; real inference tests are ignored.
 
 ```sh
-devenv shell -- cargo test -p right-bot stt:: -- --ignored --test-threads=1
+devenv shell -- cargo test -p right-bot stt:: -- --ignored
 ```
 
 Expected with ffmpeg and cached/downloadable tiny model: real STT tests pass.
@@ -390,7 +390,7 @@ tokio::task::yield_now().await;
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right-agent --test memory_failure_scenarios recovery_drains_queue_after_breaker_closes -- --test-threads=1
+devenv shell -- cargo test -p right-agent --test memory_failure_scenarios recovery_drains_queue_after_breaker_closes
 ```
 
 Expected: completes in under 3 seconds.
@@ -438,8 +438,8 @@ pub(crate) fn with_retain_timeout(mut self, timeout: Duration) -> Self {
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right-memory hindsight::tests::retain_timeout_maps_to_timeout_variant -- --test-threads=1
-devenv shell -- cargo test -p right-memory hindsight::tests::retain_json_body_timeout_maps_to_timeout_variant -- --test-threads=1
+devenv shell -- cargo test -p right-memory hindsight::tests::retain_timeout_maps_to_timeout_variant
+devenv shell -- cargo test -p right-memory hindsight::tests::retain_json_body_timeout_maps_to_timeout_variant
 ```
 
 Expected: both complete in under 2 seconds total.
@@ -472,7 +472,7 @@ server.await.unwrap();
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right-stt download_url_to_path_bad_status_returns_bad_status_error -- --test-threads=1
+devenv shell -- cargo test -p right-stt download_url_to_path_bad_status_returns_bad_status_error
 ```
 
 Expected: offline deterministic pass.
@@ -498,7 +498,7 @@ Expected: offline deterministic pass.
 **Verification:**
 
 ```sh
-devenv shell -- cargo test -p right --test cli_integration -- --test-threads=1
+devenv shell -- cargo test -p right --test cli_integration
 ```
 
 Expected: `cli_integration` wall time drops from roughly 33.6s to materially lower without reducing distinct CLI behavior coverage.
@@ -572,9 +572,9 @@ jobs:
           SH
           chmod +x "$RUNNER_TEMP/bin/cloudflared" "$RUNNER_TEMP/bin/claude"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-      - name: Test workspace serially
+      - name: Test workspace
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked"
 ```
 
 - [ ] Add STT CI job. It runs inside `devenv shell`, caches the tiny Whisper model, and runs ignored STT tests explicitly.
@@ -597,9 +597,9 @@ File: `.github/workflows/tests.yml`
         with:
           path: ~/.right/cache/whisper
           key: whisper-ggml-tiny-v1
-      - name: Run STT ignored tests serially
+      - name: Run STT ignored tests
         run: |
-          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
+          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored
 ```
 
 - [ ] Add OpenShell CI job. It enters `devenv shell` for Rust tooling, installs OpenShell in the workflow, starts the Podman socket and gateway, waits for mTLS certs, then runs ignored OpenShell tests explicitly.
@@ -659,9 +659,9 @@ File: `.github/workflows/tests.yml`
           exit 1
       - name: OpenShell doctor
         run: openshell doctor check
-      - name: Run OpenShell ignored tests serially
+      - name: Run OpenShell ignored tests
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored"
 ```
 
 - [ ] Add Claude/OpenShell CI job separately so `claude upgrade` failures are isolated from OpenShell-only regressions.
@@ -721,9 +721,9 @@ File: `.github/workflows/tests.yml`
           exit 1
       - name: OpenShell doctor
         run: openshell doctor check
-      - name: Run Claude/OpenShell ignored tests serially
+      - name: Run Claude/OpenShell ignored tests
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored"
 ```
 
 - [ ] If `claude-openshell` flakes because the CI sandbox image lacks the Claude binary, do not silently skip the job. Add a test helper that installs or upgrades Claude inside the sandbox with `claude upgrade` and keep the failure visible.
@@ -743,10 +743,10 @@ Expected: no workflow syntax errors.
 **Files:**
 - Update: `/tmp/rightclaw-test-timing-stats-after.md`
 
-- [ ] Run the default serial workspace test command without doc tests:
+- [ ] Run the default workspace test command without doc tests:
 
 ```sh
-time devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast -- --test-threads=1
+time devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast
 ```
 
 - [ ] Write the new timing report to `/tmp/rightclaw-test-timing-stats-after.md` with:
@@ -760,9 +760,9 @@ time devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast 
 - [ ] Run targeted ignored suites on a machine with the external prerequisites:
 
 ```sh
-devenv shell -- cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
-devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
-devenv shell -- cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
+devenv shell -- cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored
+devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored
+devenv shell -- cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored
 ```
 
 - [ ] Do not claim GitHub Actions coverage is complete until the workflow has run at least once or `act`/`actionlint` plus local command parity has been checked.
