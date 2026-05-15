@@ -4,7 +4,7 @@
 
 **Goal:** Ship foreground learned-skill creation/update with user-visible start/finish receipts, used-skill receipts, and persisted nudge data for future background review.
 
-**Architecture:** Add a built-in `right-learn-skill` skill, expose two foreground learning MCP tools through `RightBackend`, store learning events and nudge signals in the per-agent SQLite DB, and extend foreground structured output with used-skill receipts plus create/update nudge signals. Skill package files remain sandbox-local under `.claude/skills/<skill_name>/`; MCP validates names and records metadata but never imports files.
+**Architecture:** Add a built-in `right-learn-skill` skill, expose two learning MCP tools through `RightBackend`, store learning events and nudge signals in the per-agent SQLite DB, and extend foreground structured output with used-skill receipts plus create/update nudge signals. Stage 1 registers learning tools only for foreground invocations, but the invocation kind is modeled so a future background review worker can reuse the same tools without schema churn. Skill package files remain agent-local under `.claude/skills/<skill_name>/`; MCP validates names, verifies successful writes at the derived sandbox/host path, and records metadata but never imports files.
 
 **Tech Stack:** Rust 2024, rusqlite migrations via `right-db`, rmcp tool schemas, Claude Code structured output schemas, Telegram delivery through the existing progress UDS path, standard Agent Skills package layout.
 
@@ -22,6 +22,9 @@ Included:
 - SQLite learning event, nudge signal, and nudge counter storage.
 - User-visible learning start and successful finish messages.
 - Used-skill receipt rendering in the final Telegram reply.
+- Runtime validation for nudge signal confidence: one event ref is allowed only for explicit user requests; all other nudge triggers require at least two event refs.
+- Sandbox-aware package existence validation for successful learning finish.
+- LLM-authored learned/updated receipt text passed as a `message` argument to `skill_learning_finish`.
 - Documentation and prompt updates.
 
 Excluded:
@@ -48,17 +51,17 @@ Excluded:
 - Modify `crates/right-agent/src/lib.rs`: export `learned_skills`.
 - Create `crates/right-db/src/sql/v20_learned_skills.sql`: learning/nudge tables.
 - Modify `crates/right-db/src/migrations.rs`: register v20 and test the schema.
-- Create `crates/right/src/learning.rs`: MCP parameter structs, skill-name validation, non-core classification, and learning message delivery helper.
+- Create `crates/right/src/learning.rs`: MCP parameter structs, skill-name validation, non-core classification, sandbox-aware skill package checks, successful-finish receipt validation, and learning message delivery helper.
 - Modify `crates/right/src/main.rs`: add `learning` module.
 - Modify `crates/right/src/right_backend.rs`: expose and dispatch learning MCP tools.
 - Modify `crates/right/src/right_backend_tests.rs`: backend tool count, validation, and dispatch tests.
-- Modify `crates/right/src/progress.rs`: add an unrate-limited foreground target lookup for learning start/finish delivery.
+- Modify `crates/right/src/progress.rs`: add an unrate-limited learning target lookup for learning start/finish delivery and model future background-review invocation kind.
 - Modify `crates/right/src/memory_server.rs`: stdio stubs and `with_instructions()` for tool parity.
 - Modify `crates/right/src/aggregator.rs`: `with_instructions()` and tool-list tests.
 - Modify `crates/right-mcp/src/internal_client.rs`: constants for full MCP tool names.
 - Modify `crates/bot/src/cc/worker_reply.rs`: parse new structured output fields.
 - Modify `crates/bot/src/telegram/worker.rs`: persist reply learning metadata and append used-skill receipts.
-- Modify `crates/bot/src/cc/invocation.rs`, `crates/bot/src/cron.rs`, `crates/bot/src/reflection.rs`, and `crates/bot/src/cron_delivery.rs`: deny foreground-only learning tools outside foreground turns.
+- Modify `crates/bot/src/cc/invocation.rs`, `crates/bot/src/cron.rs`, `crates/bot/src/reflection.rs`, and `crates/bot/src/cron_delivery.rs`: deny Stage 1 learning tools outside foreground turns.
 - Modify `PROMPT_SYSTEM.md`, `docs/architecture/mcp.md`, `docs/architecture/sessions.md`, and `docs/architecture/sandbox.md`: keep docs in sync.
 
 ## Verification Cadence
@@ -911,6 +914,91 @@ async fn skill_learning_start_allows_non_core_update_until_delivery() {
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "learning_send_failed");
 }
+
+#[tokio::test]
+async fn skill_learning_start_rejects_update_when_package_missing() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "update",
+                "skill_name": "custom-skill",
+                "reason": "missing_step",
+                "event_refs": ["e1", "e2"],
+                "message": "Updating a reusable custom skill."
+            }),
+            crate::progress::ToolCallContext { invocation_id: Some("inv-1".to_owned()) },
+        )
+        .await
+        .expect("tool should return operation error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_package_missing");
+}
+
+#[tokio::test]
+async fn skill_learning_finish_requires_receipt_message_for_success() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let skill_dir = agent_dir.join(".claude/skills/rl-demo");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "# demo").unwrap();
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": "rl-demo",
+                "status": "created",
+                "summary": "Captured reusable steps.",
+                "event_refs": ["e1", "e2"]
+            }),
+            crate::progress::ToolCallContext { invocation_id: Some("inv-1".to_owned()) },
+        )
+        .await
+        .expect("tool should return operation error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn skill_learning_finish_rejects_success_when_package_missing() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": "rl-demo",
+                "status": "created",
+                "message": "Learned skill: rl-demo.",
+                "summary": "Captured reusable steps.",
+                "event_refs": ["e1", "e2"]
+            }),
+            crate::progress::ToolCallContext { invocation_id: Some("inv-1".to_owned()) },
+        )
+        .await
+        .expect("tool should return operation error");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_package_missing");
+}
 ```
 
 - [ ] **Step 2: Run backend tests and verify failure**
@@ -934,24 +1022,42 @@ pub const SKILL_LEARNING_START_MCP_TOOL: &str = "mcp__right__skill_learning_star
 pub const SKILL_LEARNING_FINISH_MCP_TOOL: &str = "mcp__right__skill_learning_finish";
 ```
 
-- [ ] **Step 4: Add unrate-limited foreground lookup**
+- [ ] **Step 4: Add unrate-limited learning target lookup**
 
-In `crates/right/src/progress.rs`, add this method to `impl ProgressRegistry`:
+In `crates/right/src/progress.rs`, expand the invocation kind:
 
 ```rust
-pub(crate) async fn foreground_send_target(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProgressInvocationKind {
+    Foreground,
+    BackgroundReview,
+    #[cfg(test)]
+    NonForeground,
+}
+```
+
+Then add this method to `impl ProgressRegistry`:
+
+```rust
+pub(crate) async fn learning_send_target(
     &self,
     invocation_id: &str,
-) -> Result<ProgressSendTarget, ProgressError> {
+) -> Result<(ProgressInvocationKind, ProgressSendTarget), ProgressError> {
     let inner = self.inner.lock().await;
     let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
-    if !matches!(invocation.kind, ProgressInvocationKind::Foreground) {
+    if !matches!(
+        invocation.kind,
+        ProgressInvocationKind::Foreground | ProgressInvocationKind::BackgroundReview
+    ) {
         return Err(ProgressError::Forbidden);
     }
-    Ok(ProgressSendTarget {
-        bot_socket_path: invocation.bot_socket_path.clone(),
-        bot_send_token: invocation.bot_send_token.clone(),
-    })
+    Ok((
+        invocation.kind,
+        ProgressSendTarget {
+            bot_socket_path: invocation.bot_socket_path.clone(),
+            bot_send_token: invocation.bot_send_token.clone(),
+        },
+    ))
 }
 ```
 
@@ -959,15 +1065,28 @@ Add a unit test in the same file:
 
 ```rust
 #[tokio::test(start_paused = true)]
-async fn foreground_send_target_does_not_consume_progress_rate_limit() {
+async fn learning_send_target_does_not_consume_progress_rate_limit() {
     let registry = ProgressRegistry::default();
     registry.register(foreground_registration()).await;
 
-    registry.foreground_send_target("inv-1").await.unwrap();
-    registry.foreground_send_target("inv-1").await.unwrap();
+    registry.learning_send_target("inv-1").await.unwrap();
+    registry.learning_send_target("inv-1").await.unwrap();
     registry.begin_send("inv-1").await.unwrap();
 }
 ```
+
+In `crates/right-mcp/src/internal_client.rs`, expand `ProgressInvocationKindDto`:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressInvocationKindDto {
+    Foreground,
+    BackgroundReview,
+}
+```
+
+In `crates/right/src/internal_api.rs`, map both DTO values to the internal enum. Stage 1 should still register only `Foreground` from Telegram worker; `BackgroundReview` is reserved for the future background review worker and must not be used by cron/reflection/delivery paths.
 
 - [ ] **Step 5: Implement learning MCP params and validators**
 
@@ -1012,6 +1131,15 @@ pub(crate) enum LearningFinishStatusParam {
     Failed,
 }
 
+impl LearningFinishStatusParam {
+    pub(crate) fn is_success(&self) -> bool {
+        matches!(
+            self,
+            LearningFinishStatusParam::Created | LearningFinishStatusParam::Updated
+        )
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SkillLearningFinishParams {
     pub(crate) action: LearningActionParam,
@@ -1048,6 +1176,59 @@ pub(crate) fn skill_package_dir(agent_dir: &Path, skill_name: &str) -> Result<Pa
         return Err("derived skill path escaped .claude/skills".to_owned());
     }
     Ok(path)
+}
+
+async fn skill_package_exists(
+    agent_name: &str,
+    mtls_dir: Option<&Path>,
+    agent_dir: &Path,
+    skill_name: &str,
+) -> Result<bool, anyhow::Error> {
+    if let Some(mtls_dir) = mtls_dir {
+        let parsed_config = right_agent::agent::parse_agent_config(agent_dir);
+        let (sandboxed, explicit_sandbox_name) = match parsed_config {
+            Ok(Some(config)) => (
+                *config.sandbox_mode() == right_agent::agent::SandboxMode::Openshell,
+                config
+                    .sandbox
+                    .as_ref()
+                    .and_then(|sandbox| sandbox.name.as_deref())
+                    .map(str::to_owned),
+            ),
+            Ok(None) | Err(_) => (true, None),
+        };
+        if sandboxed {
+            let sandbox_name = right_openshell::openshell::resolve_sandbox_name(
+                agent_name,
+                explicit_sandbox_name.as_deref(),
+            );
+            let mut client = right_openshell::openshell::connect_grpc(mtls_dir)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:#}"))
+                .context("skill package check: failed to connect to OpenShell gRPC")?;
+            let sandbox_id =
+                right_openshell::openshell::resolve_sandbox_id(&mut client, &sandbox_name)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))
+                    .context("skill package check: failed to resolve sandbox ID")?;
+            let skill_path = format!("/sandbox/.claude/skills/{skill_name}/SKILL.md");
+            let (_, exit_code) = right_openshell::openshell::exec_in_sandbox(
+                &mut client,
+                &sandbox_id,
+                &["test", "-f", &skill_path],
+                right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}"))
+            .with_context(|| format!("skill package check: test -f {skill_path} failed"))?;
+            return Ok(exit_code == 0);
+        }
+    }
+
+    Ok(skill_package_dir(agent_dir, skill_name)
+        .map_err(|message| anyhow::anyhow!(message))?
+        .join("SKILL.md")
+        .is_file())
 }
 
 pub(crate) fn is_known_core_skill(skill_name: &str) -> bool {
@@ -1099,9 +1280,78 @@ pub(crate) fn validate_learning_target(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SkillPackageExpectation {
+    MustExist,
+    MustNotExist,
+}
+
+pub(crate) async fn validate_skill_package_state(
+    agent_name: &str,
+    mtls_dir: Option<&Path>,
+    agent_dir: &Path,
+    skill_name: &str,
+    expectation: SkillPackageExpectation,
+) -> Result<(), CallToolResult> {
+    let exists = skill_package_exists(agent_name, mtls_dir, agent_dir, skill_name)
+        .await
+        .map_err(|e| {
+            tool_error(
+                "skill_package_check_failed",
+                format!("{e:#}"),
+                None,
+            )
+        })?;
+    match (expectation, exists) {
+        (SkillPackageExpectation::MustExist, true) => Ok(()),
+        (SkillPackageExpectation::MustExist, false) => Err(tool_error(
+            "skill_package_missing",
+            format!("skill package {skill_name:?} must exist under .claude/skills/{skill_name}/SKILL.md"),
+            None,
+        )),
+        (SkillPackageExpectation::MustNotExist, false) => Ok(()),
+        (SkillPackageExpectation::MustNotExist, true) => Err(tool_error(
+            "skill_already_exists",
+            format!("skill package {skill_name:?} already exists"),
+            None,
+        )),
+    }
+}
+
+pub(crate) fn validate_finish_receipt_message<'a>(
+    status: &LearningFinishStatusParam,
+    message: Option<&'a str>,
+) -> Result<Option<&'a str>, CallToolResult> {
+    if !status.is_success() {
+        return Ok(None);
+    }
+    let Some(message) = message.map(str::trim).filter(|message| !message.is_empty()) else {
+        return Err(tool_error(
+            "invalid_argument",
+            "successful skill_learning_finish requires an LLM-authored receipt message",
+            None,
+        ));
+    };
+    if message.chars().count() > right_mcp::internal_client::PROGRESS_MESSAGE_MAX_CHARS {
+        return Err(tool_error(
+            "invalid_argument",
+            "receipt message must be at most 2000 characters",
+            None,
+        ));
+    }
+    Ok(Some(message))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LearningMessagePhase {
+    Start,
+    FinishSuccess,
+}
+
 pub(crate) async fn send_learning_message(
     progress: &crate::progress::ProgressRegistry,
     context: &crate::progress::ToolCallContext,
+    phase: LearningMessagePhase,
     message: &str,
 ) -> Result<(), CallToolResult> {
     let Some(invocation_id) = context.invocation_id.as_deref() else {
@@ -1111,8 +1361,8 @@ pub(crate) async fn send_learning_message(
             None,
         ));
     };
-    let target = progress
-        .foreground_send_target(invocation_id)
+    let (kind, target) = progress
+        .learning_send_target(invocation_id)
         .await
         .map_err(|_| {
             tool_error(
@@ -1121,6 +1371,11 @@ pub(crate) async fn send_learning_message(
                 None,
             )
         })?;
+    if matches!(kind, crate::progress::ProgressInvocationKind::BackgroundReview)
+        && matches!(phase, LearningMessagePhase::Start)
+    {
+        return Ok(());
+    }
     let message = message.trim();
     if message.is_empty() || message.chars().count() > right_mcp::internal_client::PROGRESS_MESSAGE_MAX_CHARS {
         return Err(tool_error(
@@ -1184,7 +1439,7 @@ Tool::new(
 ),
 Tool::new(
     right_mcp::internal_client::SKILL_LEARNING_FINISH_TOOL,
-    "Record the result of a foreground skill create/update attempt. Successful statuses send the learned/updated receipt. Metadata/receipt only; does not move skill files.",
+    "Record the result of a skill create/update attempt. Successful statuses require an LLM-authored receipt message, verify .claude/skills/<skill_name>/SKILL.md exists, and send the learned/updated receipt. Metadata/receipt only; does not move skill files.",
     schema_for_type::<SkillLearningFinishParams>(),
 ),
 ```
@@ -1214,6 +1469,25 @@ async fn call_skill_learning_start(
         serde_json::from_value(args.clone()).context("invalid skill_learning_start params")?;
     if let Err(err) =
         crate::learning::validate_learning_target(agent_dir, &params.action, &params.skill_name)
+    {
+        return Ok(err);
+    }
+    let package_expectation = match params.action {
+        crate::learning::LearningActionParam::Create => {
+            crate::learning::SkillPackageExpectation::MustNotExist
+        }
+        crate::learning::LearningActionParam::Update => {
+            crate::learning::SkillPackageExpectation::MustExist
+        }
+    };
+    if let Err(err) = crate::learning::validate_skill_package_state(
+        agent_name,
+        self.mtls_dir.as_deref(),
+        agent_dir,
+        &params.skill_name,
+        package_expectation,
+    )
+    .await
     {
         return Ok(err);
     }
@@ -1250,7 +1524,14 @@ async fn call_skill_learning_start(
             },
         )?;
     }
-    if let Err(err) = crate::learning::send_learning_message(&self.progress, &context, &params.message).await {
+    if let Err(err) = crate::learning::send_learning_message(
+        &self.progress,
+        &context,
+        crate::learning::LearningMessagePhase::Start,
+        &params.message,
+    )
+    .await
+    {
         return Ok(err);
     }
     crate::learning::success_json("started", &params.skill_name)
@@ -1270,6 +1551,12 @@ async fn call_skill_learning_finish(
     {
         return Ok(err);
     }
+    let receipt_message =
+        crate::learning::validate_finish_receipt_message(&params.status, params.message.as_deref());
+    let receipt_message = match receipt_message {
+        Ok(message) => message.map(str::to_owned),
+        Err(err) => return Ok(err),
+    };
     let Some(invocation_id) = context.invocation_id.clone() else {
         return Ok(tool_error(
             "learning_unavailable",
@@ -1291,6 +1578,18 @@ async fn call_skill_learning_finish(
             right_agent::learned_skills::LearningStatus::Failed
         }
     };
+    if status.is_success()
+        && let Err(err) = crate::learning::validate_skill_package_state(
+            agent_name,
+            self.mtls_dir.as_deref(),
+            agent_dir,
+            &params.skill_name,
+            crate::learning::SkillPackageExpectation::MustExist,
+        )
+        .await
+    {
+        return Ok(err);
+    }
     let conn_arc = self.get_conn(agent_name)?;
     {
         let conn = Self::lock_conn(&conn_arc)?;
@@ -1318,8 +1617,14 @@ async fn call_skill_learning_finish(
         )?;
     }
     if status.is_success()
-        && let Some(message) = params.message.as_deref()
-        && let Err(err) = crate::learning::send_learning_message(&self.progress, &context, message).await
+        && let Some(message) = receipt_message.as_deref()
+        && let Err(err) = crate::learning::send_learning_message(
+            &self.progress,
+            &context,
+            crate::learning::LearningMessagePhase::FinishSuccess,
+            message,
+        )
+        .await
     {
         return Ok(err);
     }
@@ -1365,8 +1670,8 @@ Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs` with
 
 ```text
 ## Learning
-- mcp__right__skill_learning_start: Foreground-only metadata/progress for skill create/update. Call before writing or patching skill package files. action=create requires rl-*; action=update may target non-core custom/manual/hub/rl-* skills. Accepts skill names only, never paths.
-- mcp__right__skill_learning_finish: Foreground-only metadata/receipt for skill create/update completion. Successful statuses send learned/updated receipts. Does not move files.
+- mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for skill create/update. Call before writing or patching skill package files. action=create requires rl-*; action=update may target non-core custom/manual/hub/rl-* skills. Accepts skill names only, never paths.
+- mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files.
 ```
 
 - [ ] **Step 9: Run targeted MCP tests and verify pass**
@@ -1454,6 +1759,8 @@ In `crates/right-codegen/src/agent_def.rs`, replace `REPLY_SCHEMA_JSON` with thi
 ```rust
 pub const REPLY_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}},"used_skill_receipts":{"type":["array","null"],"items":{"type":"object","properties":{"package_name":{"type":"string"},"message":{"type":"string"}},"required":["package_name","message"]}},"learning_signal":{"type":["object","null"],"properties":{"kind":{"const":"create_candidate"},"package_name_hint":{"type":"string"},"trigger":{"enum":["explicit_user_request","multi_step_workflow","recovered_surprise","user_correction","repeated_tool_pattern"]},"reason_not_written":{"enum":["conversation_still_evolving","needs_full_context_review","write_or_publish_failed","needs_existing_skill_diff"]},"event_refs":{"type":"array","items":{"type":"string"},"minItems":1},"summary":{"type":"string"}},"required":["kind","package_name_hint","trigger","reason_not_written","event_refs","summary"]},"skill_issue_signal":{"type":["object","null"],"properties":{"kind":{"const":"update_candidate"},"skill_name":{"type":"string"},"issue":{"enum":["missing_step","stale_command","wrong_api_assumption","overbroad_activation","broken_script","unsafe_instruction"]},"reason_not_patched":{"enum":["conversation_still_evolving","needs_full_context_review","write_or_publish_failed","needs_existing_skill_diff"]},"observed_effect":{"enum":["retry_after_tool_error","retry_after_user_correction","manual_override","verified_alternative"]},"event_refs":{"type":"array","items":{"type":"string"},"minItems":1},"patch_hint":{"type":"string"}},"required":["kind","skill_name","issue","reason_not_patched","observed_effect","event_refs","patch_hint"]}},"required":["content"]}"#;
 ```
+
+Keep schema `minItems: 1` because `explicit_user_request` can be backed by a single event. The worker-side `select_reply_signal` runtime validation must reject one-event signals for all non-explicit triggers.
 
 - [ ] **Step 4: Run schema tests and verify pass**
 
@@ -1607,6 +1914,42 @@ fn nudge_signal_is_dropped_when_both_signals_present() {
     .unwrap();
     assert!(selected.is_none());
 }
+
+#[test]
+fn nudge_signal_requires_two_event_refs_unless_explicit_user_request() {
+    let conn = conn();
+    let selected = select_reply_signal(
+        &conn,
+        "inv-5",
+        Some(serde_json::json!({
+            "kind": "create_candidate",
+            "package_name_hint": "rl-demo",
+            "trigger": "recovered_surprise",
+            "reason_not_written": "needs_full_context_review",
+            "event_refs": ["e1"],
+            "summary": "Recovered a reusable surprise."
+        })),
+        None,
+    )
+    .unwrap();
+    assert!(selected.is_none());
+
+    let accepted = select_reply_signal(
+        &conn,
+        "inv-6",
+        Some(serde_json::json!({
+            "kind": "create_candidate",
+            "package_name_hint": "rl-demo",
+            "trigger": "explicit_user_request",
+            "reason_not_written": "conversation_still_evolving",
+            "event_refs": ["e1"],
+            "summary": "User explicitly asked to learn this."
+        })),
+        None,
+    )
+    .unwrap();
+    assert!(accepted.is_some());
+}
 ```
 
 - [ ] **Step 10: Implement nudge selector**
@@ -1625,10 +1968,35 @@ pub fn select_reply_signal(
     }
     match (learning_signal, skill_issue_signal) {
         (Some(_), Some(_)) => Ok(None),
-        (Some(signal), None) => Ok(Some((NudgeSignalKind::Learning, signal))),
-        (None, Some(signal)) => Ok(Some((NudgeSignalKind::SkillIssue, signal))),
+        (Some(signal), None) if validate_nudge_signal(&signal) => {
+            Ok(Some((NudgeSignalKind::Learning, signal)))
+        }
+        (None, Some(signal)) if validate_nudge_signal(&signal) => {
+            Ok(Some((NudgeSignalKind::SkillIssue, signal)))
+        }
+        (Some(_), None) | (None, Some(_)) => Ok(None),
         (None, None) => Ok(None),
     }
+}
+
+fn validate_nudge_signal(signal: &serde_json::Value) -> bool {
+    let event_count = signal
+        .get("event_refs")
+        .and_then(|value| value.as_array())
+        .map_or(0, Vec::len);
+    let explicit = signal
+        .get("trigger")
+        .and_then(|value| value.as_str())
+        .is_some_and(|trigger| trigger == "explicit_user_request");
+    if event_count < 2 && !explicit {
+        return false;
+    }
+    let summary_ok = signal
+        .get("summary")
+        .or_else(|| signal.get("patch_hint"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|text| !text.trim().is_empty());
+    summary_ok
 }
 ```
 
@@ -1790,7 +2158,7 @@ Expected: commit succeeds.
 
 ---
 
-### Task 6: Deny Foreground-Only Learning Tools Outside Foreground
+### Task 6: Deny Stage 1 Learning Tools Outside Foreground
 
 **Files:**
 - Modify: `crates/bot/src/cc/invocation.rs`
@@ -1799,6 +2167,8 @@ Expected: commit succeeds.
 - Modify: `crates/bot/src/cron_delivery.rs`
 
 - [ ] **Step 1: Write failing disallowed-tool tests**
+
+Stage 1 permits only foreground registration. The shared `BackgroundReview` invocation kind is reserved for the future review worker; cron, reflection, and delivery prompts must still deny the learning tools.
 
 In `crates/bot/src/cc/invocation.rs`, add tests:
 
@@ -1983,8 +2353,12 @@ In `docs/architecture/mcp.md`, add a "Learned Skill MCP Tools" section:
 `mcp__right__skill_learning_finish` are built-in RightBackend tools. They are
 metadata/progress/receipt tools: the active agent writes skill package files
 directly under `.claude/skills/<skill_name>/`; MCP validates the skill name,
-records learning events in `data.db`, and sends foreground learning messages
-through the existing bot UDS delivery path.
+records learning events in `data.db`, verifies successful finishes by checking
+`.claude/skills/<skill_name>/SKILL.md`, and sends foreground learning messages
+through the existing bot UDS delivery path. In OpenShell mode that existence
+check runs inside the sandbox; in `sandbox: none` mode it checks the host agent
+directory. The receipt text is authored by the LLM and passed as the
+`message` argument to `mcp__right__skill_learning_finish`.
 
 Create requires `rl-*`. Update may target any non-core custom/manual/hub/learned
 skill. Core/platform/bundled/codegen-owned skills are rejected when identifiable.
@@ -2125,8 +2499,10 @@ Expected: the recent commits include the task commits from this plan:
 
 - Foreground learning must not depend on background review execution.
 - Start/finish MCP tools must never accept absolute paths.
+- MCP validates skill package names before deriving paths: lowercase ASCII letters, digits, hyphens, 3-80 chars, no leading/trailing hyphen.
 - New learned skills must use `rl-*`.
 - Updating non-core custom/manual/hub/learned skills is allowed.
 - Core/platform/bundled/codegen-owned skills are read-only to learning flows.
+- Successful `skill_learning_finish` requires an LLM-authored `message` argument and must verify `.claude/skills/<skill_name>/SKILL.md` exists in the sandbox or host agent directory before recording/sending success.
 - Successful finish calls suppress nudge signals for the same invocation.
 - Background review remains disabled; data contracts and counters are ready for a future worker.
