@@ -25,6 +25,7 @@ const SSH_CONTROL_OP_TIMEOUT_SECS: u64 = 5;
 pub const SANDBOX_MCP_JSON_PATH: &str = "/sandbox/mcp.json";
 
 const DEFAULT_GATEWAY_ENDPOINT: &str = "https://127.0.0.1:8080";
+pub const DEFAULT_REBUILDABLE_BACKUP_EXCLUDES: &[&str] = &[".cache", ".venv", ".npm", ".uv"];
 
 /// Generate deterministic fallback sandbox name from agent name.
 ///
@@ -794,40 +795,27 @@ pub async fn tear_down_control_master(config_path: &Path, host: &str, socket_pat
     }
 }
 
-fn sandbox_tar_download_args(sandbox_path: &str) -> miette::Result<Vec<String>> {
-    let archive_root = sandbox_path.trim_matches('/');
-    if archive_root.is_empty() {
-        miette::bail!("sandbox path must not be empty");
-    }
-
-    Ok(vec![
-        "tar".to_string(),
-        "czpf".to_string(),
-        "-".to_string(),
-        "-C".to_string(),
-        format!("/{archive_root}"),
-        format!("--transform=s,^\\.$,{archive_root},"),
-        format!("--transform=s,^\\./,{archive_root}/,"),
-        ".".to_string(),
-    ])
-}
-
-/// Stream `tar czpf -` from inside the sandbox to a local file via SSH.
+/// Stream a sandbox tarball to a local file via SSH.
 ///
-/// Archives `/sandbox` while preserving `sandbox/...` paths in the tarball,
-/// piping stdout directly to `dest_path` without buffering in memory.
+/// Runs tar from inside the sandbox root and rewrites archive entries under
+/// `sandbox_path`, piping stdout directly to `dest_path` without buffering in
+/// memory.
 pub async fn ssh_tar_download(
     config_path: &Path,
     ssh_host: &str,
     sandbox_path: &str,
     dest_path: &Path,
+    include_rebuildable: bool,
     timeout_secs: u64,
 ) -> miette::Result<()> {
     let mut command = Command::new("ssh");
     command.arg("-F").arg(config_path);
     command.arg(ssh_host);
     command.arg("--");
-    command.args(sandbox_tar_download_args(sandbox_path)?);
+    command.args(sandbox_tar_download_args(
+        sandbox_path,
+        include_rebuildable,
+    )?);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
@@ -857,6 +845,14 @@ pub async fn ssh_tar_download(
         Ok::<_, miette::Error>(())
     };
 
+    let stderr_fut = async {
+        let mut stderr_output = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut stderr_output)
+            .await
+            .map_err(|e| miette::miette!("I/O error reading tar stderr: {e:#}"))?;
+        Ok::<_, miette::Error>(String::from_utf8_lossy(&stderr_output).into_owned())
+    };
+
     let wait_fut = async {
         child
             .wait()
@@ -864,20 +860,9 @@ pub async fn ssh_tar_download(
             .map_err(|e| miette::miette!("ssh wait failed: {e:#}"))
     };
 
-    let stderr_fut = async {
-        use tokio::io::AsyncReadExt;
-
-        let mut stderr_buf = Vec::new();
-        stderr
-            .read_to_end(&mut stderr_buf)
-            .await
-            .map_err(|e| miette::miette!("I/O error reading ssh tar stderr: {e:#}"))?;
-        Ok::<_, miette::Error>(String::from_utf8_lossy(&stderr_buf).into_owned())
-    };
-
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let ((), child_result, stderr) = tokio::time::timeout(timeout_dur, async {
-        tokio::try_join!(copy_fut, wait_fut, stderr_fut)
+    let ((), stderr, child_result) = tokio::time::timeout(timeout_dur, async {
+        tokio::try_join!(copy_fut, stderr_fut, wait_fut)
     })
     .await
     .map_err(|_| miette::miette!("ssh tar download timed out after {timeout_secs}s"))??;
@@ -894,6 +879,40 @@ pub async fn ssh_tar_download(
         ));
     }
     Ok(())
+}
+
+fn sandbox_tar_download_args(
+    sandbox_path: &str,
+    include_rebuildable: bool,
+) -> miette::Result<Vec<String>> {
+    let archive_root = sandbox_path.trim_matches('/');
+    if archive_root.is_empty() {
+        miette::bail!("sandbox path must not be empty");
+    }
+
+    // `flags=rh` rewrites archive member names and hardlink targets while
+    // preserving symlink targets such as `./target`.
+    let mut args = vec![
+        "tar".to_string(),
+        "czpf".to_string(),
+        "-".to_string(),
+        "-C".to_string(),
+        format!("/{archive_root}"),
+        format!("--transform=flags=rh;s,^\\.$,{archive_root},"),
+        format!("--transform=flags=rh;s,^\\./,{archive_root}/,"),
+    ];
+
+    if !include_rebuildable {
+        for path in DEFAULT_REBUILDABLE_BACKUP_EXCLUDES {
+            // GNU tar evaluates excludes before transforms, so match names as
+            // seen under `-C /sandbox .`, not final `sandbox/...` archive names.
+            args.push(format!("--exclude=./{path}"));
+            args.push(format!("--exclude=./{path}/*"));
+        }
+    }
+
+    args.push(".".to_string());
+    Ok(args)
 }
 
 /// Stream a local tar.gz file into the sandbox via SSH `tar xzpf -`.

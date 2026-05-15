@@ -36,15 +36,15 @@ fn ssh_host_for_sandbox_formats_correctly() {
 #[test]
 fn sandbox_tar_download_args_reads_sandbox_dir_and_preserves_archive_root() {
     assert_eq!(
-        sandbox_tar_download_args("sandbox").unwrap(),
+        sandbox_tar_download_args("sandbox", true).unwrap(),
         vec![
             "tar",
             "czpf",
             "-",
             "-C",
             "/sandbox",
-            "--transform=s,^\\.$,sandbox,",
-            "--transform=s,^\\./,sandbox/,",
+            "--transform=flags=rh;s,^\\.$,sandbox,",
+            "--transform=flags=rh;s,^\\./,sandbox/,",
             ".",
         ]
     );
@@ -127,6 +127,48 @@ fn gateway_endpoint_from_status_output_reads_active_server_url() {
         gateway_endpoint_from_status_output(output),
         Some("https://127.0.0.1:17670".to_owned())
     );
+}
+
+#[test]
+fn sandbox_tar_download_args_excludes_rebuildable_dirs_by_default() {
+    let args = sandbox_tar_download_args("sandbox", false).unwrap();
+
+    assert_eq!(&args[0..5], ["tar", "czpf", "-", "-C", "/sandbox"]);
+    assert!(args.contains(&"--transform=flags=rh;s,^\\.$,sandbox,".to_string()));
+    assert!(args.contains(&"--transform=flags=rh;s,^\\./,sandbox/,".to_string()));
+    assert_eq!(args.last().unwrap(), ".");
+
+    for path in DEFAULT_REBUILDABLE_BACKUP_EXCLUDES {
+        assert!(
+            args.contains(&format!("--exclude=./{path}")),
+            "missing directory exclude for {path}: {args:?}"
+        );
+        assert!(
+            args.contains(&format!("--exclude=./{path}/*")),
+            "missing child exclude for {path}: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn sandbox_tar_download_args_include_rebuildable_has_no_rebuildable_excludes() {
+    let args = sandbox_tar_download_args("sandbox", true).unwrap();
+
+    assert_eq!(&args[0..5], ["tar", "czpf", "-", "-C", "/sandbox"]);
+    assert!(args.contains(&"--transform=flags=rh;s,^\\.$,sandbox,".to_string()));
+    assert!(args.contains(&"--transform=flags=rh;s,^\\./,sandbox/,".to_string()));
+    assert_eq!(args.last().unwrap(), ".");
+
+    for path in DEFAULT_REBUILDABLE_BACKUP_EXCLUDES {
+        assert!(
+            !args.contains(&format!("--exclude=./{path}")),
+            "forensic mode should not exclude {path}: {args:?}"
+        );
+        assert!(
+            !args.contains(&format!("--exclude=./{path}/*")),
+            "forensic mode should not exclude children of {path}: {args:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

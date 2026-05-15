@@ -3106,6 +3106,7 @@ async fn cmd_agent_backup(home: &Path, agent_name: &str, sandbox_only: bool) -> 
             &ssh_host,
             "sandbox",
             &dest_tar,
+            true,
             300,
         )
         .await?;
@@ -4678,7 +4679,8 @@ async fn perform_migration(
         &old_ssh_host,
         "sandbox",
         &backup_tar,
-        300,
+        true,
+        600,
     )
     .await?;
 
