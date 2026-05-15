@@ -3,7 +3,10 @@ use crate::Glyph;
 
 #[test]
 fn single_line_mono_basic() {
-    let s = status(Glyph::Ok).noun("tunnel").verb("created").render(Theme::Mono);
+    let s = status(Glyph::Ok)
+        .noun("tunnel")
+        .verb("created")
+        .render(Theme::Mono);
     assert_eq!(s, "▐  ✓ tunnel  created");
 }
 
@@ -31,6 +34,19 @@ fn single_line_with_fix() {
 }
 
 #[test]
+fn multiline_fix_prefixes_each_line_with_rail() {
+    let s = status(Glyph::Err)
+        .noun("bwrap")
+        .verb("blocked")
+        .fix("create profile\n\n  sudo apparmor_parser -r /etc/apparmor.d/bwrap")
+        .render(Theme::Ascii);
+
+    for line in s.lines() {
+        assert!(line.starts_with('|'), "line missing ascii rail: {line:?}");
+    }
+}
+
+#[test]
 fn single_line_no_verb_collapses_spacing() {
     let s = status(Glyph::Info).noun("starting").render(Theme::Mono);
     assert_eq!(s, "▐  … starting");
@@ -38,7 +54,10 @@ fn single_line_no_verb_collapses_spacing() {
 
 #[test]
 fn single_line_ascii_uses_pipe_and_brackets() {
-    let s = status(Glyph::Ok).noun("tunnel").verb("created").render(Theme::Ascii);
+    let s = status(Glyph::Ok)
+        .noun("tunnel")
+        .verb("created")
+        .render(Theme::Ascii);
     assert_eq!(s, "|  [ok] tunnel  created");
 }
 

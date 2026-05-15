@@ -541,10 +541,29 @@ jobs:
       - name: Provide external-tool test stubs
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
+          mkdir -p "$HOME/.cloudflared"
+          echo "cloudflared test cert" > "$HOME/.cloudflared/cert.pem"
           cat > "$RUNNER_TEMP/bin/cloudflared" <<'SH'
           #!/bin/sh
-          echo "cloudflared test stub" >&2
-          exit 0
+          set -eu
+
+          uuid="00000000-0000-0000-0000-000000000000"
+          cf_dir="$HOME/.cloudflared"
+          mkdir -p "$cf_dir"
+
+          case " $* " in
+            *" tunnel "*" list "*)
+              printf '[]\n'
+              ;;
+            *" tunnel "*" create "*)
+              for last do :; done
+              printf '{}\n' > "$cf_dir/$uuid.json"
+              printf '{"id":"%s","name":"%s"}\n' "$uuid" "$last"
+              ;;
+            *)
+              echo "cloudflared test stub" >&2
+              ;;
+          esac
           SH
           cat > "$RUNNER_TEMP/bin/claude" <<'SH'
           #!/bin/sh

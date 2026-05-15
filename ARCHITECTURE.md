@@ -300,7 +300,7 @@ Tables in per-agent `data.db`: `memories` / `memory_events` / `memories_fts`
 | process-compose | REST API (TCP :18927) | Health, process start/stop/restart, logs, shutdown |
 | Claude Code CLI | Subprocess (`claude -p` via SSH) | Runs inside sandbox, structured JSON output |
 | Claude Code CLI | Env var (CLAUDE_CODE_OAUTH_TOKEN) | Auth token from setup-token, injected into claude -p |
-| OpenShell | gRPC + mTLS (:8080) | Sandbox create/poll/reuse, policy hot-reload, exec, file verification |
+| OpenShell | gRPC + mTLS (active gateway endpoint) | Sandbox create/poll/reuse, policy hot-reload, exec, file verification |
 | OpenShell | CLI (`openshell sandbox upload/download`) | File transfer (no gRPC equivalent yet) |
 | Telegram | teloxide long-polling | CacheMe<Throttle<Bot>> adaptor, per-agent allowlist |
 | Cloudflare Tunnel | CLI (`cloudflared`) | Named tunnel, DNS CNAME, credentials file |
@@ -504,7 +504,7 @@ theme detection. Do not repeat; migrate existing offenders when touched.
 
 ## OpenShell Integration Conventions
 
-- **Prefer gRPC over CLI**: Use the OpenShell gRPC API (mTLS on :8080) for sandbox operations wherever possible. gRPC is faster, more reliable, and provides structured responses. The CLI (`openshell sandbox upload/download`) is only used for file transfer — no gRPC file transfer API exists yet.
+- **Prefer gRPC over CLI**: Use the OpenShell gRPC API (mTLS on the active gateway endpoint) for sandbox operations wherever possible. Resolve the endpoint from `OPENSHELL_GATEWAY_ENDPOINT` or `openshell status`; do not hardcode a gateway port. gRPC is faster, more reliable, and provides structured responses. The CLI (`openshell sandbox upload/download`) is only used for file transfer — no gRPC file transfer API exists yet.
 - **gRPC for**: sandbox create/get/delete, readiness polling, exec inside sandbox, policy status, SSH session management.
 - **CLI for**: file upload/download (SSH+tar under the hood), policy apply (`openshell policy set`).
 - **NEVER use CLI for exec**: `openshell sandbox exec` CLI has unreliable argument parsing (positional name vs `--name` flag). Always use gRPC `exec_in_sandbox()` for executing commands inside sandboxes. All callers (sync, platform_store, etc.) must receive a gRPC client.
