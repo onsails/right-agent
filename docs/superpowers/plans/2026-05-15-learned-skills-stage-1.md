@@ -273,7 +273,7 @@ mod tests {
                 invocation_id: "inv-1".to_owned(),
                 agent_name: "right".to_owned(),
                 action: LearningAction::Create,
-                skill_name: "rl-demo".to_owned(),
+                skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Failed),
                 reason: None,
@@ -291,11 +291,11 @@ mod tests {
                 invocation_id: "inv-1".to_owned(),
                 agent_name: "right".to_owned(),
                 action: LearningAction::Create,
-                skill_name: "rl-demo".to_owned(),
+                skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Created),
                 reason: None,
-                message: Some("Learned skill: rl-demo".to_owned()),
+                message: Some("Learned skill: rightx-demo".to_owned()),
                 summary: Some("captured workflow".to_owned()),
                 event_refs: vec!["e1".to_owned(), "e2".to_owned()],
             },
@@ -605,7 +605,7 @@ fn right_learn_skill_mentions_protocol_and_boundaries() {
     for needle in [
         "mcp__right__skill_learning_start",
         "mcp__right__skill_learning_finish",
-        "rl-",
+        "rightx-",
         ".claude/skills/",
         "source: \"learned\"",
         "Do not call mcp__right__send_progress just to announce learning",
@@ -642,9 +642,9 @@ Create `crates/right-codegen/skills/right-learn-skill/SKILL.md` with:
 ---
 name: right-learn-skill
 description: >-
-  Create or update reusable Agent Skills from real work. Use when a workflow,
-  recovered surprise, user correction, or loaded non-core skill issue should be
-  saved as a skill package for future sessions.
+  Use when real work reveals a reusable workflow, recovered tool/API surprise,
+  durable user correction, or problem with a rightx-* learned skill that should
+  be captured for future sessions.
 version: 0.1.0
 compatibility: Uses standard Claude Code Agent Skills in .claude/skills.
 ---
@@ -663,17 +663,17 @@ Create a new skill when at least one trigger is true:
 - The user corrected your approach and the correction is a durable gotcha.
 - You discovered a repeated tool/API usage pattern likely to recur.
 
-New skills created by Right learning must use an `rl-` package name:
+New skills created by Right learning must use a `rightx-` package name:
 
 ```text
-.claude/skills/rl-<slug>/SKILL.md
+.claude/skills/rightx-<slug>/SKILL.md
 ```
 
 Use lowercase ASCII letters, digits, and hyphens. Do not use absolute paths.
 
 ## Update An Existing Skill
 
-Update an existing non-core skill when a loaded skill was materially wrong or incomplete:
+Update an existing `rightx-*` learned skill when it was materially wrong or incomplete:
 
 - missing required step
 - stale command or API behavior
@@ -682,8 +682,7 @@ Update an existing non-core skill when a loaded skill was materially wrong or in
 - broken script
 - unsafe instruction
 
-You may update custom, manually installed, hub-installed, and `rl-*` learned skills.
-Do not update core/platform/bundled/codegen-owned skills.
+You may update only existing `rightx-*` learned skills. Do not update custom, manually installed, hub-installed, core/platform/bundled, or codegen-owned skills through this learning flow.
 
 ## Skip
 
@@ -697,7 +696,7 @@ Before writing or patching any skill package file, call:
 mcp__right__skill_learning_start
 ```
 
-Use `action: "create"` for new `rl-*` skills and `action: "update"` for existing non-core skills. Include a short localized message that tells the user what is being learned or updated.
+Use `action: "create"` for new `rightx-*` skills and `action: "update"` for existing `rightx-*` skills. Include a short localized message that tells the user what is being learned or updated.
 
 Do not call `mcp__right__send_progress` just to announce learning. The learning start tool sends the user-visible progress message.
 
@@ -725,7 +724,7 @@ Use the full Agent Skills format:
 
 Include `scripts/`, `references/`, or `assets/` only when they remove real complexity from future use.
 
-Update `.claude/skills/installed.json` for new learned skills with `source: "learned"` and `path: ".claude/skills/rl-<slug>"`.
+Update `.claude/skills/installed.json` for new learned skills with `source: "learned"` and `path: ".claude/skills/rightx-<slug>"`.
 
 ## Skill Quality
 
@@ -738,17 +737,18 @@ In `SKILL.md`, include:
 - tool/API gotchas
 - verification command or success check
 - when not to use it
+- that future use of this `rightx-*` learned skill should emit a short localized `used_skill_receipts` message when it materially guides the answer
 
 Do not store secrets. Do not copy large transcripts. Keep references focused.
 
 ## Deferred Signal
 
-If the conversation is still evolving or a full-context review is safer, do not write a half-baked skill. Instead, leave one hidden structured output signal:
+If the conversation is still evolving or a full-context review is safer, do not write a half-baked skill. Instead, leave at most one hidden structured output signal:
 
-- `learning_signal` for a new skill candidate
-- `skill_issue_signal` for an existing non-core skill problem
+- `learning_signal` for a new `rightx-*` skill candidate
+- `skill_issue_signal` for an existing `rightx-*` learned skill problem
 
-Emit no signal after a successful `mcp__right__skill_learning_finish`.
+Emit no signal after a successful `mcp__right__skill_learning_finish`. Emit at most one signal, never both. Use 1 non-empty event ref for an explicit user request and 2+ non-empty event refs for every other trigger. Do not emit a signal for weak hunches, one-off facts, or unverified failures.
 ```
 
 - [ ] **Step 4: Embed and install the skill**
@@ -822,7 +822,7 @@ fn tools_list_includes_learning_tools() {
 }
 
 #[tokio::test]
-async fn skill_learning_start_rejects_create_without_rl_prefix() {
+async fn skill_learning_start_rejects_create_without_learned_prefix() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
 
@@ -876,7 +876,7 @@ async fn skill_learning_start_rejects_core_skill_update() {
 }
 
 #[tokio::test]
-async fn skill_learning_start_allows_non_core_update_until_delivery() {
+async fn skill_learning_start_rejects_non_learned_update() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
     let skill_dir = agent_dir.join(".claude/skills/custom-skill");
@@ -912,7 +912,7 @@ async fn skill_learning_start_allows_non_core_update_until_delivery() {
 
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
-    assert_eq!(body["error"]["code"], "learning_send_failed");
+    assert_eq!(body["error"]["code"], "invalid_argument");
 }
 
 #[tokio::test]
@@ -927,10 +927,10 @@ async fn skill_learning_start_rejects_update_when_package_missing() {
             "skill_learning_start",
             json!({
                 "action": "update",
-                "skill_name": "custom-skill",
+                "skill_name": "rightx-custom-skill",
                 "reason": "missing_step",
                 "event_refs": ["e1", "e2"],
-                "message": "Updating a reusable custom skill."
+                "message": "Updating a reusable learned skill."
             }),
             crate::progress::ToolCallContext { invocation_id: Some("inv-1".to_owned()) },
         )
@@ -946,7 +946,7 @@ async fn skill_learning_start_rejects_update_when_package_missing() {
 async fn skill_learning_finish_requires_receipt_message_for_success() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
-    let skill_dir = agent_dir.join(".claude/skills/rl-demo");
+    let skill_dir = agent_dir.join(".claude/skills/rightx-demo");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(skill_dir.join("SKILL.md"), "# demo").unwrap();
 
@@ -957,7 +957,7 @@ async fn skill_learning_finish_requires_receipt_message_for_success() {
             "skill_learning_finish",
             json!({
                 "action": "create",
-                "skill_name": "rl-demo",
+                "skill_name": "rightx-demo",
                 "status": "created",
                 "summary": "Captured reusable steps.",
                 "event_refs": ["e1", "e2"]
@@ -984,9 +984,9 @@ async fn skill_learning_finish_rejects_success_when_package_missing() {
             "skill_learning_finish",
             json!({
                 "action": "create",
-                "skill_name": "rl-demo",
+                "skill_name": "rightx-demo",
                 "status": "created",
-                "message": "Learned skill: rl-demo.",
+                "message": "Learned skill: rightx-demo.",
                 "summary": "Captured reusable steps.",
                 "event_refs": ["e1", "e2"]
             }),
@@ -1263,10 +1263,10 @@ pub(crate) fn validate_learning_target(
     if let Err(message) = validate_skill_name(skill_name) {
         return Err(tool_error("invalid_argument", message, None));
     }
-    if matches!(action, LearningActionParam::Create) && !skill_name.starts_with("rl-") {
+    if matches!(action, LearningActionParam::Create) && !skill_name.starts_with("rightx-") {
         return Err(tool_error(
             "invalid_argument",
-            "action=create requires skill_name to start with rl-",
+            "action=create requires skill_name to start with rightx-",
             None,
         ));
     }
@@ -1434,7 +1434,7 @@ Add two `Tool::new(...)` entries after `send_progress`:
 ```rust
 Tool::new(
     right_mcp::internal_client::SKILL_LEARNING_START_TOOL,
-    "Announce and record that the foreground agent is starting to create or update a skill package. Metadata/progress only; accepts skill names, never paths. action=create requires rl-*; action=update may target non-core custom/manual/hub/rl-* skills.",
+    "Announce and record that the foreground agent is starting to create or update a learned skill package. Metadata/progress only; accepts skill names, never paths. action=create and action=update both require rightx-* skill names.",
     schema_for_type::<SkillLearningStartParams>(),
 ),
 Tool::new(
@@ -1638,7 +1638,7 @@ In `crates/right/src/memory_server.rs`, add stub tool methods next to `send_prog
 
 ```rust
 #[tool(
-    description = "DO NOT CALL in stdio mode. In HTTP foreground mode this records and announces the start of a skill create/update attempt. Accepts skill names only; action=create requires rl-*."
+    description = "DO NOT CALL in stdio mode. In HTTP foreground mode this records and announces the start of a skill create/update attempt. Accepts skill names only; action=create and action=update both require rightx-*."
 )]
 async fn skill_learning_start(
     &self,
@@ -1670,7 +1670,7 @@ Update `with_instructions()` in both `memory_server.rs` and `aggregator.rs` with
 
 ```text
 ## Learning
-- mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for skill create/update. Call before writing or patching skill package files. action=create requires rl-*; action=update may target non-core custom/manual/hub/rl-* skills. Accepts skill names only, never paths.
+- mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.
 - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files.
 ```
 
@@ -1779,16 +1779,16 @@ In `crates/bot/src/cc/worker_reply.rs`, add:
 ```rust
 #[test]
 fn parse_reply_output_accepts_used_skill_receipts() {
-    let json = r#"{"result":{"content":"Done","used_skill_receipts":[{"package_name":"rl-demo","message":"Used learned skill: rl-demo"}],"learning_signal":null,"skill_issue_signal":null}}"#;
+    let json = r#"{"result":{"content":"Done","used_skill_receipts":[{"package_name":"rightx-demo","message":"Used learned skill: rightx-demo"}],"learning_signal":null,"skill_issue_signal":null}}"#;
     let (output, _) = parse_reply_output(json).unwrap();
     let receipts = output.used_skill_receipts.unwrap();
-    assert_eq!(receipts[0].package_name, "rl-demo");
-    assert_eq!(receipts[0].message, "Used learned skill: rl-demo");
+    assert_eq!(receipts[0].package_name, "rightx-demo");
+    assert_eq!(receipts[0].message, "Used learned skill: rightx-demo");
 }
 
 #[test]
 fn parse_reply_output_accepts_learning_signal() {
-    let json = r#"{"result":{"content":"Done","learning_signal":{"kind":"create_candidate","package_name_hint":"rl-demo","trigger":"recovered_surprise","reason_not_written":"needs_full_context_review","event_refs":["e1","e2"],"summary":"Reusable gotcha."},"skill_issue_signal":null}}"#;
+    let json = r#"{"result":{"content":"Done","learning_signal":{"kind":"create_candidate","package_name_hint":"rightx-demo","trigger":"recovered_surprise","reason_not_written":"needs_full_context_review","event_refs":["e1","e2"],"summary":"Reusable gotcha."},"skill_issue_signal":null}}"#;
     let (output, _) = parse_reply_output(json).unwrap();
     assert!(output.learning_signal.is_some());
     assert!(output.skill_issue_signal.is_none());
@@ -1881,11 +1881,11 @@ fn nudge_signal_is_dropped_when_successful_finish_exists() {
             invocation_id: "inv-3".to_owned(),
             agent_name: "right".to_owned(),
             action: LearningAction::Create,
-            skill_name: "rl-demo".to_owned(),
+            skill_name: "rightx-demo".to_owned(),
             phase: LearningPhase::Finish,
             status: Some(LearningStatus::Created),
             reason: None,
-            message: Some("Learned skill: rl-demo".to_owned()),
+            message: Some("Learned skill: rightx-demo".to_owned()),
             summary: Some("captured".to_owned()),
             event_refs: vec![],
         },
@@ -1923,7 +1923,7 @@ fn nudge_signal_requires_two_event_refs_unless_explicit_user_request() {
         "inv-5",
         Some(serde_json::json!({
             "kind": "create_candidate",
-            "package_name_hint": "rl-demo",
+            "package_name_hint": "rightx-demo",
             "trigger": "recovered_surprise",
             "reason_not_written": "needs_full_context_review",
             "event_refs": ["e1"],
@@ -1939,7 +1939,7 @@ fn nudge_signal_requires_two_event_refs_unless_explicit_user_request() {
         "inv-6",
         Some(serde_json::json!({
             "kind": "create_candidate",
-            "package_name_hint": "rl-demo",
+            "package_name_hint": "rightx-demo",
             "trigger": "explicit_user_request",
             "reason_not_written": "conversation_still_evolving",
             "event_refs": ["e1"],
@@ -2092,12 +2092,12 @@ Add tests:
 fn append_used_skill_receipts_adds_messages_after_content() {
     let content = Some("Done.".to_owned());
     let receipts = vec![UsedSkillReceipt {
-        package_name: "rl-demo".to_owned(),
-        message: "Used learned skill: rl-demo".to_owned(),
+        package_name: "rightx-demo".to_owned(),
+        message: "Used learned skill: rightx-demo".to_owned(),
     }];
     assert_eq!(
         append_used_skill_receipts(content, Some(&receipts)).as_deref(),
-        Some("Done.\n\nUsed learned skill: rl-demo")
+        Some("Done.\n\nUsed learned skill: rightx-demo")
     );
 }
 ```
@@ -2331,7 +2331,7 @@ Expected: FAIL until operating instructions mention the new skill.
 In `crates/right-codegen/templates/right/prompt/OPERATING_INSTRUCTIONS.md`, in the Memory section after `Procedures and reusable workflows -- save as skills, not memory`, add:
 
 ```markdown
-When you discover a reusable procedure, recovered tool/API surprise, user correction that should change future behavior, or a loaded non-core skill that needs repair, use the `/right-learn-skill` skill. It decides whether to create an `rl-*` skill, patch a non-core skill, or leave a nudge signal.
+When you discover a reusable procedure, recovered tool/API surprise, user correction that should change future behavior, or a `rightx-*` learned skill that needs repair, use the `/right-learn-skill` skill. It decides whether to create or update a `rightx-*` learned skill, or leave a nudge signal.
 ```
 
 - [ ] **Step 4: Update PROMPT_SYSTEM.md**
@@ -2360,8 +2360,8 @@ check runs inside the sandbox; in `sandbox: none` mode it checks the host agent
 directory. The receipt text is authored by the LLM and passed as the
 `message` argument to `mcp__right__skill_learning_finish`.
 
-Create requires `rl-*`. Update may target any non-core custom/manual/hub/learned
-skill. Core/platform/bundled/codegen-owned skills are rejected when identifiable.
+Create and update both require `rightx-*`. The learning flow never patches
+custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.
 ```
 
 In `docs/architecture/sessions.md`, extend the foreground progress paragraph:
@@ -2377,8 +2377,9 @@ In `docs/architecture/sandbox.md`, add `right-learn-skill.<hash>/` to the platfo
 
 ```markdown
 Learned skill packages are agent-owned directories under
-`/sandbox/.claude/skills/rl-*` or existing non-core skill directories. They are
-not copied from sandbox to host by the learning MCP tools.
+`/sandbox/.claude/skills/rightx-*`. The learning MCP tools do not patch
+non-`rightx-*` skill directories and do not copy skill files from sandbox to
+host.
 ```
 
 - [ ] **Step 6: Run prompt/doc tests**
@@ -2500,9 +2501,9 @@ Expected: the recent commits include the task commits from this plan:
 - Foreground learning must not depend on background review execution.
 - Start/finish MCP tools must never accept absolute paths.
 - MCP validates skill package names before deriving paths: lowercase ASCII letters, digits, hyphens, 3-80 chars, no leading/trailing hyphen.
-- New learned skills must use `rl-*`.
-- Updating non-core custom/manual/hub/learned skills is allowed.
-- Core/platform/bundled/codegen-owned skills are read-only to learning flows.
+- New learned skills must use `rightx-*`.
+- Updating existing `rightx-*` learned skills is allowed.
+- Custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills are read-only to learning flows.
 - Successful `skill_learning_finish` requires an LLM-authored `message` argument and must verify `.claude/skills/<skill_name>/SKILL.md` exists in the sandbox or host agent directory before recording/sending success.
 - Successful finish calls suppress nudge signals for the same invocation.
 - Background review remains disabled; data contracts and counters are ready for a future worker.

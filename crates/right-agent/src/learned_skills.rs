@@ -1,3 +1,5 @@
+use right_mcp::LEARNED_SKILL_PREFIX;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LearningAction {
@@ -226,7 +228,7 @@ fn validate_learning_signal(signal: &serde_json::Value) -> Option<bool> {
         return None;
     }
 
-    non_empty_str(signal, "package_name_hint")?;
+    learned_skill_name(signal, "package_name_hint")?;
     let trigger = enum_str(signal, "trigger", LEARNING_TRIGGERS)?;
     enum_str(signal, "reason_not_written", NUDGE_REASONS)?;
     non_empty_str(signal, "summary")?;
@@ -240,7 +242,7 @@ fn validate_skill_issue_signal(signal: &serde_json::Value) -> Option<()> {
         return None;
     }
 
-    non_empty_str(signal, "skill_name")?;
+    learned_skill_name(signal, "skill_name")?;
     enum_str(signal, "issue", SKILL_ISSUES)?;
     enum_str(signal, "reason_not_patched", NUDGE_REASONS)?;
     enum_str(signal, "observed_effect", OBSERVED_EFFECTS)?;
@@ -255,6 +257,11 @@ fn non_empty_str<'a>(signal: &'a serde_json::Value, field: &str) -> Option<&'a s
         return None;
     }
     Some(value)
+}
+
+fn learned_skill_name<'a>(signal: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    let value = non_empty_str(signal, field)?;
+    value.starts_with(LEARNED_SKILL_PREFIX).then_some(value)
 }
 
 fn enum_str<'a>(signal: &'a serde_json::Value, field: &str, allowed: &[&str]) -> Option<&'a str> {
@@ -353,7 +360,7 @@ mod tests {
                 invocation_id: "inv-1".to_owned(),
                 agent_name: "right".to_owned(),
                 action: LearningAction::Create,
-                skill_name: "rl-demo".to_owned(),
+                skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Failed),
                 reason: None,
@@ -371,11 +378,11 @@ mod tests {
                 invocation_id: "inv-1".to_owned(),
                 agent_name: "right".to_owned(),
                 action: LearningAction::Create,
-                skill_name: "rl-demo".to_owned(),
+                skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Created),
                 reason: None,
-                message: Some("Learned skill: rl-demo".to_owned()),
+                message: Some("Learned skill: rightx-demo".to_owned()),
                 summary: Some("captured workflow".to_owned()),
                 event_refs: vec!["e1".to_owned(), "e2".to_owned()],
             },
@@ -431,7 +438,7 @@ mod tests {
     fn learning_signal(trigger: &str, event_refs: Vec<&str>, summary: &str) -> serde_json::Value {
         serde_json::json!({
             "kind": "create_candidate",
-            "package_name_hint": "right-demo",
+            "package_name_hint": "rightx-demo",
             "trigger": trigger,
             "reason_not_written": "needs_full_context_review",
             "event_refs": event_refs,
@@ -442,7 +449,7 @@ mod tests {
     fn skill_issue_signal(event_refs: Vec<&str>, patch_hint: &str) -> serde_json::Value {
         serde_json::json!({
             "kind": "update_candidate",
-            "skill_name": "right-demo",
+            "skill_name": "rightx-demo",
             "issue": "stale_command",
             "reason_not_patched": "needs_full_context_review",
             "observed_effect": "retry_after_tool_error",
@@ -460,11 +467,11 @@ mod tests {
                 invocation_id: "inv-success".to_owned(),
                 agent_name: "right".to_owned(),
                 action: LearningAction::Create,
-                skill_name: "right-demo".to_owned(),
+                skill_name: "rightx-demo".to_owned(),
                 phase: LearningPhase::Finish,
                 status: Some(LearningStatus::Created),
                 reason: None,
-                message: Some("Learned skill: right-demo".to_owned()),
+                message: Some("Learned skill: rightx-demo".to_owned()),
                 summary: Some("captured workflow".to_owned()),
                 event_refs: vec!["event-1".to_owned()],
             },
@@ -618,7 +625,7 @@ mod tests {
             "inv-non-string-ref",
             Some(serde_json::json!({
                 "kind": "create_candidate",
-                "package_name_hint": "right-demo",
+                "package_name_hint": "rightx-demo",
                 "trigger": "multi_step_workflow",
                 "reason_not_written": "needs_full_context_review",
                 "event_refs": ["event-1", 42, "event-2"],
@@ -653,6 +660,43 @@ mod tests {
     }
 
     #[test]
+    fn nudge_signal_requires_learned_skill_prefix() {
+        let conn = conn();
+        let create_without_prefix = select_reply_signal(
+            &conn,
+            "inv-create-prefix",
+            Some(serde_json::json!({
+                "kind": "create_candidate",
+                "package_name_hint": "custom-demo",
+                "trigger": "explicit_user_request",
+                "reason_not_written": "needs_full_context_review",
+                "event_refs": ["event-1"],
+                "summary": "Capture this workflow.",
+            })),
+            None,
+        )
+        .unwrap();
+        assert!(create_without_prefix.is_none());
+
+        let update_without_prefix = select_reply_signal(
+            &conn,
+            "inv-update-prefix",
+            None,
+            Some(serde_json::json!({
+                "kind": "update_candidate",
+                "skill_name": "custom-demo",
+                "issue": "stale_command",
+                "reason_not_patched": "needs_full_context_review",
+                "observed_effect": "retry_after_tool_error",
+                "event_refs": ["event-1", "event-2"],
+                "patch_hint": "Patch the stale command.",
+            })),
+        )
+        .unwrap();
+        assert!(update_without_prefix.is_none());
+    }
+
+    #[test]
     fn nudge_signal_rejects_invalid_enum_values() {
         let conn = conn();
         let invalid_trigger = select_reply_signal(
@@ -673,7 +717,7 @@ mod tests {
             "inv-invalid-learning-reason",
             Some(serde_json::json!({
                 "kind": "create_candidate",
-                "package_name_hint": "right-demo",
+                "package_name_hint": "rightx-demo",
                 "trigger": "explicit_user_request",
                 "reason_not_written": "needs review",
                 "event_refs": ["event-1"],
@@ -690,7 +734,7 @@ mod tests {
             None,
             Some(serde_json::json!({
                 "kind": "update_candidate",
-                "skill_name": "right-demo",
+                "skill_name": "rightx-demo",
                 "issue": "stale command",
                 "reason_not_patched": "needs_full_context_review",
                 "observed_effect": "retry_after_tool_error",
@@ -707,7 +751,7 @@ mod tests {
             None,
             Some(serde_json::json!({
                 "kind": "update_candidate",
-                "skill_name": "right-demo",
+                "skill_name": "rightx-demo",
                 "issue": "stale_command",
                 "reason_not_patched": "needs_full_context_review",
                 "observed_effect": "user had to retry",

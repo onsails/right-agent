@@ -216,11 +216,70 @@ fn operating_instructions_route_reusable_workflows_to_right_learn_skill() {
         "/right-learn-skill",
         "Procedures and reusable workflows",
         "save as skills, not memory",
+        right_mcp::LEARNED_SKILL_PREFIX,
     ] {
         assert!(
             ops.contains(needle),
             "OPERATING_INSTRUCTIONS must mention {needle:?}"
         );
+    }
+}
+
+#[test]
+fn operating_instructions_teach_used_learned_skill_receipts() {
+    let ops = crate::OPERATING_INSTRUCTIONS;
+    for needle in [
+        right_mcp::LEARNED_SKILL_PREFIX,
+        "used_skill_receipts",
+        "materially guides your answer",
+    ] {
+        assert!(
+            ops.contains(needle),
+            "OPERATING_INSTRUCTIONS must teach learned-skill receipt rule: missing {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn right_learn_skill_prompt_uses_current_prefix_and_exact_signal_rules() {
+    let skill = include_str!("../skills/right-learn-skill/SKILL.md");
+    assert!(
+        skill.contains("description: >-\n  Use when"),
+        "right-learn-skill description should start with Use when"
+    );
+    assert!(
+        skill.contains(right_mcp::LEARNED_SKILL_PREFIX),
+        "right-learn-skill must mention learned-skill prefix {:?}",
+        right_mcp::LEARNED_SKILL_PREFIX
+    );
+    for needle in [
+        "used_skill_receipts",
+        "at most one",
+        "successful `mcp__right__skill_learning_finish`",
+        "1 non-empty event ref",
+        "2+ non-empty event refs",
+    ] {
+        assert!(
+            skill.contains(needle),
+            "right-learn-skill must mention {needle:?}"
+        );
+    }
+}
+
+#[test]
+fn learned_skill_prompt_text_has_no_old_or_invalid_prefixes() {
+    let learn_skill = include_str!("../skills/right-learn-skill/SKILL.md");
+    let agent_texts = [
+        ("OPERATING_INSTRUCTIONS", crate::OPERATING_INSTRUCTIONS),
+        ("right-learn-skill", learn_skill),
+    ];
+    for (name, text) in agent_texts {
+        for forbidden in ["rl-", "_right-"] {
+            assert!(
+                !text.contains(forbidden),
+                "{name} must not mention old or invalid learned-skill prefix {forbidden:?}"
+            );
+        }
     }
 }
 

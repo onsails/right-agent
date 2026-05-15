@@ -112,7 +112,7 @@ impl RightBackend {
             ),
             Tool::new(
                 SKILL_LEARNING_START_TOOL,
-                "Stage 1 foreground metadata/progress for skill create/update. Call before writing or patching skill package files. action=create requires rl-*; action=update may target non-core custom/manual/hub/rl-* skills. Accepts skill names only, never paths.",
+                "Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.",
                 schema_for_type::<SkillLearningStartParams>(),
             ),
             Tool::new(
