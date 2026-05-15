@@ -9,6 +9,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use right_openshell::openshell::acquire_test_name_lock;
+use std::ffi::OsString;
 use tempfile::TempDir;
 
 fn write_minimal_agent(home: &std::path::Path) {
@@ -21,6 +22,14 @@ fn write_minimal_agent(home: &std::path::Path) {
     .unwrap();
 }
 
+fn path_without_openshell() -> OsString {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let paths = std::env::split_paths(&path)
+        .filter(|dir| !dir.join("openshell").is_file())
+        .collect::<Vec<_>>();
+    std::env::join_paths(paths).unwrap()
+}
+
 #[test]
 fn right_up_errors_when_global_config_missing() {
     let _lock = acquire_test_name_lock("right-up-fixed-port");
@@ -29,6 +38,8 @@ fn right_up_errors_when_global_config_missing() {
 
     Command::cargo_bin("right")
         .unwrap()
+        .env("PATH", path_without_openshell())
+        .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
         .args(["--home", home.path().to_str().unwrap(), "up"])
         .assert()
         .failure()
@@ -48,6 +59,8 @@ fn right_up_errors_when_tunnel_block_missing_from_config() {
 
     Command::cargo_bin("right")
         .unwrap()
+        .env("PATH", path_without_openshell())
+        .env("OPENSHELL_MTLS_DIR", home.path().join("missing-mtls"))
         .args(["--home", home.path().to_str().unwrap(), "up"])
         .assert()
         .failure()
