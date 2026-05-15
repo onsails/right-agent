@@ -54,6 +54,7 @@ pub struct TestSandbox {
     name: String,
     mtls_dir: PathBuf,
     _tmp: tempfile::TempDir, // keeps policy file alive
+    _slot: openshell::SandboxTestSlot,
     _name_lock: openshell::TestNameLock,
 }
 
@@ -63,7 +64,12 @@ impl TestSandbox {
     pub async fn create(test_name: &str) -> Self {
         let name = format!("right-test-{test_name}");
 
-        // Acquire the per-name lock FIRST. Blocks until any other process
+        // Hold one global sandbox slot for the sandbox lifetime. CI can set the
+        // slot limit to 1 to serialize only live sandbox tests, not the whole
+        // workspace test runner.
+        let slot = openshell::acquire_sandbox_slot();
+
+        // Acquire the per-name lock. Blocks until any other process
         // (including a different worktree's test binary) holding the same
         // name has finished and released. Held for the lifetime of `Self`
         // — released only after Drop completes, by which point the sandbox
@@ -144,6 +150,7 @@ network_policies:
             name,
             mtls_dir,
             _tmp: tmp,
+            _slot: slot,
             _name_lock: name_lock,
         }
     }

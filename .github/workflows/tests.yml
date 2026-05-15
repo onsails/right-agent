@@ -85,6 +85,8 @@ jobs:
   openshell:
     name: openshell ignored tests
     runs-on: ubuntu-latest
+    env:
+      RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
@@ -147,6 +149,8 @@ jobs:
   claude-openshell:
     name: claude ignored tests
     runs-on: ubuntu-latest
+    env:
+      RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "1"
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
