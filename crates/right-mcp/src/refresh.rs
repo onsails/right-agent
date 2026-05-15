@@ -532,6 +532,48 @@ pub async fn run_refresh_scheduler(
 mod tests {
     use super::*;
 
+    async fn request_count(server: &wiremock::MockServer) -> usize {
+        server.received_requests().await.unwrap().len()
+    }
+
+    async fn wait_for_scheduler_entry(agent_dir: &std::path::Path, server_name: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let found = right_db::open_connection(agent_dir, false)
+                .ok()
+                .and_then(|conn| load_oauth_entries_from_db(&conn).ok())
+                .map(|entries| entries.iter().any(|(name, _)| name == server_name))
+                .unwrap_or(false);
+            if found {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("scheduler did not persist OAuth state for {server_name}");
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn wait_for_token(
+        token: &Arc<tokio::sync::RwLock<Option<String>>>,
+        expected: &str,
+        server: &wiremock::MockServer,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if token.read().await.as_deref() == Some(expected) {
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!(
+                    "token did not update to {expected}; received_requests={}",
+                    request_count(server).await
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     #[test]
     fn backoff_cap_matches_last_step() {
         assert_eq!(
@@ -676,8 +718,8 @@ mod tests {
             token_endpoint: format!("{}/token", server.uri()),
             client_id: "c".into(),
             client_secret: None,
-            // Already past margin → fires immediately
-            expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            // Already expired -> fires immediately.
+            expires_at: chrono::Utc::now() - chrono::Duration::minutes(5),
             server_url: "https://x/mcp".into(),
         };
         let token_arc: Arc<tokio::sync::RwLock<Option<String>>> =
@@ -704,26 +746,25 @@ mod tests {
         .await
         .unwrap();
 
+        wait_for_scheduler_entry(tmp.path(), "s").await;
+
         // First scheduler fire calls do_refresh_cancellable, which retries
         // internally 3 times with 30/60s backoff (~90s virtual). All return
         // 503 → Transient. Scheduler reschedules in 60s. Second fire's first
         // attempt hits the 200 mock → success.
-        //
-        // Drive virtual time forward until token_arc updates or we time out.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
+        for _ in 0..200 {
             tokio::time::advance(Duration::from_secs(5)).await;
-            tokio::task::yield_now().await;
-            if *token_arc.read().await == Some("new-tok".to_string()) {
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+                if token_arc.read().await.as_deref() == Some("new-tok") {
+                    break;
+                }
+            }
+            if token_arc.read().await.as_deref() == Some("new-tok") {
                 break;
             }
-            if std::time::Instant::now() > deadline {
-                panic!(
-                    "scheduler did not refresh in time; received_requests={}",
-                    server.received_requests().await.unwrap().len()
-                );
-            }
         }
+        wait_for_token(&token_arc, "new-tok", &server).await;
 
         let n_requests = server.received_requests().await.unwrap().len();
         assert!(
