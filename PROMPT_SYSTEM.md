@@ -263,12 +263,15 @@ non-empty `event_refs` and enum-constrained reason/type fields; the bot may
 drop ambiguous or low-evidence signals without affecting reply delivery.
 
 ### bootstrap-schema.json (bootstrap mode)
-Same as reply-schema plus required `bootstrap_complete` (boolean).
+Required: `content` (string|null) and `bootstrap_complete` (boolean).
+Optional: `reply_to_message_id`, `attachments`. Bootstrap mode does not include
+normal-mode learned-skill fields (`used_skill_receipts`, `learning_signal`,
+`skill_issue_signal`).
 Server-side validation: `bootstrap_complete: true` is ignored unless IDENTITY.md,
 SOUL.md, USER.md all exist on the host after reverse_sync.
 
 ### CRON_SCHEMA_JSON (cron jobs — default)
-Defined in `crates/right-agent/src/codegen/agent_def.rs`. Required:
+Defined in `crates/right-codegen/src/agent_def.rs`. Required:
 `summary` (string). Optional: `notify` (object | null) and
 `no_notify_reason` (string | null). When `notify` is non-null, its
 `content` field is required. `notify: null` is the silent-output path
@@ -276,7 +279,7 @@ Defined in `crates/right-agent/src/codegen/agent_def.rs`. Required:
 carry a short factual explanation.
 
 ### BG_CONTINUATION_SCHEMA_JSON (cron jobs — background continuation)
-Defined in `crates/right-agent/src/codegen/agent_def.rs`. Selected by
+Defined in `crates/right-codegen/src/agent_def.rs`. Selected by
 `cron::execute_job` via `select_schema_and_fork` for
 `ScheduleKind::BackgroundContinuation` runs (foreground turns the
 worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
@@ -295,7 +298,8 @@ worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
 
 The `right` MCP server provides `with_instructions()` describing all tools:
 memory (memory_retain/memory_recall/memory_reflect — Hindsight mode only),
-cron (list/show runs), MCP management (add/remove/list/auth), foreground
+cron (list/show runs), MCP management (`mcp__right__mcp_list` read-only;
+add/remove/auth stay in the Telegram `/mcp` control plane), foreground
 progress (mcp__right__send_progress), learned-skill metadata/progress/receipt
 tools (mcp__right__skill_learning_start and
 mcp__right__skill_learning_finish), and bootstrap

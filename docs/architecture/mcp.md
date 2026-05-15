@@ -142,7 +142,9 @@ limit, then calls the bot's `POST /progress/send` endpoint. Telegram send
 failures surface as tool-level `progress_send_failed` errors.
 
 Cron, delivery, reflection, and background-continuation calls pass
-`mcp__right__send_progress` via `--disallowedTools`; they have no live
+foreground-only tools (`mcp__right__send_progress`,
+`mcp__right__skill_learning_start`, and
+`mcp__right__skill_learning_finish`) via `--disallowedTools`; they have no live
 foreground invocation and must use their structured output delivery path.
 
 ## Learned Skill MCP Tools
