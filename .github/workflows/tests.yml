@@ -23,7 +23,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config ffmpeg
+
+      - name: Provide cloudflared test stub
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/cloudflared" <<'SH'
+          #!/bin/sh
+          echo "cloudflared test stub" >&2
+          exit 0
+          SH
+          chmod +x "$RUNNER_TEMP/bin/cloudflared"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Test workspace serially
         run: cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
@@ -50,7 +61,7 @@ jobs:
 
       - name: Run STT ignored tests serially
         run: |
-          cargo test -p right-bot stt:: -- --ignored --test-threads=1
+          cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
 
   openshell:
     name: openshell ignored tests
@@ -69,44 +80,35 @@ jobs:
 
       - name: Install OpenShell
         run: |
-          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/openshell" --help
+          secret="$(openssl rand -hex 32)"
+          echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
+          systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
+          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
+          openshell --help
 
-      - name: Start OpenShell gateway
+      - name: Wait for OpenShell gateway
         run: |
-          nohup "$HOME/.local/bin/openshell" gateway start --recreate --port 8080 > "$RUNNER_TEMP/openshell-gateway.log" 2>&1 &
           for attempt in $(seq 1 90); do
-            if "$HOME/.local/bin/openshell" gateway info >/dev/null 2>&1 \
+            if openshell status >/dev/null 2>&1 \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
+              openshell status
               exit 0
             fi
             echo "waiting for OpenShell gateway ($attempt/90)"
             sleep 2
           done
-          cat "$RUNNER_TEMP/openshell-gateway.log"
+          systemctl --user status openshell-gateway --no-pager || true
+          journalctl --user -u openshell-gateway --no-pager -n 80 || true
           exit 1
 
       - name: OpenShell doctor
         run: openshell doctor check
 
-      - name: Run right-openshell live tests serially
+      - name: Run OpenShell ignored tests serially
         run: |
-          cargo test -p right-openshell verify_sandbox_files_ -- --ignored --test-threads=1
-          cargo test -p right-openshell exec_immediately_after_sandbox_create_reproduces_init_flow -- --ignored --test-threads=1
-          cargo test -p right-openshell upload_file_to_directory -- --ignored --test-threads=1
-          cargo test -p right-openshell upload_directory_preserves_files_and_overwrites -- --ignored --test-threads=1
-          cargo test -p right-openshell download_file_writes_to_exact_dest_path -- --ignored --test-threads=1
-          cargo test -p right-openshell test_sandbox_holds_name_lock -- --ignored --test-threads=1
-
-      - name: Run right-agent live tests serially
-        run: |
-          cargo test -p right-agent --test control_master -- --ignored --test-threads=1
-          cargo test -p right-agent --test policy_apply -- --ignored --test-threads=1
-          cargo test -p right-agent --test rebootstrap_sandbox -- --ignored --test-threads=1
-          cargo test -p right --test cli_integration test_policy_validates_against_openshell -- --ignored --test-threads=1
+          cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
 
   claude-openshell:
     name: claude ignored tests
@@ -125,24 +127,27 @@ jobs:
 
       - name: Install OpenShell
         run: |
-          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/openshell" --help
+          secret="$(openssl rand -hex 32)"
+          echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
+          systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
+          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
+          openshell --help
 
-      - name: Start OpenShell gateway
+      - name: Wait for OpenShell gateway
         run: |
-          nohup "$HOME/.local/bin/openshell" gateway start --recreate --port 8080 > "$RUNNER_TEMP/openshell-gateway.log" 2>&1 &
           for attempt in $(seq 1 90); do
-            if "$HOME/.local/bin/openshell" gateway info >/dev/null 2>&1 \
+            if openshell status >/dev/null 2>&1 \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
+              openshell status
               exit 0
             fi
             echo "waiting for OpenShell gateway ($attempt/90)"
             sleep 2
           done
-          cat "$RUNNER_TEMP/openshell-gateway.log"
+          systemctl --user status openshell-gateway --no-pager || true
+          journalctl --user -u openshell-gateway --no-pager -n 80 || true
           exit 1
 
       - name: OpenShell doctor
@@ -150,5 +155,4 @@ jobs:
 
       - name: Run Claude/OpenShell ignored tests serially
         run: |
-          cargo test -p right-bot --test cc_debug_integration -- --ignored --test-threads=1
-          cargo test -p right-bot --test sandbox_upgrade -- --ignored --test-threads=1
+          cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1

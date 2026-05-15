@@ -143,7 +143,7 @@ mod tests {
 
     #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
-    async fn inference_returns_known_words() {
+    async fn ci_stt_inference_returns_known_words() {
         let model = ensure_tiny_model().await;
         let samples = decode_to_pcm_f32(&fixture("hello.oga"))
             .await

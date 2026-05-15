@@ -37,7 +37,7 @@ async fn assert_absent_in_sandbox(sandbox: &TestSandbox, path: &str) {
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn execute_against_live_sandbox() {
+async fn ci_openshell_execute_against_live_sandbox() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("rebootstrap").await;
 
