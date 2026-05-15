@@ -18,6 +18,7 @@ const SKILL_RIGHT_MEMORY_FILE: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/ri
 const SKILL_RIGHT_MEMORY_HINDSIGHT: Dir =
     include_dir!("$CARGO_MANIFEST_DIR/skills/right-memory-hindsight");
 const SKILL_RIGHT_REFLECT: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-reflect");
+const SKILL_RIGHT_LEARN_SKILL: Dir = include_dir!("$CARGO_MANIFEST_DIR/skills/right-learn-skill");
 
 /// Canonical names of Right Agent built-in skills under `.claude/skills/`.
 ///
@@ -30,6 +31,7 @@ pub const BUILTIN_SKILL_NAMES: &[&str] = &[
     "right-skills",
     "right-cron",
     "right-mcp",
+    "right-learn-skill",
     "right-memory",
     "right-reflect",
 ];
@@ -51,6 +53,7 @@ fn builtin_skill_dir(
         "right-skills" => Ok(&SKILL_RIGHT_SKILLS),
         "right-cron" => Ok(&SKILL_RIGHT_CRON),
         "right-mcp" => Ok(&SKILL_RIGHT_MCP),
+        "right-learn-skill" => Ok(&SKILL_RIGHT_LEARN_SKILL),
         "right-memory" => Ok(if *memory_provider == MemoryProvider::Hindsight {
             &SKILL_RIGHT_MEMORY_HINDSIGHT
         } else {
@@ -259,6 +262,41 @@ mod tests {
                 .exists(),
             "right-mcp/SKILL.md should exist"
         );
+    }
+
+    #[test]
+    fn installs_right_learn_skill() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        let path = dir.path().join(".claude/skills/right-learn-skill/SKILL.md");
+        assert!(path.exists(), "right-learn-skill/SKILL.md should exist");
+    }
+
+    #[test]
+    fn right_learn_skill_mentions_protocol_and_boundaries() {
+        let dir = tempdir().unwrap();
+        install_builtin_skills(dir.path(), &MemoryProvider::File).unwrap();
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/skills/right-learn-skill/SKILL.md"))
+                .unwrap();
+
+        for needle in [
+            "mcp__right__skill_learning_start",
+            "mcp__right__skill_learning_finish",
+            "rl-",
+            ".claude/skills/",
+            "source: \"learned\"",
+            "Do not call mcp__right__send_progress just to announce learning",
+            "core/platform/bundled/codegen-owned",
+            "scripts/",
+            "references/",
+            "assets/",
+        ] {
+            assert!(
+                content.contains(needle),
+                "right-learn-skill must mention {needle:?}"
+            );
+        }
     }
 
     #[test]
@@ -512,6 +550,7 @@ mod tests {
             ("right-skills", "right-skills"),
             ("right-cron", "right-cron"),
             ("right-mcp", "right-mcp"),
+            ("right-learn-skill", "right-learn-skill"),
             ("right-memory-file", "right-memory"),
             ("right-reflect", "right-reflect"),
         ];
