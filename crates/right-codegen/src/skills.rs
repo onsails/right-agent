@@ -287,6 +287,7 @@ mod tests {
             ".claude/skills/",
             "source: \"learned\"",
             "Do not call mcp__right__send_progress just to announce learning",
+            "LLM-authored receipt message",
             "core/platform/bundled/codegen-owned",
             "scripts/",
             "references/",
