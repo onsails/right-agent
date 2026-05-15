@@ -467,7 +467,7 @@ mod tests {
         assert!(policy.contains(r#"host: "storage.googleapis.com""#));
         assert!(
             !policy.contains(r#"host: "**.*""#),
-            "restrictive must not contain wildcard"
+            "restrictive must not contain top-level wildcard"
         );
     }
 
