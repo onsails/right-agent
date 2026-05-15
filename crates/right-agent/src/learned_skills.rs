@@ -157,44 +157,109 @@ pub fn select_reply_signal(
     }
 }
 
+const LEARNING_TRIGGERS: &[&str] = &[
+    "explicit_user_request",
+    "multi_step_workflow",
+    "recovered_surprise",
+    "user_correction",
+    "repeated_tool_pattern",
+];
+
+const NUDGE_REASONS: &[&str] = &[
+    "conversation_still_evolving",
+    "needs_full_context_review",
+    "write_or_publish_failed",
+    "needs_existing_skill_diff",
+];
+
+const SKILL_ISSUES: &[&str] = &[
+    "missing_step",
+    "stale_command",
+    "wrong_api_assumption",
+    "overbroad_activation",
+    "broken_script",
+    "unsafe_instruction",
+];
+
+const OBSERVED_EFFECTS: &[&str] = &[
+    "retry_after_tool_error",
+    "retry_after_user_correction",
+    "manual_override",
+    "verified_alternative",
+];
+
 fn validate_nudge_signal(
     signal_kind: NudgeSignalKind,
     signal: serde_json::Value,
 ) -> Option<(NudgeSignalKind, serde_json::Value)> {
-    let expected_kind = match signal_kind {
-        NudgeSignalKind::Learning => "create_candidate",
-        NudgeSignalKind::SkillIssue => "update_candidate",
+    let is_explicit_user_request = match signal_kind {
+        NudgeSignalKind::Learning => validate_learning_signal(&signal)?,
+        NudgeSignalKind::SkillIssue => {
+            validate_skill_issue_signal(&signal)?;
+            false
+        }
     };
-    if signal.get("kind").and_then(|v| v.as_str()) != Some(expected_kind) {
-        return None;
-    }
-
-    let has_text = match signal_kind {
-        NudgeSignalKind::Learning => signal
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.trim().is_empty()),
-        NudgeSignalKind::SkillIssue => signal
-            .get("patch_hint")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.trim().is_empty()),
-    };
-    if !has_text {
-        return None;
-    }
 
     let event_ref_count = signal
         .get("event_refs")
         .and_then(|v| v.as_array())
-        .map_or(0, Vec::len);
-    let is_explicit_user_request = signal_kind == NudgeSignalKind::Learning
-        && signal.get("trigger").and_then(|v| v.as_str()) == Some("explicit_user_request");
+        .map_or(0, |refs| {
+            refs.iter()
+                .filter_map(|value| value.as_str())
+                .filter(|event_ref| !event_ref.trim().is_empty())
+                .count()
+        });
     let required_refs = if is_explicit_user_request { 1 } else { 2 };
     if event_ref_count < required_refs {
         return None;
     }
 
     Some((signal_kind, signal))
+}
+
+fn validate_learning_signal(signal: &serde_json::Value) -> Option<bool> {
+    let kind = signal.get("kind").and_then(|v| v.as_str())?;
+    if kind != "create_candidate" {
+        return None;
+    }
+
+    non_empty_str(signal, "package_name_hint")?;
+    let trigger = enum_str(signal, "trigger", LEARNING_TRIGGERS)?;
+    enum_str(signal, "reason_not_written", NUDGE_REASONS)?;
+    non_empty_str(signal, "summary")?;
+
+    Some(trigger == "explicit_user_request")
+}
+
+fn validate_skill_issue_signal(signal: &serde_json::Value) -> Option<()> {
+    let kind = signal.get("kind").and_then(|v| v.as_str())?;
+    if kind != "update_candidate" {
+        return None;
+    }
+
+    non_empty_str(signal, "skill_name")?;
+    enum_str(signal, "issue", SKILL_ISSUES)?;
+    enum_str(signal, "reason_not_patched", NUDGE_REASONS)?;
+    enum_str(signal, "observed_effect", OBSERVED_EFFECTS)?;
+    non_empty_str(signal, "patch_hint")?;
+
+    Some(())
+}
+
+fn non_empty_str<'a>(signal: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    let value = signal.get(field).and_then(|v| v.as_str())?;
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(value)
+}
+
+fn enum_str<'a>(signal: &'a serde_json::Value, field: &str, allowed: &[&str]) -> Option<&'a str> {
+    let value = non_empty_str(signal, field)?;
+    if !allowed.contains(&value) {
+        return None;
+    }
+    Some(value)
 }
 
 pub fn ensure_nudge_state(
@@ -365,7 +430,7 @@ mod tests {
             "kind": "create_candidate",
             "package_name_hint": "right-demo",
             "trigger": trigger,
-            "reason_not_written": "needs review",
+            "reason_not_written": "needs_full_context_review",
             "event_refs": event_refs,
             "summary": summary,
         })
@@ -375,9 +440,9 @@ mod tests {
         serde_json::json!({
             "kind": "update_candidate",
             "skill_name": "right-demo",
-            "issue": "stale command",
-            "reason_not_patched": "needs review",
-            "observed_effect": "user had to retry",
+            "issue": "stale_command",
+            "reason_not_patched": "needs_full_context_review",
+            "observed_effect": "retry_after_tool_error",
             "event_refs": event_refs,
             "patch_hint": patch_hint,
         })
@@ -446,7 +511,7 @@ mod tests {
             &conn,
             "inv-short",
             Some(learning_signal(
-                "agent_observed_repetition",
+                "multi_step_workflow",
                 vec!["event-1"],
                 "Capture this workflow.",
             )),
@@ -492,5 +557,102 @@ mod tests {
         )
         .unwrap();
         assert!(empty_patch_hint.is_none());
+    }
+
+    #[test]
+    fn nudge_signal_rejects_empty_or_whitespace_event_refs() {
+        let conn = conn();
+        let explicit_with_blank_ref = select_reply_signal(
+            &conn,
+            "inv-blank-explicit",
+            Some(learning_signal(
+                "explicit_user_request",
+                vec![" \t\n"],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+        assert!(explicit_with_blank_ref.is_none());
+
+        let non_explicit_with_one_nonblank_ref = select_reply_signal(
+            &conn,
+            "inv-blank-non-explicit",
+            Some(learning_signal(
+                "multi_step_workflow",
+                vec!["event-1", " "],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+        assert!(non_explicit_with_one_nonblank_ref.is_none());
+    }
+
+    #[test]
+    fn nudge_signal_rejects_invalid_enum_values() {
+        let conn = conn();
+        let invalid_trigger = select_reply_signal(
+            &conn,
+            "inv-invalid-trigger",
+            Some(learning_signal(
+                "agent_observed_repetition",
+                vec!["event-1", "event-2"],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+        assert!(invalid_trigger.is_none());
+
+        let invalid_learning_reason = select_reply_signal(
+            &conn,
+            "inv-invalid-learning-reason",
+            Some(serde_json::json!({
+                "kind": "create_candidate",
+                "package_name_hint": "right-demo",
+                "trigger": "explicit_user_request",
+                "reason_not_written": "needs review",
+                "event_refs": ["event-1"],
+                "summary": "Capture this workflow.",
+            })),
+            None,
+        )
+        .unwrap();
+        assert!(invalid_learning_reason.is_none());
+
+        let invalid_issue = select_reply_signal(
+            &conn,
+            "inv-invalid-issue",
+            None,
+            Some(serde_json::json!({
+                "kind": "update_candidate",
+                "skill_name": "right-demo",
+                "issue": "stale command",
+                "reason_not_patched": "needs_full_context_review",
+                "observed_effect": "retry_after_tool_error",
+                "event_refs": ["event-1", "event-2"],
+                "patch_hint": "Patch the stale command.",
+            })),
+        )
+        .unwrap();
+        assert!(invalid_issue.is_none());
+
+        let invalid_observed_effect = select_reply_signal(
+            &conn,
+            "inv-invalid-observed-effect",
+            None,
+            Some(serde_json::json!({
+                "kind": "update_candidate",
+                "skill_name": "right-demo",
+                "issue": "stale_command",
+                "reason_not_patched": "needs_full_context_review",
+                "observed_effect": "user had to retry",
+                "event_refs": ["event-1", "event-2"],
+                "patch_hint": "Patch the stale command.",
+            })),
+        )
+        .unwrap();
+        assert!(invalid_observed_effect.is_none());
     }
 }

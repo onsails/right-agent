@@ -105,7 +105,7 @@ pub fn parse_reply_output(raw_json: &str) -> Result<(ReplyOutput, Option<String>
     Ok((output, session_id))
 }
 
-pub fn append_used_skill_receipts(
+pub(crate) fn append_used_skill_receipts(
     content: Option<String>,
     receipts: Option<&[UsedSkillReceipt]>,
 ) -> Option<String> {
@@ -118,9 +118,14 @@ pub fn append_used_skill_receipts(
 
     let messages = receipts
         .iter()
-        .map(|receipt| receipt.message.as_str())
+        .map(|receipt| receipt.message.trim())
+        .filter(|message| !message.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
+    if messages.is_empty() {
+        return content.filter(|content| !content.is_empty());
+    }
+
     match content {
         Some(content) if !content.is_empty() => Some(format!("{content}\n\n{messages}")),
         _ => Some(messages),
@@ -298,6 +303,57 @@ mod tests {
             content.as_deref(),
             Some("Done\n\nUsed skill: right-mcp\nUsed skill: right-memory")
         );
+    }
+
+    #[test]
+    fn append_used_skill_receipts_none_content_blank_receipts_returns_none() {
+        let receipts = vec![
+            UsedSkillReceipt {
+                package_name: "right-mcp".to_owned(),
+                message: "   ".to_owned(),
+            },
+            UsedSkillReceipt {
+                package_name: "right-memory".to_owned(),
+                message: "\n\t".to_owned(),
+            },
+        ];
+
+        let content = append_used_skill_receipts(None, Some(receipts.as_slice()));
+
+        assert_eq!(content, None);
+    }
+
+    #[test]
+    fn append_used_skill_receipts_appends_only_nonblank_trimmed_messages() {
+        let receipts = vec![
+            UsedSkillReceipt {
+                package_name: "right-mcp".to_owned(),
+                message: "  Used skill: right-mcp  ".to_owned(),
+            },
+            UsedSkillReceipt {
+                package_name: "right-memory".to_owned(),
+                message: "\n".to_owned(),
+            },
+            UsedSkillReceipt {
+                package_name: "right-codegen".to_owned(),
+                message: "\tUsed skill: right-codegen\n".to_owned(),
+            },
+        ];
+
+        let content =
+            append_used_skill_receipts(Some("Done".to_owned()), Some(receipts.as_slice()));
+
+        assert_eq!(
+            content.as_deref(),
+            Some("Done\n\nUsed skill: right-mcp\nUsed skill: right-codegen")
+        );
+    }
+
+    #[test]
+    fn append_used_skill_receipts_empty_receipts_leaves_content_unchanged() {
+        let content = append_used_skill_receipts(Some("Done".to_owned()), Some(&[]));
+
+        assert_eq!(content.as_deref(), Some("Done"));
     }
 
     // bootstrap mode tests

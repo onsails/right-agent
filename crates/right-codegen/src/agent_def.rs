@@ -63,8 +63,12 @@ pub const REPLY_SCHEMA_JSON: &str = r#"{
       "properties": {
         "kind": { "const": "create_candidate" },
         "package_name_hint": { "type": "string" },
-        "trigger": { "type": "string" },
-        "reason_not_written": { "type": "string" },
+        "trigger": {
+          "enum": ["explicit_user_request", "multi_step_workflow", "recovered_surprise", "user_correction", "repeated_tool_pattern"]
+        },
+        "reason_not_written": {
+          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
+        },
         "event_refs": {
           "type": "array",
           "items": { "type": "string" },
@@ -79,9 +83,15 @@ pub const REPLY_SCHEMA_JSON: &str = r#"{
       "properties": {
         "kind": { "const": "update_candidate" },
         "skill_name": { "type": "string" },
-        "issue": { "type": "string" },
-        "reason_not_patched": { "type": "string" },
-        "observed_effect": { "type": "string" },
+        "issue": {
+          "enum": ["missing_step", "stale_command", "wrong_api_assumption", "overbroad_activation", "broken_script", "unsafe_instruction"]
+        },
+        "reason_not_patched": {
+          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
+        },
+        "observed_effect": {
+          "enum": ["retry_after_tool_error", "retry_after_user_correction", "manual_override", "verified_alternative"]
+        },
         "event_refs": {
           "type": "array",
           "items": { "type": "string" },

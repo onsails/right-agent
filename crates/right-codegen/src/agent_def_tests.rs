@@ -39,6 +39,22 @@ fn reply_schema_contains_learned_skill_fields() {
         !required_strs.contains(&"used_skill_receipts"),
         "used_skill_receipts must be optional"
     );
+
+    for path in [
+        &["learning_signal", "trigger"][..],
+        &["learning_signal", "reason_not_written"][..],
+        &["skill_issue_signal", "issue"][..],
+        &["skill_issue_signal", "reason_not_patched"][..],
+        &["skill_issue_signal", "observed_effect"][..],
+    ] {
+        let field = &properties[path[0]]["properties"][path[1]];
+        assert!(
+            field.get("enum").and_then(|v| v.as_array()).is_some(),
+            "{}.{} must use a JSON Schema enum",
+            path[0],
+            path[1]
+        );
+    }
 }
 
 #[test]
