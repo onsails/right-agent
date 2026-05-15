@@ -3,6 +3,15 @@ use crate::{
     generate_system_prompt,
 };
 
+fn enum_values(field: &serde_json::Value) -> Vec<&str> {
+    field["enum"]
+        .as_array()
+        .expect("field enum must be an array")
+        .iter()
+        .map(|value| value.as_str().expect("enum value must be a string"))
+        .collect()
+}
+
 #[test]
 fn reply_schema_json_is_valid() {
     let parsed: serde_json::Value =
@@ -55,6 +64,31 @@ fn reply_schema_contains_learned_skill_fields() {
             path[1]
         );
     }
+
+    let trigger_enum = enum_values(&properties["learning_signal"]["properties"]["trigger"]);
+    assert_eq!(
+        trigger_enum,
+        vec![
+            "explicit_user_request",
+            "multi_step_workflow",
+            "recovered_surprise",
+            "user_correction",
+            "repeated_tool_pattern",
+        ]
+    );
+
+    let issue_enum = enum_values(&properties["skill_issue_signal"]["properties"]["issue"]);
+    assert_eq!(
+        issue_enum,
+        vec![
+            "missing_step",
+            "stale_command",
+            "wrong_api_assumption",
+            "overbroad_activation",
+            "broken_script",
+            "unsafe_instruction",
+        ]
+    );
 }
 
 #[test]

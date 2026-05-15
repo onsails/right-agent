@@ -200,21 +200,24 @@ fn validate_nudge_signal(
         }
     };
 
-    let event_ref_count = signal
-        .get("event_refs")
-        .and_then(|v| v.as_array())
-        .map_or(0, |refs| {
-            refs.iter()
-                .filter_map(|value| value.as_str())
-                .filter(|event_ref| !event_ref.trim().is_empty())
-                .count()
-        });
+    let event_ref_count = valid_event_ref_count(&signal)?;
     let required_refs = if is_explicit_user_request { 1 } else { 2 };
     if event_ref_count < required_refs {
         return None;
     }
 
     Some((signal_kind, signal))
+}
+
+fn valid_event_ref_count(signal: &serde_json::Value) -> Option<usize> {
+    let refs = signal.get("event_refs").and_then(|v| v.as_array())?;
+    for event_ref in refs {
+        let event_ref = event_ref.as_str()?;
+        if event_ref.trim().is_empty() {
+            return None;
+        }
+    }
+    Some(refs.len())
 }
 
 fn validate_learning_signal(signal: &serde_json::Value) -> Option<bool> {
@@ -587,6 +590,66 @@ mod tests {
         )
         .unwrap();
         assert!(non_explicit_with_one_nonblank_ref.is_none());
+    }
+
+    #[test]
+    fn nudge_signal_rejects_blank_ref_even_when_enough_nonblank_refs_exist() {
+        let conn = conn();
+        let selected = select_reply_signal(
+            &conn,
+            "inv-mixed-blank",
+            Some(learning_signal(
+                "multi_step_workflow",
+                vec!["event-1", " ", "event-2"],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn nudge_signal_rejects_non_string_event_ref() {
+        let conn = conn();
+        let selected = select_reply_signal(
+            &conn,
+            "inv-non-string-ref",
+            Some(serde_json::json!({
+                "kind": "create_candidate",
+                "package_name_hint": "right-demo",
+                "trigger": "multi_step_workflow",
+                "reason_not_written": "needs_full_context_review",
+                "event_refs": ["event-1", 42, "event-2"],
+                "summary": "Capture this workflow.",
+            })),
+            None,
+        )
+        .unwrap();
+
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn nudge_signal_accepts_valid_two_event_refs() {
+        let conn = conn();
+        let selected = select_reply_signal(
+            &conn,
+            "inv-two-refs",
+            Some(learning_signal(
+                "multi_step_workflow",
+                vec!["event-1", "event-2"],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected.map(|(kind, _)| kind),
+            Some(NudgeSignalKind::Learning)
+        );
     }
 
     #[test]
