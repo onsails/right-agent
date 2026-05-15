@@ -6,7 +6,7 @@
 
 **Architecture:** Split tests by dependency boundary. Pure Rust, local filesystem, mock HTTP, and mock OpenShell-gRPC tests remain in the default `cargo test` path. Tests that require a live OpenShell gateway, a sandbox image with Claude Code, OpenShell file transfer, or real ffmpeg/Whisper inference become `#[ignore]` with stable `ci-*` reasons and are invoked by named workflow jobs. Slow tests that do not truly require external services are rewritten, not ignored.
 
-**Tech Stack:** Rust 2024, Cargo/libtest `--test-threads=1`, GitHub Actions, direct NVIDIA OpenShell installer, ffmpeg, Whisper tiny model cache, existing `devenv.nix`.
+**Tech Stack:** Rust 2024, Cargo/libtest `--test-threads=1`, GitHub Actions, `devenv shell` for the Rust/toolchain environment, direct NVIDIA OpenShell installer, rootless Podman socket for the OpenShell gateway, ffmpeg, Whisper tiny model cache, existing `devenv.nix`.
 
 **Timing source:** `/tmp/rightclaw-test-timing-stats.md` from the serial run on 2026-05-15.
 
@@ -35,7 +35,7 @@ File: `.github/workflows/tests.yml`
 File: `.github/workflows/tests.yml`
 
 ```yaml
-run: cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+run: devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
 ```
 
 - Exclude doc tests from the measured/default workflow path for this cleanup. The timing run was explicitly finalized without doc tests.
@@ -521,19 +521,22 @@ on:
     branches: ["master"]
   workflow_dispatch:
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   workspace:
     name: workspace tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config ffmpeg
-      - name: Provide cloudflared test stub
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
+      - name: Provide external-tool test stubs
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
           cat > "$RUNNER_TEMP/bin/cloudflared" <<'SH'
@@ -541,13 +544,19 @@ jobs:
           echo "cloudflared test stub" >&2
           exit 0
           SH
-          chmod +x "$RUNNER_TEMP/bin/cloudflared"
+          cat > "$RUNNER_TEMP/bin/claude" <<'SH'
+          #!/bin/sh
+          echo "claude test stub" >&2
+          exit 0
+          SH
+          chmod +x "$RUNNER_TEMP/bin/cloudflared" "$RUNNER_TEMP/bin/claude"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Test workspace serially
-        run: cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+        run: |
+          devenv shell -- env PATH="$RUNNER_TEMP/bin:$PATH" cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
 ```
 
-- [ ] Add STT CI job. It installs ffmpeg, caches the tiny Whisper model, and runs ignored STT tests explicitly.
+- [ ] Add STT CI job. It runs inside `devenv shell`, caches the tiny Whisper model, and runs ignored STT tests explicitly.
 
 File: `.github/workflows/tests.yml`
 
@@ -556,22 +565,23 @@ File: `.github/workflows/tests.yml`
     name: stt ignored tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config ffmpeg
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
       - uses: actions/cache@v4
         with:
           path: ~/.right/cache/whisper
           key: whisper-ggml-tiny-v1
       - name: Run STT ignored tests serially
-        run: cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
+        run: |
+          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
 ```
 
-- [ ] Add OpenShell CI job. It installs OpenShell in the workflow, starts the gateway, waits for mTLS certs, then runs ignored OpenShell tests explicitly.
+- [ ] Add OpenShell CI job. It enters `devenv shell` for Rust tooling, installs OpenShell in the workflow, starts the Podman socket and gateway, waits for mTLS certs, then runs ignored OpenShell tests explicitly.
 
 File: `.github/workflows/tests.yml`
 
@@ -580,13 +590,29 @@ File: `.github/workflows/tests.yml`
     name: openshell ignored tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Start Podman socket
+        run: |
+          systemctl --user enable --now podman.socket
+          for attempt in $(seq 1 30); do
+            if test -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"; then
+              podman info
+              exit 0
+            fi
+            echo "waiting for Podman socket ($attempt/30)"
+            sleep 1
+          done
+          systemctl --user status podman.socket --no-pager || true
+          journalctl --user -u podman.socket --no-pager -n 80 || true
+          exit 1
       - name: Install OpenShell
         run: |
           secret="$(openssl rand -hex 32)"
@@ -596,7 +622,7 @@ File: `.github/workflows/tests.yml`
           openshell --help
       - name: Wait for OpenShell gateway
         run: |
-          for i in $(seq 1 90); do
+          for attempt in $(seq 1 90); do
             if openshell status >/dev/null 2>&1 \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
@@ -604,6 +630,7 @@ File: `.github/workflows/tests.yml`
               openshell status
               exit 0
             fi
+            echo "waiting for OpenShell gateway ($attempt/90)"
             sleep 2
           done
           systemctl --user status openshell-gateway --no-pager || true
@@ -613,7 +640,7 @@ File: `.github/workflows/tests.yml`
         run: openshell doctor check
       - name: Run OpenShell ignored tests serially
         run: |
-          cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
+          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
 ```
 
 - [ ] Add Claude/OpenShell CI job separately so `claude upgrade` failures are isolated from OpenShell-only regressions.
@@ -625,13 +652,29 @@ File: `.github/workflows/tests.yml`
     name: claude ignored tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-protoc@v3
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - uses: cachix/cachix-action@v16
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dtolnay/rust-toolchain@stable
+          name: devenv
+      - name: Install devenv.sh
+        run: nix profile add nixpkgs#devenv
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+        run: sudo apt-get update && sudo apt-get install -y podman
+      - name: Start Podman socket
+        run: |
+          systemctl --user enable --now podman.socket
+          for attempt in $(seq 1 30); do
+            if test -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"; then
+              podman info
+              exit 0
+            fi
+            echo "waiting for Podman socket ($attempt/30)"
+            sleep 1
+          done
+          systemctl --user status podman.socket --no-pager || true
+          journalctl --user -u podman.socket --no-pager -n 80 || true
+          exit 1
       - name: Install OpenShell
         run: |
           secret="$(openssl rand -hex 32)"
@@ -641,7 +684,7 @@ File: `.github/workflows/tests.yml`
           openshell --help
       - name: Wait for OpenShell gateway
         run: |
-          for i in $(seq 1 90); do
+          for attempt in $(seq 1 90); do
             if openshell status >/dev/null 2>&1 \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
@@ -649,14 +692,17 @@ File: `.github/workflows/tests.yml`
               openshell status
               exit 0
             fi
+            echo "waiting for OpenShell gateway ($attempt/90)"
             sleep 2
           done
           systemctl --user status openshell-gateway --no-pager || true
           journalctl --user -u openshell-gateway --no-pager -n 80 || true
           exit 1
+      - name: OpenShell doctor
+        run: openshell doctor check
       - name: Run Claude/OpenShell ignored tests serially
         run: |
-          cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
+          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
 ```
 
 - [ ] If `claude-openshell` flakes because the CI sandbox image lacks the Claude binary, do not silently skip the job. Add a test helper that installs or upgrades Claude inside the sandbox with `claude upgrade` and keep the failure visible.
