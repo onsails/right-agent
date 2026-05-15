@@ -7,6 +7,7 @@ pub(crate) mod internal_api;
 pub(crate) mod learning;
 mod memory_server;
 pub(crate) mod progress;
+mod restore;
 pub(crate) mod right_backend;
 mod wizard;
 
