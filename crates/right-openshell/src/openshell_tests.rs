@@ -580,7 +580,7 @@ async fn wait_for_deleted_succeeds_when_sandbox_disappears() {
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn verify_sandbox_files_detects_missing_and_reuploads() {
+async fn ci_openshell_verify_sandbox_files_detects_missing_and_reuploads() {
     let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -607,7 +607,7 @@ async fn verify_sandbox_files_detects_missing_and_reuploads() {
 /// may not be up yet, causing "Connection reset by peer".
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn exec_immediately_after_sandbox_create_reproduces_init_flow() {
+async fn ci_openshell_exec_immediately_after_sandbox_create_reproduces_init_flow() {
     let _slot = super::acquire_sandbox_slot();
     // ensure_sandbox takes the explicit sandbox name. Use the same legacy
     // `sandbox_name()` helper here so the test asserts against a stable prefix
@@ -749,7 +749,7 @@ network_policies:
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn verify_sandbox_files_passes_when_all_present() {
+async fn ci_openshell_verify_sandbox_files_passes_when_all_present() {
     let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -771,7 +771,7 @@ async fn verify_sandbox_files_passes_when_all_present() {
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn upload_file_to_directory() {
+async fn ci_openshell_upload_file_to_directory() {
     let sbox = shared_test_sandbox().await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -818,7 +818,7 @@ async fn upload_file_rejects_non_directory_dest() {
 /// Also tests overwrite: sync runs every 5 min, so repeated uploads must work.
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn upload_directory_preserves_files_and_overwrites() {
+async fn ci_openshell_upload_directory_preserves_files_and_overwrites() {
     let sbox = shared_test_sandbox().await;
 
     // Create a directory tree mimicking a skill: right-mcp/SKILL.md
@@ -867,7 +867,7 @@ async fn upload_directory_preserves_files_and_overwrites() {
 /// the file at exactly the caller's `host_dest` path.
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn download_file_writes_to_exact_dest_path() {
+async fn ci_openshell_download_file_writes_to_exact_dest_path() {
     let sbox = shared_test_sandbox().await;
 
     // Put a known file in the sandbox.
@@ -1039,7 +1039,7 @@ fn test_name_lock_sanitizes_name() {
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn test_sandbox_holds_name_lock() {
+async fn ci_openshell_test_sandbox_holds_name_lock() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;

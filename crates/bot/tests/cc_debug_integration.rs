@@ -18,7 +18,7 @@ use right_openshell::test_support::TestSandbox;
 /// the debug file before bailing.
 #[ignore = "ci-claude: requires live OpenShell sandbox and claude binary"]
 #[tokio::test]
-async fn cc_debug_file_lands_inside_sandbox() {
+async fn ci_claude_cc_debug_file_lands_inside_sandbox() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("right-reflect-debugfile").await;
 
@@ -88,7 +88,7 @@ async fn cc_debug_file_lands_inside_sandbox() {
 /// this test seeds a synthetic file rather than relying on CC to create one.
 #[ignore = "ci-claude: requires live OpenShell sandbox and claude binary"]
 #[tokio::test]
-async fn jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
+async fn ci_claude_jsonl_project_dir_is_accessible_and_cc_preserves_contents() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox = TestSandbox::create("right-reflect-jsonl").await;
 

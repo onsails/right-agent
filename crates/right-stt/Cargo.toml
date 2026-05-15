@@ -8,10 +8,10 @@ publish = false
 futures = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 right-agent-config = { path = "../right-agent-config", version = "*" }
+rustls = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 which = { workspace = true }
 
 [dev-dependencies]
-rustls = { workspace = true }
 tempfile = { workspace = true }

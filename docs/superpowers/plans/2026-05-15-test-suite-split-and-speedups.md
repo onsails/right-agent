@@ -23,9 +23,11 @@ File: `.github/workflows/tests.yml`
 ```yaml
 - name: Install OpenShell
   run: |
-    curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-    echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-    "$HOME/.local/bin/openshell" --help
+    secret="$(openssl rand -hex 32)"
+    echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
+    systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
+    curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
+    openshell --help
 ```
 
 - Keep normal Cargo compilation parallel. Limit runtime test scheduling with libtest flags:
@@ -530,7 +532,17 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake pkg-config ffmpeg
+      - name: Provide cloudflared test stub
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/cloudflared" <<'SH'
+          #!/bin/sh
+          echo "cloudflared test stub" >&2
+          exit 0
+          SH
+          chmod +x "$RUNNER_TEMP/bin/cloudflared"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Test workspace serially
         run: cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
 ```
@@ -556,7 +568,7 @@ File: `.github/workflows/tests.yml`
           path: ~/.right/cache/whisper
           key: whisper-ggml-tiny-v1
       - name: Run STT ignored tests serially
-        run: cargo test -p right-bot stt:: -- --ignored --test-threads=1
+        run: cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
 ```
 
 - [ ] Add OpenShell CI job. It installs OpenShell in the workflow, starts the gateway, waits for mTLS certs, then runs ignored OpenShell tests explicitly.
@@ -577,38 +589,31 @@ File: `.github/workflows/tests.yml`
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
       - name: Install OpenShell
         run: |
-          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/openshell" --help
-      - name: Start OpenShell gateway
+          secret="$(openssl rand -hex 32)"
+          echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
+          systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
+          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
+          openshell --help
+      - name: Wait for OpenShell gateway
         run: |
-          nohup "$HOME/.local/bin/openshell" gateway start --port 8080 > "$RUNNER_TEMP/openshell-gateway.log" 2>&1 &
           for i in $(seq 1 90); do
-            if "$HOME/.local/bin/openshell" gateway info >/dev/null 2>&1 \
+            if openshell status >/dev/null 2>&1 \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
+              openshell status
               exit 0
             fi
             sleep 2
           done
-          cat "$RUNNER_TEMP/openshell-gateway.log"
+          systemctl --user status openshell-gateway --no-pager || true
+          journalctl --user -u openshell-gateway --no-pager -n 80 || true
           exit 1
       - name: OpenShell doctor
         run: openshell doctor check
-      - name: Run right-openshell live tests serially
+      - name: Run OpenShell ignored tests serially
         run: |
-          cargo test -p right-openshell verify_sandbox_files_ -- --ignored --test-threads=1
-          cargo test -p right-openshell exec_immediately_after_sandbox_create_reproduces_init_flow -- --ignored --test-threads=1
-          cargo test -p right-openshell upload_file_to_directory -- --ignored --test-threads=1
-          cargo test -p right-openshell upload_directory_preserves_files_and_overwrites -- --ignored --test-threads=1
-          cargo test -p right-openshell download_file_writes_to_exact_dest_path -- --ignored --test-threads=1
-      - name: Run right-agent live tests serially
-        run: |
-          cargo test -p right-agent --test control_master -- --ignored --test-threads=1
-          cargo test -p right-agent --test policy_apply -- --ignored --test-threads=1
-          cargo test -p right-agent --test rebootstrap_sandbox -- --ignored --test-threads=1
-          cargo test -p right --test cli_integration test_policy_validates_against_openshell -- --ignored --test-threads=1
+          cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
 ```
 
 - [ ] Add Claude/OpenShell CI job separately so `claude upgrade` failures are isolated from OpenShell-only regressions.
@@ -629,27 +634,29 @@ File: `.github/workflows/tests.yml`
         run: sudo apt-get update && sudo apt-get install -y cmake pkg-config
       - name: Install OpenShell
         run: |
-          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/openshell" --help
-      - name: Start OpenShell gateway
+          secret="$(openssl rand -hex 32)"
+          echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
+          systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
+          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
+          openshell --help
+      - name: Wait for OpenShell gateway
         run: |
-          nohup "$HOME/.local/bin/openshell" gateway start --port 8080 > "$RUNNER_TEMP/openshell-gateway.log" 2>&1 &
           for i in $(seq 1 90); do
-            if "$HOME/.local/bin/openshell" gateway info >/dev/null 2>&1 \
+            if openshell status >/dev/null 2>&1 \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
               && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
+              openshell status
               exit 0
             fi
             sleep 2
           done
-          cat "$RUNNER_TEMP/openshell-gateway.log"
+          systemctl --user status openshell-gateway --no-pager || true
+          journalctl --user -u openshell-gateway --no-pager -n 80 || true
           exit 1
       - name: Run Claude/OpenShell ignored tests serially
         run: |
-          cargo test -p right-bot --test cc_debug_integration -- --ignored --test-threads=1
-          cargo test -p right-bot --test sandbox_upgrade -- --ignored --test-threads=1
+          cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
 ```
 
 - [ ] If `claude-openshell` flakes because the CI sandbox image lacks the Claude binary, do not silently skip the job. Add a test helper that installs or upgrades Claude inside the sandbox with `claude upgrade` and keep the failure visible.
@@ -686,9 +693,9 @@ time devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast 
 - [ ] Run targeted ignored suites on a machine with the external prerequisites:
 
 ```sh
-devenv shell -- cargo test -p right-openshell upload_file_to_directory -- --ignored --test-threads=1
-devenv shell -- cargo test -p right-bot stt:: -- --ignored --test-threads=1
-devenv shell -- cargo test -p right-bot --test cc_debug_integration -- --ignored --test-threads=1
+devenv shell -- cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
+devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
+devenv shell -- cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
 ```
 
 - [ ] Do not claim GitHub Actions coverage is complete until the workflow has run at least once or `act`/`actionlint` plus local command parity has been checked.

@@ -63,7 +63,7 @@ let _ = operation();  // Explicitly ignores
 ### 5. Testing
 - **NEVER** use `std::env::set_var()` in tests (pollutes environment)
 - **ALWAYS** pass config through function parameters
-- **External integration tests**: tests requiring live OpenShell, Claude Code inside a sandbox, real ffmpeg/Whisper inference, or network model downloads must be `#[ignore]` locally and explicitly invoked by GitHub Actions jobs. Use stable ignore reasons: `ci-openshell: ...`, `ci-claude: ...`, `ci-stt: ...`.
+- **External integration tests**: tests requiring live OpenShell, Claude Code inside a sandbox, real ffmpeg/Whisper inference, or network model downloads must be `#[ignore]` locally and explicitly invoked by GitHub Actions jobs. Use stable ignore reasons and workspace-filterable test name prefixes together: `ci-openshell: ...` with `ci_openshell_`, `ci-claude: ...` with `ci_claude_`, `ci-stt: ...` with `ci_stt_`. `crates/right/tests/ci_ignored_contract.rs` enforces this so future packages are not missed.
 - **Cadence**: TDD still applies, but use the narrowest useful command for the loop. Run the new/regression test first and verify it fails; after implementation rerun that test or the nearest package/module suite. Do not run full workspace tests after every edit or every small plan step.
 - **Targeting**: Prefer `devenv shell -- cargo test -p <crate> <filter>` or `devenv shell -- cargo test -p <crate>` during development. Use workspace-wide tests midstream only for broad cross-crate changes or when targeted results cannot prove the behavior.
 - **Worktrees**: At worktree start, run one baseline verification appropriate to the planned scope and record existing failures. At worktree completion, run the final full workspace test from inside that worktree.

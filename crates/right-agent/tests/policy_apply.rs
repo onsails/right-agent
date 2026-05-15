@@ -102,7 +102,7 @@ fn cleanup_sandbox(name: &str) {
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn generated_permissive_policy_applies_to_live_openshell() {
+async fn ci_openshell_generated_permissive_policy_applies_to_live_openshell() {
     let _slot = acquire_sandbox_slot();
 
     let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
@@ -123,7 +123,7 @@ async fn generated_permissive_policy_applies_to_live_openshell() {
 
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn generated_restrictive_policy_applies_to_live_openshell() {
+async fn ci_openshell_generated_restrictive_policy_applies_to_live_openshell() {
     let _slot = acquire_sandbox_slot();
 
     let policy = generate_policy(8100, &NetworkPolicy::Restrictive, None);

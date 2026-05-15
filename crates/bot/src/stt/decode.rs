@@ -82,7 +82,7 @@ mod tests {
     // while working with the actual fixture duration.
     #[ignore = "ci-stt: runs real ffmpeg decoding"]
     #[tokio::test]
-    async fn decode_voice_oga_yields_samples() {
+    async fn ci_stt_decode_voice_oga_yields_samples() {
         let samples = decode_to_pcm_f32(&fixture("hello.oga"))
             .await
             .expect("ffmpeg required (install: brew install ffmpeg / apt install ffmpeg)");
@@ -95,7 +95,7 @@ mod tests {
 
     #[ignore = "ci-stt: runs real ffmpeg decoding"]
     #[tokio::test]
-    async fn decode_video_note_mp4_yields_samples() {
+    async fn ci_stt_decode_video_note_mp4_yields_samples() {
         let samples = decode_to_pcm_f32(&fixture("circle.mp4"))
             .await
             .expect("ffmpeg required");
@@ -108,7 +108,7 @@ mod tests {
 
     #[ignore = "ci-stt: runs real ffmpeg decoding"]
     #[tokio::test]
-    async fn decode_corrupted_input_returns_error() {
+    async fn ci_stt_decode_corrupted_input_returns_error() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         tokio::fs::write(tmp.path(), b"not audio").await.unwrap();
         match decode_to_pcm_f32(tmp.path()).await {

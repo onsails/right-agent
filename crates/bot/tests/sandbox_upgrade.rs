@@ -19,7 +19,7 @@ use right_openshell::test_support::TestSandbox;
 /// be removed.
 #[ignore = "ci-claude: runs real claude upgrade inside live OpenShell sandbox"]
 #[tokio::test]
-async fn claude_upgrade_lifecycle() {
+async fn ci_claude_upgrade_lifecycle() {
     let sbox = TestSandbox::create("claude-upgrade").await;
 
     // 1. `claude upgrade` exits 0 and reports either a fresh install or

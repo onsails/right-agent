@@ -161,7 +161,7 @@ mod transcribe_or_marker_tests {
 
     #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
-    async fn voice_success_returns_success_marker() {
+    async fn ci_stt_voice_success_returns_success_marker() {
         let ctx = tiny_ctx(true).await;
         let m = transcribe_or_marker(&ctx, markers::VoiceKind::Voice, &fixture("hello.oga")).await;
         assert!(m.contains("надиктовал"));
@@ -256,7 +256,7 @@ mod tests {
 
     #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
-    async fn transcribe_voice_end_to_end() {
+    async fn ci_stt_transcribe_voice_end_to_end() {
         let t = Transcriber::new(tiny_path().await);
         let res = t.transcribe_voice(&fixture("hello.oga")).await.unwrap();
         assert!(res.text.to_lowercase().contains("test"));
@@ -264,7 +264,7 @@ mod tests {
 
     #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
-    async fn transcribe_video_note_end_to_end() {
+    async fn ci_stt_transcribe_video_note_end_to_end() {
         let t = Transcriber::new(tiny_path().await);
         let res = t
             .transcribe_video_note(&fixture("circle.mp4"))

@@ -81,6 +81,7 @@ async fn download_url_to_path(
     display_name: &str,
     dest: &Path,
 ) -> Result<(), DownloadError> {
+    ensure_crypto_provider();
     let partial = partial_path_for(dest);
 
     if let Some(parent) = dest.parent() {
@@ -122,6 +123,10 @@ async fn download_url_to_path(
     drop(file);
     tokio::fs::rename(&partial, dest).await?;
     Ok(())
+}
+
+fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Public entry: check ffmpeg, then download missing models. Logs warnings
@@ -171,14 +176,6 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Install ring as the rustls process-level crypto provider. Idempotent —
-    /// safe to call from multiple tests in the same binary.
-    fn setup_crypto() {
-        // install_default returns Err(existing provider Arc) when already
-        // installed by another test in the same binary — that's not a failure.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-
     #[test]
     fn model_cache_path_layout() {
         let home = Path::new("/tmp/.right");
@@ -224,7 +221,6 @@ mod tests {
 
     #[tokio::test]
     async fn download_url_to_path_bad_status_returns_bad_status_error() {
-        setup_crypto();
         let tmp = TempDir::new().unwrap();
         let dest = tmp.path().join("out.bin");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

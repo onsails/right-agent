@@ -388,8 +388,9 @@ mod tests {
         assert!(message.contains("13"));
     }
 
+    #[ignore = "ci-openshell: requires live OpenShell gateway"]
     #[tokio::test]
-    async fn cleanup_obsolete_builtin_skill_paths_removes_legacy_paths_in_sandbox() {
+    async fn ci_openshell_cleanup_obsolete_builtin_skill_paths_removes_legacy_paths_in_sandbox() {
         let sandbox =
             right_openshell::test_support::TestSandbox::create("obsolete-skills-cleanup").await;
         let mtls_dir = match right_openshell::openshell::preflight_check() {

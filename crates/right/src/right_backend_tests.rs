@@ -228,8 +228,9 @@ network_policies:
     sbox
 }
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn bootstrap_done_sandbox_files_present() {
+async fn ci_openshell_bootstrap_done_sandbox_files_present() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-present";
 
@@ -284,8 +285,9 @@ async fn bootstrap_done_sandbox_files_present() {
     right_openshell::test_cleanup::unregister_test_sandbox(sandbox_name);
 }
 
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn bootstrap_done_sandbox_files_missing() {
+async fn ci_openshell_bootstrap_done_sandbox_files_missing() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let sandbox_name = "rightclaw-test-bootstrap-missing";
 

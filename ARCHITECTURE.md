@@ -95,8 +95,9 @@ deployment, TLS-MITM, and the bot-startup sandbox sequence.
 
 Live OpenShell coverage is CI-explicit: tests that create real sandboxes or
 rely on OpenShell CLI file transfer use `#[ignore = "ci-openshell: ..."]`
-and are called by `.github/workflows/tests.yml`. Mock gRPC and pure policy
-tests remain in the default workspace test path.
+with a `ci_openshell_` test-name prefix and are called by the workspace-wide
+ignored-test filter in `.github/workflows/tests.yml`. Mock gRPC and pure
+policy tests remain in the default workspace test path.
 
 ### Login Flow (setup-token)
 

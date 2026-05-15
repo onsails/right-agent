@@ -684,7 +684,7 @@ fn test_agent_list() {
 /// Creates an ephemeral sandbox via `ensure_sandbox`, applies the policy, then destroys it.
 #[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
-async fn test_policy_validates_against_openshell() {
+async fn ci_openshell_policy_validates_against_openshell() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
