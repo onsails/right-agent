@@ -42,14 +42,20 @@ Per-callsite `--disallowedTools`:
 
 - **Foreground** (`bot::telegram::worker`): baseline only. `Agent` is allowed —
   foreground turns can spawn subagents legitimately.
-- **Cron** (`bot::cron`): baseline + `mcp__right__send_progress`. `Agent`
+- **Cron** (`bot::cron`): baseline + foreground-only tools
+  (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
+  `mcp__right__skill_learning_finish`). `Agent`
   intentionally remains allowed; cron jobs may legitimately fan out to
-  subagents. Progress is denied because cron turns have no live foreground
-  invocation registered.
-- **Reflection** (`bot::reflection`): baseline + `Agent` + `mcp__right__send_progress`.
+  subagents. Foreground-only tools are denied because cron turns have no live
+  foreground invocation registered.
+- **Reflection** (`bot::reflection`): baseline + `Agent` + foreground-only
+  tools (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
+  `mcp__right__skill_learning_finish`).
   Reflection is a single follow-up turn — subagents would waste budget — and
-  it is not a foreground turn, so progress is unavailable.
-- **Delivery** / **background continuation**: baseline + `mcp__right__send_progress`,
+  it is not a foreground turn, so foreground-only tools are unavailable.
+- **Delivery** / **background continuation**: baseline + foreground-only tools
+  (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
+  `mcp__right__skill_learning_finish`),
   same rationale as cron.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
