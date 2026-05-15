@@ -1,0 +1,919 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Learned Skills Trigger Flow</title>
+  <style type="text/css">
+    :root {
+      --bg: #f6f7fb;
+      --paper: #ffffff;
+      --ink: #17202a;
+      --muted: #607086;
+      --line: #d8e0ea;
+      --blue: #1f6feb;
+      --blue-soft: #eaf3ff;
+      --green: #137333;
+      --green-soft: #e8f5ec;
+      --amber: #8a5a00;
+      --amber-soft: #fff5d8;
+      --red: #9b1c1c;
+      --red-soft: #fdeaea;
+      --code: #f0f3f8;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .page {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 34px 22px 52px;
+    }
+
+    h1 {
+      font-size: 2.2rem;
+      line-height: 1.08;
+      margin: 0 0 8px;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      font-size: 1.25rem;
+      margin: 0 0 14px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      font-size: 1rem;
+      margin: 0 0 8px;
+      letter-spacing: 0;
+    }
+
+    p { margin: 0 0 12px; }
+
+    code {
+      background: var(--code);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 10px 0 0;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--code);
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.86rem;
+      line-height: 1.42;
+    }
+
+    .lede {
+      max-width: 920px;
+      color: var(--muted);
+      font-size: 1.05rem;
+      margin-bottom: 24px;
+    }
+
+    .section {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      margin: 16px 0;
+      box-shadow: 0 1px 2px rgba(20, 28, 40, 0.04);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfcff;
+    }
+
+    .flow {
+      display: grid;
+      gap: 8px;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: minmax(190px, 1fr) 36px minmax(190px, 1fr);
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    .node {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 11px;
+      background: #fff;
+      min-height: 76px;
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--blue);
+    }
+
+    .node.green strong { color: var(--green); }
+    .node.amber strong { color: var(--amber); }
+    .node.red strong { color: var(--red); }
+
+    .node.green { background: var(--green-soft); }
+    .node.amber { background: var(--amber-soft); }
+    .node.red { background: var(--red-soft); }
+    .node.blue { background: var(--blue-soft); }
+
+    .arrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .ladder {
+      display: grid;
+      gap: 8px;
+    }
+
+    .connector {
+      color: var(--muted);
+      font-size: 0.86rem;
+      padding-left: 14px;
+      border-left: 2px solid var(--line);
+      margin-left: 13px;
+    }
+
+    .compare {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .matrix {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 13px;
+      background: #fff;
+    }
+
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 0.8rem;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      background: #fff;
+      margin-bottom: 8px;
+    }
+
+    ul {
+      margin: 8px 0 0;
+      padding-left: 1.2rem;
+    }
+
+    li { margin: 4px 0; }
+
+    .callout {
+      border-left: 4px solid var(--blue);
+      background: var(--blue-soft);
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin-top: 14px;
+    }
+
+    @media (max-width: 860px) {
+      .split,
+      .compare,
+      .matrix { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; }
+      .arrow { min-height: 24px; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <h1>Learned Skills Trigger Flow</h1>
+  <p class="lede">
+    Brainstorming diagram for Right Agent stage 1: foreground learning ships first, while nudge signals, counters, provenance, and review contracts are laid down now so the background loop can be enabled later without redesign.
+  </p>
+
+  <div class="section">
+    <h2>Hermes Model: Three Loops</h2>
+    <div class="split">
+      <div class="panel">
+        <h3>Immediate self-improvement</h3>
+        <div class="ladder">
+          <div class="node blue">
+            <strong>Foreground agent works</strong>
+            Complex task, recovered failure, user correction, or non-trivial workflow.
+          </div>
+          <div class="connector">Prompt guidance says to save procedures as skills.</div>
+          <div class="node green">
+            <strong>skill_manage during conversation</strong>
+            Agent creates or patches a skill while still in the active turn.
+          </div>
+          <div class="connector">Useful, but depends on model compliance.</div>
+          <div class="node">
+            <strong>Future reuse</strong>
+            Skill appears in the skill index and loads by progressive disclosure.
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3>Background and maintenance</h3>
+        <div class="ladder">
+          <div class="node amber">
+            <strong>Post-turn review fork</strong>
+            After enough tool iterations, Hermes can fork a review agent with memory and skills tools.
+          </div>
+          <div class="connector">This is the real safety net for missed foreground learning.</div>
+          <div class="node green">
+            <strong>Review creates or patches skills</strong>
+            It surveys the just-finished session and captures reusable procedures.
+          </div>
+          <div class="connector">Later, a separate idle loop handles library hygiene.</div>
+          <div class="node">
+            <strong>Curator</strong>
+            Weekly-ish idle maintenance: telemetry, stale/archive, patch/consolidate.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Why Nudges Exist</h2>
+    <p>
+      Foreground learning creates immediate value, but by itself it is only prompt compliance. Nudges make learning an
+      observable system loop: after enough useful work, Right can ask a dedicated reviewer whether anything should have
+      been persisted or repaired.
+    </p>
+    <div class="matrix">
+      <div class="card">
+        <span class="badge">Reliability</span>
+        <h3>Secondary goal</h3>
+        <p>The foreground agent is focused on solving the user's task. Skill creation is easy to skip when the turn is long, urgent, or tool-heavy.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Trajectory</span>
+        <h3>Episode view</h3>
+        <p>Some reusable lessons are only obvious after failed attempts, user correction, and a final verified path are all visible together.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Repair</span>
+        <h3>Skill drift</h3>
+        <p>A loaded skill can be stale or incomplete. Foreground should patch it, but a nudge review catches missed repairs from the transcript.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Economics</span>
+        <h3>Worth a review</h3>
+        <p>Tool/correction counters do not prove there is a skill. They mean the episode was expensive enough that a bounded review may be worth it.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Right Agent Stage 1: Foreground Learning + Nudge Foundation</h2>
+    <div class="flow">
+      <div class="row">
+        <div class="node blue">
+          <strong>Foreground agent works</strong>
+          Uses loaded skills, discovers workflow, hits surprise, or finds a skill incomplete.
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="node green">
+          <strong>Load right-learn-skill</strong>
+          A built-in authoring skill teaches when to learn, how to name packages, and how to avoid noisy one-off skills.
+        </div>
+      </div>
+      <div class="row">
+        <div class="node blue">
+          <strong>skill_learning_start before writing</strong>
+          Before creating or updating package files, the agent calls <code>mcp__right__skill_learning_start</code>.
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="node green">
+          <strong>Write learned skill package</strong>
+          The active agent writes <code>SKILL.md</code>, scripts, refs, and assets directly under <code>.claude/skills/&lt;skill_name&gt;/</code>.
+        </div>
+      </div>
+      <div class="row">
+        <div class="node green">
+          <strong>Sandbox-local publish</strong>
+          New skills use <code>rl-*</code>. Updates may patch any non-core custom/manual/hub/<code>rl-*</code> skill.
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="node blue">
+          <strong>skill_learning_finish receipt</strong>
+          Successful finish sends localized text: <code>Learned skill: &lt;name&gt;</code> or <code>Updated skill: &lt;name&gt;</code>.
+        </div>
+      </div>
+      <div class="row">
+        <div class="node">
+          <strong>Future use receipt</strong>
+          When a learned skill materially guides work, final response says <code>Used learned skill: &lt;name&gt;</code>.
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="node amber">
+          <strong>Deferred-learning signal</strong>
+          Emit only when a create/update trigger exists, no successful finish call happened, and the agent can cite event refs plus a reason for deferring.
+        </div>
+      </div>
+      <div class="row">
+        <div class="node">
+          <strong>Progress is not approval</strong>
+          The user sees that value is being created, but there is no interactive approval gate.
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="node amber">
+          <strong>Record nudge telemetry</strong>
+          Store start/finish calls, provenance, event refs, skill use, skipped signals, and cheap counters for future background review.
+        </div>
+      </div>
+      <div class="row">
+        <div class="node">
+          <strong>Nudge worker can be off</strong>
+          Stage 1 can persist signals and counters even if no background fork consumes them yet.
+        </div>
+        <div class="arrow">-&gt;</div>
+        <div class="node red">
+          <strong>Write boundary</strong>
+          Stage 1 may create <code>rl-*</code> skills and patch non-core skills; no core/platform/bundled/codegen-owned mutation.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Nudge Loop Foundation</h2>
+    <p>
+      Nudges are the reliability layer. Stage 1 does not need to run the background fork, but it should already record
+      the signals and counters the fork will consume later. This turns learning from prompt compliance into an observable
+      system loop.
+    </p>
+    <div class="matrix">
+      <div class="card">
+        <span class="badge">Explicit</span>
+        <h3>Foreground hints</h3>
+        <ul>
+          <li><code>learning_signal</code> for new-skill candidates</li>
+          <li><code>skill_issue_signal</code> for update candidates</li>
+          <li>only valid when no successful learning finish exists</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Periodic</span>
+        <h3>Nudge fallback</h3>
+        <ul>
+          <li>complex session with many tool calls</li>
+          <li>loaded learned skill followed by correction</li>
+          <li>recovered failure without foreground learning</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Never</span>
+        <h3>Excluded work</h3>
+        <ul>
+          <li>reviewing its own review output</li>
+          <li>editing core/platform/bundled/codegen-owned skills</li>
+          <li>sending user-facing progress chatter from background review</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Decision</span>
+        <h3>Fork decides</h3>
+        <ul>
+          <li>create <code>rl-*</code> skill</li>
+          <li>patch non-core skill</li>
+          <li>do nothing silently</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Foundation rule:</strong> implement storage and schema now; running the fork is optional. The nudge loop
+      must be able to catch both missed creation and missed skill repair once enabled.
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Nudge Cost Controls</h2>
+    <p>
+      Cost controls are part of the foundation even if the worker is disabled. They define when a future background
+      review is worth paying for and prevent a noisy learning loop.
+    </p>
+    <div class="matrix">
+      <div class="card">
+        <span class="badge">Counters</span>
+        <h3>Cheap gates</h3>
+        <ul>
+          <li><code>tool_iters_since_review</code></li>
+          <li><code>turns_since_review</code></li>
+          <li><code>skill_issue_hints_since_review</code></li>
+          <li><code>last_review_at</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Gate</span>
+        <h3>Run only when</h3>
+        <ul>
+          <li>foreground learning was skipped</li>
+          <li>skill issue hint exists</li>
+          <li>nudge threshold is crossed</li>
+          <li>and no review is already running</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Budget caps</span>
+        <h3>Hard limits</h3>
+        <ul>
+          <li>minimum interval between reviews</li>
+          <li>per-review model budget</li>
+          <li>per-day review count</li>
+          <li>per-day learning budget</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Coalescing</span>
+        <h3>One review window</h3>
+        <ul>
+          <li>merge multiple busy turns into one review</li>
+          <li>review events since last successful review</li>
+          <li>bounded by max events/chars</li>
+          <li>selected by salience, not tail length</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Reviewer limits:</strong> exact thresholds can be tuned later, but the contract is fixed:
+      no user-visible message unless the fork creates or updates a skill.
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>When Foreground Should Learn</h2>
+    <p>
+      Failure types are guidance for <code>right-learn-skill</code>, not a Rust classification system. The foreground
+      agent decides whether the experience is reusable while the context is fresh.
+    </p>
+    <div class="matrix">
+      <div class="card">
+        <span class="badge">Create</span>
+        <h3>New workflow</h3>
+        <ul>
+          <li>complex task required several non-obvious steps</li>
+          <li>user explicitly asked to remember the workflow</li>
+          <li>tool/API usage pattern is likely to recur</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Create</span>
+        <h3>Recovered surprise</h3>
+        <ul>
+          <li>command/tool failed, then reusable fix was found</li>
+          <li>tool succeeded but returned an unexpected shape</li>
+          <li>user correction exposed a durable gotcha</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Update</span>
+        <h3>Loaded skill drift</h3>
+        <ul>
+          <li>loaded non-core skill missed a required step</li>
+          <li>skill had stale command/API behavior</li>
+          <li>skill caused confusion or rework</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Skip</span>
+        <h3>No skill</h3>
+        <ul>
+          <li>one-off task details or temporary progress</li>
+          <li>generic facts better stored as memory</li>
+          <li>unverified workaround or failed attempt</li>
+          <li>core/platform/bundled/codegen-owned skill changes</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Write protocol:</strong> before any create/update file write, call
+      <code>mcp__right__skill_learning_start</code>. After success or failure, call
+      <code>mcp__right__skill_learning_finish</code>. If unsure, leave an optional nudge signal only when the signal
+      contract below is satisfied.
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Learning MCP Protocol + Structured Output</h2>
+    <p>
+      Foreground success is recorded through dedicated MCP calls, not through a final <code>skill_receipt</code> field.
+      Structured output keeps only future-facing nudge signals and used-skill receipts.
+    </p>
+    <div class="split">
+      <div class="panel">
+        <h3>Start call</h3>
+<pre>{
+  "action": "create",
+  "skill_name": "rl-notion-database-filters",
+  "reason": "recovered_surprise",
+  "event_refs": ["e17", "e19", "e21"],
+  "message": "Learning a reusable skill for Notion database filters."
+}</pre>
+      </div>
+      <div class="panel">
+        <h3>Finish call</h3>
+<pre>{
+  "action": "create",
+  "skill_name": "rl-notion-database-filters",
+  "status": "created",
+  "message": "&lt;localized learned-skill receipt&gt;",
+  "summary": "Captured reusable Notion filter schema rule."
+}</pre>
+      </div>
+    </div>
+    <div class="split" style="margin-top: 12px;">
+      <div class="panel">
+        <h3>Rust handling</h3>
+<pre>record_learning_start(call);
+if call.is_foreground() {
+    send_progress_to_user(call.message);
+}
+
+record_learning_finish(call);
+if call.status.is_success() {
+    send_receipt_to_user(call.message);
+    ignore_background_signals_for_invocation();
+}</pre>
+      </div>
+      <div class="panel">
+        <h3>Structured output remains</h3>
+<pre>{
+  "used_skill_receipts": [
+    {
+      "skill_name": "rl-notion-database-filters",
+      "message": "&lt;localized used-skill receipt&gt;"
+    }
+  ],
+  "learning_signal": null,
+  "skill_issue_signal": null
+}</pre>
+      </div>
+    </div>
+    <div class="matrix" style="margin-top: 12px;">
+      <div class="card">
+        <span class="badge">Default</span>
+        <h3>No skill</h3>
+        <p>No successful finish call, no used receipt, and no nudge signal. Most turns should not learn anything.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Foreground</span>
+        <h3>Foreground skill</h3>
+        <p>The model calls start, writes or patches the package, then calls finish. MCP sends progress and receipt.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Nudge</span>
+        <h3>Create signal</h3>
+        <p><code>learning_signal</code> queues a background fork only for a concrete new-skill candidate that foreground did not publish.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Nudge</span>
+        <h3>Update signal</h3>
+        <p><code>skill_issue_signal</code> queues a background fork only for a concrete defect in an existing non-core skill.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Exact Signal Conditions</h2>
+    <div class="split">
+      <div class="panel">
+        <h3>New-skill candidate</h3>
+<pre>{
+  "learning_signal": {
+    "kind": "create_candidate",
+    "package_name_hint": "rl-notion-database-filters",
+    "trigger": "recovered_surprise",
+    "reason_not_written": "needs_full_context_review",
+    "event_refs": ["e17", "e19", "e21"],
+    "summary": "Reusable Notion filter schema gotcha."
+  }
+}</pre>
+      </div>
+      <div class="panel">
+        <h3>Existing-skill update</h3>
+<pre>{
+  "skill_issue_signal": {
+    "kind": "update_candidate",
+    "skill_name": "notion-database-filters",
+    "issue": "wrong_api_assumption",
+    "reason_not_patched": "needs_existing_skill_diff",
+    "observed_effect": "retry_after_user_correction",
+    "event_refs": ["e12", "e14", "e18"],
+    "patch_hint": "Use rich_text filter for this property."
+  }
+}</pre>
+      </div>
+    </div>
+    <div class="matrix" style="margin-top: 12px;">
+      <div class="card">
+        <span class="badge">All required</span>
+        <h3>Signal allowed</h3>
+        <ul>
+          <li>one create/update trigger from <code>When Foreground Should Learn</code></li>
+          <li>no successful learning finish call was recorded</li>
+          <li>exactly one of <code>learning_signal</code> or <code>skill_issue_signal</code></li>
+          <li>allowed defer reason is present</li>
+          <li>at least two useful <code>event_refs</code>, or one explicit user request</li>
+          <li>candidate is reusable across future sessions</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Allowed</span>
+        <h3>Defer reason</h3>
+        <ul>
+          <li><code>conversation_still_evolving</code></li>
+          <li><code>needs_full_context_review</code></li>
+          <li><code>write_or_publish_failed</code></li>
+          <li><code>needs_existing_skill_diff</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Never signal</span>
+        <h3>Reject</h3>
+        <ul>
+          <li>one-off task details</li>
+          <li>generic memory facts</li>
+          <li>unverified workaround</li>
+          <li>skill already created or updated successfully</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Routing</span>
+        <h3>Background action</h3>
+        <ul>
+          <li><code>learning_signal</code> can create only</li>
+          <li><code>skill_issue_signal</code> can patch only</li>
+          <li>if both appear, drop both and log schema violation</li>
+          <li>both are ignored after a successful learning finish</li>
+          <li>fork may still return <code>learned=false</code></li>
+        </ul>
+      </div>
+    </div>
+    <div class="matrix" style="margin-top: 12px;">
+      <div class="card">
+        <span class="badge">Create codes</span>
+        <h3>Allowed triggers</h3>
+        <ul>
+          <li><code>explicit_user_request</code></li>
+          <li><code>multi_step_workflow</code></li>
+          <li><code>recovered_surprise</code></li>
+          <li><code>user_correction</code></li>
+          <li><code>repeated_tool_pattern</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Update codes</span>
+        <h3>Allowed issues</h3>
+        <ul>
+          <li><code>missing_step</code></li>
+          <li><code>stale_command</code></li>
+          <li><code>wrong_api_assumption</code></li>
+          <li><code>overbroad_activation</code></li>
+          <li><code>broken_script</code></li>
+          <li><code>unsafe_instruction</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Evidence</span>
+        <h3>Observed effects</h3>
+        <ul>
+          <li><code>retry_after_tool_error</code></li>
+          <li><code>retry_after_user_correction</code></li>
+          <li><code>manual_override</code></li>
+          <li><code>verified_alternative</code></li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="badge">Schema</span>
+        <h3>Required naming</h3>
+        <ul>
+          <li>create uses <code>package_name_hint</code> with <code>rl-*</code></li>
+          <li>update uses existing non-core <code>skill_name</code></li>
+          <li>create uses <code>reason_not_written</code></li>
+          <li>update uses <code>reason_not_patched</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Background Review Contract</h2>
+    <div class="split">
+      <div class="panel">
+        <h3>Inputs</h3>
+        <ul>
+          <li>full completed conversation transcript when within budget</li>
+          <li>fallback <code>context.json</code> bundle when transcript is too large</li>
+          <li>invocation/run id and started/finished timestamps</li>
+          <li>timeline index with stable event ids</li>
+          <li>salient events selected by reason, not line count</li>
+          <li><code>learning_signal</code> or <code>skill_issue_signal</code> and event refs when present</li>
+          <li>existing skill names and source/core classification when available</li>
+          <li><code>right-learn-skill</code> authoring guidance</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3>Allowed actions</h3>
+        <ul>
+          <li>decide whether a reusable workflow exists</li>
+          <li>create <code>rl-*</code> packages from <code>learning_signal</code></li>
+          <li>patch non-core packages from <code>skill_issue_signal</code></li>
+          <li>write under <code>.claude/skills/&lt;skill_name&gt;/</code> inside the agent sandbox</li>
+          <li>include <code>SKILL.md</code>, <code>scripts/</code>, <code>references/</code>, <code>assets/</code></li>
+          <li>call learning start/finish for metadata and receipts</li>
+        </ul>
+      </div>
+    </div>
+    <div class="split" style="margin-top: 12px;">
+      <div class="panel">
+        <h3>Forbidden actions</h3>
+        <ul>
+          <li>ask the user questions</li>
+          <li>send user-facing progress messages</li>
+          <li>edit project files outside the learned skill package</li>
+          <li>edit core/platform/bundled/codegen-owned skills</li>
+          <li>trigger another learning review</li>
+          <li>learn from its own review output</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3>Finish result</h3>
+        <div class="node green">
+          <strong>created or updated</strong>
+          Successful finish stores skill name and sends receipt: <code>Learned skill: &lt;name&gt;</code>.
+        </div>
+        <div class="connector">or</div>
+        <div class="node">
+          <strong>failed or skipped</strong>
+          Store a short reason; do not send a success receipt.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Background Context Strategy</h2>
+    <p>
+      Learning should use the full completed conversation when it fits. That preserves multi-pass feedback loops where
+      the skill only becomes obvious after several user corrections and model retries. If full context is too large,
+      Rust builds a bounded review bundle from the completed invocation and starts an isolated background learner with
+      an expansion index.
+    </p>
+    <div class="split">
+      <div class="panel">
+        <h3>Primary fork scope</h3>
+        <ul>
+          <li>foreground: completed conversation transcript</li>
+          <li>background learner: separate task, not resumed main session</li>
+          <li>write target: <code>.claude/skills/&lt;skill_name&gt;/</code> for create <code>rl-*</code> or patch non-core only</li>
+          <li>notification: sent only through successful learning finish</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <h3>Fallback scope boundary</h3>
+        <ul>
+          <li>selected transcript windows from the completed conversation</li>
+          <li>event ids stable across transcript and bundle</li>
+          <li>timestamps used only as metadata, not as the main filter</li>
+          <li>expansion requests allowed for referenced events</li>
+        </ul>
+      </div>
+    </div>
+    <div class="split" style="margin-top: 12px;">
+      <div class="panel">
+        <h3>Salience selection</h3>
+        <ul>
+          <li>always include user input and final answer excerpts</li>
+          <li>include all errors, retries, verification, and file writes</li>
+          <li>include all events referenced by signal <code>event_refs</code></li>
+          <li>summarize low-signal spans by counts and short descriptions</li>
+        </ul>
+      </div>
+    </div>
+    <div class="split" style="margin-top: 12px;">
+      <div class="panel">
+        <h3>Review bundle shape</h3>
+<pre>{
+  "scope": {
+    "kind": "foreground",
+    "session_id": "...",
+    "invocation_id": "...",
+    "started_at": "...",
+    "finished_at": "..."
+  },
+  "skill_issue_signal": {
+    "kind": "update_candidate",
+    "skill_name": "notion-database-filters",
+    "issue": "wrong_api_assumption",
+    "reason_not_patched": "needs_existing_skill_diff",
+    "observed_effect": "retry_after_user_correction",
+    "event_refs": ["e17", "e19", "e21"],
+    "patch_hint": "Use rich_text filter for this property."
+  },
+  "timeline_index": [
+    { "id": "e17", "kind": "tool_use", "tool": "mcp__notion__query_database" }
+  ],
+  "included_events": [
+    { "id": "e17", "reason": "signal_ref", "detail": "..." },
+    { "id": "e19", "reason": "retry", "detail": "..." },
+    { "id": "e21", "reason": "success_after_retry", "detail": "..." }
+  ],
+  "omitted_spans": [
+    { "range": ["e22", "e80"], "summary": "read-only repository inspection" }
+  ]
+}</pre>
+      </div>
+      <div class="panel">
+        <h3>Why not always raw JSONL?</h3>
+        <ul>
+          <li>full sessions may hit context limits or trigger compaction</li>
+          <li>tail-only truncation can drop the important early surprise</li>
+          <li>date-only filtering still includes long low-value stretches</li>
+          <li>event ids let the foreground model point to exactly what mattered</li>
+          <li>fresh review session has predictable context and cost</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Where Right Differs From Hermes</h2>
+    <div class="compare">
+      <div class="card">
+        <span class="badge">Boundary</span>
+        <h3>Sandbox-local skill content</h3>
+        <p>Hermes writes agent-created skills into the user's Hermes skills tree. Right keeps learned package files inside the agent sandbox in stage 1; host stores metadata only.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Trigger</span>
+        <h3>Foreground plus nudges</h3>
+        <p>Hermes supports foreground and background learning. Right ships foreground learning first, but records nudge-ready signals and counters from day one.</p>
+      </div>
+      <div class="card">
+        <span class="badge">UX</span>
+        <h3>Receipt, not approval</h3>
+        <p>No approval queue. The value is visible through learned/used receipts, usually in the same response that created or updated the skill.</p>
+      </div>
+      <div class="card">
+        <span class="badge">API</span>
+        <h3>MCP start/finish only</h3>
+        <p>Learning MCP tools validate skill names, send progress/receipts, and record metadata. The agent writes files directly; MCP never imports arbitrary host paths.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Scope</span>
+        <h3>No curator in stage 1</h3>
+        <p>Curator-style stale/archive/consolidation is deferred until learned skills exist and usage telemetry is meaningful.</p>
+      </div>
+      <div class="card">
+        <span class="badge">Format</span>
+        <h3>Full Agent Skills package</h3>
+        <p><code>scripts/</code>, <code>references/</code>, and <code>assets/</code> are supported from the start; this is not a markdown-only memory feature.</p>
+      </div>
+    </div>
+    <div class="callout">
+      <strong>Development start:</strong> implement <code>right-learn-skill</code>, sandbox-local learned skill publishing,
+      <code>rl-*</code> create prefix, <code>mcp__right__skill_learning_start</code>,
+      <code>mcp__right__skill_learning_finish</code>, used-skill receipts, signal schema, provenance, and nudge counters.
+      The background worker can remain disabled until the foreground loop has real data to review.
+    </div>
+  </div>
+</div>
+</body>
+</html>

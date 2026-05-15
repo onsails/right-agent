@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hermes AI Skills Research for Right Agent</title>
+  <style type="text/css">
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fb;
+      --paper: #ffffff;
+      --ink: #17202a;
+      --muted: #5d6775;
+      --line: #d9dee8;
+      --accent: #1f6feb;
+      --accent-soft: #e9f2ff;
+      --warn: #8a5a00;
+      --warn-soft: #fff7df;
+      --good: #176b42;
+      --bad: #9b1c1c;
+      --code: #f1f3f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.58 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 40px 22px 64px;
+    }
+    .masthead {
+      padding: 28px 0 22px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 28px;
+    }
+    h1 {
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      line-height: 1.04;
+      margin: 0 0 12px;
+      letter-spacing: 0;
+    }
+    h2 {
+      font-size: 1.55rem;
+      line-height: 1.2;
+      margin: 42px 0 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+      letter-spacing: 0;
+    }
+    h3 {
+      font-size: 1.05rem;
+      margin: 24px 0 8px;
+      letter-spacing: 0;
+    }
+    p { margin: 0 0 13px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .lede {
+      max-width: 920px;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--paper);
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+    .section {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 22px;
+      margin: 18px 0;
+      box-shadow: 0 1px 2px rgba(20, 28, 40, 0.04);
+    }
+    .section > h2:first-child { margin-top: 0; }
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 14px 16px;
+      margin: 16px 0;
+      border-radius: 6px;
+    }
+    .warning {
+      border-left-color: var(--warn);
+      background: var(--warn-soft);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 15px;
+      background: #fbfcff;
+    }
+    ul, ol { padding-left: 1.35rem; margin: 8px 0 14px; }
+    li { margin: 5px 0; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 0.95rem;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 10px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th { background: #f1f5fb; }
+    code {
+      background: var(--code);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    pre {
+      white-space: pre-wrap;
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      overflow: auto;
+    }
+    .diagram {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      margin: 16px 0;
+      background: #fbfcff;
+    }
+    .diagram h4 {
+      margin: 0 0 12px;
+      color: var(--ink);
+      font-size: 1rem;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+    .node {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #ffffff;
+      min-height: 72px;
+    }
+    .node strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--accent);
+    }
+    .node.mutate strong { color: var(--warn); }
+    .node.stop strong { color: var(--bad); }
+    .node.keep strong { color: var(--good); }
+    .connector {
+      text-align: center;
+      color: var(--muted);
+      font-weight: 700;
+      align-self: center;
+    }
+    .flow-vertical {
+      display: grid;
+      gap: 8px;
+    }
+    .flow-vertical .connector { text-align: left; padding-left: 18px; }
+    .status {
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: var(--code);
+    }
+    .adopt { color: var(--good); }
+    .reject { color: var(--bad); }
+    .modify { color: var(--warn); }
+    .refs li { overflow-wrap: anywhere; }
+    .footer {
+      color: var(--muted);
+      font-size: 0.92rem;
+      padding: 20px 0 0;
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="masthead">
+    <h1>Hermes AI Skills Research for Right Agent</h1>
+    <p class="lede">
+      A source-grounded review of Hermes Agent's AI Skills feature and what Right Agent should adopt, reject, or modify while preserving bot-first management, sandbox-first security, OpenClaw/ClawHub compatibility, upgrade-friendly deployment, and Right Agent MCP naming rules.
+    </p>
+    <div class="meta">
+      <span class="pill">Prepared: 2026-05-14</span>
+      <span class="pill">Focus: Hermes Agent AI Skills</span>
+      <span class="pill">Deliverable: self-contained HTML</span>
+    </div>
+  </div>
+
+  <div class="section" id="executive-summary">
+    <h2>Executive Summary</h2>
+    <p>
+      The most important point is autonomous skill creation. Hermes Agent treats skills as procedural memory: when it solves a non-trivial workflow, recovers from dead ends, receives a user correction, or completes a complex task, it can preserve the working method as a reusable <code>SKILL.md</code> package through <code>skill_manage</code> <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Hermes Agent-managed skills</a>. That is the learning loop: the agent does work, extracts the reusable procedure, stores it as a skill, loads it only when relevant, and later patches or archives it as experience accumulates.
+    </p>
+    <p>
+      The file format and hub ecosystem matter, but they are secondary. Hermes' differentiator is that skills are not only user-installed packages; they are the agent's way to convert execution history into future capability. Hermes' docs describe skills as token-efficient documents compatible with the <a href="https://agentskills.io/">agentskills.io</a> open standard and loaded through progressive disclosure rather than injected wholesale into every prompt <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Hermes Skills System</a>. Its docs home and homepage explicitly market persistent memory plus auto-generated skills as the mechanism by which Hermes "grows" over time <a href="https://hermes-agent.nousresearch.com/docs/">Hermes docs home</a> <a href="https://hermes-agent.nousresearch.com/">Hermes homepage</a>.
+    </p>
+    <p>
+      Right Agent already has part of this model: bundled Claude Code skills are embedded by <a href="../../crates/right-codegen/src/skills.rs">right-codegen</a>, installed into each agent's <code>.claude/skills/</code>, and its <code>rightskills</code> skill points at skills.sh while preserving a per-agent <code>installed.json</code>. However, Right Agent does not yet have the core loop: agent notices "I learned a reusable procedure" - proposes a skill - user approves - platform installs it safely - future sessions load it when relevant.
+    </p>
+    <div class="callout">
+      <strong>Recommendation:</strong> prioritize a safe auto-creation loop before broad marketplace support. Add an agent-facing <code>mcp__right__skill_propose</code> draft path and a bot-facing approval flow. Do not port Hermes' unrestricted <code>skill_manage</code> mutation model unchanged.
+    </div>
+  </div>
+
+  <div class="section" id="source-notes">
+    <h2>Source Notes</h2>
+    <ul>
+      <li><strong>Primary Hermes sources:</strong> the current public Hermes docs, NousResearch GitHub repository files, and Hermes' own AGENTS.md. The docs were crawled within the last week by the search index and the official docs footer identifies the project as MIT licensed in 2026 <a href="https://hermes-agent.nousresearch.com/docs/">Hermes docs home</a>.</li>
+      <li><strong>Authoritative support:</strong> the Hermes homepage states the product includes persistent memory and auto-generated skills, and the docs home describes a closed learning loop with autonomous skill creation and self-improvement <a href="https://hermes-agent.nousresearch.com/">Hermes homepage</a> <a href="https://hermes-agent.nousresearch.com/docs/">Hermes docs home</a>.</li>
+      <li><strong>Code-level checks:</strong> Hermes' <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skills_tool.py">tools/skills_tool.py</a>, <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">tools/skill_manager_tool.py</a>, and <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">agent/prompt_builder.py</a> were used to verify that the docs map to real modules.</li>
+      <li><strong>Right Agent sources:</strong> recommendations below are grounded in <a href="../../AGENTS.md">AGENTS.md</a>, <a href="../../AGENTS.rust.md">AGENTS.rust.md</a>, <a href="../../ARCHITECTURE.md">ARCHITECTURE.md</a>, <a href="../../PROMPT_SYSTEM.md">PROMPT_SYSTEM.md</a>, the docs under <a href="../architecture/">docs/architecture/</a>, bundled skills under <a href="../../crates/right-codegen/skills/">crates/right-codegen/skills/</a>, templates under <a href="../../templates/right/">templates/right/</a>, and Right Agent code under <a href="../../crates/">crates/</a>.</li>
+      <li><strong>Gaps:</strong> Hermes documents the behavior and the relevant code modules exist, but this research did not run Hermes locally or trace every slash-command dispatch path. Where runtime behavior is inferred from docs plus file names, it is labeled as inference.</li>
+      <li><strong>Conflict note:</strong> Hermes docs say the curator only reviews agent-authored skills, while the same page's "What agent-created means" section defines the mutable bucket as anything not present in bundled or hub provenance manifests, including hand-written local skills and external skill directories <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/curator">Curator docs</a>. That is not a direct contradiction, but it is a safety footgun: "agent-created" is provenance-by-exclusion, not proof of authorship.</li>
+    </ul>
+  </div>
+
+  <div class="section" id="what-hermes-ai-skills-are">
+    <h2>What Hermes AI Skills Are</h2>
+    <p>
+      Confirmed: Hermes skills are on-demand knowledge documents stored as directories containing a required <code>SKILL.md</code> and optional supporting files. The official Skills System page defines them as documents the agent loads when needed, using progressive disclosure to minimize token usage and staying compatible with the agentskills.io standard <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skills System</a>.
+    </p>
+    <p>
+      A skill is closer to a reusable operating procedure than to a native tool. Hermes' Creating Skills guide says skills are appropriate when a capability can be expressed as instructions, shell commands, and existing tools; it recommends native tools when precise API integration, auth flows, streaming, or binary handling must be built into the agent <a href="https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills">Creating Skills</a>.
+    </p>
+    <p>
+      Confirmed: Hermes can create and revise these skills itself. The Skills System page says the agent can create, patch, edit, delete, and add supporting files through <code>skill_manage</code>, turning successful workflows into future procedural memory <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Agent-managed skills</a>. The prompt builder reinforces that behavior by telling the model to save non-trivial workflows as skills and patch stale skills during use <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">prompt_builder.py</a>.
+    </p>
+    <div class="callout">
+      <strong>The point of auto-creation:</strong> memory remembers facts; skills remember methods. Auto-created skills are how Hermes turns a one-off success into a reusable operating procedure, including commands tried, pitfalls hit, verification steps, and when to use the workflow again.
+    </div>
+  </div>
+
+  <div class="section" id="user-value">
+    <h2>User Value</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Less Repeated Steering</h3>
+        <p>Once Hermes discovers a workflow, it can encode the procedure as a skill instead of forcing the user to teach the same process again. Hermes' docs frame skills as procedural knowledge, distinct from factual memory <a href="https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/">Working with Skills</a>.</p>
+      </div>
+      <div class="card">
+        <h3>Self-Improving Agent</h3>
+        <p>Hermes can offer to save the approach after complex multi-step work, so the agent's capability library grows from its own successful traces instead of only from preinstalled packages <a href="https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/">Working with Skills</a>.</p>
+      </div>
+      <div class="card">
+        <h3>Lower Token Cost</h3>
+        <p>The agent starts with a compact index and loads full instructions or references only when needed. Hermes documents a three-level pattern: list metadata, view one skill, then view a specific supporting file <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Progressive Disclosure</a>.</p>
+      </div>
+      <div class="card">
+        <h3>Portable Capability Packages</h3>
+        <p>Skill packages can be shared through bundled skills, official optional skills, skills.sh, GitHub taps, well-known endpoints, direct URLs, ClawHub, Claude marketplace-style repos, and LobeHub conversions <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skills Hub</a>.</p>
+      </div>
+      <div class="card">
+        <h3>Natural UX</h3>
+        <p>Installed skills become slash commands in CLI and messaging surfaces, and can also be loaded by natural conversation via <code>skill_view</code> <a href="https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/">Working with Skills</a>.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="how-it-works">
+    <h2>How It Works</h2>
+    <ol>
+      <li><strong>Discovery:</strong> Hermes scans <code>~/.hermes/skills/</code> plus configured read-only external directories. Local skills take precedence when names collide, and external skills appear in the prompt index, <code>skills_list</code>, <code>skill_view</code>, and slash commands <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">External Skill Directories</a>.</li>
+      <li><strong>Indexing:</strong> The agent receives a compact skill index and can use <code>skills_list()</code> for metadata. Hermes' prompt builder has a <code>build_skills_system_prompt</code> path with in-process and disk snapshot caching for skill metadata <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">prompt_builder.py</a>.</li>
+      <li><strong>Loading:</strong> The agent loads one skill's full <code>SKILL.md</code> using <code>skill_view(name)</code>, then optionally loads a supporting file with <code>skill_view(name, path)</code> <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skills System</a>.</li>
+      <li><strong>Execution:</strong> Confirmed docs describe skills as instructions plus supporting files, not as a separate executor. Inference: the actual action happens through the ordinary Hermes tools enabled for the session, such as terminal, file, browser, web, or MCP toolsets <a href="https://hermes-agent.nousresearch.com/docs/reference/toolsets-reference">Toolsets Reference</a>.</li>
+      <li><strong>Auto-creation trigger:</strong> Hermes documents four creation moments: successful complex tasks, dead ends followed by a working path, user corrections, and discovered non-trivial workflows <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">When the Agent Creates Skills</a>.</li>
+      <li><strong>Mutation:</strong> The agent can call <code>skill_manage</code> to create, patch, edit, delete, or add/remove supporting files. Hermes explicitly prefers patching for updates because it is more token-efficient than full rewrites <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Agent-managed skills</a>.</li>
+      <li><strong>Maintenance:</strong> The curator tracks use, view, and patch counts, transitions idle agent-created skills from active to stale to archived, and can run an auxiliary model review. It archives rather than deletes, supports pinning, and writes reports and backups <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/curator">Curator</a>.</li>
+    </ol>
+  </div>
+
+  <div class="section" id="skill-manage-deep-dive">
+    <h2>skill_manage Deep Dive</h2>
+    <p>
+      Hermes' tool is named <code>skill_manage</code> (singular). It is the agent-facing write API for procedural memory, not the learning algorithm by itself. The tool executes validated filesystem mutations; the decision to call it comes from Hermes' system prompt, the tool schema guidance, explicit user requests, and background review flows <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">skill_manager_tool.py</a> <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">prompt_builder.py</a>.
+    </p>
+    <table summary="Hermes skill_manage actions and decisions">
+      <thead>
+        <tr><th>Question</th><th>Hermes Behavior</th><th>Source-Backed Detail</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>How does it write skills?</td>
+          <td><code>skill_manage</code> dispatches actions: <code>create</code>, <code>patch</code>, <code>edit</code>, <code>delete</code>, <code>write_file</code>, and <code>remove_file</code>.</td>
+          <td><code>create</code> writes a full <code>SKILL.md</code> under <code>~/.hermes/skills/</code>, optionally inside a category. <code>patch</code> applies targeted fuzzy find-and-replace. <code>edit</code> replaces the whole <code>SKILL.md</code>. Supporting files are restricted to <code>references/</code>, <code>templates/</code>, <code>scripts/</code>, and <code>assets/</code> <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">tool source</a>.</td>
+        </tr>
+        <tr>
+          <td>How does it learn new skills?</td>
+          <td>The model distills a successful or corrected execution trace into a reusable <code>SKILL.md</code> and calls <code>skill_manage(action="create")</code>.</td>
+          <td>Hermes prompt guidance tells the model to save procedures when it discovers a reusable way to do something, and separately says procedures belong in skills rather than memory <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">prompt_builder.py</a>. The tool schema says good skills include trigger conditions, exact numbered steps, pitfalls, and verification steps <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">tool source</a>.</td>
+        </tr>
+        <tr>
+          <td>What triggers creation?</td>
+          <td>Creation is triggered by model judgment, not by a hard-coded classifier in <code>skill_manage</code>.</td>
+          <td>The documented triggers are complex successful tasks, especially 5+ tool calls; recovered errors or dead ends; user-corrected approaches that worked; discovered non-trivial workflows; and explicit user requests to remember a procedure. The schema also says to offer to save after difficult or iterative tasks, skip simple one-offs, and confirm with the user before creating <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skills System</a> <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">tool source</a>.</td>
+        </tr>
+        <tr>
+          <td>When does it adjust a skill?</td>
+          <td>It patches immediately when active use proves the skill is stale, incomplete, OS-specific, or wrong.</td>
+          <td>The prompt builder instructs the model to patch an outdated, incomplete, or wrong skill during use instead of waiting. The schema lists update triggers: stale or wrong instructions, OS-specific failures, and missing steps or pitfalls. <code>patch</code> is preferred over <code>edit</code> because it sends only the changed text and preserves structure when possible <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">prompt_builder.py</a> <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Agent-managed skills</a>.</td>
+        </tr>
+        <tr>
+          <td>When does it delete?</td>
+          <td>Deletion is for pruning or consolidation, and should be user-confirmed.</td>
+          <td><code>delete</code> removes the skill directory. The <code>absorbed_into</code> parameter records whether the deleted skill was merged into an umbrella skill or was truly pruned with no forwarding target. If <code>absorbed_into</code> names a target, that target must already exist. The schema says to confirm before deleting <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">tool source</a>.</td>
+        </tr>
+        <tr>
+          <td>What does the curator decide?</td>
+          <td>The curator handles library hygiene rather than immediate learning.</td>
+          <td>It runs after enough time and idle time have passed, marks unused skills stale after 30 days, archives after 90 days, and runs an auxiliary-model review that may keep, patch through <code>skill_manage</code>, consolidate, or archive. Hermes describes archive as recoverable and says the curator does not auto-delete <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/curator">Curator docs</a>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>What Is an Umbrella Skill?</h3>
+    <p>
+      An umbrella skill is not a special Hermes object type. It is a normal, broader skill that absorbs the useful parts of one or more narrower skills before those narrower skills are removed. Example: separate skills for "debug GitHub Actions cache misses", "debug GitHub Actions matrix failures", and "debug GitHub Actions permissions" might be consolidated into a broader <code>github-actions-debugging</code> umbrella skill with sections for each failure class.
+    </p>
+    <p>
+      In <code>skill_manage</code>, the concept appears through the <code>absorbed_into</code> parameter on <code>delete</code>. The agent or curator should first patch or create the umbrella skill so the useful procedure is preserved, then delete the narrower skill with <code>absorbed_into="umbrella-skill-name"</code>. The tool validates that the named umbrella skill already exists, which prevents a false claim that content was merged somewhere nonexistent <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">skill_manager_tool.py</a>.
+    </p>
+
+    <h3>skill_manage Flow Diagrams</h3>
+    <div class="diagram">
+      <h4>Foreground Learning: Create or Patch</h4>
+      <div class="flow">
+        <div class="node">
+          <strong>Experience</strong>
+          Complex success, recovered failure, user correction, non-trivial workflow, or user asks to remember.
+        </div>
+        <div class="connector">then</div>
+        <div class="node">
+          <strong>Model Judgment</strong>
+          Is this repeatable and valuable enough to preserve?
+        </div>
+        <div class="connector">if yes</div>
+        <div class="node mutate">
+          <strong>skill_manage</strong>
+          Create a new <code>SKILL.md</code> or patch the existing skill that was stale, wrong, or incomplete.
+        </div>
+        <div class="connector">then</div>
+        <div class="node keep">
+          <strong>Reusable Skill</strong>
+          Future sessions see the skill in the index and load full instructions only when relevant.
+        </div>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <h4>Delete and Umbrella Consolidation</h4>
+      <div class="flow-vertical">
+        <div class="node">
+          <strong>Candidate Skill</strong>
+          Skill is duplicate, too narrow, stale beyond repair, or better represented inside a broader workflow.
+        </div>
+        <div class="connector">if useful content remains</div>
+        <div class="node mutate">
+          <strong>Patch Umbrella First</strong>
+          Add the useful procedure, pitfalls, or verification steps to an existing broader skill, or create that broader skill first.
+        </div>
+        <div class="connector">then</div>
+        <div class="node mutate">
+          <strong>Delete with Intent</strong>
+          Call <code>skill_manage(action="delete", name="narrow-skill", absorbed_into="umbrella-skill")</code>.
+        </div>
+        <div class="connector">or, if no useful content remains</div>
+        <div class="node stop">
+          <strong>Prune Explicitly</strong>
+          Call delete with <code>absorbed_into=""</code> after confirmation so downstream tooling knows this was not a merge.
+        </div>
+      </div>
+    </div>
+
+    <div class="diagram">
+      <h4>Curator Maintenance Loop</h4>
+      <div class="flow">
+        <div class="node">
+          <strong>Idle Check</strong>
+          Enough time passed and agent has been idle long enough.
+        </div>
+        <div class="connector">then</div>
+        <div class="node">
+          <strong>Telemetry Pass</strong>
+          View/use/patch counts and last activity determine stale or archive candidates.
+        </div>
+        <div class="connector">then</div>
+        <div class="node mutate">
+          <strong>LLM Review</strong>
+          Keep, patch with <code>skill_manage</code>, consolidate into an umbrella, or archive.
+        </div>
+        <div class="connector">then</div>
+        <div class="node keep">
+          <strong>Recoverable State</strong>
+          Skills are patched or archived with reports/backups; Hermes says curator archival is recoverable.
+        </div>
+      </div>
+    </div>
+
+    <p>
+      The current implementation also validates names, YAML frontmatter, content size, and path traversal; writes atomically; clears the skill prompt cache on successful mutation; and can optionally run a security scan when <code>skills.guard_agent_created</code> is enabled. That guard is off by default in Hermes because the docs/code consider it too noisy for normal agent workflows <a href="https://hermes-agent.nousresearch.com/docs/user-guide/configuration/">Configuration</a> <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">skill_manager_tool.py</a>.
+    </p>
+    <div class="callout warning">
+      <strong>Porting warning:</strong> there is a pin-scope mismatch between Hermes documentation and current tool code. The curator docs describe pins as a broader fence, while <code>skill_manager_tool.py</code> currently guards deletion and allows patches/edits on pinned skills. Right Agent should not inherit that ambiguity; pinned or approved skills should have explicit, bot-enforced mutation policy.
+    </div>
+  </div>
+
+  <div class="section" id="architecture">
+    <h2>Architecture</h2>
+    <h3>Skill Format</h3>
+    <p>
+      Hermes uses YAML frontmatter with <code>name</code>, <code>description</code>, optional <code>version</code>, <code>author</code>, <code>license</code>, <code>platforms</code>, and Hermes metadata such as tags, category, related skills, required or fallback toolsets, and config keys <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">SKILL.md Format</a>. Hermes AGENTS.md adds reviewer rules: short descriptions, modern section order, scripts under <code>scripts/</code>, references under <code>references/</code>, templates under <code>templates/</code>, and tests for new skills <a href="https://github.com/NousResearch/hermes-agent/blob/main/AGENTS.md">Hermes AGENTS.md</a>.
+    </p>
+
+    <h3>Discovery and Loading Flow</h3>
+    <p>
+      Confirmed: Hermes exposes skills through <code>skills_list</code>, <code>skill_view</code>, and slash commands. The loading model is progressive: metadata first, full skill content second, individual support file third <a href="https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/">Working with Skills</a>. Code corroborates this split in <a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skills_tool.py">tools/skills_tool.py</a> and the prompt index builder in <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">agent/prompt_builder.py</a>.
+    </p>
+
+    <h3>Execution Model</h3>
+    <p>
+      Inference from docs: a skill does not grant a new capability by itself. It instructs the model how to use existing toolsets, shell commands, scripts, references, or APIs. If a required toolset is not enabled, the skill can be hidden with <code>requires_toolsets</code>; if a primary tool is present, a fallback skill can be hidden with <code>fallback_for_toolsets</code> or <code>fallback_for_tools</code> <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Conditional Activation</a>.
+    </p>
+
+    <h3>Autonomous Creation Loop</h3>
+    <p>
+      Confirmed: Hermes' docs describe <code>skill_manage</code> as the mechanism for the agent to create, update, and delete its own skills, and list the events that should trigger creation: complex success, errors that led to a working path, user correction, or discovery of a non-trivial workflow <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Agent-managed skills</a>. The practical loop is: observe a successful trace, distill it into <code>SKILL.md</code>, include supporting files when the procedure needs references or scripts, make the skill available by name in future sessions, and patch it when later runs expose drift.
+    </p>
+    <p>
+      This is stronger than a marketplace feature. A marketplace imports someone else's procedures; auto-creation turns the agent's own local experience into procedures tailored to the user's environment. That is why Right Agent should implement draft skill creation early, even if broad hub support comes later.
+    </p>
+
+    <h3>Storage and Registry Model</h3>
+    <p>
+      Hermes' local single source of truth is <code>~/.hermes/skills/</code>. The docs show local category directories, <code>.hub/lock.json</code>, <code>.hub/quarantine/</code>, <code>.hub/audit.log</code>, and <code>.bundled_manifest</code> under that tree <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skill Directory Structure</a>. Taps are stored separately at <code>~/.hermes/.hub/taps.json</code>, and bundled skill syncs use <code>.bundled_manifest</code> hashes to avoid overwriting user-modified copies <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Bundled skill updates</a>.
+    </p>
+
+    <h3>User-Facing Management UX</h3>
+    <p>
+      Users manage skills via CLI commands such as <code>hermes skills list</code>, <code>browse</code>, <code>search</code>, <code>inspect</code>, <code>install</code>, <code>check</code>, <code>update</code>, <code>audit</code>, <code>uninstall</code>, <code>reset</code>, <code>publish</code>, and <code>tap add</code>. The same command family is available as <code>/skills</code> slash commands inside chat sessions <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skills Hub commands</a>. Per-platform enablement can also be managed with the interactive <code>hermes skills</code> TUI <a href="https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/">Per-platform skill management</a>.
+    </p>
+  </div>
+
+  <div class="section" id="security-and-permission-model">
+    <h2>Security and Permission Model</h2>
+    <p>
+      Hermes has several safety layers around skills, but they are not equivalent to a per-skill sandbox capability model. Toolsets decide which native tools are available for a session or platform, and conditional skill metadata controls whether a skill appears when required tools are present or absent <a href="https://hermes-agent.nousresearch.com/docs/reference/toolsets-reference">Toolsets Reference</a> <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Conditional Activation</a>.
+    </p>
+    <table summary="Hermes skill security and permission areas">
+      <thead>
+        <tr><th>Area</th><th>Hermes Behavior</th><th>Security Implication</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Secrets</td>
+          <td>Skills can declare required environment variables. Hermes asks for missing values only when the skill loads in the local CLI; messaging surfaces tell users to configure locally instead of sending secrets in chat <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Secure Setup on Load</a>.</td>
+          <td>Good pattern for Right Agent: credential entry must stay outside the sandbox and outside chat transcripts.</td>
+        </tr>
+        <tr>
+          <td>Hub installs</td>
+          <td>Hub-installed skills are scanned for exfiltration, prompt injection, destructive commands, supply-chain signals, and related threats. <code>--force</code> can override non-dangerous findings but not dangerous verdicts <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Security scanning and force</a>.</td>
+          <td>Good scanner/provenance idea, but Right Agent should require explicit bot-side confirmation for overrides.</td>
+        </tr>
+        <tr>
+          <td>External dirs</td>
+          <td>External skill directories are read-only for discovery. Agent-created and edited skills write to the local skills tree <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">External Skill Directories</a>.</td>
+          <td>Matches Right Agent's need to preserve compatibility without letting shared registries become mutable by the agent.</td>
+        </tr>
+        <tr>
+          <td>Curator</td>
+          <td>The curator archives instead of deleting, creates backups, respects pins, and excludes bundled/hub-installed skills from telemetry writes <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/curator">Curator</a>.</td>
+          <td>Useful but should be report-only or opt-in in Right Agent until provenance is strong.</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="callout warning">
+      <strong>Security inference:</strong> Hermes' conditional activation hides irrelevant skills from the prompt, but it should not be treated as hard authorization. A skill that instructs shell use is bounded by whatever terminal/file/network sandbox the session already has.
+    </div>
+  </div>
+
+  <div class="section" id="comparison-with-right-agent">
+    <h2>Comparison With Right Agent</h2>
+    <table summary="Hermes and Right Agent architecture comparison">
+      <thead>
+        <tr><th>Dimension</th><th>Hermes</th><th>Right Agent Current State</th><th>Implication</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Runtime model</td>
+          <td>Hermes is a Python agent with native toolsets and multiple terminal backends; its docs describe local, Docker, SSH, Singularity, Modal, Daytona, and similar execution backends <a href="https://hermes-agent.nousresearch.com/docs/">Hermes docs home</a>.</td>
+          <td>Right Agent is Rust 2024, orchestrates Claude Code through process-compose, and defaults to OpenShell sandboxes with host-held credentials <a href="../../AGENTS.md">AGENTS.md</a> <a href="../../ARCHITECTURE.md">ARCHITECTURE.md</a>.</td>
+          <td>Right Agent cannot copy Hermes' local filesystem mutation model directly; host/sandbox ownership matters.</td>
+        </tr>
+        <tr>
+          <td>Prompt integration</td>
+          <td>Hermes builds a compact skill index and loads individual skills with <code>skill_view</code> <a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">prompt_builder.py</a>.</td>
+          <td>Right Agent assembles one composite system prompt via <code>--system-prompt-file</code>; it uses compiled-in templates, agent-owned files, and platform-managed generated files <a href="../../PROMPT_SYSTEM.md">PROMPT_SYSTEM.md</a>.</td>
+          <td>A native Right skill index should preserve prompt caching and avoid per-message filesystem scanning.</td>
+        </tr>
+        <tr>
+          <td>Skill storage</td>
+          <td><code>~/.hermes/skills/</code> is the local source of truth, with hub metadata and bundled manifests under that tree <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skill Directory Structure</a>.</td>
+          <td>Right Agent installs bundled skills into per-agent <code>.claude/skills/</code>. <a href="../../crates/right-codegen/src/skills.rs">skills.rs</a> embeds <code>rightskills</code>, <code>rightcron</code>, <code>rightmcp</code>, <code>rightmemory</code>, and <code>rightreflect</code>; <a href="../../crates/right-platform-store/src/lib.rs">right-platform-store</a> deploys a platform-managed subset into OpenShell sandboxes.</td>
+          <td>Right should retain per-agent isolation and add provenance metadata rather than a global mutable shared tree.</td>
+        </tr>
+        <tr>
+          <td>Management UX</td>
+          <td>Users have CLI and slash-command <code>/skills</code> management, plus agent-side <code>skill_manage</code> mutation <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Skills Hub commands</a>.</td>
+          <td>Right Agent has Telegram-first management for operational concerns such as MCP, model, and debug. Project rules explicitly say MCP config must go through the bot and that agents cannot register external MCP servers <a href="../../AGENTS.md">AGENTS.md</a> <a href="../../ARCHITECTURE.md">ARCHITECTURE.md</a>.</td>
+          <td>Skill install/remove/update should be bot-owned, not performed by arbitrary agent shell commands inside the sandbox.</td>
+        </tr>
+        <tr>
+          <td>Self-improvement loop</td>
+          <td>Hermes lets the agent create or patch procedural memory through <code>skill_manage</code> after complex successes, corrections, and recovered failures <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Agent-managed skills</a>.</td>
+          <td>Right Agent has memory and bundled skills, but no platform-owned path for an agent to propose a new reusable skill after a successful task. <a href="../../crates/right-codegen/skills/rightmemory-hindsight/SKILL.md">rightmemory</a> explicitly says reusable procedures should become skills, but there is no safe proposal/approval flow yet.</td>
+          <td>This is the biggest Hermes idea to adapt: preserve the learning loop, but put approval and installation under the bot.</td>
+        </tr>
+        <tr>
+          <td>MCP and tool naming</td>
+          <td>Hermes uses native tool names such as <code>skills_list</code>, <code>skill_view</code>, and <code>skill_manage</code> <a href="https://hermes-agent.nousresearch.com/docs/reference/toolsets-reference">Toolsets Reference</a>.</td>
+          <td>Right Agent uses Claude Code MCP naming with <code>mcp__right__&lt;tool&gt;</code> in agent-facing text; docs require that full prefix in skills, templates, prompts, and codegen <a href="../../AGENTS.md">AGENTS.md</a>.</td>
+          <td>Any Right Agent skill-management MCP tools must be documented as <code>mcp__right__skill_list</code>, <code>mcp__right__skill_view</code>, etc., not Hermes-style bare names.</td>
+        </tr>
+        <tr>
+          <td>Security default</td>
+          <td>Hermes supports sandbox backends and scans hub installs, but agent-managed skills can write to the local skills tree <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Agent-managed skills</a>.</td>
+          <td>Right Agent's security model is OpenShell-first, credentials stay on the host, the agent runs Claude Code with <code>--dangerously-skip-permissions</code>, and OpenShell policy is the security layer <a href="../../ARCHITECTURE.md">Security Model</a>.</td>
+          <td>Right Agent should treat skill packages as policy-relevant content, especially when scripts or network requirements are declared.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warning">
+      <strong>Local drift to audit:</strong> Right Agent's installer includes <code>rightmemory</code> and <code>rightreflect</code>, and local docs reference them, but the current platform-store manifest enumerates only <code>rightskills</code>, <code>rightcron</code>, and <code>rightmcp</code> for sandbox deployment. Before adding a broader skill lifecycle, align the installer, manifest, and prompt docs.
+    </div>
+  </div>
+
+  <div class="section" id="applicability-to-right-agent">
+    <h2>Applicability to Right Agent</h2>
+    <h3><span class="status adopt">Adopt</span></h3>
+    <ul>
+      <li><strong>Progressive disclosure:</strong> keep a compact installed-skill index and load full <code>SKILL.md</code> or supporting files only when needed. This maps cleanly to Right Agent's prompt-cache sensitivity documented in <a href="../../PROMPT_SYSTEM.md">PROMPT_SYSTEM.md</a>.</li>
+      <li><strong>Provenance and hashes:</strong> track source, install identifier, trust level, content hash, install time, and update hash for each non-bundled skill, following Hermes' lock/update model <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Update lifecycle</a>.</li>
+      <li><strong>Multi-source compatibility:</strong> support OpenClaw/ClawHub and agentskills-compatible <code>SKILL.md</code> packages. Right Agent already promises drop-in OpenClaw/ClawHub file compatibility <a href="../../AGENTS.md">AGENTS.md</a>.</li>
+      <li><strong>Read-only external dirs:</strong> allow configured shared directories to appear in discovery while keeping writes local and platform-managed, matching Hermes' external-dir precedence model <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">External Skill Directories</a>.</li>
+      <li><strong>Curator concepts:</strong> use usage telemetry, stale reports, pins, archives, and backups, but start as report-only until Right Agent has strong provenance and approval flows.</li>
+      <li><strong>Auto-created skill drafts:</strong> let agents draft reusable procedures when a task reveals a repeatable workflow. The draft should include trigger conditions, exact steps, pitfalls, verification, and any proposed supporting files, mirroring Hermes' skill-as-procedural-memory model <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Agent-managed skills</a>.</li>
+    </ul>
+
+    <h3><span class="status reject">Reject</span></h3>
+    <ul>
+      <li><strong>Unapproved agent mutation:</strong> do not give the agent a direct equivalent of Hermes' full <code>skill_manage</code> delete/edit power over installed skills. That conflicts with Right Agent's bot-first management and sandbox-first posture.</li>
+      <li><strong>Chat secret capture:</strong> do not ask for API keys in Telegram chat. Hermes also avoids secret prompts on messaging surfaces <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Secure Setup on Load</a>; Right should keep credential collection in bot-managed flows.</li>
+      <li><strong>Automatic policy widening:</strong> do not let a skill install expand OpenShell network or filesystem policy. Existing <a href="../../crates/right-codegen/skills/rightskills/SKILL.md">rightskills</a> already says not to auto-expand sandbox config; a native implementation should enforce that in code.</li>
+      <li><strong>Dangerous override from chat:</strong> do not expose a casual <code>--force</code> equivalent for dangerous scanner results. Community skill overrides should be explicit, audited, and user-confirmed.</li>
+    </ul>
+
+    <h3><span class="status modify">Modify</span></h3>
+    <ul>
+      <li><strong>Bot-first management:</strong> implement <code>/skills</code> in Telegram, backed by host-side internal APIs, rather than relying on the agent to run <code>npx skills</code> inside its sandbox.</li>
+      <li><strong>Agent-created skills as the core loop:</strong> add an MCP tool such as <code>mcp__right__skill_propose</code> that stores a draft and asks the user to approve through Telegram before installation. This preserves the Hermes learning loop without silently mutating the runtime.</li>
+      <li><strong>Content-addressed deployment:</strong> put approved skills into the host agent dir, then let platform-store deploy them into <code>/sandbox/.platform/</code> and symlink into <code>/sandbox/.claude/skills/</code>, matching Right Agent's existing upgrade model <a href="../../ARCHITECTURE.md">Upgrade &amp; Migration Model</a>.</li>
+      <li><strong>Permission metadata:</strong> use skill frontmatter for advisory requirements, but translate network/filesystem changes into explicit bot-side policy review. Filesystem-policy changes require sandbox migration in Right Agent and cannot be hidden inside skill install <a href="../architecture/sandbox.md">sandbox docs</a>.</li>
+    </ul>
+  </div>
+
+  <div class="section" id="recommended-implementation-path">
+    <h2>Recommended Implementation Path</h2>
+    <ol>
+      <li><strong>Audit current built-in skill deployment.</strong> Align <a href="../../crates/right-codegen/src/skills.rs">right-codegen skill installation</a>, <a href="../../crates/right-platform-store/src/lib.rs">platform-store manifest deployment</a>, and <a href="../../PROMPT_SYSTEM.md">PROMPT_SYSTEM.md</a> so every documented bundled skill is actually present inside OpenShell sandboxes.</li>
+      <li><strong>Build <code>mcp__right__skill_propose</code> first.</strong> Let the agent submit a draft <code>SKILL.md</code> plus optional supporting files after a complex task, recovered failure, user correction, or discovered repeatable workflow. Store the draft outside the active skill tree.</li>
+      <li><strong>Add Telegram approval for drafts.</strong> The bot should show a compact diff, scanner result, requested domains/filesystem needs, and actions: approve, reject, edit later. Approval, not the agent, installs the skill.</li>
+      <li><strong>Define a Right Agent skill registry.</strong> Store per-agent entries in SQLite or a platform-managed manifest, with fields for name, source, install identifier, category, trust, content hash, installed_at, updated_at, disabled, provenance, and draft/approved state. Avoid manually editing agent configs or <code>.mcp.json</code>.</li>
+      <li><strong>Deploy approved skills through platform-store.</strong> Extend the manifest from a fixed built-in subset to a registry-driven list of approved skill directories. Preserve user-installed directories across restarts and use content hashes to avoid stale or partial sandbox state.</li>
+      <li><strong>Add bot-owned <code>/skills</code> commands.</strong> Start with <code>/skills list</code>, <code>drafts</code>, <code>show</code>, <code>approve</code>, <code>reject</code>, and <code>disable</code>. Marketplace commands such as <code>search</code>, <code>install</code>, <code>update</code>, and <code>audit</code> can follow after the auto-creation loop works.</li>
+      <li><strong>Implement scanner and policy gate.</strong> Parse frontmatter and supporting files. Block path traversal, unexpected symlinks, prompt-injection patterns, destructive shell snippets, secret-looking literals, unsupported required platforms, and declared network/filesystem requirements not covered by current OpenShell policy.</li>
+      <li><strong>Add read-only agent discovery tools if Claude Code's native Skill surface is insufficient.</strong> If needed, expose <code>mcp__right__skill_list</code> and <code>mcp__right__skill_view</code>, and update <code>with_instructions()</code>, templates, skills, and <a href="../../PROMPT_SYSTEM.md">PROMPT_SYSTEM.md</a> with full <code>mcp__right__</code> names.</li>
+      <li><strong>Add curator later, initially report-only.</strong> Track skill usage and produce <code>/skills doctor</code> or <code>/skills curator report</code>. Only after reliable backups and pins exist should Right Agent archive stale agent-created skills.</li>
+    </ol>
+  </div>
+
+  <div class="section" id="open-questions">
+    <h2>Open Questions</h2>
+    <ul>
+      <li>Should Right Agent keep using Claude Code's native <code>.claude/skills</code> activation entirely, or add its own MCP-backed <code>skill_view</code> layer for more deterministic progressive disclosure?</li>
+      <li>Where should approved skill provenance live: per-agent SQLite, <code>.claude/skills/installed.json</code>, or both for compatibility?</li>
+      <li>How should Right Agent expose non-secret skill config without violating the bot-managed-field exception? A bot-managed registry in SQLite is cleaner than adding more user-facing <code>agent.yaml</code> fields.</li>
+      <li>Should external read-only skill directories be allowed at all in sandboxed agents, or only on the host side with platform-store copying selected approved skills?</li>
+      <li>What scanner policy should Right use for OpenClaw/ClawHub compatibility when third-party skills include helper scripts or broad shell instructions?</li>
+      <li>Should agent-created skills be disabled by default until user approval, or installed as inactive drafts visible only through <code>/skills drafts</code>?</li>
+      <li>How should Right reconcile skill update checks with the upgrade-friendly rule that existing agents adopt new platform behavior without recreation?</li>
+    </ul>
+  </div>
+
+  <div class="section" id="references">
+    <h2>References</h2>
+    <h3>Hermes Sources</h3>
+    <ol class="refs">
+      <li><a href="https://hermes-agent.nousresearch.com/">Hermes Agent homepage</a></li>
+      <li><a href="https://hermes-agent.nousresearch.com/docs/">Hermes Agent docs home</a></li>
+      <li><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills">Hermes Skills System</a></li>
+      <li><a href="https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/">Working with Skills guide</a></li>
+      <li><a href="https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills">Creating Skills guide</a></li>
+      <li><a href="https://hermes-agent.nousresearch.com/docs/reference/toolsets-reference">Toolsets Reference</a></li>
+      <li><a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/curator">Curator docs</a></li>
+      <li><a href="https://hermes-agent.nousresearch.com/docs/user-guide/configuration/">Hermes Configuration</a></li>
+      <li><a href="https://github.com/NousResearch/hermes-agent/blob/main/AGENTS.md">NousResearch/hermes-agent AGENTS.md</a></li>
+      <li><a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skills_tool.py">Hermes tools/skills_tool.py</a></li>
+      <li><a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skill_manager_tool.py">Hermes tools/skill_manager_tool.py</a></li>
+      <li><a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skills_hub.py">Hermes tools/skills_hub.py</a></li>
+      <li><a href="https://github.com/NousResearch/hermes-agent/blob/main/tools/skills_guard.py">Hermes tools/skills_guard.py</a></li>
+      <li><a href="https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py">Hermes agent/prompt_builder.py</a></li>
+    </ol>
+    <h3>Right Agent Sources</h3>
+    <ol class="refs">
+      <li><a href="../../AGENTS.md">AGENTS.md</a></li>
+      <li><a href="../../AGENTS.rust.md">AGENTS.rust.md</a></li>
+      <li><a href="../../ARCHITECTURE.md">ARCHITECTURE.md</a></li>
+      <li><a href="../../PROMPT_SYSTEM.md">PROMPT_SYSTEM.md</a></li>
+      <li><a href="../architecture/mcp.md">docs/architecture/mcp.md</a></li>
+      <li><a href="../architecture/sandbox.md">docs/architecture/sandbox.md</a></li>
+      <li><a href="../architecture/lifecycle.md">docs/architecture/lifecycle.md</a></li>
+      <li><a href="../architecture/memory.md">docs/architecture/memory.md</a></li>
+      <li><a href="../architecture/sessions.md">docs/architecture/sessions.md</a></li>
+      <li><a href="../../crates/right-codegen/src/skills.rs">crates/right-codegen/src/skills.rs</a></li>
+      <li><a href="../../crates/right-codegen/skills/rightskills/SKILL.md">crates/right-codegen/skills/rightskills/SKILL.md</a></li>
+      <li><a href="../../crates/right-codegen/src/pipeline.rs">crates/right-codegen/src/pipeline.rs</a></li>
+      <li><a href="../../crates/right-platform-store/src/lib.rs">crates/right-platform-store/src/lib.rs</a></li>
+      <li><a href="../../crates/right-codegen/src/agent_def.rs">crates/right-codegen/src/agent_def.rs</a></li>
+      <li><a href="../../crates/right-codegen/src/mcp_config.rs">crates/right-codegen/src/mcp_config.rs</a></li>
+      <li><a href="../../crates/bot/src/telegram/handler.rs">crates/bot/src/telegram/handler.rs</a></li>
+      <li><a href="../../crates/right/src/aggregator.rs">crates/right/src/aggregator.rs</a></li>
+      <li><a href="../../templates/right/agent/TOOLS.md">templates/right/agent/TOOLS.md</a></li>
+      <li><a href="../../templates/right/agent/agent.yaml">templates/right/agent/agent.yaml</a></li>
+    </ol>
+  </div>
+
+  <div class="footer">
+    <p>Prepared for Right Agent. All Hermes claims are cited to official docs or source files unless marked as inference.</p>
+  </div>
+</div>
+</body>
+</html>
