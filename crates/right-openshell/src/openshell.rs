@@ -546,8 +546,12 @@ pub fn spawn_sandbox(
         cmd.arg(dir);
     }
 
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
+    // `openshell sandbox create` is long-running; callers wait for READY via
+    // gRPC and kill this process afterwards. Do not pipe output unless it is
+    // drained concurrently, or fresh CI runs can block before the sandbox is
+    // registered.
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
 
     let child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| miette::miette!("failed to spawn openshell sandbox create: {e:#}"))?;
