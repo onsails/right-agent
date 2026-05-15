@@ -26,7 +26,84 @@ pub const CRON_INSTRUCTIONS: &str = include_str!("../templates/right/prompt/CRON
 ///
 /// Agents write replies as JSON conforming to this schema.
 /// `content` is required (may be null for media-only replies).
-pub const REPLY_SCHEMA_JSON: &str = r#"{"type":"object","properties":{"content":{"type":["string","null"]},"reply_to_message_id":{"type":["integer","null"]},"attachments":{"type":["array","null"],"items":{"type":"object","properties":{"type":{"enum":["photo","document","video","audio","voice","video_note","sticker","animation"]},"path":{"type":"string"},"filename":{"type":["string","null"]},"caption":{"type":["string","null"]},"media_group_id":{"type":["string","null"]}},"required":["type","path"]}}},"required":["content"]}"#;
+pub const REPLY_SCHEMA_JSON: &str = r#"{
+  "type": "object",
+  "properties": {
+    "content": { "type": ["string", "null"] },
+    "reply_to_message_id": { "type": ["integer", "null"] },
+    "attachments": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "enum": ["photo", "document", "video", "audio", "voice", "video_note", "sticker", "animation"]
+          },
+          "path": { "type": "string" },
+          "filename": { "type": ["string", "null"] },
+          "caption": { "type": ["string", "null"] },
+          "media_group_id": { "type": ["string", "null"] }
+        },
+        "required": ["type", "path"]
+      }
+    },
+    "used_skill_receipts": {
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "properties": {
+          "package_name": { "type": "string" },
+          "message": { "type": "string" }
+        },
+        "required": ["package_name", "message"]
+      }
+    },
+    "learning_signal": {
+      "type": ["object", "null"],
+      "properties": {
+        "kind": { "const": "create_candidate" },
+        "package_name_hint": { "type": "string" },
+        "trigger": {
+          "enum": ["explicit_user_request", "multi_step_workflow", "recovered_surprise", "user_correction", "repeated_tool_pattern"]
+        },
+        "reason_not_written": {
+          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
+        },
+        "event_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "summary": { "type": "string" }
+      },
+      "required": ["kind", "package_name_hint", "trigger", "reason_not_written", "event_refs", "summary"]
+    },
+    "skill_issue_signal": {
+      "type": ["object", "null"],
+      "properties": {
+        "kind": { "const": "update_candidate" },
+        "skill_name": { "type": "string" },
+        "issue": {
+          "enum": ["missing_step", "stale_command", "wrong_api_assumption", "overbroad_activation", "broken_script", "unsafe_instruction"]
+        },
+        "reason_not_patched": {
+          "enum": ["conversation_still_evolving", "needs_full_context_review", "write_or_publish_failed", "needs_existing_skill_diff"]
+        },
+        "observed_effect": {
+          "enum": ["retry_after_tool_error", "retry_after_user_correction", "manual_override", "verified_alternative"]
+        },
+        "event_refs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "patch_hint": { "type": "string" }
+      },
+      "required": ["kind", "skill_name", "issue", "reason_not_patched", "observed_effect", "event_refs", "patch_hint"]
+    }
+  },
+  "required": ["content"]
+}"#;
 
 /// JSON schema for bootstrap mode — adds `bootstrap_complete` field.
 ///

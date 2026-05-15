@@ -17,8 +17,8 @@ fn open_connection_applies_migrations() {
     let conn = open_connection(dir.path(), true).unwrap();
     assert_eq!(
         query_user_version(&conn),
-        19,
-        "latest migration should be v19"
+        20,
+        "latest migration should be v20"
     );
     // After migrations, the current sessions table should exist.
     let count: i64 = conn
@@ -55,7 +55,7 @@ fn open_connection_without_migration_preserves_existing_schema() {
     let conn = open_connection(dir.path(), false).unwrap();
     assert_eq!(
         query_user_version(&conn),
-        19,
+        20,
         "migrate=false should not downgrade schema"
     );
     assert_eq!(

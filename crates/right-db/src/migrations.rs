@@ -21,6 +21,7 @@ const V16_SCHEMA: &str = include_str!("sql/v16_usage_api_key_source.sql");
 #[allow(dead_code)] // Doc-only: actual migration uses Rust hook for idempotency.
 const V17_SCHEMA: &str = include_str!("sql/v17_cron_target.sql");
 const V19_SCHEMA: &str = include_str!("sql/v19_cron_runs_target_index.sql");
+const V20_SCHEMA: &str = include_str!("sql/v20_learned_skills.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -202,6 +203,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v17_cron_target),
         M::up_with_hook("", v18_cron_runs_target),
         M::up(V19_SCHEMA),
+        M::up(V20_SCHEMA),
     ])
 });
 
@@ -996,5 +998,47 @@ mod tests {
             thread.is_none(),
             "target_thread_id should remain NULL when spec's thread is NULL"
         );
+    }
+
+    #[test]
+    fn learned_skills_migration_creates_event_tables() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        for table in [
+            "skill_learning_events",
+            "skill_nudge_signals",
+            "skill_nudge_state",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{table} table must exist");
+        }
+    }
+
+    #[test]
+    fn learned_skills_nudge_state_defaults_are_usable() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO skill_nudge_state (agent_name) VALUES ('right')",
+            [],
+        )
+        .unwrap();
+
+        let row: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT tool_iters_since_review, turns_since_review, skill_issue_hints_since_review, review_running FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0, 0, 0));
     }
 }

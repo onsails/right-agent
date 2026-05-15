@@ -425,6 +425,34 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "DO NOT CALL in stdio mode — learning requires foreground HTTP aggregator context. Stage 1 foreground metadata/progress for skill create/update; HTTP mode only."
+    )]
+    async fn skill_learning_start(
+        &self,
+        Parameters(_params): Parameters<crate::learning::SkillLearningStartParams>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(tool_error(
+            "learning_unavailable",
+            "skill_learning_start requires foreground HTTP aggregator context",
+            None,
+        ))
+    }
+
+    #[tool(
+        description = "DO NOT CALL in stdio mode — learning requires foreground HTTP aggregator context. Stage 1 foreground metadata/receipt for skill create/update completion; HTTP mode only."
+    )]
+    async fn skill_learning_finish(
+        &self,
+        Parameters(_params): Parameters<crate::learning::SkillLearningFinishParams>,
+    ) -> Result<CallToolResult, McpError> {
+        Ok(tool_error(
+            "learning_unavailable",
+            "skill_learning_finish requires foreground HTTP aggregator context",
+            None,
+        ))
+    }
+
+    #[tool(
         description = "Signal that bootstrap onboarding is complete. Call this AFTER you have created IDENTITY.md, SOUL.md, and USER.md. The system will verify the files exist."
     )]
     async fn bootstrap_done(&self) -> Result<CallToolResult, McpError> {
@@ -476,6 +504,9 @@ impl rmcp::ServerHandler for MemoryServer {
                  - mcp__right__mcp_list: List all registered MCP servers (read-only — add/remove/auth via Telegram /mcp)\n\n\
                  ## Progress\n\
                  - mcp__right__send_progress: Foreground-only progress messages (max 2000 characters). DO NOT call in stdio mode — always returns progress_unavailable and wastes budget. Available only when routed via the HTTP aggregator.\n\n\
+                 ## Learning\n\
+                 - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.\n\
+                 - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files.\n\n\
                  ## Bootstrap\n\
                  - mcp__right__bootstrap_done: Signal onboarding completion. Verifies IDENTITY.md, SOUL.md, USER.md exist. Call AFTER creating all three files.",
             )

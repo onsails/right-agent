@@ -495,7 +495,7 @@ async fn deliver_through_session(
         allowed_tools: vec![],
         // Delivery is a relay, but harness built-ins are still available — apply
         // baseline so the haiku relay can't self-loop or escape via TeamCreate etc.
-        disallowed_tools: crate::cc::invocation::disallow_send_progress(
+        disallowed_tools: crate::cc::invocation::disallow_foreground_only_tools(
             crate::cc::invocation::baseline_disallowed_tools(),
         ),
         extra_args: vec![],

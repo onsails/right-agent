@@ -30,6 +30,10 @@ Foreground turns may also send sparse standalone progress messages via
 the thinking anchor. The worker registers a fresh invocation ID for the current
 turn, injects it into the MCP config as `X-Right-Invocation`, and unregisters it
 on completion, spawn/write failure, timeout, stop, or background handoff.
+Foreground turns may also call learned-skill start/finish tools. These use the
+same per-invocation `X-Right-Invocation` registration as progress, but they are
+not generic progress calls: start sends the learning/update notice, successful
+finish sends the learned/updated receipt, and both calls persist provenance.
 
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Process timeout (600s) is a safety net only.
@@ -38,14 +42,20 @@ Per-callsite `--disallowedTools`:
 
 - **Foreground** (`bot::telegram::worker`): baseline only. `Agent` is allowed —
   foreground turns can spawn subagents legitimately.
-- **Cron** (`bot::cron`): baseline + `mcp__right__send_progress`. `Agent`
+- **Cron** (`bot::cron`): baseline + foreground-only tools
+  (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
+  `mcp__right__skill_learning_finish`). `Agent`
   intentionally remains allowed; cron jobs may legitimately fan out to
-  subagents. Progress is denied because cron turns have no live foreground
-  invocation registered.
-- **Reflection** (`bot::reflection`): baseline + `Agent` + `mcp__right__send_progress`.
+  subagents. Foreground-only tools are denied because cron turns have no live
+  foreground invocation registered.
+- **Reflection** (`bot::reflection`): baseline + `Agent` + foreground-only
+  tools (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
+  `mcp__right__skill_learning_finish`).
   Reflection is a single follow-up turn — subagents would waste budget — and
-  it is not a foreground turn, so progress is unavailable.
-- **Delivery** / **background continuation**: baseline + `mcp__right__send_progress`,
+  it is not a foreground turn, so foreground-only tools are unavailable.
+- **Delivery** / **background continuation**: baseline + foreground-only tools
+  (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
+  `mcp__right__skill_learning_finish`),
   same rationale as cron.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`

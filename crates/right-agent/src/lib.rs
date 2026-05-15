@@ -4,6 +4,7 @@ pub mod agent;
 pub mod cron_spec;
 pub mod doctor;
 pub mod init;
+pub mod learned_skills;
 pub mod rebootstrap;
 pub mod runtime;
 pub(crate) mod tunnel;
