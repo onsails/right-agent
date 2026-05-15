@@ -11,6 +11,37 @@ fn reply_schema_json_is_valid() {
 }
 
 #[test]
+fn reply_schema_contains_learned_skill_fields() {
+    let parsed: serde_json::Value =
+        serde_json::from_str(REPLY_SCHEMA_JSON).expect("REPLY_SCHEMA_JSON must be valid JSON");
+    let properties = parsed["properties"]
+        .as_object()
+        .expect("schema properties must be an object");
+    assert!(
+        properties.contains_key("used_skill_receipts"),
+        "schema must include used_skill_receipts"
+    );
+    assert!(
+        properties.contains_key("learning_signal"),
+        "schema must include learning_signal"
+    );
+    assert!(
+        properties.contains_key("skill_issue_signal"),
+        "schema must include skill_issue_signal"
+    );
+
+    let required = parsed["required"]
+        .as_array()
+        .expect("schema required must be an array");
+    let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    assert!(required_strs.contains(&"content"), "must require content");
+    assert!(
+        !required_strs.contains(&"used_skill_receipts"),
+        "used_skill_receipts must be optional"
+    );
+}
+
+#[test]
 fn bootstrap_schema_json_is_valid() {
     let parsed: serde_json::Value = serde_json::from_str(BOOTSTRAP_SCHEMA_JSON)
         .expect("BOOTSTRAP_SCHEMA_JSON must be valid JSON");

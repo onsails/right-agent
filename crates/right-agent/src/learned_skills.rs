@@ -139,6 +139,64 @@ pub fn successful_finish_exists(
     Ok(count > 0)
 }
 
+pub fn select_reply_signal(
+    conn: &rusqlite::Connection,
+    invocation_id: &str,
+    learning_signal: Option<serde_json::Value>,
+    skill_issue_signal: Option<serde_json::Value>,
+) -> Result<Option<(NudgeSignalKind, serde_json::Value)>, rusqlite::Error> {
+    if successful_finish_exists(conn, invocation_id)? {
+        return Ok(None);
+    }
+
+    match (learning_signal, skill_issue_signal) {
+        (Some(_), Some(_)) => Ok(None),
+        (Some(signal), None) => Ok(validate_nudge_signal(NudgeSignalKind::Learning, signal)),
+        (None, Some(signal)) => Ok(validate_nudge_signal(NudgeSignalKind::SkillIssue, signal)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn validate_nudge_signal(
+    signal_kind: NudgeSignalKind,
+    signal: serde_json::Value,
+) -> Option<(NudgeSignalKind, serde_json::Value)> {
+    let expected_kind = match signal_kind {
+        NudgeSignalKind::Learning => "create_candidate",
+        NudgeSignalKind::SkillIssue => "update_candidate",
+    };
+    if signal.get("kind").and_then(|v| v.as_str()) != Some(expected_kind) {
+        return None;
+    }
+
+    let has_text = match signal_kind {
+        NudgeSignalKind::Learning => signal
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty()),
+        NudgeSignalKind::SkillIssue => signal
+            .get("patch_hint")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty()),
+    };
+    if !has_text {
+        return None;
+    }
+
+    let event_ref_count = signal
+        .get("event_refs")
+        .and_then(|v| v.as_array())
+        .map_or(0, Vec::len);
+    let is_explicit_user_request = signal_kind == NudgeSignalKind::Learning
+        && signal.get("trigger").and_then(|v| v.as_str()) == Some("explicit_user_request");
+    let required_refs = if is_explicit_user_request { 1 } else { 2 };
+    if event_ref_count < required_refs {
+        return None;
+    }
+
+    Some((signal_kind, signal))
+}
+
 pub fn ensure_nudge_state(
     conn: &rusqlite::Connection,
     agent_name: &str,
@@ -300,5 +358,139 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hints, 1);
+    }
+
+    fn learning_signal(trigger: &str, event_refs: Vec<&str>, summary: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "create_candidate",
+            "package_name_hint": "right-demo",
+            "trigger": trigger,
+            "reason_not_written": "needs review",
+            "event_refs": event_refs,
+            "summary": summary,
+        })
+    }
+
+    fn skill_issue_signal(event_refs: Vec<&str>, patch_hint: &str) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "update_candidate",
+            "skill_name": "right-demo",
+            "issue": "stale command",
+            "reason_not_patched": "needs review",
+            "observed_effect": "user had to retry",
+            "event_refs": event_refs,
+            "patch_hint": patch_hint,
+        })
+    }
+
+    #[test]
+    fn nudge_signal_is_dropped_when_successful_finish_exists() {
+        let conn = conn();
+        insert_learning_event(
+            &conn,
+            &LearningEvent {
+                invocation_id: "inv-success".to_owned(),
+                agent_name: "right".to_owned(),
+                action: LearningAction::Create,
+                skill_name: "right-demo".to_owned(),
+                phase: LearningPhase::Finish,
+                status: Some(LearningStatus::Created),
+                reason: None,
+                message: Some("Learned skill: right-demo".to_owned()),
+                summary: Some("captured workflow".to_owned()),
+                event_refs: vec!["event-1".to_owned()],
+            },
+        )
+        .unwrap();
+
+        let selected = select_reply_signal(
+            &conn,
+            "inv-success",
+            Some(learning_signal(
+                "explicit_user_request",
+                vec!["event-1"],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn nudge_signal_is_dropped_when_both_signals_present() {
+        let conn = conn();
+        let selected = select_reply_signal(
+            &conn,
+            "inv-both",
+            Some(learning_signal(
+                "explicit_user_request",
+                vec!["event-1"],
+                "Capture this workflow.",
+            )),
+            Some(skill_issue_signal(
+                vec!["event-2"],
+                "Patch the stale command.",
+            )),
+        )
+        .unwrap();
+
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn nudge_signal_requires_two_event_refs_unless_explicit_user_request() {
+        let conn = conn();
+        let dropped = select_reply_signal(
+            &conn,
+            "inv-short",
+            Some(learning_signal(
+                "agent_observed_repetition",
+                vec!["event-1"],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+        assert!(dropped.is_none());
+
+        let accepted = select_reply_signal(
+            &conn,
+            "inv-explicit",
+            Some(learning_signal(
+                "explicit_user_request",
+                vec!["event-1"],
+                "Capture this workflow.",
+            )),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.map(|(kind, _)| kind),
+            Some(NudgeSignalKind::Learning)
+        );
+
+        let empty_summary = select_reply_signal(
+            &conn,
+            "inv-empty-summary",
+            Some(learning_signal(
+                "explicit_user_request",
+                vec!["event-1"],
+                "",
+            )),
+            None,
+        )
+        .unwrap();
+        assert!(empty_summary.is_none());
+
+        let empty_patch_hint = select_reply_signal(
+            &conn,
+            "inv-empty-patch",
+            None,
+            Some(skill_issue_signal(vec!["event-1", "event-2"], "")),
+        )
+        .unwrap();
+        assert!(empty_patch_hint.is_none());
     }
 }
