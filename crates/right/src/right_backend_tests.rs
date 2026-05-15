@@ -35,13 +35,29 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 progress + 1 bootstrap = 10
+    // 7 cron + 1 mcp + 1 progress + 2 learning + 1 bootstrap = 12
     assert_eq!(
         tools.len(),
-        10,
-        "expected 10 tools, got {}: {:?}",
+        12,
+        "expected 12 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tools_list_includes_learning_tools() {
+    let (backend, _, _tmp) = make_backend();
+    let tools = backend.tools_list();
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+
+    assert!(
+        names.contains(&"skill_learning_start"),
+        "missing skill_learning_start: {names:?}"
+    );
+    assert!(
+        names.contains(&"skill_learning_finish"),
+        "missing skill_learning_finish: {names:?}"
     );
 }
 
@@ -141,6 +157,175 @@ async fn bootstrap_done_with_files() {
         !agent_dir.join("BOOTSTRAP.md").exists(),
         "BOOTSTRAP.md should be removed"
     );
+}
+
+#[tokio::test]
+async fn skill_learning_start_rejects_create_without_rl_prefix() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "create",
+                "skill_name": "custom-skill",
+                "reason": "user requested a reusable workflow",
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn skill_learning_start_rejects_core_skill_update() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "update",
+                "skill_name": "right-cron",
+                "reason": "try to patch a built-in skill",
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_core_readonly");
+}
+
+#[tokio::test]
+async fn skill_learning_start_allows_non_core_update_until_delivery() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    let skill_dir = agent_dir.join(".claude/skills/custom-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(skill_dir.join("SKILL.md"), "# Custom skill").expect("write skill");
+
+    backend
+        .progress_registry()
+        .register(crate::progress::ProgressRegistration {
+            invocation_id: "inv-1".to_owned(),
+            kind: crate::progress::ProgressInvocationKind::Foreground,
+            bot_socket_path: agent_dir.join("missing-bot.sock"),
+            bot_send_token: "send-token".to_owned(),
+        })
+        .await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "update",
+                "skill_name": "custom-skill",
+                "reason": "make the skill more precise",
+                "message": "I am updating custom-skill with a narrower workflow.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-1".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "learning_send_failed");
+}
+
+#[tokio::test]
+async fn skill_learning_start_rejects_update_when_package_missing() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_start",
+            json!({
+                "action": "update",
+                "skill_name": "custom-skill",
+                "reason": "update a missing package",
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_package_missing");
+}
+
+#[tokio::test]
+async fn skill_learning_finish_requires_receipt_message_for_success() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": "rl-user-workflow",
+                "status": "created",
+            }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn skill_learning_finish_rejects_success_when_package_missing() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "skill_learning_finish",
+            json!({
+                "action": "create",
+                "skill_name": "rl-user-workflow",
+                "status": "created",
+                "message": "I learned rl-user-workflow and will use it when this pattern appears again.",
+            }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-1".to_owned()),
+            },
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "skill_package_missing");
 }
 
 // ---------------------------------------------------------------------------

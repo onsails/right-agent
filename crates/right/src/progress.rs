@@ -31,6 +31,7 @@ pub(crate) struct ToolCallContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProgressInvocationKind {
     Foreground,
+    BackgroundReview,
     #[cfg(test)]
     NonForeground,
 }
@@ -160,6 +161,27 @@ impl ProgressRegistry {
         })
     }
 
+    pub(crate) async fn learning_send_target(
+        &self,
+        invocation_id: &str,
+    ) -> Result<(ProgressInvocationKind, ProgressSendTarget), ProgressError> {
+        let inner = self.inner.lock().await;
+        let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
+        if !matches!(
+            invocation.kind,
+            ProgressInvocationKind::Foreground | ProgressInvocationKind::BackgroundReview
+        ) {
+            return Err(ProgressError::Forbidden);
+        }
+        Ok((
+            invocation.kind,
+            ProgressSendTarget {
+                bot_socket_path: invocation.bot_socket_path.clone(),
+                bot_send_token: invocation.bot_send_token.clone(),
+            },
+        ))
+    }
+
     /// Clear `last_sent_at` so the next attempt is not rate-limited.
     ///
     /// Why: `begin_send` optimistically reserves the rate-limit slot before the
@@ -225,6 +247,21 @@ mod tests {
         registry.mark_send_failed("inv-1").await;
         // Without rollback this would be RateLimited; with rollback it passes.
         registry.begin_send("inv-1").await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn learning_send_target_does_not_consume_progress_rate_limit() {
+        let registry = ProgressRegistry::default();
+        registry.register(foreground_registration()).await;
+
+        let (kind, target) = registry.learning_send_target("inv-1").await.unwrap();
+        assert_eq!(kind, ProgressInvocationKind::Foreground);
+        assert_eq!(target.bot_socket_path, PathBuf::from("/tmp/bot.sock"));
+        assert_eq!(target.bot_send_token, "send-token");
+
+        registry.begin_send("inv-1").await.unwrap();
+        let err = registry.begin_send("inv-1").await.unwrap_err();
+        assert!(matches!(err, ProgressError::RateLimited { .. }));
     }
 
     #[test]
