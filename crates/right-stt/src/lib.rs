@@ -227,16 +227,24 @@ mod tests {
         setup_crypto();
         let tmp = TempDir::new().unwrap();
         let dest = tmp.path().join("out.bin");
-        // httpbin.org/status/404 reliably returns 404; if the dev machine is
-        // offline the test will surface as a different error variant — accept that.
-        let result = download_url_to_path("https://httpbin.org/status/404", "test", &dest).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let result = download_url_to_path(&url, "test", &dest).await;
+        server.await.unwrap();
         match result {
             Err(DownloadError::BadStatus { status: 404, .. }) => {}
-            Err(DownloadError::Http(_)) => {
-                // Network unavailable in test env — skip.
-                eprintln!("skipping: network unavailable for httpbin.org");
-            }
-            other => panic!("expected BadStatus(404) or network failure, got {other:?}"),
+            other => panic!("expected BadStatus(404), got {other:?}"),
         }
     }
 

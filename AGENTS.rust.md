@@ -63,7 +63,7 @@ let _ = operation();  // Explicitly ignores
 ### 5. Testing
 - **NEVER** use `std::env::set_var()` in tests (pollutes environment)
 - **ALWAYS** pass config through function parameters
-- **NEVER** use `#[ignore]` on integration tests that require OpenShell or other external services. Dev machines have OpenShell running — these tests must run with `cargo test`. If a test needs a live sandbox, it runs against the live sandbox.
+- **External integration tests**: tests requiring live OpenShell, Claude Code inside a sandbox, real ffmpeg/Whisper inference, or network model downloads must be `#[ignore]` locally and explicitly invoked by GitHub Actions jobs. Use stable ignore reasons: `ci-openshell: ...`, `ci-claude: ...`, `ci-stt: ...`.
 - **Cadence**: TDD still applies, but use the narrowest useful command for the loop. Run the new/regression test first and verify it fails; after implementation rerun that test or the nearest package/module suite. Do not run full workspace tests after every edit or every small plan step.
 - **Targeting**: Prefer `devenv shell -- cargo test -p <crate> <filter>` or `devenv shell -- cargo test -p <crate>` during development. Use workspace-wide tests midstream only for broad cross-crate changes or when targeted results cannot prove the behavior.
 - **Worktrees**: At worktree start, run one baseline verification appropriate to the planned scope and record existing failures. At worktree completion, run the final full workspace test from inside that worktree.

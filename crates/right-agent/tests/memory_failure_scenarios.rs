@@ -100,7 +100,10 @@ async fn recovery_drains_queue_after_breaker_closes() {
     // Flip mock to success. Wait past breaker open timer then drain.
     sw.set(200, r#"{"success":true,"operation_id":"op-1"}"#)
         .await;
-    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    tokio::time::resume();
 
     let report = right_memory::retain_queue::drain_tick(&conn, |items| {
         let w = &wrapper;
@@ -129,8 +132,7 @@ async fn drain_poison_pill_deleted_good_records_still_processed() {
     let wrapper = common::wrap(&url, "bot").await;
     let conn = right_db::open_connection(wrapper.agent_db_path(), false).unwrap();
 
-    right_memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None)
-        .unwrap();
+    right_memory::retain_queue::enqueue(&conn, "bot", "POISON", None, None, None, None).unwrap();
     right_memory::retain_queue::enqueue(&conn, "bot", "GOOD", None, None, None, None).unwrap();
 
     let report = right_memory::retain_queue::drain_tick(&conn, |items| async move {

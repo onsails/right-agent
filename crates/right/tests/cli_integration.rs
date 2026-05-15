@@ -32,7 +32,7 @@ fn test_help_output() {
 }
 
 #[test]
-fn test_init_creates_structure() {
+fn test_init_smoke_generates_codegen_list_and_doctor() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
 
@@ -54,29 +54,6 @@ fn test_init_creates_structure() {
     assert!(!dir.path().join("agents/right/IDENTITY.md").exists());
     assert!(!dir.path().join("agents/right/SOUL.md").exists());
     assert!(dir.path().join("agents/right/BOOTSTRAP.md").exists());
-}
-
-#[test]
-fn test_init_generates_per_agent_codegen() {
-    // Regression: 59243d0 moved per-agent codegen to bot startup but init creates
-    // the sandbox directly. Without run_single_agent_codegen, agent defs and schemas
-    // are missing when prepare_staging_dir runs, causing sandbox upload to fail.
-    let dir = tempdir().unwrap();
-    let home = dir.path().to_str().unwrap();
-
-    right()
-        .args([
-            "--home",
-            home,
-            "init",
-            "-y",
-            "--sandbox-mode",
-            "none",
-            "--tunnel-hostname",
-            "test.example.com",
-        ])
-        .assert()
-        .success();
 
     let claude_dir = dir.path().join("agents/right/.claude");
 
@@ -113,6 +90,20 @@ fn test_init_generates_per_agent_codegen() {
         dir.path().join("agents/right/data.db").exists(),
         "missing data.db"
     );
+
+    right()
+        .args(["--home", home, "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("right"))
+        .stdout(predicate::str::contains("1 agent"));
+
+    right()
+        .args(["--home", home, "doctor"])
+        .assert()
+        // May still fail overall (process-compose not in PATH)
+        // but should contain the agent check.
+        .stdout(predicate::str::contains("agents/right/"));
 }
 
 #[test]
@@ -151,33 +142,6 @@ fn test_init_twice_fails() {
 }
 
 #[test]
-fn test_list_after_init() {
-    let dir = tempdir().unwrap();
-    let home = dir.path().to_str().unwrap();
-
-    right()
-        .args([
-            "--home",
-            home,
-            "init",
-            "-y",
-            "--tunnel-hostname",
-            "test.example.com",
-            "--sandbox-mode",
-            "none",
-        ])
-        .assert()
-        .success();
-
-    right()
-        .args(["--home", home, "list"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("right"))
-        .stdout(predicate::str::contains("1 agent"));
-}
-
-#[test]
 fn test_list_empty() {
     let dir = tempdir().unwrap();
     let home = dir.path().to_str().unwrap();
@@ -211,35 +175,6 @@ fn test_help_shows_doctor() {
         .assert()
         .success()
         .stdout(predicate::str::contains("doctor"));
-}
-
-#[test]
-fn test_doctor_in_valid_home() {
-    let dir = tempdir().unwrap();
-    let home = dir.path().to_str().unwrap();
-
-    // Initialize first so agent structure exists.
-    right()
-        .args([
-            "--home",
-            home,
-            "init",
-            "-y",
-            "--tunnel-hostname",
-            "test.example.com",
-            "--sandbox-mode",
-            "none",
-        ])
-        .assert()
-        .success();
-
-    // Doctor should report the valid agent.
-    right()
-        .args(["--home", home, "doctor"])
-        .assert()
-        // May still fail overall (process-compose not in PATH)
-        // but should contain the agent check.
-        .stdout(predicate::str::contains("agents/right/"));
 }
 
 #[test]
@@ -747,6 +682,7 @@ fn test_agent_list() {
 
 /// Validate generated OpenShell policy against a live sandbox.
 /// Creates an ephemeral sandbox via `ensure_sandbox`, applies the policy, then destroys it.
+#[ignore = "ci-openshell: requires live OpenShell gateway"]
 #[tokio::test]
 async fn test_policy_validates_against_openshell() {
     let _slot = right_openshell::openshell::acquire_sandbox_slot();

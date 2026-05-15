@@ -93,6 +93,11 @@ section only. Filesystem/landlock changes require sandbox recreation
 See: `docs/architecture/sandbox.md` for staging-dir layout, platform-store
 deployment, TLS-MITM, and the bot-startup sandbox sequence.
 
+Live OpenShell coverage is CI-explicit: tests that create real sandboxes or
+rely on OpenShell CLI file transfer use `#[ignore = "ci-openshell: ..."]`
+and are called by `.github/workflows/tests.yml`. Mock gRPC and pure policy
+tests remain in the default workspace test path.
+
 ### Login Flow (setup-token)
 
 See: `docs/architecture/lifecycle.md` (Login Flow).

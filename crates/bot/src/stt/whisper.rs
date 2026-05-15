@@ -36,7 +36,11 @@ impl WhisperEngine {
         // transcribe() call holds it — ~470MB orphaned per race.
         match self.ctx.set(arc) {
             Ok(()) => Ok(self.ctx.get().expect("just set").clone()),
-            Err(_orphan) => Ok(self.ctx.get().expect("loser of race; winner set first").clone()),
+            Err(_orphan) => Ok(self
+                .ctx
+                .get()
+                .expect("loser of race; winner set first")
+                .clone()),
         }
     }
 
@@ -137,6 +141,7 @@ mod tests {
         }
     }
 
+    #[ignore = "ci-stt: runs real ffmpeg and Whisper inference"]
     #[tokio::test]
     async fn inference_returns_known_words() {
         let model = ensure_tiny_model().await;

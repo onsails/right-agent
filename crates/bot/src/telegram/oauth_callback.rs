@@ -325,6 +325,7 @@ use super::broadcast_to_chats as notify_telegram;
 /// - `/healthz` JSON
 ///
 /// Removes any stale socket first; signals `ready_tx` after bind.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_bot_uds_server(
     socket_path: PathBuf,
     state: OAuthCallbackState,
