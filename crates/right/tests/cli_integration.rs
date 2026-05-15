@@ -1,4 +1,6 @@
 use std::fs;
+use std::path::Path;
+use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -18,6 +20,23 @@ fn minimal_config_yaml(home: &std::path::Path) -> String {
         "tunnel:\n  tunnel_uuid: \"00000000-0000-0000-0000-000000000000\"\n  credentials_file: \"{}\"\n  hostname: \"test.example.com\"\n",
         creds.display()
     )
+}
+
+fn tar_entries(path: &Path) -> Vec<String> {
+    let output = StdCommand::new("tar")
+        .args(["-tzf", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "tar -tzf failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]
@@ -889,6 +908,109 @@ fn test_agent_backup_sandbox_only() {
         !backup_dir.join("data.db").exists(),
         "sandbox-only should not have data.db"
     );
+}
+
+#[test]
+fn test_agent_backup_excludes_rebuildable_dirs_by_default_no_sandbox() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+
+    let agent_dir = home.path().join("agents").join("test-agent");
+    fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+    fs::create_dir_all(agent_dir.join(".cache")).unwrap();
+    fs::create_dir_all(agent_dir.join(".venv")).unwrap();
+    fs::create_dir_all(agent_dir.join(".npm")).unwrap();
+    fs::create_dir_all(agent_dir.join(".uv")).unwrap();
+    fs::create_dir_all(agent_dir.join("custom-dir")).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(agent_dir.join(".claude/session.json"), "{}\n").unwrap();
+    fs::write(agent_dir.join(".cache/cache.txt"), "cache\n").unwrap();
+    fs::write(agent_dir.join(".venv/python.txt"), "venv\n").unwrap();
+    fs::write(agent_dir.join(".npm/npm.txt"), "npm\n").unwrap();
+    fs::write(agent_dir.join(".uv/uv.txt"), "uv\n").unwrap();
+    fs::write(agent_dir.join("custom-dir/state.txt"), "state\n").unwrap();
+
+    right()
+        .args(["--home", home_str, "agent", "backup", "test-agent"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Backup complete:"));
+
+    let backups_dir = home.path().join("backups").join("test-agent");
+    let entries: Vec<_> = fs::read_dir(&backups_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "should have exactly one backup");
+    let backup_dir = entries[0].path();
+    let tar_entries = tar_entries(&backup_dir.join("sandbox.tar.gz"));
+
+    assert!(tar_entries.contains(&"test-agent/.claude/session.json".to_string()));
+    assert!(tar_entries.contains(&"test-agent/custom-dir/state.txt".to_string()));
+    assert!(
+        !tar_entries
+            .iter()
+            .any(|entry| entry.starts_with("test-agent/.cache/"))
+    );
+    assert!(
+        !tar_entries
+            .iter()
+            .any(|entry| entry.starts_with("test-agent/.venv/"))
+    );
+    assert!(
+        !tar_entries
+            .iter()
+            .any(|entry| entry.starts_with("test-agent/.npm/"))
+    );
+    assert!(
+        !tar_entries
+            .iter()
+            .any(|entry| entry.starts_with("test-agent/.uv/"))
+    );
+}
+
+#[test]
+fn test_agent_backup_include_rebuildable_keeps_rebuildable_dirs_no_sandbox() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+
+    let agent_dir = home.path().join("agents").join("test-agent");
+    fs::create_dir_all(agent_dir.join(".cache")).unwrap();
+    fs::create_dir_all(agent_dir.join(".venv")).unwrap();
+    fs::create_dir_all(agent_dir.join(".npm")).unwrap();
+    fs::create_dir_all(agent_dir.join(".uv")).unwrap();
+    fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+    fs::write(agent_dir.join(".cache/cache.txt"), "cache\n").unwrap();
+    fs::write(agent_dir.join(".venv/python.txt"), "venv\n").unwrap();
+    fs::write(agent_dir.join(".npm/npm.txt"), "npm\n").unwrap();
+    fs::write(agent_dir.join(".uv/uv.txt"), "uv\n").unwrap();
+
+    right()
+        .args([
+            "--home",
+            home_str,
+            "agent",
+            "backup",
+            "test-agent",
+            "--include-rebuildable",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Backup complete:"));
+
+    let backups_dir = home.path().join("backups").join("test-agent");
+    let entries: Vec<_> = fs::read_dir(&backups_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "should have exactly one backup");
+    let backup_dir = entries[0].path();
+    let tar_entries = tar_entries(&backup_dir.join("sandbox.tar.gz"));
+
+    assert!(tar_entries.contains(&"test-agent/.cache/cache.txt".to_string()));
+    assert!(tar_entries.contains(&"test-agent/.venv/python.txt".to_string()));
+    assert!(tar_entries.contains(&"test-agent/.npm/npm.txt".to_string()));
+    assert!(tar_entries.contains(&"test-agent/.uv/uv.txt".to_string()));
 }
 
 #[test]
