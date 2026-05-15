@@ -470,7 +470,8 @@ Rules:
 - Never hardcode sandbox names (no `right-foo-test-lifecycle` fixtures).
 - Never invoke the `openshell` CLI from tests. Use `TestSandbox::exec` or the gRPC helpers in `right_openshell::openshell`.
 - Never add `#[ignore]` to sandbox tests. Dev machines have OpenShell.
-- Parallel caps (`SandboxTestSlot` / `acquire_sandbox_slot`) are unchanged — tests that create multiple sandboxes should still acquire a slot.
+- `TestSandbox` holds a `SandboxTestSlot` for its lifetime. Direct tests that bypass `TestSandbox` and call `spawn_sandbox` must acquire `acquire_sandbox_slot()` themselves.
+- CI may set `RIGHT_MAX_CONCURRENT_SANDBOX_TESTS` low to throttle only live sandbox creation while preserving normal Cargo test parallelism. Use at least `2` in jobs with a process-lifetime shared sandbox.
 
 ## Security Model
 
