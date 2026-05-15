@@ -35,7 +35,7 @@ File: `.github/workflows/tests.yml`
 File: `.github/workflows/tests.yml`
 
 ```yaml
-run: devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
+run: devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
 ```
 
 - Exclude doc tests from the measured/default workflow path for this cleanup. The timing run was explicitly finalized without doc tests.
@@ -555,7 +555,7 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Test workspace serially
         run: |
-          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
 ```
 
 - [ ] Add STT CI job. It runs inside `devenv shell`, caches the tiny Whisper model, and runs ignored STT tests explicitly.
@@ -580,7 +580,7 @@ File: `.github/workflows/tests.yml`
           key: whisper-ggml-tiny-v1
       - name: Run STT ignored tests serially
         run: |
-          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1"
+          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
 ```
 
 - [ ] Add OpenShell CI job. It enters `devenv shell` for Rust tooling, installs OpenShell in the workflow, starts the Podman socket and gateway, waits for mTLS certs, then runs ignored OpenShell tests explicitly.
@@ -642,7 +642,7 @@ File: `.github/workflows/tests.yml`
         run: openshell doctor check
       - name: Run OpenShell ignored tests serially
         run: |
-          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"/usr/bin:\$PATH\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1"
 ```
 
 - [ ] Add Claude/OpenShell CI job separately so `claude upgrade` failures are isolated from OpenShell-only regressions.
@@ -704,7 +704,7 @@ File: `.github/workflows/tests.yml`
         run: openshell doctor check
       - name: Run Claude/OpenShell ignored tests serially
         run: |
-          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"/usr/bin:\$PATH\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1"
 ```
 
 - [ ] If `claude-openshell` flakes because the CI sandbox image lacks the Claude binary, do not silently skip the job. Add a test helper that installs or upgrades Claude inside the sandbox with `claude upgrade` and keep the failure visible.
