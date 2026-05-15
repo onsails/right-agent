@@ -19,6 +19,9 @@
   git-hooks.hooks.rustfmt.enable = true;
 
   env.RUSTC_WRAPPER = "sccache";
+  # Keep devenv builds separate from system-profile Cargo calls, which
+  # otherwise frequently invalidate the shared target cache.
+  env.CARGO_TARGET_DIR = "target/devenv";
 
   enterShell = ''
     echo "Right Agent dev environment"
