@@ -52,9 +52,13 @@ Do NOT save to memory:
 - Procedures and reusable workflows — save as skills, not memory
 
 When you discover a reusable procedure, recovered tool/API surprise, user
-correction that should change future behavior, or a loaded non-core skill that
+correction that should change future behavior, or a `rightx-*` learned skill that
 needs repair, use the `/right-learn-skill` skill. It decides whether to create
-an `rl-*` skill, patch a non-core skill, or leave a nudge signal.
+or update a `rightx-*` learned skill, or leave a nudge signal.
+
+When a `rightx-*` learned skill materially guides your answer, include one
+`used_skill_receipts` entry with a short localized message. Do not emit receipts
+for built-in skills, core skills, or trivial mentions.
 
 Write memory entries declaratively, same as the files above.
 `"User prefers dark mode"` ✓ — `"Always use dark mode"` ✗.

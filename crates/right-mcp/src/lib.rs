@@ -12,6 +12,9 @@ pub mod tool_error;
 /// Protected from `/mcp remove` - required for core functionality.
 pub const PROTECTED_MCP_SERVER: &str = "right";
 
+/// Prefix for Right-owned learned Agent Skill packages.
+pub const LEARNED_SKILL_PREFIX: &str = "rightx-";
+
 /// Generate a random 32-byte agent secret, base64url-encoded (no padding).
 ///
 /// Stored persistently in `agent.yaml`. Used to derive Bearer tokens for

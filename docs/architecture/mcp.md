@@ -160,5 +160,5 @@ check runs inside the sandbox; in `sandbox: none` mode it checks the host agent
 directory. The receipt text is authored by the LLM and passed as the
 `message` argument to `mcp__right__skill_learning_finish`.
 
-Create requires `rl-*`. Update may target any non-core custom/manual/hub/learned
-skill. Core/platform/bundled/codegen-owned skills are rejected when identifiable.
+Create and update both require `rightx-*`. The learning flow never patches
+custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.

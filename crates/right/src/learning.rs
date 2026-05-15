@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use right_agent::learned_skills::{LearningAction, LearningStatus};
+use right_mcp::LEARNED_SKILL_PREFIX;
 use right_mcp::internal_client::{InternalClient, ProgressSendRequest};
 use right_mcp::tool_error::tool_error;
 use rmcp::model::CallToolResult;
@@ -29,10 +30,21 @@ impl LearningActionParam {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SkillLearningStartParams {
+    #[schemars(
+        description = "Learning action: create a new rightx-* skill or update an existing rightx-* skill."
+    )]
     pub(crate) action: LearningActionParam,
+    #[schemars(description = "Skill package name only, never a path. Must start with rightx-.")]
     pub(crate) skill_name: String,
+    #[schemars(description = "Short reason for learning or updating this skill.")]
     pub(crate) reason: Option<String>,
+    #[schemars(
+        description = "Evidence references from the current turn. Use one non-empty ref for explicit user requests, otherwise two or more."
+    )]
     pub(crate) event_refs: Option<Vec<String>>,
+    #[schemars(
+        description = "Localized user-visible start message. Required for foreground learning starts."
+    )]
     pub(crate) message: Option<String>,
 }
 
@@ -71,11 +83,27 @@ impl LearningFinishStatusParam {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct SkillLearningFinishParams {
+    #[schemars(
+        description = "Learning action: create a new rightx-* skill or update an existing rightx-* skill."
+    )]
     pub(crate) action: LearningActionParam,
+    #[schemars(description = "Skill package name only, never a path. Must start with rightx-.")]
     pub(crate) skill_name: String,
+    #[schemars(
+        description = "created/updated only after .claude/skills/<skill_name>/SKILL.md exists; otherwise aborted or failed."
+    )]
     pub(crate) status: LearningFinishStatusParam,
+    #[schemars(
+        description = "LLM-authored localized receipt message. Required for successful created/updated finishes."
+    )]
     pub(crate) message: Option<String>,
+    #[schemars(
+        description = "Optional short summary of what was learned, updated, aborted, or failed."
+    )]
     pub(crate) summary: Option<String>,
+    #[schemars(
+        description = "Evidence references from the current turn. Use one non-empty ref for explicit user requests, otherwise two or more."
+    )]
     pub(crate) event_refs: Option<Vec<String>>,
 }
 
@@ -236,22 +264,22 @@ fn source_marks_core(value: &serde_json::Value) -> bool {
 
 pub(crate) fn validate_learning_target(
     agent_dir: &Path,
-    action: LearningActionParam,
+    _action: LearningActionParam,
     skill_name: &str,
 ) -> Result<(), CallToolResult> {
     validate_skill_name(skill_name)?;
-    if matches!(action, LearningActionParam::Create) && !skill_name.starts_with("rl-") {
-        return Err(tool_error(
-            "invalid_argument",
-            "action=create requires skill_name to start with 'rl-'",
-            None,
-        ));
-    }
     let registry_marks_core = installed_json_marks_core(agent_dir, skill_name)?;
     if is_known_core_skill(skill_name) || registry_marks_core {
         return Err(tool_error(
             "skill_core_readonly",
             "core/platform/codegen skill packages are read-only",
+            None,
+        ));
+    }
+    if !skill_name.starts_with(LEARNED_SKILL_PREFIX) {
+        return Err(tool_error(
+            "invalid_argument",
+            format!("skill learning requires skill_name to start with '{LEARNED_SKILL_PREFIX}'"),
             None,
         ));
     }

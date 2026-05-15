@@ -160,7 +160,7 @@ async fn bootstrap_done_with_files() {
 }
 
 #[tokio::test]
-async fn skill_learning_start_rejects_create_without_rl_prefix() {
+async fn skill_learning_start_rejects_create_without_learned_prefix() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
 
@@ -182,6 +182,13 @@ async fn skill_learning_start_rejects_create_without_rl_prefix() {
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "invalid_argument");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(right_mcp::LEARNED_SKILL_PREFIX),
+        "error should mention learned-skill prefix: {body}"
+    );
 }
 
 #[tokio::test]
@@ -210,7 +217,7 @@ async fn skill_learning_start_rejects_core_skill_update() {
 }
 
 #[tokio::test]
-async fn skill_learning_start_allows_non_core_update_until_delivery() {
+async fn skill_learning_start_rejects_non_learned_update() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
     std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
@@ -218,16 +225,6 @@ async fn skill_learning_start_allows_non_core_update_until_delivery() {
     let skill_dir = agent_dir.join(".claude/skills/custom-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# Custom skill").expect("write skill");
-
-    backend
-        .progress_registry()
-        .register(crate::progress::ProgressRegistration {
-            invocation_id: "inv-1".to_owned(),
-            kind: crate::progress::ProgressInvocationKind::Foreground,
-            bot_socket_path: agent_dir.join("missing-bot.sock"),
-            bot_send_token: "send-token".to_owned(),
-        })
-        .await;
 
     let result = backend
         .tools_call(
@@ -240,16 +237,21 @@ async fn skill_learning_start_allows_non_core_update_until_delivery() {
                 "reason": "make the skill more precise",
                 "message": "I am updating custom-skill with a narrower workflow.",
             }),
-            crate::progress::ToolCallContext {
-                invocation_id: Some("inv-1".to_owned()),
-            },
+            crate::progress::ToolCallContext::default(),
         )
         .await
         .expect("tool errors should be returned as CallToolResult");
 
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
-    assert_eq!(body["error"]["code"], "learning_send_failed");
+    assert_eq!(body["error"]["code"], "invalid_argument");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(right_mcp::LEARNED_SKILL_PREFIX),
+        "error should mention learned-skill prefix: {body}"
+    );
 }
 
 #[tokio::test]
@@ -266,7 +268,7 @@ async fn skill_learning_start_rejects_update_when_package_missing() {
             "skill_learning_start",
             json!({
                 "action": "update",
-                "skill_name": "custom-skill",
+                "skill_name": "rightx-custom-skill",
                 "reason": "update a missing package",
             }),
             crate::progress::ToolCallContext::default(),
@@ -291,7 +293,7 @@ async fn skill_learning_finish_requires_receipt_message_for_success() {
             "skill_learning_finish",
             json!({
                 "action": "create",
-                "skill_name": "rl-user-workflow",
+                "skill_name": "rightx-user-workflow",
                 "status": "created",
             }),
             crate::progress::ToolCallContext::default(),
@@ -302,6 +304,13 @@ async fn skill_learning_finish_requires_receipt_message_for_success() {
     assert_eq!(result.is_error, Some(true));
     let body = extract_error_body(&result);
     assert_eq!(body["error"]["code"], "invalid_argument");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("message"),
+        "successful finish without receipt should fail on message: {body}"
+    );
 }
 
 #[tokio::test]
@@ -318,9 +327,9 @@ async fn skill_learning_finish_rejects_success_when_package_missing() {
             "skill_learning_finish",
             json!({
                 "action": "create",
-                "skill_name": "rl-user-workflow",
+                "skill_name": "rightx-user-workflow",
                 "status": "created",
-                "message": "I learned rl-user-workflow and will use it when this pattern appears again.",
+                "message": "I learned rightx-user-workflow and will use it when this pattern appears again.",
             }),
             crate::progress::ToolCallContext {
                 invocation_id: Some("inv-1".to_owned()),
@@ -343,9 +352,9 @@ async fn skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls() {
         "sandbox:\n  mode: openshell\n",
     )
     .expect("write agent config");
-    let skill_dir = agent_dir.join(".claude/skills/rl-demo");
+    let skill_dir = agent_dir.join(".claude/skills/rightx-demo");
     std::fs::create_dir_all(&skill_dir).expect("create host skill dir");
-    std::fs::write(skill_dir.join("SKILL.md"), "# RL demo").expect("write host skill");
+    std::fs::write(skill_dir.join("SKILL.md"), "# RightX demo").expect("write host skill");
 
     let result = backend
         .tools_call(
@@ -354,9 +363,9 @@ async fn skill_learning_finish_rejects_sandboxed_host_fallback_without_mtls() {
             "skill_learning_finish",
             json!({
                 "action": "create",
-                "skill_name": "rl-demo",
+                "skill_name": "rightx-demo",
                 "status": "created",
-                "message": "I learned rl-demo and will use it for this workflow.",
+                "message": "I learned rightx-demo and will use it for this workflow.",
             }),
             crate::progress::ToolCallContext {
                 invocation_id: Some("inv-1".to_owned()),
@@ -375,9 +384,12 @@ async fn skill_learning_start_rejects_malformed_installed_json() {
     let (backend, agents_dir, _tmp) = make_backend();
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
     let skills_dir = agent_dir.join(".claude/skills");
-    std::fs::create_dir_all(skills_dir.join("custom-skill")).expect("create skill dir");
-    std::fs::write(skills_dir.join("custom-skill/SKILL.md"), "# Custom skill")
-        .expect("write skill");
+    std::fs::create_dir_all(skills_dir.join("rightx-custom-skill")).expect("create skill dir");
+    std::fs::write(
+        skills_dir.join("rightx-custom-skill/SKILL.md"),
+        "# Custom skill",
+    )
+    .expect("write skill");
     std::fs::write(skills_dir.join("installed.json"), "{not json").expect("write registry");
 
     let result = backend
@@ -387,9 +399,9 @@ async fn skill_learning_start_rejects_malformed_installed_json() {
             "skill_learning_start",
             json!({
                 "action": "update",
-                "skill_name": "custom-skill",
+                "skill_name": "rightx-custom-skill",
                 "reason": "try to update while registry is malformed",
-                "message": "I am checking the registry before updating custom-skill.",
+                "message": "I am checking the registry before updating rightx-custom-skill.",
             }),
             crate::progress::ToolCallContext::default(),
         )
@@ -450,7 +462,7 @@ async fn skill_learning_start_rejects_empty_message_before_insert() {
     let agent_dir = create_agent_dir(&agents_dir, "test-agent");
     std::fs::write(agent_dir.join("agent.yaml"), "sandbox:\n  mode: none\n")
         .expect("write agent config");
-    let skill_dir = agent_dir.join(".claude/skills/custom-skill");
+    let skill_dir = agent_dir.join(".claude/skills/rightx-custom-skill");
     std::fs::create_dir_all(&skill_dir).expect("create skill dir");
     std::fs::write(skill_dir.join("SKILL.md"), "# Custom skill").expect("write skill");
 
@@ -471,7 +483,7 @@ async fn skill_learning_start_rejects_empty_message_before_insert() {
             "skill_learning_start",
             json!({
                 "action": "update",
-                "skill_name": "custom-skill",
+                "skill_name": "rightx-custom-skill",
                 "reason": "try empty start message",
                 "message": "   ",
             }),

@@ -591,7 +591,7 @@ impl rmcp::ServerHandler for Aggregator {
                  short tasks. Rate limited to one message every 30 seconds. Cron, \
                  delivery, reflection, and background-continuation turns must not use it.\n\n\
                  ## Learning\n\
-                 - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for skill create/update. Call before writing or patching skill package files. action=create requires rl-*; action=update may target non-core custom/manual/hub/rl-* skills. Accepts skill names only, never paths.\n\
+                 - mcp__right__skill_learning_start: Stage 1 foreground metadata/progress for learned skill create/update. Call before writing or patching skill package files. action=create and action=update both require rightx-* skill names. Accepts skill names only, never paths.\n\
                  - mcp__right__skill_learning_finish: Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files.\n\n\
                  Error convention (operation errors):\n\
                  On operation failure, tools return is_error: true with content\n  \

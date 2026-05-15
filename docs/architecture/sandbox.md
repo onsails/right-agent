@@ -46,5 +46,6 @@ Platform store (/sandbox/.platform/ inside sandbox):
 ```
 
 Learned skill packages are agent-owned directories under
-`/sandbox/.claude/skills/rl-*` or existing non-core skill directories. They are
-not copied from sandbox to host by the learning MCP tools.
+`/sandbox/.claude/skills/rightx-*`. The learning MCP tools do not patch
+non-`rightx-*` skill directories and do not copy skill files from sandbox to
+host.

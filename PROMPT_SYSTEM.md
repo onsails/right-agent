@@ -339,7 +339,8 @@ and background-continuation turns deny foreground-only tools via
 the `/right-learn-skill` built-in skill. They validate skill-learning
 provenance, record events, and send foreground learning receipts; they do not
 move skill files from sandbox to host. The active agent writes skill package
-files under `.claude/skills/<skill_name>/`.
+files under `.claude/skills/<skill_name>/`. Create and update both require
+`rightx-*` skill package names.
 
 ## Upstream MCP Server Instructions
 
