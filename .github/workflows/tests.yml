@@ -87,6 +87,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
+      RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
+      RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
@@ -146,11 +148,20 @@ jobs:
         run: |
           devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored"
 
+      - name: Dump OpenShell diagnostics
+        if: failure()
+        run: |
+          openshell status || true
+          journalctl --user -u openshell-gateway --no-pager -n 200 || true
+          podman ps -a || true
+
   claude-openshell:
     name: claude ignored tests
     runs-on: ubuntu-latest
     env:
       RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "1"
+      RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
+      RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
@@ -209,3 +220,10 @@ jobs:
       - name: Run Claude/OpenShell ignored tests
         run: |
           devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored"
+
+      - name: Dump OpenShell diagnostics
+        if: failure()
+        run: |
+          openshell status || true
+          journalctl --user -u openshell-gateway --no-pager -n 200 || true
+          podman ps -a || true

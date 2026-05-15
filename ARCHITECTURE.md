@@ -478,6 +478,7 @@ Rules:
 - Never add `#[ignore]` to sandbox tests. Dev machines have OpenShell.
 - `TestSandbox` holds a `SandboxTestSlot` for its lifetime. Direct tests that bypass `TestSandbox` and call `spawn_sandbox` must acquire `acquire_sandbox_slot()` themselves.
 - CI may set `RIGHT_MAX_CONCURRENT_SANDBOX_TESTS` low to throttle only live sandbox creation while preserving normal Cargo test parallelism. Use at least `2` in jobs with a process-lifetime shared sandbox.
+- CI may raise `RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS` and `RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS` for cold OpenShell runners; local defaults stay short (`120s` READY, `60s` SSH).
 
 ## Security Model
 

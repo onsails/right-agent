@@ -48,6 +48,28 @@ impl Drop for PathGuard {
     }
 }
 
+const SANDBOX_READY_TIMEOUT_ENV: &str = "RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS";
+const SANDBOX_SSH_TIMEOUT_ENV: &str = "RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS";
+
+fn timeout_secs_from_env_value(value: Option<&str>, default_secs: u64) -> u64 {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_secs)
+}
+
+fn timeout_secs_from_env(env: &str, default_secs: u64) -> u64 {
+    timeout_secs_from_env_value(std::env::var(env).ok().as_deref(), default_secs)
+}
+
+pub fn sandbox_ready_timeout_secs(default_secs: u64) -> u64 {
+    timeout_secs_from_env(SANDBOX_READY_TIMEOUT_ENV, default_secs)
+}
+
+pub fn sandbox_ssh_timeout_secs(default_secs: u64) -> u64 {
+    timeout_secs_from_env(SANDBOX_SSH_TIMEOUT_ENV, default_secs)
+}
+
 /// Ephemeral test sandbox. Created per test, destroyed on `Drop`. Panic-hook
 /// cleanup in `test_cleanup` handles `panic = "abort"` cases.
 pub struct TestSandbox {
@@ -127,7 +149,7 @@ network_policies:
 
         let mut child =
             openshell::spawn_sandbox(&name, &policy_path, None).expect("failed to spawn sandbox");
-        openshell::wait_for_ready(&mut client, &name, 120, 2)
+        openshell::wait_for_ready(&mut client, &name, sandbox_ready_timeout_secs(120), 2)
             .await
             .expect("sandbox did not become READY");
 
@@ -139,7 +161,7 @@ network_policies:
         let sandbox_id = openshell::resolve_sandbox_id(&mut client, &name)
             .await
             .expect("resolve sandbox id");
-        openshell::wait_for_ssh(&mut client, &sandbox_id, 60, 2)
+        openshell::wait_for_ssh(&mut client, &sandbox_id, sandbox_ssh_timeout_secs(60), 2)
             .await
             .expect("SSH transport did not become ready");
 
@@ -185,5 +207,23 @@ impl Drop for TestSandbox {
     fn drop(&mut self) {
         test_cleanup::unregister_test_sandbox(&self.name);
         test_cleanup::delete_sandbox_sync(&self.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::timeout_secs_from_env_value;
+
+    #[test]
+    fn timeout_secs_from_env_value_uses_positive_integer_override() {
+        assert_eq!(timeout_secs_from_env_value(Some("360"), 120), 360);
+    }
+
+    #[test]
+    fn timeout_secs_from_env_value_rejects_missing_invalid_and_zero_values() {
+        assert_eq!(timeout_secs_from_env_value(None, 120), 120);
+        assert_eq!(timeout_secs_from_env_value(Some(""), 120), 120);
+        assert_eq!(timeout_secs_from_env_value(Some("abc"), 120), 120);
+        assert_eq!(timeout_secs_from_env_value(Some("0"), 120), 120);
     }
 }
