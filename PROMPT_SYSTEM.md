@@ -245,13 +245,22 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 
 ### reply-schema.json (normal mode)
 Required: `content` (string|null).
-Optional: `reply_to_message_id`, `attachments`.
+Optional: `reply_to_message_id`, `attachments`, `used_skill_receipts`,
+`learning_signal`, `skill_issue_signal`.
 
 **Attachments.** Each item in `attachments` accepts an optional `media_group_id`
 (nullable string). Items sharing the same value are delivered as a single
 Telegram media group (album). Validation and degradation rules match Telegram's
 `sendMediaGroup` constraints — see `### Media Groups (Albums)` in
 `OPERATING_INSTRUCTIONS.md` for the full rules shown to the agent.
+
+**Learned-skill metadata.** `used_skill_receipts` is an optional nullable array
+of `{ package_name, message }`; receipt messages are appended to the Telegram
+reply. `learning_signal` is an optional nullable `create_candidate` object for
+candidate skill creation, and `skill_issue_signal` is an optional nullable
+`update_candidate` object for candidate skill updates. Both signals require
+non-empty `event_refs` and enum-constrained reason/type fields; the bot may
+drop ambiguous or low-evidence signals without affecting reply delivery.
 
 ### bootstrap-schema.json (bootstrap mode)
 Same as reply-schema plus required `bootstrap_complete` (boolean).

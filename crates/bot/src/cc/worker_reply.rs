@@ -263,13 +263,13 @@ mod tests {
 
     #[test]
     fn parse_reply_output_accepts_learning_signal() {
-        let json = r#"{"result":{"content":"done","learning_signal":{"kind":"create_candidate","package_name_hint":"right-demo","trigger":"explicit_user_request","reason_not_written":"needs review","event_refs":["event-1"],"summary":"Capture this workflow."}}}"#;
+        let json = r#"{"result":{"content":"done","learning_signal":{"kind":"create_candidate","package_name_hint":"right-demo","trigger":"explicit_user_request","reason_not_written":"needs_full_context_review","event_refs":["event-1"],"summary":"Capture this workflow."}}}"#;
         let (output, _) = parse_reply_output(json).unwrap();
         let signal = output.learning_signal.unwrap();
         assert_eq!(signal.kind, "create_candidate");
         assert_eq!(signal.package_name_hint, "right-demo");
         assert_eq!(signal.trigger, "explicit_user_request");
-        assert_eq!(signal.reason_not_written, "needs review");
+        assert_eq!(signal.reason_not_written, "needs_full_context_review");
         assert_eq!(signal.event_refs, vec!["event-1"]);
         assert_eq!(signal.summary, "Capture this workflow.");
     }
