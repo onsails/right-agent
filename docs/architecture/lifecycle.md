@@ -85,9 +85,11 @@ Sandbox migration (filesystem policy change):
   ├─ Delete old sandbox (best-effort)
   └─ config_watcher restarts bot → picks up new sandbox
 
-right agent backup <name> [--sandbox-only]
+right agent backup <name> [--sandbox-only] [--include-rebuildable]
   ├─ Sandbox mode: SSH tar /sandbox/ → sandbox.tar.gz
-  ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz
+  │   └─ Default excludes: sandbox/.cache, sandbox/.venv, sandbox/.npm, sandbox/.uv
+  ├─ --include-rebuildable: include those rebuildable dirs for forensic backup
+  ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz with the same default excludes
   ├─ Full mode: + agent.yaml, policy.yaml, VACUUM INTO data.db
   └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
 
