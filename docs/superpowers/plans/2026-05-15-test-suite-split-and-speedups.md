@@ -6,7 +6,7 @@
 
 **Architecture:** Split tests by dependency boundary. Pure Rust, local filesystem, mock HTTP, and mock OpenShell-gRPC tests remain in the default `cargo test` path. Tests that require a live OpenShell gateway, a sandbox image with Claude Code, OpenShell file transfer, or real ffmpeg/Whisper inference become `#[ignore]` with stable `ci-*` reasons and are invoked by named workflow jobs. Slow tests that do not truly require external services are rewritten, not ignored.
 
-**Tech Stack:** Rust 2024, Cargo/libtest `--test-threads=1`, GitHub Actions, `devenv shell` for the Rust/toolchain environment, direct NVIDIA OpenShell installer, rootless Podman socket for the OpenShell gateway, ffmpeg, Whisper tiny model cache, existing `devenv.nix`.
+**Tech Stack:** Rust 2024, Cargo/libtest `--test-threads=1`, GitHub Actions, `devenv shell` for the Rust/toolchain environment, direct NVIDIA OpenShell installer, rootless Podman socket for the OpenShell gateway, ffmpeg, libclang for bindgen, Whisper tiny model cache, existing `devenv.nix`.
 
 **Timing source:** `/tmp/rightclaw-test-timing-stats.md` from the serial run on 2026-05-15.
 
@@ -35,7 +35,7 @@ File: `.github/workflows/tests.yml`
 File: `.github/workflows/tests.yml`
 
 ```yaml
-run: devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+run: devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
 ```
 
 - Exclude doc tests from the measured/default workflow path for this cleanup. The timing run was explicitly finalized without doc tests.
@@ -287,12 +287,14 @@ Expected on a machine with OpenShell: retained live transfer coverage passes.
 - Modify: `crates/bot/src/stt/whisper.rs`
 - Modify: `devenv.nix`
 
-- [ ] Add `ffmpeg` to `devenv.nix` packages so local and CI shells have the same STT prerequisite when using devenv.
+- [ ] Add `ffmpeg` and a Nix `LIBCLANG_PATH` to `devenv.nix` so local and CI shells have the same STT and bindgen prerequisites when using devenv.
 
 File: `devenv.nix`
 
 ```nix
     ffmpeg
+
+  env.LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 ```
 
 - [ ] Mark real inference tests ignored:
@@ -553,7 +555,7 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Test workspace serially
         run: |
-          devenv shell -- env PATH="$RUNNER_TEMP/bin:$PATH" cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
 ```
 
 - [ ] Add STT CI job. It runs inside `devenv shell`, caches the tiny Whisper model, and runs ignored STT tests explicitly.
@@ -578,7 +580,7 @@ File: `.github/workflows/tests.yml`
           key: whisper-ggml-tiny-v1
       - name: Run STT ignored tests serially
         run: |
-          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1"
 ```
 
 - [ ] Add OpenShell CI job. It enters `devenv shell` for Rust tooling, installs OpenShell in the workflow, starts the Podman socket and gateway, waits for mTLS certs, then runs ignored OpenShell tests explicitly.
@@ -640,7 +642,7 @@ File: `.github/workflows/tests.yml`
         run: openshell doctor check
       - name: Run OpenShell ignored tests serially
         run: |
-          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"/usr/bin:\$PATH\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1"
 ```
 
 - [ ] Add Claude/OpenShell CI job separately so `claude upgrade` failures are isolated from OpenShell-only regressions.
@@ -702,7 +704,7 @@ File: `.github/workflows/tests.yml`
         run: openshell doctor check
       - name: Run Claude/OpenShell ignored tests serially
         run: |
-          devenv shell -- env PATH="/usr/bin:$PATH" cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1
+          devenv shell -- bash -lc "unset RUSTC RUSTC_WRAPPER; export PATH=\"/usr/bin:\$PATH\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1"
 ```
 
 - [ ] If `claude-openshell` flakes because the CI sandbox image lacks the Claude binary, do not silently skip the job. Add a test helper that installs or upgrades Claude inside the sandbox with `claude upgrade` and keep the failure visible.
