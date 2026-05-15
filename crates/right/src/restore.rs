@@ -369,6 +369,57 @@ mod tests {
     }
 
     #[test]
+    fn write_and_read_backup_manifest_roundtrips() {
+        let dir = tempdir().unwrap();
+        let config = hindsight_config(Some("shared-bank"));
+        let manifest = build_backup_manifest("right", Some(&config), None).unwrap();
+
+        write_backup_manifest(dir.path(), &manifest).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join(BACKUP_MANIFEST_FILENAME)).unwrap();
+        assert!(
+            content.ends_with('\n'),
+            "backup manifest should be newline-terminated"
+        );
+        let restored = read_backup_manifest(dir.path()).unwrap();
+        assert_eq!(restored.as_ref(), Some(&manifest));
+    }
+
+    #[test]
+    fn explicit_state_manifest_detects_db_tables_without_reading_secrets() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE mcp_servers (name TEXT PRIMARY KEY, auth_token TEXT);
+            CREATE TABLE auth_tokens (token TEXT NOT NULL);
+            CREATE TABLE cron_specs (job_name TEXT PRIMARY KEY, prompt TEXT NOT NULL);
+            INSERT INTO mcp_servers (name, auth_token) VALUES ('linear', 'mcp_secret');
+            INSERT INTO auth_tokens (token) VALUES ('claude_secret');
+            INSERT INTO cron_specs (job_name, prompt) VALUES ('daily', 'secret prompt');
+            "#,
+        )
+        .unwrap();
+        let config = AgentConfig {
+            telegram_token: Some("telegram_secret".to_string()),
+            ..AgentConfig::default()
+        };
+
+        let manifest = build_backup_manifest("right", Some(&config), Some(&db_path)).unwrap();
+
+        assert!(manifest.explicit_state.has_telegram_token);
+        assert!(manifest.explicit_state.has_mcp_servers);
+        assert!(manifest.explicit_state.has_mcp_auth_tokens);
+        assert!(manifest.explicit_state.has_cron_specs);
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(!json.contains("telegram_secret"));
+        assert!(!json.contains("mcp_secret"));
+        assert!(!json.contains("claude_secret"));
+        assert!(!json.contains("secret prompt"));
+    }
+
+    #[test]
     fn infers_legacy_source_agent_from_right_home_backup_layout() {
         let dir = tempdir().unwrap();
         let backup = dir
@@ -382,6 +433,48 @@ mod tests {
             infer_legacy_source_agent(dir.path(), &backup).as_deref(),
             Some("right")
         );
+    }
+
+    #[test]
+    fn legacy_source_inference_returns_none_for_path_outside_right_home_backups() {
+        let dir = tempdir().unwrap();
+        let backup_root = dir.path().join("backups");
+        std::fs::create_dir_all(&backup_root).unwrap();
+        let outside = dir
+            .path()
+            .join("elsewhere")
+            .join("right")
+            .join("20260516-0117");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        assert_eq!(infer_legacy_source_agent(dir.path(), &outside), None);
+    }
+
+    #[test]
+    fn legacy_source_inference_returns_none_for_extra_nested_components() {
+        let dir = tempdir().unwrap();
+        let backup = dir
+            .path()
+            .join("backups")
+            .join("right")
+            .join("20260516-0117")
+            .join("extra");
+        std::fs::create_dir_all(&backup).unwrap();
+
+        assert_eq!(infer_legacy_source_agent(dir.path(), &backup), None);
+    }
+
+    #[test]
+    fn legacy_source_inference_returns_none_when_backup_path_does_not_exist() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("backups")).unwrap();
+        let missing = dir
+            .path()
+            .join("backups")
+            .join("right")
+            .join("20260516-0117");
+
+        assert_eq!(infer_legacy_source_agent(dir.path(), &missing), None);
     }
 
     #[test]
