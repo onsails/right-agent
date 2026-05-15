@@ -113,6 +113,22 @@ fn control_master_socket_path_uses_sandbox_name() {
     );
 }
 
+#[test]
+fn gateway_endpoint_from_status_output_reads_active_server_url() {
+    let output = "\
+\u{1b}[1m\u{1b}[36mServer Status\u{1b}[39m\u{1b}[0m
+
+  \u{1b}[2mGateway:\u{1b}[0m openshell
+  \u{1b}[2mServer:\u{1b}[0m https://127.0.0.1:17670
+  \u{1b}[2mStatus:\u{1b}[0m \u{1b}[32mConnected\u{1b}[39m
+";
+
+    assert_eq!(
+        gateway_endpoint_from_status_output(output),
+        Some("https://127.0.0.1:17670".to_owned())
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Mock gRPC server for is_sandbox_ready / wait_for_ready tests
 // ---------------------------------------------------------------------------

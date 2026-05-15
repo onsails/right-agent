@@ -24,6 +24,8 @@ const SSH_CONTROL_OP_TIMEOUT_SECS: u64 = 5;
 /// Path to `mcp.json` inside an OpenShell sandbox.
 pub const SANDBOX_MCP_JSON_PATH: &str = "/sandbox/mcp.json";
 
+const DEFAULT_GATEWAY_ENDPOINT: &str = "https://127.0.0.1:8080";
+
 /// Generate deterministic fallback sandbox name from agent name.
 ///
 /// This deliberately still returns `rightclaw-{agent_name}` after the
@@ -153,6 +155,54 @@ pub fn preflight_check() -> OpenShellStatus {
     }
 }
 
+fn gateway_endpoint() -> String {
+    std::env::var("OPENSHELL_GATEWAY_ENDPOINT")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .or_else(gateway_endpoint_from_status)
+        .unwrap_or_else(|| DEFAULT_GATEWAY_ENDPOINT.to_owned())
+}
+
+fn gateway_endpoint_from_status() -> Option<String> {
+    let output = std::process::Command::new("openshell")
+        .arg("status")
+        .env("NO_COLOR", "1")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    gateway_endpoint_from_status_output(&String::from_utf8_lossy(&output.stdout))
+        .or_else(|| gateway_endpoint_from_status_output(&String::from_utf8_lossy(&output.stderr)))
+}
+
+fn gateway_endpoint_from_status_output(output: &str) -> Option<String> {
+    output
+        .find("Server:")
+        .or_else(|| output.find("Endpoint:"))
+        .and_then(|idx| extract_first_url(&output[idx..]))
+}
+
+fn extract_first_url(text: &str) -> Option<String> {
+    let https = text.find("https://");
+    let http = text.find("http://");
+    let start = match (https, http) {
+        (Some(https), Some(http)) => https.min(http),
+        (Some(https), None) => https,
+        (None, Some(http)) => http,
+        (None, None) => return None,
+    };
+    let endpoint: String = text[start..]
+        .chars()
+        .take_while(|ch| !ch.is_whitespace() && !ch.is_control())
+        .collect();
+
+    (!endpoint.is_empty()).then_some(endpoint)
+}
+
 /// Connect to the OpenShell gRPC server with mTLS.
 ///
 /// Reads CA cert, client cert, and client key from `mtls_dir`:
@@ -181,12 +231,14 @@ pub async fn connect_grpc(mtls_dir: &Path) -> miette::Result<OpenShellClient<Cha
         .identity(Identity::from_pem(client_cert, client_key))
         .domain_name("localhost");
 
-    let channel = Channel::from_static("https://127.0.0.1:8080")
+    let endpoint = gateway_endpoint();
+    let channel = Channel::from_shared(endpoint.clone())
+        .map_err(|e| miette::miette!("invalid OpenShell gRPC endpoint '{endpoint}': {e:#}"))?
         .tls_config(tls)
         .map_err(|e| miette::miette!("TLS config error: {e:#}"))?
         .connect()
         .await
-        .map_err(|e| miette::miette!("gRPC connect to 127.0.0.1:8080 failed: {e:#}"))?;
+        .map_err(|e| miette::miette!("gRPC connect to {endpoint} failed: {e:#}"))?;
 
     Ok(OpenShellClient::new(channel))
 }

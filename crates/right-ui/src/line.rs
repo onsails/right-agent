@@ -26,10 +26,22 @@ pub struct Line {
 }
 
 impl Line {
-    pub fn noun(mut self, s: impl Into<String>) -> Self { self.noun = s.into(); self }
-    pub fn verb(mut self, s: impl Into<String>) -> Self { self.verb = s.into(); self }
-    pub fn detail(mut self, s: impl Into<String>) -> Self { self.detail = Some(s.into()); self }
-    pub fn fix(mut self, s: impl Into<String>) -> Self { self.fix = Some(s.into()); self }
+    pub fn noun(mut self, s: impl Into<String>) -> Self {
+        self.noun = s.into();
+        self
+    }
+    pub fn verb(mut self, s: impl Into<String>) -> Self {
+        self.verb = s.into();
+        self
+    }
+    pub fn detail(mut self, s: impl Into<String>) -> Self {
+        self.detail = Some(s.into());
+        self
+    }
+    pub fn fix(mut self, s: impl Into<String>) -> Self {
+        self.fix = Some(s.into());
+        self
+    }
 
     /// Render as a single string. May contain `\n` if `fix` is set.
     pub fn render(&self, theme: Theme) -> String {
@@ -60,7 +72,16 @@ impl Line {
             out.push('\n');
             out.push_str(&Rail::blank(theme));
             out.push_str("    fix: ");
-            out.push_str(f);
+            let mut lines = f.split('\n');
+            if let Some(first) = lines.next() {
+                out.push_str(first);
+            }
+            for line in lines {
+                out.push('\n');
+                out.push_str(&Rail::blank(theme));
+                out.push_str("    ");
+                out.push_str(line);
+            }
         }
         out
     }
@@ -73,10 +94,18 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new() -> Self { Block { lines: Vec::new() } }
-    pub fn push(&mut self, line: Line) { self.lines.push(line); }
-    pub fn is_empty(&self) -> bool { self.lines.is_empty() }
-    pub fn len(&self) -> usize { self.lines.len() }
+    pub fn new() -> Self {
+        Block { lines: Vec::new() }
+    }
+    pub fn push(&mut self, line: Line) {
+        self.lines.push(line);
+    }
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
 
     pub fn render(&self, theme: Theme) -> String {
         let pad = self.lines.iter().map(|l| l.noun.len()).max().unwrap_or(0);

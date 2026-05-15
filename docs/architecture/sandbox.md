@@ -10,6 +10,7 @@ Sandboxes are **persistent** — never deleted automatically. They live as long 
 
 ```
 Bot startup:
+  ├─ Resolve OpenShell gateway endpoint (OPENSHELL_GATEWAY_ENDPOINT or openshell status)
   ├─ gRPC GetSandbox → exists?
   │   ├─ YES: apply_policy (hot-reload via openshell policy set --wait)
   │   └─ NO: prepare_staging_dir → spawn_sandbox → wait_for_ready
