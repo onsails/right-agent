@@ -812,10 +812,8 @@ pub async fn ssh_tar_download(
     command.arg("-F").arg(config_path);
     command.arg(ssh_host);
     command.arg("--");
-    command.args(sandbox_tar_download_args(
-        sandbox_path,
-        include_rebuildable,
-    )?);
+    let tar_args = sandbox_tar_download_args(sandbox_path, include_rebuildable)?;
+    command.arg(ssh_remote_command(&tar_args)?);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
@@ -879,6 +877,11 @@ pub async fn ssh_tar_download(
         ));
     }
     Ok(())
+}
+
+fn ssh_remote_command(args: &[String]) -> miette::Result<String> {
+    shlex::try_join(args.iter().map(|arg| arg.as_str()))
+        .map_err(|e| miette::miette!("failed to quote SSH remote command args: {e}"))
 }
 
 fn sandbox_tar_download_args(
