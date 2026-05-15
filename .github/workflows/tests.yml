@@ -57,9 +57,9 @@ jobs:
           chmod +x "$RUNNER_TEMP/bin/cloudflared" "$RUNNER_TEMP/bin/claude"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: Test workspace serially
+      - name: Test workspace
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked -- --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked"
 
   stt:
     name: stt ignored tests
@@ -78,9 +78,9 @@ jobs:
           path: ~/.right/cache/whisper
           key: whisper-ggml-tiny-v1
 
-      - name: Run STT ignored tests serially
+      - name: Run STT ignored tests
         run: |
-          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored --test-threads=1
+          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored
 
   openshell:
     name: openshell ignored tests
@@ -140,9 +140,9 @@ jobs:
       - name: OpenShell doctor
         run: openshell doctor check
 
-      - name: Run OpenShell ignored tests serially
+      - name: Run OpenShell ignored tests
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored"
 
   claude-openshell:
     name: claude ignored tests
@@ -202,6 +202,6 @@ jobs:
       - name: OpenShell doctor
         run: openshell doctor check
 
-      - name: Run Claude/OpenShell ignored tests serially
+      - name: Run Claude/OpenShell ignored tests
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored --test-threads=1"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored"
