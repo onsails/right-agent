@@ -137,6 +137,19 @@ pub(crate) fn transient_backoff_secs(attempt: u32) -> u64 {
         .unwrap_or(TRANSIENT_BACKOFF_CAP_SECS)
 }
 
+fn transient_backoff_delay(attempt: u32) -> Duration {
+    #[cfg(test)]
+    {
+        let _ = attempt;
+        Duration::from_millis(10)
+    }
+
+    #[cfg(not(test))]
+    {
+        Duration::from_secs(transient_backoff_secs(attempt))
+    }
+}
+
 /// Result of a single in-flight refresh task: the server name, a per-server
 /// generation counter (bumped on every `NewEntry`), and the classified
 /// [`do_refresh_cancellable`] outcome.
@@ -447,17 +460,14 @@ pub async fn run_refresh_scheduler(
                                         .entry(name.clone())
                                         .and_modify(|n| *n += 1)
                                         .or_insert(1);
-                                    let delay = transient_backoff_secs(*attempt);
+                                    let delay = transient_backoff_delay(*attempt);
                                     tracing::info!(
                                         server = %name,
                                         attempt = *attempt,
-                                        delay_secs = delay,
+                                        delay_secs = delay.as_secs(),
                                         "scheduling transient retry"
                                     );
-                                    timers.insert(
-                                        name.clone(),
-                                        tokio::time::Instant::now() + Duration::from_secs(delay),
-                                    );
+                                    timers.insert(name.clone(), tokio::time::Instant::now() + delay);
                                 }
                             }
                             Err(crate::reconnect::ReconnectError::Cancelled) => {
@@ -612,12 +622,6 @@ mod tests {
         }
     }
 
-    async fn let_scheduler_process_response() {
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
-    }
-
     async fn advance_until_request_count(server: &wiremock::MockServer, expected: usize) {
         for _ in 0..200 {
             if request_count(server).await >= expected {
@@ -667,6 +671,7 @@ mod tests {
             TRANSIENT_BACKOFF_CAP_SECS,
             "cap must equal last step or backoff regresses on the boundary"
         );
+        assert_eq!(transient_backoff_secs(999), TRANSIENT_BACKOFF_CAP_SECS);
     }
 
     #[test]
@@ -823,8 +828,6 @@ mod tests {
             crate::proxy::AuthMethod::Bearer,
         ));
 
-        tokio::time::pause();
-
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
 
@@ -840,22 +843,9 @@ mod tests {
         wait_for_scheduler_entry(tmp.path(), "s").await;
 
         // First scheduler fire calls do_refresh_cancellable, which retries
-        // internally 3 times with 30/60s backoff (~90s virtual). All return
-        // 503 → Transient. Scheduler reschedules in 60s. Second fire's first
-        // attempt hits the 200 mock → success.
-        advance_until_request_count(&server, 1).await;
-        wait_for_response_count(&responses, 1).await;
-        let_scheduler_process_response().await;
-
-        advance_until_request_count(&server, 2).await;
-        wait_for_response_count(&responses, 2).await;
-        let_scheduler_process_response().await;
-
-        advance_until_request_count(&server, 3).await;
-        wait_for_response_count(&responses, 3).await;
-        let_scheduler_process_response().await;
-
-        advance_until_request_count(&server, 4).await;
+        // internally 3 times. In test builds those backoffs are milliseconds.
+        // All three initial attempts return 503 -> Transient. The scheduler's
+        // next fire hits the 200 mock -> success.
         wait_for_response_count(&responses, 4).await;
         wait_for_token(&token_arc, "new-tok", &server).await;
 
@@ -913,8 +903,6 @@ mod tests {
             .set_status(crate::proxy::BackendStatus::Unreachable)
             .await;
 
-        tokio::time::pause();
-
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         let scheduler = tokio::spawn(run_refresh_scheduler(tmp.path().to_path_buf(), rx));
 
@@ -929,11 +917,8 @@ mod tests {
 
         wait_for_scheduler_entry(tmp.path(), "s").await;
 
-        // Already-expired tokens fire immediately. Once the request reaches
-        // wiremock, do not advance virtual time again; on slow CI that can
-        // trip reqwest's timeout before the real mock response is processed.
-        advance_until_request_count(&server, 1).await;
-        let_scheduler_process_response().await;
+        // Already-expired tokens fire immediately. This test uses real time:
+        // real reqwest/wiremock I/O is a poor fit for paused Tokio time.
         wait_for_backend_status(
             &backend,
             crate::proxy::BackendStatus::NeedsAuth,
