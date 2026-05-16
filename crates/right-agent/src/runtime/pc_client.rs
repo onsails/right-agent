@@ -143,6 +143,21 @@ impl PcClient {
         Ok(())
     }
 
+    /// Restart the managed cloudflared process when regenerated ingress config changed.
+    ///
+    /// Cloudflared reads local ingress config at process start; process-compose
+    /// reload does not restart it when only the config file content changes.
+    pub async fn restart_cloudflared_if_config_changed(
+        &self,
+        cloudflared_config_changed: bool,
+    ) -> miette::Result<()> {
+        if !cloudflared_config_changed {
+            return Ok(());
+        }
+
+        self.restart_process("cloudflared").await
+    }
+
     /// Stop a specific process by name.
     pub async fn stop_process(&self, name: &str) -> miette::Result<()> {
         let resp = self

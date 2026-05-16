@@ -59,6 +59,43 @@ async fn health_check_fails_when_token_missing() {
     );
 }
 
+#[tokio::test]
+async fn restart_cloudflared_if_config_changed_posts_restart_when_changed() {
+    setup_crypto();
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/process/restart/cloudflared"))
+        .and(header("X-PC-Token-Key", "the-token"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let port = server.address().port();
+    let client = PcClient::new(port, Some("the-token".to_string())).unwrap();
+
+    client
+        .restart_cloudflared_if_config_changed(true)
+        .await
+        .expect("changed cloudflared config must restart cloudflared");
+}
+
+#[tokio::test]
+async fn restart_cloudflared_if_config_changed_skips_restart_when_unchanged() {
+    setup_crypto();
+    let server = wiremock::MockServer::start().await;
+    let port = server.address().port();
+    let client = PcClient::new(port, Some("the-token".to_string())).unwrap();
+
+    client
+        .restart_cloudflared_if_config_changed(false)
+        .await
+        .expect("unchanged cloudflared config must not call process-compose");
+}
+
 #[test]
 fn pc_client_constructs_with_port() {
     setup_crypto();
