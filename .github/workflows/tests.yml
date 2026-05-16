@@ -62,9 +62,15 @@ jobs:
         run: |
           devenv shell -- bash -lc "export PATH=\"\$RUNNER_TEMP/bin:\$PATH\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked"
 
-  stt:
-    name: stt ignored tests
+  ignored:
+    name: ignored tests
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      OPENSHELL_VERSION: "v0.0.42"
+      OPENSHELL_DRIVERS: "docker"
+      RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
+      RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
@@ -81,94 +87,10 @@ jobs:
           key: whisper-ggml-tiny-v1
 
       - name: Run STT ignored tests
+        id: stt_tests
+        continue-on-error: true
         run: |
           devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored
-
-  openshell:
-    name: openshell ignored tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      OPENSHELL_VERSION: "v0.0.42"
-      OPENSHELL_DRIVERS: "docker"
-      RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
-      RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
-      RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
-    steps:
-      - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        run: nix profile add nixpkgs#devenv
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target/devenv"
-          cmd-format: devenv shell -- {0}
-
-      - name: Check Docker runtime
-        run: |
-          docker version
-          docker info
-
-      - name: Install OpenShell
-        run: |
-          secret="$(openssl rand -hex 32)"
-          echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
-          systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
-          systemctl --user set-environment OPENSHELL_DRIVERS="$OPENSHELL_DRIVERS"
-          curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION="$OPENSHELL_VERSION" OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
-          openshell --version
-          openshell --help
-
-      - name: Wait for OpenShell gateway
-        run: |
-          for attempt in $(seq 1 90); do
-            if openshell status >/dev/null 2>&1 \
-              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/ca.crt" \
-              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.crt" \
-              && test -f "$HOME/.config/openshell/gateways/openshell/mtls/tls.key"; then
-              openshell status
-              exit 0
-            fi
-            echo "waiting for OpenShell gateway ($attempt/90)"
-            sleep 2
-          done
-          systemctl --user status openshell-gateway --no-pager || true
-          journalctl --user -u openshell-gateway --no-pager -n 80 || true
-          exit 1
-
-      - name: OpenShell doctor
-        run: openshell doctor check
-
-      - name: Run OpenShell ignored tests
-        run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored"
-
-      - name: Dump OpenShell diagnostics
-        if: failure()
-        run: |
-          openshell status || true
-          journalctl --user -u openshell-gateway --no-pager -n 200 || true
-          docker ps -a || true
-
-  claude-openshell:
-    name: claude ignored tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      OPENSHELL_VERSION: "v0.0.42"
-      OPENSHELL_DRIVERS: "docker"
-      RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "1"
-      RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
-      RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
-    steps:
-      - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - name: Install devenv.sh
-        run: nix profile add nixpkgs#devenv
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target/devenv"
-          cmd-format: devenv shell -- {0}
 
       - name: Check Docker runtime
         run: |
@@ -206,12 +128,42 @@ jobs:
         run: openshell doctor check
 
       - name: Run Claude/OpenShell ignored tests
+        id: claude_tests
+        continue-on-error: true
+        env:
+          RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "1"
         run: |
           devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored"
 
+      - name: Run OpenShell ignored tests
+        id: openshell_tests
+        continue-on-error: true
+        env:
+          RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
+        run: |
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored"
+
       - name: Dump OpenShell diagnostics
-        if: failure()
+        if: ${{ failure() || steps.claude_tests.outcome == 'failure' || steps.openshell_tests.outcome == 'failure' }}
         run: |
           openshell status || true
           journalctl --user -u openshell-gateway --no-pager -n 200 || true
           docker ps -a || true
+
+      - name: Check ignored test results
+        if: always()
+        run: |
+          failed=0
+          if test "${{ steps.stt_tests.outcome }}" != "success"; then
+            echo "::error::STT ignored tests failed"
+            failed=1
+          fi
+          if test "${{ steps.claude_tests.outcome }}" != "success"; then
+            echo "::error::Claude/OpenShell ignored tests failed"
+            failed=1
+          fi
+          if test "${{ steps.openshell_tests.outcome }}" != "success"; then
+            echo "::error::OpenShell ignored tests failed"
+            failed=1
+          fi
+          exit "$failed"
