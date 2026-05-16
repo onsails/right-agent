@@ -419,7 +419,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::openshell_proto::openshell::datamodel::v1::{Sandbox, SandboxCondition, SandboxStatus};
+use crate::openshell_proto::openshell::datamodel::v1::{SandboxCondition, SandboxStatus};
 use crate::test_support::TestSandbox;
 
 /// Shared sandbox for upload / download / verify tests that need a generic
