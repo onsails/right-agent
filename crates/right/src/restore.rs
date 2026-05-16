@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use chrono::{SecondsFormat, Utc};
@@ -632,5 +630,36 @@ mod tests {
             !content.contains("recall_max_tokens"),
             "default recall_max_tokens should stay omitted, got:\n{content}"
         );
+    }
+
+    #[test]
+    fn preserve_mode_normalizes_yaml_to_source_bank() {
+        let dir = tempdir().unwrap();
+        let backup = dir
+            .path()
+            .join("backups")
+            .join("right")
+            .join("20260516-0117");
+        std::fs::create_dir_all(&backup).unwrap();
+        let agent_yaml = dir.path().join("agent.yaml");
+        std::fs::write(
+            &agent_yaml,
+            "model: \"sonnet\"\n\nmemory:\n  provider: hindsight\n  api_key: \"hs_test\"\n",
+        )
+        .unwrap();
+        let config = hindsight_config(None);
+        let decision = decide_restore(
+            dir.path(),
+            "right-drill",
+            &backup,
+            &config,
+            RestoreBindingMode::PreserveSource,
+        )
+        .unwrap();
+
+        apply_memory_action(&agent_yaml, config, decision.memory_action).unwrap();
+
+        let content = std::fs::read_to_string(&agent_yaml).unwrap();
+        assert!(content.contains("bank_id: \"right\""), "got:\n{content}");
     }
 }

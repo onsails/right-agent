@@ -25,6 +25,11 @@ pub(crate) const MAIN_PROMPT_LABELS: &[&str] = &[
     "create fresh",
     "restore from backup",
     "backup directory path:",
+    "restore binding mode:",
+    "preserve source bindings",
+    "rebind to target",
+    "set memory bank id",
+    "memory bank id:",
     // prompt_dependencies: missing-binary install confirms
     "install openshell now?",
     "start openshell gateway now?",
@@ -87,6 +92,62 @@ mod voice_pass_main {
                 "prompt label must not contain '!': {label:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_parse_tests {
+    use clap::{CommandFactory, Parser};
+
+    use super::Cli;
+
+    #[test]
+    fn restore_binding_flags_require_from_backup() {
+        let err =
+            match Cli::try_parse_from(["right", "agent", "init", "clone", "--rebind-to-target"]) {
+                Ok(_) => panic!("restore binding flags must require --from-backup"),
+                Err(err) => err,
+            };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn restore_binding_flags_conflict() {
+        let mut command = Cli::command();
+        let err = command
+            .try_get_matches_from_mut([
+                "right",
+                "agent",
+                "init",
+                "clone",
+                "--from-backup",
+                "/tmp/backup",
+                "--preserve-source-bindings",
+                "--rebind-to-target",
+            ])
+            .expect_err("restore binding flags must be mutually exclusive");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn memory_bank_id_rejects_empty_value() {
+        let err = match Cli::try_parse_from([
+            "right",
+            "agent",
+            "init",
+            "clone",
+            "--from-backup",
+            "/tmp/backup",
+            "--memory-bank-id",
+            "   ",
+        ]) {
+            Ok(_) => panic!("--memory-bank-id must reject whitespace-only values"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 }
 
@@ -153,6 +214,28 @@ pub enum AgentCommands {
         /// Restore agent from a backup directory
         #[arg(long, conflicts_with_all = ["fresh", "network_policy", "sandbox_mode"])]
         from_backup: Option<std::path::PathBuf>,
+        /// Preserve the source backup's implicit Hindsight memory binding
+        #[arg(
+            long,
+            requires = "from_backup",
+            conflicts_with_all = ["rebind_to_target", "memory_bank_id"]
+        )]
+        preserve_source_bindings: bool,
+        /// Rebind implicit Hindsight memory to the target agent name
+        #[arg(
+            long,
+            requires = "from_backup",
+            conflicts_with_all = ["preserve_source_bindings", "memory_bank_id"]
+        )]
+        rebind_to_target: bool,
+        /// Set the restored Hindsight memory bank id explicitly
+        #[arg(
+            long,
+            requires = "from_backup",
+            value_parser = non_empty_arg,
+            conflicts_with_all = ["preserve_source_bindings", "rebind_to_target"]
+        )]
+        memory_bank_id: Option<String>,
     },
     /// Configure an agent interactively (or get/set a specific setting)
     Config {
@@ -426,6 +509,31 @@ pub enum Commands {
     },
 }
 
+fn non_empty_arg(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err("value cannot be empty".to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn restore_binding_mode_from_flags(
+    preserve_source_bindings: bool,
+    rebind_to_target: bool,
+    memory_bank_id: Option<String>,
+) -> restore::RestoreBindingMode {
+    if preserve_source_bindings {
+        restore::RestoreBindingMode::PreserveSource
+    } else if rebind_to_target {
+        restore::RestoreBindingMode::RebindToTarget
+    } else if let Some(memory_bank_id) = memory_bank_id {
+        restore::RestoreBindingMode::MemoryBankId(memory_bank_id)
+    } else {
+        restore::RestoreBindingMode::DirectUnspecified
+    }
+}
+
 /// Intercept `BlockAlreadyRendered`: exit code 1, no miette formatting.
 /// Used when a command has already rendered a brand-conformant rail block
 /// explaining the failure.
@@ -601,9 +709,17 @@ async fn main() -> miette::Result<()> {
                 network_policy,
                 sandbox_mode,
                 from_backup,
+                preserve_source_bindings,
+                rebind_to_target,
+                memory_bank_id,
             } => {
                 if let Some(backup_path) = from_backup {
-                    cmd_agent_restore(&home, &name, &backup_path).await
+                    let restore_binding_mode = restore_binding_mode_from_flags(
+                        preserve_source_bindings,
+                        rebind_to_target,
+                        memory_bank_id,
+                    );
+                    cmd_agent_restore(&home, &name, &backup_path, restore_binding_mode).await
                 } else {
                     cmd_agent_init(
                         &home,
@@ -1808,6 +1924,7 @@ fn cmd_agent_init(
                         home,
                         name,
                         &backup_path,
+                        restore::RestoreBindingMode::Interactive,
                     ))
                 });
             }
@@ -2807,6 +2924,7 @@ async fn cmd_agent_restore(
     home: &Path,
     agent_name: &str,
     backup_path: &Path,
+    restore_binding_mode: restore::RestoreBindingMode,
 ) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
@@ -2858,7 +2976,43 @@ async fn cmd_agent_restore(
         }
     }
 
-    // 3. Parse restored config to determine sandbox mode.
+    // 3. Parse restored config, resolve restore binding semantics, then
+    // normalize restored agent.yaml before codegen or sandbox creation can use it.
+    let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
+    let config = config.ok_or_else(|| {
+        miette::miette!(
+            "agent.yaml restored but parsed config is unavailable at {}",
+            agent_dir.display()
+        )
+    })?;
+
+    let effective_restore_binding_mode = if matches!(
+        restore_binding_mode,
+        restore::RestoreBindingMode::Interactive
+    ) {
+        prompt_restore_binding_mode()?
+    } else {
+        restore_binding_mode
+    };
+
+    let restore_decision = restore::decide_restore(
+        home,
+        agent_name,
+        backup_path,
+        &config,
+        effective_restore_binding_mode,
+    )?;
+
+    restore::apply_memory_action(
+        &agent_dir.join("agent.yaml"),
+        config,
+        restore_decision.memory_action,
+    )?;
+
+    for warning in restore_decision.warnings {
+        eprintln!("warning: {warning}");
+    }
+
     let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
     let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
 
@@ -3011,6 +3165,33 @@ async fn cmd_agent_restore(
         agent_dir.display()
     );
     Ok(())
+}
+
+fn prompt_restore_binding_mode() -> miette::Result<restore::RestoreBindingMode> {
+    let options = vec![
+        "preserve source bindings",
+        "rebind to target",
+        "set memory bank id",
+    ];
+    let choice = inquire::Select::new("restore binding mode:", options)
+        .prompt()
+        .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+
+    match choice {
+        "preserve source bindings" => Ok(restore::RestoreBindingMode::PreserveSource),
+        "rebind to target" => Ok(restore::RestoreBindingMode::RebindToTarget),
+        "set memory bank id" => {
+            let memory_bank_id = inquire::Text::new("memory bank id:")
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let memory_bank_id =
+                non_empty_arg(&memory_bank_id).map_err(|e| miette::miette!("{e}"))?;
+            Ok(restore::RestoreBindingMode::MemoryBankId(memory_bank_id))
+        }
+        _ => Err(miette::miette!(
+            "unexpected restore binding mode selection: {choice}"
+        )),
+    }
 }
 
 async fn cmd_agent_backup(
