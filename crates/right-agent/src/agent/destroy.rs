@@ -279,12 +279,27 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
         let all_agents = crate::agent::discover_agents(&agents_dir)?;
         let self_exe = std::env::current_exe()
             .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
-        right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
+        let codegen_outcome =
+            right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
         match pc_client.reload_configuration().await {
             Ok(()) => {
-                tracing::info!("reloaded process-compose configuration");
+                tracing::info!(
+                    cloudflared_config_changed = codegen_outcome.cloudflared_config_changed,
+                    "reloaded process-compose configuration"
+                );
                 result.pc_reloaded = true;
+                if let Err(e) = pc_client
+                    .restart_cloudflared_if_config_changed(
+                        codegen_outcome.cloudflared_config_changed,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error = format!("{e:#}"),
+                        "failed to restart cloudflared after config change"
+                    );
+                }
             }
             Err(e) => {
                 tracing::warn!(
