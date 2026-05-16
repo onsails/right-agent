@@ -16,11 +16,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v17
-        with:
-          name: devenv
       - name: Install devenv.sh
         run: nix profile add nixpkgs#devenv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/devenv"
+          cmd-format: devenv shell -- {0}
 
       - name: Provide external-tool test stubs
         run: |
@@ -67,11 +68,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v17
-        with:
-          name: devenv
       - name: Install devenv.sh
         run: nix profile add nixpkgs#devenv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/devenv"
+          cmd-format: devenv shell -- {0}
 
       - uses: actions/cache@v5
         with:
@@ -95,11 +97,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v17
-        with:
-          name: devenv
       - name: Install devenv.sh
         run: nix profile add nixpkgs#devenv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/devenv"
+          cmd-format: devenv shell -- {0}
 
       - name: Check Docker runtime
         run: |
@@ -160,11 +163,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: cachix/install-nix-action@v31
-      - uses: cachix/cachix-action@v17
-        with:
-          name: devenv
       - name: Install devenv.sh
         run: nix profile add nixpkgs#devenv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/devenv"
+          cmd-format: devenv shell -- {0}
 
       - name: Check Docker runtime
         run: |
