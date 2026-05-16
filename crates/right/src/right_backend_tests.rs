@@ -555,8 +555,9 @@ process:
 network_policies:
   outbound:
     endpoints:
-      - host: \"**.*\"
-        port: 443
+      - port: 443
+        allowed_ips:
+          - \"1.1.1.1/32\"
         protocol: rest
         access: full
     binaries:

@@ -28,15 +28,152 @@ fn restrictive_endpoints() -> String {
         .join("\n")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Ipv4Range {
+    start: u32,
+    end: u32,
+}
+
+const NON_PUBLIC_IPV4_CIDRS: &[(&str, u8)] = &[
+    ("0.0.0.0", 8),
+    ("10.0.0.0", 8),
+    ("100.64.0.0", 10),
+    ("127.0.0.0", 8),
+    ("169.254.0.0", 16),
+    ("172.16.0.0", 12),
+    ("192.0.0.0", 24),
+    ("192.0.2.0", 24),
+    ("192.88.99.0", 24),
+    ("192.168.0.0", 16),
+    ("198.18.0.0", 15),
+    ("198.51.100.0", 24),
+    ("203.0.113.0", 24),
+    ("224.0.0.0", 4),
+    ("240.0.0.0", 4),
+];
+
+const PUBLIC_IPV6_CIDRS: &[&str] = &["2000::/3"];
+
+fn ipv4_cidr_to_range(base: &str, prefix: u8) -> Ipv4Range {
+    let base = u32::from(
+        base.parse::<std::net::Ipv4Addr>()
+            .expect("static IPv4 CIDR base must parse"),
+    );
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let start = base & mask;
+    Ipv4Range {
+        start,
+        end: start | !mask,
+    }
+}
+
+fn range_to_ipv4_cidrs(start: u32, end: u32) -> Vec<String> {
+    let mut cidrs = Vec::new();
+    let mut cursor = u64::from(start);
+    let end = u64::from(end);
+
+    while cursor <= end {
+        let alignment = cursor & cursor.wrapping_neg();
+        let mut block_size = if alignment == 0 {
+            1_u64 << 32
+        } else {
+            alignment
+        };
+        let remaining = end - cursor + 1;
+        while block_size > remaining {
+            block_size >>= 1;
+        }
+
+        let prefix = 32 - block_size.trailing_zeros();
+        cidrs.push(format!(
+            "{}/{}",
+            std::net::Ipv4Addr::from(cursor as u32),
+            prefix
+        ));
+        cursor += block_size;
+    }
+
+    cidrs
+}
+
+fn public_ipv4_cidrs() -> Vec<String> {
+    let mut ranges = NON_PUBLIC_IPV4_CIDRS
+        .iter()
+        .map(|(base, prefix)| ipv4_cidr_to_range(base, *prefix))
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| range.start);
+
+    let mut merged = Vec::<Ipv4Range>::new();
+    for range in ranges {
+        if let Some(last) = merged.last_mut()
+            && range.start <= last.end.saturating_add(1)
+        {
+            last.end = last.end.max(range.end);
+            continue;
+        }
+        merged.push(range);
+    }
+
+    let mut cidrs = Vec::new();
+    let mut cursor = 0_u32;
+    for range in merged {
+        if cursor < range.start {
+            cidrs.extend(range_to_ipv4_cidrs(cursor, range.start - 1));
+        }
+        if range.end == u32::MAX {
+            return cidrs;
+        }
+        cursor = cursor.max(range.end + 1);
+    }
+    cidrs.extend(range_to_ipv4_cidrs(cursor, u32::MAX));
+    cidrs
+}
+
+pub fn public_web_allowed_ip_cidrs() -> Vec<String> {
+    public_ipv4_cidrs()
+        .into_iter()
+        .chain(PUBLIC_IPV6_CIDRS.iter().map(|cidr| (*cidr).to_owned()))
+        .collect()
+}
+
+fn public_web_allowed_ips_yaml(indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    public_web_allowed_ip_cidrs()
+        .into_iter()
+        .map(|cidr| format!("{pad}- \"{cidr}\""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn permissive_endpoints() -> String {
+    let allowed_ips = public_web_allowed_ips_yaml(10);
+    format!(
+        r#"      - port: 443
+        allowed_ips:
+{allowed_ips}
+        protocol: rest
+        access: full
+      - port: 80
+        allowed_ips:
+{allowed_ips}
+        protocol: rest
+        access: full"#
+    )
+}
+
 /// Generate an OpenShell policy YAML string.
 ///
 /// `right_mcp_port`: TCP port for the host-side right MCP HTTP server.
-/// `network_policy`: Controls which outbound HTTPS domains are allowed.
+/// `network_policy`: Controls which outbound public web or HTTPS domains are allowed.
 /// `host_ip`: Resolved IP of `host.openshell.internal` from inside the sandbox.
 ///   When `Some`, uses the exact IP/32 in `allowed_ips`. When `None`, falls back
 ///   to common Docker network ranges (172.16.0.0/12 + 192.168.0.0/16).
 ///
-/// Network policy allows outbound HTTPS (port 443). Since OpenShell v0.0.30
+/// Network policy allows outbound HTTP/HTTPS. Since OpenShell v0.0.30
 /// the proxy auto-detects TLS via ClientHello peek and terminates unconditionally
 /// for credential injection — `tls: terminate` is no longer written (emits a
 /// per-request deprecation WARN in the sandbox supervisor log and is scheduled
@@ -48,19 +185,12 @@ pub fn generate_policy(
     host_ip: Option<std::net::IpAddr>,
 ) -> String {
     let network_section = match network_policy {
-        NetworkPolicy::Permissive => r#"  outbound:
-    endpoints:
-      - host: "**.*"
-        port: 443
-        protocol: rest
-        access: full
-      - host: "**.*"
-        port: 80
-        protocol: rest
-        access: full
-    binaries:
-      - path: "**""#
-            .to_owned(),
+        NetworkPolicy::Permissive => {
+            format!(
+                "  outbound:\n    endpoints:\n{}\n    binaries:\n      - path: \"**\"",
+                permissive_endpoints()
+            )
+        }
         NetworkPolicy::Restrictive => {
             format!(
                 "  anthropic:\n    endpoints:\n{}\n    binaries:\n      - path: \"**\"",
@@ -120,6 +250,75 @@ network_policies:
     )
 }
 
+/// Rewrite legacy generated permissive endpoints that OpenShell v0.0.37+
+/// rejects (`host: "**.*"`) into public-web `allowed_ips` endpoints.
+///
+/// Returns `Ok(Some(yaml))` when it changed the document and `Ok(None)` when
+/// the input has no legacy public-web endpoint.
+pub fn migrate_legacy_permissive_policy_yaml(yaml: &str) -> miette::Result<Option<String>> {
+    let mut doc: serde_json::Value = serde_saphyr::from_str(yaml)
+        .map_err(|e| miette::miette!("failed to parse policy.yaml for migration: {e:#}"))?;
+
+    let replacement_ips = serde_json::Value::Array(
+        public_web_allowed_ip_cidrs()
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
+
+    let Some(policies) = doc
+        .get_mut("network_policies")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(None);
+    };
+
+    let mut changed = false;
+    for (name, policy) in policies.iter_mut() {
+        if name != "outbound" {
+            continue;
+        }
+
+        let Some(endpoints) = policy
+            .get_mut("endpoints")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+
+        for endpoint in endpoints {
+            let is_legacy_host =
+                endpoint.get("host").and_then(serde_json::Value::as_str) == Some("**.*");
+            let is_public_web_port = matches!(
+                endpoint.get("port").and_then(serde_json::Value::as_u64),
+                Some(80 | 443)
+            );
+            let is_generated_legacy_shape =
+                endpoint.get("protocol").and_then(serde_json::Value::as_str) == Some("rest")
+                    && endpoint.get("access").and_then(serde_json::Value::as_str) == Some("full");
+
+            if is_legacy_host && is_public_web_port && is_generated_legacy_shape {
+                let endpoint = endpoint.as_object_mut().ok_or_else(|| {
+                    miette::miette!("policy.yaml contains a non-mapping endpoint")
+                })?;
+                endpoint.remove("host");
+                endpoint
+                    .entry("allowed_ips".to_owned())
+                    .or_insert_with(|| replacement_ips.clone());
+                changed = true;
+            }
+        }
+    }
+
+    if !changed {
+        return Ok(None);
+    }
+
+    serde_saphyr::to_string(&doc)
+        .map(Some)
+        .map_err(|e| miette::miette!("failed to serialize migrated policy.yaml: {e:#}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,12 +335,65 @@ mod tests {
     }
 
     #[test]
-    fn allows_all_outbound_https_and_http() {
+    fn permissive_policy_uses_public_allowed_ips() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        assert!(policy.contains(r#"host: "**.*""#));
-        assert!(policy.contains("port: 443"));
-        assert!(policy.contains("port: 80"));
-        assert!(policy.contains("outbound:"));
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("policy must be valid YAML");
+        let outbound = &parsed["network_policies"]["outbound"];
+        let endpoints = outbound["endpoints"]
+            .as_array()
+            .expect("outbound endpoints must be a list");
+
+        assert_eq!(
+            endpoints.len(),
+            2,
+            "permissive policy has HTTP and HTTPS endpoints"
+        );
+        assert!(
+            !policy.contains(r#"host: "**.*""#),
+            "OpenShell v0.0.37+ rejects TLD wildcard endpoints"
+        );
+
+        for port in [443_u64, 80] {
+            let endpoint = endpoints
+                .iter()
+                .find(|endpoint| endpoint["port"].as_u64() == Some(port))
+                .unwrap_or_else(|| panic!("missing permissive endpoint for port {port}"));
+            assert!(
+                endpoint.get("host").is_none(),
+                "public-web endpoint must be hostless so DNS names are not filtered by TLD wildcard"
+            );
+            let allowed_ips = endpoint["allowed_ips"]
+                .as_array()
+                .expect("public-web endpoint must use allowed_ips");
+            assert!(
+                allowed_ips
+                    .iter()
+                    .any(|cidr| cidr.as_str() == Some("1.0.0.0/8")),
+                "public-web IPv4 CIDRs must include normal public ranges"
+            );
+            assert!(
+                allowed_ips
+                    .iter()
+                    .any(|cidr| cidr.as_str() == Some("2000::/3")),
+                "public-web IPv6 CIDRs must include global unicast"
+            );
+            for forbidden in [
+                "0.0.0.0/0",
+                "10.0.0.0/8",
+                "127.0.0.0/8",
+                "169.254.0.0/16",
+                "172.16.0.0/12",
+                "192.168.0.0/16",
+            ] {
+                assert!(
+                    !allowed_ips
+                        .iter()
+                        .any(|cidr| cidr.as_str() == Some(forbidden)),
+                    "public-web endpoint must not allow {forbidden}"
+                );
+            }
+        }
     }
 
     /// Regression: OpenShell v0.0.30 deprecated the `tls:` field. Emitting
@@ -167,17 +419,18 @@ mod tests {
         assert!(!policy.contains("8100"));
     }
 
-    /// OpenShell rejects bare `*` host wildcards — must use `*.example.com` or `*.*` patterns.
+    /// OpenShell v0.0.37+ rejects TLD-wide wildcard hosts.
     #[test]
-    fn no_bare_star_host_wildcards() {
+    fn no_tld_wide_host_wildcards() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
         for line in policy.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("host:") {
                 let host_val = trimmed.trim_start_matches("host:").trim().trim_matches('"');
+                assert_ne!(host_val, "*", "bare '*' wildcard rejected by OpenShell");
                 assert_ne!(
-                    host_val, "*",
-                    "bare '*' wildcard rejected by OpenShell — use '*.*' or '*.domain.com'"
+                    host_val, "**.*",
+                    "TLD-wide '**.*' wildcard rejected by OpenShell v0.0.37+"
                 );
             }
         }
@@ -219,13 +472,19 @@ mod tests {
     }
 
     #[test]
-    fn permissive_policy_allows_all_https() {
+    fn permissive_policy_allows_public_web_without_domain_wildcard() {
         let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        assert!(policy.contains(r#"host: "**.*""#));
+        assert!(
+            !policy.contains(r#"host: "**.*""#),
+            "permissive policy must not emit OpenShell-rejected TLD wildcard"
+        );
         assert!(
             !policy.contains(r#"host: "*.anthropic.com""#),
-            "permissive uses wildcard, not explicit domains"
+            "permissive policy uses public allowed_ips, not restrictive domain entries"
         );
+        assert!(policy.contains("allowed_ips:"));
+        assert!(policy.contains("port: 443"));
+        assert!(policy.contains("port: 80"));
     }
 
     #[test]
@@ -245,6 +504,155 @@ mod tests {
             if trimmed.starts_with("host:") {
                 let host_val = trimmed.trim_start_matches("host:").trim().trim_matches('"');
                 assert_ne!(host_val, "*", "bare '*' wildcard rejected by OpenShell");
+            }
+        }
+    }
+
+    #[test]
+    fn migrates_legacy_permissive_wildcard_policy() {
+        let legacy = r#"version: 1
+network_policies:
+  outbound:
+    endpoints:
+      - host: "**.*"
+        port: 443
+        protocol: rest
+        access: full
+      - host: "**.*"
+        port: 80
+        protocol: rest
+        access: full
+    binaries:
+      - path: "**"
+  right:
+    endpoints:
+      - host: "host.openshell.internal"
+        port: 8100
+        allowed_ips:
+          - "192.168.65.254/32"
+        protocol: rest
+        access: full
+    binaries:
+      - path: "**"
+"#;
+
+        let migrated = migrate_legacy_permissive_policy_yaml(legacy)
+            .expect("migration must parse")
+            .expect("legacy wildcard must be migrated");
+
+        assert!(
+            !migrated.contains(r#"host: "**.*""#),
+            "legacy TLD wildcard must be removed"
+        );
+
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&migrated).expect("migrated policy must be valid YAML");
+        let endpoints = parsed["network_policies"]["outbound"]["endpoints"]
+            .as_array()
+            .expect("outbound endpoints must remain a list");
+
+        for port in [443_u64, 80] {
+            let endpoint = endpoints
+                .iter()
+                .find(|endpoint| endpoint["port"].as_u64() == Some(port))
+                .unwrap_or_else(|| panic!("missing migrated endpoint for port {port}"));
+            assert!(endpoint.get("host").is_none());
+            assert!(
+                endpoint["allowed_ips"]
+                    .as_array()
+                    .expect("allowed_ips must be a list")
+                    .iter()
+                    .any(|cidr| cidr.as_str() == Some("1.0.0.0/8"))
+            );
+        }
+
+        assert_eq!(
+            parsed["network_policies"]["right"]["endpoints"][0]["host"].as_str(),
+            Some("host.openshell.internal"),
+            "non-public-web host endpoint must be preserved"
+        );
+    }
+
+    #[test]
+    fn migration_is_noop_for_current_policy() {
+        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let migrated =
+            migrate_legacy_permissive_policy_yaml(&policy).expect("current policy must parse");
+        assert!(migrated.is_none(), "current policy must not be rewritten");
+    }
+
+    #[test]
+    fn migration_removes_legacy_host_and_preserves_existing_allowed_ips() {
+        let custom = r#"version: 1
+network_policies:
+  outbound:
+    endpoints:
+      - host: "**.*"
+        port: 443
+        allowed_ips:
+          - "8.8.8.8/32"
+        protocol: rest
+        access: full
+    binaries:
+      - path: "**"
+"#;
+
+        let migrated = migrate_legacy_permissive_policy_yaml(custom)
+            .expect("custom policy must parse")
+            .expect("legacy wildcard host must be removed");
+
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&migrated).expect("migrated policy must be valid YAML");
+        let endpoint = &parsed["network_policies"]["outbound"]["endpoints"][0];
+        assert!(endpoint.get("host").is_none());
+        assert!(
+            endpoint["allowed_ips"]
+                .as_array()
+                .expect("allowed_ips must remain a list")
+                .iter()
+                .any(|cidr| cidr.as_str() == Some("8.8.8.8/32")),
+            "migration must preserve existing allowed_ips"
+        );
+        assert!(
+            !endpoint["allowed_ips"]
+                .as_array()
+                .expect("allowed_ips must remain a list")
+                .iter()
+                .any(|cidr| cidr.as_str() == Some("1.0.0.0/8")),
+            "migration must not replace existing allowed_ips"
+        );
+    }
+
+    #[test]
+    fn public_web_ipv4_cidrs_do_not_overlap_non_public_ranges() {
+        fn overlaps(left: Ipv4Range, right: Ipv4Range) -> bool {
+            left.start <= right.end && right.start <= left.end
+        }
+
+        let denied_ranges = NON_PUBLIC_IPV4_CIDRS
+            .iter()
+            .map(|(base, prefix)| ipv4_cidr_to_range(base, *prefix))
+            .collect::<Vec<_>>();
+
+        for cidr in public_web_allowed_ip_cidrs() {
+            if cidr.contains(':') {
+                continue;
+            }
+            let (base, prefix) = cidr
+                .split_once('/')
+                .unwrap_or_else(|| panic!("CIDR must contain prefix: {cidr}"));
+            let public_range = ipv4_cidr_to_range(
+                base,
+                prefix
+                    .parse::<u8>()
+                    .unwrap_or_else(|_| panic!("CIDR prefix must parse: {cidr}")),
+            );
+
+            for denied_range in &denied_ranges {
+                assert!(
+                    !overlaps(public_range, *denied_range),
+                    "public CIDR {cidr} overlaps denied range {denied_range:?}"
+                );
             }
         }
     }

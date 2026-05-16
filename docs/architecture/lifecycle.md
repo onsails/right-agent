@@ -12,6 +12,8 @@ right init  /  right agent init <name>
   │   telegram, chat IDs, stt, memory) and writes sandbox config + policy.yaml
   │   to the agent dir. `init` skips the wizard and also writes
   │   ~/.right/config.yaml + detects Telegram token / cloudflared tunnel.
+  │   Permissive network policy is generated as hostless public `allowed_ips`;
+  │   restrictive policy uses scoped DNS wildcard endpoints.
   │   `right-config` owns global config loading, saving, and path helpers.
   ├─ Create ~/.right/agents/<name>/ with template files
   ├─ Write BOOTSTRAP.md, TOOLS.md, agent.yaml
@@ -47,6 +49,8 @@ right bot --agent <name>  (spawned by process-compose)
   │   ├─ Or create new: prepare staging dir, spawn sandbox, wait for READY
   │   └─ Generate SSH config for sandbox exec
   ├─ Initial sync (blocking): `right-platform-store` deploys platform files to /sandbox/.platform/ (content-addressed + symlinks)
+  ├─ Identity mirror sync: pull IDENTITY.md / SOUL.md / USER.md from /sandbox
+  │   into host agent_dir/ when present
   ├─ Start background sync task (every 5 min — `right-platform-store` re-deploys /sandbox/.platform/, GC stale entries)
   ├─ Start cron engine, OAuth callback server, refresh scheduler
   └─ Start teloxide long-polling dispatcher
@@ -97,7 +101,7 @@ right agent backup <name> [--sandbox-only] [--include-rebuildable]
   │   └─ Default excludes: sandbox/.cache, sandbox/.venv, sandbox/.npm, sandbox/.uv
   ├─ --include-rebuildable: include those rebuildable dirs for forensic backup
   ├─ No-sandbox mode: tar agent dir → sandbox.tar.gz with the same default excludes
-  ├─ Full mode: + agent.yaml, policy.yaml, VACUUM INTO data.db
+  ├─ Full mode: + agent.yaml, allowlist.yaml, policy.yaml, VACUUM INTO data.db
   └─ Stored at ~/.right/backups/<agent>/<YYYYMMDD-HHMM>/
 
 right agent rebootstrap <name> [-y]
@@ -115,13 +119,23 @@ right agent init <name> --from-backup <path>
   ├─ Read backup.json when present, or infer legacy source from backup path
   ├─ Resolve restore binding mode for clone-sensitive implicit defaults
   ├─ Fail before creating target agent state if binding mode is required
-  ├─ Restore config files to new agent dir
+  ├─ Restore config/control-plane files to new agent dir (agent.yaml, allowlist.yaml, policy.yaml, data.db when present)
   ├─ Normalize restored agent.yaml before codegen/sandbox creation
+  ├─ Migrate copied legacy `host: "**.*"` policy.yaml before sandbox creation
   ├─ Warn when clone restore copies explicit external state (Telegram, MCP, cron)
   ├─ Create new sandbox with timestamped name
   ├─ Restore sandbox files via SSH tar
+  │   └─ On upload failure: delete new sandbox best-effort, remove partial
+  │      agent dir, and report the remote tar stderr when available
   ├─ Write sandbox.name to agent.yaml
+  ├─ Reconcile host identity mirror from /sandbox
   └─ Run codegen + initial sync
+
+Sandboxed identity files are restored from `sandbox.tar.gz` into `/sandbox`.
+After restore and again on bot startup, Right Agent reconciles `IDENTITY.md`,
+`SOUL.md`, and `USER.md` from `/sandbox` into the host `agent_dir/` mirror.
+This mirror is required for control-plane checks, but sandboxed prompt assembly
+reads `/sandbox` directly.
 
 right down
   └─ POST /project/stop to process-compose REST API

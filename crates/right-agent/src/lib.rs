@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod cron_spec;
 pub mod doctor;
+pub mod identity_mirror;
 pub mod init;
 pub mod learned_skills;
 pub mod rebootstrap;

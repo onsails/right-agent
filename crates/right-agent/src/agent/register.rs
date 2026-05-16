@@ -65,15 +65,9 @@ pub async fn register_with_running_pc(
     let codegen_outcome = right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
     client.reload_configuration().await?;
-    if let Err(e) = client
-        .restart_cloudflared_if_config_changed(codegen_outcome.cloudflared_config_changed)
-        .await
-    {
-        tracing::warn!(
-            error = format!("{e:#}"),
-            "failed to restart cloudflared after config change"
-        );
-    }
+    client
+        .restart_cloudflared_or_warn(codegen_outcome.cloudflared_config_changed)
+        .await;
     tracing::info!(
         agent = %options.agent_name,
         cloudflared_config_changed = codegen_outcome.cloudflared_config_changed,

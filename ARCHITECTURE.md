@@ -375,6 +375,12 @@ Every per-agent codegen output belongs to exactly one category:
 | `MergedRMW` | Read, merge, write. Preserves unknown fields. | .claude.json, agent.yaml (secret injection) |
 | `AgentOwned` | Created by init. Never touched again. | TOOLS.md, IDENTITY.md, SOUL.md, USER.md, MEMORY.md, settings.local.json |
 
+For sandboxed agents, identity `AgentOwned` files are authoritative in
+`/sandbox` once the sandbox exists. Host copies of `IDENTITY.md`, `SOUL.md`,
+and `USER.md` are an explicit mirror, not the prompt source. Code that needs a
+complete host mirror must call the identity mirror reconciliation helper instead
+of assuming a prior user message ran reverse sync.
+
 Cross-agent outputs (process-compose.yaml, agent-tokens.json, cloudflared
 config) are all `Regenerated(BotRestart)` — reread on `right up`.
 
@@ -452,7 +458,7 @@ Direct `std::fs::write` inside codegen modules is a review-blocking defect.
 Any test that needs a live OpenShell sandbox MUST create it via
 `right_openshell::test_support::TestSandbox::create("<test-name>")`. The helper:
 
-- Generates a unique `right-test-<name>` sandbox with a minimal permissive policy (wildcard `"**.*"` host on port 443, `binaries: "**"`).
+- Generates a unique `right-test-<name>` sandbox with a minimal hostless `allowed_ips` smoke-test endpoint (`1.1.1.1/32`) on port 443 and `binaries: "**"`.
 - Registers the sandbox in `test_cleanup` so sandboxes are deleted even under `panic = "abort"` (the panic hook drains the registry and calls `openshell sandbox delete`).
 - Cleans up leftovers from prior SIGKILLed runs via `pkill_test_orphans`.
 - Exposes `.exec(&[...])` which goes through gRPC — the project bans the `openshell sandbox exec` CLI from tests.
@@ -477,14 +483,14 @@ Rules:
 - **Sandbox isolation**: OpenShell (k3s containers) — filesystem + network + TLS policies per agent
 - **TLS MITM**: OpenShell proxy terminates and re-signs TLS with per-sandbox CA for L7 inspection
 - **Credential isolation**: Host credentials never uploaded to sandbox. Each sandbox authenticates independently via OAuth login flow.
-- **Network policy**: Wildcard domain allowlists (*.anthropic.com, *.claude.com, *.claude.ai) + `binaries: "**"`. TLS termination is automatic (OpenShell v0.0.30+).
+- **Network policy**: Scoped wildcard domain allowlists (`*.anthropic.com`, `*.claude.com`, `*.claude.ai`) or hostless public `allowed_ips` endpoint allowlists + `binaries: "**"`. TLS termination is automatic (OpenShell v0.0.30+).
 - **`--dangerously-skip-permissions`**: Always on for all CC invocations. OpenShell policy is the security layer, not CC's permission system.
 - **Prompt-injection defense**: `ironclaw_safety::Sanitizer` runs on
   memory writes (Hindsight retain path) and `wrap_external_content`
   frames the `## Memory` section as untrusted data on read. Phase-2
   wrap is the primary defense; phase-1 sanitize is hygiene. See
   `docs/architecture/memory.md`.
-- **Chat ID allowlist**: Empty = block all (secure default); per-agent in agent.yaml
+- **Chat ID allowlist**: Empty = block all (secure default); per-agent in `agents/<name>/allowlist.yaml`. Legacy `agent.yaml::allowed_chat_ids` is migration input only.
 - **Protected MCP**: "right" cannot be removed via `/mcp remove`
 - **MCP tool restriction**: Agents cannot register/remove external MCP servers — `mcp_add`, `mcp_remove`, `mcp_auth` are not exposed as MCP tools. Only the user can manage servers via Telegram `/mcp` commands routed through the internal Unix socket API. This prevents sandbox escape via data exfiltration to attacker-controlled MCP endpoints.
 - **OAuth CSRF**: Token matching in callback server
@@ -507,6 +513,7 @@ theme detection. Do not repeat; migrate existing offenders when touched.
 - **Prefer gRPC over CLI**: Use the OpenShell gRPC API (mTLS on the active gateway endpoint) for sandbox operations wherever possible. Resolve the endpoint from `OPENSHELL_GATEWAY_ENDPOINT` or `openshell status`; do not hardcode a gateway port. gRPC is faster, more reliable, and provides structured responses. The CLI (`openshell sandbox upload/download`) is only used for file transfer — no gRPC file transfer API exists yet.
 - **gRPC for**: sandbox create/get/delete, readiness polling, exec inside sandbox, policy status, SSH session management.
 - **CLI for**: file upload/download (SSH+tar under the hood), policy apply (`openshell policy set`).
+- **Vendored proto compatibility is load-bearing**: OpenShell v0.0.42 returns sandbox IDs as `Sandbox.metadata.id`; older vendored protos decoded field 1 as top-level `Sandbox.id` and failed with `invalid string value: data is not UTF-8 encoded`. `resolve_sandbox_id` must read `metadata.id`, and `ci_openshell_policy_validates_against_openshell` is the live regression gate.
 - **NEVER use CLI for exec**: `openshell sandbox exec` CLI has unreliable argument parsing (positional name vs `--name` flag). Always use gRPC `exec_in_sandbox()` for executing commands inside sandboxes. All callers (sync, platform_store, etc.) must receive a gRPC client.
 - **Known CLI bug**: Directory uploads may silently drop small files. Always verify critical files after directory upload, and re-upload individually if missing.
 
@@ -515,7 +522,8 @@ theme detection. Do not repeat; migrate existing offenders when touched.
 - **Do not emit `tls:` field** (OpenShell v0.0.30+). The proxy auto-detects TLS via ClientHello peek and terminates unconditionally for credential injection. Writing `tls: terminate` or `tls: passthrough` triggers a per-request `WARN` in the sandbox supervisor log and the field is slated for removal. Omit the field for auto-detect; use `tls: skip` only to explicitly disable termination (raw tunnel).
 - `binaries: path: "**"` not `"/sandbox/**"`. Claude binary lives at `/usr/local/bin/claude`, not under `/sandbox/`.
 - `protocol: rest` and `access: full` are required for HTTPS endpoints so the proxy applies L7 policy on the terminated plaintext.
-- Wildcard domains (`*.anthropic.com`) work — the earlier 403 was caused by the binaries restriction, not wildcard matching.
+- Scoped wildcard domains (`*.anthropic.com`) work — the earlier 403 was caused by the binaries restriction, not wildcard matching.
+- OpenShell v0.0.37+ rejects TLD/global host wildcards. Permissive public internet policy must use hostless public `allowed_ips` endpoints, not a DNS wildcard.
 - CC actively manages `.claude.json` — strips unknown project trust entries on startup. Use `--dangerously-skip-permissions` instead of relying on trust entries.
 - `HTTPS_PROXY=http://10.200.0.1:3128` is set automatically inside sandbox. All HTTP/HTTPS goes through the proxy.
 - **Host service access from sandbox** (`host.openshell.internal`): requires `allowed_ips` in the policy endpoint to bypass SSRF protection. Server must bind `0.0.0.0` (not `127.0.0.1` — loopback is always blocked). Plain HTTP just works (no TLS to terminate). Prefer `host.openshell.internal` over `host.docker.internal` — both resolve to the same IP, but the OpenShell hostname is guaranteed available in all sandboxes regardless of Docker setup.
@@ -527,9 +535,9 @@ theme detection. Do not repeat; migrate existing offenders when touched.
 `~/.right/` is the runtime root (override with `--home`). Critical paths:
 
 - `config.yaml` — global config (tunnel).
-- `agents/<name>/` — per-agent state. Key files: `agent.yaml`, `policy.yaml`, `data.db`, `.claude/.credentials.json` (symlink to `~/.claude/.credentials.json`, host-only — NOT uploaded to sandbox). Subdirs include `crons/`, `inbox/`, `outbox/`, and `tmp/` for staging during attachment transfer. Sandbox-internal: `/sandbox/.claude/projects/-sandbox/<sid>.jsonl` (CC project history, agent-readable for self-introspection via the `/right-reflect` skill); `/sandbox/.claude/logs/<sid>.log` (CC debug output, only present when `/debug` is on).
+- `agents/<name>/` — per-agent state. Key files: `agent.yaml`, `allowlist.yaml`, `policy.yaml`, `data.db`, `.claude/.credentials.json` (symlink to `~/.claude/.credentials.json`, host-only — NOT uploaded to sandbox). Subdirs include `crons/`, `inbox/`, `outbox/`, and `tmp/` for staging during attachment transfer. Sandbox-internal: `/sandbox/.claude/projects/-sandbox/<sid>.jsonl` (CC project history, agent-readable for self-introspection via the `/right-reflect` skill); `/sandbox/.claude/logs/<sid>.log` (CC debug output, only present when `/debug` is on).
 - `run/process-compose.yaml`, `run/state.json` (carries `pc_port` + `pc_api_token`), `run/internal.sock` (bot↔aggregator UDS), `run/ssh/<agent>.ssh-config`.
-- `backups/<agent>/<YYYYMMDD-HHMM>/` — `sandbox.tar.gz` plus optional `agent.yaml` + `data.db` + `policy.yaml` for full backups. `right agent backup` excludes rebuildable sandbox dirs by default (`.cache`, `.venv`, `.npm`, `.uv`); `--include-rebuildable` opts into forensic sandbox archives.
+- `backups/<agent>/<YYYYMMDD-HHMM>/` — `sandbox.tar.gz` plus optional `agent.yaml` + `allowlist.yaml` + `data.db` + `policy.yaml` for full backups. `right agent backup` excludes rebuildable sandbox dirs by default (`.cache`, `.venv`, `.npm`, `.uv`); `--include-rebuildable` opts into forensic sandbox archives.
 - `logs/<agent>.log.<date>` — per-agent daily log rotation. `mcp-aggregator.log` for the shared aggregator.
 - `cache/whisper/ggml-<model>.bin` — STT models (downloaded at `right up`).
 

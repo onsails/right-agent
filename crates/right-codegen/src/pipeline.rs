@@ -441,9 +441,15 @@ pub(crate) mod tests {
         assert!(agent_dir.join("policy.yaml").exists());
         let policy = std::fs::read_to_string(agent_dir.join("policy.yaml")).unwrap();
         assert!(
-            policy.contains(r#"host: "**.*""#),
-            "permissive policy must allow all HTTPS"
+            !policy.contains(r#"host: "**.*""#),
+            "permissive policy must not emit OpenShell-rejected TLD wildcard"
         );
+        assert!(
+            policy.contains("allowed_ips:"),
+            "permissive policy must allow public web through allowed_ips"
+        );
+        assert!(policy.contains("port: 443"));
+        assert!(policy.contains("port: 80"));
     }
 
     #[test]
