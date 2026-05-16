@@ -124,10 +124,14 @@ fn obsolete_builtin_skill_cleanup_error(
     )
 }
 
-/// Files that CC creates/modifies inside the sandbox and should be synced back to host.
-/// Excludes codegen-only files (BOOTSTRAP.md) — those are uploaded by
-/// forward sync and never modified by CC.
-const REVERSE_SYNC_FILES: &[&str] = &["TOOLS.md", "IDENTITY.md", "SOUL.md", "USER.md"];
+/// Files that CC creates/modifies inside the sandbox and must be mirrored to host.
+///
+/// This intentionally excludes TOOLS.md. Sandboxed prompt assembly reads
+/// `/sandbox/TOOLS.md` directly, and current host-side consumers require only
+/// the identity mirror files.
+fn reverse_sync_files() -> &'static [&'static str] {
+    &right_agent::identity_mirror::IDENTITY_MIRROR_FILES
+}
 
 /// Sync .md files from sandbox back to host after a `claude -p` invocation.
 ///
@@ -140,7 +144,7 @@ pub(crate) async fn reverse_sync_md(agent_dir: &Path, sandbox_name: &str) -> mie
     // Download all files concurrently. Each job gets a unique dest path so
     // openshell can never clash on temp files.
     let mut join_set = tokio::task::JoinSet::new();
-    for &filename in REVERSE_SYNC_FILES {
+    for &filename in reverse_sync_files() {
         let sandbox = sandbox_name.to_owned();
         let dl_path = tmp_dir.path().join(format!("dl-{filename}"));
         let sandbox_path = format!("/sandbox/{filename}");
@@ -386,6 +390,15 @@ mod tests {
         assert!(message.contains("rightskills"));
         assert!(message.contains("denied"));
         assert!(message.contains("13"));
+    }
+
+    #[test]
+    fn reverse_sync_files_match_identity_mirror_contract() {
+        assert_eq!(
+            reverse_sync_files(),
+            right_agent::identity_mirror::IDENTITY_MIRROR_FILES
+        );
+        assert!(!reverse_sync_files().contains(&"TOOLS.md"));
     }
 
     #[ignore = "ci-openshell: requires live OpenShell gateway"]

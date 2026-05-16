@@ -158,6 +158,23 @@ impl PcClient {
         self.restart_process("cloudflared").await
     }
 
+    /// Best-effort cloudflared restart: log a warning on failure and continue.
+    ///
+    /// Used by register/destroy/restart paths where a stale tunnel is a
+    /// degraded-but-survivable outcome — propagating the error would roll
+    /// back unrelated successful work (agent registration, removal, restart).
+    pub async fn restart_cloudflared_or_warn(&self, cloudflared_config_changed: bool) {
+        if let Err(e) = self
+            .restart_cloudflared_if_config_changed(cloudflared_config_changed)
+            .await
+        {
+            tracing::warn!(
+                error = format!("{e:#}"),
+                "failed to restart cloudflared after config change"
+            );
+        }
+    }
+
     /// Stop a specific process by name.
     pub async fn stop_process(&self, name: &str) -> miette::Result<()> {
         let resp = self

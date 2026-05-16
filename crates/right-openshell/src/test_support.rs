@@ -4,10 +4,49 @@
 //! Consumers outside `right-agent`'s own test binary depend on the
 //! `test-support` feature.
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::openshell;
 use crate::test_cleanup;
+
+/// Process-wide lock for tests that mutate the global environment (PATH,
+/// arbitrary env vars). Hold this guard for the entire duration of the
+/// mutation to serialize against any other test in the same binary that
+/// touches the process environment.
+pub static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// RAII guard that prepends a directory to `PATH` and restores the prior
+/// value on drop. Tests using this MUST first acquire [`PROCESS_ENV_LOCK`]
+/// so concurrent test threads don't race on the global PATH.
+pub struct PathGuard(Option<OsString>);
+
+impl PathGuard {
+    pub fn prepend(path: &Path) -> Self {
+        let old_path = std::env::var_os("PATH");
+        let mut new_path = OsString::from(path.as_os_str());
+        if let Some(old_path) = &old_path {
+            new_path.push(":");
+            new_path.push(old_path);
+        }
+        unsafe {
+            std::env::set_var("PATH", new_path);
+        }
+        Self(old_path)
+    }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.0 {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
 
 /// Ephemeral test sandbox. Created per test, destroyed on `Drop`. Panic-hook
 /// cleanup in `test_cleanup` handles `panic = "abort"` cases.
@@ -54,7 +93,7 @@ impl TestSandbox {
                 .expect("cleanup of leftover sandbox failed");
         }
 
-        // Minimal policy — fast startup, permissive network (wildcard 443).
+        // Minimal policy — fast startup, public allowed_ips endpoint on 443.
         let tmp = tempfile::tempdir().unwrap();
         let policy_path = tmp.path().join("policy.yaml");
         let policy = "\
@@ -70,8 +109,9 @@ process:
 network_policies:
   outbound:
     endpoints:
-      - host: \"**.*\"
-        port: 443
+      - port: 443
+        allowed_ips:
+          - \"1.1.1.1/32\"
         protocol: rest
         access: full
     binaries:

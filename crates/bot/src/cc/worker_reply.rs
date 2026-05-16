@@ -43,18 +43,12 @@ pub struct ReplyOutput {
     pub bootstrap_complete: Option<bool>,
 }
 
-/// Required identity files that must exist for bootstrap to be accepted as complete.
-const BOOTSTRAP_REQUIRED_FILES: &[&str] = &["IDENTITY.md", "SOUL.md", "USER.md"];
-
-/// Check whether bootstrap completion should be accepted.
+/// Host-mode bootstrap completion check.
 ///
-/// Returns `true` only when all required identity files exist in `agent_dir`.
-/// If any are missing, the agent didn't actually complete the onboarding flow
-/// and bootstrap mode should continue.
+/// Sandboxed bootstrap is verified in `telegram::worker` by reconciling the
+/// authoritative `/sandbox` identity files into the required host mirror.
 pub(crate) fn should_accept_bootstrap(agent_dir: &Path) -> bool {
-    BOOTSTRAP_REQUIRED_FILES
-        .iter()
-        .all(|f| agent_dir.join(f).exists())
+    right_agent::identity_mirror::host_identity_mirror_complete(agent_dir)
 }
 
 /// Parse CC structured JSON output (D-03, D-04).
@@ -382,7 +376,7 @@ mod tests {
     #[test]
     fn should_accept_bootstrap_all_files_present() {
         let dir = tempfile::tempdir().unwrap();
-        for f in BOOTSTRAP_REQUIRED_FILES {
+        for f in right_agent::identity_mirror::IDENTITY_MIRROR_FILES {
             std::fs::write(dir.path().join(f), "# test").unwrap();
         }
         assert!(should_accept_bootstrap(dir.path()));

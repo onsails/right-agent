@@ -1,4 +1,34 @@
 use super::*;
+use crate::test_support::{PROCESS_ENV_LOCK, PathGuard};
+use prost::Message;
+use std::ffi::OsString;
+use std::path::Path;
+
+struct EnvGuard {
+    key: &'static str,
+    old_value: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set_path_value(key: &'static str, value: &Path) -> Self {
+        let old_value = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, old_value }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.old_value {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 #[test]
 fn sandbox_name_prefixes_agent_name() {
@@ -130,6 +160,55 @@ fn gateway_endpoint_from_status_output_reads_active_server_url() {
 }
 
 #[test]
+fn sandbox_response_decodes_openshell_0_0_42_metadata_layout() {
+    fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
+        while value >= 0x80 {
+            buf.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        buf.push(value as u8);
+    }
+
+    fn push_key(buf: &mut Vec<u8>, field: u32, wire_type: u8) {
+        push_varint(buf, u64::from((field << 3) | u32::from(wire_type)));
+    }
+
+    fn push_string(buf: &mut Vec<u8>, field: u32, value: &str) {
+        push_key(buf, field, 2);
+        push_varint(buf, value.len() as u64);
+        buf.extend_from_slice(value.as_bytes());
+    }
+
+    fn push_message(buf: &mut Vec<u8>, field: u32, value: &[u8]) {
+        push_key(buf, field, 2);
+        push_varint(buf, value.len() as u64);
+        buf.extend_from_slice(value);
+    }
+
+    let mut metadata = Vec::new();
+    push_string(&mut metadata, 1, "sandbox-id");
+    push_string(&mut metadata, 2, "right-probe");
+    push_key(&mut metadata, 3, 0);
+    push_varint(&mut metadata, 1_765_000_000_000);
+
+    let mut sandbox = Vec::new();
+    push_message(&mut sandbox, 1, &metadata);
+    push_key(&mut sandbox, 4, 0);
+    push_varint(&mut sandbox, SANDBOX_PHASE_READY as u64);
+
+    let mut response = Vec::new();
+    push_message(&mut response, 1, &sandbox);
+
+    let decoded = proto::SandboxResponse::decode(response.as_slice())
+        .expect("must decode OpenShell v0.0.42 SandboxResponse metadata layout");
+    let sandbox = decoded.sandbox.expect("response must contain sandbox");
+    let metadata = sandbox.metadata.expect("sandbox must contain metadata");
+    assert_eq!(metadata.id, "sandbox-id");
+    assert_eq!(metadata.name, "right-probe");
+    assert_eq!(sandbox.phase, SANDBOX_PHASE_READY);
+}
+
+#[test]
 fn sandbox_tar_download_args_excludes_rebuildable_dirs_by_default() {
     let args = sandbox_tar_download_args("sandbox", false).unwrap();
 
@@ -195,6 +274,86 @@ fn sandbox_tar_download_remote_command_quotes_transform_semicolons_for_shell() {
         .collect();
     let expected_args: Vec<String> = args[1..].iter().map(|arg| format!("<{arg}>")).collect();
     assert_eq!(parsed_args, expected_args);
+}
+
+#[tokio::test]
+async fn ssh_tar_upload_reports_remote_stderr_when_remote_exits_early() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let fake_ssh = bin.join("ssh");
+    std::fs::write(
+        &fake_ssh,
+        "#!/bin/sh\nprintf 'remote tar failed: permission denied\\n' >&2\nexit 23\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let archive = tmp.path().join("sandbox.tar.gz");
+    std::fs::write(&archive, vec![b'x'; 8 * 1024 * 1024]).unwrap();
+
+    let _path_guard = PathGuard::prepend(&bin);
+
+    let err = ssh_tar_upload(Path::new("ignored-config"), "ignored-host", &archive, 5)
+        .await
+        .expect_err("remote stderr should be reported when ssh exits early");
+    let msg = format!("{err:#}");
+
+    assert!(
+        msg.contains("remote tar failed: permission denied"),
+        "error should include remote stderr, got: {msg}"
+    );
+    assert!(
+        msg.contains("exit status: 23"),
+        "error should include remote exit status, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn ssh_tar_upload_extracts_sandbox_archive_under_writable_sandbox_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let args_file = tmp.path().join("ssh-args.txt");
+    let fake_ssh = bin.join("ssh");
+    std::fs::write(
+        &fake_ssh,
+        "#!/bin/sh\nfor arg in \"$@\"; do printf '<%s>\\n' \"$arg\"; done > \"$RIGHT_TEST_SSH_ARGS\"\ncat >/dev/null\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let archive = tmp.path().join("sandbox.tar.gz");
+    std::fs::write(&archive, b"not-a-real-archive").unwrap();
+
+    let _path_guard = PathGuard::prepend(&bin);
+    let _args_guard = EnvGuard::set_path_value("RIGHT_TEST_SSH_ARGS", &args_file);
+
+    ssh_tar_upload(Path::new("config"), "openshell-example", &archive, 5)
+        .await
+        .unwrap();
+
+    let args = std::fs::read_to_string(args_file).unwrap();
+    assert!(
+        args.contains("<-C>\n</sandbox>\n"),
+        "sandbox restore must extract inside /sandbox, got:\n{args}"
+    );
+    assert!(
+        args.contains("<--strip-components=1>\n<sandbox>\n"),
+        "sandbox restore must strip the archived sandbox/ root, got:\n{args}"
+    );
+    assert!(
+        !args.contains("<-C>\n</>\n"),
+        "sandbox restore must not chdir to policy-denied /, got:\n{args}"
+    );
 }
 
 #[test]
@@ -340,6 +499,13 @@ impl open_shell_server::OpenShell for MockOpenShell {
         }
         Ok(tonic::Response::new(proto::SandboxResponse {
             sandbox: Some(crate::openshell_proto::openshell::datamodel::v1::Sandbox {
+                metadata: Some(
+                    crate::openshell_proto::openshell::datamodel::v1::ObjectMeta {
+                        id: "mock-sandbox-id".to_owned(),
+                        name: "mock-sandbox".to_owned(),
+                        ..Default::default()
+                    },
+                ),
                 phase,
                 ..Default::default()
             }),
@@ -617,6 +783,16 @@ async fn is_sandbox_ready_returns_true_when_ready() {
     let result = is_sandbox_ready(&mut client, "test").await;
     assert!(result.is_ok());
     assert!(result.unwrap());
+}
+
+#[tokio::test]
+async fn resolve_sandbox_id_reads_metadata_id() {
+    let (addr, _shutdown) = start_mock_server(MockOpenShell::with_phase(SANDBOX_PHASE_READY)).await;
+    let mut client = mock_client(addr).await;
+
+    let sandbox_id = resolve_sandbox_id(&mut client, "test").await.unwrap();
+
+    assert_eq!(sandbox_id, "mock-sandbox-id");
 }
 
 #[tokio::test]

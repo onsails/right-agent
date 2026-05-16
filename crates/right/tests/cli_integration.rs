@@ -774,6 +774,20 @@ fn test_agent_backup_and_restore_no_sandbox() {
     .unwrap();
     fs::write(agent_dir.join("TOOLS.md"), "# Tools\n").unwrap();
     fs::write(agent_dir.join("policy.yaml"), "version: 1\n").unwrap();
+    let allowlist = "\
+version: 1
+users:
+  - id: 111
+    label: alice
+    added_by: null
+    added_at: 2026-05-16T12:00:00Z
+groups:
+  - id: -222
+    label: ops
+    opened_by: null
+    opened_at: 2026-05-16T12:00:00Z
+";
+    fs::write(agent_dir.join("allowlist.yaml"), allowlist).unwrap();
     fs::write(agent_dir.join("test-file.txt"), "hello world\n").unwrap();
 
     // Create a data.db with a test table.
@@ -792,6 +806,7 @@ fn test_agent_backup_and_restore_no_sandbox() {
         .success()
         .stdout(predicate::str::contains("sandbox.tar.gz"))
         .stdout(predicate::str::contains("agent.yaml"))
+        .stdout(predicate::str::contains("allowlist.yaml"))
         .stdout(predicate::str::contains("data.db"));
 
     // Find backup directory.
@@ -812,6 +827,15 @@ fn test_agent_backup_and_restore_no_sandbox() {
     assert!(
         backup_dir.join("agent.yaml").exists(),
         "should have agent.yaml"
+    );
+    assert!(
+        backup_dir.join("allowlist.yaml").exists(),
+        "should have allowlist.yaml"
+    );
+    assert_eq!(
+        fs::read_to_string(backup_dir.join("allowlist.yaml")).unwrap(),
+        allowlist,
+        "backup must preserve allowlist.yaml content"
     );
     assert!(backup_dir.join("data.db").exists(), "should have data.db");
 
@@ -847,6 +871,11 @@ fn test_agent_backup_and_restore_no_sandbox() {
     assert!(
         restored_dir.join("agent.yaml").exists(),
         "should have agent.yaml"
+    );
+    assert_eq!(
+        fs::read_to_string(restored_dir.join("allowlist.yaml")).unwrap(),
+        allowlist,
+        "restore must preserve allowlist.yaml content"
     );
 
     // Verify the test file was restored from tar (--strip-components=1 used during extraction).

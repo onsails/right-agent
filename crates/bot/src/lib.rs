@@ -776,6 +776,13 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             sandbox_id.clone(),
         );
         sync::initial_sync(&agent_dir, &sbox).await?;
+        if let Err(e) = sync::reverse_sync_md(&agent_dir, sbox.sandbox_name()).await {
+            tracing::warn!(
+                agent = %args.agent,
+                sandbox = %sbox.sandbox_name(),
+                "startup identity mirror sync failed: {e:#}"
+            );
+        }
         let sync_agent_dir = agent_dir.clone();
         let sync_shutdown = shutdown.clone();
         Some(tokio::spawn(sync::run_sync_task(

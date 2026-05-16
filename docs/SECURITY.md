@@ -7,7 +7,7 @@ Right Agent enforces security at the infrastructure level. Every agent runs insi
 Each agent runs inside its own [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox — a k3s container managed via gRPC. Sandboxes are persistent (survive bot restarts) and isolate:
 
 - **Filesystem** — agents can only access paths explicitly allowed by policy
-- **Network** — all traffic routes through an HTTPS proxy (`10.200.0.1:3128`) with domain allowlists
+- **Network** — all traffic routes through an HTTPS proxy (`10.200.0.1:3128`) with endpoint allowlists
 - **Credentials** — each sandbox has its own authentication state, independent of the host
 - **Processes** — agent processes are contained within the sandbox boundary
 
@@ -23,8 +23,8 @@ MCP OAuth tokens are stored per-agent and refreshed automatically (10 minutes be
 
 All sandbox network traffic goes through OpenShell's HTTPS proxy:
 
-- **Domain allowlists** — wildcard patterns (e.g., `*.anthropic.com`, `*.claude.ai`) control which endpoints agents can reach
-- **TLS termination** — the proxy terminates and re-signs TLS with a per-sandbox CA for L7 inspection. Required on all HTTPS endpoints (OpenShell v0.0.23+).
+- **Endpoint allowlists** — restrictive mode uses scoped DNS wildcards (e.g., `*.anthropic.com`, `*.claude.ai`); permissive mode uses hostless public `allowed_ips` ranges. OpenShell v0.0.37+ rejects TLD/global DNS wildcards.
+- **TLS termination** — the proxy terminates and re-signs TLS with a per-sandbox CA for L7 inspection. OpenShell v0.0.30+ auto-detects TLS; generated HTTPS endpoints omit the deprecated `tls` field.
 - **Policy hot-reload** — network rules can be updated without restarting the sandbox via `openshell policy set --wait`
 
 ## Declarative Policies
@@ -32,14 +32,14 @@ All sandbox network traffic goes through OpenShell's HTTPS proxy:
 Each agent gets a generated policy file controlling:
 
 - **Filesystem rules** — read/write paths, binary execution paths
-- **Network rules** — allowed domains, allowed IPs, TLS termination settings
+- **Network rules** — allowed domains, allowed IPs, endpoint protocol/access settings
 - **Binary restrictions** — which executables the agent can run (`path: "**"` for full access, or locked down per-binary)
 
 Policies are regenerated on each `right up` from `agent.yaml` configuration and sandbox override settings.
 
 ## Configuring Policies
 
-**Default behavior:** Out of the box with `network_policy: permissive`, agents can reach any HTTPS endpoint. All traffic still goes through OpenShell's proxy with TLS termination for inspection — but no domain restrictions apply.
+**Default behavior:** Out of the box with `network_policy: permissive`, agents can reach public HTTP/HTTPS endpoints through hostless `allowed_ips` ranges. All allowed traffic still goes through OpenShell's proxy; HTTPS traffic is terminated and re-signed for inspection. Permissive mode is not a DNS wildcard and does not include private/reserved IP ranges.
 
 With `network_policy: restrictive`, only Anthropic and Claude domains are allowed:
 - `*.anthropic.com`, `anthropic.com`
@@ -64,7 +64,7 @@ network_policy: restrictive   # or: permissive
 
 Then run `right up` to regenerate and apply the policy.
 
-**Custom domain allowlists:**
+**Custom endpoint allowlists:**
 
 For fine-grained control beyond restrictive/permissive, edit the generated policy directly:
 
@@ -81,7 +81,6 @@ Add endpoint entries under `network_policies` following OpenShell's format. For 
         port: 443
         protocol: rest
         access: full
-        tls: terminate
     binaries:
       - path: "**"
 ```

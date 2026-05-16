@@ -235,11 +235,17 @@ Agent-owned files live at `/sandbox/` root. Platform-managed files live in `/pla
 
 | File | Path | Synced by |
 |------|------|----------|
-| IDENTITY.md | `agent_dir/IDENTITY.md` | reverse_sync |
-| SOUL.md | `agent_dir/SOUL.md` | reverse_sync |
-| USER.md | `agent_dir/USER.md` | reverse_sync |
-| TOOLS.md | `agent_dir/TOOLS.md` | reverse_sync |
+| IDENTITY.md | `agent_dir/IDENTITY.md` | identity mirror reconciliation |
+| SOUL.md | `agent_dir/SOUL.md` | identity mirror reconciliation |
+| USER.md | `agent_dir/USER.md` | identity mirror reconciliation |
+| TOOLS.md | `agent_dir/TOOLS.md` | init/forward sync seed; not reverse-synced |
 | BOOTSTRAP.md | `agent_dir/BOOTSTRAP.md` | template (deleted after bootstrap) |
+
+For sandboxed agents, `/sandbox/IDENTITY.md`, `/sandbox/SOUL.md`, and
+`/sandbox/USER.md` are the runtime source of truth for prompt assembly. The
+host files under `agent_dir/` are a required explicit mirror for control-plane
+operations, diagnostics, and rebootstrap. Mirror reconciliation runs after
+sandbox restore, on bot startup, and after normal CC invocations.
 
 ## JSON Schemas
 
@@ -267,8 +273,10 @@ Required: `content` (string|null) and `bootstrap_complete` (boolean).
 Optional: `reply_to_message_id`, `attachments`. Bootstrap mode does not include
 normal-mode learned-skill fields (`used_skill_receipts`, `learning_signal`,
 `skill_issue_signal`).
-Server-side validation: `bootstrap_complete: true` is ignored unless IDENTITY.md,
-SOUL.md, USER.md all exist on the host after reverse_sync.
+Server-side validation: `bootstrap_complete: true` is ignored unless
+IDENTITY.md, SOUL.md, and USER.md are verified. For sandboxed agents, the worker
+first reconciles those files from `/sandbox` into the host mirror; no-sandbox
+agents are checked directly in `agent_dir/`.
 
 ### CRON_SCHEMA_JSON (cron jobs — default)
 Defined in `crates/right-codegen/src/agent_def.rs`. Required:
@@ -368,8 +376,9 @@ ARCHITECTURE.md § "Reflection Primitive" for lifecycle details.
 ## Bootstrap Completion Flow
 
 1. Agent sends response with `bootstrap_complete: true` in structured output
-2. Worker runs blocking `reverse_sync_md` (pulls files from sandbox to host)
-3. `should_accept_bootstrap()` checks IDENTITY.md + SOUL.md + USER.md on host
+2. Sandboxed worker reconciles IDENTITY.md + SOUL.md + USER.md from `/sandbox`
+   into the host mirror
+3. No-sandbox worker checks IDENTITY.md + SOUL.md + USER.md in `agent_dir/`
 4. If all present → delete session, delete BOOTSTRAP.md → normal mode
 5. If missing → ignore bootstrap_complete, continue bootstrap mode
 

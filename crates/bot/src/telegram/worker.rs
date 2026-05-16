@@ -206,6 +206,45 @@ pub struct WorkerContext {
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
+async fn should_accept_bootstrap_for_worker(ctx: &WorkerContext) -> bool {
+    should_accept_bootstrap_for_paths(
+        &ctx.agent_dir,
+        &ctx.agent_name,
+        ctx.ssh_config_path.as_deref(),
+        ctx.resolved_sandbox.as_deref(),
+    )
+    .await
+}
+
+async fn should_accept_bootstrap_for_paths(
+    agent_dir: &Path,
+    agent_name: &str,
+    ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
+) -> bool {
+    match (ssh_config_path, resolved_sandbox) {
+        (Some(_), Some(sandbox_name)) => {
+            match right_agent::identity_mirror::sync_identity_mirror_from_sandbox(
+                agent_dir,
+                sandbox_name,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        sandbox = %sandbox_name,
+                        "bootstrap identity mirror sync failed: {e:#}"
+                    );
+                    false
+                }
+            }
+        }
+        _ => should_accept_bootstrap(agent_dir),
+    }
+}
+
 /// Format a CC subprocess error as a Telegram message (D-16).
 ///
 /// Returns HTML intended for `ParseMode::Html`. Callers must fall back to
@@ -921,42 +960,34 @@ pub fn spawn_worker(
                     }
                 };
 
-            // Reverse sync .md changes from sandbox.
-            // Bootstrap mode: BLOCK so files are on host for completion check.
-            // Normal mode: fire-and-forget, don't delay reply.
+            // Keep the host identity mirror fresh after normal sandbox turns.
+            // Bootstrap completion performs an explicit sandbox -> host reconciliation
+            // inside `should_accept_bootstrap_for_worker`, so it does not need this
+            // separate pre-check sync.
             let bootstrap_mode = ctx.agent_dir.join("BOOTSTRAP.md").exists();
-            if ctx.ssh_config_path.is_some() {
+            if ctx.ssh_config_path.is_some() && !bootstrap_mode {
                 let sandbox = ctx.resolved_sandbox.clone().unwrap();
-                if bootstrap_mode {
-                    if let Err(e) = crate::sync::reverse_sync_md(&ctx.agent_dir, &sandbox).await {
-                        tracing::warn!(
-                            agent = %ctx.agent_name,
-                            "bootstrap reverse sync failed: {e:#}"
-                        );
+                let agent_dir = ctx.agent_dir.clone();
+                let agent_name = ctx.agent_name.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::sync::reverse_sync_md(&agent_dir, &sandbox).await {
+                        tracing::warn!(agent = %agent_name, "reverse sync failed: {e:#}");
                     }
-                } else {
-                    let agent_dir = ctx.agent_dir.clone();
-                    let agent_name = ctx.agent_name.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::sync::reverse_sync_md(&agent_dir, &sandbox).await {
-                            tracing::warn!(agent = %agent_name, "reverse sync failed: {e:#}");
-                        }
-                    });
-                }
+                });
             }
 
-            // Bootstrap completion: check if identity files are now on host after sync.
+            // Bootstrap completion: verify identity files before accepting completion.
             // MCP tool bootstrap_done may have already deleted BOOTSTRAP.md, but
             // we also check here as a safety net (handles no-sandbox mode too).
             let bootstrap_signaled = matches!(
                 &reply_result,
                 Ok(Some(output)) if output.bootstrap_complete == Some(true)
             );
-            if bootstrap_mode && bootstrap_signaled && should_accept_bootstrap(&ctx.agent_dir) {
-                tracing::info!(
-                    key = ?key,
-                    "bootstrap complete — identity files present after sync"
-                );
+            if bootstrap_mode
+                && bootstrap_signaled
+                && should_accept_bootstrap_for_worker(&ctx).await
+            {
+                tracing::info!(key = ?key, "bootstrap complete — identity files verified");
                 // Open a short-lived connection to deactivate the session.
                 if let Ok(conn) = right_db::open_connection(&ctx.agent_dir, false) {
                     deactivate_current(&conn, chat_id, eff_thread_id)
@@ -2937,6 +2968,60 @@ async fn send_error_to_telegram(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use right_openshell::test_support::{PROCESS_ENV_LOCK, PathGuard};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn sandbox_bootstrap_acceptance_materializes_identity_mirror_from_sandbox() {
+        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let fake_openshell = bin.join("openshell");
+        std::fs::write(
+            &fake_openshell,
+            r#"#!/bin/sh
+set -eu
+if [ "$1" != "sandbox" ] || [ "$2" != "download" ]; then
+  exit 64
+fi
+sandbox="$3"
+src="$4"
+dest="$5"
+if [ "$sandbox" != "right-test-sandbox" ]; then
+  exit 65
+fi
+case "$src" in
+  /sandbox/IDENTITY.md) printf '# identity\n' > "$dest/IDENTITY.md" ;;
+  /sandbox/SOUL.md) printf '# soul\n' > "$dest/SOUL.md" ;;
+  /sandbox/USER.md) printf '# user\n' > "$dest/USER.md" ;;
+  *) exit 66 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_openshell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _path_guard = PathGuard::prepend(&bin);
+
+        let agent_dir = tmp.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        let ssh_config = tmp.path().join("sandbox.ssh-config");
+
+        assert!(
+            should_accept_bootstrap_for_paths(
+                &agent_dir,
+                "right-test-agent",
+                Some(&ssh_config),
+                Some("right-test-sandbox"),
+            )
+            .await
+        );
+        assert!(right_agent::identity_mirror::host_identity_mirror_complete(
+            &agent_dir
+        ));
+    }
+
     // format_error_reply tests
     #[test]
     fn error_reply_contains_exit_code_and_stderr() {

@@ -5,8 +5,8 @@ use std::process::Command;
 use serde::Deserialize;
 
 use right_agent::agent::discover_agents;
-use right_config::{TunnelConfig, read_global_config, write_global_config};
 use right_agent::init::validate_telegram_token;
+use right_config::{TunnelConfig, read_global_config, write_global_config};
 
 /// Every user-visible string from every prompt in the wizard — labels, Select
 /// options, and static prefixes of dynamic-format prompts. This is the
@@ -35,7 +35,7 @@ pub(crate) const PROMPT_LABELS: &[&str] = &[
     "settings:",
     "tunnel name:",
     "select agent:",
-    "agent: ",  // dynamic prefix (CombinedMenuItem::Agent)
+    "agent: ", // dynamic prefix (CombinedMenuItem::Agent)
     "done",
     // agent_setting_menu sub-prompts
     "model (e.g. sonnet, opus, haiku — empty to clear):",
@@ -399,13 +399,11 @@ fn handle_existing_tunnel(
         }
 
         TunnelExistingAction::DeleteAndRecreate => {
-            let confirmed = inquire::Confirm::new(&format!(
-                "delete tunnel \"{}\" permanently?",
-                existing.name
-            ))
-            .with_default(false)
-            .prompt()
-            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let confirmed =
+                inquire::Confirm::new(&format!("delete tunnel \"{}\" permanently?", existing.name))
+                    .with_default(false)
+                    .prompt()
+                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
             if !confirmed {
                 return Err(miette::miette!("cancelled"));
@@ -759,12 +757,15 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
         options.push(opt_done.clone());
 
         let theme = right_ui::detect();
-        println!("{}", right_ui::section(theme, &format!("agent: {chosen_name}")));
+        println!(
+            "{}",
+            right_ui::section(theme, &format!("agent: {chosen_name}"))
+        );
         println!("{}", right_ui::Rail::blank(theme));
 
         let selection = inquire::Select::new("settings:", options)
-                .prompt()
-                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            .prompt()
+            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
 
         if selection == opt_done {
             break;
@@ -797,10 +798,9 @@ pub async fn agent_setting_menu(home: &Path, agent_name: Option<&str>) -> miette
             }
             Some("model")
         } else if selection == opt_chat_ids {
-            let input =
-                inquire::Text::new("allowed chat ids (comma-separated, empty to clear):")
-                    .prompt()
-                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let input = inquire::Text::new("allowed chat ids (comma-separated, empty to clear):")
+                .prompt()
+                .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             let trimmed = input.trim();
             if trimmed.is_empty() {
                 update_agent_yaml_chat_ids(&agent_yaml_path, &[])?;
@@ -1105,12 +1105,11 @@ pub fn prompt_ffmpeg_install() -> miette::Result<bool> {
                 println!("Then run: brew install ffmpeg");
                 return Ok(false);
             }
-            let install = inquire::Confirm::new(
-                "ffmpeg required for voice transcription. install via brew?",
-            )
-            .with_default(true)
-            .prompt()
-            .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
+            let install =
+                inquire::Confirm::new("ffmpeg required for voice transcription. install via brew?")
+                    .with_default(true)
+                    .prompt()
+                    .map_err(|e| miette::miette!("prompt failed: {e:#}"))?;
             let theme = right_ui::detect();
             if !install {
                 println!(
@@ -1772,8 +1771,7 @@ mod voice_pass {
         for label in PROMPT_LABELS {
             let first = label.chars().next().unwrap();
             assert!(
-                !first.is_uppercase()
-                    || ALLOWED_PROPER_NOUNS.iter().any(|p| label.starts_with(p)),
+                !first.is_uppercase() || ALLOWED_PROPER_NOUNS.iter().any(|p| label.starts_with(p)),
                 "prompt has uppercase first letter: {label:?}"
             );
         }

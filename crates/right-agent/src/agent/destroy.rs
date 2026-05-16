@@ -26,7 +26,7 @@ pub struct DestroyResult {
 ///
 /// For non-sandboxed agents: tars the agent directory (excluding data.db).
 /// For sandboxed agents: attempts SSH tar of sandbox, falls back to config-only backup.
-/// Always copies agent.yaml, policy.yaml, and VACUUM-copies data.db.
+/// Always copies agent.yaml, policy.yaml, allowlist.yaml, and VACUUM-copies data.db.
 async fn run_backup(
     home: &Path,
     agent_name: &str,
@@ -81,7 +81,7 @@ async fn run_backup(
         }
     }
 
-    for filename in &["agent.yaml", "policy.yaml"] {
+    for filename in &["agent.yaml", "policy.yaml", "allowlist.yaml"] {
         let src = agent_dir.join(filename);
         if src.exists() {
             std::fs::copy(&src, backup_dir.join(filename))
@@ -289,17 +289,9 @@ pub async fn destroy_agent(home: &Path, options: &DestroyOptions) -> miette::Res
                     "reloaded process-compose configuration"
                 );
                 result.pc_reloaded = true;
-                if let Err(e) = pc_client
-                    .restart_cloudflared_if_config_changed(
-                        codegen_outcome.cloudflared_config_changed,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        error = format!("{e:#}"),
-                        "failed to restart cloudflared after config change"
-                    );
-                }
+                pc_client
+                    .restart_cloudflared_or_warn(codegen_outcome.cloudflared_config_changed)
+                    .await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -430,6 +422,44 @@ mod tests {
         assert!(
             result.dir_removed,
             "agent dir should be removed after backup"
+        );
+    }
+
+    #[tokio::test]
+    async fn destroy_with_backup_copies_allowlist_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+
+        let agents_dir = home.join("agents").join("backup-allowlist");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("agent.yaml"), "sandbox:\n  mode: none\n").unwrap();
+        let allowlist = "\
+version: 1
+users:
+  - id: 111
+    label: alice
+    added_by: null
+    added_at: 2026-05-16T12:00:00Z
+groups:
+  - id: -222
+    label: ops
+    opened_by: null
+    opened_at: 2026-05-16T12:00:00Z
+";
+        std::fs::write(agents_dir.join("allowlist.yaml"), allowlist).unwrap();
+
+        let options = DestroyOptions {
+            agent_name: "backup-allowlist".into(),
+            backup: true,
+        };
+
+        let result = destroy_agent(home, &options).await.unwrap();
+        let backup_path = result.backup_path.expect("backup path must be recorded");
+
+        assert_eq!(
+            std::fs::read_to_string(backup_path.join("allowlist.yaml")).unwrap(),
+            allowlist,
+            "pre-destroy backup must preserve allowlist.yaml outside sandbox.tar.gz"
         );
     }
 }

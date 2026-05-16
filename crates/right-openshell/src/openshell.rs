@@ -920,8 +920,8 @@ fn sandbox_tar_download_args(
 
 /// Stream a local tar.gz file into the sandbox via SSH `tar xzpf -`.
 ///
-/// Pipes `src_path` to SSH stdin, running `tar xzpf - -C /` inside the sandbox.
-/// Archive paths like `sandbox/...` are extracted to `/sandbox/...`.
+/// Pipes `src_path` to SSH stdin, extracting the archived `sandbox/...` root
+/// into the writable `/sandbox` directory.
 pub async fn ssh_tar_upload(
     config_path: &Path,
     ssh_host: &str,
@@ -932,7 +932,15 @@ pub async fn ssh_tar_upload(
     command.arg("-F").arg(config_path);
     command.arg(ssh_host);
     command.arg("--");
-    command.args(["tar", "xzpf", "-", "-C", "/"]);
+    command.args([
+        "tar",
+        "xzpf",
+        "-",
+        "-C",
+        "/sandbox",
+        "--strip-components=1",
+        "sandbox",
+    ]);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -967,18 +975,27 @@ pub async fn ssh_tar_upload(
     };
 
     let timeout_dur = Duration::from_secs(timeout_secs);
-    let ((), output) =
-        tokio::time::timeout(timeout_dur, async { tokio::try_join!(write_fut, wait_fut) })
+    let (write_result, output_result) =
+        tokio::time::timeout(timeout_dur, async { tokio::join!(write_fut, wait_fut) })
             .await
-            .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))??;
+            .map_err(|_| miette::miette!("ssh tar upload timed out after {timeout_secs}s"))?;
+
+    let output = output_result?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let local_error = write_result
+            .as_ref()
+            .err()
+            .map(|e| format!("; local upload error: {e:#}"))
+            .unwrap_or_default();
         return Err(miette::miette!(
-            "ssh tar upload failed (exit {}): {stderr}",
-            output.status
+            "ssh tar upload failed (exit {}): {stderr}{local_error}",
+            output.status,
         ));
     }
+
+    write_result?;
     Ok(())
 }
 
@@ -1416,7 +1433,16 @@ pub async fn resolve_sandbox_id(
         .sandbox
         .ok_or_else(|| miette::miette!("GetSandbox returned empty response for '{name}'"))?;
 
-    Ok(sandbox.id)
+    let metadata = sandbox.metadata.ok_or_else(|| {
+        miette::miette!("GetSandbox returned sandbox without metadata for '{name}'")
+    })?;
+    if metadata.id.is_empty() {
+        return Err(miette::miette!(
+            "GetSandbox returned sandbox metadata without id for '{name}'"
+        ));
+    }
+
+    Ok(metadata.id)
 }
 
 /// Execute a command inside a sandbox via gRPC `ExecSandbox` (single attempt).
