@@ -26,7 +26,9 @@
   env.CARGO_TARGET_DIR = "target/devenv";
 
   enterShell = ''
-    echo "Right Agent dev environment"
+    case "$-" in
+      *i*) echo "Right Agent dev environment" ;;
+    esac
   '';
 
   enterTest = ''
