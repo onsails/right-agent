@@ -2754,9 +2754,18 @@ async fn cmd_reload(home: &Path, _agents_filter: Option<Vec<String>>) -> miette:
     let self_exe = std::env::current_exe()
         .map_err(|e| miette::miette!("failed to resolve current executable path: {e:#}"))?;
 
-    right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
+    let codegen_outcome = right_codegen::run_agent_codegen(home, &all_agents, &self_exe, false)?;
 
     client.reload_configuration().await?;
+    if let Err(e) = client
+        .restart_cloudflared_if_config_changed(codegen_outcome.cloudflared_config_changed)
+        .await
+    {
+        tracing::warn!(
+            error = format!("{e:#}"),
+            "failed to restart cloudflared after config change"
+        );
+    }
 
     // Notify aggregator to pick up new agents from updated token map
     let socket_path = home.join("run/internal.sock");
