@@ -105,7 +105,12 @@ right agent rebootstrap <name> [-y]
 
 right agent init <name> --from-backup <path>
   ├─ Validate: agent must not exist, backup has sandbox.tar.gz + agent.yaml
+  ├─ Read backup.json when present, or infer legacy source from backup path
+  ├─ Resolve restore binding mode for clone-sensitive implicit defaults
+  ├─ Fail before creating target agent state if binding mode is required
   ├─ Restore config files to new agent dir
+  ├─ Normalize restored agent.yaml before codegen/sandbox creation
+  ├─ Warn when clone restore copies explicit external state (Telegram, MCP, cron)
   ├─ Create new sandbox with timestamped name
   ├─ Restore sandbox files via SSH tar
   ├─ Write sandbox.name to agent.yaml
