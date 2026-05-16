@@ -176,6 +176,24 @@ pub(crate) fn decide_restore(
     })
 }
 
+pub(crate) fn restore_binding_choice_required(
+    home: &Path,
+    target_agent: &str,
+    backup_dir: &Path,
+    config: &AgentConfig,
+) -> miette::Result<bool> {
+    let Some(memory) = config.memory.as_ref() else {
+        return Ok(false);
+    };
+    if memory.provider != MemoryProvider::Hindsight || memory.bank_id.is_some() {
+        return Ok(false);
+    }
+
+    let manifest = read_backup_manifest(backup_dir)?;
+    let source = resolve_source(home, backup_dir, manifest.as_ref());
+    Ok(source.source_agent.as_deref() != Some(target_agent))
+}
+
 fn resolve_source(
     home: &Path,
     backup_dir: &Path,
