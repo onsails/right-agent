@@ -24,8 +24,15 @@ right up [--agents x,y] [--detach] [--no-sandbox]
   ├─ Per agent: resolve secret for token map (generate if missing)
   ├─ Generate agent-tokens.json
   ├─ Generate process-compose.yaml (minijinja)
-  ├─ Generate cloudflared config (if tunnel)
+  ├─ Generate cloudflared config and record whether content changed
   └─ Launch process-compose (TUI or detached)
+
+right reload / running agent register / running agent destroy
+  ├─ Discover agents from agents/ directory
+  ├─ Run cross-agent codegen and record whether cloudflared config content changed
+  ├─ POST /project/configuration to process-compose
+  ├─ If cloudflared config changed: restart `cloudflared` via process-compose
+  └─ Notify aggregator reload path when applicable
 
 right bot --agent <name>  (spawned by process-compose)
   ├─ Resolve token, open data.db
