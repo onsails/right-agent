@@ -88,6 +88,7 @@ jobs:
     timeout-minutes: 60
     env:
       OPENSHELL_VERSION: "v0.0.42"
+      OPENSHELL_DRIVERS: "docker"
       RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
       RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
       RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
@@ -110,6 +111,7 @@ jobs:
           secret="$(openssl rand -hex 32)"
           echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
           systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
+          systemctl --user set-environment OPENSHELL_DRIVERS="$OPENSHELL_DRIVERS"
           curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION="$OPENSHELL_VERSION" OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
           openshell --version
           openshell --help
@@ -151,6 +153,7 @@ jobs:
     timeout-minutes: 60
     env:
       OPENSHELL_VERSION: "v0.0.42"
+      OPENSHELL_DRIVERS: "docker"
       RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "1"
       RIGHT_TEST_SANDBOX_READY_TIMEOUT_SECS: "360"
       RIGHT_TEST_SANDBOX_SSH_TIMEOUT_SECS: "120"
@@ -173,6 +176,7 @@ jobs:
           secret="$(openssl rand -hex 32)"
           echo "OPENSHELL_SSH_HANDSHAKE_SECRET=$secret" >> "$GITHUB_ENV"
           systemctl --user set-environment OPENSHELL_SSH_HANDSHAKE_SECRET="$secret"
+          systemctl --user set-environment OPENSHELL_DRIVERS="$OPENSHELL_DRIVERS"
           curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION="$OPENSHELL_VERSION" OPENSHELL_SSH_HANDSHAKE_SECRET="$secret" sh
           openshell --version
           openshell --help
