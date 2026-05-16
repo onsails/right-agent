@@ -2958,7 +2958,41 @@ async fn cmd_agent_restore(
         ));
     }
 
-    // 2. Create agent dir and restore config files.
+    // 2. Parse backup config and resolve binding semantics before creating
+    // partial target state. Direct restores with ambiguous implicit Hindsight
+    // bindings must fail without leaving home/agents/<target> behind.
+    let backup_config = right_agent::agent::discovery::parse_agent_config(backup_path)?;
+    let backup_config = backup_config.ok_or_else(|| {
+        miette::miette!(
+            "agent.yaml exists but parsed config is unavailable at {}",
+            backup_path.display()
+        )
+    })?;
+    let is_sandboxed = backup_config.is_sandboxed();
+
+    let effective_restore_binding_mode = if matches!(
+        restore_binding_mode,
+        restore::RestoreBindingMode::Interactive
+    ) {
+        if restore::restore_binding_choice_required(home, agent_name, backup_path, &backup_config)?
+        {
+            prompt_restore_binding_mode()?
+        } else {
+            restore::RestoreBindingMode::DirectUnspecified
+        }
+    } else {
+        restore_binding_mode
+    };
+
+    let restore_decision = restore::decide_restore(
+        home,
+        agent_name,
+        backup_path,
+        &backup_config,
+        effective_restore_binding_mode,
+    )?;
+
+    // 3. Create agent dir and restore config files.
     std::fs::create_dir_all(&agent_dir)
         .into_diagnostic()
         .map_err(|e| {
@@ -2976,48 +3010,22 @@ async fn cmd_agent_restore(
         }
     }
 
-    // 3. Parse restored config, resolve restore binding semantics, then
-    // normalize restored agent.yaml before codegen or sandbox creation can use it.
-    let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
-    let config = config.ok_or_else(|| {
-        miette::miette!(
-            "agent.yaml restored but parsed config is unavailable at {}",
-            agent_dir.display()
-        )
-    })?;
-
-    let effective_restore_binding_mode = if matches!(
-        restore_binding_mode,
-        restore::RestoreBindingMode::Interactive
-    ) {
-        prompt_restore_binding_mode()?
-    } else {
-        restore_binding_mode
-    };
-
-    let restore_decision = restore::decide_restore(
-        home,
-        agent_name,
-        backup_path,
-        &config,
-        effective_restore_binding_mode,
-    )?;
-
-    restore::apply_memory_action(
-        &agent_dir.join("agent.yaml"),
-        config,
-        restore_decision.memory_action,
-    )?;
-
-    for warning in restore_decision.warnings {
-        eprintln!("warning: {warning}");
-    }
-
-    let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
-    let is_sandboxed = config.as_ref().map(|c| c.is_sandboxed()).unwrap_or(true);
-
     if is_sandboxed {
-        // 4. Sandboxed restore: create new sandbox, upload tar contents.
+        // 4. Sandboxed restore: normalize restored agent.yaml before codegen
+        // or sandbox creation can use it, then create new sandbox and upload
+        // tar contents.
+        restore::apply_memory_action(
+            &agent_dir.join("agent.yaml"),
+            backup_config.clone(),
+            restore_decision.memory_action.clone(),
+        )?;
+
+        for warning in &restore_decision.warnings {
+            eprintln!("warning: {warning}");
+        }
+
+        let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
+
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M").to_string();
         let new_sandbox_name = format!("right-{agent_name}-{timestamp}");
 
@@ -3156,6 +3164,25 @@ async fn cmd_agent_restore(
                 "tar extraction failed with status {status}"
             ));
         }
+
+        restore::apply_memory_action(
+            &agent_dir.join("agent.yaml"),
+            backup_config,
+            restore_decision.memory_action,
+        )?;
+
+        for warning in restore_decision.warnings {
+            eprintln!("warning: {warning}");
+        }
+
+        let config = right_agent::agent::discovery::parse_agent_config(&agent_dir)?;
+        if config.is_none() {
+            return Err(miette::miette!(
+                "agent.yaml restored but parsed config is unavailable at {}",
+                agent_dir.display()
+            ));
+        }
+
         println!("Agent files restored");
     }
 

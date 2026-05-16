@@ -868,6 +868,101 @@ fn test_agent_backup_and_restore_no_sandbox() {
 }
 
 #[test]
+fn test_agent_restore_fails_before_partial_agent_for_missing_binding_mode() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+    let backup_dir = home
+        .path()
+        .join("backups")
+        .join("source-agent")
+        .join("20260516-0117");
+    fs::create_dir_all(&backup_dir).unwrap();
+    fs::write(backup_dir.join("sandbox.tar.gz"), "not a real tar").unwrap();
+    fs::write(
+        backup_dir.join("agent.yaml"),
+        "sandbox:\n  mode: none\nmemory:\n  provider: hindsight\n",
+    )
+    .unwrap();
+
+    right()
+        .args([
+            "--home",
+            home_str,
+            "agent",
+            "init",
+            "restored-agent",
+            "--from-backup",
+            backup_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires an explicit binding mode",
+        ));
+
+    assert!(
+        !home.path().join("agents").join("restored-agent").exists(),
+        "binding-mode rejection must not leave a partial target agent directory"
+    );
+}
+
+#[test]
+fn test_agent_backup_and_restore_no_sandbox_preserves_source_hindsight_bank() {
+    let home = tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+
+    let agent_dir = home.path().join("agents").join("source-agent");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        agent_dir.join("agent.yaml"),
+        "sandbox:\n  mode: none\nmemory:\n  provider: hindsight\n",
+    )
+    .unwrap();
+    fs::write(agent_dir.join("IDENTITY.md"), "# Source Agent\n").unwrap();
+
+    right()
+        .args(["--home", home_str, "agent", "backup", "source-agent"])
+        .assert()
+        .success();
+
+    let backups_dir = home.path().join("backups").join("source-agent");
+    let entries: Vec<_> = fs::read_dir(&backups_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "should have exactly one backup");
+    let backup_dir = entries[0].path();
+
+    fs::remove_dir_all(&agent_dir).unwrap();
+    fs::write(
+        home.path().join("config.yaml"),
+        minimal_config_yaml(home.path()),
+    )
+    .unwrap();
+
+    right()
+        .args([
+            "--home",
+            home_str,
+            "agent",
+            "init",
+            "restored-agent",
+            "--from-backup",
+            backup_dir.to_str().unwrap(),
+            "--preserve-source-bindings",
+        ])
+        .assert()
+        .success();
+
+    let restored_yaml =
+        fs::read_to_string(home.path().join("agents/restored-agent/agent.yaml")).unwrap();
+    assert!(
+        restored_yaml.contains("bank_id: \"source-agent\""),
+        "restored agent.yaml must preserve the source Hindsight bank after tar extraction, got:\n{restored_yaml}"
+    );
+}
+
+#[test]
 fn test_agent_backup_sandbox_only() {
     let home = tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
