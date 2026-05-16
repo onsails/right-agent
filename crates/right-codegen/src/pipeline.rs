@@ -8,7 +8,9 @@ use right_runtime_state::{
 };
 
 use crate::cloudflared::CloudflaredCredentials;
-use crate::contract::{write_agent_owned, write_merged_rmw, write_regenerated};
+use crate::contract::{
+    write_agent_owned, write_merged_rmw, write_regenerated, write_regenerated_detect_change,
+};
 
 /// Inject a secret into agent.yaml if not already present.
 /// Returns the existing or newly generated secret.
@@ -190,6 +192,15 @@ pub fn run_single_agent_codegen(
     Ok(agent_secret)
 }
 
+/// Observable effects from cross-agent codegen.
+///
+/// Callers that already have a running process-compose instance use this to
+/// restart long-lived processes that do not hot-reload rewritten files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodegenOutcome {
+    pub cloudflared_config_changed: bool,
+}
+
 /// Run cross-agent codegen pipeline.
 ///
 /// Generates: agent-tokens.json, process-compose.yaml, cloudflared config, runtime state.
@@ -203,12 +214,13 @@ pub fn run_agent_codegen(
     all_agents: &[AgentDef],
     self_exe: &Path,
     debug: bool,
-) -> miette::Result<()> {
+) -> miette::Result<CodegenOutcome> {
     let run_dir = home.join("run");
     std::fs::create_dir_all(&run_dir)
         .map_err(|e| miette::miette!("failed to create run directory: {e:#}"))?;
 
     let global_cfg = right_config::read_global_config(home)?;
+    let mut outcome = CodegenOutcome::default();
 
     // Resolve agent secrets for token map.
     // Per-agent codegen is now done by the bot at startup (run_single_agent_codegen).
@@ -277,7 +289,8 @@ pub fn run_agent_codegen(
             &creds,
         )?;
         let cf_config_path = home.join("cloudflared-config.yml");
-        write_regenerated(&cf_config_path, &cf_config)?;
+        outcome.cloudflared_config_changed =
+            write_regenerated_detect_change(&cf_config_path, &cf_config)?;
         tracing::info!(path = %cf_config_path.display(), "cloudflared config written");
 
         // Write DNS routing wrapper script.
@@ -349,7 +362,7 @@ pub fn run_agent_codegen(
     };
     write_state(&state, &state_path)?;
 
-    Ok(())
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -407,7 +420,7 @@ pub(crate) mod tests {
         std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
         std::fs::write(
             agent_dir.join("agent.yaml"),
-            "restart: never\nnetwork_policy: permissive\n",
+            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: none\n",
         )
         .unwrap();
 
@@ -470,6 +483,63 @@ pub(crate) mod tests {
         assert!(home.join("run/process-compose.yaml").exists());
         // state.json should exist
         assert!(home.join("run/state.json").exists());
+    }
+
+    #[test]
+    fn run_agent_codegen_reports_new_cloudflared_config_changed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        write_minimal_global_config(home);
+
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: none\n",
+        )
+        .unwrap();
+
+        let agent = agent_fixture(&agent_dir);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+
+        let outcome =
+            run_agent_codegen(home, std::slice::from_ref(&agent), &self_exe, false).unwrap();
+
+        assert!(
+            outcome.cloudflared_config_changed,
+            "first cloudflared config write must be reported as changed"
+        );
+    }
+
+    #[test]
+    fn run_agent_codegen_reports_unchanged_cloudflared_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        write_minimal_global_config(home);
+
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: none\n",
+        )
+        .unwrap();
+
+        let agent = agent_fixture(&agent_dir);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+
+        let first =
+            run_agent_codegen(home, std::slice::from_ref(&agent), &self_exe, false).unwrap();
+        let second =
+            run_agent_codegen(home, std::slice::from_ref(&agent), &self_exe, false).unwrap();
+
+        assert!(first.cloudflared_config_changed);
+        assert!(
+            !second.cloudflared_config_changed,
+            "second identical cloudflared config write must not be reported as changed"
+        );
     }
 
     #[test]
