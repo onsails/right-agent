@@ -59,6 +59,30 @@ pub fn write_regenerated(path: &Path, content: &str) -> miette::Result<()> {
         .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))
 }
 
+/// Unconditional write that also reports whether the file content changed.
+///
+/// This keeps `Regenerated` write semantics intact: callers still rewrite the
+/// file every time, but can use the returned flag to decide whether a running
+/// process must be restarted to read the new content.
+pub fn write_regenerated_detect_change(path: &Path, content: &str) -> miette::Result<bool> {
+    ensure_parent_dir(path)?;
+
+    let changed = match std::fs::read(path) {
+        Ok(existing) => existing != content.as_bytes(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            return Err(miette::miette!(
+                "failed to read existing {} before write: {e:#}",
+                path.display()
+            ));
+        }
+    };
+
+    std::fs::write(path, content)
+        .map_err(|e| miette::miette!("failed to write {}: {e:#}", path.display()))?;
+    Ok(changed)
+}
+
 /// Byte-variant of [`write_regenerated`] for callers with non-UTF-8 content
 /// (bundled binary assets, etc.). Identical semantics — unconditional
 /// overwrite, creates parent directories.
@@ -259,6 +283,54 @@ mod tests {
         let path = dir.path().join("a/b/c/file.txt");
         write_regenerated(&path, "hello").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+    }
+
+    #[test]
+    fn write_regenerated_detect_change_reports_new_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub/file.txt");
+
+        let changed = write_regenerated_detect_change(&path, "first").unwrap();
+
+        assert!(changed, "new file must count as changed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+    }
+
+    #[test]
+    fn write_regenerated_detect_change_reports_same_content_unchanged() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub/file.txt");
+
+        write_regenerated_detect_change(&path, "first").unwrap();
+        let changed = write_regenerated_detect_change(&path, "first").unwrap();
+
+        assert!(!changed, "identical content must not count as changed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+    }
+
+    #[test]
+    fn write_regenerated_detect_change_reports_different_content_changed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub/file.txt");
+
+        write_regenerated_detect_change(&path, "first").unwrap();
+        let changed = write_regenerated_detect_change(&path, "second").unwrap();
+
+        assert!(changed, "different content must count as changed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    #[test]
+    fn write_regenerated_detect_change_overwrites_non_utf8_existing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sub/file.txt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, [0xff, 0xfe, b'x']).unwrap();
+
+        let changed = write_regenerated_detect_change(&path, "repaired").unwrap();
+
+        assert!(changed, "non-UTF-8 existing content must count as changed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "repaired");
     }
 
     #[test]
