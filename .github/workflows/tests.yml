@@ -90,7 +90,7 @@ jobs:
         id: stt_tests
         continue-on-error: true
         run: |
-          devenv shell -- cargo test --workspace --no-fail-fast --locked ci_stt -- --ignored
+          devenv shell -- cargo test --workspace --lib --bins --tests --no-fail-fast --locked ci_stt -- --ignored
 
       - name: Check Docker runtime
         run: |
@@ -133,7 +133,7 @@ jobs:
         env:
           RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "1"
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_claude -- --ignored"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked ci_claude -- --ignored"
 
       - name: Run OpenShell ignored tests
         id: openshell_tests
@@ -141,7 +141,7 @@ jobs:
         env:
           RIGHT_MAX_CONCURRENT_SANDBOX_TESTS: "2"
         run: |
-          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --no-fail-fast --locked ci_openshell -- --ignored"
+          devenv shell -- bash -lc "export PATH=\"\$PATH:/usr/local/bin:/usr/bin\"; cargo test --workspace --lib --bins --tests --no-fail-fast --locked ci_openshell -- --ignored"
 
       - name: Dump OpenShell diagnostics
         if: ${{ failure() || steps.claude_tests.outcome == 'failure' || steps.openshell_tests.outcome == 'failure' }}
