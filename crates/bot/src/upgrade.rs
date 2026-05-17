@@ -14,6 +14,17 @@ const UPGRADE_INTERVAL: Duration = Duration::from_secs(8 * 3600);
 
 /// Timeout for `claude upgrade` SSH command (2 minutes).
 const UPGRADE_TIMEOUT_SECS: u64 = 120;
+const CLAUDE_UPGRADE_SCRIPT: &str = r#"output="$(claude upgrade 2>&1)"
+status=$?
+printf '%s\n' "$output"
+if [ "$status" -eq 1 ]; then
+  case "$output" in
+    *"Current version"*"up to date"*) exit 0 ;;
+  esac
+fi
+exit "$status"
+"#;
+const CLAUDE_UPGRADE_CMD: [&str; 3] = ["bash", "-lc", CLAUDE_UPGRADE_SCRIPT];
 
 /// Run a single upgrade attempt at startup (blocking).
 /// Called before cron/telegram tasks exist — no lock needed.
@@ -103,7 +114,7 @@ async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
     let result = right_openshell::openshell::ssh_exec(
         ssh_config_path,
         ssh_host,
-        &["claude", "upgrade"],
+        &CLAUDE_UPGRADE_CMD,
         UPGRADE_TIMEOUT_SECS,
     )
     .await;
@@ -113,7 +124,7 @@ async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
             let stdout = stdout.trim();
             if stdout.contains("Successfully updated") {
                 tracing::info!(agent = %agent_name, output = %stdout, "claude upgraded");
-            } else if stdout.contains("already") || stdout.contains("up to date") {
+            } else if claude_upgrade_up_to_date(stdout) || stdout.contains("already") {
                 tracing::info!(agent = %agent_name, "claude is up to date");
             } else {
                 tracing::info!(agent = %agent_name, output = %stdout, "claude upgrade completed");
@@ -123,6 +134,15 @@ async fn run_upgrade(ssh_config_path: &Path, ssh_host: &str, agent_name: &str) {
             tracing::error!(agent = %agent_name, "claude upgrade failed: {e:#}");
         }
     }
+}
+
+#[cfg(test)]
+fn claude_upgrade_success(exit: i32, stdout: &str) -> bool {
+    exit == 0 || (exit == 1 && claude_upgrade_up_to_date(stdout))
+}
+
+fn claude_upgrade_up_to_date(stdout: &str) -> bool {
+    stdout.contains("Current version") && stdout.contains("up to date")
 }
 
 #[cfg(test)]
@@ -190,5 +210,16 @@ mod tests {
             !blocked.load(Ordering::SeqCst),
             "reader should have proceeded"
         );
+    }
+
+    #[test]
+    fn claude_upgrade_accepts_current_version_exit_one() {
+        let stdout = "Current version: 2.1.143\n\nClaude Code is up to date\n";
+        assert!(super::claude_upgrade_success(1, stdout));
+    }
+
+    #[test]
+    fn claude_upgrade_rejects_unrelated_exit_one() {
+        assert!(!super::claude_upgrade_success(1, "network failed"));
     }
 }
