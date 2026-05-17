@@ -1128,7 +1128,7 @@ pub async fn ssh_tar_upload(
     command.arg("-F").arg(config_path);
     command.arg(ssh_host);
     command.arg("--");
-    command.args([
+    command.arg(quote_ssh_remote_args([
         "tar",
         "xzpf",
         "-",
@@ -1136,7 +1136,7 @@ pub async fn ssh_tar_upload(
         "/sandbox",
         "--strip-components=1",
         "sandbox",
-    ]);
+    ])?);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
