@@ -5,6 +5,9 @@
 //! post-upgrade state.
 //! CI-explicit ignored test because it requires a live OpenShell gateway and
 //! runs real `claude upgrade` over the network.
+//! If Claude's download service denies a GitHub runner with 403, the test logs
+//! the denial and exits early; production handles that path by logging the
+//! failed startup upgrade attempt and leaving the baked npm Claude in place.
 
 use right_openshell::test_support::TestSandbox;
 
@@ -28,6 +31,10 @@ async fn ci_claude_upgrade_lifecycle() {
     //    upgrade. Without this, Claude may only repair config and leave the
     //    native symlink absent.
     let (stdout, exit) = sbox.exec_with_timeout(&["claude", "install"], 180).await;
+    if claude_install_download_denied(exit, &stdout) {
+        eprintln!("skipping claude upgrade lifecycle: Claude download service denied this runner");
+        return;
+    }
     assert_eq!(exit, 0, "claude install failed: {stdout}");
 
     // 2. `claude upgrade` reports either a fresh install or the idempotent
@@ -78,4 +85,33 @@ fn claude_upgrade_success(exit: i32, stdout: &str) -> bool {
 
 fn claude_upgrade_up_to_date(stdout: &str) -> bool {
     stdout.contains("Current version")
+}
+
+fn claude_install_download_denied(exit: i32, stdout: &str) -> bool {
+    exit != 0
+        && stdout.contains("downloads.claude.ai/claude-code-releases/latest")
+        && stdout.contains("status code 403")
+}
+
+#[test]
+fn claude_install_download_denied_detects_runner_403() {
+    let stdout = "\
+Checking installation status...
+Installing Claude Code native build latest...
+Failed to fetch version from https://downloads.claude.ai/claude-code-releases/latest: \
+Request failed with status code 403";
+
+    assert!(claude_install_download_denied(1, stdout));
+}
+
+#[test]
+fn claude_install_download_denied_rejects_other_failures() {
+    assert!(!claude_install_download_denied(
+        1,
+        "Failed to fetch version from https://downloads.claude.ai/claude-code-releases/latest: timeout"
+    ));
+    assert!(!claude_install_download_denied(
+        0,
+        "Request failed with status code 403"
+    ));
 }
