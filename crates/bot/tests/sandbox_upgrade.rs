@@ -1,14 +1,16 @@
 //! Integration test for `claude upgrade` inside an OpenShell sandbox.
 //!
 //! Creates an ephemeral sandbox via `right_openshell::test_support::TestSandbox`,
-//! runs `claude upgrade`, and asserts the full post-upgrade state.
+//! runs `claude install` plus `claude upgrade`, and asserts the full
+//! post-upgrade state.
 //! CI-explicit ignored test because it requires a live OpenShell gateway and
 //! runs real `claude upgrade` over the network.
 
 use right_openshell::test_support::TestSandbox;
 
-/// Full lifecycle: upgrade runs, symlink appears, upgraded binary reports
-/// a Claude Code version, and PATH precedence favours `/sandbox/.local/bin`.
+/// Full lifecycle: install registers the native target, upgrade runs, symlink
+/// appears, upgraded binary reports a Claude Code version, and PATH precedence
+/// favours `/sandbox/.local/bin`.
 ///
 /// `#[ignore]` exception (against the project's general no-ignore rule for
 /// integration tests): this test runs a real `claude upgrade` over the
@@ -22,7 +24,13 @@ use right_openshell::test_support::TestSandbox;
 async fn ci_claude_upgrade_lifecycle() {
     let sbox = TestSandbox::create("claude-upgrade").await;
 
-    // 1. `claude upgrade` reports either a fresh install or the idempotent
+    // 1. Match production startup: register native install metadata before
+    //    upgrade. Without this, Claude may only repair config and leave the
+    //    native symlink absent.
+    let (stdout, exit) = sbox.exec_with_timeout(&["claude", "install"], 180).await;
+    assert_eq!(exit, 0, "claude install failed: {stdout}");
+
+    // 2. `claude upgrade` reports either a fresh install or the idempotent
     //    current-version path. Claude currently exits 1 for "up to date", so
     //    treat that specific output as a successful no-op.
     let (stdout, exit) = sbox.exec_with_timeout(&["claude", "upgrade"], 180).await;
@@ -35,13 +43,13 @@ async fn ci_claude_upgrade_lifecycle() {
         "unexpected upgrade output: {stdout}"
     );
 
-    // 2. The symlink `/sandbox/.local/bin/claude` now exists.
+    // 3. The symlink `/sandbox/.local/bin/claude` now exists.
     let (_, exit) = sbox
         .exec(&["test", "-L", "/sandbox/.local/bin/claude"])
         .await;
     assert_eq!(exit, 0, "/sandbox/.local/bin/claude symlink missing");
 
-    // 3. The upgraded binary runs and reports a Claude Code version.
+    // 4. The upgraded binary runs and reports a Claude Code version.
     let (stdout, exit) = sbox
         .exec(&["/sandbox/.local/bin/claude", "--version"])
         .await;
@@ -51,7 +59,7 @@ async fn ci_claude_upgrade_lifecycle() {
         "expected 'Claude Code' in version output, got: {stdout}"
     );
 
-    // 4. PATH precedence: with `/sandbox/.local/bin` prepended, `which claude`
+    // 5. PATH precedence: with `/sandbox/.local/bin` prepended, `which claude`
     //    resolves to the upgraded path, not the image's `/usr/local/bin/claude`.
     let (stdout, exit) = sbox
         .exec(&["bash", "-c", "PATH=/sandbox/.local/bin:$PATH which claude"])
