@@ -22,13 +22,16 @@ use right_openshell::test_support::TestSandbox;
 async fn ci_claude_upgrade_lifecycle() {
     let sbox = TestSandbox::create("claude-upgrade").await;
 
-    // 1. `claude upgrade` exits 0 and reports either a fresh install or
-    //    "Current version" (idempotent re-run). 180s — fetch + install over
-    //    the network doesn't fit the 10s default.
+    // 1. `claude upgrade` reports either a fresh install or the idempotent
+    //    current-version path. Claude currently exits 1 for "up to date", so
+    //    treat that specific output as a successful no-op.
     let (stdout, exit) = sbox.exec_with_timeout(&["claude", "upgrade"], 180).await;
-    assert_eq!(exit, 0, "claude upgrade failed; stdout: {stdout}");
     assert!(
-        stdout.contains("Successfully updated") || stdout.contains("Current version"),
+        claude_upgrade_success(exit, &stdout),
+        "claude upgrade failed with exit {exit}; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("Successfully updated") || claude_upgrade_up_to_date(&stdout),
         "unexpected upgrade output: {stdout}"
     );
 
@@ -59,4 +62,12 @@ async fn ci_claude_upgrade_lifecycle() {
         "/sandbox/.local/bin/claude",
         "expected /sandbox/.local/bin/claude, got: {stdout}"
     );
+}
+
+fn claude_upgrade_success(exit: i32, stdout: &str) -> bool {
+    exit == 0 || (exit == 1 && claude_upgrade_up_to_date(stdout))
+}
+
+fn claude_upgrade_up_to_date(stdout: &str) -> bool {
+    stdout.contains("Current version") && stdout.contains("up to date")
 }
