@@ -403,5 +403,4 @@ mod tests {
             "old top-level keys must not survive from-scratch write"
         );
     }
-
 }

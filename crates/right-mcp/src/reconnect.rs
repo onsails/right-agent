@@ -172,9 +172,9 @@ pub async fn do_refresh_cancellable(
                     // fall through to backoff
                 } else {
                     tracing::warn!(attempt, %status, %body, "cancellable refresh attempt failed (permanent http)");
-                    return Err(ReconnectError::Refresh(RefreshFailure::Permanent(
-                        format!("HTTP {status}: {body}"),
-                    )));
+                    return Err(ReconnectError::Refresh(RefreshFailure::Permanent(format!(
+                        "HTTP {status}: {body}"
+                    ))));
                 }
             }
             Err(e) => {
@@ -458,9 +458,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS
-            .to_latest(&mut conn)
-            .unwrap();
+        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
 
         let token_arc: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
         let backend = Arc::new(ProxyBackend::new(
@@ -636,9 +634,8 @@ mod tests {
         let cancel = CancellationToken::new();
 
         tokio::time::pause();
-        let handle = tokio::spawn(async move {
-            do_refresh_cancellable(&client, &entry, &cancel).await
-        });
+        let handle =
+            tokio::spawn(async move { do_refresh_cancellable(&client, &entry, &cancel).await });
         // Burn through all backoffs deterministically.
         for _ in 0..MAX_RETRIES {
             tokio::time::advance(Duration::from_secs(200)).await;
@@ -666,9 +663,8 @@ mod tests {
         let cancel = CancellationToken::new();
 
         tokio::time::pause();
-        let handle = tokio::spawn(async move {
-            do_refresh_cancellable(&client, &entry, &cancel).await
-        });
+        let handle =
+            tokio::spawn(async move { do_refresh_cancellable(&client, &entry, &cancel).await });
         for _ in 0..MAX_RETRIES {
             tokio::time::advance(Duration::from_secs(200)).await;
             tokio::task::yield_now().await;
@@ -690,8 +686,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/token"))
             .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_string(r#"{"error":"invalid_grant"}"#),
+                ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_grant"}"#),
             )
             .expect(1) // must NOT retry — first response is enough
             .mount(&server)
@@ -725,9 +720,8 @@ mod tests {
         let cancel = CancellationToken::new();
 
         tokio::time::pause();
-        let handle = tokio::spawn(async move {
-            do_refresh_cancellable(&client, &entry, &cancel).await
-        });
+        let handle =
+            tokio::spawn(async move { do_refresh_cancellable(&client, &entry, &cancel).await });
         for _ in 0..MAX_RETRIES {
             tokio::time::advance(Duration::from_secs(200)).await;
             tokio::task::yield_now().await;

@@ -131,10 +131,7 @@ mod tests {
 
     #[test]
     fn strip_removes_bot_mention() {
-        assert_eq!(
-            strip_bot_mentions("@right_bot hello", "right_bot"),
-            "hello"
-        );
+        assert_eq!(strip_bot_mentions("@right_bot hello", "right_bot"), "hello");
         assert_eq!(
             strip_bot_mentions("hey @right_bot how are you", "right_bot"),
             "hey how are you"
@@ -151,10 +148,7 @@ mod tests {
 
     #[test]
     fn strip_is_case_insensitive() {
-        assert_eq!(
-            strip_bot_mentions("@Right_Bot hi", "right_bot"),
-            "hi"
-        );
+        assert_eq!(strip_bot_mentions("@Right_Bot hi", "right_bot"), "hi");
     }
 
     #[test]

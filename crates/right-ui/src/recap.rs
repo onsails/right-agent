@@ -15,7 +15,11 @@ pub struct Recap {
 
 impl Recap {
     pub fn new(title: &str) -> Self {
-        Recap { title: title.into(), block: Block::new(), next: None }
+        Recap {
+            title: title.into(),
+            block: Block::new(),
+            next: None,
+        }
     }
 
     pub fn ok(mut self, noun: &str, detail: &str) -> Self {

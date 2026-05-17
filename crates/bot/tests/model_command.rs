@@ -36,8 +36,7 @@ fn write_yaml_then_diff_classifies_as_hot_reloadable() {
 fn arc_swap_visible_across_threads() {
     // Sanity: the ArcSwap cell shared between watcher and CC invocation
     // path actually propagates a store across threads.
-    let cell: Arc<ArcSwap<Option<String>>> =
-        Arc::new(ArcSwap::from_pointee(None));
+    let cell: Arc<ArcSwap<Option<String>>> = Arc::new(ArcSwap::from_pointee(None));
 
     let cell_clone = Arc::clone(&cell);
     let writer = std::thread::spawn(move || {

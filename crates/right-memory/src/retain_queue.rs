@@ -177,7 +177,10 @@ where
             Err(ErrorKind::Quota) => {
                 // Should not happen (Quota never enqueues). Defensive stop:
                 // 402 will not self-heal until the user tops up.
-                tracing::warn!(id = entry.id, "drain encountered Quota; stopping until quota is restored");
+                tracing::warn!(
+                    id = entry.id,
+                    "drain encountered Quota; stopping until quota is restored"
+                );
                 break;
             }
             Err(_) => {

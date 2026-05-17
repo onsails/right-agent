@@ -126,9 +126,9 @@ fn aggregate_per_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use right_db::open_connection;
     use crate::usage::UsageBreakdown;
     use crate::usage::insert::{insert_cron, insert_interactive};
+    use right_db::open_connection;
     use tempfile::tempdir;
 
     fn breakdown(cost: f64, model: &str) -> UsageBreakdown {

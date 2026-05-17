@@ -34,9 +34,6 @@ fn init_labels_are_lowercase_first() {
 #[test]
 fn init_labels_have_no_exclamation_marks() {
     for label in INIT_LABELS {
-        assert!(
-            !label.contains('!'),
-            "init prompt contains '!': {label:?}"
-        );
+        assert!(!label.contains('!'), "init prompt contains '!': {label:?}");
     }
 }

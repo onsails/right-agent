@@ -677,9 +677,7 @@ mod tests {
     #[test]
     fn load_oauth_entries_from_db_test() {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        right_db::MIGRATIONS
-            .to_latest(&mut conn)
-            .unwrap();
+        right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn.execute(
             "INSERT INTO mcp_servers (name, url, auth_type, auth_token, refresh_token, \
              token_endpoint, client_id, expires_at) \
@@ -919,12 +917,7 @@ mod tests {
 
         // Already-expired tokens fire immediately. This test uses real time:
         // real reqwest/wiremock I/O is a poor fit for paused Tokio time.
-        wait_for_backend_status(
-            &backend,
-            crate::proxy::BackendStatus::NeedsAuth,
-            &server,
-        )
-        .await;
+        wait_for_backend_status(&backend, crate::proxy::BackendStatus::NeedsAuth, &server).await;
 
         scheduler.abort();
     }

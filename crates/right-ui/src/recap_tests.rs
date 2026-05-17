@@ -45,7 +45,10 @@ fn recap_no_next_omits_pointer() {
 
 #[test]
 fn recap_ascii_uses_pipe() {
-    let s = Recap::new("ready").ok("tunnel", "ok").next("right up").render(Theme::Ascii);
+    let s = Recap::new("ready")
+        .ok("tunnel", "ok")
+        .next("right up")
+        .render(Theme::Ascii);
     assert!(s.starts_with("| ready "));
     assert!(s.contains("|  [ok] tunnel"));
     assert!(s.contains("|  next: right up"));

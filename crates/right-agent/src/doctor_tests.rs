@@ -19,10 +19,7 @@ fn check_binary_returns_pass_for_present_binary() {
 
 #[test]
 fn check_binary_includes_fix_hint_on_failure() {
-    let check = check_binary(
-        "right-nonexistent-xyz",
-        Some("https://example.com/install"),
-    );
+    let check = check_binary("right-nonexistent-xyz", Some("https://example.com/install"));
     assert_eq!(check.status, CheckStatus::Fail);
     assert_eq!(check.fix.as_deref(), Some("https://example.com/install"));
 }
@@ -162,10 +159,7 @@ fn run_doctor_always_checks_all_three_binaries() {
         .map(|c| c.name.as_str())
         .collect();
 
-    assert!(
-        binary_names.contains(&"right"),
-        "missing right check"
-    );
+    assert!(binary_names.contains(&"right"), "missing right check");
     assert!(
         binary_names.contains(&"process-compose"),
         "missing process-compose check"
@@ -571,8 +565,7 @@ fn check_mcp_tokens_counts_registered_servers() {
 
     // Create data.db with a registered server
     let conn = right_db::open_connection(&agent_dir, true).unwrap();
-    right_mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp")
-        .unwrap();
+    right_mcp::credentials::db_add_server(&conn, "notion", "https://mcp.notion.com/mcp").unwrap();
 
     let result = check_mcp_tokens_impl(dir.path());
     assert_eq!(result.status, CheckStatus::Pass);

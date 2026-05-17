@@ -26,7 +26,9 @@ pub(crate) fn parse_debug_action(args: &str) -> Result<DebugAction, String> {
         "" => Ok(DebugAction::Status),
         "on" | "true" | "1" => Ok(DebugAction::On),
         "off" | "false" | "0" => Ok(DebugAction::Off),
-        other => Err(format!("Unknown argument: {other}. Use `/debug on`, `/debug off`, or `/debug` (status).")),
+        other => Err(format!(
+            "Unknown argument: {other}. Use `/debug on`, `/debug off`, or `/debug` (status)."
+        )),
     }
 }
 
@@ -49,7 +51,8 @@ pub(crate) fn render_status(debug_on: bool, current_log_size: Option<u64>) -> St
          Use `/debug on` to enable per-session API/transport logs at \
          `/sandbox/.claude/logs/<session>.log`. Existing CC project history at \
          `/sandbox/.claude/projects/-sandbox/*.jsonl` is always written; debug \
-         mode adds deeper API-layer detail.".to_string()
+         mode adds deeper API-layer detail."
+            .to_string()
     }
 }
 
@@ -57,7 +60,8 @@ pub(crate) fn render_status(debug_on: bool, current_log_size: Option<u64>) -> St
 pub(crate) fn render_toggle(new_value: bool) -> String {
     if new_value {
         "🐛 Debug mode ON. Future turns will write API/transport logs to \
-         `/sandbox/.claude/logs/<session>.log`. Past turns are unchanged.".to_string()
+         `/sandbox/.claude/logs/<session>.log`. Past turns are unchanged."
+            .to_string()
     } else {
         "🐛 Debug mode OFF. Existing logs remain.".to_string()
     }
@@ -73,7 +77,10 @@ pub(crate) fn apply_action(
     current_log_size: Option<u64>,
 ) -> Result<String, String> {
     match action {
-        DebugAction::Status => Ok(render_status(flag.load(Ordering::Relaxed), current_log_size)),
+        DebugAction::Status => Ok(render_status(
+            flag.load(Ordering::Relaxed),
+            current_log_size,
+        )),
         DebugAction::On | DebugAction::Off => {
             let new_value = action == DebugAction::On;
             right_agent::agent::types::write_agent_yaml_debug(agent_yaml_path, Some(new_value))

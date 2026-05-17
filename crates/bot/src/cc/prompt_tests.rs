@@ -16,7 +16,12 @@ fn test_script(base: &str, mode: PromptMode, args: &[String], mcp: Option<&str>)
 
 #[test]
 fn script_bootstrap_includes_bootstrap_md() {
-    let script = test_script("Base prompt", PromptMode::Bootstrap, &["claude".into(), "-p".into()], None);
+    let script = test_script(
+        "Base prompt",
+        PromptMode::Bootstrap,
+        &["claude".into(), "-p".into()],
+        None,
+    );
     assert!(
         script.contains("Bootstrap Instructions"),
         "must have Bootstrap Instructions header"
@@ -42,7 +47,12 @@ fn script_bootstrap_includes_bootstrap_md() {
 
 #[test]
 fn script_normal_includes_all_identity_files() {
-    let script = test_script("Base prompt", PromptMode::Normal, &["claude".into(), "-p".into()], None);
+    let script = test_script(
+        "Base prompt",
+        PromptMode::Normal,
+        &["claude".into(), "-p".into()],
+        None,
+    );
     assert!(script.contains("IDENTITY.md"));
     assert!(script.contains("SOUL.md"));
     assert!(script.contains("USER.md"));
@@ -59,7 +69,12 @@ fn script_normal_includes_all_identity_files() {
 
 #[test]
 fn script_escapes_single_quotes_in_base() {
-    let script = test_script("It's a test", PromptMode::Bootstrap, &["claude".into()], None);
+    let script = test_script(
+        "It's a test",
+        PromptMode::Bootstrap,
+        &["claude".into()],
+        None,
+    );
     // Single quote must be escaped for shell: ' → '\''
     assert!(!script.contains("It's"), "raw single quote must be escaped");
     assert!(script.contains("It"), "content must still be present");
@@ -179,7 +194,12 @@ fn script_mcp_instructions_with_custom_paths() {
 
 #[test]
 fn script_bootstrap_uses_compiled_constant() {
-    let script = test_script("Base prompt", PromptMode::Bootstrap, &["claude".into(), "-p".into()], None);
+    let script = test_script(
+        "Base prompt",
+        PromptMode::Bootstrap,
+        &["claude".into(), "-p".into()],
+        None,
+    );
     // Bootstrap uses compiled-in constant, NOT cat of file
     assert!(
         !script.contains("cat /sandbox"),
@@ -317,7 +337,10 @@ fn script_file_mode_wraps_memory_md_with_ironclaw_markers() {
         "file-mode wrap must apply sed-based escape on MEMORY.md content"
     );
     // head -200 still applies for size cap
-    assert!(script.contains("head -200"), "must keep MEMORY.md truncation");
+    assert!(
+        script.contains("head -200"),
+        "must keep MEMORY.md truncation"
+    );
 }
 
 #[test]
@@ -440,7 +463,12 @@ fn deploy_composite_memory_format_wraps_content_in_external_content_markers() {
 #[test]
 fn deploy_composite_memory_format_appends_status_marker_outside_wrap() {
     let content = "stuff";
-    let formatted = format_composite_memory(content, "label", Some("<memory-status>degraded</memory-status>"), None);
+    let formatted = format_composite_memory(
+        content,
+        "label",
+        Some("<memory-status>degraded</memory-status>"),
+        None,
+    );
     let end_marker_pos = formatted.find("END EXTERNAL CONTENT").unwrap();
     let status_pos = formatted.find("<memory-status>").unwrap();
     assert!(

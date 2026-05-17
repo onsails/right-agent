@@ -70,7 +70,10 @@ pub(crate) fn diff_classify(old_yaml: &str, new_yaml: &str) -> ChangeKind {
     old.model = None;
     old.debug = None;
     if old == new {
-        ChangeKind::HotReloadable { new_model, new_debug }
+        ChangeKind::HotReloadable {
+            new_model,
+            new_debug,
+        }
     } else {
         ChangeKind::RestartRequired
     }
@@ -105,8 +108,9 @@ pub(crate) fn spawn_config_watcher(
         .to_os_string();
     let yaml_path: PathBuf = agent_yaml.to_path_buf();
 
-    let initial_yaml = std::fs::read_to_string(&yaml_path)
-        .map_err(|e| miette::miette!("failed to read {} for watcher: {e:#}", yaml_path.display()))?;
+    let initial_yaml = std::fs::read_to_string(&yaml_path).map_err(|e| {
+        miette::miette!("failed to read {} for watcher: {e:#}", yaml_path.display())
+    })?;
 
     let (tx, rx) = mpsc::channel();
 
@@ -151,7 +155,10 @@ pub(crate) fn spawn_config_watcher(
                         ChangeKind::NoChange => {
                             last_yaml = new_yaml;
                         }
-                        ChangeKind::HotReloadable { new_model, new_debug } => {
+                        ChangeKind::HotReloadable {
+                            new_model,
+                            new_debug,
+                        } => {
                             tracing::info!(
                                 model = ?new_model.as_deref().unwrap_or("default"),
                                 debug = ?new_debug,
@@ -196,7 +203,10 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-sonnet-4-6\"\n";
         let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model, new_debug: _ } => {
+            ChangeKind::HotReloadable {
+                new_model,
+                new_debug: _,
+            } => {
                 assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
             }
             other => panic!("expected HotReloadable, got {other:?}"),
@@ -208,7 +218,10 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\n";
         let new = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model, new_debug: _ } => {
+            ChangeKind::HotReloadable {
+                new_model,
+                new_debug: _,
+            } => {
                 assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
             }
             other => panic!("expected HotReloadable, got {other:?}"),
@@ -220,7 +233,10 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\nmodel: \"claude-haiku-4-5\"\n";
         let new = "restart: never\nmax_restarts: 5\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model, new_debug: _ } => {
+            ChangeKind::HotReloadable {
+                new_model,
+                new_debug: _,
+            } => {
                 assert!(new_model.is_none());
             }
             other => panic!("expected HotReloadable, got {other:?}"),
@@ -266,7 +282,10 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\ndebug: false\n";
         let new = "restart: never\nmax_restarts: 5\ndebug: true\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model, new_debug } => {
+            ChangeKind::HotReloadable {
+                new_model,
+                new_debug,
+            } => {
                 assert!(new_model.is_none());
                 assert_eq!(new_debug, Some(true));
             }
@@ -279,7 +298,10 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\n";
         let new = "restart: never\nmax_restarts: 5\ndebug: true\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model, new_debug } => {
+            ChangeKind::HotReloadable {
+                new_model,
+                new_debug,
+            } => {
                 assert!(new_model.is_none());
                 assert_eq!(new_debug, Some(true));
             }
@@ -292,7 +314,10 @@ mod tests {
         let old = "restart: never\nmax_restarts: 5\ndebug: true\n";
         let new = "restart: never\nmax_restarts: 5\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model, new_debug } => {
+            ChangeKind::HotReloadable {
+                new_model,
+                new_debug,
+            } => {
                 assert!(new_model.is_none());
                 assert!(new_debug.is_none());
             }
@@ -305,7 +330,10 @@ mod tests {
         let old = "restart: never\nmodel: \"claude-sonnet-4-6\"\ndebug: false\n";
         let new = "restart: never\nmodel: \"claude-haiku-4-5\"\ndebug: true\n";
         match classify(old, new) {
-            ChangeKind::HotReloadable { new_model, new_debug } => {
+            ChangeKind::HotReloadable {
+                new_model,
+                new_debug,
+            } => {
                 assert_eq!(new_model.as_deref(), Some("claude-haiku-4-5"));
                 assert_eq!(new_debug, Some(true));
             }
@@ -328,7 +356,10 @@ mod tests {
         let new = "restart: never\n";
         match classify(old, new) {
             ChangeKind::HotReloadable { new_debug, .. } => {
-                assert!(new_debug.is_none(), "removal yields None — watcher uses initial_debug fallback");
+                assert!(
+                    new_debug.is_none(),
+                    "removal yields None — watcher uses initial_debug fallback"
+                );
             }
             other => panic!("expected HotReloadable, got {other:?}"),
         }

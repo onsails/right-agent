@@ -277,6 +277,76 @@ fn sandbox_tar_download_remote_command_quotes_transform_semicolons_for_shell() {
 }
 
 #[tokio::test]
+async fn ssh_exec_quotes_remote_command_as_single_shell_string() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let args_file = tmp.path().join("ssh-args.txt");
+    let fake_ssh = bin.join("ssh");
+    std::fs::write(
+        &fake_ssh,
+        "#!/bin/sh\nfor arg in \"$@\"; do printf '<%s>\\n' \"$arg\"; done > \"$RIGHT_TEST_SSH_ARGS\"\nprintf 'ok\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _path_guard = PathGuard::prepend(&bin);
+    let _args_guard = EnvGuard::set_path_value("RIGHT_TEST_SSH_ARGS", &args_file);
+    let script = r#"output="$(printf 'Current version: 2.1.143')"; printf '%s\n' "$output""#;
+
+    ssh_exec(
+        Path::new("config"),
+        "openshell-example",
+        &["bash", "-lc", script],
+        5,
+    )
+    .await
+    .unwrap();
+
+    let args = std::fs::read_to_string(args_file).unwrap();
+    let captured: Vec<&str> = args
+        .lines()
+        .map(|line| line.trim_start_matches('<').trim_end_matches('>'))
+        .collect();
+    let separator = captured
+        .iter()
+        .position(|arg| *arg == "--")
+        .expect("ssh args should include command separator");
+    let remote_args = &captured[separator + 1..];
+    assert_eq!(
+        remote_args.len(),
+        1,
+        "ssh_exec must pass one quoted remote command argument, got:\n{args}"
+    );
+
+    let probe = format!(
+        "bash() {{ for arg in \"$@\"; do printf '<%s>\\n' \"$arg\"; done; }}; {}",
+        remote_args[0]
+    );
+    let output = Command::new("sh").arg("-c").arg(probe).output().unwrap();
+    assert!(
+        output.status.success(),
+        "quoted remote command should parse under sh, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed_args: Vec<String> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        parsed_args,
+        vec!["<-lc>".to_string(), format!("<{script}>")]
+    );
+}
+
+#[tokio::test]
 async fn ssh_tar_upload_reports_remote_stderr_when_remote_exits_early() {
     use std::os::unix::fs::PermissionsExt;
 

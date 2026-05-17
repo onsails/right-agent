@@ -100,9 +100,9 @@ mod tests {
             users,
             groups,
         };
-        AllowlistHandle(Arc::new(std::sync::RwLock::new(
-            AllowlistState::from_file(file),
-        )))
+        AllowlistHandle(Arc::new(std::sync::RwLock::new(AllowlistState::from_file(
+            file,
+        ))))
     }
 
     fn group_msg_with_media_group(
@@ -240,10 +240,7 @@ mod tests {
 
         let f = make_routing_filter(allowlist, identity);
         let d = f(msg).expect("captioned sibling must pass");
-        assert!(matches!(
-            d.address,
-            Some(AddressKind::GroupMentionText)
-        ));
+        assert!(matches!(d.address, Some(AddressKind::GroupMentionText)));
     }
 
     #[test]

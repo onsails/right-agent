@@ -95,7 +95,10 @@ pub fn write_agent_yaml_debug(
                 found = true;
                 if let Some(v) = new_value {
                     let needs_newline = line.ends_with('\n');
-                    out.push_str(&format!("debug: {v}{}", if needs_newline { "\n" } else { "" }));
+                    out.push_str(&format!(
+                        "debug: {v}{}",
+                        if needs_newline { "\n" } else { "" }
+                    ));
                 }
             } else {
                 out.push_str(line);
@@ -515,9 +518,18 @@ sandbox:
         super::write_agent_yaml_debug(&path, Some(true)).unwrap();
 
         let result = std::fs::read_to_string(&path).unwrap();
-        assert!(result.contains("restart: never"), "preserve existing fields:\n{result}");
-        assert!(result.contains("max_restarts: 5"), "preserve existing fields:\n{result}");
-        assert!(result.contains("debug: true"), "append debug when absent:\n{result}");
+        assert!(
+            result.contains("restart: never"),
+            "preserve existing fields:\n{result}"
+        );
+        assert!(
+            result.contains("max_restarts: 5"),
+            "preserve existing fields:\n{result}"
+        );
+        assert!(
+            result.contains("debug: true"),
+            "append debug when absent:\n{result}"
+        );
         let parsed: AgentConfig = serde_saphyr::from_str(&result).unwrap();
         assert_eq!(parsed.debug, Some(true));
     }
@@ -531,8 +543,14 @@ sandbox:
         super::write_agent_yaml_debug(&path, Some(true)).unwrap();
 
         let result = std::fs::read_to_string(&path).unwrap();
-        assert!(!result.contains("debug: false"), "old value gone:\n{result}");
-        assert!(result.contains("debug: true"), "new value present:\n{result}");
+        assert!(
+            !result.contains("debug: false"),
+            "old value gone:\n{result}"
+        );
+        assert!(
+            result.contains("debug: true"),
+            "new value present:\n{result}"
+        );
         let restart_pos = result.find("restart:").unwrap();
         let debug_pos = result.find("debug:").unwrap();
         assert!(restart_pos < debug_pos, "field order preserved:\n{result}");
@@ -557,7 +575,11 @@ sandbox:
     fn write_agent_yaml_debug_preserves_comments() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.yaml");
-        std::fs::write(&path, "# header\nrestart: never\n\n# comment\nmax_restarts: 5\n").unwrap();
+        std::fs::write(
+            &path,
+            "# header\nrestart: never\n\n# comment\nmax_restarts: 5\n",
+        )
+        .unwrap();
 
         super::write_agent_yaml_debug(&path, Some(true)).unwrap();
 
