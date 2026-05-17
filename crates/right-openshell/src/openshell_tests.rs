@@ -255,7 +255,7 @@ fn sandbox_tar_download_remote_command_quotes_transform_semicolons_for_shell() {
     use std::process::Command;
 
     let args = sandbox_tar_download_args("sandbox", false).unwrap();
-    let remote_command = ssh_remote_command(&args).unwrap();
+    let remote_command = quote_ssh_remote_args(args.iter().map(String::as_str)).unwrap();
     let probe = format!(
         "tar() {{ for arg in \"$@\"; do printf '<%s>\\n' \"$arg\"; done; }}; {remote_command}"
     );
@@ -274,6 +274,35 @@ fn sandbox_tar_download_remote_command_quotes_transform_semicolons_for_shell() {
         .collect();
     let expected_args: Vec<String> = args[1..].iter().map(|arg| format!("<{arg}>")).collect();
     assert_eq!(parsed_args, expected_args);
+}
+
+#[test]
+fn quote_ssh_remote_args_preserves_shell_metacharacters_as_data() {
+    use std::process::Command;
+
+    let remote_command = quote_ssh_remote_args([
+        "probe_cmd",
+        "alpha beta",
+        "$(nope)",
+        "semi;colon",
+        "quote'arg",
+    ])
+    .unwrap();
+    let probe = format!(
+        "probe_cmd() {{ for arg in \"$@\"; do command printf '<%s>\\n' \"$arg\"; done; }}; {remote_command}"
+    );
+
+    let output = Command::new("sh").arg("-c").arg(probe).output().unwrap();
+    assert!(
+        output.status.success(),
+        "quoted command should parse under sh; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "<alpha beta>\n<$(nope)>\n<semi;colon>\n<quote'arg>\n"
+    );
 }
 
 #[tokio::test]

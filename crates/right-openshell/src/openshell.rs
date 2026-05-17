@@ -782,7 +782,7 @@ pub async fn ssh_exec(
     command.arg("-F").arg(config_path);
     command.arg(host);
     command.arg("--");
-    command.arg(ssh_remote_command_strs(cmd.iter().copied())?);
+    command.arg(quote_ssh_remote_args(cmd.iter().copied())?);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.kill_on_drop(false);
@@ -1002,7 +1002,7 @@ pub async fn ssh_tar_download(
     command.arg(ssh_host);
     command.arg("--");
     let tar_args = sandbox_tar_download_args(sandbox_path, include_rebuildable)?;
-    command.arg(ssh_remote_command(&tar_args)?);
+    command.arg(quote_ssh_remote_args(tar_args.iter().map(String::as_str))?);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
@@ -1068,11 +1068,14 @@ pub async fn ssh_tar_download(
     Ok(())
 }
 
-fn ssh_remote_command(args: &[String]) -> miette::Result<String> {
-    ssh_remote_command_strs(args.iter().map(|arg| arg.as_str()))
-}
-
-fn ssh_remote_command_strs<'a>(args: impl IntoIterator<Item = &'a str>) -> miette::Result<String> {
+/// Quote argv for OpenSSH remote command execution.
+///
+/// OpenSSH does not preserve remote argv. It sends one command string to the
+/// remote login shell, so callers must pass the returned string as exactly one
+/// argument after the SSH host or `--`.
+pub fn quote_ssh_remote_args<'a>(
+    args: impl IntoIterator<Item = &'a str>,
+) -> miette::Result<String> {
     shlex::try_join(args)
         .map_err(|e| miette::miette!("failed to quote SSH remote command args: {e}"))
 }
