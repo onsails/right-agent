@@ -69,5 +69,5 @@ fn claude_upgrade_success(exit: i32, stdout: &str) -> bool {
 }
 
 fn claude_upgrade_up_to_date(stdout: &str) -> bool {
-    stdout.contains("Current version") && stdout.contains("up to date")
+    stdout.contains("Current version")
 }

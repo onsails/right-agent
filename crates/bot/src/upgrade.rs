@@ -19,7 +19,7 @@ status=$?
 printf '%s\n' "$output"
 if [ "$status" -eq 1 ]; then
   case "$output" in
-    *"Current version"*"up to date"*) exit 0 ;;
+    *"Current version"*) exit 0 ;;
   esac
 fi
 exit "$status"
@@ -142,7 +142,7 @@ fn claude_upgrade_success(exit: i32, stdout: &str) -> bool {
 }
 
 fn claude_upgrade_up_to_date(stdout: &str) -> bool {
-    stdout.contains("Current version") && stdout.contains("up to date")
+    stdout.contains("Current version")
 }
 
 #[cfg(test)]
@@ -215,6 +215,16 @@ mod tests {
     #[test]
     fn claude_upgrade_accepts_current_version_exit_one() {
         let stdout = "Current version: 2.1.143\n\nClaude Code is up to date\n";
+        assert!(super::claude_upgrade_success(1, stdout));
+    }
+
+    #[test]
+    fn claude_upgrade_accepts_current_version_config_repair_exit_one() {
+        let stdout = "Current version: 2.1.143\n\
+            Checking for updates to latest version...\n\
+            Warning: Running native installation but config install method is 'not set'\n\
+            Updating configuration to track installation method...\n\
+            Installation method set to: native\n";
         assert!(super::claude_upgrade_success(1, stdout));
     }
 
