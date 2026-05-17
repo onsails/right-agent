@@ -64,7 +64,8 @@ fn doctor_dumb_term_still_ascii() {
         .args(["--home", home.path().to_str().unwrap(), "doctor"])
         .assert();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("| diagnostics") || stdout.contains("|  ["),
+    assert!(
+        stdout.contains("| diagnostics") || stdout.contains("|  ["),
         "TERM=dumb should still produce Ascii rail+glyphs, full stdout:\n{stdout}"
     );
 }
@@ -181,10 +182,14 @@ fn init_ascii_fallback() {
         .env("TERM", "dumb")
         .env_remove("NO_COLOR")
         .args([
-            "--home", home.path().to_str().unwrap(),
-            "init", "-y",
-            "--sandbox-mode", "none",
-            "--tunnel-hostname", "test.example.com",
+            "--home",
+            home.path().to_str().unwrap(),
+            "init",
+            "-y",
+            "--sandbox-mode",
+            "none",
+            "--tunnel-hostname",
+            "test.example.com",
         ])
         .assert()
         .success();
@@ -207,7 +212,8 @@ fn no_color_flag_matches_env_var() {
         let assert = right()
             .env_remove("NO_COLOR")
             .args([
-                "--home", home_flag.path().to_str().unwrap(),
+                "--home",
+                home_flag.path().to_str().unwrap(),
                 "--no-color",
                 "doctor",
             ])
@@ -219,19 +225,28 @@ fn no_color_flag_matches_env_var() {
     let stdout_env = {
         let assert = right()
             .env("NO_COLOR", "1")
-            .args([
-                "--home", home_env.path().to_str().unwrap(),
-                "doctor",
-            ])
+            .args(["--home", home_env.path().to_str().unwrap(), "doctor"])
             .assert();
         String::from_utf8(assert.get_output().stdout.clone()).unwrap()
     };
 
     // Both should be Ascii (no ANSI, bracketed glyphs).
-    assert!(!stdout_flag.contains('\x1b'), "--no-color must not emit ANSI");
-    assert!(!stdout_env.contains('\x1b'), "NO_COLOR=1 must not emit ANSI");
-    assert!(stdout_flag.contains('|'), "--no-color must produce ascii rail");
-    assert!(stdout_env.contains('|'), "NO_COLOR=1 must produce ascii rail");
+    assert!(
+        !stdout_flag.contains('\x1b'),
+        "--no-color must not emit ANSI"
+    );
+    assert!(
+        !stdout_env.contains('\x1b'),
+        "NO_COLOR=1 must not emit ANSI"
+    );
+    assert!(
+        stdout_flag.contains('|'),
+        "--no-color must produce ascii rail"
+    );
+    assert!(
+        stdout_env.contains('|'),
+        "NO_COLOR=1 must produce ascii rail"
+    );
 }
 
 fn capture_stdout(env: &[(&str, &str)], args: &[&str]) -> String {

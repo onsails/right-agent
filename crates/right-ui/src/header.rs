@@ -59,7 +59,10 @@ mod tests {
     #[test]
     fn section_long_name_no_negative_dashes() {
         // Name longer than TARGET_COL — saturating_sub keeps dashes at zero.
-        let s = section(Theme::Mono, "this-is-a-very-long-section-name-exceeding-48-cells");
+        let s = section(
+            Theme::Mono,
+            "this-is-a-very-long-section-name-exceeding-48-cells",
+        );
         assert!(!s.contains('─'), "no dashes when name overflows: {s:?}");
     }
 }

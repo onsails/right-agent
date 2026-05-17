@@ -111,7 +111,10 @@ fn no_ansi_in_mono_or_ascii() {
             Glyph::Err.render(theme),
             Glyph::Info.render(theme),
         ] {
-            assert!(!s.contains(ESC), "theme {theme:?} string {s:?} contains ANSI escape");
+            assert!(
+                !s.contains(ESC),
+                "theme {theme:?} string {s:?} contains ANSI escape"
+            );
         }
     }
 }

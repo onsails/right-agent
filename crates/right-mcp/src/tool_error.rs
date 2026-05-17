@@ -32,8 +32,8 @@ pub fn tool_error(
         error.insert("details".to_string(), d);
     }
     let payload = json!({ "error": serde_json::Value::Object(error) });
-    let text = serde_json::to_string_pretty(&payload)
-        .expect("serializing tool_error JSON cannot fail");
+    let text =
+        serde_json::to_string_pretty(&payload).expect("serializing tool_error JSON cannot fail");
     CallToolResult::error(vec![Content::text(text)])
 }
 

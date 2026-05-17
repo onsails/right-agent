@@ -102,8 +102,7 @@ async fn webhook_router_200_on_correct_secret_emits_update() {
     use futures::StreamExt as _;
     use teloxide::update_listeners::AsUpdateStream as _;
 
-    let (mut listener, _stop, router) =
-        build_webhook_router("the-secret".to_string(), dummy_url());
+    let (mut listener, _stop, router) = build_webhook_router("the-secret".to_string(), dummy_url());
 
     // Spawn the POST through the router on a separate task so we can pull from
     // the listener stream in parallel — the handler awaits the channel send,

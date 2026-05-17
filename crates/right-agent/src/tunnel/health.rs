@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use right_config::read_global_config;
 use crate::runtime::pc_client::PcClient;
+use right_config::read_global_config;
 
 /// Timeout for the tunnel hostname reachability probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);

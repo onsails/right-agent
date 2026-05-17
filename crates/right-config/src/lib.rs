@@ -45,11 +45,8 @@ fn migrate_old_home(old: &Path, new: &Path) -> miette::Result<()> {
                 .and_then(|p| u16::try_from(p).ok())
         {
             let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
-            if std::net::TcpStream::connect_timeout(
-                &addr,
-                std::time::Duration::from_millis(500),
-            )
-            .is_ok()
+            if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+                .is_ok()
             {
                 return Err(miette::miette!(
                     "Detected {} with a running process-compose on port {}. \
@@ -294,7 +291,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let result = resolve_home_with_base(tmp.path()).unwrap();
         let expected = tmp.path().join(".right");
-        assert_eq!(result, expected, "default home must be ~/.right after rename");
+        assert_eq!(
+            result, expected,
+            "default home must be ~/.right after rename"
+        );
     }
 
     #[test]
@@ -562,7 +562,10 @@ mod tests {
         std::fs::write(old.join("run").join("state.json"), &giant).unwrap();
 
         let result = migrate_old_home(&old, &new);
-        assert!(result.is_ok(), "must handle oversized state.json: {result:?}");
+        assert!(
+            result.is_ok(),
+            "must handle oversized state.json: {result:?}"
+        );
         assert!(!old.exists());
         assert!(new.exists());
     }

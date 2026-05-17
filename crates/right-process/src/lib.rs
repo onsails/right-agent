@@ -246,8 +246,7 @@ mod tests {
         // (or until the surrounding test runner times out).
         let started = tokio::time::Instant::now();
         let mut buf = String::new();
-        let _ =
-            tokio::time::timeout(Duration::from_secs(1), reader.read_to_string(&mut buf)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), reader.read_to_string(&mut buf)).await;
         let elapsed = started.elapsed();
 
         assert!(

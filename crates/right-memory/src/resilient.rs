@@ -575,11 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn retain_402_sets_quota_status_no_enqueue() {
-        let (_h, url) = mock(
-            r#"{"detail":"Insufficient credits. Balance: $-0.01"}"#,
-            402,
-        )
-        .await;
+        let (_h, url) = mock(r#"{"detail":"Insufficient credits. Balance: $-0.01"}"#, 402).await;
         let w = wrap(&url);
         let policy = RetryPolicy {
             per_attempt: Duration::from_secs(2),

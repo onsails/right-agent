@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Right Agent Backend Expansion Research</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --ink: #1b1f27;
+      --muted: #5d6472;
+      --line: #d9dee7;
+      --panel: #ffffff;
+      --good: #147a4b;
+      --warn: #9a5b00;
+      --bad: #a83232;
+      --blue: #2365b8;
+      --violet: #6550b9;
+      --shadow: 0 10px 30px rgba(31, 39, 51, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+    code {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: #f1f3f6;
+      padding: 0.1rem 0.32rem;
+      font-size: 0.92em;
+    }
+    .wrap { max-width: 1320px; margin: 0 auto; padding: 18px; }
+    header {
+      background: #151922;
+      color: white;
+      padding: 28px 0 18px;
+      border-bottom: 4px solid #3d8f68;
+    }
+    header .wrap { display: grid; gap: 14px; }
+    h1 { margin: 0; font-size: clamp(2rem, 4vw, 4.2rem); line-height: 0.98; letter-spacing: 0; max-width: 1100px; }
+    h2 { margin: 0 0 10px; font-size: 1.55rem; letter-spacing: 0; }
+    h3 { margin: 0 0 6px; font-size: 1.05rem; letter-spacing: 0; }
+    p { margin: 0 0 10px; }
+    .lede { max-width: 980px; color: #dce3ee; font-size: 1.05rem; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px; }
+    .tag, .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0.25rem 0.55rem;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+    header .tag { border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.09); color: white; }
+    .badge.official { border-color: #92c5ff; background: #e8f3ff; }
+    .badge.source { border-color: #a9dbc4; background: #e7f6ef; }
+    .badge.local { border-color: #b8c2ff; background: #eef0ff; }
+    .badge.blocked { border-color: #f1b5b5; background: #fff0f0; }
+    .badge.inferred { border-color: #ecd28c; background: #fff8db; }
+    .badge.anecdote { border-color: #ceb5ff; background: #f5efff; }
+
+    .sticky {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(246, 247, 249, 0.96);
+      backdrop-filter: blur(10px);
+    }
+    .sticky .wrap {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      padding-top: 10px;
+      padding-bottom: 10px;
+    }
+    .decision {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .decision b { display: block; font-size: 0.82rem; color: var(--muted); }
+    .decision span { display: block; font-weight: 750; }
+    .controls { display: flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; }
+    .controls label, .jump a {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      padding: 0.42rem 0.55rem;
+      color: var(--ink);
+      text-decoration: none;
+      font-size: 0.84rem;
+      cursor: pointer;
+    }
+    main { padding: 18px 0 40px; }
+    section {
+      margin: 0 auto 18px;
+      max-width: 1320px;
+      padding: 0 18px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 16px;
+    }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
+    .card {
+      grid-column: span 3;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 13px;
+      min-height: 135px;
+    }
+    .card.wide { grid-column: span 6; }
+    .score {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .score strong { font-size: 1.05rem; }
+    .meter { height: 8px; background: #e8ebf0; border-radius: 99px; overflow: hidden; margin: 10px 0; }
+    .meter span { display: block; height: 100%; background: linear-gradient(90deg, #2365b8, #3d8f68); }
+    .note { color: var(--muted); font-size: 0.92rem; }
+    .good { color: var(--good); font-weight: 700; }
+    .warn { color: var(--warn); font-weight: 700; }
+    .bad { color: var(--bad); font-weight: 700; }
+
+    .quick {
+      display: grid;
+      grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .flow div {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f9fafc;
+      padding: 10px;
+      min-height: 82px;
+    }
+    .flow b { display: block; margin-bottom: 4px; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    table { width: 100%; border-collapse: collapse; min-width: 940px; }
+    th, td { border-bottom: 1px solid var(--line); border-right: 1px solid var(--line); padding: 9px; text-align: left; vertical-align: top; }
+    th:last-child, td:last-child { border-right: 0; }
+    tr:last-child td { border-bottom: 0; }
+    th { background: #eef2f6; color: #303744; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0; }
+    td:first-child, th:first-child { position: sticky; left: 0; background: inherit; z-index: 1; font-weight: 750; }
+    th:first-child { background: #e8edf4; z-index: 2; }
+    .score-table .score-heat {
+      min-width: 58px;
+      text-align: center;
+      font-weight: 760;
+      font-variant-numeric: tabular-nums;
+      background:
+        linear-gradient(90deg, rgba(var(--heat-rgb), var(--heat-fill)) var(--heat-pct), transparent var(--heat-pct)),
+        rgba(var(--heat-rgb), var(--heat-bg));
+      color: #18202b;
+    }
+    .score-table .score-total { font-weight: 850; }
+    .score-table .score-total strong { font: inherit; }
+    .score-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin: 8px 0;
+    }
+    .score-legend span {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      padding: 0.22rem 0.52rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .score-legend b {
+      display: inline-block;
+      width: 0.8rem;
+      height: 0.8rem;
+      border-radius: 3px;
+      margin-right: 0.35rem;
+      vertical-align: -0.1rem;
+    }
+    .score-legend .hot-high { background: rgba(20, 122, 75, 0.42); }
+    .score-legend .hot-mid { background: rgba(154, 91, 0, 0.42); }
+    .score-legend .hot-low { background: rgba(168, 50, 50, 0.42); }
+    .cell { border-radius: 6px; padding: 6px 7px; display: inline-block; min-width: 74px; text-align: center; font-weight: 750; }
+    .yes { background: #e4f5ed; color: var(--good); }
+    .part { background: #fff3cf; color: var(--warn); }
+    .no { background: #ffe8e8; color: var(--bad); }
+    .na { background: #eceff4; color: #687080; }
+
+    details {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      margin: 10px 0;
+      overflow: hidden;
+    }
+    summary {
+      cursor: pointer;
+      padding: 12px 14px;
+      font-weight: 800;
+      background: #f7f9fb;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    details > div { padding: 14px; }
+    .cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .mini { border-left: 4px solid #c9d2df; padding: 0 0 0 10px; margin: 8px 0; }
+    .tree { display: grid; grid-template-columns: repeat(4, minmax(180px, 1fr)); gap: 10px; }
+    .tree .node { border: 1px solid var(--line); border-radius: 8px; background: #fff; padding: 12px; }
+    .test-status { font-weight: 800; }
+    .source-list li { margin: 0 0 7px; }
+    .hidden-by-filter { display: none !important; }
+
+    @media (max-width: 980px) {
+      .sticky .wrap, .quick, .cols { grid-template-columns: 1fr; }
+      .decision { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .controls { justify-content: flex-start; }
+      .card, .card.wide { grid-column: span 6; }
+      .flow, .tree { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+      .wrap, section { padding-left: 12px; padding-right: 12px; }
+      .decision, .flow, .tree { grid-template-columns: 1fr; }
+      .card, .card.wide { grid-column: span 12; }
+      header { padding-top: 22px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <div class="meta">
+        <span class="tag">Research date: 2026-05-14</span>
+        <span class="tag">Branch: research/agent-backend-expansion-report</span>
+        <span class="tag">Secret hygiene: setup token never printed</span>
+      </div>
+      <h1>Right Agent backend expansion research</h1>
+      <p class="lede">Interactive brief for comparing Claude Code, OpenCode, Pi, Rig.rs, Codex, LangChain/LangGraph, and ACP-backed runtimes. ACP is analyzed as a bot-harness communication capability, not as a backend alternative.</p>
+    </div>
+  </header>
+
+  <nav class="sticky">
+    <div class="wrap">
+      <div class="decision">
+        <div><b>Default</b><span>Claude Code</span></div>
+        <div><b>Second backend</b><span>Codex + CC</span></div>
+        <div><b>Claude alt</b><span>Pi, policy-gated</span></div>
+        <div><b>CLI/ACP alt</b><span>OpenCode</span></div>
+        <div><b>Programmatic lane</b><span>Deep Agents/LangGraph</span></div>
+        <div><b>Protocol lane</b><span>ACP adapter only</span></div>
+      </div>
+      <div class="controls">
+        <label><input type="checkbox" data-filter="setup"> setup-token</label>
+        <label><input type="checkbox" data-filter="skills"> skills</label>
+        <label><input type="checkbox" data-filter="resume"> resume/fork</label>
+        <label><input type="checkbox" data-filter="recommended"> recommended</label>
+        <span class="jump"><a href="#scorecards">Scores</a></span>
+        <span class="jump"><a href="#matrix">Matrix</a></span>
+        <span class="jump"><a href="#tests">Tests</a></span>
+        <span class="jump"><a href="#ledger">Ledger</a></span>
+        <span class="jump"><a href="#sources">Sources</a></span>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+    <section id="summary">
+      <div class="quick">
+        <div class="panel">
+          <h2>1. Read This First</h2>
+          <p><strong>Ship path:</strong> keep Claude Code as the default and preserve setup-token onboarding. When Right Agent supports two backends, add Codex alongside Claude Code as the OpenAI backend instead of treating Codex as a Claude-token replacement.</p>
+          <p><strong>Corrected auth result:</strong> the real setup token was tested beyond Claude Code after explicit approval. Pi passed through <code>ANTHROPIC_OAUTH_TOKEN</code>. OpenCode and LangChain reached Anthropic only through <code>ANTHROPIC_API_KEY</code>/<code>x-api-key</code> and hit 429 rate-limit responses. Codex ignored Claude envs because its value is a separate OpenAI-auth backend. Rig source has no OAuth env path; a direct first-party Anthropic <code>x-api-key</code> probe produced the same 429 shape.</p>
+          <p><strong>Best new research finding:</strong> generic LangChain is not a drop-in CLI backend, but the LangChain ecosystem now has a concrete Deep Agents layer with <code>SKILL.md</code>, filesystem/shell backends, LangGraph checkpoints, and ACP code.</p>
+        </div>
+        <div class="panel">
+          <h2>2. Visual Decision</h2>
+          <div class="flow" aria-label="recommended architecture flow">
+            <div><b>🤖 Bot</b>Rust Telegram control plane owns credentials, policy, session routing.</div>
+            <div><b>📦 OpenShell</b>Every runtime executes inside sandbox, including LangChain/Rig wrappers.</div>
+            <div><b>🔌 Adapter</b>stdio JSON/NDJSON first; ACP only when it removes complexity.</div>
+            <div><b>🧠 Runtime</b>Claude CLI, OpenCode CLI, Pi RPC, Codex exec, Deep Agents, or Rig runner.</div>
+            <div><b>🧾 Audit</b>Normalize events, tool calls, errors, billing mode, resume/fork capability.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="scorecards">
+      <div class="panel">
+        <h2>3. Scoring Model and Full Overview</h2>
+        <p class="note">Scores are Right Agent product-fit scores for external users, not raw library quality. Implementation effort is deliberately excluded. Composite roadmap scores, such as <code>Codex + Claude Code</code>, measure product capability after multi-backend support exists. That means a composite can outrank a single runtime while still carrying integration risk.</p>
+        <p class="note">Score cells are heatmapped by percentage of each criterion maximum; bar width shows points captured inside that column. Totals are raw sums out of 85.</p>
+        <div class="score-legend" aria-label="Score heatmap legend">
+          <span><b class="hot-high"></b>High</span>
+          <span><b class="hot-mid"></b>Medium</span>
+          <span><b class="hot-low"></b>Low</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Weight</th>
+                <th>Criterion</th>
+                <th>What earns points</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>25</td><td>Auth/onboarding</td><td>Works with current setup-token/subscription flow, or has a clean replacement for external users.</td></tr>
+              <tr><td>15</td><td>Skills compatibility</td><td>Preserves OpenClaw/ClawHub <code>SKILL.md</code> semantics with minimal adapter work.</td></tr>
+              <tr><td>15</td><td>Session durability</td><td>Resume, fork, background continuation, and inspectable state are native or easy to model.</td></tr>
+              <tr><td>15</td><td>Sandbox communication</td><td>Clean process/API surface for a Rust bot talking to a sandboxed runtime.</td></tr>
+              <tr><td>15</td><td>Evidence and policy risk</td><td>Higher confidence from source/local tests and fewer vendor-policy unknowns.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table class="score-table">
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Platform/library</th>
+                <th>Auth<br><small>/25</small></th>
+                <th>Skills<br><small>/15</small></th>
+                <th>State<br><small>/15</small></th>
+                <th>Sandbox<br><small>/15</small></th>
+                <th>Evidence<br><small>/15</small></th>
+                <th>Total<br><small>/85</small></th>
+                <th>Lane</th>
+                <th>Overview verdict</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="score-row" data-auth="25" data-skills="15" data-state="15" data-sandbox="14" data-evidence="15" data-total="84"><td>1</td><td>Codex + Claude Code</td><td>25</td><td>15</td><td>15</td><td>14</td><td>15</td><td><strong>84</strong></td><td>Two-backend path</td><td>Highest product-capability path once multi-backend support exists: Claude Code keeps Claude subscription/setup-token semantics while Codex adds a native OpenAI backend with <code>exec --json</code>, app-server, skills, resume, and fork.</td></tr>
+              <tr class="score-row" data-auth="25" data-skills="15" data-state="14" data-sandbox="14" data-evidence="13" data-total="81"><td>2</td><td>Claude Code</td><td>25</td><td>15</td><td>14</td><td>14</td><td>13</td><td><strong>81</strong></td><td>Default single runtime</td><td>Best current single-backend fit because it already matches setup-token auth, skills, MCP, streaming, resume/fork, and current product behavior. It loses a few points for known subscription/billing anecdotes and platform-specific operational rough edges.</td></tr>
+              <tr class="score-row" data-auth="23" data-skills="14" data-state="14" data-sandbox="11" data-evidence="12" data-total="74"><td>3</td><td>Pi</td><td>23</td><td>14</td><td>14</td><td>11</td><td>12</td><td><strong>74</strong></td><td>Claude-subscription alternate</td><td>Only non-Claude-Code candidate with a clean real-token pass. It beats OpenCode for Claude-subscription replacement; loses sandbox points because the CLI was smoke-tested in OpenShell but the RPC/tool/event contract has source/test proof rather than a full OpenShell e2e run.</td></tr>
+              <tr class="score-row" data-auth="10" data-skills="13" data-state="15" data-sandbox="12" data-evidence="15" data-total="65"><td>4</td><td>Deep Agents + LangGraph</td><td>10</td><td>13</td><td>15</td><td>12</td><td>15</td><td><strong>65</strong></td><td>Programmatic harness</td><td>Best programmatic path for skills plus durable resume/fork. Low auth score because it is not setup-token native.</td></tr>
+              <tr class="score-row" data-auth="10" data-skills="8" data-state="12" data-sandbox="15" data-evidence="15" data-total="60"><td>5</td><td>ACP</td><td>10</td><td>8</td><td>12</td><td>15</td><td>15</td><td><strong>60</strong></td><td>Adapter/protocol</td><td>Good bot-to-harness envelope when the backend already owns auth/state. Auth and skills score low because ACP carries these concerns; it does not define them.</td></tr>
+              <tr class="score-row" data-auth="10" data-skills="15" data-state="13" data-sandbox="12" data-evidence="8" data-total="58"><td>6</td><td>OpenCode</td><td>10</td><td>15</td><td>13</td><td>12</td><td>8</td><td><strong>58</strong></td><td>CLI/ACP alternate</td><td>Strongest alternate CLI surface and native skills/session/ACP shape. It loses auth/evidence points because no successful Claude setup-token pass was observed; API-key-shaped path only reached 429.</td></tr>
+              <tr class="score-row" data-auth="12" data-skills="0" data-state="9" data-sandbox="13" data-evidence="12" data-total="46"><td>7</td><td>Rig.rs</td><td>12</td><td>0</td><td>9</td><td>13</td><td>12</td><td><strong>46</strong></td><td>Rust library lane</td><td>Rust-native and attractive for long-term ownership, but it lacks native <code>SKILL.md</code>, Claude setup-token auth, and ready-made Right Agent session semantics.</td></tr>
+              <tr class="score-row" data-auth="5" data-skills="8" data-state="11" data-sandbox="2" data-evidence="13" data-total="39"><td>8</td><td>LangSmith Deployment</td><td>5</td><td>8</td><td>11</td><td>2</td><td>13</td><td><strong>39</strong></td><td>Deployment product</td><td>Useful for managed/self-hosted runtime research, but not a local sandbox subprocess default for Right Agent.</td></tr>
+              <tr class="score-row" data-auth="10" data-skills="3" data-state="4" data-sandbox="10" data-evidence="12" data-total="39"><td>8</td><td>Generic LangChain</td><td>10</td><td>3</td><td>4</td><td>10</td><td>12</td><td><strong>39</strong></td><td>Model/tool library</td><td>Useful abstraction layer, but insufficient alone as a Right Agent backend without LangGraph/Deep Agents and a custom harness.</td></tr>
+              <tr class="score-row" data-auth="4" data-skills="2" data-state="2" data-sandbox="6" data-evidence="12" data-total="26"><td>10</td><td>LangServe</td><td>4</td><td>2</td><td>2</td><td>6</td><td>12</td><td><strong>26</strong></td><td>REST wrapper</td><td>Lowest fit for this product decision. It can expose chains, but does not solve sandboxed agent lifecycle, setup-token auth, or resume/fork.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="grid">
+        <article class="card candidate" data-candidate="codex" data-skills data-resume data-recommended>
+          <div class="score"><strong>Codex + CC</strong><span>84/85</span></div>
+          <div class="meter"><span style="width:99%"></span></div>
+          <p>Best roadmap path: keep Claude Code for Claude, add Codex for OpenAI.</p>
+          <span class="badge source">source + help verified</span>
+        </article>
+        <article class="card candidate" data-candidate="claude" data-setup data-skills data-resume data-recommended>
+          <div class="score"><strong>Claude Code</strong><span>81/85</span></div>
+          <div class="meter"><span style="width:95%"></span></div>
+          <p>Best current single backend: setup-token auth, skills, MCP, streaming, and current product parity.</p>
+          <span class="badge local">local real-token pass</span>
+        </article>
+        <article class="card candidate" data-candidate="pi" data-setup data-skills data-resume data-recommended>
+          <div class="score"><strong>Pi</strong><span>74/85</span></div>
+          <div class="meter"><span style="width:87%"></span></div>
+          <p>Best Claude-subscription alternate: real setup token passed, with native skills and resume/fork controls.</p>
+          <span class="badge local">local real-token pass</span>
+        </article>
+        <article class="card candidate" data-candidate="langchain" data-skills data-resume data-recommended>
+          <div class="score"><strong>Deep Agents + LangGraph</strong><span>65/85</span></div>
+          <div class="meter"><span style="width:76%"></span></div>
+          <p>Best owned programmatic harness if Right Agent accepts Python/JS runtime ownership.</p>
+          <span class="badge source">first-class new lane</span>
+        </article>
+        <article class="card candidate" data-candidate="acp" data-resume data-recommended>
+          <div class="score"><strong>ACP</strong><span>60/85</span></div>
+          <div class="meter"><span style="width:71%"></span></div>
+          <p>Adapter fit score only: useful protocol envelope, not a backend or auth/session source.</p>
+          <span class="badge official">stable + draft split</span>
+        </article>
+        <article class="card candidate" data-candidate="opencode" data-skills data-resume data-recommended>
+          <div class="score"><strong>OpenCode</strong><span>58/85</span></div>
+          <div class="meter"><span style="width:68%"></span></div>
+          <p>Best CLI/ACP alternate: strong run/server/session paths, no successful setup-token pass.</p>
+          <span class="badge source">source-proven</span>
+        </article>
+        <article class="card candidate" data-candidate="rig" data-resume>
+          <div class="score"><strong>Rig.rs</strong><span>46/85</span></div>
+          <div class="meter"><span style="width:54%"></span></div>
+          <p>Rust-native provider/tooling library; Right Agent would own most agent runtime semantics.</p>
+          <span class="badge source">source-proven</span>
+        </article>
+        <article class="card wide">
+          <div class="score"><strong>External-user product rule</strong><span>⚠️</span></div>
+          <p>Technical auth success does not prove policy fitness. For external users, subscription/setup-token use needs vendor guidance, revocation handling, and sandbox-only credential injection.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="matrix">
+      <div class="panel">
+        <h2>4. Capability Heatmap</h2>
+        <p class="note">Cells are quick-read summaries. Expand the details below for evidence and caveats.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Candidate</th>
+                <th>Setup token</th>
+                <th>Skills</th>
+                <th>MCP/tools</th>
+                <th>Resume</th>
+                <th>Fork/background</th>
+                <th>Sandbox communication</th>
+                <th>Right Agent ownership</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="candidate-row" data-candidate="claude" data-setup data-skills data-resume data-recommended>
+                <td>Claude Code</td>
+                <td><span class="cell yes">native</span><br>Real <code>CLAUDE_CODE_OAUTH_TOKEN</code> pass.</td>
+                <td><span class="cell yes">native</span><br>Current product skill path remains intact.</td>
+                <td><span class="cell yes">native</span><br>MCP + strict config already integrated.</td>
+                <td><span class="cell yes">native</span><br><code>--resume</code>/<code>--continue</code>.</td>
+                <td><span class="cell yes">native</span><br><code>--fork-session</code>, background agents.</td>
+                <td>Process stdio with stream JSON inside OpenShell.</td>
+                <td>Adapter + policy normalization.</td>
+              </tr>
+              <tr class="candidate-row" data-candidate="opencode" data-skills data-resume data-recommended>
+                <td>OpenCode</td>
+                <td><span class="cell part">partial</span><br>Claude/OAuth envs ignored; <code>ANTHROPIC_API_KEY</code> path reached Anthropic 429.</td>
+                <td><span class="cell yes">native</span><br>Loads <code>.claude</code>/<code>.agents</code> skill roots.</td>
+                <td><span class="cell yes">native</span><br>Run, server, MCP, ACP surfaces.</td>
+                <td><span class="cell part">source</span><br>Session continue/export/import paths.</td>
+                <td><span class="cell part">source</span><br><code>--fork</code> on continued sessions.</td>
+                <td>Prefer stdio JSON first; ACP only if event semantics help.</td>
+                <td>Auth onboarding, schema parity, event mapping.</td>
+              </tr>
+              <tr class="candidate-row" data-candidate="pi" data-setup data-skills data-resume data-recommended>
+                <td>Pi</td>
+                <td><span class="cell yes">pass</span><br>Real setup token passed through <code>ANTHROPIC_OAUTH_TOKEN</code>.</td>
+                <td><span class="cell yes">native</span><br>Agent Skills standard and <code>--skill</code>.</td>
+                <td><span class="cell part">adapter</span><br>Extensions, custom providers, RPC mode.</td>
+                <td><span class="cell yes">native</span><br><code>--continue</code>/<code>--resume</code>/<code>--session</code>.</td>
+                <td><span class="cell yes">native</span><br><code>--fork</code> exposed in help.</td>
+                <td>Prefer <code>--mode rpc</code> or JSON/text subprocess inside sandbox.</td>
+                <td>RPC mapping, OAuth policy, tool approval semantics.</td>
+              </tr>
+              <tr class="candidate-row" data-candidate="langchain" data-skills data-resume data-recommended>
+                <td>LangChain/LangGraph/Deep Agents</td>
+                <td><span class="cell part">API key 429</span><br>Claude/OAuth envs ignored; setup token as <code>ANTHROPIC_API_KEY</code> reached Anthropic 429.</td>
+                <td><span class="cell part">Deep Agents</span><br>Native in Deep Agents; not generic LangChain.</td>
+                <td><span class="cell yes">native</span><br>LangChain MCP adapters and custom tools.</td>
+                <td><span class="cell yes">native</span><br>LangGraph threads/checkpointers.</td>
+                <td><span class="cell yes">native</span><br>Time travel, replay, update-state fork.</td>
+                <td>Right Agent-owned Python/JS harness inside OpenShell.</td>
+                <td>Full runtime harness, auth, prompts, final output, policy.</td>
+              </tr>
+              <tr class="candidate-row" data-candidate="rig" data-resume>
+                <td>Rig.rs</td>
+                <td><span class="cell part">wire 429</span><br>Source uses <code>ANTHROPIC_API_KEY</code>/<code>x-api-key</code>; direct first-party probe returned 429.</td>
+                <td><span class="cell no">none</span><br>No native <code>SKILL.md</code>.</td>
+                <td><span class="cell part">library</span><br>MCP/tooling primitives, not product harness.</td>
+                <td><span class="cell part">build</span><br>Use memory/history primitives.</td>
+                <td><span class="cell part">build</span><br>Right Agent defines branch semantics.</td>
+                <td>Rust runner in sandbox over stdio JSON-RPC or ACP.</td>
+                <td>Almost everything above provider/tool abstractions.</td>
+              </tr>
+              <tr class="candidate-row" data-candidate="codex" data-skills data-resume data-recommended>
+                <td>Codex + Claude Code</td>
+                <td><span class="cell yes">separate</span><br>Claude Code keeps setup-token; Codex uses OpenAI auth.</td>
+                <td><span class="cell yes">native</span><br>Codex skills loader supports <code>SKILL.md</code>.</td>
+                <td><span class="cell part">native</span><br>MCP server/app-server surfaces.</td>
+                <td><span class="cell yes">native</span><br><code>resume</code> command.</td>
+                <td><span class="cell yes">native</span><br><code>fork</code> command.</td>
+                <td><code>codex exec --json</code> or app-server JSON-RPC inside sandbox.</td>
+                <td>Backend router, OpenAI auth onboarding, cost/account labeling.</td>
+              </tr>
+              <tr class="candidate-row" data-candidate="acp" data-resume data-recommended>
+                <td>ACP-backed runtime</td>
+                <td><span class="cell na">none</span><br>Protocol does not define provider auth.</td>
+                <td><span class="cell na">none</span><br>Skills live in backend/wrapper.</td>
+                <td><span class="cell part">protocol</span><br>Tool calls and permissions are protocol messages.</td>
+                <td><span class="cell part">optional</span><br><code>session/load</code>, <code>session/resume</code> gated by capabilities.</td>
+                <td><span class="cell part">draft</span><br><code>session/fork</code> is RFD/draft, not stable.</td>
+                <td>JSON-RPC over stdio preferred.</td>
+                <td>Wrapper state store, fork/background semantics.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tests">
+      <div class="panel">
+        <h2>5. Local Auth/Test Matrix</h2>
+        <p class="note">All tests used disposable directories under <code>/private/tmp</code> or sandbox-local <code>/tmp</code>. The real setup token was never printed. After explicit approval, real-token tests were run through Claude Code, Pi, OpenCode, LangChain Python/JS, and Codex env paths. Rig.rs is a library, not a first-party harness CLI, so the report records source evidence plus a direct first-party Anthropic wire probe matching Rig's <code>x-api-key</code> path.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Runtime</th>
+                <th>Install/version</th>
+                <th>Env tested</th>
+                <th>Command shape</th>
+                <th>Observed result</th>
+                <th>Evidence level</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="candidate-row" data-candidate="claude" data-setup data-recommended>
+                <td>Claude Code</td>
+                <td><code>npx -y @anthropic-ai/claude-code@2.1.141</code></td>
+                <td>Real <code>CLAUDE_CODE_OAUTH_TOKEN</code>; no <code>ANTHROPIC_API_KEY</code>.</td>
+                <td><code>claude -p "Reply exactly RA_OK" --output-format text --model sonnet --tools "" --no-session-persistence</code></td>
+                <td><span class="test-status good">PASS</span>: status 0, output <code>RA_OK</code>, no token leak. Dir: <code>/private/tmp/right-agent-auth-claude-cc.JA4uXT</code>.</td>
+                <td><span class="badge local">local real-token</span></td>
+              </tr>
+              <tr class="candidate-row" data-candidate="claude" data-setup>
+                <td>Claude Code negative control</td>
+                <td><code>@anthropic-ai/claude-code@2.1.141</code></td>
+                <td>Real token placed only in <code>ANTHROPIC_OAUTH_TOKEN</code>; no Claude env.</td>
+                <td>Same non-interactive command.</td>
+                <td><span class="test-status bad">FAIL EXPECTED</span>: <code>Not logged in · Please run /login</code>. Dir: <code>/private/tmp/right-agent-auth-claude-anthoauth.6m1IGd</code>.</td>
+                <td><span class="badge local">local real-token negative</span></td>
+              </tr>
+              <tr class="candidate-row" data-candidate="opencode" data-recommended>
+                <td>OpenCode</td>
+                <td><code>npx -y opencode-ai@1.14.49</code></td>
+                <td>Real token in <code>CLAUDE_CODE_OAUTH_TOKEN</code>, <code>ANTHROPIC_OAUTH_TOKEN</code>, and <code>ANTHROPIC_API_KEY</code> variants.</td>
+                <td><code>opencode run --pure --model anthropic/claude-sonnet-4-5-20250929</code></td>
+                <td><span class="test-status warn">PARTIAL</span>: Claude/OAuth env variants were ignored; <code>ANTHROPIC_API_KEY</code> enabled Anthropic provider and reached API, then timed out after 429 rate-limit errors in logs. Dir: <code>/private/tmp/right-agent-auth-opencode-anthoapi-model.btqqy1</code>.</td>
+                <td><span class="badge local">local real-token</span> <span class="badge source">source</span></td>
+              </tr>
+              <tr class="candidate-row" data-candidate="pi" data-setup data-recommended>
+                <td>Pi</td>
+                <td><code>npx -y @earendil-works/pi-coding-agent@0.74.0</code></td>
+                <td>Real setup token in <code>ANTHROPIC_OAUTH_TOKEN</code>; no <code>ANTHROPIC_API_KEY</code>.</td>
+                <td><code>pi -p --model anthropic/claude-sonnet-4-5-20250929 --no-tools --no-session</code></td>
+                <td><span class="test-status good">PASS</span>: status 0, output <code>RA_OK</code>. Dir: <code>/private/tmp/right-agent-auth-pi-real.Lu1sds</code>.</td>
+                <td><span class="badge local">local real-token</span> <span class="badge source">source</span></td>
+              </tr>
+              <tr class="candidate-row" data-candidate="codex" data-recommended>
+                <td>Codex + Claude Code strategy</td>
+                <td><code>npx -y @openai/codex@0.130.0</code></td>
+                <td>Real token in <code>CLAUDE_CODE_OAUTH_TOKEN</code> and <code>ANTHROPIC_OAUTH_TOKEN</code> variants; no OpenAI key.</td>
+                <td><code>codex exec --json</code>; <code>codex app-server --listen stdio://</code>; source protocol scan.</td>
+                <td><span class="test-status good">DUAL-BACKEND FIT</span>: Claude envs are ignored, as expected. Help/source verify <code>exec --json</code>, <code>app-server</code>, <code>mcp-server</code>, <code>resume</code>, <code>fork</code>, <code>skills/list</code>, and app-server JSON-RPC. The correct path is OpenAI auth plus Claude Code, not Claude token translation.</td>
+                <td><span class="badge local">local help</span> <span class="badge source">source</span></td>
+              </tr>
+              <tr class="candidate-row" data-candidate="langchain" data-resume data-recommended>
+                <td>LangChain Python + LangGraph</td>
+                <td><code>uv pip install langchain-anthropic==1.4.3 langgraph==1.2.0 deepagents==0.6.1 langchain-mcp-adapters==0.2.2</code></td>
+                <td>Real token in <code>CLAUDE_CODE_OAUTH_TOKEN</code>, <code>ANTHROPIC_OAUTH_TOKEN</code>, and <code>ANTHROPIC_API_KEY</code> variants.</td>
+                <td>Construct <code>ChatAnthropic</code> and invoke <code>claude-sonnet-4-5-20250929</code>; separately run local LangGraph checkpoint/fork harness.</td>
+                <td><span class="test-status warn">PARTIAL</span>: Claude/OAuth env variants constructed then failed auth resolution; <code>ANTHROPIC_API_KEY</code> path reached Anthropic and returned 429. LangGraph local resume/fork harness still passed. Dirs: <code>/private/tmp/right-agent-auth-langchain-py-real-ANTHOAPI.qvoaJZ</code>, <code>/private/tmp/right-agent-auth-langchain-py.dekdPY</code>.</td>
+                <td><span class="badge local">local harness</span> <span class="badge source">source</span></td>
+              </tr>
+              <tr class="candidate-row" data-candidate="langchain" data-resume data-recommended>
+                <td>LangChain.js + LangGraph.js</td>
+                <td><code>npm install @langchain/anthropic@1.3.29 @langchain/langgraph@1.3.0 deepagents@1.10.2 @langchain/mcp-adapters@1.1.3</code></td>
+                <td>Real token in <code>CLAUDE_CODE_OAUTH_TOKEN</code>, <code>ANTHROPIC_OAUTH_TOKEN</code>, and <code>ANTHROPIC_API_KEY</code> variants.</td>
+                <td>Construct <code>ChatAnthropic</code>; run local LangGraph.js memory saver harness.</td>
+                <td><span class="test-status warn">PARTIAL</span>: Claude/OAuth env variants reported <code>Anthropic API key not found</code>; <code>ANTHROPIC_API_KEY</code> path reached Anthropic and returned 429 with retries disabled. LangGraph.js local harness still passed. Dirs: <code>/private/tmp/right-agent-auth-langchain-js-real-ANTHOAPI-noretry.bCWTp3</code>, <code>/private/tmp/right-agent-auth-langchain-js.NKhQXm</code>.</td>
+                <td><span class="badge local">local real-token</span> <span class="badge source">source</span></td>
+              </tr>
+              <tr class="candidate-row" data-candidate="rig">
+                <td>Rig.rs</td>
+                <td><code>rig-core 0.37.0</code>, source tag <code>rig-v0.37.0</code></td>
+                <td>Source supports only <code>ANTHROPIC_API_KEY</code>; direct first-party probe used real token on matching <code>x-api-key</code> path.</td>
+                <td>Source read plus direct <code>curl</code> to Anthropic <code>/v1/messages</code> with <code>x-api-key</code>.</td>
+                <td><span class="test-status warn">SOURCE + WIRE</span>: no first-party Rig harness CLI exists to run. Source uses <code>ANTHROPIC_API_KEY</code>/<code>x-api-key</code>; direct Anthropic <code>x-api-key</code> probe returned 429. Source has no <code>CLAUDE_CODE_OAUTH_TOKEN</code> or <code>ANTHROPIC_OAUTH_TOKEN</code> path.</td>
+                <td><span class="badge source">source</span> <span class="badge local">first-party wire test</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="ledger">
+      <div class="panel">
+        <h2>6. Resolved Claim Ledger</h2>
+        <p class="note">This section is the audit surface for prior weak claims. "Blocked" means the report records the exact blocker and the next proof path; it is not scored as confirmed evidence.</p>
+
+        <h3>Claims Cleared</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Claim</th>
+                <th>Resolution</th>
+                <th>Evidence</th>
+                <th>Product meaning</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Pi setup-token support</td><td><span class="cell yes">confirmed</span></td><td>Real <code>/tmp/setup-token</code> passed via <code>ANTHROPIC_OAUTH_TOKEN</code>; source resolves that env before <code>ANTHROPIC_API_KEY</code> and sends OAuth bearer auth for <code>sk-ant-oat</code> tokens.</td><td>Technically viable Claude-subscription alternate; policy/revocation remains a release gate.</td></tr>
+              <tr><td>OpenCode setup-token support</td><td><span class="cell no">not confirmed</span></td><td>Real <code>CLAUDE_CODE_OAUTH_TOKEN</code>/<code>ANTHROPIC_OAUTH_TOKEN</code> variants were ignored. <code>ANTHROPIC_API_KEY</code> shape reached Anthropic and returned 429.</td><td>Do not advertise Claude setup-token support. Treat as API-key or non-Claude backend until proven otherwise.</td></tr>
+              <tr><td>Rig.rs auth</td><td><span class="cell part">source + wire</span></td><td>Source reads <code>ANTHROPIC_API_KEY</code> and emits <code>x-api-key</code>. Direct Anthropic <code>x-api-key</code> probe with the setup token returned 429.</td><td>No native Claude setup-token/OAuth lane. Rig requires a Right Agent-owned harness and auth decision.</td></tr>
+              <tr><td>ACP resume/fork</td><td><span class="cell part">split answer</span></td><td>ACP stable docs define optional <code>loadSession</code> and <code>sessionCapabilities.resume</code>; fork is an RFD/draft <code>session/fork</code>.</td><td>ACP can carry resume only when the agent advertises it. Fork is backend/wrapper-specific for now.</td></tr>
+              <tr><td>LangChain ecosystem</td><td><span class="cell yes">expanded</span></td><td>LangChain split into generic LangChain, LangGraph, Deep Agents, LangSmith/Agent Server, and LangServe. Deep Agents source/docs show <code>SKILL.md</code>, backends, checkpointers, and ACP.</td><td>The viable programmatic lane is Deep Agents + LangGraph, not generic LangChain alone.</td></tr>
+              <tr><td>Codex + Claude Code scoring</td><td><span class="cell yes">clarified</span></td><td>Codex source/help show OpenAI-auth backend surfaces; Claude Code keeps Claude setup-token onboarding.</td><td>The composite scores product capability after a backend router exists. It is not a claim that Codex consumes Claude tokens.</td></tr>
+              <tr><td>OpenShell execution</td><td><span class="cell part">smoke-proven</span></td><td>Inside <code>right-test-shared</code>, isolated temp HOME/cache executed Pi <code>0.74.0</code>, OpenCode <code>1.14.49</code>, and Codex <code>0.130.0</code>. Python exists; Cargo is absent.</td><td>Node CLIs are runnable in OpenShell. LangChain can run with Python; Rig runner must be prebuilt/copied or sandbox image must include Cargo.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Auth and Setup-Token Matrix</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Candidate</th><th>Setup-token result</th><th>Observed auth surface</th><th>Release decision</th></tr></thead>
+            <tbody>
+              <tr><td>Claude Code</td><td><span class="cell yes">pass</span></td><td><code>CLAUDE_CODE_OAUTH_TOKEN</code> official and local pass.</td><td>Default Claude backend.</td></tr>
+              <tr><td>Codex standalone</td><td><span class="cell na">not applicable</span></td><td>OpenAI auth; Claude envs ignored.</td><td>OpenAI backend only.</td></tr>
+              <tr><td>Claude Code + Codex</td><td><span class="cell yes">preserved</span></td><td>Claude Code handles Claude setup-token; Codex handles OpenAI auth.</td><td>Best two-backend roadmap.</td></tr>
+              <tr><td>OpenCode</td><td><span class="cell no">no pass</span></td><td><code>ANTHROPIC_API_KEY</code> shape reached 429; OAuth envs ignored.</td><td>Gate behind API-key/non-Claude auth.</td></tr>
+              <tr><td>Pi</td><td><span class="cell yes">pass</span></td><td><code>ANTHROPIC_OAUTH_TOKEN</code> real-token pass.</td><td>Technical alternate, policy-gated.</td></tr>
+              <tr><td>Rig.rs</td><td><span class="cell no">no OAuth path</span></td><td><code>ANTHROPIC_API_KEY</code>/<code>x-api-key</code> source path.</td><td>Requires custom auth/harness story.</td></tr>
+              <tr><td>LangChain Python/JS</td><td><span class="cell part">API-key 429</span></td><td><code>ANTHROPIC_API_KEY</code>; OAuth envs ignored.</td><td>Use API/cloud auth or wrap Claude Code.</td></tr>
+              <tr><td>LangGraph</td><td><span class="cell na">inherits model auth</span></td><td>Checkpoint/runtime layer, not provider-auth layer.</td><td>Pair with selected model adapter.</td></tr>
+              <tr><td>Deep Agents</td><td><span class="cell na">inherits model auth</span></td><td>Uses LangChain/provider auth.</td><td>Good harness layer; auth still ours.</td></tr>
+              <tr><td>LangSmith Agent Server</td><td><span class="cell no">not setup-token</span></td><td>LangSmith/cloud deployment auth.</td><td>Deployment product, not local default.</td></tr>
+              <tr><td>LangServe</td><td><span class="cell no">not setup-token</span></td><td>App/server-owned provider credentials.</td><td>REST wrapper only.</td></tr>
+              <tr><td>ACP protocol</td><td><span class="cell na">none</span></td><td>Protocol does not define provider auth.</td><td>Auth belongs to backend/wrapper.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>State, Skills, and Sandbox Matrix</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Candidate</th><th>Skills</th><th>Resume/fork/background</th><th>Sandbox communication</th></tr></thead>
+            <tbody>
+              <tr><td>Claude Code</td><td><span class="cell yes">native</span> <code>SKILL.md</code></td><td><span class="cell yes">native</span> resume/continue/fork/background agents.</td><td>Existing stdio stream JSON inside OpenShell.</td></tr>
+              <tr><td>Codex standalone</td><td><span class="cell yes">native</span> skills/app-server surfaces.</td><td><span class="cell yes">native</span> <code>resume</code>, <code>fork</code>, thread protocol.</td><td>OpenShell smoke pass for CLI; use <code>exec --json</code> or app-server JSON-RPC.</td></tr>
+              <tr><td>Claude Code + Codex</td><td><span class="cell yes">preserved</span></td><td><span class="cell yes">two stores</span> each backend keeps its own session semantics.</td><td>Backend router chooses Claude stream or Codex JSON-RPC per session.</td></tr>
+              <tr><td>OpenCode</td><td><span class="cell yes">native</span> Claude/Agents-style skill roots.</td><td><span class="cell yes">CLI</span> continue/session/fork/export/import surfaces.</td><td>OpenShell smoke pass for CLI. Use stdio JSON first; ACP/serve after event audit.</td></tr>
+              <tr><td>Pi</td><td><span class="cell yes">native</span> Agent Skills and <code>--skill</code>.</td><td><span class="cell yes">CLI/RPC</span> continue/resume/session/fork; RPC tests cover state, JSONL sessions, bash.</td><td>OpenShell smoke pass for CLI. Full RPC/tool e2e in OpenShell remains the next proof.</td></tr>
+              <tr><td>Rig.rs</td><td><span class="cell no">none</span></td><td><span class="cell part">library</span> memory/history primitives; Right Agent defines branches.</td><td>Rust runner should run as prebuilt binary in sandbox. Current sandbox lacks Cargo.</td></tr>
+              <tr><td>LangChain Python/JS</td><td><span class="cell part">library</span> custom code required.</td><td><span class="cell no">not alone</span> use LangGraph for durable state.</td><td>Run Right Agent-owned Python/JS harness in OpenShell.</td></tr>
+              <tr><td>LangGraph</td><td><span class="cell part">via wrapper</span></td><td><span class="cell yes">native</span> threads, checkpointers, replay, update-state fork.</td><td>Python exists in OpenShell; package/runtime install must be sandbox-controlled.</td></tr>
+              <tr><td>Deep Agents</td><td><span class="cell yes">native</span> <code>SKILL.md</code> progressive disclosure.</td><td><span class="cell yes">LangGraph</span> checkpointer-backed; background depends on deployment/runtime.</td><td>Run backend filesystem/shell inside OpenShell; ACP example exists.</td></tr>
+              <tr><td>LangSmith Agent Server</td><td><span class="cell part">deployment</span></td><td><span class="cell yes">server</span> background runs/task queues.</td><td>External/self-hosted service, not sandbox subprocess by default.</td></tr>
+              <tr><td>LangServe</td><td><span class="cell no">not enough</span></td><td><span class="cell no">not enough</span> wrapper around chains.</td><td>HTTP service adds network surface without solving agent lifecycle.</td></tr>
+              <tr><td>ACP protocol</td><td><span class="cell na">backend-owned</span></td><td><span class="cell part">optional/draft</span> resume optional; fork draft.</td><td>JSON-RPC over stdio inside sandbox; never expose host fs/terminal.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="deep">
+      <div class="panel">
+        <h2>7. Detailed Findings</h2>
+
+        <details open class="candidate" data-candidate="langchain" data-skills data-resume data-recommended>
+          <summary>🧩 LangChain / LangGraph / Deep Agents ecosystem <span class="badge source">first-class candidate</span></summary>
+          <div class="cols">
+            <div>
+              <h3>What the ecosystem provides</h3>
+              <p>LangChain Python/JS gives model/tool abstractions, custom tools, streaming, provider integrations, and MCP adapters. LangGraph adds durable execution through threads and checkpointers. LangSmith Deployment adds Agent Server, background runs, task queues, streaming, cron jobs, and deployment/runtime APIs. LangServe remains a REST wrapper and should not be the core Right Agent lane for sandboxed bot-harness execution.</p>
+              <p>Deep Agents is the relevant agent-harness layer. Its docs and source show <code>SKILL.md</code> support, progressive disclosure, filesystem/shell backends, human-in-the-loop gates, CLI/headless mode, persistent local SQLite sessions, MCP, and ACP library code.</p>
+              <div class="mini"><strong>Auth finding:</strong> <code>langchain-anthropic</code> reads <code>ANTHROPIC_API_KEY</code>. Real <code>CLAUDE_CODE_OAUTH_TOKEN</code> and <code>ANTHROPIC_OAUTH_TOKEN</code> variants were ignored by Python/JS. Putting the setup token in <code>ANTHROPIC_API_KEY</code> reached Anthropic but returned 429 rate-limit responses. This lane requires explicit API-key/cloud-provider auth or a Right Agent-owned Claude Code subprocess adapter.</div>
+            </div>
+            <div>
+              <h3>Resume/fork answer</h3>
+              <p>LangGraph directly supports checkpoint-backed threads, replay, and fork-like branching via <code>get_state_history()</code> and <code>update_state()</code>. Replay re-executes nodes after the checkpoint; it is not a cache read. Fork is a new checkpoint branch from a prior config.</p>
+              <p>With ACP, LangGraph can preserve Right Agent resume/fork if the wrapper maps ACP session IDs to LangGraph thread/checkpoint IDs and exposes stable <code>session/load</code>/<code>session/resume</code>. Fork needs draft ACP <code>session/fork</code> or a Right Agent custom method/meta convention.</p>
+              <div class="mini"><strong>Right Agent ownership:</strong> prompt generation, skill source layering, credential injection, OpenShell process lifecycle, final-output extraction, and bot event normalization still belong to us.</div>
+            </div>
+          </div>
+        </details>
+
+        <details class="candidate" data-candidate="claude" data-setup data-skills data-resume data-recommended>
+          <summary>🔐 Claude Code subscription/setup-token <span class="badge official">official + local pass</span></summary>
+          <div>
+            <p><strong>Official facts:</strong> current Claude Code authentication docs list credential precedence and explicitly define <code>CLAUDE_CODE_OAUTH_TOKEN</code> as a one-year token generated by <code>claude setup-token</code>. The token authenticates with Pro, Max, Team, or Enterprise subscription credentials; <code>--bare</code> does not read it. Docs also say <code>ANTHROPIC_API_KEY</code> takes precedence and can move usage to API billing.</p>
+            <p><strong>Local fact:</strong> clean install of <code>@anthropic-ai/claude-code@2.1.141</code> with only real <code>CLAUDE_CODE_OAUTH_TOKEN</code> returned <code>RA_OK</code>. The negative-control test with only <code>ANTHROPIC_OAUTH_TOKEN</code> failed with “Not logged in”.</p>
+            <p><strong>Policy/business risk:</strong> Help Center billing docs describe Pro/Max usage limits and separate API-credit behavior. GitHub issues show unresolved/auth-cost anecdotes, including setup-token not enough in some containers, subscription recognition failures, API fallback/billing confusion, and double-billing allegations. These are not authoritative facts, but they are product-risk signals.</p>
+            <p><strong>External-user decision:</strong> official Claude Code remains the default setup-token path. Pi has a real technical pass through <code>ANTHROPIC_OAUTH_TOKEN</code>, but third-party consumption of subscription tokens requires vendor-policy review, revocation handling, and sandbox-only injection before user-facing release.</p>
+          </div>
+        </details>
+
+        <details class="candidate" data-candidate="pi" data-setup data-skills data-resume data-recommended>
+          <summary>🟡 Pi <span class="badge local">real OAuth pass</span></summary>
+          <div>
+            <p>Pi now has a real-token pass. Source shows <code>ANTHROPIC_OAUTH_TOKEN</code> takes precedence over <code>ANTHROPIC_API_KEY</code>. Its Anthropic provider treats tokens containing <code>sk-ant-oat</code> as OAuth, sends bearer auth, and includes Claude Code beta/identity headers. Clean local run with the real setup token in <code>ANTHROPIC_OAUTH_TOKEN</code> returned <code>RA_OK</code>.</p>
+            <p>Skills are native: help exposes <code>--skill</code>, <code>--no-skills</code>, and docs/source show Agent Skills conventions. Session controls are native: <code>--continue</code>, <code>--resume</code>, <code>--session</code>, and <code>--fork</code>.</p>
+            <p><strong>Remaining risk:</strong> Pi is third-party code consuming a Claude subscription token. The technical pass is real, but product policy requires vendor guidance and a revocation/containment story before exposing this to external users.</p>
+          </div>
+        </details>
+
+        <details class="candidate" data-candidate="opencode" data-skills data-resume data-recommended>
+          <summary>🟦 OpenCode <span class="badge source">best CLI alternate</span></summary>
+          <div>
+            <p>OpenCode remains the best CLI/ACP alternate because source and CLI help show <code>run</code>, <code>serve</code>, <code>acp</code>, session continuation/fork, MCP management, provider auth, and native skill loading. It loads skill roots from Claude/Agents-style locations, which makes current Right Agent user skill preservation realistic. It is not ranked above Pi for Claude-subscription replacement because it does not have a successful setup-token pass.</p>
+            <p>Setup-token parity did not pass. Source search found no <code>CLAUDE_CODE_OAUTH_TOKEN</code> or <code>ANTHROPIC_OAUTH_TOKEN</code> Anthropic provider path. Real-token tests with those envs were ignored. Putting the setup token in <code>ANTHROPIC_API_KEY</code> enabled the Anthropic provider and reached Anthropic, but the run timed out after 429 rate-limit errors. That is an attempted real-token path, not a successful Claude-subscription pass.</p>
+            <p><strong>Recommendation:</strong> build OpenCode behind capability gates. Start with its native run/server event path. Use ACP only if it improves lifecycle and permission normalization inside OpenShell.</p>
+          </div>
+        </details>
+
+        <details class="candidate" data-candidate="rig" data-resume>
+          <summary>🦀 Rig.rs <span class="badge source">programmatic Rust lane</span></summary>
+          <div>
+            <p>Rig.rs should not be rejected for lacking CLI session identity. The relevant question is whether Right Agent wants to own a Rust runner. Source shows Anthropic provider support, streaming/memory/tool primitives, and MCP examples. Source also shows Anthropic auth is API-key based: <code>Client::from_env()</code> reads <code>ANTHROPIC_API_KEY</code>, and <code>AnthropicKey</code> emits <code>x-api-key</code>. A direct first-party Anthropic <code>x-api-key</code> probe with the real setup token returned 429, matching the OpenCode/LangChain API-key-shaped path.</p>
+            <p>Rig.rs does not supply native <code>SKILL.md</code>, OpenClaw skill directories, Claude setup-token auth, or a ready Right Agent-style subprocess protocol. If selected, Right Agent builds skills, prompt rendering, session storage, fork/background semantics, MCP lifecycle, and JSON-RPC/ACP transport.</p>
+          </div>
+        </details>
+
+        <details class="candidate" data-candidate="codex" data-skills data-resume data-recommended>
+          <summary>⚙️ Codex + Claude Code <span class="badge source">two-backend path</span></summary>
+          <div>
+            <p>Codex should be researched as the OpenAI half of a two-backend Right Agent, paired with Claude Code. Claude Code keeps Claude subscription/setup-token onboarding; Codex adds OpenAI models, OpenAI account auth, native <code>SKILL.md</code> loading, <code>resume</code>/<code>fork</code>, MCP server support, and two integration surfaces: <code>codex exec --json</code> for simple noninteractive turns and experimental <code>codex app-server</code> JSON-RPC for richer thread/control-plane integration.</p>
+            <p>Clean real-token tests with <code>CLAUDE_CODE_OAUTH_TOKEN</code> and <code>ANTHROPIC_OAUTH_TOKEN</code> ignored Claude envs and attempted OpenAI auth, returning 401 without OpenAI credentials. That is not a negative for the revised path; it confirms Codex must not be evaluated as a Claude-token replacement.</p>
+            <p><strong>Right Agent path:</strong> add a backend router with explicit provider identity: <code>claude-code</code> sessions use Claude setup-token and current stream normalization; <code>codex</code> sessions use OpenAI auth and Codex event normalization. Keep credentials separate, label billing/account mode in every audit record, and make bot commands expose backend selection before Codex reaches external users.</p>
+          </div>
+        </details>
+
+        <details class="candidate" data-candidate="acp" data-resume data-recommended>
+          <summary>🔌 ACP capabilities and limits <span class="badge official">stable vs draft</span></summary>
+          <div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>ACP capability</th><th>Status</th><th>Right Agent answer</th></tr></thead>
+                <tbody>
+                  <tr><td>Session creation</td><td><span class="cell yes">stable</span></td><td><code>session/new</code> creates a session if auth allows it.</td></tr>
+                  <tr><td>Session listing</td><td><span class="cell part">stable optional</span></td><td><code>session/list</code> exists only when the agent advertises capability.</td></tr>
+                  <tr><td>Load/resume</td><td><span class="cell part">stable optional</span></td><td><code>session/load</code> and <code>session/resume</code> require advertised support and backend persistence.</td></tr>
+                  <tr><td>Fork</td><td><span class="cell part">draft/RFD</span></td><td><code>session/fork</code> is not portable stable ACP.</td></tr>
+                  <tr><td>Background continuation</td><td><span class="cell no">framework-specific</span></td><td>Use backend run/task queues or custom wrapper methods; ACP does not create background semantics by itself.</td></tr>
+                  <tr><td>Turn cancellation</td><td><span class="cell yes">stable</span></td><td><code>session/cancel</code> is defined.</td></tr>
+                  <tr><td>Tools and permissions</td><td><span class="cell yes">stable</span></td><td>Good event shape; requires Right Agent audit mapping.</td></tr>
+                  <tr><td>Filesystem/terminal</td><td><span class="cell part">client capability</span></td><td>Danger: client-side fs/terminal must be inside OpenShell, never the host bot.</td></tr>
+                  <tr><td>Custom <code>_meta</code></td><td><span class="cell part">extension only</span></td><td>Safe for hints/observability; unsafe as portable semantics because ACP says implementations must not assume values.</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p><strong>Direct answer:</strong> ACP supports resume only when the specific agent advertises stable optional <code>sessionCapabilities.resume</code> or <code>loadSession</code>. ACP does not support fork by itself in stable protocol; fork is a draft RFD. ACP plus Rig.rs can preserve resume/fork only if Right Agent builds storage and fork semantics. ACP plus LangGraph can preserve resume/fork more naturally by mapping ACP sessions to LangGraph threads/checkpoints, but the wrapper still owns the product contract.</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <div class="panel">
+        <h2>8. Bot-to-Sandbox Communication</h2>
+        <div class="tree">
+          <div class="node"><h3>Claude Code</h3><p>Bot spawns <code>claude -p --output-format stream-json</code> inside OpenShell. Keep credentials outside sandbox until injected. Use existing stream normalizer.</p></div>
+          <div class="node"><h3>OpenCode</h3><p>Start with subprocess run/server JSON. Evaluate ACP after event mapping. Do not let ACP fs/terminal reach host.</p></div>
+          <div class="node"><h3>Pi</h3><p>Use RPC/text mode inside sandbox. Map sessions/fork explicitly and verify noninteractive tool approval behavior.</p></div>
+          <div class="node"><h3>Codex + CC</h3><p>Use a backend router: Claude Code handles Claude/subscription sessions; Codex handles OpenAI sessions through <code>exec --json</code> or app-server JSON-RPC. Keep credentials, billing labels, and session stores separate.</p></div>
+          <div class="node"><h3>Deep Agents</h3><p>Run a Right Agent-owned Python/JS harness inside OpenShell. Bot talks stdio JSON-RPC/ACP or sandbox-local HTTP. Keep LangChain tools in sandbox.</p></div>
+          <div class="node"><h3>Rig.rs</h3><p>Compile a Right Agent Rust runner inside sandbox. Use stdio JSON-RPC first; ACP wrapper optional.</p></div>
+          <div class="node"><h3>LangSmith Deployment</h3><p>Useful for managed runtime research, but external SaaS or self-hosted Agent Server is a deployment product choice, not a local sandbox subprocess by default.</p></div>
+          <div class="node"><h3>ACP</h3><p>Good common envelope when native or wrapper-owned. It is not enough for auth, billing, skills, persistence, fork, or sandbox policy.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="recommendation">
+      <div class="panel">
+        <h2>9. Recommendation</h2>
+        <ol>
+          <li><strong>Keep Claude Code as default.</strong> It is the only backend with official setup-token semantics and a clean real-token pass.</li>
+          <li><strong>Add a backend capability trait.</strong> Include auth mode, skills, MCP, schema output, streaming, resume, fork, background continuation, ACP support, sandbox transport, and policy status.</li>
+          <li><strong>Make Codex + Claude Code the first two-backend path.</strong> Claude Code remains the Claude/subscription backend; Codex becomes the OpenAI backend through OpenAI auth, <code>exec --json</code>, and app-server JSON-RPC. Do not spend effort making Codex consume Claude setup tokens.</li>
+          <li><strong>Keep Pi as the Claude-subscription alternate.</strong> It is the only non-Claude-Code runtime with a clean setup-token pass. The open question is product policy, not technical viability.</li>
+          <li><strong>Build OpenCode as the CLI/ACP alternate.</strong> It has the closest CLI/server/session shape. Do not promise Claude setup-token support unless the 429/API-key path is confirmed under usable limits and vendor policy.</li>
+          <li><strong>Promote Deep Agents/LangGraph to the programmatic lane.</strong> It can preserve skills and resume/fork if Right Agent owns the wrapper and accepts Python/JS runtime complexity.</li>
+          <li><strong>Keep Rig.rs as a Rust-native prototype lane.</strong> It is attractive only if owning the full runtime is desirable.</li>
+          <li><strong>Use ACP selectively.</strong> ACP is useful for bot-harness communication, not a substitute for backend capability detection.</li>
+          <li><strong>Separate onboarding by backend.</strong> Claude Code gets setup-token onboarding. Pi can technically use setup-token OAuth through <code>ANTHROPIC_OAUTH_TOKEN</code>. OpenCode/LangChain/Rig need API-key-shaped auth proof under real limits or a wrapper that shells out to official Claude Code.</li>
+          <li><strong>Treat third-party setup-token support as policy-sensitive.</strong> The technical matrix now has real-token evidence, but external-user exposure requires vendor guidance, revocation handling, and sandbox-only credential injection.</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="sources">
+      <div class="panel">
+        <h2>10. Evidence Log and Sources</h2>
+        <details open>
+          <summary>Evidence quality key</summary>
+          <div>
+            <span class="badge official">official docs</span>
+            <span class="badge source">source code</span>
+            <span class="badge local">local test</span>
+            <span class="badge blocked">blocked proof</span>
+            <span class="badge inferred">inference</span>
+            <span class="badge anecdote">GitHub/community anecdote</span>
+          </div>
+        </details>
+        <details open>
+          <summary>Source URLs and local source snapshots</summary>
+          <div>
+            <ul class="source-list">
+              <li><span class="badge official">official</span> Claude Code auth docs: <a href="https://code.claude.com/docs/en/authentication">Authentication</a>; Pro/Max billing help: <a href="https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan">Use Claude Code with Pro or Max</a>; GitHub Actions docs: <a href="https://code.claude.com/docs/en/github-actions">Claude Code GitHub Actions</a>.</li>
+              <li><span class="badge anecdote">GitHub</span> Claude Code issues/discussions: <a href="https://github.com/anthropics/claude-code/issues/8938">#8938 setup-token container auth</a>, <a href="https://github.com/anthropics/claude-code/issues/23315">#23315 billing allegation</a>, <a href="https://github.com/anthropics/claude-code/issues/31012">#31012 subscription recognition</a>, <a href="https://github.com/anthropics/claude-code/issues/2944">#2944 API fallback</a>, <a href="https://github.com/anthropics/claude-code-action/discussions/428">Action discussion #428</a>.</li>
+              <li><span class="badge official">official</span> LangChain docs: <a href="https://docs.langchain.com/oss/python/deepagents/skills">Deep Agents skills</a>, <a href="https://docs.langchain.com/oss/python/langchain/mcp">LangChain MCP</a>, <a href="https://docs.langchain.com/oss/python/langgraph/use-time-travel">LangGraph time travel</a>, <a href="https://docs.langchain.com/oss/python/langgraph/human-in-the-loop">LangGraph interrupts</a>, <a href="https://docs.langchain.com/langsmith/deployments">LangSmith Deployment</a>, <a href="https://docs.langchain.com/langsmith/agent-server">Agent Server</a>, <a href="https://docs.langchain.com/langgraph-platform/background-run">background runs</a>.</li>
+              <li><span class="badge source">source</span> LangChain clones: <code>/private/tmp/right-agent-langchain-src</code> commit <code>9db9628d793909ce8f3eed4e57b5935f2fb0a235</code>; <code>/private/tmp/right-agent-langgraph-src</code> commit <code>076e2a3627206f5a1aef573aaca4a01e5af897ca</code>; <code>/private/tmp/right-agent-deepagents-src</code> commit <code>b3c577de9243b1dc9919f5534273667c50fd0c2d</code>.</li>
+              <li><span class="badge source">source</span> OpenCode: local source <code>/private/tmp/right-agent-opencode-src</code>, tag <code>v1.14.49</code>, commit <code>1a47578445eb2c630976c089b8e62085f5b5cc17</code>; package <code>opencode-ai@1.14.49</code>.</li>
+              <li><span class="badge source">source</span> Pi: local source <code>/private/tmp/right-agent-pi-src</code>, tag <code>v0.74.0</code>, commit <code>1eee081e29c1323c40b98db11d0a62b919831881</code>; package <code>@earendil-works/pi-coding-agent@0.74.0</code>.</li>
+              <li><span class="badge source">source</span> Rig.rs: local source <code>/private/tmp/right-agent-rig-src</code>, tag <code>rig-v0.37.0</code>, commit <code>63d215f14409293c1d68cd43265f5283c3326fae</code>; crate <code>rig-core 0.37.0</code>.</li>
+              <li><span class="badge source">source</span> Codex: local source <code>/private/tmp/right-agent-codex-src</code>, tag <code>rust-v0.130.0</code>, commit <code>58573da43ab697e8b79f152c53df4b42230395a8</code>; package <code>@openai/codex@0.130.0</code>. Re-checked CLI help for <code>exec --json</code>, <code>app-server</code>, <code>mcp-server</code>, <code>resume</code>, <code>fork</code>, and source protocol items including <code>thread/resume</code>, <code>thread/fork</code>, <code>skills/list</code>, and <code>getAuthStatus</code>.</li>
+              <li><span class="badge official">official</span> ACP docs: <a href="https://agentclientprotocol.com/protocol/schema">schema</a>, <a href="https://agentclientprotocol.com/protocol/session-setup">session setup</a>, <a href="https://agentclientprotocol.com/protocol/session-list">session list</a>, <a href="https://agentclientprotocol.com/rfds/session-fork">session fork RFD</a>, <a href="https://agentclientprotocol.com/protocol/file-system">file system</a>, <a href="https://agentclientprotocol.com/protocol/terminals">terminals</a>.</li>
+              <li><span class="badge local">local</span> Package metadata checked on 2026-05-14: Claude Code <code>2.1.141</code>, OpenCode <code>1.14.49</code>, Pi <code>0.74.0</code>, Codex <code>0.130.0</code>, <code>langchain-anthropic 1.4.3</code>, <code>langgraph 1.2.0</code>, <code>deepagents 0.6.1</code>, <code>langchain-mcp-adapters 0.2.2</code>, <code>@langchain/anthropic 1.3.29</code>, <code>@langchain/langgraph 1.3.0</code>, <code>deepagents 1.10.2</code>, <code>@langchain/mcp-adapters 1.1.3</code>, <code>langsmith 0.8.4</code>, <code>langserve 0.3.3</code>.</li>
+              <li><span class="badge local">local</span> Real-token auth retest on 2026-05-14: Pi <code>ANTHROPIC_OAUTH_TOKEN</code> pass; OpenCode/LangChain <code>ANTHROPIC_API_KEY</code> paths reached Anthropic 429; Codex ignored Claude envs; direct first-party Anthropic <code>x-api-key</code> and bearer OAuth probes both returned 429 after earlier Claude Code/Pi passes.</li>
+              <li><span class="badge local">local</span> OpenShell smoke on 2026-05-14: <code>right-test-shared</code> executed Pi <code>0.74.0</code>, OpenCode <code>1.14.49</code>, and Codex <code>0.130.0</code> with isolated sandbox-local temp HOME/cache and no secrets; <code>python3</code> exists at <code>/sandbox/.venv/bin/python3</code>; <code>cargo</code> is absent.</li>
+            </ul>
+          </div>
+        </details>
+        <details open>
+          <summary>Redacted command and source appendix</summary>
+          <div>
+            <ul class="source-list">
+              <li><span class="badge local">command</span> Real-token commands used environment variables populated from <code>/tmp/setup-token</code> with shell tracing off. The token value was never included in command text, stdout, or this report.</li>
+              <li><span class="badge local">command</span> OpenShell smoke shape: <code>openshell sandbox exec -n right-test-shared --no-tty --timeout 180 -- sh -lc '... npx -y @earendil-works/pi-coding-agent@0.74.0 --version; npx -y opencode-ai@1.14.49 --version; npx -y @openai/codex@0.130.0 --version'</code>.</li>
+              <li><span class="badge local">command</span> Pi real-token shape: <code>ANTHROPIC_OAUTH_TOKEN=&lt;redacted&gt; npx -y @earendil-works/pi-coding-agent@0.74.0 --provider anthropic --model claude-sonnet-4-5 --mode json --no-tools --no-session -p 'Reply exactly RA_OK'</code>.</li>
+              <li><span class="badge source">source</span> Pi auth: <code>/private/tmp/right-agent-pi-src/packages/ai/src/env-api-keys.ts:96-99</code> and <code>/private/tmp/right-agent-pi-src/packages/ai/src/providers/anthropic.ts:758-839</code>.</li>
+              <li><span class="badge source">source</span> Pi RPC: <code>/private/tmp/right-agent-pi-src/packages/coding-agent/test/rpc.test.ts:14-126</code> covers OAuth/API-key gated RPC startup, state, session JSONL, compaction, and bash command execution.</li>
+              <li><span class="badge source">source</span> Rig Anthropic auth: <code>/private/tmp/right-agent-rig-src/crates/rig-core/src/providers/anthropic/client.rs:55-60</code> emits <code>x-api-key</code>; <code>:110-116</code> reads <code>ANTHROPIC_API_KEY</code>.</li>
+              <li><span class="badge source">source</span> Deep Agents skills: <code>/private/tmp/right-agent-deepagents-src/action.yml:153-203</code> installs directories containing <code>SKILL.md</code>.</li>
+              <li><span class="badge source">source</span> Deep Agents ACP: <code>/private/tmp/right-agent-deepagents-src/libs/acp/examples/demo_agent.py:13-19</code> imports Deep Agents, LangGraph checkpointer, and <code>AgentServerACP</code>; <code>:45-78</code> builds the checkpointer-backed agent; <code>:118-119</code> runs ACP.</li>
+              <li><span class="badge source">source</span> Codex app-server protocol: <code>/private/tmp/right-agent-codex-src/codex-rs/app-server-protocol/schema/typescript/v2/ThreadResumeParams.ts:10-20</code> and <code>ThreadForkParams.ts:10-18</code>.</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>Completion audit against /tmp/goal-unconfirmed</summary>
+          <div>
+            <ul class="source-list">
+              <li>ACP is not presented as a backend alternative: passed.</li>
+              <li>LangChain/LangGraph is researched as first-class: passed, with Deep Agents separated from generic LangChain.</li>
+              <li>ACP resume/fork answered directly: passed, stable optional resume/load, draft fork.</li>
+              <li>Skills support assessed for every candidate: passed.</li>
+              <li>Claude setup-token research includes official docs, GitHub anecdotes, and local test: passed.</li>
+              <li>Local tests use clean installs/config: passed for all executed tests.</li>
+              <li>Third-party real-token tests: rerun after explicit approval. Pi passed. OpenCode/LangChain API-key-shaped paths reached Anthropic 429. Codex ignored Claude envs. Rig.rs has no first-party harness CLI; source plus direct first-party wire-equivalent probe was recorded.</li>
+              <li>OpenShell proof: passed for Pi/OpenCode/Codex CLI smoke; Python present; Cargo absent, so Rig sandbox execution requires prebuilt binary or sandbox image change.</li>
+              <li>Weak claims: passed. Remaining partials are listed in the resolved-claim ledger with exact evidence level and next proof path.</li>
+              <li>Secret exposure: token was not printed, not embedded in this report, and not found in disposable <code>/private/tmp/right-agent-auth-*</code> files after the run.</li>
+              <li>Revised scoring: passed, with implementation effort excluded, weighted fit-only rubric, per-aspect point columns, and arithmetic totals out of 85 for Claude Code, Codex + Claude Code, Pi, OpenCode, Deep Agents/LangGraph, ACP, Rig.rs, LangSmith Deployment, generic LangChain, and LangServe. Local verifier confirmed all ten score rows sum correctly.</li>
+              <li>Codex path re-research: passed, Codex is now presented as the OpenAI half of a two-backend <code>Codex + Claude Code</code> strategy, not as a Claude setup-token replacement.</li>
+              <li>Quick comparison without full prose: heatmap, scorecards, filters, and test matrix provided.</li>
+            </ul>
+          </div>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const boxes = [...document.querySelectorAll('[data-filter]')];
+    const items = [...document.querySelectorAll('.candidate, .candidate-row')];
+
+    function applyFilters() {
+      const active = boxes.filter((box) => box.checked).map((box) => box.dataset.filter);
+      items.forEach((item) => {
+        const keep = active.every((name) => item.hasAttribute('data-' + name));
+        item.classList.toggle('hidden-by-filter', !keep);
+      });
+    }
+
+    function applyScoreHeatmap() {
+      const columns = [
+        ['auth', 'Auth', 25, 2],
+        ['skills', 'Skills', 15, 3],
+        ['state', 'State', 15, 4],
+        ['sandbox', 'Sandbox', 15, 5],
+        ['evidence', 'Evidence', 15, 6],
+        ['total', 'Total', 85, 7],
+      ];
+      const palette = {
+        high: '20, 122, 75',
+        medium: '154, 91, 0',
+        low: '168, 50, 50',
+      };
+
+      document.querySelectorAll('.score-table .score-row').forEach((row) => {
+        columns.forEach(([key, label, max, index]) => {
+          const value = Number(row.dataset[key]);
+          const cell = row.cells[index];
+          if (!cell || Number.isNaN(value)) return;
+
+          const percent = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
+          const band = percent >= 85 ? 'high' : percent >= 55 ? 'medium' : 'low';
+          cell.classList.add('score-heat');
+          if (key === 'total') cell.classList.add('score-total');
+          cell.style.setProperty('--heat-pct', percent + '%');
+          cell.style.setProperty('--heat-fill', '0.54');
+          cell.style.setProperty('--heat-bg', percent === 0 ? '0.1' : '0.2');
+          cell.style.setProperty('--heat-rgb', palette[band]);
+          cell.title = `${label}: ${value}/${max} (${percent}%)`;
+          cell.setAttribute('aria-label', cell.title);
+        });
+      });
+    }
+
+    boxes.forEach((box) => box.addEventListener('change', applyFilters));
+    applyFilters();
+    applyScoreHeatmap();
+  </script>
+</body>
+</html>

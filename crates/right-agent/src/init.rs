@@ -337,18 +337,18 @@ where
         match prompt() {
             Ok(v) => return Ok(Some(v)),
             Err(inquire::InquireError::OperationCanceled) => return Ok(None),
-            Err(inquire::InquireError::OperationInterrupted) => match inquire::Confirm::new(
-                "cancel?",
-            )
-            .with_default(false)
-            .with_help_message("y = exit setup, n = return to current question")
-            .prompt()
-            {
-                Ok(true) | Err(inquire::InquireError::OperationInterrupted) => {
-                    return Err(miette::miette!("Setup cancelled by user."));
+            Err(inquire::InquireError::OperationInterrupted) => {
+                match inquire::Confirm::new("cancel?")
+                    .with_default(false)
+                    .with_help_message("y = exit setup, n = return to current question")
+                    .prompt()
+                {
+                    Ok(true) | Err(inquire::InquireError::OperationInterrupted) => {
+                        return Err(miette::miette!("Setup cancelled by user."));
+                    }
+                    Ok(false) | Err(_) => continue,
                 }
-                Ok(false) | Err(_) => continue,
-            },
+            }
             Err(e) => return Err(miette::miette!("prompt failed: {e:#}")),
         }
     }

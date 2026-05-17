@@ -109,9 +109,7 @@ fn save_token(agent_dir: &Path, token: &str) -> Result<(), String> {
 /// `agent_dir` is the agent directory (data.db lives inside it).
 pub(crate) fn load_auth_token(agent_dir: &Path) -> Option<String> {
     let conn = right_db::open_connection(agent_dir, false).ok()?;
-    right_mcp::credentials::get_auth_token(&conn)
-        .ok()
-        .flatten()
+    right_mcp::credentials::get_auth_token(&conn).ok().flatten()
 }
 
 /// Instruction message sent to user when auth is needed.

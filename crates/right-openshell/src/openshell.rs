@@ -782,7 +782,7 @@ pub async fn ssh_exec(
     command.arg("-F").arg(config_path);
     command.arg(host);
     command.arg("--");
-    command.args(cmd);
+    command.arg(ssh_remote_command_strs(cmd.iter().copied())?);
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.kill_on_drop(false);
@@ -1069,7 +1069,11 @@ pub async fn ssh_tar_download(
 }
 
 fn ssh_remote_command(args: &[String]) -> miette::Result<String> {
-    shlex::try_join(args.iter().map(|arg| arg.as_str()))
+    ssh_remote_command_strs(args.iter().map(|arg| arg.as_str()))
+}
+
+fn ssh_remote_command_strs<'a>(args: impl IntoIterator<Item = &'a str>) -> miette::Result<String> {
+    shlex::try_join(args)
         .map_err(|e| miette::miette!("failed to quote SSH remote command args: {e}"))
 }
 

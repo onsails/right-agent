@@ -326,9 +326,7 @@ pub async fn discover_as(
             } else {
                 // Any non-2xx (404, 401, 5xx, …) → speculative URL didn't
                 // hit metadata. Skip and try the AS metadata fallback chain.
-                debug!(
-                    "discover_as: RFC 9728 returned {status}, falling back to AS metadata"
-                );
+                debug!("discover_as: RFC 9728 returned {status}, falling back to AS metadata");
                 None
             }
         }
@@ -1167,7 +1165,10 @@ mod tests {
         let result = discover_as(&client, &server_url).await;
 
         let meta = result.expect("discover_as must succeed for Linear-style server");
-        assert_eq!(meta.authorization_endpoint, "https://auth.linear.example/authorize");
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://auth.linear.example/authorize"
+        );
         assert_eq!(meta.token_endpoint, "https://auth.linear.example/token");
     }
 
@@ -1204,8 +1205,14 @@ mod tests {
         // Origin-only AS URL should still produce the same two URLs as before.
         let urls = as_metadata_urls("https://auth.example.com");
         assert_eq!(urls.len(), 2);
-        assert_eq!(urls[0], "https://auth.example.com/.well-known/oauth-authorization-server");
-        assert_eq!(urls[1], "https://auth.example.com/.well-known/openid-configuration");
+        assert_eq!(
+            urls[0],
+            "https://auth.example.com/.well-known/oauth-authorization-server"
+        );
+        assert_eq!(
+            urls[1],
+            "https://auth.example.com/.well-known/openid-configuration"
+        );
     }
 
     #[test]
@@ -1241,7 +1248,10 @@ mod tests {
             parse_www_authenticate_resource_metadata(r#"Bearer realm="x""#),
             None
         );
-        assert_eq!(parse_www_authenticate_resource_metadata("Basic realm=x"), None);
+        assert_eq!(
+            parse_www_authenticate_resource_metadata("Basic realm=x"),
+            None
+        );
         assert_eq!(parse_www_authenticate_resource_metadata(""), None);
     }
 
@@ -1309,7 +1319,10 @@ mod tests {
         let result = discover_as(&client, &server_url).await;
 
         let meta = result.expect("WWW-Authenticate-driven discovery must succeed");
-        assert_eq!(meta.authorization_endpoint, "https://auth.example.com/authorize");
+        assert_eq!(
+            meta.authorization_endpoint,
+            "https://auth.example.com/authorize"
+        );
         assert_eq!(meta.token_endpoint, "https://auth.example.com/token");
     }
 }

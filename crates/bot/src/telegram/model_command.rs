@@ -82,7 +82,10 @@ pub(crate) fn render_menu_body(current: Option<&str>) -> String {
         } else {
             "   "
         };
-        out.push_str(&format!("{}{} — {}\n", mark, choice.label, choice.description));
+        out.push_str(&format!(
+            "{}{} — {}\n",
+            mark, choice.label, choice.description
+        ));
     }
     out
 }
@@ -194,10 +197,9 @@ pub(crate) async fn handle_model_callback(
     let old_value: Option<String> = crate::snapshot_model(&settings.model);
 
     // Persist before swap: if disk write fails, in-memory stays untouched.
-    if let Err(e) = right_agent::agent::types::write_agent_yaml_model(
-        &agent_yaml_path,
-        choice.model_id,
-    ) {
+    if let Err(e) =
+        right_agent::agent::types::write_agent_yaml_model(&agent_yaml_path, choice.model_id)
+    {
         tracing::error!(error = %format!("{e:#}"), "/model: failed to write agent.yaml");
         bot.answer_callback_query(q.id)
             .text("Failed to save model — see bot logs")
@@ -306,14 +308,23 @@ mod tests {
     #[test]
     fn menu_body_shows_checkmark_on_active() {
         let body = render_menu_body(Some("claude-sonnet-4-6"));
-        assert!(body.contains("✓ Sonnet"), "expected checkmark on Sonnet:\n{body}");
-        assert!(!body.contains("✓ Default"), "no checkmark on Default:\n{body}");
+        assert!(
+            body.contains("✓ Sonnet"),
+            "expected checkmark on Sonnet:\n{body}"
+        );
+        assert!(
+            !body.contains("✓ Default"),
+            "no checkmark on Default:\n{body}"
+        );
     }
 
     #[test]
     fn menu_body_shows_default_when_none() {
         let body = render_menu_body(None);
-        assert!(body.contains("✓ Default"), "expected checkmark on Default:\n{body}");
+        assert!(
+            body.contains("✓ Default"),
+            "expected checkmark on Default:\n{body}"
+        );
     }
 
     #[test]
@@ -351,7 +362,12 @@ mod tests {
             .collect();
         assert_eq!(
             data,
-            vec!["model:default", "model:sonnet", "model:sonnet1m", "model:haiku"]
+            vec![
+                "model:default",
+                "model:sonnet",
+                "model:sonnet1m",
+                "model:haiku"
+            ]
         );
     }
 }

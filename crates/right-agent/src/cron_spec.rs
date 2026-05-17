@@ -279,9 +279,7 @@ fn resolve_schedule_fields(
             Ok(("".to_string(), 0, Some(rat.to_string()), warning))
         }
         (None, None, true) => Ok((IMMEDIATE_SENTINEL.to_string(), 0, None, None)),
-        (None, None, false) => {
-            Err("one of schedule, run_at, or immediate must be provided".into())
-        }
+        (None, None, false) => Err("one of schedule, run_at, or immediate must be provided".into()),
         _ => Err(
             "schedule, run_at, and immediate are mutually exclusive — provide exactly one".into(),
         ),
@@ -756,7 +754,8 @@ pub fn load_specs_from_db(
             target_thread_id,
         ) = row?;
 
-        let schedule_kind = match ScheduleKind::from_db_row(&schedule, run_at.as_deref(), recurring) {
+        let schedule_kind = match ScheduleKind::from_db_row(&schedule, run_at.as_deref(), recurring)
+        {
             Ok(k) => k,
             Err(e) => {
                 tracing::error!(job = %job_name, "failed to parse schedule kind: {e}");
