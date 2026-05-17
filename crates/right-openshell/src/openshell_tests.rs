@@ -441,17 +441,57 @@ async fn ssh_tar_upload_extracts_sandbox_archive_under_writable_sandbox_dir() {
         .unwrap();
 
     let args = std::fs::read_to_string(args_file).unwrap();
+    let captured: Vec<&str> = args
+        .lines()
+        .map(|line| line.trim_start_matches('<').trim_end_matches('>'))
+        .collect();
+    let separator = captured
+        .iter()
+        .position(|arg| *arg == "--")
+        .expect("ssh args should include command separator");
+    let remote_args = &captured[separator + 1..];
+    assert_eq!(
+        remote_args.len(),
+        1,
+        "ssh_tar_upload must pass one quoted remote command argument, got:\n{args}"
+    );
+
+    let probe = format!(
+        "tar() {{ for arg in \"$@\"; do command printf '<%s>\\n' \"$arg\"; done; }}; {}",
+        remote_args[0]
+    );
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(probe)
+        .output()
+        .unwrap();
     assert!(
-        args.contains("<-C>\n</sandbox>\n"),
-        "sandbox restore must extract inside /sandbox, got:\n{args}"
+        output.status.success(),
+        "quoted tar upload command should parse under sh; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed_args: Vec<String> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        parsed_args,
+        vec![
+            "<xzpf>".to_string(),
+            "<->".to_string(),
+            "<-C>".to_string(),
+            "</sandbox>".to_string(),
+            "<--strip-components=1>".to_string(),
+            "<sandbox>".to_string(),
+        ]
     );
     assert!(
-        args.contains("<--strip-components=1>\n<sandbox>\n"),
-        "sandbox restore must strip the archived sandbox/ root, got:\n{args}"
-    );
-    assert!(
-        !args.contains("<-C>\n</>\n"),
-        "sandbox restore must not chdir to policy-denied /, got:\n{args}"
+        !parsed_args
+            .windows(2)
+            .any(|pair| pair[0] == "<-C>" && pair[1] == "</>"),
+        "sandbox restore must not chdir to policy-denied /"
     );
 }
 
