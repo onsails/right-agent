@@ -1864,6 +1864,8 @@ async fn start_progress_invocation(
         invocation_id: invocation_id.clone(),
         kind: right_mcp::internal_client::ProgressInvocationKindDto::Foreground,
         bot_send_token,
+        chat_id: Some(chat_id),
+        thread_id: Some(eff_thread_id),
     };
     if let Err(e) = ctx.internal_client.progress_register(&register_req).await {
         tracing::warn!(invocation_id, "progress register failed: {e:#}");
