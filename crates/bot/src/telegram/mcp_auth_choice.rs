@@ -124,11 +124,17 @@ pub(crate) async fn take_pending_auth_choice(
         return PendingMcpAuthChoiceTake::Expired;
     }
 
-    if callback_chat_id.is_some_and(|chat_id| chat_id != current.chat_id) {
+    let Some(callback_chat_id) = callback_chat_id else {
+        return PendingMcpAuthChoiceTake::ChatMismatch;
+    };
+    if callback_chat_id != current.chat_id {
         return PendingMcpAuthChoiceTake::ChatMismatch;
     }
 
-    if callback_thread_id.is_some_and(|thread_id| thread_id != current.thread_id) {
+    let Some(callback_thread_id) = callback_thread_id else {
+        return PendingMcpAuthChoiceTake::ChatMismatch;
+    };
+    if callback_thread_id != current.thread_id {
         return PendingMcpAuthChoiceTake::ChatMismatch;
     }
 
@@ -506,6 +512,34 @@ mod tests {
         )))));
 
         let taken = take_pending_auth_choice(&slot, 42, Some(200), Some(0), Instant::now()).await;
+
+        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
+    }
+
+    #[tokio::test]
+    async fn take_pending_auth_choice_rejects_missing_chat_context_without_clearing_request() {
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(Some(pending_request(
+            42,
+            100,
+            Instant::now() + MCP_AUTH_CHOICE_TTL,
+        )))));
+
+        let taken = take_pending_auth_choice(&slot, 42, None, Some(0), Instant::now()).await;
+
+        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
+    }
+
+    #[tokio::test]
+    async fn take_pending_auth_choice_rejects_missing_thread_context_without_clearing_request() {
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(Some(pending_request(
+            42,
+            100,
+            Instant::now() + MCP_AUTH_CHOICE_TTL,
+        )))));
+
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), None, Instant::now()).await;
 
         assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
