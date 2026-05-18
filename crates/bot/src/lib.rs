@@ -451,6 +451,23 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         }
     }
 
+    // One-shot startup reaper for stale `skill_nudge_state.review_running`
+    // rows left at 1 by the previous boot's non-graceful exit (panic,
+    // SIGKILL, OOM) between `try_mark_review_started` and
+    // `mark_review_finished`. Without this, the review gate would return
+    // `Skip(AlreadyRunning)` forever for that agent until someone manually
+    // edits SQLite. Must run BEFORE any `maybe_spawn_learned_skill_review`
+    // can fire, hence here at bot startup right after migrations.
+    let reset = right_agent::learned_skills::reset_stale_review_running(&conn)
+        .map_err(|e| miette::miette!("reset stale background-review gates: {:#}", e))?;
+    if reset > 0 {
+        tracing::info!(
+            agent = %args.agent,
+            count = reset,
+            "reset stale background-review gates"
+        );
+    }
+
     // Resolve Telegram token
     let token = telegram::resolve_token(&config)?;
 

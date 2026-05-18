@@ -470,22 +470,11 @@ pub fn review_gate_decision(
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
-    ensure_nudge_state_in_tx(&tx, agent_name)?;
+    ensure_nudge_state(&tx, agent_name)?;
     roll_over_daily_count_if_stale(&tx, agent_name, input.today)?;
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
     tx.commit()?;
     Ok(decision)
-}
-
-fn ensure_nudge_state_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    agent_name: &str,
-) -> Result<(), rusqlite::Error> {
-    tx.execute(
-        "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
-        [agent_name],
-    )?;
-    Ok(())
 }
 
 fn roll_over_daily_count_if_stale(
@@ -553,7 +542,7 @@ pub fn try_mark_review_started(
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
-    ensure_nudge_state_in_tx(&tx, agent_name)?;
+    ensure_nudge_state(&tx, agent_name)?;
     roll_over_daily_count_if_stale(&tx, agent_name, input.today)?;
 
     let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
@@ -597,7 +586,7 @@ pub fn mark_review_finished(
     reset_activity_counters: bool,
 ) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
-    ensure_nudge_state_in_tx(&tx, agent_name)?;
+    ensure_nudge_state(&tx, agent_name)?;
     let reset_activity_counters =
         reset_activity_counters && !matches!(status, ReviewStatus::Failed);
     let reset_issue_hints = !matches!(status, ReviewStatus::Failed)
@@ -620,6 +609,48 @@ pub fn mark_review_finished(
         ],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// Clear stale `review_running = 1` rows.
+///
+/// The bot is the only writer for this flag. If the previous boot exited
+/// non-gracefully (panic, SIGKILL, OOM) between `try_mark_review_started`
+/// and `mark_review_finished`, the flag is left at 1 and the review gate
+/// returns `Skip(AlreadyRunning)` forever. This one-shot startup reaper
+/// resets every such row to 0 — without touching `last_review_at`,
+/// `last_review_status`, or any counters — so the next eligible signal
+/// can start a new review.
+///
+/// Returns the count of rows reset (for logging).
+///
+/// Single-statement write — no transaction needed.
+pub fn reset_stale_review_running(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "UPDATE skill_nudge_state SET review_running = 0 WHERE review_running = 1",
+        [],
+    )
+}
+
+/// Clear `review_running` for a single agent without touching any other
+/// field.
+///
+/// Used by the bot shutdown path when a background review is aborted
+/// mid-flight: no review actually finished, so `last_review_at`,
+/// `last_review_status`, and counters must remain as the in-flight review
+/// left them. Calling `mark_review_finished` here would (incorrectly) rewrite
+/// `last_review_at = now()`, costing the full cooldown window on every
+/// restart cycle.
+///
+/// Single-statement write — no transaction needed.
+pub fn clear_review_running(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE skill_nudge_state SET review_running = 0 WHERE agent_name = ?1",
+        [agent_name],
+    )?;
     Ok(())
 }
 
@@ -880,6 +911,152 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (0, 0, 0, "nothing_to_learn".to_owned()));
+    }
+
+    #[test]
+    fn reset_stale_review_running_clears_flag_without_touching_other_fields() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "stale").unwrap();
+        // Seed a row that looks like a stranded review: running=1, with
+        // pre-existing counters, cooldown, and last_review_at/status that
+        // the reaper MUST leave alone.
+        conn.execute(
+            "UPDATE skill_nudge_state \
+             SET review_running = 1, \
+                 tool_iters_since_review = 7, \
+                 turns_since_review = 2, \
+                 skill_issue_hints_since_review = 1, \
+                 daily_review_count = 4, \
+                 daily_review_date = '2026-05-18', \
+                 last_review_at = '2026-05-18T11:30:00Z', \
+                 last_review_status = 'nothing_to_learn' \
+             WHERE agent_name='stale'",
+            [],
+        )
+        .unwrap();
+
+        // Also seed a non-stale row to confirm the WHERE clause is selective.
+        ensure_nudge_state(&conn, "idle").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state \
+             SET review_running = 0, last_review_at = '2026-05-18T10:00:00Z' \
+             WHERE agent_name='idle'",
+            [],
+        )
+        .unwrap();
+
+        let reset = reset_stale_review_running(&conn).unwrap();
+        assert_eq!(reset, 1);
+
+        let stale_row: (i64, i64, i64, i64, i64, String, String, String) = conn
+            .query_row(
+                "SELECT review_running, tool_iters_since_review, turns_since_review, \
+                        skill_issue_hints_since_review, daily_review_count, daily_review_date, \
+                        last_review_at, last_review_status \
+                 FROM skill_nudge_state WHERE agent_name='stale'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stale_row,
+            (
+                0,
+                7,
+                2,
+                1,
+                4,
+                "2026-05-18".to_owned(),
+                "2026-05-18T11:30:00Z".to_owned(),
+                "nothing_to_learn".to_owned(),
+            )
+        );
+
+        // Idle row untouched.
+        let idle_running: i64 = conn
+            .query_row(
+                "SELECT review_running FROM skill_nudge_state WHERE agent_name='idle'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idle_running, 0);
+
+        // Re-running the reaper on a clean DB is a no-op.
+        let reset_again = reset_stale_review_running(&conn).unwrap();
+        assert_eq!(reset_again, 0);
+    }
+
+    #[test]
+    fn clear_review_running_clears_flag_without_touching_other_fields() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "agent-x").unwrap();
+        // Seed a mid-review row: running=1, with a prior cooldown timestamp,
+        // counters, and last_review_status that the shutdown helper MUST
+        // leave alone (otherwise `last_review_at = now()` costs the full
+        // cooldown window on every restart).
+        conn.execute(
+            "UPDATE skill_nudge_state \
+             SET review_running = 1, \
+                 tool_iters_since_review = 11, \
+                 turns_since_review = 4, \
+                 skill_issue_hints_since_review = 2, \
+                 daily_review_count = 3, \
+                 daily_review_date = '2026-01-01', \
+                 last_review_at = '2026-01-01T00:00:00Z', \
+                 last_review_status = 'created' \
+             WHERE agent_name='agent-x'",
+            [],
+        )
+        .unwrap();
+
+        clear_review_running(&conn, "agent-x").unwrap();
+
+        let row: (i64, i64, i64, i64, i64, String, String, String) = conn
+            .query_row(
+                "SELECT review_running, tool_iters_since_review, turns_since_review, \
+                        skill_issue_hints_since_review, daily_review_count, daily_review_date, \
+                        last_review_at, last_review_status \
+                 FROM skill_nudge_state WHERE agent_name='agent-x'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                0,
+                11,
+                4,
+                2,
+                3,
+                "2026-01-01".to_owned(),
+                "2026-01-01T00:00:00Z".to_owned(),
+                "created".to_owned(),
+            )
+        );
     }
 
     #[test]

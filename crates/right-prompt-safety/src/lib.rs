@@ -19,6 +19,15 @@
 use ironclaw_safety::{SanitizedOutput, Sanitizer, wrap_external_content};
 use std::sync::OnceLock;
 
+/// Re-export of `ironclaw_safety::wrap_external_content` for callers that
+/// need to wrap non-memory external content (e.g. learning-review prompt
+/// sections sourced from foreground sessions). The `source_label` becomes
+/// part of the wrap delimiter so reviewers see which channel the content
+/// came from.
+pub fn wrap_external(source_label: &str, content: &str) -> String {
+    wrap_external_content(source_label, content)
+}
+
 const SOURCE_LABEL: &str = "memory";
 
 static SANITIZER: OnceLock<Sanitizer> = OnceLock::new();
