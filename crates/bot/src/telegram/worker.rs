@@ -24,8 +24,9 @@ use crate::cc::worker_reply::{append_used_skill_receipts, should_accept_bootstra
 use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
     NudgeSignalKind, NudgeSignalRecord, ReviewGateDecision, ReviewGateInput, ReviewStatus,
-    SkillReviewReport, increment_turn_nudge_counters, insert_skill_review_report,
-    mark_review_finished, record_nudge_signal, select_reply_signal, try_mark_review_started,
+    SkillReviewReport, clear_review_running, increment_turn_nudge_counters,
+    insert_skill_review_report, mark_review_finished, record_nudge_signal, select_reply_signal,
+    try_mark_review_started,
 };
 
 use super::session::{
@@ -1648,6 +1649,32 @@ pub(crate) async fn send_tg(
     Ok(())
 }
 
+/// Send a learned-skill review `user_notice` to Telegram.
+///
+/// The notice is produced by the reviewer LLM after consuming
+/// potentially attacker-controlled session content, so it MUST NOT be
+/// rendered as raw bot copy. We HTML-escape the notice, wrap it in a
+/// labelled `<blockquote>`, and send with `ParseMode::Html` so any
+/// injected markup is shown as text and the framing makes it visually
+/// clear the line came from the background reviewer, not the bot.
+async fn send_review_user_notice(
+    bot: &super::BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    notice: &str,
+) -> Result<(), teloxide::RequestError> {
+    let escaped = html_escape(notice);
+    let body = format!("<b>Learned-skill reviewer notice</b>\n<blockquote>{escaped}</blockquote>");
+    let mut send = bot
+        .send_message(chat_id, body)
+        .parse_mode(teloxide::types::ParseMode::Html);
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(ThreadId(MessageId(eff_thread_id as i32)));
+    }
+    send.await?;
+    Ok(())
+}
+
 /// Spawn a background task that requests a setup-token from the user.
 ///
 /// 1. Sends instruction to user via Telegram.
@@ -2120,15 +2147,11 @@ fn bounded_review_failure_error(error: &str) -> String {
     } else {
         error
     };
-    let mut chars = error.chars();
-    let mut out: String = chars
-        .by_ref()
-        .take(BACKGROUND_REVIEW_FAILURE_ERROR_MAX_CHARS)
-        .collect();
-    if chars.next().is_some() {
-        out.push_str("... [truncated]");
-    }
-    out
+    crate::learning_review::bounded_text(
+        error,
+        BACKGROUND_REVIEW_FAILURE_ERROR_MAX_CHARS,
+        crate::learning_review::TRUNCATED_SUFFIX,
+    )
 }
 
 fn bounded_review_failure_excerpt(value: Option<&str>) -> Option<String> {
@@ -2136,15 +2159,11 @@ fn bounded_review_failure_excerpt(value: Option<&str>) -> Option<String> {
     if value.is_empty() {
         return None;
     }
-    let mut chars = value.chars();
-    let mut out: String = chars
-        .by_ref()
-        .take(BACKGROUND_REVIEW_FAILURE_EXCERPT_MAX_CHARS)
-        .collect();
-    if chars.next().is_some() {
-        out.push_str("... [truncated]");
-    }
-    Some(out)
+    Some(crate::learning_review::bounded_text(
+        value,
+        BACKGROUND_REVIEW_FAILURE_EXCERPT_MAX_CHARS,
+        crate::learning_review::TRUNCATED_SUFFIX,
+    ))
 }
 
 fn maybe_spawn_learned_skill_review(
@@ -2197,7 +2216,6 @@ fn maybe_spawn_learned_skill_review(
     let signal_trigger = crate::learning_review::select_review_trigger(
         has_learning_accepted,
         has_skill_issue_accepted,
-        false,
     );
     let today = review_today_utc();
     let gate = match try_mark_review_started(
@@ -2232,12 +2250,13 @@ fn maybe_spawn_learned_skill_review(
     let ssh_config_path = ctx.ssh_config_path.clone();
     let resolved_sandbox = ctx.resolved_sandbox.clone();
     let debug = Arc::clone(&ctx.debug);
+    let shutdown = ctx.shutdown.clone();
     let source_invocation_id = source_invocation_id.to_owned();
     let root_session_id = root_session_id.to_owned();
     let tg_chat_id = teloxide::types::ChatId(chat_id);
 
     std::mem::drop(tokio::spawn(async move {
-        let review_result = run_background_learned_skill_review(
+        let review_future = run_background_learned_skill_review(
             &agent_name,
             &agent_dir,
             &agent_db_dir,
@@ -2254,8 +2273,21 @@ fn maybe_spawn_learned_skill_review(
             tool_iters_since_review,
             turns_since_review,
             skill_issue_hints_since_review,
-        )
-        .await;
+        );
+
+        let review_result = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                // Dropping `review_future` here drops any in-flight
+                // `ProcessGroupChild`, which SIGKILLs the entire claude-p
+                // process group. No `skill_review_reports` row is written
+                // for a cancelled review — just clear the running gate so
+                // the next eligible turn can spawn another review.
+                clear_background_review_gate_on_shutdown(&agent_db_dir, &agent_name);
+                return;
+            }
+            result = review_future => result,
+        };
 
         match review_result {
             Ok((report, notice)) => {
@@ -2266,7 +2298,9 @@ fn maybe_spawn_learned_skill_review(
                     notice,
                     move |notice| {
                         let bot = bot.clone();
-                        async move { send_tg(&bot, tg_chat_id, eff_thread_id, &notice).await }
+                        async move {
+                            send_review_user_notice(&bot, tg_chat_id, eff_thread_id, &notice).await
+                        }
                     },
                 )
                 .await;
@@ -2298,25 +2332,57 @@ fn maybe_spawn_learned_skill_review(
     }));
 }
 
+/// Clears the `skill_nudge_state.review_running` flag without inserting a
+/// `skill_review_reports` row. Called when a background review is aborted by
+/// bot shutdown — recording a "failed" report for a deliberate cancellation
+/// would be misleading, but the running gate must still be released or the
+/// next review path would refuse to start.
+///
+/// Uses `clear_review_running` (not `mark_review_finished`) so the cooldown
+/// timestamp and status from any prior real review remain intact: no review
+/// actually finished here, only got interrupted.
+fn clear_background_review_gate_on_shutdown(agent_db_dir: &Path, agent_name: &str) {
+    let conn = match right_db::open_connection(agent_db_dir, false) {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(
+                agent = %agent_name,
+                "learned-skill shutdown gate-clear db reopen failed: {:#}",
+                e
+            );
+            return;
+        }
+    };
+    if let Err(e) = clear_review_running(&conn, agent_name) {
+        tracing::warn!(
+            agent = %agent_name,
+            "learned-skill shutdown gate-clear failed: {:#}",
+            e
+        );
+    }
+}
+
+// `agent_dir` is the host-side agent root: `load_auth_token` opens its
+// `data.db` to fetch the OAuth token, matching `cc::invocation::build_claude_command`.
 fn build_background_review_claude_command(
     args: &[String],
     agent_dir: &Path,
-    agent_db_dir: &Path,
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
-) -> tokio::process::Command {
+) -> Result<tokio::process::Command, BackgroundReviewFailure> {
     if let Some(ssh_config) = ssh_config_path {
-        let sandbox_name =
-            resolved_sandbox.expect("sandbox name required for sandbox background review");
+        let sandbox_name = resolved_sandbox.ok_or_else(|| {
+            BackgroundReviewFailure::new("sandbox name required for SSH-based background review")
+        })?;
         let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
         let mut script = String::new();
-        if let Some(token) = crate::login::load_auth_token(agent_db_dir) {
+        if let Some(token) = crate::login::load_auth_token(agent_dir) {
             let escaped = token.replace('\'', "'\\''");
             script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
         }
         let quoted =
             right_openshell::openshell::quote_ssh_remote_args(args.iter().map(String::as_str))
-                .expect("claude args should not contain nul bytes");
+                .map_err(|e| BackgroundReviewFailure::new(format!("quote claude args: {e:#}")))?;
         script.push_str(&quoted);
 
         let mut cmd = tokio::process::Command::new("ssh");
@@ -2326,9 +2392,11 @@ fn build_background_review_claude_command(
         cmd.arg(&ssh_host);
         cmd.arg("--");
         cmd.arg(script);
-        cmd
+        Ok(cmd)
     } else {
-        crate::cc::invocation::build_claude_command(args, agent_dir, None, None)
+        Ok(crate::cc::invocation::build_claude_command(
+            args, agent_dir, None, None,
+        ))
     }
 }
 
@@ -2414,10 +2482,9 @@ async fn run_background_learned_skill_review(
     let mut cmd = build_background_review_claude_command(
         &args,
         agent_dir,
-        agent_db_dir,
         ssh_config_path.as_deref(),
         resolved_sandbox.as_deref(),
-    );
+    )?;
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = right_process::ProcessGroupChild::spawn(cmd).map_err(|e| {
@@ -4156,10 +4223,10 @@ mod tests {
         let cmd = build_background_review_claude_command(
             &args,
             temp.path(),
-            temp.path(),
             Some(Path::new("ssh.config")),
             Some("right-demo"),
-        );
+        )
+        .expect("sandbox name provided");
         let std_cmd = cmd.as_std();
         let ssh_args: Vec<String> = std_cmd
             .get_args()

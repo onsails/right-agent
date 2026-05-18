@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
@@ -238,6 +236,11 @@ pub(crate) struct ReviewBundle {
     pub(crate) learned_skills: Vec<LearnedSkillSummary>,
 }
 
+const REVIEW_WRAP_LABEL_ACCEPTED_SIGNAL: &str = "learning-review/accepted_signal_json";
+const REVIEW_WRAP_LABEL_EVENT_TIMELINE: &str = "learning-review/event_timeline";
+const REVIEW_WRAP_LABEL_LEARNING_EVENTS: &str = "learning-review/learning_events";
+const REVIEW_WRAP_LABEL_SKILL_INDEX: &str = "learning-review/rightx_skill_index";
+
 const REVIEW_PROMPT_ACCEPTED_SIGNAL_MAX_CHARS: usize = 2_048;
 const REVIEW_PROMPT_EVENT_TIMELINE_MAX_ITEMS: usize = 24;
 const REVIEW_PROMPT_EVENT_TIMELINE_ITEM_MAX_CHARS: usize = 200;
@@ -278,9 +281,10 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
 
     if let Some(signal) = &bundle.accepted_signal_json {
         prompt.push_str("accepted_signal_json:\n");
-        prompt.push_str(&bounded_prompt_block(
-            signal,
-            REVIEW_PROMPT_ACCEPTED_SIGNAL_MAX_CHARS,
+        let bounded = bounded_prompt_block(signal, REVIEW_PROMPT_ACCEPTED_SIGNAL_MAX_CHARS);
+        prompt.push_str(&right_prompt_safety::wrap_external(
+            REVIEW_WRAP_LABEL_ACCEPTED_SIGNAL,
+            &bounded,
         ));
         prompt.push_str("\n\n");
     }
@@ -288,6 +292,7 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     push_bounded_list(
         &mut prompt,
         "event_timeline",
+        REVIEW_WRAP_LABEL_EVENT_TIMELINE,
         &bundle.event_timeline,
         REVIEW_PROMPT_EVENT_TIMELINE_MAX_ITEMS,
         REVIEW_PROMPT_EVENT_TIMELINE_ITEM_MAX_CHARS,
@@ -295,33 +300,40 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     push_bounded_list(
         &mut prompt,
         "learning_events",
+        REVIEW_WRAP_LABEL_LEARNING_EVENTS,
         &bundle.learning_events,
         REVIEW_PROMPT_LEARNING_EVENTS_MAX_ITEMS,
         REVIEW_PROMPT_LEARNING_EVENT_ITEM_MAX_CHARS,
     );
     prompt.push_str("\nrightx_skill_index:\n");
+    let mut skill_body = String::new();
     for skill in bundle
         .learned_skills
         .iter()
         .take(REVIEW_PROMPT_LEARNED_SKILLS_MAX_ITEMS)
     {
-        prompt.push_str("- ");
-        prompt.push_str(&bounded_prompt_line(
+        skill_body.push_str("- ");
+        skill_body.push_str(&bounded_prompt_line(
             &skill.name,
             REVIEW_PROMPT_SKILL_NAME_MAX_CHARS,
         ));
-        prompt.push_str(": ");
-        prompt.push_str(&bounded_prompt_line(
+        skill_body.push_str(": ");
+        skill_body.push_str(&bounded_prompt_line(
             &skill.excerpt,
             REVIEW_PROMPT_SKILL_EXCERPT_MAX_CHARS,
         ));
-        prompt.push('\n');
+        skill_body.push('\n');
     }
     push_omitted_count(
-        &mut prompt,
+        &mut skill_body,
         bundle.learned_skills.len(),
         REVIEW_PROMPT_LEARNED_SKILLS_MAX_ITEMS,
     );
+    prompt.push_str(&right_prompt_safety::wrap_external(
+        REVIEW_WRAP_LABEL_SKILL_INDEX,
+        skill_body.trim_end_matches('\n'),
+    ));
+    prompt.push('\n');
     prompt.push_str(
         "\nReturn JSON with status, confidence, candidate_skill_name, candidate_summary, \
          evidence_refs, and user_notice. Use only rightx-* candidate skill names.\n",
@@ -329,6 +341,7 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     prompt
 }
 
+#[cfg(test)]
 pub(crate) async fn run_review_with_output<F, Fut>(
     bundle: ReviewBundle,
     run_json: F,
@@ -345,14 +358,11 @@ where
 pub(crate) fn select_review_trigger(
     has_learning_signal: bool,
     has_skill_issue_signal: bool,
-    effort_threshold_met: bool,
 ) -> Option<right_agent::learned_skills::ReviewTriggerKind> {
     if has_skill_issue_signal {
         Some(right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal)
     } else if has_learning_signal {
         Some(right_agent::learned_skills::ReviewTriggerKind::LearningSignal)
-    } else if effort_threshold_met {
-        Some(right_agent::learned_skills::ReviewTriggerKind::EffortThreshold)
     } else {
         None
     }
@@ -393,19 +403,25 @@ fn review_cooldown_elapsed(
 fn push_bounded_list(
     prompt: &mut String,
     heading: &str,
+    wrap_label: &str,
     items: &[String],
     max_items: usize,
     max_item_chars: usize,
 ) {
     prompt.push_str(heading);
     prompt.push_str(":\n");
+    let mut body = String::new();
     for item in items.iter().take(max_items) {
-        prompt.push_str("- ");
-        prompt.push_str(&bounded_prompt_line(item, max_item_chars));
-        prompt.push('\n');
+        body.push_str("- ");
+        body.push_str(&bounded_prompt_line(item, max_item_chars));
+        body.push('\n');
     }
-    push_omitted_count(prompt, items.len(), max_items);
-    prompt.push('\n');
+    push_omitted_count(&mut body, items.len(), max_items);
+    prompt.push_str(&right_prompt_safety::wrap_external(
+        wrap_label,
+        body.trim_end_matches('\n'),
+    ));
+    prompt.push_str("\n\n");
 }
 
 fn push_omitted_count(prompt: &mut String, item_count: usize, max_items: usize) {
@@ -417,18 +433,25 @@ fn push_omitted_count(prompt: &mut String, item_count: usize, max_items: usize) 
 }
 
 fn bounded_prompt_line(value: &str, max_chars: usize) -> String {
-    bounded_prompt_text(&value.replace(['\r', '\n'], " "), max_chars)
+    bounded_text(
+        &value.replace(['\r', '\n'], " "),
+        max_chars,
+        TRUNCATED_SUFFIX,
+    )
 }
 
 fn bounded_prompt_block(value: &str, max_chars: usize) -> String {
-    bounded_prompt_text(value, max_chars)
+    bounded_text(value, max_chars, TRUNCATED_SUFFIX)
 }
 
-fn bounded_prompt_text(value: &str, max_chars: usize) -> String {
-    let mut chars = value.chars();
+pub(crate) const TRUNCATED_SUFFIX: &str = "... [truncated]";
+pub(crate) const ELLIPSIS_SUFFIX: &str = "...";
+
+pub(crate) fn bounded_text(value: &str, max_chars: usize, suffix: &str) -> String {
+    let mut chars = value.chars().filter(|c| *c != '\0');
     let mut out: String = chars.by_ref().take(max_chars).collect();
     if chars.next().is_some() {
-        out.push_str("... [truncated]");
+        out.push_str(suffix);
     }
     out
 }
@@ -620,11 +643,7 @@ fn summarize_stream_event(line: &str) -> Option<String> {
 
 fn bounded_event_text(value: &str) -> String {
     const MAX_CHARS: usize = 280;
-    let mut out = value.chars().take(MAX_CHARS).collect::<String>();
-    if value.chars().count() > MAX_CHARS {
-        out.push_str("...");
-    }
-    out
+    bounded_text(value, MAX_CHARS, ELLIPSIS_SUFFIX)
 }
 
 #[cfg(test)]

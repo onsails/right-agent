@@ -235,8 +235,8 @@ fn parse_review_process_stdout_rejects_invalid_review_payload() {
 }
 
 #[test]
-fn select_review_trigger_prefers_skill_issue_signal_over_learning_and_effort() {
-    let trigger = select_review_trigger(true, true, true);
+fn select_review_trigger_prefers_skill_issue_signal_over_learning() {
+    let trigger = select_review_trigger(true, true);
 
     assert_eq!(
         trigger,
@@ -245,8 +245,8 @@ fn select_review_trigger_prefers_skill_issue_signal_over_learning_and_effort() {
 }
 
 #[test]
-fn select_review_trigger_uses_learning_signal_before_effort() {
-    let trigger = select_review_trigger(true, false, true);
+fn select_review_trigger_uses_learning_signal_when_only_learning() {
+    let trigger = select_review_trigger(true, false);
 
     assert_eq!(
         trigger,
@@ -255,18 +255,8 @@ fn select_review_trigger_uses_learning_signal_before_effort() {
 }
 
 #[test]
-fn select_review_trigger_uses_effort_when_no_signal_exists() {
-    let trigger = select_review_trigger(false, false, true);
-
-    assert_eq!(
-        trigger,
-        Some(right_agent::learned_skills::ReviewTriggerKind::EffortThreshold)
-    );
-}
-
-#[test]
-fn select_review_trigger_returns_none_without_signal_or_effort() {
-    let trigger = select_review_trigger(false, false, false);
+fn select_review_trigger_returns_none_without_signal() {
+    let trigger = select_review_trigger(false, false);
 
     assert_eq!(trigger, None);
 }
@@ -361,6 +351,88 @@ fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
     assert!(prompt.contains("Do not ask the user questions"));
     assert!(prompt.contains("nothing_to_learn is normal"));
     assert!(prompt.contains("rightx-oauth-debugging"));
+}
+
+#[test]
+fn review_prompt_wraps_external_sections() {
+    // Every section that carries agent- or user-originated content must be
+    // framed as untrusted external content so a prompt-injection attempt
+    // inside the foreground session cannot impersonate reviewer
+    // instructions.
+    let bundle = ReviewBundle {
+        agent_name: "right".to_owned(),
+        source_invocation_id: "inv-1".to_owned(),
+        root_session_id: Some("session-1".to_owned()),
+        trigger_kind: "learning_signal".to_owned(),
+        accepted_signal_json: Some(r#"{"summary":"signal body"}"#.to_owned()),
+        tool_iters_since_review: 1,
+        turns_since_review: 1,
+        skill_issue_hints_since_review: 0,
+        event_timeline: vec!["event-1 user asked X".to_owned()],
+        learning_events: vec!["start create rightx-foo".to_owned()],
+        learned_skills: vec![LearnedSkillSummary {
+            name: "rightx-foo".to_owned(),
+            excerpt: "description: foo skill".to_owned(),
+        }],
+    };
+
+    let prompt = build_review_prompt(&bundle);
+
+    // ironclaw wraps content with a labelled SECURITY NOTICE followed by
+    // generic `--- BEGIN/END EXTERNAL CONTENT ---` delimiters; one envelope
+    // per external section.
+    for label in [
+        "accepted_signal_json",
+        "event_timeline",
+        "learning_events",
+        "rightx_skill_index",
+    ] {
+        let security_notice = format!("UNTRUSTED source (learning-review/{label})");
+        assert!(
+            prompt.contains(&security_notice),
+            "missing security notice for {label}; prompt was:\n{prompt}"
+        );
+    }
+    let begin_count = prompt.matches("--- BEGIN EXTERNAL CONTENT ---").count();
+    let end_count = prompt.matches("--- END EXTERNAL CONTENT ---").count();
+    assert_eq!(
+        begin_count, 4,
+        "expected one BEGIN marker per external section; prompt was:\n{prompt}"
+    );
+    assert_eq!(
+        end_count, 4,
+        "expected one END marker per external section; prompt was:\n{prompt}"
+    );
+
+    // Sanity-check: agent-authored bodies are present inside the wrap.
+    assert!(prompt.contains("signal body"));
+    assert!(prompt.contains("user asked X"));
+    assert!(prompt.contains("start create rightx-foo"));
+    assert!(prompt.contains("description: foo skill"));
+}
+
+#[test]
+fn review_prompt_omits_accepted_signal_wrap_when_signal_missing() {
+    let bundle = ReviewBundle {
+        agent_name: "right".to_owned(),
+        source_invocation_id: "inv-1".to_owned(),
+        root_session_id: Some("session-1".to_owned()),
+        trigger_kind: "learning_signal".to_owned(),
+        accepted_signal_json: None,
+        tool_iters_since_review: 1,
+        turns_since_review: 1,
+        skill_issue_hints_since_review: 0,
+        event_timeline: vec!["event-1 fine".to_owned()],
+        learning_events: vec![],
+        learned_skills: vec![],
+    };
+
+    let prompt = build_review_prompt(&bundle);
+
+    assert!(!prompt.contains("accepted_signal_json"));
+    assert!(!prompt.contains("learning-review/accepted_signal_json"));
+    // Other wraps still emitted.
+    assert!(prompt.contains("UNTRUSTED source (learning-review/event_timeline)"));
 }
 
 #[tokio::test]
@@ -652,4 +724,9 @@ fn stream_event_timeline_keeps_recent_events_from_append_only_log() {
     assert!(timeline[0].contains("recent-1"), "{timeline:?}");
     assert!(timeline[1].contains("recent-2"), "{timeline:?}");
     assert!(timeline[2].contains("result"), "{timeline:?}");
+}
+
+#[test]
+fn bounded_text_strips_nul_bytes() {
+    assert_eq!(bounded_text("ab\0cd", 100, "..."), "abcd");
 }

@@ -78,7 +78,6 @@ pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> 
     disallow_conversation_search(disallow_learning_tools(disallow_send_progress(tools)))
 }
 
-#[allow(dead_code)]
 pub(crate) fn disallow_background_review_mutation_tools(tools: Vec<String>) -> Vec<String> {
     let mut tools = disallow_foreground_only_tools(tools);
     for tool_name in [
