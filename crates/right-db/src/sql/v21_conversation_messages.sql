@@ -35,20 +35,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS conversation_messages_fts USING fts5(
     content_rowid='id'
 );
 
-CREATE TRIGGER IF NOT EXISTS conversation_messages_ai
-AFTER INSERT ON conversation_messages BEGIN
+CREATE TRIGGER IF NOT EXISTS conversation_messages_ai AFTER INSERT ON conversation_messages BEGIN
     INSERT INTO conversation_messages_fts(rowid, content)
     VALUES (new.id, new.content);
 END;
 
-CREATE TRIGGER IF NOT EXISTS conversation_messages_ad
-AFTER DELETE ON conversation_messages BEGIN
+CREATE TRIGGER IF NOT EXISTS conversation_messages_ad AFTER DELETE ON conversation_messages BEGIN
     INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
     VALUES ('delete', old.id, old.content);
 END;
 
-CREATE TRIGGER IF NOT EXISTS conversation_messages_au
-AFTER UPDATE ON conversation_messages BEGIN
+CREATE TRIGGER IF NOT EXISTS conversation_messages_au AFTER UPDATE ON conversation_messages BEGIN
     INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
     VALUES ('delete', old.id, old.content);
     INSERT INTO conversation_messages_fts(rowid, content)

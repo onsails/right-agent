@@ -1043,4 +1043,96 @@ mod tests {
             .unwrap();
         assert_eq!(row, (0, 0, 0, 0));
     }
+
+    #[test]
+    fn conversation_messages_schema_exists() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        for table in ["conversation_messages", "conversation_messages_fts"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{table} table must exist");
+        }
+    }
+
+    #[test]
+    fn conversation_messages_unique_inbound_message() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO conversation_messages (
+                platform, chat_id, thread_id, message_id, role, content
+             ) VALUES ('telegram', 10, 0, 25, 'user', 'hello')",
+            [],
+        )
+        .unwrap();
+        let result = conn.execute(
+            "INSERT INTO conversation_messages (
+                platform, chat_id, thread_id, message_id, role, content
+             ) VALUES ('telegram', 10, 0, 25, 'user', 'duplicate')",
+            [],
+        );
+
+        assert!(
+            result.is_err(),
+            "same platform/chat/message/role inbound row must be unique"
+        );
+    }
+
+    #[test]
+    fn conversation_messages_fts_tracks_updates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO conversation_messages (
+                platform, chat_id, thread_id, message_id, role, content
+             ) VALUES ('telegram', 10, 0, 25, 'user', 'original term')",
+            [],
+        )
+        .unwrap();
+
+        let original_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_messages_fts
+                 WHERE conversation_messages_fts MATCH 'original'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(original_count, 1);
+
+        conn.execute(
+            "UPDATE conversation_messages SET content = 'replacement term' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let original_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_messages_fts
+                 WHERE conversation_messages_fts MATCH 'original'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let replacement_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM conversation_messages_fts
+                 WHERE conversation_messages_fts MATCH 'replacement'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(original_count, 0, "old FTS term must be removed");
+        assert_eq!(replacement_count, 1, "new FTS term must be indexed");
+    }
 }
