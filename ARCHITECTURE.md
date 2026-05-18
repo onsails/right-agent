@@ -190,7 +190,7 @@ call it to give the agent a short `--resume`-d turn wrapped in
 human-friendly summary of the failure.
 
 Reflection never reflects on itself. Hindsight `memory_retain` is skipped
-for reflection turns. `cron_runs.status` gates delivery: `'failed'` routes
+for reflection turns. `async_runs.status` gates delivery: `'failed'` routes
 to `DELIVERY_INSTRUCTION_FAILURE`; any other status routes to
 `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
 
@@ -298,7 +298,7 @@ See: `docs/architecture/memory.md` (Memory Resilience Layer).
 
 Tables in per-agent `data.db`: `memories` / `memory_events` / `memories_fts`
 (legacy, unused but retained for migration compat), `telegram_sessions`,
-`cron_specs`, `cron_runs`, `mcp_servers`, `auth_tokens`, `pending_retains`,
+`cron_specs`, `async_runs`, `mcp_servers`, `auth_tokens`, `pending_retains`,
 `memory_alerts`. Run `sqlite3 data.db .schema` for column-level definitions.
 
 ## External Integrations
