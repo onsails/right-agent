@@ -17,8 +17,8 @@ fn open_connection_applies_migrations() {
     let conn = open_connection(dir.path(), true).unwrap();
     assert_eq!(
         query_user_version(&conn),
-        21,
-        "latest migration should be v21"
+        22,
+        "latest migration should be v22"
     );
     // After migrations, the current sessions table should exist.
     let count: i64 = conn
@@ -55,7 +55,7 @@ fn open_connection_without_migration_preserves_existing_schema() {
     let conn = open_connection(dir.path(), false).unwrap();
     assert_eq!(
         query_user_version(&conn),
-        21,
+        22,
         "migrate=false should not downgrade schema"
     );
     assert_eq!(
@@ -191,68 +191,64 @@ fn schema_has_conversation_messages_table() {
 }
 
 #[test]
-fn schema_has_cron_runs_table() {
-    let dir = tempdir().unwrap();
-    open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
-    let count: i64 = conn
+fn schema_has_async_runs_table_and_no_cron_runs_table() {
+    let dir = tempdir().expect("tempdir");
+    let conn = right_db::open_connection(dir.path(), true).expect("open db");
+
+    let async_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='async_runs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(async_count, 1, "async_runs table should exist");
+
+    let cron_count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='cron_runs'",
             [],
-            |row| row.get(0),
+            |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 1, "cron_runs table should exist after V3 migration");
+    assert_eq!(cron_count, 0, "cron_runs table should be removed");
 }
 
 #[test]
-fn cron_runs_insert_and_update() {
-    let dir = tempdir().unwrap();
-    open_db(dir.path(), true).unwrap();
-    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+fn async_runs_insert_and_update() {
+    let dir = tempdir().expect("tempdir");
+    let conn = right_db::open_connection(dir.path(), true).expect("open db");
 
-    // Insert a running job
     conn.execute(
-        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path) VALUES ('run-1', 'deploy-check', '2026-04-01T00:00:00Z', 'running', '/tmp/deploy-check-run-1.txt')",
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, run_session_id, target_chat_id, status,
+            delivery_required, delivery_status, created_at, updated_at
+         ) VALUES (
+            'run-1', 'cron', 'deploy-check', 'run-1', -100, 'running',
+            0, 'none', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z'
+         )",
         [],
     )
     .unwrap();
 
-    // Verify finished_at and exit_code are NULL while running
-    let (finished_at, exit_code, status): (Option<String>, Option<i32>, String) = conn
-        .query_row(
-            "SELECT finished_at, exit_code, status FROM cron_runs WHERE id='run-1'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .unwrap();
-    assert!(
-        finished_at.is_none(),
-        "finished_at should be NULL while running"
-    );
-    assert!(
-        exit_code.is_none(),
-        "exit_code should be NULL while running"
-    );
-    assert_eq!(status, "running");
-
-    // Update to success
     conn.execute(
-        "UPDATE cron_runs SET finished_at='2026-04-01T00:01:00Z', exit_code=0, status='success' WHERE id='run-1'",
+        "UPDATE async_runs
+         SET finished_at='2026-04-01T00:01:00Z', exit_code=0, status='success'
+         WHERE id='run-1'",
         [],
     )
     .unwrap();
 
-    let (finished_at, exit_code, status): (Option<String>, Option<i32>, String) = conn
+    let row: (Option<String>, Option<i64>, String) = conn
         .query_row(
-            "SELECT finished_at, exit_code, status FROM cron_runs WHERE id='run-1'",
+            "SELECT finished_at, exit_code, status FROM async_runs WHERE id='run-1'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(finished_at.as_deref(), Some("2026-04-01T00:01:00Z"));
-    assert_eq!(exit_code, Some(0));
-    assert_eq!(status, "success");
+    assert_eq!(row.0.as_deref(), Some("2026-04-01T00:01:00Z"));
+    assert_eq!(row.1, Some(0));
+    assert_eq!(row.2, "success");
 }
 
 #[test]
