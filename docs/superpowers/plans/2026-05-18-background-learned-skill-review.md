@@ -986,7 +986,7 @@ Then move the tests from Step 1 into `crates/bot/src/learning_review_tests.rs` a
 mod tests;
 ```
 
-Use the path module because this file will grow during later tasks.
+Keep tests in a sibling module so `learning_review.rs` stays focused on review types and helpers.
 
 - [ ] **Step 4: Add mutation-tool deny helper tests**
 
@@ -1375,7 +1375,6 @@ Expected: commit succeeds.
 ### Task 6: Worker Scheduling Integration
 
 **Files:**
-- Modify: `crates/bot/src/telegram/worker.rs`
 - Modify: `crates/bot/src/learning_review.rs`
 - Test: `crates/bot/src/learning_review_tests.rs`
 
@@ -1410,9 +1409,24 @@ fn trigger_kind_uses_effort_when_no_signal_exists() {
         Some(right_agent::learned_skills::ReviewTriggerKind::EffortThreshold)
     );
 }
+
+#[test]
+fn review_cooldown_elapsed_handles_empty_old_and_recent_timestamps() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-05-18T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let cooldown = chrono::Duration::minutes(30);
+
+    assert!(review_cooldown_elapsed(None, now, cooldown).unwrap());
+    assert!(review_cooldown_elapsed(Some("2026-05-18T09:29:59Z"), now, cooldown).unwrap());
+    assert!(!review_cooldown_elapsed(Some("2026-05-18T09:45:00Z"), now, cooldown).unwrap());
+
+    let err = review_cooldown_elapsed(Some("not-a-date"), now, cooldown).unwrap_err();
+    assert!(err.contains("last_review_at"), "{err}");
+}
 ```
 
-- [ ] **Step 2: Implement trigger selection helper**
+- [ ] **Step 2: Implement trigger selection and cooldown helpers**
 
 In `crates/bot/src/learning_review.rs`, add:
 
@@ -1432,147 +1446,41 @@ pub(crate) fn select_review_trigger(
         None
     }
 }
-```
 
-- [ ] **Step 3: Add worker helper for review gate**
-
-In `crates/bot/src/telegram/worker.rs`, add near the learned-skill reply metadata block a private helper:
-
-```rust
-fn review_today_utc() -> String {
-    chrono::Utc::now().format("%Y-%m-%d").to_string()
+pub(crate) fn review_cooldown_elapsed(
+    last_review_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    cooldown: chrono::Duration,
+) -> Result<bool, String> {
+    let Some(last_review_at) = last_review_at else {
+        return Ok(true);
+    };
+    let last_review_at = chrono::DateTime::parse_from_rfc3339(last_review_at)
+        .map_err(|e| format!("parse skill review last_review_at: {e:#}"))?
+        .with_timezone(&chrono::Utc);
+    Ok(now.signed_duration_since(last_review_at) >= cooldown)
 }
 ```
 
-Then add a helper after `invoke_cc` support helpers:
-
-```rust
-fn review_cooldown_elapsed(_conn: &rusqlite::Connection, _agent_name: &str) -> bool {
-    true
-}
-```
-
-Stage 2 starts with cooldown logic in domain tests and uses `true` in the first worker integration slice. Replace this helper with a timestamp comparison in the next task after reports are being written.
-
-- [ ] **Step 4: Schedule review after reply metadata persistence**
-
-In `crates/bot/src/telegram/worker.rs`, after the block that records nudge signals and before `Ok(CcReply { ... })`, add this call:
-
-```rust
-            maybe_spawn_learned_skill_review(
-                &conn,
-                &ctx,
-                chat_id,
-                eff_thread_id,
-                &session_uuid,
-                learning_invocation_id.as_deref(),
-                reply_output.learning_signal.is_some(),
-                reply_output.skill_issue_signal.is_some(),
-            )
-            .await;
-```
-
-Add the helper below `remove_sandbox_progress_config_file`:
-
-```rust
-async fn maybe_spawn_learned_skill_review(
-    conn: &rusqlite::Connection,
-    ctx: &WorkerContext,
-    chat_id: i64,
-    eff_thread_id: i64,
-    root_session_id: &str,
-    source_invocation_id: Option<&str>,
-    has_learning_signal: bool,
-    has_skill_issue_signal: bool,
-) {
-    let Some(source_invocation_id) = source_invocation_id else {
-        return;
-    };
-    let today = review_today_utc();
-    let cooldown_elapsed = review_cooldown_elapsed(conn, &ctx.agent_name);
-    let gate = match right_agent::learned_skills::review_gate_decision(
-        conn,
-        &ctx.agent_name,
-        right_agent::learned_skills::ReviewGateInput {
-            has_signal: has_learning_signal || has_skill_issue_signal,
-            today: &today,
-            cooldown_elapsed,
-            daily_limit: 12,
-        },
-    ) {
-        Ok(gate) => gate,
-        Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "learned-skill review gate failed: {e:#}");
-            return;
-        }
-    };
-    let right_agent::learned_skills::ReviewGateDecision::Start(mut trigger_kind) = gate else {
-        return;
-    };
-    if has_skill_issue_signal {
-        trigger_kind = right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal;
-    } else if has_learning_signal {
-        trigger_kind = right_agent::learned_skills::ReviewTriggerKind::LearningSignal;
-    }
-    if let Err(e) = right_agent::learned_skills::mark_review_started(conn, &ctx.agent_name, &today) {
-        tracing::warn!(agent = %ctx.agent_name, "learned-skill review start mark failed: {e:#}");
-        return;
-    }
-
-    let agent_name = ctx.agent_name.clone();
-    let agent_dir = ctx.agent_dir.clone();
-    let bot = ctx.bot.clone();
-    let internal_client = ctx.internal_client.clone();
-    let model = crate::snapshot_model(&ctx.model);
-    let ssh_config_path = ctx.ssh_config_path.clone();
-    let resolved_sandbox = ctx.resolved_sandbox.clone();
-    let source_invocation_id = source_invocation_id.to_owned();
-    let root_session_id = root_session_id.to_owned();
-    let tg_chat_id = teloxide::types::ChatId(chat_id);
-
-    std::mem::drop(tokio::spawn(async move {
-        tracing::debug!(
-            agent = %agent_name,
-            source_invocation_id = %source_invocation_id,
-            "learned-skill background review scheduled"
-        );
-        let _ = (
-            agent_dir,
-            bot,
-            internal_client,
-            model,
-            ssh_config_path,
-            resolved_sandbox,
-            root_session_id,
-            tg_chat_id,
-            eff_thread_id,
-            trigger_kind,
-        );
-    }));
-}
-```
-
-This step intentionally schedules a no-op task after marking `review_running`.
-The next task replaces the no-op with the real review run and finish handling. If this task is committed alone, tests should assert only that gate selection and start marking work in pure helpers.
-
-- [ ] **Step 5: Run targeted tests**
+- [ ] **Step 3: Run targeted tests**
 
 Run:
 
 ```bash
 devenv shell -- cargo test -p right-bot select_review_trigger
+devenv shell -- cargo test -p right-bot review_cooldown_elapsed
 devenv shell -- cargo test -p right-agent review_gate
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit scheduling seam**
+- [ ] **Step 4: Commit scheduling helper slice**
 
 Run:
 
 ```bash
-devenv shell -- git add crates/bot/src/telegram/worker.rs crates/bot/src/learning_review.rs crates/bot/src/learning_review_tests.rs
-devenv shell -- git commit -m "feat(bot): schedule learned skill review"
+devenv shell -- git add crates/bot/src/learning_review.rs crates/bot/src/learning_review_tests.rs
+devenv shell -- git commit -m "feat(bot): add learned skill review scheduling helpers"
 ```
 
 Expected: commit succeeds.
@@ -1629,22 +1537,142 @@ fn parse_review_process_stdout_reads_result_object() {
 }
 ```
 
-- [ ] **Step 3: Replace no-op spawned task with review execution**
+- [ ] **Step 3: Add worker scheduling helper with real review execution**
 
-In `crates/bot/src/telegram/worker.rs`, inside the spawned task from Task 6, replace the no-op tuple with:
+In `crates/bot/src/telegram/worker.rs`, after the block that records nudge signals and before `Ok(CcReply { ... })`, add this call:
 
 ```rust
+            let accepted_review_signal_json = match (
+                reply_output.learning_signal.as_ref(),
+                reply_output.skill_issue_signal.as_ref(),
+            ) {
+                (Some(signal), None) | (None, Some(signal)) => Some(signal.to_string()),
+                _ => None,
+            };
+            maybe_spawn_learned_skill_review(
+                &conn,
+                &ctx,
+                chat_id,
+                eff_thread_id,
+                &session_uuid,
+                learning_invocation_id.as_deref(),
+                reply_output.learning_signal.is_some(),
+                reply_output.skill_issue_signal.is_some(),
+                accepted_review_signal_json,
+            )
+            .await;
+```
+
+Add these helpers below `remove_sandbox_progress_config_file`:
+
+```rust
+fn review_today_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+fn load_skill_review_last_review_at(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
+    conn.query_row(
+        "SELECT last_review_at FROM skill_nudge_state WHERE agent_name = ?1",
+        [agent_name],
+        |r| r.get(0),
+    )
+}
+
+async fn maybe_spawn_learned_skill_review(
+    conn: &rusqlite::Connection,
+    ctx: &WorkerContext,
+    chat_id: i64,
+    eff_thread_id: i64,
+    root_session_id: &str,
+    source_invocation_id: Option<&str>,
+    has_learning_signal: bool,
+    has_skill_issue_signal: bool,
+    accepted_signal_json: Option<String>,
+) {
+    let Some(source_invocation_id) = source_invocation_id else {
+        return;
+    };
+    let last_review_at = match load_skill_review_last_review_at(conn, &ctx.agent_name) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "learned-skill review last timestamp load failed: {e:#}");
+            return;
+        }
+    };
+    let cooldown_elapsed = match crate::learning_review::review_cooldown_elapsed(
+        last_review_at.as_deref(),
+        chrono::Utc::now(),
+        chrono::Duration::minutes(30),
+    ) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "learned-skill review cooldown check failed: {e}");
+            return;
+        }
+    };
+    let today = review_today_utc();
+    let gate = match right_agent::learned_skills::review_gate_decision(
+        conn,
+        &ctx.agent_name,
+        right_agent::learned_skills::ReviewGateInput {
+            has_signal: has_learning_signal || has_skill_issue_signal,
+            today: &today,
+            cooldown_elapsed,
+            daily_limit: 12,
+        },
+    ) {
+        Ok(gate) => gate,
+        Err(e) => {
+            tracing::warn!(agent = %ctx.agent_name, "learned-skill review gate failed: {e:#}");
+            return;
+        }
+    };
+    let right_agent::learned_skills::ReviewGateDecision::Start(gated_trigger) = gate else {
+        return;
+    };
+    let effort_threshold_met =
+        matches!(gated_trigger, right_agent::learned_skills::ReviewTriggerKind::EffortThreshold);
+    let Some(trigger_kind) = crate::learning_review::select_review_trigger(
+        has_learning_signal,
+        has_skill_issue_signal,
+        effort_threshold_met,
+    ) else {
+        return;
+    };
+    if let Err(e) = right_agent::learned_skills::mark_review_started(conn, &ctx.agent_name, &today) {
+        tracing::warn!(agent = %ctx.agent_name, "learned-skill review start mark failed: {e:#}");
+        return;
+    }
+
+    let agent_name = ctx.agent_name.clone();
+    let agent_dir = ctx.agent_dir.clone();
+    let bot = ctx.bot.clone();
+    let model = crate::snapshot_model(&ctx.model);
+    let ssh_config_path = ctx.ssh_config_path.clone();
+    let resolved_sandbox = ctx.resolved_sandbox.clone();
+    let debug = std::sync::Arc::clone(&ctx.debug);
+    let source_invocation_id = source_invocation_id.to_owned();
+    let root_session_id = root_session_id.to_owned();
+    let tg_chat_id = teloxide::types::ChatId(chat_id);
+
+    std::mem::drop(tokio::spawn(async move {
         let report_result = run_background_learned_skill_review(
             &agent_name,
             &agent_dir,
             source_invocation_id.clone(),
-            root_session_id.clone(),
+            root_session_id,
             chat_id,
             eff_thread_id,
             trigger_kind,
             model,
             ssh_config_path,
             resolved_sandbox,
+            debug,
+            accepted_signal_json,
         )
         .await;
         match report_result {
@@ -1683,6 +1711,8 @@ In `crates/bot/src/telegram/worker.rs`, inside the spawned task from Task 6, rep
                 }
             }
         }
+    }));
+}
 ```
 
 - [ ] **Step 4: Add background review runner function**
@@ -1701,6 +1731,8 @@ async fn run_background_learned_skill_review(
     model: Option<String>,
     ssh_config_path: Option<std::path::PathBuf>,
     resolved_sandbox: Option<String>,
+    debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    accepted_signal_json: Option<String>,
 ) -> anyhow::Result<(right_agent::learned_skills::SkillReviewReport, Option<String>)> {
     let learned_skills = if ssh_config_path.is_some() {
         collect_sandbox_review_skill_index(resolved_sandbox.as_deref()).await?
@@ -1711,7 +1743,7 @@ async fn run_background_learned_skill_review(
     let bundle = crate::learning_review::ReviewBundle {
         source_invocation_id: source_invocation_id.clone(),
         trigger_kind: trigger_kind.as_str().to_owned(),
-        accepted_signal_json: None,
+        accepted_signal_json,
         tool_iters_since_review: 0,
         event_timeline: vec![format!("{} completed foreground invocation {}", agent_name, source_invocation_id)],
         learned_skills,
@@ -1734,14 +1766,26 @@ async fn run_background_learned_skill_review(
         disallowed_tools,
         extra_args: vec![],
         prompt: Some(prompt),
-        debug: None,
-        append_system_prompt: None,
+        debug_flag: Some(debug),
     };
-    let args = invocation.args();
-    let output = crate::cc::invocation::spawn_claude_command(&args)
-        .output()
-        .await
+    let args = invocation.into_args();
+    let mut cmd = crate::cc::invocation::build_claude_command(
+        &args,
+        agent_dir,
+        ssh_config_path.as_deref(),
+        resolved_sandbox.as_deref(),
+    );
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
         .map_err(|e| anyhow::anyhow!("spawn background review claude: {e:#}"))?;
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(180),
+        child.wait_with_output(),
+    )
+        .await
+        .map_err(|_| anyhow::anyhow!("background review claude timed out"))?
+        .map_err(|e| anyhow::anyhow!("wait for background review claude: {e:#}"))?;
     if !output.status.success() {
         return Err(anyhow::anyhow!(
             "background review claude exited {:?}: {}",
@@ -1860,8 +1904,7 @@ In `docs/architecture/mcp.md`, add under learned skill tools:
 Stage 2 background learned-skill review is report-only. Background review
 invocations do not expose `mcp__right__skill_learning_start` or
 `mcp__right__skill_learning_finish`; those tools remain foreground learning
-protocol tools until a later write-enabled background stage is explicitly
-designed.
+protocol tools in Stage 2.
 ```
 
 - [ ] **Step 3: Update PROMPT_SYSTEM.md**
@@ -1947,9 +1990,3 @@ devenv shell -- git status --short
 ```
 
 Expected: clean except for unrelated pre-existing user changes. Do not revert unrelated files.
-
-## Notes For Implementers
-
-- The `run_background_learned_skill_review` snippet uses `spawn_claude_command` as the command seam. If the exact function signature differs during implementation, adapt at the smallest local boundary and keep the tests focused on output parsing, gate state, and report persistence.
-- The first execution slice intentionally uses a compact synthetic event timeline. A later hardening pass can replace it with stable stream-event extraction from NDJSON logs.
-- Do not add skill writes in this plan. A future Stage 3 can turn high-confidence reports into drafts or write-enabled background updates.
