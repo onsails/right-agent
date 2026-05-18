@@ -138,8 +138,6 @@ pub(crate) fn parse_api_key_source(init_json: &str) -> Option<String> {
 /// Agent-facing status of the built-in `right` MCP server from Claude Code's
 /// `system/init` stream event.
 #[derive(Debug, Clone, PartialEq, Eq)]
-// Introduced before the health probe and Telegram worker consumers in later tasks.
-#[allow(dead_code)]
 pub(crate) enum RightMcpInitStatus {
     Connected,
     /// `status = None` means the init event did not list `right` at all.
@@ -155,8 +153,6 @@ pub(crate) enum RightMcpInitStatus {
 /// `Unhealthy { status: None }` when the line is an init event but `right`
 /// is absent, because the agent-facing MCP registry is missing the platform
 /// server.
-// Introduced before the health probe and Telegram worker consumers in later tasks.
-#[allow(dead_code)]
 pub(crate) fn parse_right_mcp_init_status(init_json: &str) -> Option<RightMcpInitStatus> {
     let v: serde_json::Value = serde_json::from_str(init_json).ok()?;
     if v.get("type")?.as_str()? != "system" {
