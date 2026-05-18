@@ -167,8 +167,25 @@ fn permissive_endpoints() -> String {
     )
 }
 
+/// Right MCP host access mode for the rendered `right:` policy endpoint.
+///
+/// The two variants form a lifecycle pair: `BootstrapUnresolved` renders a
+/// `right:` endpoint without `allowed_ips:` so the sandbox can be created
+/// before `host.openshell.internal` is resolvable; `Resolved` carries the
+/// concrete host IPs and is hot-applied via
+/// `apply_exact_right_mcp_policy_for_sandbox` (or the inline flow in
+/// `bot/src/lib.rs`) once the sandbox is READY. See ARCHITECTURE.md →
+/// "OpenShell Policy Gotchas" → "Right MCP policy lifecycle".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostMcpAccess {
+    /// Bootstrap mode used before sandbox creation: the rendered `right:`
+    /// endpoint has no `allowed_ips:` block, so OpenShell's SSRF guard blocks
+    /// sandbox-to-host MCP traffic. Callers MUST hot-apply a `Resolved`
+    /// policy via `apply_exact_right_mcp_policy_for_sandbox` after the
+    /// sandbox reaches READY and before any `claude -p` invocation;
+    /// otherwise MCP is silently unreachable from inside the sandbox.
+    /// See ARCHITECTURE.md → "OpenShell Policy Gotchas" → "Right MCP policy
+    /// lifecycle".
     BootstrapUnresolved,
     Resolved(Vec<IpAddr>),
 }
@@ -180,6 +197,13 @@ fn host_mcp_ip_cidr(ip: IpAddr) -> String {
     }
 }
 
+/// Render the `allowed_ips:` block for the Right MCP `right:` endpoint.
+///
+/// `BootstrapUnresolved` deliberately returns an empty string — no
+/// `allowed_ips:` block is emitted, leaving the bootstrap policy
+/// sandbox-creation-only. It is paired with `Resolved`, which carries the
+/// concrete IPs and is hot-applied via
+/// `apply_exact_right_mcp_policy_for_sandbox` once the sandbox is READY.
 fn right_mcp_allowed_ips_yaml(host_mcp_access: HostMcpAccess) -> String {
     match host_mcp_access {
         HostMcpAccess::BootstrapUnresolved => String::new(),

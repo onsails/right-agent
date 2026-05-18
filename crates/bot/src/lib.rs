@@ -149,6 +149,56 @@ pub async fn run(args: BotArgs) -> miette::Result<bool> {
     run_async(args).await
 }
 
+/// Backoff delays (ms) between retry attempts on the bot-startup
+/// `resolve_host_ips` call. The first attempt is immediate; failures
+/// sleep `BACKOFFS_MS[attempt - 1]` before the next attempt. Length of
+/// the slice is `attempts - 1`.
+const RESOLVE_HOST_IPS_BACKOFFS_MS: &[u64] = &[200, 500, 1000];
+
+/// Drive `attempt_fn` until it succeeds or `backoffs_ms.len() + 1` attempts
+/// have failed. Logs a `warn` per failed attempt and a final `error` if all
+/// attempts fail. The last error is propagated unchanged — FAIL FAST after
+/// retry budget is exhausted.
+///
+/// Only used at the bot-startup callsite of `resolve_host_ips`: a transient
+/// DNS hiccup, sandbox NSS warmup race, or OpenShell-alias rename should
+/// not brick the bot. Init/restore/migration callsites in `right` are
+/// interactive and intentionally fail fast.
+async fn run_with_backoff<T>(
+    op_name: &str,
+    agent: &str,
+    backoffs_ms: &[u64],
+    mut attempt_fn: impl AsyncFnMut() -> miette::Result<T>,
+) -> miette::Result<T> {
+    let max_attempts = backoffs_ms.len() + 1;
+    let mut last_err: Option<miette::Report> = None;
+    for attempt in 1..=max_attempts {
+        match attempt_fn().await {
+            Ok(val) => return Ok(val),
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent,
+                    attempt,
+                    max_attempts,
+                    "{op_name} failed: {e:#}",
+                );
+                last_err = Some(e);
+                if attempt < max_attempts {
+                    let delay_ms = backoffs_ms[attempt - 1];
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+    let err = last_err.expect("loop runs at least once");
+    tracing::error!(
+        agent = %agent,
+        attempts = max_attempts,
+        "{op_name} exhausted retries: {err:#}",
+    );
+    Err(err)
+}
+
 async fn run_async(args: BotArgs) -> miette::Result<bool> {
     use right_agent::agent::discovery::{parse_agent_config, validate_agent_name};
     use right_config::resolve_home;
@@ -651,13 +701,22 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             ));
         }
 
-        // Resolve host IP from inside sandbox for policy allowed_ips.
+        // Resolve host IPs from inside sandbox for policy allowed_ips.
+        // Retry transient failures (DNS hiccup, NSS warmup race, OpenShell
+        // alias rename) — startup is non-interactive and must self-heal.
         let sandbox_id =
             right_openshell::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
-        let host_ips =
-            right_openshell::openshell::resolve_host_ips(&mut grpc_client, &sandbox_id).await?;
+        let host_ips = run_with_backoff(
+            "resolve_host_ips",
+            &args.agent,
+            RESOLVE_HOST_IPS_BACKOFFS_MS,
+            async || {
+                right_openshell::openshell::resolve_host_ips(&mut grpc_client, &sandbox_id).await
+            },
+        )
+        .await?;
 
-        // Regenerate policy with resolved host IP and apply.
+        // Regenerate policy with resolved host IPs and apply.
         let network_policy = config.network_policy;
         let policy_content = right_codegen::policy::generate_policy(
             right_runtime_state::MCP_HTTP_PORT,
@@ -1181,6 +1240,52 @@ mod tests {
     //! would hang to timeout.
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
+
+    use super::{RESOLVE_HOST_IPS_BACKOFFS_MS, run_with_backoff};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Helper retries on transient failures and returns the first success.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn retry_succeeds_after_transient_failures() {
+        let attempts = AtomicUsize::new(0);
+        let result: miette::Result<u32> =
+            run_with_backoff("test_op", "test-agent", &[10, 20, 40], async || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if n < 3 {
+                    Err(miette::miette!("transient {n}"))
+                } else {
+                    Ok(42u32)
+                }
+            })
+            .await;
+        assert_eq!(result.expect("must succeed"), 42);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    /// Helper exhausts retry budget and propagates the last error.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn retry_propagates_last_error_after_exhaustion() {
+        let attempts = AtomicUsize::new(0);
+        let result: miette::Result<u32> =
+            run_with_backoff("test_op", "test-agent", &[10, 20, 40], async || {
+                let n = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                Err(miette::miette!("attempt {n} failed"))
+            })
+            .await;
+        let err = result.expect_err("must fail after exhausting retries");
+        // Three backoffs == four attempts total.
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        assert!(
+            format!("{err:#}").contains("attempt 4 failed"),
+            "expected last error message preserved, got: {err:#}",
+        );
+    }
+
+    /// Production constants stay sane (3 retries, in ms, ascending).
+    #[test]
+    fn resolve_host_ips_backoff_constants() {
+        assert_eq!(RESOLVE_HOST_IPS_BACKOFFS_MS, &[200u64, 500, 1000]);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn drain_loop_pattern_exits_on_shutdown() {

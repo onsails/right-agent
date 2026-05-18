@@ -1825,12 +1825,7 @@ pub async fn resolve_host_ips(
         ));
     }
 
-    let resolved_ips = ips
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    tracing::info!(sandbox_id, %resolved_ips, "resolved host.openshell.internal");
+    tracing::info!(sandbox_id, ?ips, "resolved host.openshell.internal");
     Ok(ips)
 }
 
