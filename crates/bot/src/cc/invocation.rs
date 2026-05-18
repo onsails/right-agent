@@ -285,9 +285,9 @@ pub(crate) fn build_claude_command(
             let escaped = token.replace('\'', "'\\''");
             script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
         }
-        // shlex::try_join fails only on nul bytes — safe for CLI args.
-        let quoted = shlex::try_join(args.iter().map(|s| s.as_str()))
-            .expect("claude args should not contain nul bytes");
+        let quoted =
+            right_openshell::openshell::quote_ssh_remote_args(args.iter().map(String::as_str))
+                .expect("claude args should not contain nul bytes");
         script.push_str(&quoted);
         let mut c = tokio::process::Command::new("ssh");
         c.arg("-F").arg(ssh_config);
@@ -311,7 +311,7 @@ pub(crate) fn build_claude_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn minimal() -> ClaudeInvocation {
         ClaudeInvocation {
@@ -359,6 +359,60 @@ mod tests {
         inv.prompt = None;
         let args = inv.into_args();
         assert!(!args.contains(&"--".to_string()));
+    }
+
+    #[test]
+    fn ssh_invocation_quotes_claude_argv_as_one_remote_script() {
+        let temp = tempfile::tempdir().unwrap();
+        let args = vec![
+            "claude".to_string(),
+            "-p".to_string(),
+            "--".to_string(),
+            "alpha beta; $(nope) quote'arg".to_string(),
+        ];
+
+        let cmd = build_claude_command(
+            &args,
+            temp.path(),
+            Some(Path::new("config")),
+            Some("example"),
+        );
+        let std_cmd = cmd.as_std();
+        let ssh_args: Vec<String> = std_cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(std_cmd.get_program(), "ssh");
+        assert_eq!(ssh_args[0], "-F");
+        assert_eq!(ssh_args[1], "config");
+        assert_eq!(ssh_args[2], "openshell-example");
+        assert_eq!(ssh_args[3], "--");
+        assert_eq!(
+            ssh_args[4..].len(),
+            1,
+            "claude ssh invocation must pass exactly one remote script argument"
+        );
+
+        let probe = format!(
+            "claude() {{ for arg in \"$@\"; do command printf '<%s>\\n' \"$arg\"; done; }}; {}",
+            ssh_args[4]
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(probe)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "quoted claude args should parse under sh; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "<-p>\n<-->\n<alpha beta; $(nope) quote'arg>\n"
+        );
     }
 
     #[test]

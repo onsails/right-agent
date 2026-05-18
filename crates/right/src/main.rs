@@ -4090,14 +4090,6 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn build_agent_ssh_remote_command(command: &[String]) -> miette::Result<Option<String>> {
-    if command.is_empty() {
-        return Ok(None);
-    }
-
-    right_openshell::openshell::quote_ssh_remote_args(command.iter().map(String::as_str)).map(Some)
-}
-
 fn build_agent_ssh_command(
     ssh_config: &Path,
     ssh_host: &str,
@@ -4106,8 +4098,11 @@ fn build_agent_ssh_command(
     let mut cmd = std::process::Command::new("ssh");
     cmd.arg("-F").arg(ssh_config);
     cmd.arg(ssh_host);
-    if let Some(remote_command) = build_agent_ssh_remote_command(command)? {
-        cmd.arg(remote_command);
+    if !command.is_empty() {
+        cmd.arg("--");
+        cmd.arg(right_openshell::openshell::quote_ssh_remote_args(
+            command.iter().map(String::as_str),
+        )?);
     }
     Ok(cmd)
 }
@@ -4195,7 +4190,6 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
         ));
     }
 
-    // 5. exec into SSH
     let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
     let mut cmd = build_agent_ssh_command(&ssh_config, &ssh_host, command)?;
 
@@ -4239,13 +4233,14 @@ mod tests {
         assert_eq!(args[2], "openshell-example");
         assert_eq!(
             args[3..].len(),
-            1,
-            "agent ssh must pass one remote command argument"
+            2,
+            "agent ssh must pass `--` plus one remote command argument"
         );
+        assert_eq!(args[3], "--");
 
         let probe = format!(
             "probe_cmd() {{ for arg in \"$@\"; do command printf '<%s>\\n' \"$arg\"; done; }}; {}",
-            args[3]
+            args[4]
         );
 
         let output = std::process::Command::new("sh")
