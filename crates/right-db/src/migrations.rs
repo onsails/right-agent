@@ -208,7 +208,7 @@ fn v22_async_runs(tx: &Transaction) -> Result<(), HookError> {
             END,
             cr.id,
             COALESCE(cr.target_chat_id, cs.target_chat_id, 0),
-            COALESCE(cr.target_thread_id, cs.target_thread_id),
+            cr.target_thread_id,
             cr.status,
             CASE
               WHEN cr.job_name LIKE 'bg-%' OR cs.schedule LIKE '@bg:%' THEN 'spawned'
@@ -1217,6 +1217,135 @@ mod tests {
             Some("123e4567-e89b-12d3-a456-426614174000")
         );
         assert_eq!(row.2.as_deref(), Some("spawned"));
+    }
+
+    #[test]
+    fn v22_preserves_copied_run_null_thread_snapshot() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                target_chat_id, target_thread_id
+             ) VALUES (
+                'threaded-spec', '*/15 * * * *', 'run', 1.0,
+                '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                -100, 77
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (
+                id, job_name, started_at, status, log_path, delivery_status,
+                target_chat_id, target_thread_id
+             ) VALUES (
+                'root-topic-run', 'threaded-spec', '2026-05-18T02:00:00Z',
+                'success', '/log/root-topic-run.ndjson', 'silent', -100, NULL
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let thread_id: Option<i64> = conn
+            .query_row(
+                "SELECT target_thread_id FROM async_runs WHERE id = 'root-topic-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            thread_id.is_none(),
+            "copied run must preserve NULL target_thread_id snapshot"
+        );
+    }
+
+    #[test]
+    fn v22_detects_background_run_by_job_name_without_bg_schedule() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+             VALUES (
+                'bg-name-run', 'bg-legacy', '2026-05-18T02:00:00Z',
+                'success', '/log/bg-name-run.ndjson', 'silent'
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT kind, handoff_state FROM async_runs WHERE id = 'bg-name-run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(row.1.as_deref(), Some("spawned"));
+    }
+
+    #[test]
+    fn v22_synthesizes_failed_background_run_for_pending_legacy_bg_spec() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                triggered_at, target_chat_id, target_thread_id
+             ) VALUES (
+                'queued-bg', '@bg:123e4567-e89b-12d3-a456-426614174001',
+                'continue', 1.0, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                '2026-05-18T02:00:00Z', -100, 42
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (i64, String, String, String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), kind, status, delivery_status, source_session_id, target_thread_id
+                 FROM async_runs WHERE producer_ref = 'queued-bg'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, "background");
+        assert_eq!(row.2, "failed");
+        assert_eq!(row.3, "pending");
+        assert_eq!(
+            row.4.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174001")
+        );
+        assert_eq!(row.5, Some(42));
+
+        let spec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_specs WHERE job_name = 'queued-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_count, 0, "legacy @bg cron spec must be deleted");
     }
 
     #[test]
