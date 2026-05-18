@@ -1,6 +1,7 @@
 #![warn(unreachable_pub)]
 
 pub(crate) mod async_delivery;
+pub(crate) mod background;
 pub(crate) mod cc;
 mod config_watcher;
 pub(crate) mod cron;
