@@ -349,7 +349,7 @@ async fn ssh_exec_quotes_remote_command_as_single_shell_string() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
-    let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+    let _guard = PROCESS_ENV_LOCK.lock().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
@@ -418,7 +418,7 @@ async fn ssh_exec_quotes_remote_command_as_single_shell_string() {
 async fn ssh_tar_upload_reports_remote_stderr_when_remote_exits_early() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+    let _guard = PROCESS_ENV_LOCK.lock().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
@@ -455,7 +455,7 @@ async fn ssh_tar_upload_reports_remote_stderr_when_remote_exits_early() {
 async fn ssh_tar_upload_extracts_sandbox_archive_under_writable_sandbox_dir() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+    let _guard = PROCESS_ENV_LOCK.lock().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");

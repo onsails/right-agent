@@ -114,16 +114,16 @@ and explicitly excludes `Agent`.
 
 ## Per-session mutex on --resume
 
-Worker (`bot/src/telegram/worker.rs`) and cron delivery
-(`bot/src/cron_delivery.rs`) both invoke `claude -p --resume <main_session_id>`,
+Worker (`bot/src/telegram/worker.rs`) and async delivery
+(`bot/src/async_delivery.rs`) both invoke `claude -p --resume <main_session_id>`,
 which mutates the session's JSONL file. Concurrent invocations against the same
 session would interleave or lose turns.
 
 A `SessionLocks` map (`Arc<DashMap<String, Arc<Mutex<()>>>>`) keyed by the main
 `root_session_id` serialises these accesses. Worker acquires before each
 foreground turn; delivery acquires before each Haiku-relayed delivery. Cron
-job execution itself does NOT acquire — it runs `--fork-session` against a new
-session ID and does not race the main session JSONL.
+job execution itself does NOT acquire — it runs with a fresh `--session-id`
+and no `--resume`/`--fork-session`, so it does not race the main session JSONL.
 
 `right_platform_knobs::IDLE_THRESHOLD_SECS = 120` remains as UX politeness
 ("don't interrupt the user mid-conversation"), but correctness now lives in
@@ -145,7 +145,7 @@ summary of the failure instead of the raw ring-buffer dump.
   Reflection reply is sent to Telegram directly; on reflection failure, the
   caller falls back to the raw error message.
 - Cron uses `ReflectionLimits::CRON` (5 turns, $0.40, 180s process timeout).
-  Reflection reply is stored in `cron_runs.notify_json`; `cron_delivery` picks
+  Reflection reply is stored in `async_runs.notify_json`; async delivery picks
   it up and relays using `DELIVERY_INSTRUCTION_FAILURE` (non-verbatim — agent
   may rephrase lightly, must preserve facts).
 - `usage_events` rows for reflection use `source = "reflection"`, discriminated
@@ -153,7 +153,7 @@ summary of the failure instead of the raw ring-buffer dump.
   on a separate "🧠 Reflection" line per window.
 - Reflection never reflects on itself. Hindsight `memory_retain` is skipped for
   reflection turns.
-- `cron_runs.status` gates delivery: `'failed'` routes to
+- `async_runs.status` gates delivery: `'failed'` routes to
   `DELIVERY_INSTRUCTION_FAILURE`, any other status (currently `'success'`)
   routes to `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
 
@@ -167,33 +167,25 @@ summary of the failure instead of the raw ring-buffer dump.
 - `ScheduleKind::Immediate` — fires on next reconcile tick (≤5s), then deletes.
   Encoded as `schedule = '@immediate'` sentinel, no DB migration. Bot-internal
   (also available to `cron_create` as `--immediate` once exposed in the MCP
-  surface). `insert_immediate_cron` defaults `lock_ttl` to
-  `IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`) when the caller passes none — the lock
-  heartbeat is written once at job start and never refreshed, so a tight TTL
-  would let the reconciler spawn a duplicate `execute_job` against the same
-  spec on the next 5-second tick. The TTL is the duplicate-prevention guard,
-  not a wall-clock execution limit.
-- `ScheduleKind::BackgroundContinuation { fork_from }` — fires on next reconcile
-  tick (≤5s), then deletes. Encoded as `schedule = '@bg:<fork_from-uuid>'`.
-  Bot-internal: produced only by `worker::enqueue_background_job` (via
-  `cron_spec::insert_background_continuation`) when a foreground turn hits the
-  600s timeout or the user taps the 🌙 Background button. Inherits the
-  `IMMEDIATE_DEFAULT_LOCK_TTL` default since these turns can run for hours.
+  surface). Immediate jobs default `lock_ttl` to `IMMEDIATE_DEFAULT_LOCK_TTL`
+  (`"6h"`) when created without an explicit TTL — the lock heartbeat is written
+  once at job start and never refreshed, so a tight TTL would let the
+  reconciler spawn a duplicate `execute_job` against the same spec on the next
+  5-second tick. The TTL is the duplicate-prevention guard, not a wall-clock
+  execution limit.
 
-  At dispatch time `cron::execute_job` calls `select_schema_and_fork`, which
-  co-derives two effects from the same variant: (1) the structured-output JSON
-  schema (`BG_CONTINUATION_SCHEMA_JSON` — forbids silent output, `notify` is
-  required and non-null), and (2) the `fork_from` UUID passed to
-  `ClaudeInvocation` as `--resume <fork_from> --fork-session --session-id
-  <run_id>`. The forked session inherits the main session's history; the
-  prompt body — built by `build_continuation_prompt` — is a SYSTEM_NOTICE
-  asking the agent to finish answering the user's most recent message.
+Legacy rows encoded as `schedule = '@bg:<fork_from-uuid>'` are no
+longer schedulable. `ScheduleKind::from_db_row` rejects them, and
+`load_specs_from_db` skips them so one stale row does not break all
+cron loading.
 
-  Agents cannot hijack `--resume` by crafting prompts: the variant carries
-  `fork_from` as typed data, and the `cron_create` MCP surface never produces
-  it. A one-time startup migration `cron::migrate_legacy_bg_continuation`
-  rewrites pre-existing rows that used the deprecated `@immediate` +
-  `X-FORK-FROM:` convention into the new encoding.
+Worker-created background rows start as `status = 'queued'` and
+`handoff_state = 'queued'`. Startup recovery converts only those interrupted
+queued handoffs into failed rows with pending delivery. It does not infer stale
+`running` recovery without process ownership. Foreground background markers
+read only `async_runs.kind = 'background'` rows for the chat, including running
+rows and finished `success`/`failed` rows with `delivery_status IN
+('pending', 'retryable')`.
 
 ## Self-introspection
 
@@ -201,7 +193,7 @@ Session-bearing CC invocations write their full conversation graph to
 `/sandbox/.claude/projects/-sandbox/<session-uuid>.jsonl` inside the
 sandbox. The session UUID matches the `--session-id` we pass to
 `claude`, so the bot's session UUIDs (from the `sessions` table) and
-`cron_runs.id` map directly to JSONL filenames.
+`async_runs.run_session_id` values map directly to JSONL filenames.
 
 The `/right-reflect` bundled skill teaches the agent to read these
 files when the user asks "why did you ...?". When `/debug` is on,

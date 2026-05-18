@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use right_agent::async_runs::CronRunJsonRow;
 use right_mcp::tool_error::tool_error;
 use rmcp::{
     ErrorData as McpError, ServiceExt,
@@ -191,9 +192,11 @@ impl MemoryServer {
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn
             .prepare(
-                "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at, delivery_status, no_notify_reason
-                 FROM cron_runs
-                 WHERE (?1 IS NULL OR job_name = ?1)
+                "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
+                        summary, notify_json, delivered_at, delivery_status, no_notify_reason
+                 FROM async_runs
+                 WHERE kind = 'cron'
+                   AND (?1 IS NULL OR producer_ref = ?1)
                  ORDER BY started_at DESC
                  LIMIT ?2",
             )
@@ -216,8 +219,8 @@ impl MemoryServer {
                 ))
             })
             .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| McpError::internal_error(format!("row read failed: {e:#}"), None))?;
         let output = serde_json::to_string_pretty(&rows)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e:#}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -235,8 +238,10 @@ impl MemoryServer {
             .lock()
             .map_err(|e| McpError::internal_error(format!("mutex poisoned: {e}"), None))?;
         let result = conn.query_row(
-            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at, delivery_status, no_notify_reason
-             FROM cron_runs WHERE id = ?1",
+            "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
+                    summary, notify_json, delivered_at, delivery_status, no_notify_reason
+             FROM async_runs
+             WHERE kind = 'cron' AND id = ?1",
             rusqlite::params![params.run_id],
             |row| {
                 Ok(cron_run_to_json(
@@ -545,7 +550,7 @@ impl rmcp::ServerHandler for MemoryServer {
     }
 }
 
-/// Convert a cron_runs row to JSON value.
+/// Convert an async cron run row to JSON value.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cron_run_to_json(
@@ -562,28 +567,20 @@ pub(crate) fn cron_run_to_json(
     delivery_status: Option<&str>,
     no_notify_reason: Option<&str>,
 ) -> serde_json::Value {
-    let mut val = serde_json::json!({
-        "id": id,
-        "job_name": job_name,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "exit_code": exit_code,
-        "status": status,
-        "log_path": log_path,
-        "delivered_at": delivered_at,
-        "delivery_status": delivery_status,
-        "no_notify_reason": no_notify_reason,
-    });
-    if let Some(s) = summary {
-        val["summary"] = serde_json::Value::String(s.to_owned());
-    }
-    // Parse notify_json into a structured object so the agent sees content directly.
-    if let Some(nj) = notify_json
-        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(nj)
-    {
-        val["notify"] = parsed;
-    }
-    val
+    right_agent::async_runs::cron_run_to_json(&CronRunJsonRow {
+        id: id.to_owned(),
+        job_name: job_name.to_owned(),
+        started_at: started_at.to_owned(),
+        finished_at: finished_at.map(str::to_owned),
+        exit_code,
+        status: status.to_owned(),
+        log_path: log_path.map(str::to_owned),
+        summary: summary.map(str::to_owned),
+        notify_json: notify_json.map(str::to_owned),
+        delivered_at: delivered_at.map(str::to_owned),
+        delivery_status: delivery_status.map(str::to_owned),
+        no_notify_reason: no_notify_reason.map(str::to_owned),
+    })
 }
 
 /// Run the MCP memory server over stdio.

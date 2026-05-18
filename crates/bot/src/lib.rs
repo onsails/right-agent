@@ -1,9 +1,10 @@
 #![warn(unreachable_pub)]
 
+pub(crate) mod async_delivery;
+pub(crate) mod background;
 pub(crate) mod cc;
 mod config_watcher;
 pub(crate) mod cron;
-pub(crate) mod cron_delivery;
 mod keepalive;
 pub(crate) mod learning_review;
 pub(crate) mod login;
@@ -430,25 +431,16 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .map_err(|e| miette::miette!("failed to open data.db: {:#}", e))?;
     tracing::info!(agent = %args.agent, "data.db opened");
 
-    // One-time data migration: rewrite legacy `@immediate` + `X-FORK-FROM:`
-    // bg-continuation rows into the new `@bg:<uuid>` schedule encoding.
-    // Idempotent — safe to re-run on every startup.
-    //
-    // Deliberate FAIL FAST exception: a transient DB error here only causes
-    // legacy rows to keep their old encoding for one more boot; the cron
-    // engine ignores them (`@immediate` no longer maps to a fork target),
-    // so they sit dormant rather than corrupting state. Halting bot startup
-    // would block agents whose data.db has zero legacy rows for a problem
-    // affecting nobody. Logged at error so the next boot retries and the
-    // condition stays visible.
-    match crate::cron::migrate_legacy_bg_continuation(&conn) {
-        Ok(0) => {}
-        Ok(n) => {
-            tracing::info!(agent = %args.agent, "migrated {n} legacy bg-continuation rows")
-        }
-        Err(e) => {
-            tracing::error!(agent = %args.agent, "legacy bg-continuation migration failed: {e:#}")
-        }
+    let interrupted_handoffs =
+        crate::background::mark_interrupted_handoffs(&conn).map_err(|e| {
+            miette::miette!("failed to recover interrupted background handoffs: {:#}", e)
+        })?;
+    if interrupted_handoffs > 0 {
+        tracing::info!(
+            agent = %args.agent,
+            count = interrupted_handoffs,
+            "recovered interrupted background handoffs"
+        );
     }
 
     // One-shot startup reaper for stale `skill_nudge_state.review_running`
@@ -930,7 +922,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .await;
     });
 
-    // Shared idle timestamp: tracks last handler/worker interaction for cron delivery gating.
+    // Shared idle timestamp: tracks last handler/worker interaction for async delivery gating.
     use crate::telegram::handler::IdleTimestamp;
     let idle_timestamp = Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(
         chrono::Utc::now().timestamp(),
@@ -964,7 +956,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         });
     }
 
-    // Cron delivery loop: delivers pending cron results through main CC session when idle
+    // Async delivery loop: delivers pending async results through main CC session when idle
     let delivery_agent_dir = agent_dir.clone();
     let delivery_agent_name = args.agent.clone();
     let delivery_bot = telegram::bot::build_bot(token.clone());
@@ -978,7 +970,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_session_locks = Arc::clone(&session_locks);
     let delivery_debug = Arc::clone(&debug_flag);
     let delivery_handle = tokio::spawn(async move {
-        cron_delivery::run_delivery_loop(
+        async_delivery::run_delivery_loop(
             delivery_agent_dir,
             delivery_agent_name,
             delivery_bot,
@@ -1073,7 +1065,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     tracing::info!("waiting for cron to finish");
     let _ = cron_handle.await;
-    tracing::info!("waiting for cron delivery to finish");
+    tracing::info!("waiting for async delivery to finish");
     let _ = delivery_handle.await;
     if let Some(handle) = sync_handle {
         tracing::info!("waiting for sync to finish");

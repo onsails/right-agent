@@ -41,8 +41,8 @@ Composite-prompt CC invocation paths use `build_prompt_assembly_script()`:
 |--------|--------|------|--------|-------|
 | Worker (Telegram messages) | `telegram/worker.rs` | `Normal` or `Bootstrap` | reply-schema.json / bootstrap-schema.json | agent config |
 | Cron (scheduled jobs) | `cron.rs` | `Cron` | CRON_SCHEMA_JSON | agent config |
-| Cron (background continuation) | `cron.rs` (`ScheduleKind::BackgroundContinuation`) | `Cron` | BG_CONTINUATION_SCHEMA_JSON | agent config |
-| Delivery (cron result relay) | `cron_delivery.rs` | `Normal` | reply-schema.json | claude-haiku-4-5-20251001 |
+| Background continuation | `background.rs` | `Cron` | BG_CONTINUATION_SCHEMA_JSON | agent config |
+| Delivery (async cron/background results) | `async_delivery.rs` | `Normal` | reply-schema.json | claude-haiku-4-5-20251001 |
 | Reflection (post-failure summary) | `reflection.rs` | `Normal` | reply-schema.json | agent config |
 
 Background learned-skill review is the exception: it is a separate
@@ -52,12 +52,10 @@ a bounded report bundle from the completed foreground turn, accepted signal
 JSON, learning events for the source invocation, and the `rightx-*` skill
 index, then stores the structured output as a review report.
 
-`cron::execute_job` selects between `CRON_SCHEMA_JSON` and
-`BG_CONTINUATION_SCHEMA_JSON` via `select_schema_and_fork` (in
-`crates/bot/src/cron.rs`): the `BackgroundContinuation { fork_from }`
-variant routes to `BG_CONTINUATION_SCHEMA_JSON` and supplies
-`fork_from` as the `--resume`/`--fork-session` source; all other kinds
-use `CRON_SCHEMA_JSON` with no fork.
+`cron::execute_job` always uses `CRON_SCHEMA_JSON` with no fork. Telegram
+background handoff is not cron-backed: `background::spawn_background_continuation`
+uses `BG_CONTINUATION_SCHEMA_JSON` and supplies the explicit
+`--resume <main-session> --fork-session --session-id <run_id>` invocation.
 
 **Model selection.** The agent's Claude model is read from
 `agent.yaml::model` (or omitted for CC's default). Users can switch via
@@ -183,11 +181,12 @@ prompt cache for all preceding blocks.
 {fetched from aggregator via POST /mcp-instructions}
 ```
 
-Cron mode is selected by `cron::execute_job` for both regular cron
-runs (`CRON_SCHEMA_JSON`) and background-continuation runs
-(`BG_CONTINUATION_SCHEMA_JSON`). The memory section is intentionally
-omitted — cron jobs are static instructions, not user queries; agents
-that need memory call `memory_recall` explicitly from the cron prompt.
+Cron mode is selected by `cron::execute_job` for regular cron runs
+(`CRON_SCHEMA_JSON`) and by `background::spawn_background_continuation`
+for Telegram background handoffs (`BG_CONTINUATION_SCHEMA_JSON`). The
+memory section is intentionally omitted — these prompts are static
+platform instructions, not live user queries; agents that need memory
+call `memory_recall` explicitly from the prompt.
 
 The `## Cron Delivery Contract` block tells the agent that its
 structured output is the Telegram delivery channel and that the turn
@@ -310,11 +309,10 @@ Defined in `crates/right-codegen/src/agent_def.rs`. Required:
 (cron ran but has nothing to report); `no_notify_reason` should then
 carry a short factual explanation.
 
-### BG_CONTINUATION_SCHEMA_JSON (cron jobs — background continuation)
+### BG_CONTINUATION_SCHEMA_JSON (Telegram background continuation)
 Defined in `crates/right-codegen/src/agent_def.rs`. Selected by
-`cron::execute_job` via `select_schema_and_fork` for
-`ScheduleKind::BackgroundContinuation` runs (foreground turns the
-worker offloaded to a forked session). Differs from `CRON_SCHEMA_JSON`:
+`background::spawn_background_continuation` for foreground turns the
+worker offloaded to a forked session. Differs from `CRON_SCHEMA_JSON`:
 
 - `notify` is REQUIRED and non-null — silent output is forbidden because
   the user is waiting for the foreground answer that was sent to

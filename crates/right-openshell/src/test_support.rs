@@ -6,7 +6,6 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use crate::openshell;
 use crate::test_cleanup;
@@ -15,7 +14,7 @@ use crate::test_cleanup;
 /// arbitrary env vars). Hold this guard for the entire duration of the
 /// mutation to serialize against any other test in the same binary that
 /// touches the process environment.
-pub static PROCESS_ENV_LOCK: Mutex<()> = Mutex::new(());
+pub static PROCESS_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// RAII guard that prepends a directory to `PATH` and restores the prior
 /// value on drop. Tests using this MUST first acquire [`PROCESS_ENV_LOCK`]

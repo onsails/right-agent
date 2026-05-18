@@ -239,6 +239,8 @@ pub struct WorkerContext {
     /// Per-(chat, thread) flag set by the bg callback. Worker checks after kill+wait
     /// to distinguish UserRequested backgrounding from auto-timeout.
     pub bg_requests: super::BgRequests,
+    /// Per-(chat, thread) gate held while a foreground turn is handed to background.
+    pub bg_handoff_gates: super::BgHandoffGates,
     /// Per-run thinking-preview visibility, mutated by Show/Hide thinking callbacks.
     pub(crate) thinking_visibility: super::ThinkingVisibility,
     /// Shared idle timestamp — worker updates after each reply sent.
@@ -326,7 +328,7 @@ pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
 /// entry (still present until just after the select-break), reads its
 /// turn_id, and inserts `bg_requests[key] = turn_id`. Without this gate the
 /// worker would reclassify the successful turn as Backgrounded, drop the
-/// reply, and enqueue a duplicate continuation cron job.
+/// reply, and spawn a duplicate background continuation.
 ///
 /// Only honor the bg request when the turn did NOT finish normally — i.e.
 /// either the safety timeout fired, CC exited non-zero, or stdout is empty.
@@ -468,10 +470,10 @@ fn recall_tags(chat_id: i64) -> Vec<String> {
 ///
 /// `assistant_text = None` is used by the Backgrounded path: the user message
 /// is retained at fork time so the document_id (= main session UUID) stays in
-/// sync with the conversation. The eventual cron-delivery answer relayed back
-/// through `--resume <main>` does not auto-retain (cron sessions skip memory),
-/// so this is the only chance to record the user turn before recall on the
-/// next foreground message would otherwise return a context hole.
+/// sync with the conversation. The eventual background answer does not
+/// auto-retain into the main session, so this is the chance to record the user
+/// turn before recall on the next foreground message would otherwise return a
+/// context hole.
 fn build_retain_content(
     user_text: &str,
     assistant_text: Option<&str>,
@@ -571,52 +573,65 @@ for this turn — the user is waiting for an answer.\n\
     )
 }
 
-/// Enqueue a one-shot `BackgroundContinuation` cron job that will fork from
-/// `main_session_id` and continue the interrupted turn. Job name is
-/// `bg-<HHMMSS>-<8hex>` — timestamped for human scanning, uuid-suffixed for
-/// collision-free PK insert. The `fork_from` UUID is carried structurally in
-/// the schedule kind, NOT as a header in the prompt body.
-fn enqueue_background_job(
+fn create_background_run(
     conn: &rusqlite::Connection,
     chat_id: i64,
     thread_id: i64,
     main_session_id: &str,
-    reason: BgReason,
 ) -> Result<String, String> {
-    const JOB_SUFFIX_HEX_CHARS: usize = 8;
-    let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let job_name = format!(
-        "bg-{}-{}",
-        chrono::Utc::now().format("%H%M%S"),
-        &suffix[..JOB_SUFFIX_HEX_CHARS]
-    );
-    let prompt = build_continuation_prompt(reason);
-    let fork_from = uuid::Uuid::parse_str(main_session_id).map_err(|e| {
+    let run_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    right_agent::async_runs::insert_queued_background_run(
+        conn,
+        right_agent::async_runs::NewBackgroundRun {
+            id: &run_id,
+            producer_ref: Some("background"),
+            source_session_id: main_session_id,
+            run_session_id: &run_id,
+            target_chat_id: chat_id,
+            target_thread_id: (thread_id != 0).then_some(thread_id),
+            created_at: &now,
+        },
+    )
+    .map_err(|e| {
         tracing::error!(
             chat_id,
             thread_id,
             main_session_id,
-            error = %format!("{e:#}"),
-            "enqueue_background_job: main_session_id is not a valid UUID — \
-             upstream invariant violated (data corruption or bug)"
+            "create_background_run: insert failed: {e:#}"
         );
-        format!("main_session_id '{main_session_id}' is not a UUID: {e:#}")
+        format!("insert background run: {e:#}")
     })?;
-    let target_thread = if thread_id == 0 {
-        None
-    } else {
-        Some(thread_id)
-    };
-    right_agent::cron_spec::insert_background_continuation(
-        conn,
-        &job_name,
-        &prompt,
-        fork_from,
-        chat_id,
-        target_thread,
-        None,
-    )?;
-    Ok(job_name)
+    Ok(run_id)
+}
+
+struct BgHandoffGateRelease {
+    gates: super::BgHandoffGates,
+    key: SessionKey,
+    released: bool,
+}
+
+impl BgHandoffGateRelease {
+    fn new(gates: super::BgHandoffGates, key: SessionKey) -> Self {
+        Self {
+            gates,
+            key,
+            released: false,
+        }
+    }
+
+    fn release(mut self) {
+        super::release_bg_handoff_gate(&self.gates, self.key);
+        self.released = true;
+    }
+}
+
+impl Drop for BgHandoffGateRelease {
+    fn drop(&mut self) {
+        if !self.released {
+            super::release_bg_handoff_gate(&self.gates, self.key);
+        }
+    }
 }
 
 /// Build the `<memory-status>` marker appended to composite-memory.md.
@@ -661,12 +676,11 @@ fn build_memory_marker(
 
 /// Build the `<background-jobs>` marker tail for `composite-memory.md`.
 ///
-/// Surfaces in-flight bg/cron runs targeted at this chat so the foreground
+/// Surfaces in-flight background runs targeted at this chat so the foreground
 /// agent is aware of work pending in the background. Two states qualify:
 /// - `status = 'running'` — job currently executing.
-/// - `status = 'success' AND delivered_at IS NULL` — job finished, answer
-///   queued for delivery (held by `IDLE_THRESHOLD_SECS` until the chat
-///   goes idle).
+/// - finished runs with pending/retryable delivery — answer queued for delivery
+///   (held by `IDLE_THRESHOLD_SECS` until the chat goes idle).
 ///
 /// Best-effort: a DB failure here would block the foreground turn for an
 /// observability tail. We log at WARN and return `None` so the agent still
@@ -680,11 +694,18 @@ fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) ->
         }
     };
     let mut stmt = match conn.prepare(
-        "SELECT id, job_name, started_at, status \
-         FROM cron_runs \
-         WHERE target_chat_id = ?1 \
-           AND ((status = 'running') OR (status = 'success' AND delivered_at IS NULL)) \
-         ORDER BY started_at",
+        "SELECT id, COALESCE(producer_ref, 'background'), COALESCE(started_at, created_at), status \
+         FROM async_runs \
+         WHERE kind = 'background' \
+           AND NULLIF(target_chat_id, 0) = ?1 \
+           AND ( \
+             status = 'running' \
+             OR (status IN ('success', 'failed') \
+                 AND delivery_status IN ('pending', 'retryable') \
+                 AND notify_json IS NOT NULL) \
+           ) \
+         ORDER BY COALESCE(started_at, created_at) DESC \
+         LIMIT 5",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -918,6 +939,7 @@ pub fn spawn_worker(
                 "worker received message, starting debounce"
             );
             let batch = collect_batch(first, &mut rx).await;
+            super::wait_for_bg_handoff_gate(&ctx.bg_handoff_gates, key).await;
 
             // Group vs DM detection: used for tag derivation, live-thinking
             // suppression, and reply-to behavior across the batch.
@@ -1479,17 +1501,17 @@ pub fn spawn_worker(
                     reason,
                     main_session_id,
                     thinking_msg_id,
+                    session_guard,
                 }) => {
                     tracing::info!(?key, ?reason, "backgrounding turn");
 
-                    // Retain the user message before forking. Cron-delivery later
-                    // resumes the same `main_session_id` to relay the answer, but
-                    // cron paths skip auto-retain (see ARCHITECTURE.md "Cron jobs
-                    // skip memory"). Without this call the user turn never reaches
-                    // Hindsight and the next foreground recall is blind to it.
+                    // Retain the user message before forking. Background turns do
+                    // not auto-retain into the main session. Without this call the
+                    // user turn never reaches Hindsight and the next foreground
+                    // recall is blind to it.
                     // `update_mode: "append"` matches the success path so the
                     // assistant turn (whenever the agent later writes one — via
-                    // memory_retain MCP call from the cron prompt, or via a
+                    // memory_retain MCP call from the background prompt, or via a
                     // subsequent foreground turn) extends the same document.
                     if let Some(ref hs) = ctx.hindsight {
                         let sender_id = batch.first().and_then(|m| m.author.user_id);
@@ -1504,37 +1526,33 @@ pub fn spawn_worker(
                         );
                     }
 
-                    // 1. Open DB connection and enqueue the background job.
-                    let conn = match right_db::open_connection(&ctx.agent_dir, false) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::error!(?key, "DB open for bg enqueue failed: {e:#}");
-                            send_error_to_telegram(
-                                &ctx,
-                                tg_chat_id,
+                    let gate_release =
+                        BgHandoffGateRelease::new(Arc::clone(&ctx.bg_handoff_gates), key);
+
+                    let run_id_result = {
+                        match right_db::open_connection(&ctx.agent_dir, false) {
+                            Ok(conn) => create_background_run(
+                                &conn,
+                                chat_id,
                                 eff_thread_id,
-                                "\u{26a0}\u{fe0f} Failed to enqueue background job: database unavailable.",
-                            )
-                            .await;
-                            continue;
+                                &main_session_id,
+                            ),
+                            Err(e) => {
+                                tracing::error!(?key, "DB open for bg run create failed: {e:#}");
+                                Err("database unavailable".to_string())
+                            }
                         }
                     };
-                    let job_name = match enqueue_background_job(
-                        &conn,
-                        chat_id,
-                        eff_thread_id,
-                        &main_session_id,
-                        reason,
-                    ) {
-                        Ok(name) => name,
+                    let run_id = match run_id_result {
+                        Ok(run_id) => run_id,
                         Err(e) => {
-                            tracing::error!(?key, "bg enqueue failed: {e}");
+                            tracing::error!(?key, "background run create failed: {e}");
                             send_error_to_telegram(
                                 &ctx,
                                 tg_chat_id,
                                 eff_thread_id,
                                 &format!(
-                                    "\u{26a0}\u{fe0f} Failed to enqueue background job: {}",
+                                    "\u{26a0}\u{fe0f} Failed to start background work: {}",
                                     html_escape(&e)
                                 ),
                             )
@@ -1542,24 +1560,71 @@ pub fn spawn_worker(
                             continue;
                         }
                     };
-                    tracing::info!(?key, %job_name, "background job enqueued");
 
-                    // 2. Edit thinking message to per-reason banner, clear keyboard.
-                    if let Some(msg_id) = thinking_msg_id {
-                        let banner = match reason {
-                            BgReason::AutoTimeout => {
-                                "\u{23f1} Foreground hit 10-min limit — continuing in background. \
-                                 Will reply when ready \u{1f319}"
+                    let prompt = build_continuation_prompt(reason);
+                    let handoff_status = crate::background::spawn_background_continuation(
+                        crate::background::BackgroundRunRequest {
+                            run_id: run_id.clone(),
+                            source_session_id: main_session_id.clone(),
+                            target_chat_id: chat_id,
+                            target_thread_id: (eff_thread_id != 0).then_some(eff_thread_id),
+                            prompt,
+                        },
+                        ctx.agent_dir.clone(),
+                        ctx.agent_name.clone(),
+                        crate::snapshot_model(&ctx.model),
+                        ctx.ssh_config_path.clone(),
+                        Arc::clone(&ctx.internal_client),
+                        ctx.resolved_sandbox.clone(),
+                        Arc::clone(&ctx.upgrade_lock),
+                        session_guard,
+                        Arc::clone(&ctx.debug),
+                    )
+                    .await;
+                    gate_release.release();
+
+                    match handoff_status {
+                        crate::background::HandoffStatus::Spawned => {
+                            tracing::info!(?key, %run_id, "background run spawned");
+                            if let Some(msg_id) = thinking_msg_id {
+                                let banner = match reason {
+                                    BgReason::AutoTimeout => {
+                                        "\u{23f1} Foreground hit 10-min limit — continuing in background. \
+                                         Will reply when ready \u{1f319}"
+                                    }
+                                    BgReason::UserRequested => {
+                                        "\u{1f319} Working in background. Will reply when ready"
+                                    }
+                                };
+                                let _ = ctx
+                                    .bot
+                                    .edit_message_text(tg_chat_id, msg_id, banner)
+                                    .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                                    .await;
                             }
-                            BgReason::UserRequested => {
-                                "\u{1f319} Working in background. Will reply when ready"
+                        }
+                        crate::background::HandoffStatus::Failed(error) => {
+                            tracing::error!(?key, %run_id, "background handoff failed: {error}");
+                            let text = format!(
+                                "\u{26a0}\u{fe0f} Failed to start background work: {}",
+                                html_escape(&error)
+                            );
+                            if let Some(msg_id) = thinking_msg_id {
+                                let edit_result = ctx
+                                    .bot
+                                    .edit_message_text(tg_chat_id, msg_id, &text)
+                                    .parse_mode(teloxide::types::ParseMode::Html)
+                                    .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
+                                    .await;
+                                if edit_result.is_err() {
+                                    send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &text)
+                                        .await;
+                                }
+                            } else {
+                                send_error_to_telegram(&ctx, tg_chat_id, eff_thread_id, &text)
+                                    .await;
                             }
-                        };
-                        let _ = ctx
-                            .bot
-                            .edit_message_text(tg_chat_id, msg_id, banner)
-                            .reply_markup(teloxide::types::InlineKeyboardMarkup::default())
-                            .await;
+                        }
                     }
                 }
             }
@@ -1571,8 +1636,8 @@ pub fn spawn_worker(
             //
             // The Backgrounded path retains the user message above (no assistant
             // text) so the main session_id has the user turn recorded before the
-            // cron-delivery answer arrives — cron-side sessions skip auto-retain
-            // entirely, so without this the next recall would have a context hole.
+            // background answer arrives; without this the next recall would have
+            // a context hole.
             if let Some(ref hs) = ctx.hindsight {
                 // Auto-retain this turn.
                 if let Some(ref reply_text) = reply_text_for_retain {
@@ -1797,14 +1862,17 @@ pub(crate) enum InvokeCcFailure {
     /// errors, schema read failures). The `message` is sent to Telegram verbatim.
     NonReflectable { message: String },
     /// The foreground turn was terminated (timeout or user request) and work
-    /// has been enqueued as a background cron job. `spawn_worker` edits
-    /// `thinking_msg_id` with a per-reason banner.
+    /// has been spawned as an immediate background continuation. `spawn_worker`
+    /// edits `thinking_msg_id` with a per-reason banner.
     Backgrounded {
         reason: BgReason,
         /// UUID of the main session from which the background job should fork.
         main_session_id: String,
         /// The live "thinking" message to edit with a backgrounded banner.
         thinking_msg_id: Option<teloxide::types::MessageId>,
+        /// Foreground main-session lock, held until background fork init is confirmed
+        /// or handoff failure is persisted after killing the child.
+        session_guard: tokio::sync::OwnedMutexGuard<()>,
     },
 }
 
@@ -2400,6 +2468,7 @@ fn build_background_review_claude_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_background_learned_skill_review(
     agent_name: &str,
     agent_dir: &Path,
@@ -2602,6 +2671,7 @@ async fn record_successful_background_review<F, Fut, E>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_failed_background_review(
     agent_db_dir: &Path,
     agent_name: String,
@@ -2992,7 +3062,7 @@ async fn invoke_cc(
 
     // Per-session mutex on `--resume` AND `--session-id` — also held on
     // first-call turns to prevent cron-delivery's `--resume <new_uuid>` from
-    // racing the JSONL write. `cron_delivery::run_delivery_loop` reads the
+    // racing the JSONL write. `async_delivery::run_delivery_loop` reads the
     // freshly-inserted active session via `get_active_session` and may invoke
     // `claude -p --resume <session_uuid>` while this worker's
     // `claude -p --session-id <session_uuid>` subprocess is still writing the
@@ -3000,7 +3070,7 @@ async fn invoke_cc(
     // call the lock is uncontended (fresh UUID, no other holder), so there's
     // zero overhead vs. the previous skip-on-first-call path. The guard is
     // held for the entire CC subprocess lifetime, then dropped on return.
-    let _session_guard: tokio::sync::OwnedMutexGuard<()> = {
+    let session_guard: tokio::sync::OwnedMutexGuard<()> = {
         let entry = ctx
             .session_locks
             .entry(session_uuid.clone())
@@ -3601,6 +3671,7 @@ async fn invoke_cc(
     if bg_click_after_success {
         // bg click landed on a normally-finished turn — drop the flag so the
         // real reply still gets delivered.
+        super::release_bg_handoff_gate(&ctx.bg_handoff_gates, (chat_id, eff_thread_id));
         tracing::debug!(
             ?chat_id,
             turn_id,
@@ -3663,6 +3734,7 @@ async fn invoke_cc(
             reason: BgReason::UserRequested,
             main_session_id: session_uuid.clone(),
             thinking_msg_id,
+            session_guard,
         });
     }
 
@@ -3691,6 +3763,7 @@ async fn invoke_cc(
             reason: BgReason::AutoTimeout,
             main_session_id: session_uuid.clone(),
             thinking_msg_id,
+            session_guard,
         });
     }
 
@@ -4337,7 +4410,7 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_bootstrap_acceptance_materializes_identity_mirror_from_sandbox() {
-        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let _guard = PROCESS_ENV_LOCK.lock().await;
 
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
@@ -5007,6 +5080,110 @@ mod background_continuation_tests {
     use super::*;
     use right_db::open_connection;
 
+    fn open_marker_conn(path: &std::path::Path) -> rusqlite::Connection {
+        open_connection(path, true).unwrap()
+    }
+
+    struct MarkerRun<'a> {
+        kind: &'a str,
+        id: &'a str,
+        job_name: &'a str,
+        started_at: &'a str,
+        status: &'a str,
+        target_chat_id: i64,
+        delivered_at: Option<&'a str>,
+        notify_json: Option<&'a str>,
+    }
+
+    impl<'a> MarkerRun<'a> {
+        fn background(
+            id: &'a str,
+            job_name: &'a str,
+            started_at: &'a str,
+            status: &'a str,
+            target_chat_id: i64,
+            delivered_at: Option<&'a str>,
+        ) -> Self {
+            Self::new(
+                "background",
+                id,
+                job_name,
+                started_at,
+                status,
+                target_chat_id,
+                delivered_at,
+            )
+        }
+
+        fn new(
+            kind: &'a str,
+            id: &'a str,
+            job_name: &'a str,
+            started_at: &'a str,
+            status: &'a str,
+            target_chat_id: i64,
+            delivered_at: Option<&'a str>,
+        ) -> Self {
+            let notify_json = if matches!(status, "success" | "failed") {
+                Some("{\"content\":\"done\"}")
+            } else {
+                None
+            };
+            Self {
+                kind,
+                id,
+                job_name,
+                started_at,
+                status,
+                target_chat_id,
+                delivered_at,
+                notify_json,
+            }
+        }
+
+        fn with_notify_json(mut self, notify_json: Option<&'a str>) -> Self {
+            self.notify_json = notify_json;
+            self
+        }
+    }
+
+    fn insert_marker_run(conn: &rusqlite::Connection, run: MarkerRun<'_>) {
+        let finished_at = matches!(run.status, "success" | "failed").then_some(run.started_at);
+        let delivery_required = matches!(run.status, "success" | "failed");
+        let delivery_status = if run.delivered_at.is_some() {
+            "delivered"
+        } else if delivery_required {
+            "pending"
+        } else {
+            "none"
+        };
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
+                status, started_at, finished_at, log_path, notify_json, delivery_required,
+                delivery_status, delivered_at, created_at, updated_at
+             ) VALUES (
+                ?1, ?2, ?3, ?1, ?4, NULL,
+                ?5, ?6, ?7, '/log', ?8, ?9,
+                ?10, ?11, ?6, ?6
+             )",
+            rusqlite::params![
+                run.id,
+                run.kind,
+                run.job_name,
+                run.target_chat_id,
+                run.status,
+                run.started_at,
+                finished_at,
+                run.notify_json,
+                if delivery_required { 1 } else { 0 },
+                delivery_status,
+                run.delivered_at,
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn continuation_prompt_auto_timeout_includes_focus_hint() {
         let p = build_continuation_prompt(BgReason::AutoTimeout);
@@ -5035,46 +5212,53 @@ mod background_continuation_tests {
     }
 
     #[test]
-    fn enqueue_background_job_inserts_bg_kind_with_target() {
+    fn create_background_run_inserts_async_background_without_cron_spec() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_connection(tmp.path(), true).expect("open_connection must succeed");
         let main = uuid::Uuid::new_v4().to_string();
-        let job = enqueue_background_job(&conn, -42, 7, &main, BgReason::AutoTimeout)
-            .expect("enqueue must succeed");
-        assert!(job.starts_with("bg-"));
+        let run_id = create_background_run(&conn, -42, 7, &main)
+            .expect("create background run must succeed");
+        uuid::Uuid::parse_str(&run_id).expect("run id must be a UUID");
 
-        let (schedule, recurring, target_chat, target_thread, prompt): (
+        let (kind, producer_ref, source_session, run_session, target_chat, target_thread, status, handoff): (
+            String,
+            Option<String>,
+            String,
             String,
             i64,
             Option<i64>,
-            Option<i64>,
+            String,
             String,
         ) = conn
             .query_row(
-                "SELECT schedule, recurring, target_chat_id, target_thread_id, prompt FROM cron_specs WHERE job_name = ?1",
-                rusqlite::params![job],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                "SELECT kind, producer_ref, source_session_id, run_session_id, target_chat_id, target_thread_id, status, handoff_state \
+                 FROM async_runs WHERE id = ?1",
+                rusqlite::params![run_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
             )
             .unwrap();
-        assert_eq!(schedule, format!("@bg:{main}"));
-        assert_eq!(recurring, 0);
-        assert_eq!(target_chat, Some(-42));
+        assert_eq!(kind, "background");
+        assert_eq!(producer_ref.as_deref(), Some("background"));
+        assert_eq!(source_session, main);
+        assert_eq!(run_session, run_id);
+        assert_eq!(target_chat, -42);
         assert_eq!(target_thread, Some(7));
-        assert!(
-            !prompt.starts_with("X-FORK-FROM:"),
-            "X-FORK-FROM header must NOT be in prompt; got {prompt:?}"
+        assert_eq!(status, "queued");
+        assert_eq!(handoff, "queued");
+
+        let cron_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM cron_specs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            cron_count, 0,
+            "new background handoff must not enqueue cron_specs"
         );
-        assert!(
-            prompt.contains("SYSTEM_NOTICE"),
-            "continuation notice must be in prompt body; got {prompt:?}"
-        );
-        assert!(prompt.contains("10-minute safety limit"));
     }
 
     #[test]
     fn build_bg_marker_returns_none_when_no_runs() {
         let tmp = tempfile::tempdir().unwrap();
-        let _conn = open_connection(tmp.path(), true).unwrap();
+        let _conn = open_marker_conn(tmp.path());
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "no rows → no marker; got {m:?}");
     }
@@ -5082,14 +5266,12 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_includes_running_run_for_chat() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
-             VALUES ('run-A', 'bg-job-A', ?1, 'running', '/log', -100, NULL)",
-            rusqlite::params![now],
-        )
-        .unwrap();
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-A", "bg-job-A", &now, "running", -100, None),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(m.starts_with("<background-jobs>"), "got {m:?}");
@@ -5101,14 +5283,12 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_includes_undelivered_success_run() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, target_chat_id, target_thread_id, delivery_status) \
-             VALUES ('run-B', 'bg-job-B', ?1, ?1, 'success', '/log', -100, NULL, 'pending')",
-            rusqlite::params![now],
-        )
-        .unwrap();
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-B", "bg-job-B", &now, "success", -100, None),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(m.contains("bg-job-B"));
@@ -5116,16 +5296,65 @@ mod background_continuation_tests {
     }
 
     #[test]
-    fn build_bg_marker_excludes_other_chat() {
+    fn build_bg_marker_excludes_finished_pending_without_notify_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
-             VALUES ('run-other', 'bg-other', ?1, 'running', '/log', -999, NULL)",
-            rusqlite::params![now],
+        insert_marker_run(
+            &conn,
+            MarkerRun::background(
+                "run-null-notify",
+                "bg-null-notify",
+                &now,
+                "failed",
+                -100,
+                None,
+            )
+            .with_notify_json(None),
+        );
+        drop(conn);
+
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        assert!(
+            m.is_none(),
+            "finished background row without notify_json is not delivery-eligible; got {m:?}"
+        );
+    }
+
+    #[test]
+    fn build_bg_marker_includes_recovered_failed_handoff_without_started_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_marker_conn(tmp.path());
+        right_agent::async_runs::insert_queued_background_run(
+            &conn,
+            right_agent::async_runs::NewBackgroundRun {
+                id: "bg-recovered",
+                producer_ref: Some("background"),
+                source_session_id: "main-1",
+                run_session_id: "bg-recovered",
+                target_chat_id: -100,
+                target_thread_id: None,
+                created_at: "2026-05-18T10:00:00Z",
+            },
         )
         .unwrap();
+        crate::background::mark_interrupted_handoffs(&conn).unwrap();
+        drop(conn);
+
+        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        assert!(m.contains("bg-recovered"), "got {m:?}");
+        assert!(m.contains("failed"), "got {m:?}");
+    }
+
+    #[test]
+    fn build_bg_marker_excludes_other_chat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_marker_conn(tmp.path());
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-other", "bg-other", &now, "running", -999, None),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "row for other chat must not appear; got {m:?}");
@@ -5134,17 +5363,33 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_excludes_delivered_run() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, target_chat_id, target_thread_id, delivered_at, delivery_status) \
-             VALUES ('run-D', 'bg-D', ?1, ?1, 'success', '/log', -100, NULL, ?1, 'delivered')",
-            rusqlite::params![now],
-        )
-        .unwrap();
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-D", "bg-D", &now, "success", -100, Some(&now)),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "delivered run must not appear; got {m:?}");
+    }
+
+    #[test]
+    fn build_bg_marker_excludes_cron_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_marker_conn(tmp.path());
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_marker_run(
+            &conn,
+            MarkerRun::new("cron", "cron-run", "cron-job", &now, "running", -100, None),
+        );
+        drop(conn);
+
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        assert!(
+            m.is_none(),
+            "cron rows must not appear in bg marker; got {m:?}"
+        );
     }
 }
 
@@ -5205,7 +5450,7 @@ mod bg_request_race_tests {
 
     // Intra-turn race: bg click lands AFTER stdout closed and child exited 0.
     // The current turn produced a valid reply — honoring bg here would silently
-    // drop that reply and enqueue a duplicate continuation cron. The gate must
+    // drop that reply and spawn a duplicate continuation. The gate must
     // clear was_bg_request so the worker delivers the reply normally.
     #[test]
     fn bg_click_after_success_is_ignored() {
@@ -5248,6 +5493,71 @@ mod bg_request_race_tests {
         assert!(!should_honor_bg_request(false, false, 0, "reply"));
         assert!(!should_honor_bg_request(false, true, -1, ""));
         assert!(!should_honor_bg_request(false, false, 1, ""));
+    }
+}
+
+#[cfg(test)]
+mod bg_handoff_gate_tests {
+    use super::*;
+    use dashmap::DashMap;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn queued_foreground_waits_for_background_handoff_release() {
+        let gates: super::super::BgHandoffGates = Arc::new(DashMap::new());
+        let key = (42, 7);
+        super::super::set_bg_handoff_gate(&gates, key);
+
+        let waiter_gates = Arc::clone(&gates);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut waiter = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            super::super::wait_for_bg_handoff_gate(&waiter_gates, key).await;
+        });
+        started_rx.await.unwrap();
+
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err(),
+            "queued foreground must wait while the handoff gate is present"
+        );
+
+        super::super::release_bg_handoff_gate(&gates, key);
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should unblock after gate release")
+            .expect("waiter task should not panic");
+    }
+
+    #[tokio::test]
+    async fn backgrounded_failure_retains_session_lock_until_dropped() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let session_guard = Arc::clone(&lock).lock_owned().await;
+        let failure = InvokeCcFailure::Backgrounded {
+            reason: BgReason::UserRequested,
+            main_session_id: "main-session".into(),
+            thinking_msg_id: None,
+            session_guard,
+        };
+
+        let waiter_lock = Arc::clone(&lock);
+        let mut waiter = tokio::spawn(async move {
+            let _guard = waiter_lock.lock_owned().await;
+        });
+
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err(),
+            "background handoff failure must retain the main session lock"
+        );
+
+        drop(failure);
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("session lock should release when the failure is dropped")
+            .expect("waiter task should not panic");
     }
 }
 
