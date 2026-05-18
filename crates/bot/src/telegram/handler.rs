@@ -1413,9 +1413,15 @@ async fn request_token_and_register(
                     .ok();
             }
             Err(e) => {
-                send_html_reply(&bot, chat_id, eff_thread_id, &format!("Failed: {e:#}"))
-                    .await
-                    .ok();
+                let escaped_error = html_escape(&format!("{e:#}"));
+                send_html_reply(
+                    &bot,
+                    chat_id,
+                    eff_thread_id,
+                    &format!("Failed: {escaped_error}"),
+                )
+                .await
+                .ok();
             }
         }
     });
