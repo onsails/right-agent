@@ -135,6 +135,53 @@ pub(crate) fn parse_api_key_source(init_json: &str) -> Option<String> {
     v.get("apiKeySource")?.as_str().map(|s| s.to_string())
 }
 
+/// Agent-facing status of the built-in `right` MCP server from Claude Code's
+/// `system/init` stream event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RightMcpInitStatus {
+    Connected,
+    /// `status = None` means the init event did not list `right` at all.
+    Unhealthy {
+        status: Option<String>,
+    },
+}
+
+/// Parse the built-in `right` MCP server status from a Claude Code
+/// `system/init` NDJSON line.
+///
+/// Returns `None` for non-init lines and malformed JSON. Returns
+/// `Unhealthy { status: None }` when the line is an init event but `right`
+/// is absent, because the agent-facing MCP registry is missing the platform
+/// server.
+pub(crate) fn parse_right_mcp_init_status(init_json: &str) -> Option<RightMcpInitStatus> {
+    let v: serde_json::Value = serde_json::from_str(init_json).ok()?;
+    if v.get("type")?.as_str()? != "system" {
+        return None;
+    }
+    if v.get("subtype")?.as_str()? != "init" {
+        return None;
+    }
+
+    let servers = v.get("mcp_servers").and_then(|s| s.as_array())?;
+    for server in servers {
+        if server.get("name").and_then(|n| n.as_str()) == Some("right") {
+            let status = server
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown");
+            return Some(if status == "connected" {
+                RightMcpInitStatus::Connected
+            } else {
+                RightMcpInitStatus::Unhealthy {
+                    status: Some(status.to_owned()),
+                }
+            });
+        }
+    }
+
+    Some(RightMcpInitStatus::Unhealthy { status: None })
+}
+
 /// Format a single event for Telegram display (HTML mode).
 ///
 /// All dynamic content is HTML-escaped for safe use with ParseMode::Html.
@@ -522,6 +569,60 @@ mod tests {
     #[test]
     fn parse_api_key_source_malformed_json_returns_none() {
         assert!(parse_api_key_source("not json").is_none());
+    }
+
+    #[test]
+    fn parse_right_mcp_init_status_connected() {
+        let line = r#"{
+        "type":"system",
+        "subtype":"init",
+        "mcp_servers":[
+            {"name":"right","status":"connected"},
+            {"name":"composio","status":"connected"}
+        ]
+    }"#;
+
+        assert_eq!(
+            parse_right_mcp_init_status(line),
+            Some(RightMcpInitStatus::Connected)
+        );
+    }
+
+    #[test]
+    fn parse_right_mcp_init_status_needs_auth() {
+        let line = r#"{
+        "type":"system",
+        "subtype":"init",
+        "mcp_servers":[{"name":"right","status":"needs-auth"}]
+    }"#;
+
+        assert_eq!(
+            parse_right_mcp_init_status(line),
+            Some(RightMcpInitStatus::Unhealthy {
+                status: Some("needs-auth".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn parse_right_mcp_init_status_missing_right_is_unhealthy() {
+        let line = r#"{
+        "type":"system",
+        "subtype":"init",
+        "mcp_servers":[{"name":"composio","status":"connected"}]
+    }"#;
+
+        assert_eq!(
+            parse_right_mcp_init_status(line),
+            Some(RightMcpInitStatus::Unhealthy { status: None })
+        );
+    }
+
+    #[test]
+    fn parse_right_mcp_init_status_ignores_non_init_lines() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+
+        assert_eq!(parse_right_mcp_init_status(line), None);
     }
 
     #[test]
