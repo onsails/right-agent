@@ -1055,6 +1055,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_add_allows_loopback_oauth_registration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = make_test_router(tmp.path());
+
+        let (status, body) = send_json(
+            app,
+            "/mcp-add",
+            serde_json::json!({
+                "agent": "test-agent",
+                "name": "local",
+                "url": "http://127.0.0.1:3333/mcp",
+                "auth_type": "oauth"
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body={body}");
+        assert_eq!(body["tools_count"], 0);
+    }
+
+    #[tokio::test]
     async fn mcp_remove_protected_name_right() {
         let tmp = tempfile::tempdir().unwrap();
         let app = make_test_router(tmp.path());
