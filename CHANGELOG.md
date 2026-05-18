@@ -1,114 +1,13 @@
 # Changelog
 ## [0.2.15] - 2026-05-18
 
-
-### Bug Fixes
-
-- **right-memory**: Handle ErrorKind::Quota in retain_queue::drain
-- **right-memory**: Exclude QuotaExhausted from CircuitOpen enqueue path
-- **deps-audit**: Consolidate test-crypto helper, document let-discard intent
-- **workspace**: Add debug: None to AgentConfig literal construction sites
-- Keep cron idle promise wording testable
-- Clarify learned skill receipt message
-- Clarify skill learning safeguards
-- **release-plz**: Add version requirement to internal path deps
-- **right-db**: Add chrono dev dependency for migration tests
-- **claude**: Accept up-to-date upgrade exit
-- **claude**: Accept current-version upgrade output
-- **bot**: Treat missing right mcp init as unhealthy
-- **bot**: Keep mcp init parser clippy-clean
-- **bot**: Narrow claude health lint allowances
-- **bot**: Bound claude health probe lifecycle
-- **bot**: Bound mcp repair operation
-- **bot**: Cancel mcp repair during dispatcher shutdown
-- **bot**: Correlate worker invocation logs
-- Align learned skills schema checks
-- Tighten learned skill reply signals
-- Validate learned skill event refs
-- **agent**: Align doctor memory schema version
-- Gate learned skill tools outside foreground
-- **restore**: Preserve implicit Hindsight bindings
-- **restore**: Fail binding validation before partial restore
-- **runtime**: Refresh tunnel after route changes
-- **restore**: Preserve sandbox agent recovery state
-- Ssh upgrade
-- **cli**: Quote agent ssh remote argv
-- **openshell**: Finish ssh remote argv quoting
-- **openshell**: Generate portable right mcp policy
-
-### Documentation
-
-- **right-memory**: Document QuotaExhausted stickiness in refresh_status
-- **rightcron**: Guide agents to write output-oriented cron prompts
-- **prompt**: Introduce /rightreflect skill and /debug command to agents
-- Document learned skill flow
-
-### Features
-
-- **right-memory**: Sanitize content via injection_guard before Hindsight POST
-- **right-memory**: Classify HTTP 402 as ErrorKind::Quota
-- **right-memory**: Exempt ErrorKind::Quota from breaker ticks
-- **right-memory**: Add MemoryStatus::QuotaExhausted variant
-- **right-memory**: Set QuotaExhausted status and skip enqueue on 402
-- **right-memory**: Clear QuotaExhausted on any 2xx, preserve on refresh
-- **codegen**: Add CRON_INSTRUCTIONS template
-- **skills**: Add /rightreflect skill content for self-introspection
-- **codegen**: Bundle and install /rightreflect skill
-- **cron**: Lower idle threshold to 2 min and teach agent the rule
-- Add right learn skill
-- **codegen**: Detect regenerated file content changes
-- **codegen**: Report cloudflared config changes
-- **bot**: Send_progress MCP tool
-- **right-db**: Scaffold new crate for SQLite plumbing
-- **db**: Add conversation message storage
-- **bot**: Parse right mcp init status
-- **bot**: Probe claude mcp health with haiku
-- **bot**: Repair stale claude mcp auth cache
-- **bot**: Wire mcp self-heal into claude turns
-- Add learned skills persistence
-- Record learned skill reply signals
-- **runtime**: Restart cloudflared after ingress changes
-- Expose learned skill MCP tools
-- **backup**: Write non-secret restore manifest
-
-### Miscellaneous
-
-- **stage-f**: Pin publish = false on new internal crates
-
-### Refactor
-
-- **right-memory**: Extract memory subsystem from right-agent
-- **right-memory**: Centralize sticky-status predicate and fix aggregator gap
-- **memory**: Move prompt safety out of right-core
-- **right-codegen**: Extract codegen subsystem from right-agent
-- **workspace**: Move platform knobs out of right-core
-- **runtime**: Move runtime state out of right-core
-- **config**: Move agent config out of right-core
-- **errors**: Localize remaining right-core errors
-- **right-mcp**: Extract mcp subsystem from right-agent
-- **openshell**: Move openshell stack out of right-core
-- **config**: Move global config out of right-core
-- **right-db**: Move SQL migration files from right-agent
-- **right-db**: Move migrations.rs from right-agent::memory
-- Enable unreachable_pub lint, privatize internals, drop zombie code
-- **openshell**: Address review issues (2 iterations)
-
-### Testing
-
-- **right-db**: Add open + migration smoke tests
-- **right-db**: Cover open_connection invariants
-- **right-db**: Port 8 missed schema/trigger tests from pre-split memory module
-- **claude**: Mirror startup install before upgrade
-- **claude**: Tolerate download denial in ci
-- **bot**: Define claude health probe command
-- **bot**: Add claude health repair state
-- **bot**: Cover mcp repair turn observation
-- **bot**: Cover worker invocation log context
-- **restore**: Cover restore binding decisions
-
-### Build
-
-- **deps**: Drop aws-lc-rs, unify on ring crypto provider
+- Agents can now save reusable skill packages from real work using `/right-learn-skill` — captured workflows and API discoveries are persisted as `rightx-*` packages available in future sessions.
+- The hourly keepalive now detects when Right MCP connectivity is broken inside a Claude session and automatically repairs the auth cache, recovering agents that previously went silent without a manual restart.
+- `right agent restore` validates Hindsight memory bindings before writing any files, preventing partial restores on validation failure, and preserves the original agent's memory bank bindings when restoring to a different environment.
+- `right agent backup` preserves symlink targets in sandbox archives and accepts a new `--include-rebuildable` flag to include cache and dependency directories normally excluded from backups.
+- Cloudflared now restarts automatically when the ingress configuration changes (e.g. after destroying an agent), so the active tunnel immediately reflects the new agent list without a manual restart.
+- When Hindsight returns HTTP 402 (quota limit), the memory system stops enqueueing new memories and skips circuit breaker ticks — quota exhaustion no longer drives agents into open-circuit failure mode.
+- The Claude auto-upgrade check no longer logs errors when `claude upgrade` reports the installed version is already current.
 
 ## [0.2.14] - 2026-05-14
 
