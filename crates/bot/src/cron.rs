@@ -216,26 +216,6 @@ fn insert_running_run(
     // `async_runs.target_chat_id` is NOT NULL. Targetless cron runs are kept
     // explicit with sentinel 0; delivery reads convert it back with NULLIF.
     let target_chat_id = spec.target_chat_id.unwrap_or(0);
-    if let right_agent::cron_spec::ScheduleKind::BackgroundContinuation { fork_from } =
-        spec.schedule_kind
-    {
-        let source_session_id = fork_from.to_string();
-        right_agent::async_runs::insert_queued_background_run(
-            conn,
-            right_agent::async_runs::NewBackgroundRun {
-                id: run_id,
-                producer_ref: Some(job_name),
-                source_session_id: &source_session_id,
-                run_session_id: run_id,
-                target_chat_id,
-                target_thread_id: spec.target_thread_id,
-                created_at: started_at,
-            },
-        )?;
-        return right_agent::async_runs::mark_background_spawned(
-            conn, run_id, started_at, log_path,
-        );
-    }
 
     right_agent::async_runs::insert_running_cron_run(
         conn,
@@ -250,103 +230,16 @@ fn insert_running_run(
     )
 }
 
-fn is_background_continuation(spec: &CronSpec) -> bool {
-    matches!(
-        &spec.schedule_kind,
-        right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
-    )
-}
-
-const BACKGROUND_FAILURE_NOTIFY_CONTENT: &str =
-    "Background work failed before it could produce a result.";
-
-fn persist_background_failure_notify(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    job_name: &str,
-    reason: &str,
-) -> Result<(), rusqlite::Error> {
-    let notify = CronNotify {
-        content: BACKGROUND_FAILURE_NOTIFY_CONTENT.to_string(),
-        attachments: None,
-    };
-    let notify_json = serde_json::to_string(&notify)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let summary =
-        format!("Background job `{job_name}` failed before producing a result (run {run_id})");
-    let error_json = serde_json::json!({
-        "kind": "background_result_unavailable",
-        "job_name": job_name,
-        "run_id": run_id,
-        "reason": reason,
-    })
-    .to_string();
-
-    right_agent::async_runs::persist_run_output(
-        conn,
-        run_id,
-        right_agent::async_runs::RunOutput {
-            summary: Some(&summary),
-            notify_json: Some(&notify_json),
-            no_notify_reason: None,
-            error_json: Some(&error_json),
-            delivery_required: true,
-        },
-    )
-}
-
-fn update_failed_run_record(
-    conn: &rusqlite::Connection,
-    run_id: &str,
-    job_name: &str,
-    spec: &CronSpec,
-    exit_code: Option<i32>,
-    reason: &str,
-) {
-    if is_background_continuation(spec)
-        && let Err(e) = persist_background_failure_notify(conn, run_id, job_name, reason)
-    {
-        tracing::error!(
-            job = %job_name,
-            run_id = %run_id,
-            "failed to persist background failure notify: {e:#}"
-        );
-    }
+fn update_failed_run_record(conn: &rusqlite::Connection, run_id: &str, exit_code: Option<i32>) {
     update_run_record(conn, run_id, exit_code, "failed");
-}
-
-fn background_success_output_failure_reason(
-    spec: &CronSpec,
-    output: &CronReplyOutput,
-) -> Option<&'static str> {
-    if !is_background_continuation(spec) {
-        return None;
-    }
-
-    let Some(notify) = &output.notify else {
-        return Some("background continuation returned notify: null");
-    };
-    if notify.content.trim().is_empty() {
-        return Some("background continuation returned empty notify.content");
-    }
-    None
 }
 
 fn persist_successful_cron_output(
     conn: &rusqlite::Connection,
     run_id: &str,
-    job_name: &str,
-    spec: &CronSpec,
-    exit_code: Option<i32>,
     cron_output: &CronReplyOutput,
     notify_json: Option<&str>,
 ) -> Result<&'static str, rusqlite::Error> {
-    if let Some(reason) = background_success_output_failure_reason(spec, cron_output) {
-        persist_background_failure_notify(conn, run_id, job_name, reason)?;
-        right_agent::async_runs::finish_run(conn, run_id, exit_code, "failed")?;
-        return Ok("pending");
-    }
-
     let delivery_required = cron_output.notify.is_some();
     let delivery_status = if delivery_required { "pending" } else { "none" };
     right_agent::async_runs::persist_run_output(
@@ -363,96 +256,21 @@ fn persist_successful_cron_output(
     Ok(delivery_status)
 }
 
-/// Pick the JSON schema and (optional) `--fork-session` source for a cron run.
-///
-/// `BackgroundContinuation` is the only kind that runs against
-/// [`right_codegen::BG_CONTINUATION_SCHEMA_JSON`] — its forked turn
-/// MUST reply (notify required + non-null) because the user is waiting for
-/// the foreground answer sent to background. All other kinds use
-/// [`right_codegen::CRON_SCHEMA_JSON`] where `notify: null` (silent)
-/// is a valid outcome.
-fn select_schema_and_fork(
-    spec: &right_agent::cron_spec::CronSpec,
-) -> (&'static str, Option<String>) {
-    match &spec.schedule_kind {
-        right_agent::cron_spec::ScheduleKind::BackgroundContinuation { fork_from } => (
-            right_codegen::BG_CONTINUATION_SCHEMA_JSON,
-            Some(fork_from.to_string()),
-        ),
-        _ => (right_codegen::CRON_SCHEMA_JSON, None),
-    }
-}
-
 /// Eligible for the immediate-fire reconcile path: kinds that must run on
 /// the next reconcile tick with no `cron_schedule()` (no `run_job_loop`
 /// handle is spawned for these).
 fn is_reconcile_tick_kind(kind: &right_agent::cron_spec::ScheduleKind) -> bool {
-    matches!(
-        kind,
-        right_agent::cron_spec::ScheduleKind::Immediate
-            | right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
-    )
+    matches!(kind, right_agent::cron_spec::ScheduleKind::Immediate)
 }
 
 /// Bypassed by the recurring-handle spawn loop: these kinds are either
-/// fired immediately (`Immediate`, `BackgroundContinuation`) or fired by
-/// the absolute-time path (`RunAt`).
+/// fired immediately (`Immediate`) or fired by the absolute-time path (`RunAt`).
 fn is_run_job_loop_skip_kind(kind: &right_agent::cron_spec::ScheduleKind) -> bool {
     matches!(
         kind,
         right_agent::cron_spec::ScheduleKind::RunAt(_)
             | right_agent::cron_spec::ScheduleKind::Immediate
-            | right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
     )
-}
-
-/// Header prefix produced by the deprecated bg-continuation convention.
-/// Followed by the fork-from UUID and a newline, then the actual prompt body.
-const LEGACY_FORK_HEADER: &str = "X-FORK-FROM: ";
-
-/// One-time startup migration: rewrite legacy `@immediate` + `X-FORK-FROM:`
-/// rows produced by the old bg-continuation convention into the new
-/// `@bg:<uuid>` sentinel + clean prompt body. Idempotent — rows already in
-/// the new form are filtered out by the `schedule = IMMEDIATE_SENTINEL`
-/// predicate. Invalid UUIDs in the legacy header leave the row untouched
-/// (logged at WARN). Returns the number of rows rewritten.
-pub(crate) fn migrate_legacy_bg_continuation(
-    conn: &rusqlite::Connection,
-) -> Result<usize, rusqlite::Error> {
-    use right_agent::cron_spec::{IMMEDIATE_SENTINEL, ScheduleKind};
-
-    let candidates: Vec<(String, String)> = {
-        let mut stmt =
-            conn.prepare("SELECT job_name, prompt FROM cron_specs WHERE schedule = ?1")?;
-        stmt.query_map([IMMEDIATE_SENTINEL], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    if candidates.is_empty() {
-        return Ok(0);
-    }
-
-    let tx = conn.unchecked_transaction()?;
-    let mut migrated = 0usize;
-    for (name, prompt) in candidates {
-        let Some(rest) = prompt.strip_prefix(LEGACY_FORK_HEADER) else {
-            continue;
-        };
-        let Some((sess, body)) = rest.split_once('\n') else {
-            continue;
-        };
-        let Ok(fork_from) = uuid::Uuid::parse_str(sess) else {
-            tracing::warn!(job = %name, "legacy @immediate row has invalid UUID in X-FORK-FROM; skipping");
-            continue;
-        };
-        let new_schedule = ScheduleKind::BackgroundContinuation { fork_from }.to_string();
-        tx.execute(
-            "UPDATE cron_specs SET schedule = ?1, prompt = ?2 WHERE job_name = ?3",
-            rusqlite::params![new_schedule, body, name],
-        )?;
-        migrated += 1;
-    }
-    tx.commit()?;
-    Ok(migrated)
 }
 
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
@@ -538,26 +356,20 @@ async fn execute_job(
         crate::cc::invocation::baseline_disallowed_tools(),
     );
 
-    // Schema and (optional) --fork-session source come from spec.schedule_kind.
-    // BackgroundContinuation produces both a stricter schema (bg) and a
-    // resume-target main session UUID; everything else gets the regular
-    // cron schema and no fork.
-    let (json_schema_str, fork_from_main_session) = select_schema_and_fork(spec);
     let prompt_for_cc = spec.prompt.clone();
 
     let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
-    let fork_session = fork_from_main_session.is_some();
     let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
-        json_schema: Some(json_schema_str.into()),
+        json_schema: Some(right_codegen::CRON_SCHEMA_JSON.into()),
         output_format: crate::cc::invocation::OutputFormat::StreamJson,
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
         max_turns: None,
-        resume_session_id: fork_from_main_session,
+        resume_session_id: None,
         new_session_id: Some(run_id.clone()),
-        fork_session,
+        fork_session: false,
         allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],
@@ -656,28 +468,14 @@ async fn execute_job(
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");
-            update_failed_run_record(
-                &conn,
-                &run_id,
-                job_name,
-                spec,
-                None,
-                "claude binary not found in PATH",
-            );
+            update_failed_run_record(&conn, &run_id, None);
             std::fs::remove_file(&lock_path).ok();
             return;
         }
         let host_log_dir = agent_dir.join("crons").join("logs");
         if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
             tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
-            update_failed_run_record(
-                &conn,
-                &run_id,
-                job_name,
-                spec,
-                None,
-                &format!("failed to create log dir: {e:#}"),
-            );
+            update_failed_run_record(&conn, &run_id, None);
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -708,14 +506,7 @@ async fn execute_job(
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
-            update_failed_run_record(
-                &conn,
-                &run_id,
-                job_name,
-                spec,
-                None,
-                &format!("spawn failed: {e:#}"),
-            );
+            update_failed_run_record(&conn, &run_id, None);
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -760,14 +551,7 @@ async fn execute_job(
         }
     };
     if exit_status.is_none() {
-        update_failed_run_record(
-            &conn,
-            &run_id,
-            job_name,
-            spec,
-            None,
-            "child wait failed or timed out",
-        );
+        update_failed_run_record(&conn, &run_id, None);
         std::fs::remove_file(&lock_path).ok();
         return;
     }
@@ -827,22 +611,6 @@ async fn execute_job(
         );
         "failed"
     };
-
-    if status == "failed"
-        && is_background_continuation(spec)
-        && let Err(e) = persist_background_failure_notify(
-            &conn,
-            &run_id,
-            job_name,
-            &format!("subprocess failed with exit code {exit_code:?}"),
-        )
-    {
-        tracing::error!(
-            job = %job_name,
-            run_id = %run_id,
-            "failed to persist background failure notify: {e:#}"
-        );
-    }
 
     // DB update on completion (D-04)
     update_run_record(&conn, &run_id, exit_code, status);
@@ -938,9 +706,6 @@ async fn execute_job(
                 let delivery_status = match persist_successful_cron_output(
                     &conn,
                     &run_id,
-                    job_name,
-                    spec,
-                    exit_code,
                     &cron_output,
                     notify_json.as_deref(),
                 ) {
@@ -961,26 +726,8 @@ async fn execute_job(
             }
             Err(reason) => {
                 tracing::warn!(job = %job_name, reason, "failed to parse cron output");
-                if is_background_continuation(spec) {
-                    if let Err(e) =
-                        persist_background_failure_notify(&conn, &run_id, job_name, &reason)
-                    {
-                        tracing::error!(
-                            job = %job_name,
-                            run_id = %run_id,
-                            "failed to persist background parse-failure notify: {e:#}"
-                        );
-                    }
-                    update_run_record(&conn, &run_id, exit_code, "failed");
-                }
             }
         }
-    } else if is_background_continuation(spec) {
-        tracing::info!(
-            job = %job_name,
-            run_id = %run_id,
-            "background failure notify persisted"
-        );
     } else {
         let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
         let raw_detail = find_last_result_line(&collected_lines)
@@ -1407,7 +1154,7 @@ fn reconcile_jobs(
         debug,
     );
 
-    // Fire Immediate + BackgroundContinuation specs (every tick — they are one-shot)
+    // Fire Immediate specs (every tick — they are one-shot)
     let immediate: Vec<(String, CronSpec)> = new_specs
         .iter()
         .filter(|(_, spec)| is_reconcile_tick_kind(&spec.schedule_kind))
@@ -1416,7 +1163,7 @@ fn reconcile_jobs(
 
     fire_one_shot_specs(
         immediate,
-        "immediate-or-bg",
+        "immediate",
         triggered_handles,
         agent_dir,
         agent_name,
@@ -1445,8 +1192,7 @@ fn reconcile_jobs(
 
     // Spawn new handles for new or changed jobs
     for (name, spec) in &new_specs {
-        // Skip RunAt, Immediate, and BackgroundContinuation specs —
-        // they are handled above, not run_job_loop
+        // Skip RunAt and Immediate specs — they are handled above, not run_job_loop.
         if is_run_job_loop_skip_kind(&spec.schedule_kind) {
             continue;
         }
@@ -1956,65 +1702,9 @@ mod tests {
     }
 
     #[test]
-    fn select_schema_for_recurring_uses_cron_schema() {
-        let spec = right_agent::cron_spec::CronSpec {
-            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: None,
-            target_thread_id: None,
-        };
-        let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_codegen::CRON_SCHEMA_JSON);
-        assert!(fork.is_none());
-    }
-
-    #[test]
-    fn select_schema_for_immediate_uses_cron_schema() {
-        let spec = right_agent::cron_spec::CronSpec {
-            schedule_kind: right_agent::cron_spec::ScheduleKind::Immediate,
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: None,
-            target_thread_id: None,
-        };
-        let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_codegen::CRON_SCHEMA_JSON);
-        assert!(fork.is_none());
-    }
-
-    #[test]
-    fn select_schema_for_bg_uses_bg_schema_and_fork_from() {
-        let main = uuid::Uuid::new_v4();
-        let spec = right_agent::cron_spec::CronSpec {
-            schedule_kind: right_agent::cron_spec::ScheduleKind::BackgroundContinuation {
-                fork_from: main,
-            },
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: None,
-            target_thread_id: None,
-        };
-        let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_codegen::BG_CONTINUATION_SCHEMA_JSON);
-        assert_eq!(fork.as_deref(), Some(main.to_string().as_str()));
-    }
-
-    #[test]
-    fn is_reconcile_tick_kind_includes_immediate_and_bg() {
+    fn is_reconcile_tick_kind_includes_immediate() {
         use right_agent::cron_spec::ScheduleKind;
         assert!(is_reconcile_tick_kind(&ScheduleKind::Immediate));
-        assert!(is_reconcile_tick_kind(
-            &ScheduleKind::BackgroundContinuation {
-                fork_from: uuid::Uuid::new_v4(),
-            }
-        ));
     }
 
     #[test]
@@ -2032,17 +1722,12 @@ mod tests {
     }
 
     #[test]
-    fn is_run_job_loop_skip_kind_includes_runat_immediate_and_bg() {
+    fn is_run_job_loop_skip_kind_includes_runat_and_immediate() {
         use right_agent::cron_spec::ScheduleKind;
         assert!(is_run_job_loop_skip_kind(&ScheduleKind::RunAt(
             chrono::Utc::now()
         )));
         assert!(is_run_job_loop_skip_kind(&ScheduleKind::Immediate));
-        assert!(is_run_job_loop_skip_kind(
-            &ScheduleKind::BackgroundContinuation {
-                fork_from: uuid::Uuid::new_v4(),
-            }
-        ));
     }
 
     #[test]
@@ -2056,92 +1741,6 @@ mod tests {
             "*/5 * * * *".into()
         )));
     }
-
-    #[test]
-    fn migrate_legacy_bg_rewrites_at_immediate_with_x_fork_from() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let main = uuid::Uuid::new_v4();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('bg-old', '@immediate', ?1, '6h', 5.0, 0, NULL, -100, NULL, ?2, ?2)",
-            rusqlite::params![format!("X-FORK-FROM: {main}\nbody continues here"), now],
-        ).unwrap();
-
-        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(migrated, 1);
-
-        let (schedule, prompt): (String, String) = conn
-            .query_row(
-                "SELECT schedule, prompt FROM cron_specs WHERE job_name = 'bg-old'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(schedule, format!("@bg:{main}"));
-        assert_eq!(prompt, "body continues here");
-    }
-
-    #[test]
-    fn migrate_legacy_bg_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let main = uuid::Uuid::new_v4();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('bg-old', '@immediate', ?1, '6h', 5.0, 0, NULL, -100, NULL, ?2, ?2)",
-            rusqlite::params![format!("X-FORK-FROM: {main}\nbody"), now],
-        ).unwrap();
-
-        let first = migrate_legacy_bg_continuation(&conn).unwrap();
-        let second = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(first, 1);
-        assert_eq!(second, 0, "second pass must migrate zero rows");
-    }
-
-    #[test]
-    fn migrate_legacy_bg_skips_invalid_uuid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('bg-bad', '@immediate', 'X-FORK-FROM: not-a-uuid\nbody', '6h', 5.0, 0, NULL, -100, NULL, ?1, ?1)",
-            rusqlite::params![now],
-        ).unwrap();
-
-        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(migrated, 0);
-
-        let schedule: String = conn
-            .query_row(
-                "SELECT schedule FROM cron_specs WHERE job_name = 'bg-bad'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            schedule, "@immediate",
-            "row with invalid UUID must be untouched"
-        );
-    }
-
-    #[test]
-    fn migrate_legacy_bg_skips_immediate_without_header() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('plain-imm', '@immediate', 'just a prompt', '6h', 5.0, 0, NULL, -100, NULL, ?1, ?1)",
-            rusqlite::params![now],
-        ).unwrap();
-
-        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(migrated, 0);
-    }
 }
 
 #[cfg(test)]
@@ -2153,18 +1752,6 @@ mod target_snapshot_tests {
         let dir = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(dir.path(), true).unwrap();
         (dir, conn)
-    }
-
-    fn background_spec(fork_from: uuid::Uuid) -> CronSpec {
-        CronSpec {
-            schedule_kind: ScheduleKind::BackgroundContinuation { fork_from },
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: Some(-42),
-            target_thread_id: Some(9),
-        }
     }
 
     #[test]
@@ -2229,222 +1816,5 @@ mod target_snapshot_tests {
             )
             .unwrap();
         assert_eq!(target_chat_id, 0);
-    }
-
-    #[test]
-    fn insert_running_run_writes_background_async_run_for_bg_continuation() {
-        let (_dir, conn) = migrated_conn();
-        let fork_from = uuid::Uuid::new_v4();
-        let spec = CronSpec {
-            schedule_kind: ScheduleKind::BackgroundContinuation { fork_from },
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: Some(-42),
-            target_thread_id: Some(9),
-        };
-        insert_running_run(
-            &conn,
-            "bg-run-1",
-            "bg-job",
-            "2026-05-05T12:00:00Z",
-            "/log/bg-run-1.ndjson",
-            &spec,
-        )
-        .unwrap();
-
-        let row: (
-            String,
-            Option<String>,
-            String,
-            String,
-            Option<i64>,
-            Option<i64>,
-            String,
-            Option<String>,
-            i64,
-            String,
-            Option<String>,
-        ) = conn
-            .query_row(
-                "SELECT kind, producer_ref, source_session_id, run_session_id,
-                        target_chat_id, target_thread_id, status, handoff_state,
-                        delivery_required, delivery_status, log_path
-                   FROM async_runs WHERE id = 'bg-run-1'",
-                [],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                        r.get(7)?,
-                        r.get(8)?,
-                        r.get(9)?,
-                        r.get(10)?,
-                    ))
-                },
-            )
-            .unwrap();
-        assert_eq!(
-            row,
-            (
-                "background".into(),
-                Some("bg-job".into()),
-                fork_from.to_string(),
-                "bg-run-1".into(),
-                Some(-42),
-                Some(9),
-                "running".into(),
-                Some("spawned".into()),
-                1,
-                "pending".into(),
-                Some("/log/bg-run-1.ndjson".into()),
-            )
-        );
-    }
-
-    #[test]
-    fn persist_background_failure_notify_sets_pending_delivery() {
-        let (_dir, conn) = migrated_conn();
-        let fork_from = uuid::Uuid::new_v4();
-        let spec = background_spec(fork_from);
-        insert_running_run(
-            &conn,
-            "bg-run-failed",
-            "bg-job",
-            "2026-05-05T12:00:00Z",
-            "/log/bg-run-failed.ndjson",
-            &spec,
-        )
-        .unwrap();
-
-        persist_background_failure_notify(&conn, "bg-run-failed", "bg-job", "parse failed")
-            .unwrap();
-        update_run_record(&conn, "bg-run-failed", Some(0), "failed");
-
-        let row: (String, i64, String, String, String) = conn
-            .query_row(
-                "SELECT status, delivery_required, delivery_status, notify_json, error_json
-                   FROM async_runs WHERE id = 'bg-run-failed'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .unwrap();
-
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.1, 1);
-        assert_eq!(row.2, "pending");
-        assert!(
-            row.3
-                .contains("Background work failed before it could produce a result.")
-        );
-        assert!(row.4.contains("bg-run-failed"));
-        assert!(row.4.contains("bg-job"));
-    }
-
-    #[test]
-    fn persist_success_output_rejects_background_notify_null() {
-        let (_dir, conn) = migrated_conn();
-        let spec = background_spec(uuid::Uuid::new_v4());
-        insert_running_run(
-            &conn,
-            "bg-run-null",
-            "bg-job",
-            "2026-05-05T12:00:00Z",
-            "/log/bg-run-null.ndjson",
-            &spec,
-        )
-        .unwrap();
-
-        let output = CronReplyOutput {
-            notify: None,
-            summary: "silent".into(),
-            no_notify_reason: Some("nothing to say".into()),
-        };
-        persist_successful_cron_output(
-            &conn,
-            "bg-run-null",
-            "bg-job",
-            &spec,
-            Some(0),
-            &output,
-            None,
-        )
-        .unwrap();
-
-        let row: (String, i64, String, String, String) = conn
-            .query_row(
-                "SELECT status, delivery_required, delivery_status, notify_json, error_json
-                   FROM async_runs WHERE id = 'bg-run-null'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.1, 1);
-        assert_eq!(row.2, "pending");
-        assert!(
-            row.3
-                .contains("Background work failed before it could produce a result.")
-        );
-        assert!(row.4.contains("notify: null"));
-    }
-
-    #[test]
-    fn persist_success_output_rejects_background_empty_content() {
-        let (_dir, conn) = migrated_conn();
-        let spec = background_spec(uuid::Uuid::new_v4());
-        insert_running_run(
-            &conn,
-            "bg-run-empty",
-            "bg-job",
-            "2026-05-05T12:00:00Z",
-            "/log/bg-run-empty.ndjson",
-            &spec,
-        )
-        .unwrap();
-
-        let notify = CronNotify {
-            content: "   ".into(),
-            attachments: None,
-        };
-        let notify_json = serde_json::to_string(&notify).unwrap();
-        let output = CronReplyOutput {
-            notify: Some(notify),
-            summary: "blank".into(),
-            no_notify_reason: None,
-        };
-        persist_successful_cron_output(
-            &conn,
-            "bg-run-empty",
-            "bg-job",
-            &spec,
-            Some(0),
-            &output,
-            Some(&notify_json),
-        )
-        .unwrap();
-
-        let row: (String, i64, String, String, String) = conn
-            .query_row(
-                "SELECT status, delivery_required, delivery_status, notify_json, error_json
-                   FROM async_runs WHERE id = 'bg-run-empty'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.1, 1);
-        assert_eq!(row.2, "pending");
-        assert!(
-            row.3
-                .contains("Background work failed before it could produce a result.")
-        );
-        assert!(row.4.contains("empty notify.content"));
     }
 }

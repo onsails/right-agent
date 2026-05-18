@@ -315,6 +315,32 @@ fn load_specs_from_db_returns_all() {
 }
 
 #[test]
+fn load_specs_skips_legacy_bg_schedule_rows() {
+    let conn = setup_db();
+    let main = Uuid::new_v4();
+    conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
+             VALUES ('legacy-bg', ?1, 'old background prompt', 1.0, 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            rusqlite::params![format!("@bg:{main}")],
+        )
+        .unwrap();
+    conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
+             VALUES ('normal', '*/5 * * * *', 'normal cron prompt', 1.0, 1, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+    let specs = load_specs_from_db(&conn).unwrap();
+
+    assert!(!specs.contains_key("legacy-bg"));
+    assert!(matches!(
+        specs["normal"].schedule_kind,
+        ScheduleKind::Recurring(_)
+    ));
+}
+
+#[test]
 fn trigger_spec_sets_timestamp() {
     let conn = setup_db();
     create_spec(&conn, "trig-job", "*/5 * * * *", "do stuff", None, None).unwrap();
@@ -1207,75 +1233,6 @@ fn create_spec_v2_immediate_inserts_sentinel() {
     assert_eq!(stored.4, Some(7));
 }
 
-#[test]
-fn insert_background_continuation_writes_bg_sentinel() {
-    let conn = setup_db();
-    let main = Uuid::new_v4();
-    insert_background_continuation(&conn, "bg-x1", "do thing", main, -100, Some(7), Some(5.0))
-        .unwrap();
-    let (schedule, recurring, run_at, chat, thread): (
-            String,
-            i64,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-        ) = conn
-            .query_row(
-                "SELECT schedule, recurring, run_at, target_chat_id, target_thread_id FROM cron_specs WHERE job_name = 'bg-x1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .unwrap();
-    assert_eq!(schedule, format!("@bg:{main}"));
-    assert_eq!(recurring, 0);
-    assert!(run_at.is_none());
-    assert_eq!(chat, Some(-100));
-    assert_eq!(thread, Some(7));
-}
-
-#[test]
-fn insert_background_continuation_uses_default_budget_when_none() {
-    let conn = setup_db();
-    insert_background_continuation(&conn, "bg-x2", "prompt", Uuid::new_v4(), -42, None, None)
-        .unwrap();
-    let budget: f64 = conn
-        .query_row(
-            "SELECT max_budget_usd FROM cron_specs WHERE job_name = 'bg-x2'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!((budget - DEFAULT_CRON_BUDGET_USD).abs() < f64::EPSILON);
-}
-
-#[test]
-fn insert_background_continuation_defaults_lock_ttl_to_six_hours() {
-    let conn = setup_db();
-    insert_background_continuation(&conn, "bg-x3", "prompt", Uuid::new_v4(), -42, None, None)
-        .unwrap();
-    let lock_ttl: Option<String> = conn
-        .query_row(
-            "SELECT lock_ttl FROM cron_specs WHERE job_name = 'bg-x3'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(lock_ttl.as_deref(), Some(IMMEDIATE_DEFAULT_LOCK_TTL));
-}
-
-#[test]
-fn insert_background_continuation_round_trips_through_load() {
-    let conn = setup_db();
-    let main = Uuid::new_v4();
-    insert_background_continuation(&conn, "bg-x4", "prompt", main, -42, None, None).unwrap();
-    let specs = load_specs_from_db(&conn).unwrap();
-    let spec = specs.get("bg-x4").expect("spec must load");
-    match &spec.schedule_kind {
-        ScheduleKind::BackgroundContinuation { fork_from } => assert_eq!(*fork_from, main),
-        other => panic!("expected BackgroundContinuation, got {other:?}"),
-    }
-}
-
 /// Regression: changing `target_chat_id` via `update_spec_partial` must
 /// redirect pending/retryable async cron deliveries to the new chat.
 /// Completed delivery rows keep the target snapshot that was actually sent.
@@ -1552,58 +1509,8 @@ fn from_db_row_invalid_run_at_returns_err() {
 }
 
 #[test]
-fn from_db_row_bg_continuation() {
+fn from_db_row_legacy_bg_schedule_errors() {
     let main = uuid::Uuid::new_v4();
-    let kind = ScheduleKind::from_db_row(&format!("@bg:{main}"), None, 0).unwrap();
-    match kind {
-        ScheduleKind::BackgroundContinuation { fork_from } => {
-            assert_eq!(fork_from, main);
-        }
-        other => panic!("expected BackgroundContinuation, got {other:?}"),
-    }
-}
-
-#[test]
-fn from_db_row_bg_invalid_uuid_errors() {
-    let err = ScheduleKind::from_db_row("@bg:not-a-uuid", None, 0);
-    assert!(err.is_err());
-    assert!(err.unwrap_err().contains("invalid"));
-}
-
-#[test]
-fn from_db_row_bg_missing_uuid_errors() {
-    let err = ScheduleKind::from_db_row("@bg:", None, 0);
-    assert!(err.is_err());
-}
-
-#[test]
-fn bg_kind_display_round_trips() {
-    let main = uuid::Uuid::new_v4();
-    let kind = ScheduleKind::BackgroundContinuation { fork_from: main };
-    let s = format!("{kind}");
-    assert_eq!(s, format!("@bg:{main}"));
-    let parsed = ScheduleKind::from_db_row(&s, None, 0).unwrap();
-    assert_eq!(kind, parsed);
-}
-
-#[test]
-fn bg_kind_is_one_shot() {
-    let kind = ScheduleKind::BackgroundContinuation {
-        fork_from: uuid::Uuid::new_v4(),
-    };
-    assert!(kind.is_one_shot());
-}
-
-#[test]
-fn bg_kind_no_cron_schedule() {
-    let kind = ScheduleKind::BackgroundContinuation {
-        fork_from: uuid::Uuid::new_v4(),
-    };
-    assert!(kind.cron_schedule().is_none());
-}
-
-#[test]
-fn immediate_kind_still_parses_after_bg_addition() {
-    let kind = ScheduleKind::from_db_row(IMMEDIATE_SENTINEL, None, 0).unwrap();
-    assert!(matches!(kind, ScheduleKind::Immediate));
+    let err = ScheduleKind::from_db_row(&format!("@bg:{main}"), None, 0).unwrap_err();
+    assert!(err.contains("no longer schedulable"));
 }
