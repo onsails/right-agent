@@ -23,6 +23,9 @@ const V17_SCHEMA: &str = include_str!("sql/v17_cron_target.sql");
 const V19_SCHEMA: &str = include_str!("sql/v19_cron_runs_target_index.sql");
 const V20_SCHEMA: &str = include_str!("sql/v20_learned_skills.sql");
 const V21_SCHEMA: &str = include_str!("sql/v21_conversation_messages.sql");
+const V22_SCHEMA: &str = include_str!("sql/v22_skill_review_reports.sql");
+
+pub const LATEST_SCHEMA_VERSION: u32 = 22;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -206,6 +209,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V19_SCHEMA),
         M::up(V20_SCHEMA),
         M::up(V21_SCHEMA),
+        M::up(V22_SCHEMA),
     ])
 });
 
@@ -1062,6 +1066,41 @@ mod tests {
     }
 
     #[test]
+    fn skill_review_reports_migration_creates_report_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='skill_review_reports'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "skill_review_reports table must exist");
+
+        for column in [
+            "agent_name",
+            "source_invocation_id",
+            "trigger_kind",
+            "status",
+            "confidence",
+            "candidate_skill_name",
+            "review_output_json",
+            "telegram_notified",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('skill_review_reports') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{column} column must exist");
+        }
+    }
+
+    #[test]
     fn conversation_messages_unique_inbound_message() {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
@@ -1134,5 +1173,27 @@ mod tests {
 
         assert_eq!(original_count, 0, "old FTS term must be removed");
         assert_eq!(replacement_count, 1, "new FTS term must be indexed");
+    }
+
+    #[test]
+    fn skill_nudge_state_has_review_gate_defaults() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO skill_nudge_state (agent_name) VALUES ('right')",
+            [],
+        )
+        .unwrap();
+
+        let row: (i64, i64, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT creation_review_interval, daily_review_count, daily_review_date, last_review_status \
+             FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (15, 0, None, None));
     }
 }
