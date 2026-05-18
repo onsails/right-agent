@@ -25,7 +25,9 @@ use super::ThinkingVisibility;
 use super::mcp_auth_choice::{
     AuthChoiceSignals, AuthDetectionResult as AuthChoiceDetectionResult, MCP_AUTH_CHOICE_TTL,
     McpAuthChoice, McpAuthRecommendation, PendingMcpAuthChoiceRequest, PendingMcpAuthChoiceSlot,
-    next_mcp_auth_choice_id, parse_token_input, recommend_auth_choice, render_auth_choice_keyboard,
+    PendingMcpAuthChoiceTake, next_mcp_auth_choice_id, parse_auth_choice_callback_data,
+    parse_token_input, recommend_auth_choice, render_auth_choice_keyboard,
+    take_pending_auth_choice,
 };
 use super::oauth_callback::PendingAuthMap;
 use super::session::{
@@ -1915,6 +1917,165 @@ async fn build_usage_summary(agent_dir: &Path, detail: bool) -> Result<String, m
     };
 
     Ok(format_summary_message(&windows, detail))
+}
+
+// ---------------------------------------------------------------------------
+// MCP auth choice callback query handler
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_mcp_auth_choice_callback(
+    bot: BotType,
+    q: CallbackQuery,
+    internal: Arc<InternalApi>,
+    pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
+    pending_token_slot: Arc<PendingTokenSlot>,
+) -> ResponseResult<()> {
+    let qid = q.id.clone();
+    let Some((request_id, choice)) = q.data.as_deref().and_then(parse_auth_choice_callback_data)
+    else {
+        bot.answer_callback_query(qid)
+            .text("Invalid MCP choice")
+            .await?;
+        return Ok(());
+    };
+
+    let callback_chat_id = q.message.as_ref().map(|message| message.chat().id.0);
+    let pending = match take_pending_auth_choice(
+        pending_auth_choice_slot.as_ref(),
+        request_id,
+        callback_chat_id,
+        std::time::Instant::now(),
+    )
+    .await
+    {
+        PendingMcpAuthChoiceTake::Ready(pending) => pending,
+        PendingMcpAuthChoiceTake::Missing => {
+            bot.answer_callback_query(qid)
+                .text("MCP choice no longer active")
+                .await?;
+            return Ok(());
+        }
+        PendingMcpAuthChoiceTake::Expired => {
+            bot.answer_callback_query(qid)
+                .text("MCP choice expired")
+                .await?;
+            return Ok(());
+        }
+        PendingMcpAuthChoiceTake::ChatMismatch => {
+            bot.answer_callback_query(qid).text("Not allowed").await?;
+            return Ok(());
+        }
+    };
+
+    bot.answer_callback_query(qid).text("Selected").await?;
+
+    match choice {
+        McpAuthChoice::OAuth => {
+            match internal
+                .0
+                .mcp_add(
+                    &pending.agent_name,
+                    &pending.server_name,
+                    &pending.bare_url,
+                    Some("oauth"),
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let escaped = html_escape(&pending.server_name);
+                    let escaped_command = html_escape(&pending.server_name);
+                    let mut reply = format!("Added MCP server <b>{escaped}</b> (OAuth).");
+                    if resp.tools_count > 0 {
+                        reply.push_str(&format!(" {} tools available.", resp.tools_count));
+                    }
+                    if let Some(ref w) = resp.warning {
+                        reply.push_str(&format!("\n{}", html_escape(w)));
+                    }
+                    reply.push_str(&format!(
+                        "\nRun <code>/mcp auth {escaped_command}</code> to authenticate."
+                    ));
+                    send_html_reply(
+                        &bot,
+                        teloxide::types::ChatId(pending.chat_id),
+                        pending.thread_id,
+                        &reply,
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    send_html_reply(
+                        &bot,
+                        teloxide::types::ChatId(pending.chat_id),
+                        pending.thread_id,
+                        &format!("Failed: {e:#}"),
+                    )
+                    .await?;
+                }
+            }
+        }
+        McpAuthChoice::Header => {
+            request_token_and_register(
+                bot.clone(),
+                teloxide::types::ChatId(pending.chat_id),
+                pending.thread_id,
+                right_mcp::internal_client::InternalClient::new(internal.0.socket_path()),
+                pending.agent_name,
+                pending.server_name,
+                pending.bare_url,
+                pending.recommendation.header_auth_type,
+                pending.recommendation.header_name,
+                pending_token_slot.as_ref().clone(),
+            )
+            .await?;
+        }
+        McpAuthChoice::UrlAsIs => {
+            let auth_type = pending.has_query.then_some("query_string");
+            match internal
+                .0
+                .mcp_add(
+                    &pending.agent_name,
+                    &pending.server_name,
+                    &pending.original_url,
+                    auth_type,
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok(resp) => {
+                    let escaped = html_escape(&pending.server_name);
+                    let mut reply = format!("Added MCP server <b>{escaped}</b>.");
+                    if resp.tools_count > 0 {
+                        reply.push_str(&format!(" {} tools available.", resp.tools_count));
+                    }
+                    if let Some(ref w) = resp.warning {
+                        reply.push_str(&format!("\n{}", html_escape(w)));
+                    }
+                    send_html_reply(
+                        &bot,
+                        teloxide::types::ChatId(pending.chat_id),
+                        pending.thread_id,
+                        &reply,
+                    )
+                    .await?;
+                }
+                Err(e) => {
+                    send_html_reply(
+                        &bot,
+                        teloxide::types::ChatId(pending.chat_id),
+                        pending.thread_id,
+                        &format!("Failed: {e:#}"),
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

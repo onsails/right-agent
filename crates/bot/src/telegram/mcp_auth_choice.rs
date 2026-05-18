@@ -81,6 +81,58 @@ pub(crate) fn parse_auth_choice_callback_data(data: &str) -> Option<(u64, McpAut
     Some((id, choice))
 }
 
+#[derive(Debug)]
+pub(crate) enum PendingMcpAuthChoiceTake {
+    Ready(PendingMcpAuthChoiceRequest),
+    Missing,
+    Expired,
+    ChatMismatch,
+}
+
+impl PartialEq for PendingMcpAuthChoiceTake {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::Ready(_), Self::Ready(_))
+                | (Self::Missing, Self::Missing)
+                | (Self::Expired, Self::Expired)
+                | (Self::ChatMismatch, Self::ChatMismatch)
+        )
+    }
+}
+
+impl Eq for PendingMcpAuthChoiceTake {}
+
+pub(crate) async fn take_pending_auth_choice(
+    slot: &PendingMcpAuthChoiceSlot,
+    request_id: u64,
+    callback_chat_id: Option<i64>,
+    now: Instant,
+) -> PendingMcpAuthChoiceTake {
+    let mut slot = slot.0.lock().await;
+    let Some(current) = slot.as_ref() else {
+        return PendingMcpAuthChoiceTake::Missing;
+    };
+
+    if current.id != request_id {
+        return PendingMcpAuthChoiceTake::Missing;
+    }
+
+    if current.is_expired(now) {
+        slot.take();
+        return PendingMcpAuthChoiceTake::Expired;
+    }
+
+    if callback_chat_id.is_some_and(|chat_id| chat_id != current.chat_id) {
+        return PendingMcpAuthChoiceTake::ChatMismatch;
+    }
+
+    PendingMcpAuthChoiceTake::Ready(
+        slot.take()
+            .expect("slot contains matching pending MCP auth choice"),
+    )
+}
+
 fn callback_suffix(choice: McpAuthChoice) -> &'static str {
     match choice {
         McpAuthChoice::OAuth => "oauth",
@@ -396,6 +448,81 @@ mod tests {
 
         let s = slot.0.lock().await;
         assert_eq!(s.as_ref().map(|p| p.id), Some(req_b_id));
+    }
+
+    #[tokio::test]
+    async fn take_pending_auth_choice_consumes_matching_request() {
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(Some(pending_request(
+            42,
+            100,
+            Instant::now() + MCP_AUTH_CHOICE_TTL,
+        )))));
+
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), Instant::now()).await;
+
+        assert!(matches!(taken, PendingMcpAuthChoiceTake::Ready(_)));
+        assert!(slot.0.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_pending_auth_choice_rejects_stale_request_without_clearing_current() {
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(Some(pending_request(
+            43,
+            100,
+            Instant::now() + MCP_AUTH_CHOICE_TTL,
+        )))));
+
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), Instant::now()).await;
+
+        assert_eq!(taken, PendingMcpAuthChoiceTake::Missing);
+        assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(43));
+    }
+
+    #[tokio::test]
+    async fn take_pending_auth_choice_clears_expired_matching_request() {
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(Some(pending_request(
+            42,
+            100,
+            Instant::now() - Duration::from_secs(1),
+        )))));
+
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), Instant::now()).await;
+
+        assert_eq!(taken, PendingMcpAuthChoiceTake::Expired);
+        assert!(slot.0.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_pending_auth_choice_rejects_chat_mismatch_without_clearing_request() {
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(Some(pending_request(
+            42,
+            100,
+            Instant::now() + MCP_AUTH_CHOICE_TTL,
+        )))));
+
+        let taken = take_pending_auth_choice(&slot, 42, Some(200), Instant::now()).await;
+
+        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
+    }
+
+    fn pending_request(id: u64, chat_id: i64, expires_at: Instant) -> PendingMcpAuthChoiceRequest {
+        PendingMcpAuthChoiceRequest {
+            id,
+            chat_id,
+            thread_id: 0,
+            agent_name: "agent".to_string(),
+            server_name: "server".to_string(),
+            original_url: "https://example.com/mcp?api_key=secret".to_string(),
+            bare_url: "https://example.com/mcp".to_string(),
+            has_query: true,
+            recommendation: McpAuthRecommendation {
+                choice: McpAuthChoice::UrlAsIs,
+                header_auth_type: "bearer".to_string(),
+                header_name: None,
+            },
+            expires_at,
+        }
     }
 
     #[test]
