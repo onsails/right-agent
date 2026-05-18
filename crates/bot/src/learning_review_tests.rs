@@ -121,6 +121,120 @@ fn output_converts_to_review_report() {
 }
 
 #[test]
+fn parse_review_process_stdout_reads_structured_output_object_first() {
+    let stdout = serde_json::json!({
+        "structured_output": {
+            "status": "nothing_to_learn",
+            "confidence": "low",
+            "candidate_skill_name": null,
+            "candidate_summary": null,
+            "evidence_refs": [],
+            "user_notice": null
+        },
+        "result": {
+            "status": "create_candidate",
+            "confidence": "high",
+            "candidate_skill_name": "rightx-wrong-wrapper",
+            "candidate_summary": "This should not be selected.",
+            "evidence_refs": ["event-1"],
+            "user_notice": "Wrong wrapper."
+        }
+    })
+    .to_string();
+
+    let output = parse_review_process_stdout(&stdout).unwrap();
+
+    assert_eq!(output.status, ReviewOutputStatus::NothingToLearn);
+    assert_eq!(output.confidence, ReviewOutputConfidence::Low);
+}
+
+#[test]
+fn parse_review_process_stdout_reads_result_object() {
+    let stdout = serde_json::json!({
+        "structured_output": null,
+        "result": {
+            "status": "create_candidate",
+            "confidence": "high",
+            "candidate_skill_name": "rightx-oauth-debugging",
+            "candidate_summary": "Capture verified OAuth callback setup.",
+            "evidence_refs": ["event-1"],
+            "user_notice": "I found a reusable workflow candidate."
+        }
+    })
+    .to_string();
+
+    let output = parse_review_process_stdout(&stdout).unwrap();
+
+    assert_eq!(output.status, ReviewOutputStatus::CreateCandidate);
+    assert_eq!(output.confidence, ReviewOutputConfidence::High);
+    assert_eq!(
+        output.candidate_skill_name.as_deref(),
+        Some("rightx-oauth-debugging")
+    );
+}
+
+#[test]
+fn parse_review_process_stdout_reads_result_json_string() {
+    let wrapped = serde_json::json!({
+        "status": "update_candidate",
+        "confidence": "medium",
+        "candidate_skill_name": "rightx-oauth-debugging",
+        "candidate_summary": "Add callback retry evidence.",
+        "evidence_refs": ["event-1"],
+        "user_notice": null
+    });
+    let stdout = serde_json::json!({ "result": wrapped.to_string() }).to_string();
+
+    let output = parse_review_process_stdout(&stdout).unwrap();
+
+    assert_eq!(output.status, ReviewOutputStatus::UpdateCandidate);
+    assert_eq!(output.confidence, ReviewOutputConfidence::Medium);
+}
+
+#[test]
+fn parse_review_process_stdout_reads_root_object() {
+    let stdout = serde_json::json!({
+        "status": "nothing_to_learn",
+        "confidence": "low",
+        "candidate_skill_name": null,
+        "candidate_summary": null,
+        "evidence_refs": [],
+        "user_notice": null
+    })
+    .to_string();
+
+    let output = parse_review_process_stdout(&stdout).unwrap();
+
+    assert_eq!(output.status, ReviewOutputStatus::NothingToLearn);
+}
+
+#[test]
+fn parse_review_process_stdout_rejects_invalid_json() {
+    let err = parse_review_process_stdout("not json").unwrap_err();
+
+    assert!(err.contains("stdout JSON"), "{err}");
+}
+
+#[test]
+fn parse_review_process_stdout_rejects_invalid_review_payload() {
+    let stdout = serde_json::json!({
+        "result": {
+            "status": "create_candidate",
+            "confidence": "high",
+            "candidate_skill_name": null,
+            "candidate_summary": "Missing candidate name.",
+            "evidence_refs": ["event-1"],
+            "user_notice": "Candidate."
+        }
+    })
+    .to_string();
+
+    let err = parse_review_process_stdout(&stdout).unwrap_err();
+
+    assert!(err.contains("candidate_skill_name"), "{err}");
+}
+
+#[test]
 fn select_review_trigger_prefers_skill_issue_signal_over_learning_and_effort() {
     let trigger = select_review_trigger(true, true, true);
 

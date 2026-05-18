@@ -23,7 +23,9 @@ pub use crate::cc::worker_reply::{ReplyOutput, parse_reply_output};
 use crate::cc::worker_reply::{append_used_skill_receipts, should_accept_bootstrap};
 use crate::reflection::FailureKind;
 use right_agent::learned_skills::{
-    NudgeSignalRecord, increment_turn_nudge_counters, record_nudge_signal, select_reply_signal,
+    NudgeSignalKind, NudgeSignalRecord, ReviewGateDecision, ReviewGateInput, ReviewStatus,
+    SkillReviewReport, increment_turn_nudge_counters, insert_skill_review_report,
+    mark_review_finished, record_nudge_signal, select_reply_signal, try_mark_review_started,
 };
 
 use super::session::{
@@ -48,6 +50,14 @@ const MEDIA_GROUP_HARD_CAP_MS: u64 = 2500;
 
 /// Maximum time to wait for a CC subprocess to complete.
 const CC_TIMEOUT_SECS: u64 = 600;
+
+const LEARNED_SKILL_REVIEW_DAILY_LIMIT: i64 = 12;
+const LEARNED_SKILL_REVIEW_COOLDOWN_MINUTES: i64 = 30;
+const BACKGROUND_REVIEW_MAX_BUDGET_USD: f64 = 0.50;
+const BACKGROUND_REVIEW_MAX_TURNS: u32 = 8;
+const BACKGROUND_REVIEW_TIMEOUT_SECS: u64 = 180;
+const BACKGROUND_REVIEW_TIMELINE_MAX_EVENTS: usize = 80;
+const BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT: i64 = 20;
 
 /// Bound on `child.wait()` after we've already broken from the streaming
 /// loop. The slave should be either gone (deadline/stop SIGKILL) or about
@@ -2040,6 +2050,438 @@ async fn remove_sandbox_progress_config_file(
     }
 }
 
+fn review_today_utc() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+fn load_skill_review_gate_snapshot(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+) -> Result<(i64, i64, i64), rusqlite::Error> {
+    right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
+    conn.query_row(
+        "SELECT tool_iters_since_review, turns_since_review, skill_issue_hints_since_review \
+         FROM skill_nudge_state WHERE agent_name = ?1",
+        [agent_name],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+}
+
+fn maybe_spawn_learned_skill_review(
+    conn: &rusqlite::Connection,
+    ctx: &WorkerContext,
+    chat_id: i64,
+    eff_thread_id: i64,
+    root_session_id: &str,
+    source_invocation_id: Option<&str>,
+    accepted_signal: Option<(NudgeSignalKind, serde_json::Value)>,
+) {
+    let Some(source_invocation_id) = source_invocation_id else {
+        return;
+    };
+
+    let cooldown_cutoff = match crate::learning_review::review_cooldown_cutoff(
+        chrono::Utc::now(),
+        chrono::Duration::minutes(LEARNED_SKILL_REVIEW_COOLDOWN_MINUTES),
+    ) {
+        Ok(cutoff) => cutoff,
+        Err(e) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "learned-skill review cooldown cutoff failed: {e}"
+            );
+            return;
+        }
+    };
+
+    let (tool_iters_since_review, turns_since_review, skill_issue_hints_since_review) =
+        match load_skill_review_gate_snapshot(conn, &ctx.agent_name) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %ctx.agent_name,
+                    "learned-skill review gate snapshot load failed: {e:#}"
+                );
+                return;
+            }
+        };
+
+    let has_learning_accepted = matches!(
+        accepted_signal.as_ref(),
+        Some((NudgeSignalKind::Learning, _))
+    );
+    let has_skill_issue_accepted = matches!(
+        accepted_signal.as_ref(),
+        Some((NudgeSignalKind::SkillIssue, _))
+    );
+    let signal_trigger = crate::learning_review::select_review_trigger(
+        has_learning_accepted,
+        has_skill_issue_accepted,
+        false,
+    );
+    let today = review_today_utc();
+    let gate = match try_mark_review_started(
+        conn,
+        &ctx.agent_name,
+        ReviewGateInput {
+            signal_trigger,
+            today: &today,
+            cooldown_cutoff: Some(cooldown_cutoff.as_str()),
+            daily_limit: LEARNED_SKILL_REVIEW_DAILY_LIMIT,
+        },
+    ) {
+        Ok(gate) => gate,
+        Err(e) => {
+            tracing::warn!(
+                agent = %ctx.agent_name,
+                "learned-skill review gate/start failed: {e:#}"
+            );
+            return;
+        }
+    };
+    let ReviewGateDecision::Start(trigger_kind) = gate else {
+        return;
+    };
+
+    let accepted_signal_json = accepted_signal.map(|(_, payload)| payload.to_string());
+    let agent_name = ctx.agent_name.clone();
+    let agent_dir = ctx.agent_dir.clone();
+    let agent_db_dir = ctx.agent_db_dir.clone();
+    let bot = ctx.bot.clone();
+    let model = crate::snapshot_model(&ctx.model);
+    let ssh_config_path = ctx.ssh_config_path.clone();
+    let resolved_sandbox = ctx.resolved_sandbox.clone();
+    let debug = Arc::clone(&ctx.debug);
+    let source_invocation_id = source_invocation_id.to_owned();
+    let root_session_id = root_session_id.to_owned();
+    let tg_chat_id = teloxide::types::ChatId(chat_id);
+
+    std::mem::drop(tokio::spawn(async move {
+        let review_result = run_background_learned_skill_review(
+            &agent_name,
+            &agent_dir,
+            &agent_db_dir,
+            source_invocation_id.clone(),
+            root_session_id.clone(),
+            chat_id,
+            eff_thread_id,
+            trigger_kind,
+            model,
+            ssh_config_path,
+            resolved_sandbox,
+            debug,
+            accepted_signal_json,
+            tool_iters_since_review,
+            turns_since_review,
+            skill_issue_hints_since_review,
+        )
+        .await;
+
+        match review_result {
+            Ok((report, notice)) => {
+                let conn = match right_db::open_connection(&agent_db_dir, false) {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = %agent_name,
+                            "learned-skill review db reopen failed: {e:#}"
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) = insert_skill_review_report(&conn, &report) {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        source_invocation_id = %report.source_invocation_id,
+                        "learned-skill review report insert failed: {e:#}"
+                    );
+                }
+                if let Err(e) = mark_review_finished(
+                    &conn,
+                    &agent_name,
+                    report.trigger_kind,
+                    report.status,
+                    report.status != ReviewStatus::Failed,
+                ) {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        "learned-skill review finish mark failed: {e:#}"
+                    );
+                }
+                if let Some(notice) = notice
+                    && let Err(e) = send_tg(&bot, tg_chat_id, eff_thread_id, &notice).await
+                {
+                    tracing::warn!(
+                        agent = %agent_name,
+                        "learned-skill review Telegram notice failed: {e:#}"
+                    );
+                }
+            }
+            Err(e) => {
+                let error = format!("{e:#}");
+                tracing::warn!(
+                    agent = %agent_name,
+                    "learned-skill background review failed: {error}"
+                );
+                record_failed_background_review(
+                    &agent_db_dir,
+                    agent_name,
+                    source_invocation_id,
+                    Some(root_session_id),
+                    Some(chat_id),
+                    Some(eff_thread_id),
+                    trigger_kind,
+                    error,
+                );
+            }
+        }
+    }));
+}
+
+async fn run_background_learned_skill_review(
+    agent_name: &str,
+    agent_dir: &Path,
+    agent_db_dir: &Path,
+    source_invocation_id: String,
+    root_session_id: String,
+    chat_id: i64,
+    thread_id: i64,
+    trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
+    model: Option<String>,
+    ssh_config_path: Option<PathBuf>,
+    resolved_sandbox: Option<String>,
+    debug: Arc<AtomicBool>,
+    accepted_signal_json: Option<String>,
+    tool_iters_since_review: i64,
+    turns_since_review: i64,
+    skill_issue_hints_since_review: i64,
+) -> anyhow::Result<(SkillReviewReport, Option<String>)> {
+    let learned_skills = if ssh_config_path.is_some() {
+        collect_sandbox_review_skill_index(resolved_sandbox.as_deref()).await?
+    } else {
+        crate::learning_review::collect_host_rightx_skill_index(agent_dir)
+            .map_err(|e| anyhow::anyhow!("collect host learned skills: {e:#}"))?
+    };
+    let mut event_timeline = crate::learning_review::collect_stream_event_timeline(
+        agent_dir,
+        &root_session_id,
+        BACKGROUND_REVIEW_TIMELINE_MAX_EVENTS,
+    )
+    .map_err(|e| anyhow::anyhow!("collect review event timeline: {e:#}"))?;
+    if event_timeline.is_empty() {
+        event_timeline.push(format!(
+            "event-1 foreground invocation {source_invocation_id} completed; stream log unavailable or empty"
+        ));
+    }
+    let learning_events = load_review_learning_events(agent_db_dir, &source_invocation_id)
+        .map_err(|e| anyhow::anyhow!("load review learning events: {e:#}"))?;
+    let bundle = crate::learning_review::ReviewBundle {
+        agent_name: agent_name.to_owned(),
+        source_invocation_id: source_invocation_id.clone(),
+        root_session_id: Some(root_session_id.clone()),
+        trigger_kind: trigger_kind.as_str().to_owned(),
+        accepted_signal_json,
+        tool_iters_since_review,
+        turns_since_review,
+        skill_issue_hints_since_review,
+        event_timeline,
+        learning_events,
+        learned_skills,
+    };
+    let prompt = crate::learning_review::build_review_prompt(&bundle);
+    let disallowed_tools = crate::cc::invocation::disallow_background_review_mutation_tools(
+        crate::cc::invocation::baseline_disallowed_tools(),
+    );
+    let invocation = crate::cc::invocation::ClaudeInvocation {
+        mcp_config_path: None,
+        json_schema: Some(crate::learning_review::REVIEW_SCHEMA_JSON.to_owned()),
+        output_format: crate::cc::invocation::OutputFormat::Json,
+        model,
+        max_budget_usd: Some(BACKGROUND_REVIEW_MAX_BUDGET_USD),
+        max_turns: Some(BACKGROUND_REVIEW_MAX_TURNS),
+        resume_session_id: None,
+        new_session_id: None,
+        fork_session: false,
+        allowed_tools: ["Read", "Glob", "Grep", "LS"]
+            .iter()
+            .map(|tool| (*tool).to_owned())
+            .collect(),
+        disallowed_tools,
+        extra_args: vec![],
+        prompt: Some(prompt),
+        debug_flag: Some(debug),
+    };
+    let args = invocation.into_args();
+    let mut cmd = crate::cc::invocation::build_claude_command(
+        &args,
+        agent_dir,
+        ssh_config_path.as_deref(),
+        resolved_sandbox.as_deref(),
+    );
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = right_process::ProcessGroupChild::spawn(cmd)
+        .map_err(|e| anyhow::anyhow!("spawn background review claude: {e:#}"))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(BACKGROUND_REVIEW_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("background review claude timed out"))?
+    .map_err(|e| anyhow::anyhow!("wait for background review claude: {e:#}"))?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "background review claude exited {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| anyhow::anyhow!("background review stdout utf8: {e:#}"))?;
+    let review_output = crate::learning_review::parse_review_process_stdout(&stdout)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let notice = review_output.should_notify_user().then(|| {
+        review_output.user_notice.clone().unwrap_or_else(|| {
+            "I found a reusable workflow candidate and recorded it for review.".to_owned()
+        })
+    });
+    let report = review_output.to_report(crate::learning_review::ReviewReportContext {
+        agent_name: agent_name.to_owned(),
+        source_invocation_id,
+        root_session_id: Some(root_session_id),
+        chat_id: Some(chat_id),
+        thread_id: Some(thread_id),
+        trigger_kind,
+        telegram_notified: notice.is_some(),
+    });
+    Ok((report, notice))
+}
+
+fn record_failed_background_review(
+    agent_db_dir: &Path,
+    agent_name: String,
+    source_invocation_id: String,
+    root_session_id: Option<String>,
+    chat_id: Option<i64>,
+    thread_id: Option<i64>,
+    trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
+    error: String,
+) {
+    let conn = match right_db::open_connection(agent_db_dir, false) {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(
+                agent = %agent_name,
+                "learned-skill failed-review db reopen failed: {e:#}"
+            );
+            return;
+        }
+    };
+    let report = SkillReviewReport {
+        agent_name: agent_name.clone(),
+        source_invocation_id,
+        root_session_id,
+        chat_id,
+        thread_id,
+        trigger_kind,
+        status: ReviewStatus::Failed,
+        confidence: right_agent::learned_skills::ReviewConfidence::Low,
+        candidate_skill_name: None,
+        candidate_summary: None,
+        evidence_refs: Vec::new(),
+        review_output_json: serde_json::json!({ "error": error }),
+        telegram_notified: false,
+    };
+    if let Err(e) = insert_skill_review_report(&conn, &report) {
+        tracing::warn!(
+            agent = %agent_name,
+            source_invocation_id = %report.source_invocation_id,
+            "learned-skill failed review report insert failed: {e:#}"
+        );
+    }
+    if let Err(e) = mark_review_finished(
+        &conn,
+        &agent_name,
+        trigger_kind,
+        ReviewStatus::Failed,
+        false,
+    ) {
+        tracing::warn!(
+            agent = %agent_name,
+            "learned-skill failed review finish mark failed: {e:#}"
+        );
+    }
+}
+
+fn load_review_learning_events(
+    agent_db_dir: &Path,
+    source_invocation_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let conn = right_db::open_connection(agent_db_dir, false)?;
+    let mut stmt = conn.prepare(
+        "SELECT action, skill_name, phase, COALESCE(status, ''), COALESCE(summary, '') \
+         FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            source_invocation_id,
+            BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT
+        ],
+        |row| {
+            let action: String = row.get(0)?;
+            let skill_name: String = row.get(1)?;
+            let phase: String = row.get(2)?;
+            let status: String = row.get(3)?;
+            let summary: String = row.get(4)?;
+            Ok(format!(
+                "{phase} {action} {skill_name} status={status} summary={summary}"
+            ))
+        },
+    )?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
+    Ok(events)
+}
+
+async fn collect_sandbox_review_skill_index(
+    sandbox_name: Option<&str>,
+) -> anyhow::Result<Vec<crate::learning_review::LearnedSkillSummary>> {
+    let sandbox_name = sandbox_name.ok_or_else(|| anyhow::anyhow!("sandbox name unresolved"))?;
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+        status => {
+            return Err(anyhow::anyhow!(
+                "OpenShell not ready for review skill index: {status:?}"
+            ));
+        }
+    };
+    let mut client = right_openshell::openshell::connect_grpc(&mtls_dir)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    let sandbox_id = right_openshell::openshell::resolve_sandbox_id(&mut client, sandbox_name)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    let command = crate::learning_review::sandbox_skill_index_command();
+    let (stdout, exit_code) = right_openshell::openshell::exec_in_sandbox(
+        &mut client,
+        &sandbox_id,
+        &command,
+        right_openshell::openshell::DEFAULT_EXEC_TIMEOUT_SECS,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    if exit_code != 0 {
+        return Err(anyhow::anyhow!(
+            "sandbox skill index command exited {exit_code}: {stdout}"
+        ));
+    }
+    Ok(crate::learning_review::parse_sandbox_skill_index_stdout(
+        &stdout,
+    ))
+}
+
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
 ///
 /// Returns `Ok(CcReply { output, session_uuid, turn_id, is_first_call })`
@@ -3192,6 +3634,7 @@ async fn invoke_cc(
                 );
             }
 
+            let mut accepted_review_signal: Option<(NudgeSignalKind, serde_json::Value)> = None;
             if let Some(invocation_id) = learning_invocation_id.as_deref() {
                 let learning_signal_json = match reply_output.learning_signal.as_ref() {
                     Some(signal) => match serde_json::to_value(signal) {
@@ -3229,6 +3672,7 @@ async fn invoke_cc(
                     skill_issue_signal_json,
                 ) {
                     Ok(Some((signal_kind, payload_json))) => {
+                        accepted_review_signal = Some((signal_kind, payload_json.clone()));
                         let record = NudgeSignalRecord {
                             invocation_id: invocation_id.to_owned(),
                             agent_name: ctx.agent_name.clone(),
@@ -3257,6 +3701,16 @@ async fn invoke_cc(
                     }
                 }
             }
+
+            maybe_spawn_learned_skill_review(
+                &conn,
+                ctx,
+                chat_id,
+                eff_thread_id,
+                &session_uuid,
+                learning_invocation_id.as_deref(),
+                accepted_review_signal,
+            );
 
             Ok(CcReply {
                 output: Some(reply_output),
@@ -3355,6 +3809,56 @@ mod tests {
 
         let bytes = buffer.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn record_failed_background_review_persists_failure_and_finishes_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).unwrap();
+        right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        record_failed_background_review(
+            temp.path(),
+            "right".to_owned(),
+            "inv-1".to_owned(),
+            Some("session-1".to_owned()),
+            Some(10),
+            Some(20),
+            right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal,
+            "spawn failed: denied".to_owned(),
+        );
+
+        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let report: (String, String, String, String, String) = conn
+            .query_row(
+                "SELECT trigger_kind, status, confidence, source_invocation_id, review_output_json \
+                 FROM skill_review_reports WHERE agent_name = 'right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(report.0, "skill_issue_signal");
+        assert_eq!(report.1, "failed");
+        assert_eq!(report.2, "low");
+        assert_eq!(report.3, "inv-1");
+        let output_json: serde_json::Value = serde_json::from_str(&report.4).unwrap();
+        assert_eq!(output_json["error"], "spawn failed: denied");
+
+        let state: (i64, String) = conn
+            .query_row(
+                "SELECT review_running, last_review_status \
+                 FROM skill_nudge_state WHERE agent_name = 'right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, (0, "failed".to_owned()));
     }
 
     #[test]

@@ -71,6 +71,19 @@ pub(crate) struct ReviewOutput {
     pub(crate) raw: serde_json::Value,
 }
 
+pub(crate) const REVIEW_SCHEMA_JSON: &str = r#"{
+  "type": "object",
+  "properties": {
+    "status": { "enum": ["nothing_to_learn", "create_candidate", "update_candidate", "failed"] },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "candidate_skill_name": { "type": ["string", "null"] },
+    "candidate_summary": { "type": ["string", "null"] },
+    "evidence_refs": { "type": "array", "items": { "type": "string" } },
+    "user_notice": { "type": ["string", "null"] }
+  },
+  "required": ["status", "confidence", "candidate_skill_name", "candidate_summary", "evidence_refs", "user_notice"]
+}"#;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ReviewReportContext {
     pub(crate) agent_name: String,
@@ -163,6 +176,22 @@ impl ReviewOutput {
             telegram_notified: ctx.telegram_notified,
         }
     }
+}
+
+pub(crate) fn parse_review_process_stdout(stdout: &str) -> Result<ReviewOutput, String> {
+    let root: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("parse review stdout JSON: {e}"))?;
+    let selected = root
+        .get("structured_output")
+        .filter(|value| !value.is_null())
+        .or_else(|| root.get("result").filter(|value| !value.is_null()))
+        .unwrap_or(&root);
+    let raw = match selected.as_str() {
+        Some(json) => serde_json::from_str(json)
+            .map_err(|e| format!("parse review stdout wrapper JSON string: {e}"))?,
+        None => selected.clone(),
+    };
+    ReviewOutput::parse(raw)
 }
 
 fn optional_trimmed_string(raw: &serde_json::Value, field: &str) -> Option<String> {
