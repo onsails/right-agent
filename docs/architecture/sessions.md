@@ -124,7 +124,7 @@ summary of the failure instead of the raw ring-buffer dump.
   Reflection reply is sent to Telegram directly; on reflection failure, the
   caller falls back to the raw error message.
 - Cron uses `ReflectionLimits::CRON` (5 turns, $0.40, 180s process timeout).
-  Reflection reply is stored in `cron_runs.notify_json`; `cron_delivery` picks
+  Reflection reply is stored in `async_runs.notify_json`; async delivery picks
   it up and relays using `DELIVERY_INSTRUCTION_FAILURE` (non-verbatim — agent
   may rephrase lightly, must preserve facts).
 - `usage_events` rows for reflection use `source = "reflection"`, discriminated

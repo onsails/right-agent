@@ -700,6 +700,24 @@ fn persist_background_failure_notify(
     run_id: &str,
     reason: &str,
 ) -> Result<(), rusqlite::Error> {
+    let (summary, notify_json, error_json) = background_failure_payload(run_id, reason)?;
+    right_agent::async_runs::persist_run_output(
+        conn,
+        run_id,
+        right_agent::async_runs::RunOutput {
+            summary: Some(&summary),
+            notify_json: Some(&notify_json),
+            no_notify_reason: None,
+            error_json: Some(&error_json),
+            delivery_required: true,
+        },
+    )
+}
+
+fn background_failure_payload(
+    run_id: &str,
+    reason: &str,
+) -> Result<(String, String, String), rusqlite::Error> {
     let notify = crate::cron::CronNotify {
         content: BACKGROUND_FAILURE_NOTIFY_CONTENT.to_string(),
         attachments: None,
@@ -713,18 +731,7 @@ fn persist_background_failure_notify(
         "reason": reason,
     })
     .to_string();
-
-    right_agent::async_runs::persist_run_output(
-        conn,
-        run_id,
-        right_agent::async_runs::RunOutput {
-            summary: Some(&summary),
-            notify_json: Some(&notify_json),
-            no_notify_reason: None,
-            error_json: Some(&error_json),
-            delivery_required: true,
-        },
-    )
+    Ok((summary, notify_json, error_json))
 }
 
 fn mark_handoff_failed(
@@ -750,24 +757,55 @@ fn mark_handoff_failed(
 pub(crate) fn mark_interrupted_handoffs(
     conn: &rusqlite::Connection,
 ) -> Result<usize, rusqlite::Error> {
-    let mut stmt = conn.prepare(
-        "SELECT id
-         FROM async_runs
-         WHERE kind = 'background'
-           AND status = 'queued'
-           AND handoff_state = 'queued'",
-    )?;
-    let run_ids = stmt
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let converted = run_ids.len();
-    drop(stmt);
     let tx = conn.unchecked_transaction()?;
+    let run_ids = {
+        let mut stmt = tx.prepare(
+            "SELECT id
+             FROM async_runs
+             WHERE kind = 'background'
+               AND status = 'queued'
+               AND handoff_state = 'queued'",
+        )?;
+        stmt.query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut converted = 0usize;
     for run_id in run_ids {
-        mark_handoff_failed(&tx, &run_id, INTERRUPTED_HANDOFF_REASON)?;
+        if mark_interrupted_handoff_failed_if_still_queued(&tx, &run_id)? {
+            converted += 1;
+        }
     }
     tx.commit()?;
     Ok(converted)
+}
+
+fn mark_interrupted_handoff_failed_if_still_queued(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+) -> Result<bool, rusqlite::Error> {
+    let (summary, notify_json, error_json) =
+        background_failure_payload(run_id, INTERRUPTED_HANDOFF_REASON)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = conn.execute(
+        "UPDATE async_runs
+         SET summary = ?2,
+             notify_json = ?3,
+             no_notify_reason = NULL,
+             error_json = ?4,
+             delivery_required = 1,
+             delivery_status = 'pending',
+             handoff_state = 'failed',
+             finished_at = ?5,
+             exit_code = NULL,
+             status = 'failed',
+             updated_at = ?5
+         WHERE id = ?1
+           AND kind = 'background'
+           AND status = 'queued'
+           AND handoff_state = 'queued'",
+        rusqlite::params![run_id, summary, notify_json, error_json, now],
+    )?;
+    Ok(rows > 0)
 }
 
 fn mark_completion_failed(
@@ -1006,5 +1044,49 @@ mod tests {
         assert_eq!(cron.0, "cron");
         assert_eq!(cron.1, "queued");
         assert_eq!(cron.2, "queued");
+    }
+
+    #[test]
+    fn mark_interrupted_handoffs_skip_rows_no_longer_queued_at_write_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        right_agent::async_runs::insert_queued_background_run(
+            &conn,
+            right_agent::async_runs::NewBackgroundRun {
+                id: "bg-raced",
+                producer_ref: Some("background"),
+                source_session_id: "main-1",
+                run_session_id: "bg-raced",
+                target_chat_id: -42,
+                target_thread_id: Some(7),
+                created_at: "2026-05-18T10:00:00Z",
+            },
+        )
+        .unwrap();
+        right_agent::async_runs::mark_background_spawned(
+            &conn,
+            "bg-raced",
+            "2026-05-18T10:01:00Z",
+            "/log/bg-raced.ndjson",
+        )
+        .unwrap();
+
+        let converted = mark_interrupted_handoff_failed_if_still_queued(&conn, "bg-raced").unwrap();
+
+        assert!(!converted);
+        let row: (String, String, i64, String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT status, handoff_state, delivery_required, delivery_status, notify_json, error_json \
+                 FROM async_runs WHERE id = 'bg-raced'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "running");
+        assert_eq!(row.1, "spawned");
+        assert_eq!(row.2, 1);
+        assert_eq!(row.3, "pending");
+        assert!(row.4.is_none());
+        assert!(row.5.is_none());
     }
 }

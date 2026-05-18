@@ -688,7 +688,8 @@ fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) ->
            AND ( \
              status = 'running' \
              OR (status IN ('success', 'failed') \
-                 AND delivery_status IN ('pending', 'retryable')) \
+                 AND delivery_status IN ('pending', 'retryable') \
+                 AND notify_json IS NOT NULL) \
            ) \
          ORDER BY COALESCE(started_at, created_at) DESC \
          LIMIT 5",
@@ -4393,7 +4394,7 @@ mod background_continuation_tests {
     }
 
     #[test]
-    fn build_bg_marker_includes_finished_pending_without_notify_json() {
+    fn build_bg_marker_excludes_finished_pending_without_notify_json() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
@@ -4410,10 +4411,10 @@ mod background_continuation_tests {
         );
         drop(conn);
 
-        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(
-            m.contains("bg-null-notify"),
-            "pending finished background row should appear by delivery_status; got {m:?}"
+            m.is_none(),
+            "finished background row without notify_json is not delivery-eligible; got {m:?}"
         );
     }
 
