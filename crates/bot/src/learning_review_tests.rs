@@ -72,6 +72,55 @@ fn nothing_to_learn_accepts_empty_candidate_fields() {
 }
 
 #[test]
+fn output_converts_to_review_report() {
+    let raw = serde_json::json!({
+        "status": "create_candidate",
+        "confidence": "high",
+        "candidate_skill_name": "rightx-demo",
+        "candidate_summary": "Capture this reusable workflow.",
+        "evidence_refs": ["event-1"],
+        "user_notice": "I found a reusable workflow candidate."
+    });
+    let output = ReviewOutput::parse(raw.clone()).unwrap();
+
+    let report = output.to_report(ReviewReportContext {
+        agent_name: "right".to_owned(),
+        source_invocation_id: "inv-1".to_owned(),
+        root_session_id: Some("session-1".to_owned()),
+        chat_id: Some(10),
+        thread_id: Some(20),
+        trigger_kind: right_agent::learned_skills::ReviewTriggerKind::LearningSignal,
+        telegram_notified: true,
+    });
+
+    assert_eq!(report.agent_name, "right");
+    assert_eq!(report.source_invocation_id, "inv-1");
+    assert_eq!(report.root_session_id.as_deref(), Some("session-1"));
+    assert_eq!(report.chat_id, Some(10));
+    assert_eq!(report.thread_id, Some(20));
+    assert_eq!(
+        report.trigger_kind,
+        right_agent::learned_skills::ReviewTriggerKind::LearningSignal
+    );
+    assert_eq!(
+        report.status,
+        right_agent::learned_skills::ReviewStatus::CreateCandidate
+    );
+    assert_eq!(
+        report.confidence,
+        right_agent::learned_skills::ReviewConfidence::High
+    );
+    assert_eq!(report.candidate_skill_name.as_deref(), Some("rightx-demo"));
+    assert_eq!(
+        report.candidate_summary.as_deref(),
+        Some("Capture this reusable workflow.")
+    );
+    assert_eq!(report.evidence_refs, vec!["event-1"]);
+    assert_eq!(report.review_output_json, raw);
+    assert!(report.telegram_notified);
+}
+
+#[test]
 fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
     let bundle = ReviewBundle {
         agent_name: "right".to_owned(),
@@ -98,6 +147,54 @@ fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
     assert!(prompt.contains("Do not ask the user questions"));
     assert!(prompt.contains("nothing_to_learn is normal"));
     assert!(prompt.contains("rightx-oauth-debugging"));
+}
+
+#[tokio::test]
+async fn run_review_with_output_builds_prompt_and_parses_json() {
+    let output = run_review_with_output(runner_test_bundle(), |prompt| async move {
+        assert!(prompt.contains("Report-only"));
+        assert!(prompt.contains("event-1 user corrected OAuth flow"));
+        Ok(serde_json::json!({
+            "status": "nothing_to_learn",
+            "confidence": "low",
+            "candidate_skill_name": null,
+            "candidate_summary": null,
+            "evidence_refs": [],
+            "user_notice": null
+        }))
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(output.status, ReviewOutputStatus::NothingToLearn);
+    assert_eq!(output.confidence, ReviewOutputConfidence::Low);
+}
+
+#[tokio::test]
+async fn run_review_with_output_surfaces_runner_error() {
+    let err = run_review_with_output(runner_test_bundle(), |_prompt| async {
+        Err("runner failed".to_owned())
+    })
+    .await
+    .unwrap_err();
+
+    assert_eq!(err, "runner failed");
+}
+
+fn runner_test_bundle() -> ReviewBundle {
+    ReviewBundle {
+        agent_name: "right".to_owned(),
+        source_invocation_id: "inv-1".to_owned(),
+        root_session_id: Some("session-1".to_owned()),
+        trigger_kind: "learning_signal".to_owned(),
+        accepted_signal_json: None,
+        tool_iters_since_review: 2,
+        turns_since_review: 1,
+        skill_issue_hints_since_review: 0,
+        event_timeline: vec!["event-1 user corrected OAuth flow".to_owned()],
+        learning_events: vec![],
+        learned_skills: vec![],
+    }
 }
 
 #[test]
