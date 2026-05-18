@@ -47,6 +47,17 @@ The legacy `store_record` / `query_records` / `search_records` / `delete_record`
 tools are removed from the surface; their backing tables (`memories`,
 `memories_fts`, `memory_events`) are retained for migration compat.
 
+## Transcript Search
+
+Conversation transcript search is local SQLite FTS5 over archived Telegram
+messages, not Hindsight. `mcp__right__thread_search` and
+`mcp__right__chat_search` return archived transcript snippets scoped by the
+current foreground Telegram invocation. Use these tools, not `memory_recall`,
+when the user asks what was said or asks for past wording.
+
+The archive records newly observed Telegram messages only. There is no backfill
+from older Telegram history or Claude session JSONL.
+
 ## Memory Resilience Layer
 
 `memory::resilient::ResilientHindsight` wraps `HindsightClient` with:
@@ -94,7 +105,9 @@ Hindsight. Critical-severity matches (`<|`, `[INST]`, `system:`,
 `ignore all previous`, null byte, etc.) escape the entire content;
 lower-severity matches log warnings via `tracing` but the content
 passes through unchanged. **No retain is ever blocked or dropped** —
-auto-retain always succeeds, MCP retain always returns success.
+auto-retain either stores or queues retryable failures. MCP retain returns
+tool-level errors for auth, quota, and invalid-client failures, and queues
+transient failures as a successful deferred retain.
 
 **Phase 2 (read-side defense, primary).** Memory content is wrapped in
 `--- BEGIN/END EXTERNAL CONTENT ---` framing with explicit

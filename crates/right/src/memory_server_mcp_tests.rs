@@ -272,6 +272,40 @@ async fn stdio_send_progress_returns_progress_unavailable() {
     assert_eq!(body["error"]["code"], "progress_unavailable");
 }
 
+#[tokio::test]
+async fn stdio_conversation_search_returns_scope_unavailable() {
+    let (server, _dir) = setup_server();
+
+    let thread_result = server
+        .thread_search(Parameters(crate::right_backend::ConversationSearchParams {
+            query: "needle".to_string(),
+            limit: None,
+        }))
+        .await
+        .expect("thread_search dispatch should be Ok with operation error");
+    assert_eq!(thread_result.is_error, Some(true));
+    let thread_text = call_result_text(thread_result);
+    let thread_body: serde_json::Value =
+        serde_json::from_str(&thread_text).expect("body must be valid JSON");
+    assert_eq!(
+        thread_body["error"]["code"],
+        "conversation_scope_unavailable"
+    );
+
+    let chat_result = server
+        .chat_search(Parameters(crate::right_backend::ConversationSearchParams {
+            query: "needle".to_string(),
+            limit: None,
+        }))
+        .await
+        .expect("chat_search dispatch should be Ok with operation error");
+    assert_eq!(chat_result.is_error, Some(true));
+    let chat_text = call_result_text(chat_result);
+    let chat_body: serde_json::Value =
+        serde_json::from_str(&chat_text).expect("body must be valid JSON");
+    assert_eq!(chat_body["error"]["code"], "conversation_scope_unavailable");
+}
+
 #[test]
 fn test_get_info_mentions_cron_and_mcp_tools() {
     let (server, _dir) = setup_server_with_dir();

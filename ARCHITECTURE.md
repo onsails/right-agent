@@ -139,6 +139,13 @@ that invocation with the aggregator, and exposes a bot-local UDS
 `POST /progress/send` guarded by a separate send token. Cron, delivery,
 reflection, and background-continuation invocations disallow the tool.
 
+Conversation search scope is server-enforced. `mcp__right__thread_search`
+searches only the current `(chat_id, effective_thread_id)`.
+`mcp__right__chat_search` searches only the current `chat_id`; in DMs this is
+only that DM, and in groups this is the whole group across topics. Agents must
+never be allowed to pass chat_id, thread_id, user ids, session ids, or a
+broader scope to these tools.
+
 See: `docs/architecture/mcp.md` for dispatch detail and rationale.
 
 ### Prompting Architecture
@@ -278,6 +285,10 @@ Two modes, configured per-agent via `memory.provider` in `agent.yaml`:
 **Hindsight** (primary, Hindsight Cloud API) and **file** (fallback,
 agent-managed `MEMORY.md`). MCP tools `memory_retain` / `memory_recall` /
 `memory_reflect` are exposed only in Hindsight mode.
+
+Conversation transcript search is separate from Hindsight. It uses local
+SQLite FTS5 over archived Telegram messages and is scoped by the current
+foreground invocation.
 
 See: `docs/architecture/memory.md` for auto-retain/recall semantics,
 prefetch cache behavior, cron-skip rules, and backgrounded-turn handling.
