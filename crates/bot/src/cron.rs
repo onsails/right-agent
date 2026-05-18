@@ -219,11 +219,13 @@ fn insert_running_run(
     if let right_agent::cron_spec::ScheduleKind::BackgroundContinuation { fork_from } =
         spec.schedule_kind
     {
+        let source_session_id = fork_from.to_string();
         right_agent::async_runs::insert_queued_background_run(
             conn,
             right_agent::async_runs::NewBackgroundRun {
                 id: run_id,
-                source_session_id: &fork_from.to_string(),
+                producer_ref: Some(job_name),
+                source_session_id: &source_session_id,
                 run_session_id: run_id,
                 target_chat_id,
                 target_thread_id: spec.target_thread_id,
@@ -2104,7 +2106,7 @@ mod target_snapshot_tests {
             row,
             (
                 "background".into(),
-                None,
+                Some("bg-job".into()),
                 fork_from.to_string(),
                 "bg-run-1".into(),
                 Some(-42),

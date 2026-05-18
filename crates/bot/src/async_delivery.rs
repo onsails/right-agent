@@ -22,9 +22,17 @@ pub(crate) struct PendingAsyncResult {
 }
 
 /// Query the oldest undelivered async result with a non-null notify_json.
+#[cfg(test)]
 pub(crate) fn fetch_pending(
     conn: &rusqlite::Connection,
 ) -> Result<Option<PendingAsyncResult>, rusqlite::Error> {
+    Ok(fetch_pending_batch(conn, 1)?.into_iter().next())
+}
+
+fn fetch_pending_batch(
+    conn: &rusqlite::Connection,
+    limit: usize,
+) -> Result<Vec<PendingAsyncResult>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, producer_ref, notify_json, COALESCE(summary, ''), status, \
                 NULLIF(target_chat_id, 0), target_thread_id \
@@ -34,25 +42,53 @@ pub(crate) fn fetch_pending(
            AND status IN ('success', 'failed') \
            AND notify_json IS NOT NULL \
          ORDER BY finished_at ASC \
-         LIMIT 1",
+         LIMIT ?1",
     )?;
-    let result = stmt.query_row([], |row| {
-        Ok(PendingAsyncResult {
-            id: row.get(0)?,
-            kind: row.get(1)?,
-            producer_ref: row.get(2)?,
-            notify_json: row.get(3)?,
-            summary: row.get(4)?,
-            status: row.get(5)?,
-            target_chat_id: row.get(6)?,
-            target_thread_id: row.get(7)?,
-        })
-    });
-    match result {
-        Ok(r) => Ok(Some(r)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e),
+    stmt.query_map(rusqlite::params![limit.max(1) as i64], pending_from_row)?
+        .collect()
+}
+
+fn pending_from_row(row: &rusqlite::Row<'_>) -> Result<PendingAsyncResult, rusqlite::Error> {
+    Ok(PendingAsyncResult {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        producer_ref: row.get(2)?,
+        notify_json: row.get(3)?,
+        summary: row.get(4)?,
+        status: row.get(5)?,
+        target_chat_id: row.get(6)?,
+        target_thread_id: row.get(7)?,
+    })
+}
+
+pub(crate) fn fetch_next_pending(
+    conn: &rusqlite::Connection,
+    delivered_in_memory: &HashSet<String>,
+) -> Result<Option<PendingAsyncResult>, rusqlite::Error> {
+    let limit = PENDING_FETCH_BATCH_SIZE.max(delivered_in_memory.len().saturating_add(1));
+    let batch = fetch_pending_batch(conn, limit)?;
+    let mut in_memory_ids = Vec::new();
+    for pending in batch {
+        if delivered_in_memory.contains(&pending.id) {
+            in_memory_ids.push(pending.id);
+            continue;
+        }
+        return Ok(Some(pending));
     }
+
+    let mut mark_error = None;
+    for id in in_memory_ids {
+        if let Err(e) = mark_delivery_outcome(conn, &id, "delivered") {
+            tracing::warn!(run_id = %id, "async delivery: retry mark delivered failed: {e:#}");
+            if mark_error.is_none() {
+                mark_error = Some(e);
+            }
+        }
+    }
+    if let Some(e) = mark_error {
+        return Err(e);
+    }
+    Ok(None)
 }
 
 /// Mark an async run delivery as complete with a given status.
@@ -267,6 +303,7 @@ pub(crate) fn format_async_yaml(pending: &PendingAsyncResult, skipped: u32) -> S
 use right_platform_knobs::IDLE_THRESHOLD_SECS;
 
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
+const PENDING_FETCH_BATCH_SIZE: usize = 25;
 
 /// Outcome of resolving a pending async run's delivery target against the live allowlist.
 #[derive(Debug)]
@@ -346,11 +383,11 @@ pub(crate) async fn run_delivery_loop(
             }
         }
 
-        let pending = match fetch_pending(&conn) {
+        let pending = match fetch_next_pending(&conn, &delivered_in_memory) {
             Ok(Some(p)) => p,
             Ok(None) => continue,
             Err(e) => {
-                tracing::error!("async delivery: fetch_pending failed: {e:#}");
+                tracing::error!("async delivery: fetch_next_pending failed: {e:#}");
                 continue;
             }
         };
@@ -381,6 +418,9 @@ pub(crate) async fn run_delivery_loop(
         };
 
         if delivered_in_memory.contains(&to_deliver.id) {
+            if mark_delivery_outcome(&conn, &to_deliver.id, "delivered").is_ok() {
+                delivered_in_memory.remove(&to_deliver.id);
+            }
             tracing::debug!(run_id = %to_deliver.id, "skipping already-delivered run (in-memory dedup)");
             continue;
         }
@@ -968,6 +1008,37 @@ mod tests {
         );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         assert_eq!(pending.id, "a", "should return oldest first");
+    }
+
+    #[test]
+    fn fetch_next_pending_skips_in_memory_delivered_oldest() {
+        let (_dir, conn) = setup_db();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                summary: Some("sum1"),
+                notify_json: Some("{\"content\":\"first\"}"),
+                ..Default::default()
+            },
+        );
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "b",
+                started_at: "2026-01-01T00:05:00Z",
+                finished_at: Some("2026-01-01T00:06:00Z"),
+                summary: Some("sum2"),
+                notify_json: Some("{\"content\":\"second\"}"),
+                ..Default::default()
+            },
+        );
+        let delivered_in_memory = HashSet::from(["a".to_string()]);
+
+        let pending = fetch_next_pending(&conn, &delivered_in_memory)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.id, "b");
     }
 
     #[test]
