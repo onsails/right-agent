@@ -60,10 +60,7 @@ pub(crate) struct ClaudeHealth {
     agent_dir: PathBuf,
     ssh_config_path: Option<PathBuf>,
     resolved_sandbox: Option<String>,
-    #[allow(dead_code)]
     sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
-    // Used to serialize repair attempts in the next wiring task.
-    #[allow(dead_code)]
     repair_lock: tokio::sync::Mutex<()>,
     repair_notice_pending: AtomicBool,
 }
@@ -104,17 +101,102 @@ impl ClaudeHealth {
     }
 
     pub(crate) async fn trigger_repair(self: &Arc<Self>, reason: &'static str) {
-        tracing::warn!(
-            agent = %self.agent_name,
-            reason,
-            "claude_health: repair deferred to Task 5"
-        );
+        let Ok(_guard) = self.repair_lock.try_lock() else {
+            tracing::debug!(
+                agent = %self.agent_name,
+                reason,
+                "claude_health: repair already running"
+            );
+            return;
+        };
+
+        tracing::warn!(agent = %self.agent_name, reason, "claude_health: repairing MCP cache");
+
+        if let Err(e) = remove_needs_auth_cache(self).await {
+            tracing::warn!(agent = %self.agent_name, reason, "claude_health: {e}");
+        }
+
+        if let Err(e) = sync_after_cache_cleanup(self).await {
+            tracing::error!(agent = %self.agent_name, reason, "claude_health: {e}");
+            return;
+        }
+
+        match tokio::time::timeout(HEALTH_PROBE_TIMEOUT, run_health_probe(self)).await {
+            Ok(Ok(HealthProbeOutcome::Healthy)) => {
+                self.mark_repaired_for_next_turn();
+                tracing::info!(agent = %self.agent_name, reason, "claude_health: repair succeeded");
+            }
+            Ok(Ok(HealthProbeOutcome::NeedsRepair { status })) => {
+                tracing::error!(
+                    agent = %self.agent_name,
+                    reason,
+                    right_status = status.as_deref().unwrap_or("missing"),
+                    "claude_health: repair probe still unhealthy"
+                );
+            }
+            Ok(Ok(HealthProbeOutcome::NoInit)) => {
+                tracing::error!(
+                    agent = %self.agent_name,
+                    reason,
+                    "claude_health: repair probe had no init"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::error!(agent = %self.agent_name, reason, "claude_health: repair probe failed: {e}");
+            }
+            Err(_) => {
+                tracing::error!(
+                    agent = %self.agent_name,
+                    reason,
+                    timeout_secs = HEALTH_PROBE_TIMEOUT.as_secs(),
+                    "claude_health: repair probe timed out"
+                );
+            }
+        }
     }
 
     #[cfg(test)]
     fn try_begin_repair_for_test(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
         self.repair_lock.try_lock().ok()
     }
+}
+
+async fn remove_needs_auth_cache(health: &ClaudeHealth) -> Result<(), String> {
+    if let Some(sbox) = health.sandbox_exec.as_ref() {
+        let (output, code) = sbox
+            .exec(&["rm", "-f", "/sandbox/.claude/mcp-needs-auth-cache.json"])
+            .await
+            .map_err(|e| format!("sandbox cache cleanup exec failed: {e:#}"))?;
+        if code != 0 {
+            return Err(format!(
+                "sandbox cache cleanup exited {code}: {}",
+                output.trim()
+            ));
+        }
+        return Ok(());
+    }
+
+    let path = health
+        .agent_dir
+        .join(".claude")
+        .join("mcp-needs-auth-cache.json");
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "local cache cleanup failed at {}: {e:#}",
+            path.display()
+        )),
+    }
+}
+
+async fn sync_after_cache_cleanup(health: &ClaudeHealth) -> Result<(), String> {
+    if let Some(sbox) = health.sandbox_exec.as_ref() {
+        crate::sync::sync_cycle(&health.agent_dir, sbox)
+            .await
+            .map_err(|e| format!("platform sync failed: {e:#}"))?;
+    }
+    Ok(())
 }
 
 /// Spawn the keepalive loop as a background task.
