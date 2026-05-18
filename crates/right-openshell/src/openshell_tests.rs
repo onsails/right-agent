@@ -160,6 +160,45 @@ fn gateway_endpoint_from_status_output_reads_active_server_url() {
 }
 
 #[test]
+fn parse_getent_ahosts_ips_deduplicates_ipv4_and_ipv6() {
+    let output = "\
+192.168.65.254 STREAM host.openshell.internal
+192.168.65.254 DGRAM
+192.168.65.254 RAW
+fdc4:f303:9324::254 STREAM host.openshell.internal
+fdc4:f303:9324::254 DGRAM
+";
+
+    let ips = parse_getent_ahosts_ips(output);
+
+    assert_eq!(
+        ips,
+        vec![
+            "192.168.65.254".parse::<std::net::IpAddr>().unwrap(),
+            "fdc4:f303:9324::254".parse::<std::net::IpAddr>().unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn parse_getent_ahosts_ips_ignores_malformed_tokens() {
+    let output = "\
+not-an-ip STREAM host.openshell.internal
+10.0.0.1 STREAM host.openshell.internal
+also-bad
+";
+
+    let ips = parse_getent_ahosts_ips(output);
+
+    assert_eq!(ips, vec!["10.0.0.1".parse::<std::net::IpAddr>().unwrap()]);
+}
+
+#[test]
+fn parse_getent_ahosts_ips_returns_empty_for_no_valid_ips() {
+    assert!(parse_getent_ahosts_ips("not-an-ip STREAM\n").is_empty());
+}
+
+#[test]
 fn sandbox_response_decodes_openshell_0_0_42_metadata_layout() {
     fn push_varint(buf: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
@@ -1221,9 +1260,6 @@ network_policies:
     endpoints:
       - host: "host.openshell.internal"
         port: 18927
-        allowed_ips:
-          - "172.16.0.0/12"
-          - "192.168.0.0/16"
         protocol: rest
         access: full
     binaries:

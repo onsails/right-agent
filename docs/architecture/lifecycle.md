@@ -14,6 +14,9 @@ right init  /  right agent init <name>
   │   ~/.right/config.yaml + detects Telegram token / cloudflared tunnel.
   │   Permissive network policy is generated as hostless public `allowed_ips`;
   │   restrictive policy uses scoped DNS wildcard endpoints.
+  │   Right MCP host access starts as a bootstrap unresolved endpoint; after
+  │   sandbox READY, Right resolves host.openshell.internal inside the sandbox
+  │   and hot-applies exact IPv4 /32 and IPv6 /128 allowed_ips.
   │   `right-config` owns global config loading, saving, and path helpers.
   ├─ Create ~/.right/agents/<name>/ with template files
   ├─ Write BOOTSTRAP.md, TOOLS.md, agent.yaml
@@ -45,7 +48,7 @@ right bot --agent <name>  (spawned by process-compose)
   │   └─ data.db init, git init, secret generation
   ├─ Clear Telegram webhook, verify bot identity
   ├─ Sandbox lifecycle (`right-openshell`):
-  │   ├─ Check if sandbox exists via gRPC → reuse with policy hot-reload
+  │   ├─ Check if sandbox exists via gRPC → reuse with exact multi-IP policy hot-reload
   │   ├─ Or create new: prepare staging dir, spawn sandbox, wait for READY
   │   └─ Generate SSH config for sandbox exec
   ├─ Initial sync (blocking): `right-platform-store` deploys platform files to /sandbox/.platform/ (content-addressed + symlinks)
@@ -91,12 +94,14 @@ Config change (right agent config):
   ├─ config_watcher detects change (2s debounce)
   ├─ Bot exits with code 2
   ├─ process-compose restarts bot (on_failure policy)
-  └─ Bot re-runs per-agent codegen with new config → applies fresh policy
+  └─ Bot re-runs per-agent codegen with new config → resolves host alias in sandbox and applies fresh policy
 
 Sandbox migration (filesystem policy change):
   ├─ Backup sandbox-only (SSH tar czpf)
-  ├─ Create new sandbox right-<agent>-<YYYYMMDD-HHMM> with new policy
+  ├─ Create new sandbox right-<agent>-<YYYYMMDD-HHMM> with bootstrap policy
   ├─ Wait for READY + SSH ready
+  ├─ Resolve host.openshell.internal inside the new sandbox
+  ├─ Hot-apply exact Right MCP allowed_ips via openshell policy set --wait
   ├─ Restore files via SSH tar xzpf
   ├─ Write sandbox.name to agent.yaml
   ├─ Delete old sandbox (best-effort)
@@ -127,9 +132,10 @@ right agent init <name> --from-backup <path>
   ├─ Fail before creating target agent state if binding mode is required
   ├─ Restore config/control-plane files to new agent dir (agent.yaml, allowlist.yaml, policy.yaml, data.db when present)
   ├─ Normalize restored agent.yaml before codegen/sandbox creation
-  ├─ Migrate copied legacy `host: "**.*"` policy.yaml before sandbox creation
+  ├─ Regenerate bootstrap policy before sandbox creation; copied policy IPs are treated as stale generated state
   ├─ Warn when clone restore copies explicit external state (Telegram, MCP, cron)
   ├─ Create new sandbox with timestamped name
+  ├─ Resolve host.openshell.internal inside the new sandbox and hot-apply exact IPv4 /32 and IPv6 /128 allowed_ips
   ├─ Restore sandbox files via SSH tar
   │   └─ On upload failure: delete new sandbox best-effort, remove partial
   │      agent dir, and report the remote tar stderr when available

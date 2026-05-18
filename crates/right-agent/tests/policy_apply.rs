@@ -110,7 +110,11 @@ fn cleanup_sandbox(name: &str) {
 async fn ci_openshell_generated_permissive_policy_applies_to_live_openshell() {
     let _slot = acquire_sandbox_slot();
 
-    let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+    let policy = generate_policy(
+        8100,
+        &NetworkPolicy::Permissive,
+        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
+    );
     let name = spawn_with_policy("policy-apply-permissive", &policy).await;
 
     let mtls_dir = match openshell::preflight_check() {
@@ -131,7 +135,11 @@ async fn ci_openshell_generated_permissive_policy_applies_to_live_openshell() {
 async fn ci_openshell_generated_restrictive_policy_applies_to_live_openshell() {
     let _slot = acquire_sandbox_slot();
 
-    let policy = generate_policy(8100, &NetworkPolicy::Restrictive, None);
+    let policy = generate_policy(
+        8100,
+        &NetworkPolicy::Restrictive,
+        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
+    );
     let name = spawn_with_policy("policy-apply-restrictive", &policy).await;
 
     let mtls_dir = match openshell::preflight_check() {

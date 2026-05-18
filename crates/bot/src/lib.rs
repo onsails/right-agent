@@ -654,22 +654,21 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         // Resolve host IP from inside sandbox for policy allowed_ips.
         let sandbox_id =
             right_openshell::openshell::resolve_sandbox_id(&mut grpc_client, &sandbox).await?;
-        let host_ip =
-            right_openshell::openshell::resolve_host_ip(&mut grpc_client, &sandbox_id).await?;
+        let host_ips =
+            right_openshell::openshell::resolve_host_ips(&mut grpc_client, &sandbox_id).await?;
 
         // Regenerate policy with resolved host IP and apply.
         let network_policy = config.network_policy;
         let policy_content = right_codegen::policy::generate_policy(
             right_runtime_state::MCP_HTTP_PORT,
             &network_policy,
-            host_ip,
+            right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
         );
         // Drift check BEFORE write+apply: `openshell policy set --wait` rejects
         // landlock changes on a live sandbox with InvalidArgument, so applying
-        // a drifted policy crash-loops the bot. FAIL FAST: if drift status
-        // cannot be determined (parse failure, gRPC error, missing payload),
-        // behave as if drift IS present — skip apply and log WARN. A bot that
-        // runs with stale policy is better than one that crash-loops.
+        // a drifted filesystem policy cannot safely repair the sandbox. Fail
+        // startup instead of running with stale network policy and hidden MCP
+        // reachability failures.
         let desired_filesystem = match right_openshell::openshell::parse_policy_yaml_filesystem(
             &policy_content,
         ) {
@@ -704,15 +703,19 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
         if drifted {
             // Still write so a later `right agent config`-triggered
-            // migration sees the fresh policy; skip apply to avoid crash-loop.
+            // migration sees the fresh policy, then fail startup. Running with
+            // stale network policy would make MCP availability nondeterministic.
             right_codegen::contract::write_regenerated(&policy_path, &policy_content)?;
-            tracing::warn!(
-                agent = %args.agent,
-                "Filesystem policy drift detected for '{}'. Landlock rules in the running sandbox do not match policy.yaml. Run `right agent config {}` (accept defaults) to trigger sandbox migration, or `right agent backup {} --sandbox-only` first if you want a recovery point.",
-                args.agent, args.agent, args.agent,
-            );
+            return Err(miette::miette!(
+                help = format!(
+                    "Run `right agent config {}` (accept defaults) to trigger sandbox migration, or `right agent backup {} --sandbox-only` first if you want a recovery point.",
+                    args.agent, args.agent
+                ),
+                "Filesystem policy drift detected for '{}'. Refusing to start with stale OpenShell policy.",
+                args.agent,
+            ));
         } else {
-            tracing::info!(agent = %args.agent, "reusing existing sandbox, applying policy with host_ip={:?}", host_ip);
+            tracing::info!(agent = %args.agent, ?host_ips, "reusing existing sandbox, applying policy with resolved host IPs");
             right_codegen::contract::write_and_apply_sandbox_policy(
                 &sandbox,
                 &policy_path,

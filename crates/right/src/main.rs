@@ -1693,6 +1693,16 @@ fn cmd_init(
                     .await
                 })
             })?;
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    apply_exact_right_mcp_policy_for_sandbox(
+                        &sb_name,
+                        &policy_path,
+                        network_policy_val,
+                    )
+                    .await
+                })
+            })?;
             println!(
                 "{}",
                 right_ui::status(right_ui::Glyph::Ok)
@@ -2151,6 +2161,16 @@ fn cmd_agent_init(
                 .await
             })
         })?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                apply_exact_right_mcp_policy_for_sandbox(
+                    &sb_name,
+                    &policy_path,
+                    overrides.network_policy,
+                )
+                .await
+            })
+        })?;
 
         println!("  Sandbox '{sb_name}' ready");
 
@@ -2253,6 +2273,62 @@ async fn check_sandbox_exists_async(sandbox_name: &str) -> miette::Result<bool> 
     };
     let mut client = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
     right_openshell::openshell::is_sandbox_ready(&mut client, sandbox_name).await
+}
+
+fn write_bootstrap_right_mcp_policy(
+    policy_path: &Path,
+    network_policy: right_agent::agent::types::NetworkPolicy,
+) -> miette::Result<()> {
+    let policy_content = right_codegen::policy::generate_policy(
+        right_runtime_state::MCP_HTTP_PORT,
+        &network_policy,
+        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
+    );
+    right_codegen::contract::write_regenerated(policy_path, &policy_content)
+}
+
+async fn apply_exact_right_mcp_policy_for_sandbox(
+    sandbox_name: &str,
+    policy_path: &Path,
+    network_policy: right_agent::agent::types::NetworkPolicy,
+) -> miette::Result<Vec<std::net::IpAddr>> {
+    let mtls_dir = match right_openshell::openshell::preflight_check() {
+        right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
+        right_openshell::openshell::OpenShellStatus::NotInstalled => {
+            return Err(miette::miette!(
+                "OpenShell is not installed — cannot resolve host MCP policy for sandbox '{sandbox_name}'"
+            ));
+        }
+        right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
+            return Err(miette::miette!(
+                "OpenShell gateway is not running — cannot resolve host MCP policy for sandbox '{sandbox_name}'"
+            ));
+        }
+        right_openshell::openshell::OpenShellStatus::BrokenGateway(dir) => {
+            return Err(miette::miette!(
+                "OpenShell gateway mTLS certificates are missing at {} — cannot resolve host MCP policy for sandbox '{sandbox_name}'",
+                dir.display()
+            ));
+        }
+    };
+
+    let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
+    let sandbox_id =
+        right_openshell::openshell::resolve_sandbox_id(&mut grpc, sandbox_name).await?;
+    let host_ips = right_openshell::openshell::resolve_host_ips(&mut grpc, &sandbox_id).await?;
+    let policy_content = right_codegen::policy::generate_policy(
+        right_runtime_state::MCP_HTTP_PORT,
+        &network_policy,
+        right_codegen::policy::HostMcpAccess::Resolved(host_ips.clone()),
+    );
+    right_codegen::contract::write_and_apply_sandbox_policy(
+        sandbox_name,
+        policy_path,
+        &policy_content,
+    )
+    .await?;
+    tracing::info!(sandbox = %sandbox_name, ?host_ips, "applied exact Right MCP policy");
+    Ok(host_ips)
 }
 
 /// If a sandbox already exists, prompt the user to recreate or abort.
@@ -3087,7 +3163,7 @@ async fn cmd_agent_restore(
                     policy_path.display()
                 ));
             }
-            migrate_restored_policy_if_needed(&policy_path)?;
+            write_bootstrap_right_mcp_policy(&policy_path, config.as_ref().map(|c| c.network_policy).unwrap_or_default())?;
 
             // Verify OpenShell is reachable.
             let mtls_dir = match right_openshell::openshell::preflight_check() {
@@ -3148,6 +3224,12 @@ async fn cmd_agent_restore(
                 right_openshell::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox_name)
                     .await?;
             right_openshell::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
+            apply_exact_right_mcp_policy_for_sandbox(
+                &new_sandbox_name,
+                &policy_path,
+                config.as_ref().map(|c| c.network_policy).unwrap_or_default(),
+            )
+            .await?;
 
             // Generate SSH config.
             let ssh_config_dir = home.join("run").join("ssh");
@@ -3376,6 +3458,7 @@ fn resolve_restored_policy_path(
     Ok(agent_dir.join(policy_file))
 }
 
+#[cfg(test)]
 fn migrate_restored_policy_if_needed(policy_path: &Path) -> miette::Result<()> {
     use miette::IntoDiagnostic;
 
@@ -4206,7 +4289,7 @@ mod tests {
         ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
         migrate_restored_policy_if_needed, resolve_agent_db, resolve_restored_policy_path,
-        truncate_content, write_managed_settings,
+        truncate_content, write_bootstrap_right_mcp_policy, write_managed_settings,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -4404,7 +4487,7 @@ network_policies:
         let current_policy = right_codegen::policy::generate_policy(
             8100,
             &right_agent_config::NetworkPolicy::Permissive,
-            None,
+            right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
         );
         fs::write(&policy_path, &current_policy).unwrap();
         let mut permissions = fs::metadata(&policy_path).unwrap().permissions();
@@ -4415,6 +4498,48 @@ network_policies:
 
         let unchanged = fs::read_to_string(&policy_path).unwrap();
         assert_eq!(unchanged, current_policy);
+    }
+
+    #[test]
+    fn bootstrap_policy_regeneration_overwrites_stale_right_mcp_ips() {
+        let tmp = TempDir::new().unwrap();
+        let policy_path = tmp.path().join("policies").join("custom-policy.yaml");
+        fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &policy_path,
+            r#"version: 1
+network_policies:
+  right:
+    endpoints:
+      - host: "host.openshell.internal"
+        port: 8100
+        allowed_ips:
+          - "203.0.113.44/32"
+          - "172.16.0.0/12"
+        protocol: rest
+        access: full
+    binaries:
+      - path: "**"
+"#,
+        )
+        .unwrap();
+
+        write_bootstrap_right_mcp_policy(
+            &policy_path,
+            right_agent::agent::types::NetworkPolicy::Permissive,
+        )
+        .unwrap();
+
+        let rewritten = fs::read_to_string(&policy_path).unwrap();
+        assert!(!rewritten.contains("203.0.113.44/32"));
+        assert!(!rewritten.contains("172.16.0.0/12"));
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&rewritten).expect("rewritten policy must be valid YAML");
+        let right_endpoint = &parsed["network_policies"]["right"]["endpoints"][0];
+        assert!(
+            right_endpoint.get("allowed_ips").is_none(),
+            "bootstrap Right MCP policy must omit stale allowed_ips"
+        );
     }
 
     #[test]
@@ -5687,6 +5812,16 @@ async fn perform_migration(
         right_openshell::openshell::resolve_sandbox_id(&mut grpc, &new_sandbox).await?;
     right_openshell::openshell::wait_for_ssh(&mut grpc, &sandbox_id, 60, 2).await?;
     println!("  SSH transport ready.");
+    apply_exact_right_mcp_policy_for_sandbox(
+        &new_sandbox,
+        &policy_path,
+        migration_config
+            .as_ref()
+            .map(|config| config.network_policy)
+            .unwrap_or_default(),
+    )
+    .await?;
+    println!("  Exact Right MCP policy applied.");
 
     // --- Step 4/6: Generate SSH config ---
     println!("Step 4/6: Generating SSH config...");

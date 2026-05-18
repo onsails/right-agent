@@ -733,7 +733,7 @@ async fn ci_openshell_policy_validates_against_openshell() {
     let policy_yaml = right_codegen::policy::generate_policy(
         right_runtime_state::MCP_HTTP_PORT,
         &right_agent::agent::types::NetworkPolicy::Permissive,
-        None,
+        right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
     );
     let tmpdir = tempdir().unwrap();
     let policy_path = tmpdir.path().join("test-policy.yaml");

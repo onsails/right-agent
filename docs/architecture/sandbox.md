@@ -12,10 +12,12 @@ Sandboxes are **persistent** — never deleted automatically. They live as long 
 Bot startup:
   ├─ Resolve OpenShell gateway endpoint (OPENSHELL_GATEWAY_ENDPOINT or openshell status)
   ├─ gRPC GetSandbox → READY?
-  │   ├─ YES: resolve sandbox id + host IP
+  │   ├─ YES: resolve sandbox id + all sandbox-visible host IPs
   │   └─ NO: startup exits; creating a missing sandbox is an init/migration job
-  ├─ Regenerate policy with resolved host IP
-  │   ├─ filesystem policy drift: write policy.yaml, skip apply, warn to trigger migration
+  ├─ Regenerate policy with exact host IPs
+  │   ├─ host.openshell.internal resolved inside sandbox via getent ahosts
+  │   ├─ IPv4 entries become /32; IPv6 entries become /128
+  │   ├─ filesystem policy drift: write policy.yaml and fail startup with migration guidance
   │   └─ no filesystem drift: write policy.yaml and hot-apply via openshell policy set --wait
   ├─ generate_ssh_config (on every startup, host-side file)
   ├─ initial_sync (blocking — before teloxide starts)
@@ -26,16 +28,21 @@ Bot startup:
 
 Sandbox creation (`right init`, `right agent init`):
   ├─ prepare_staging_dir
+  ├─ generate bootstrap policy with unresolved host.openshell.internal
   ├─ ensure_sandbox
   │   ├─ spawn_sandbox
   │   ├─ wait_for_ready
   │   └─ wait_for_ssh
+  ├─ resolve host.openshell.internal inside sandbox
+  ├─ hot-apply exact Right MCP allowed_ips via openshell policy set --wait
   └─ generate_ssh_config
 
 Sandbox migration (`right agent config` filesystem-policy drift):
   ├─ ssh_tar_download old sandbox backup
   ├─ prepare_staging_dir
-  ├─ spawn_sandbox → wait_for_ready → wait_for_ssh
+  ├─ spawn_sandbox with bootstrap policy → wait_for_ready → wait_for_ssh
+  ├─ resolve host.openshell.internal inside new sandbox
+  ├─ hot-apply exact Right MCP allowed_ips via openshell policy set --wait
   ├─ generate_ssh_config for new sandbox
   ├─ ssh_tar_upload backup into new sandbox
   └─ update agent.yaml, tear down old ControlMaster, delete old sandbox
@@ -45,7 +52,14 @@ Sandbox network:
   ├─ TLS MITM: proxy auto-detects TLS (ClientHello peek) and terminates
   │   unconditionally for credential injection (OpenShell v0.0.30+)
   │   └─ Sandbox trusts CA via /etc/openshell-tls/ca-bundle.pem
-  └─ Policy controls which domains are allowed (wildcards supported)
+  └─ Policy controls which domains/IPs are allowed (wildcards supported for scoped public hosts)
+
+Right MCP host access:
+  ├─ mcp.json points OpenShell agents at http://host.openshell.internal:<port>/mcp
+  ├─ First-create policy omits guessed Right MCP allowed_ips because the sandbox does not exist yet
+  ├─ After READY, Right resolves host.openshell.internal from inside that exact sandbox
+  ├─ Final policy includes every resolved IP as exact IPv4 /32 or IPv6 /128
+  └─ openshell forward/service are not used for Right MCP; they expose sandbox services outward
 
 Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platform/ during initial_sync):
   ├─ .claude/settings.json    — CC behavioral flags
