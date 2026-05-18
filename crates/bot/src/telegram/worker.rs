@@ -58,6 +58,7 @@ const BACKGROUND_REVIEW_MAX_TURNS: u32 = 8;
 const BACKGROUND_REVIEW_TIMEOUT_SECS: u64 = 180;
 const BACKGROUND_REVIEW_TIMELINE_MAX_EVENTS: usize = 80;
 const BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT: i64 = 20;
+const BACKGROUND_REVIEW_FAILURE_ERROR_MAX_CHARS: usize = 1_024;
 const BACKGROUND_REVIEW_FAILURE_EXCERPT_MAX_CHARS: usize = 4_096;
 
 /// Bound on `child.wait()` after we've already broken from the streaming
@@ -2102,7 +2103,7 @@ fn review_failure_output_json(
     stdout: Option<&str>,
     stderr: Option<&str>,
 ) -> serde_json::Value {
-    let mut output = serde_json::json!({ "error": error });
+    let mut output = serde_json::json!({ "error": bounded_review_failure_error(error) });
     if let Some(stdout_excerpt) = bounded_review_failure_excerpt(stdout) {
         output["stdout_excerpt"] = serde_json::Value::String(stdout_excerpt);
     }
@@ -2110,6 +2111,24 @@ fn review_failure_output_json(
         output["stderr_excerpt"] = serde_json::Value::String(stderr_excerpt);
     }
     output
+}
+
+fn bounded_review_failure_error(error: &str) -> String {
+    let error = error.trim();
+    let error = if error.is_empty() {
+        "background review failed"
+    } else {
+        error
+    };
+    let mut chars = error.chars();
+    let mut out: String = chars
+        .by_ref()
+        .take(BACKGROUND_REVIEW_FAILURE_ERROR_MAX_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        out.push_str("... [truncated]");
+    }
+    out
 }
 
 fn bounded_review_failure_excerpt(value: Option<&str>) -> Option<String> {
@@ -2442,11 +2461,7 @@ async fn run_background_learned_skill_review(
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let error = format!(
-            "background review claude exited {:?}: {}",
-            output.status.code(),
-            stderr
-        );
+        let error = format!("background review claude exited {:?}", output.status.code());
         return Err(BackgroundReviewFailure::with_output(
             error,
             Some(stdout),
@@ -3967,7 +3982,10 @@ mod tests {
             Some(10),
             Some(20),
             right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal,
-            "spawn failed: denied".to_owned(),
+            format!(
+                "background review claude exited Some(1): stderr-head{}STDERR-TAIL",
+                "z".repeat(9000)
+            ),
             Some(format!("stdout-head{}STDOUT-TAIL", "x".repeat(9000))),
             Some(format!("stderr-head{}STDERR-TAIL", "y".repeat(9000))),
         );
@@ -3986,7 +4004,18 @@ mod tests {
         assert_eq!(report.2, "low");
         assert_eq!(report.3, "inv-1");
         let output_json: serde_json::Value = serde_json::from_str(&report.4).unwrap();
-        assert_eq!(output_json["error"], "spawn failed: denied");
+        assert!(
+            output_json["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("background review claude exited Some(1): stderr-head")
+        );
+        assert!(
+            !output_json["error"]
+                .as_str()
+                .unwrap()
+                .contains("STDERR-TAIL")
+        );
         assert!(
             output_json["stdout_excerpt"]
                 .as_str()
