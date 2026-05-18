@@ -1488,6 +1488,7 @@ pub fn spawn_worker(
                     reason,
                     main_session_id,
                     thinking_msg_id,
+                    session_guard,
                 }) => {
                     tracing::info!(?key, ?reason, "backgrounding turn");
 
@@ -1564,7 +1565,7 @@ pub fn spawn_worker(
                         Arc::clone(&ctx.internal_client),
                         ctx.resolved_sandbox.clone(),
                         Arc::clone(&ctx.upgrade_lock),
-                        Arc::clone(&ctx.session_locks),
+                        session_guard,
                         Arc::clone(&ctx.debug),
                     )
                     .await;
@@ -1831,6 +1832,9 @@ pub(crate) enum InvokeCcFailure {
         main_session_id: String,
         /// The live "thinking" message to edit with a backgrounded banner.
         thinking_msg_id: Option<teloxide::types::MessageId>,
+        /// Foreground main-session lock, held until background fork init is confirmed
+        /// or handoff failure is persisted after killing the child.
+        session_guard: tokio::sync::OwnedMutexGuard<()>,
     },
 }
 
@@ -2372,7 +2376,7 @@ async fn invoke_cc(
     // call the lock is uncontended (fresh UUID, no other holder), so there's
     // zero overhead vs. the previous skip-on-first-call path. The guard is
     // held for the entire CC subprocess lifetime, then dropped on return.
-    let _session_guard: tokio::sync::OwnedMutexGuard<()> = {
+    let session_guard: tokio::sync::OwnedMutexGuard<()> = {
         let entry = ctx
             .session_locks
             .entry(session_uuid.clone())
@@ -3036,6 +3040,7 @@ async fn invoke_cc(
             reason: BgReason::UserRequested,
             main_session_id: session_uuid.clone(),
             thinking_msg_id,
+            session_guard,
         });
     }
 
@@ -3064,6 +3069,7 @@ async fn invoke_cc(
             reason: BgReason::AutoTimeout,
             main_session_id: session_uuid.clone(),
             thinking_msg_id,
+            session_guard,
         });
     }
 
@@ -4557,6 +4563,7 @@ mod bg_request_race_tests {
 
 #[cfg(test)]
 mod bg_handoff_gate_tests {
+    use super::*;
     use dashmap::DashMap;
     use std::sync::Arc;
 
@@ -4585,6 +4592,36 @@ mod bg_handoff_gate_tests {
         tokio::time::timeout(tokio::time::Duration::from_secs(1), waiter)
             .await
             .expect("waiter should unblock after gate release")
+            .expect("waiter task should not panic");
+    }
+
+    #[tokio::test]
+    async fn backgrounded_failure_retains_session_lock_until_dropped() {
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let session_guard = Arc::clone(&lock).lock_owned().await;
+        let failure = InvokeCcFailure::Backgrounded {
+            reason: BgReason::UserRequested,
+            main_session_id: "main-session".into(),
+            thinking_msg_id: None,
+            session_guard,
+        };
+
+        let waiter_lock = Arc::clone(&lock);
+        let mut waiter = tokio::spawn(async move {
+            let _guard = waiter_lock.lock_owned().await;
+        });
+
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err(),
+            "background handoff failure must retain the main session lock"
+        );
+
+        drop(failure);
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("session lock should release when the failure is dropped")
             .expect("waiter task should not panic");
     }
 }

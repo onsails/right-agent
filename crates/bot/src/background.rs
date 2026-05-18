@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncWriteExt as _};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
@@ -44,7 +44,7 @@ pub(crate) async fn spawn_background_continuation(
     internal_client: Arc<right_mcp::internal_client::InternalClient>,
     resolved_sandbox: Option<String>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
-    session_locks: crate::telegram::SessionLocks,
+    _session_guard: tokio::sync::OwnedMutexGuard<()>,
     debug: Arc<std::sync::atomic::AtomicBool>,
 ) -> HandoffStatus {
     let log_path = bg_log_path(&agent_dir, &request.run_id);
@@ -102,14 +102,6 @@ pub(crate) async fn spawn_background_continuation(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let _session_guard: tokio::sync::OwnedMutexGuard<()> = {
-        let entry = session_locks
-            .entry(request.source_session_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        entry.lock_owned().await
-    };
-
     tracing::info!(
         run_id = %request.run_id,
         source_session_id = %request.source_session_id,
@@ -126,11 +118,15 @@ pub(crate) async fn spawn_background_continuation(
         }
     };
 
+    let stderr_handle =
+        spawn_stderr_reader(child.stderr(), log_path.clone(), request.run_id.clone());
+
     let stdout = match child.stdout() {
         Some(stdout) => stdout,
         None => {
             let reason = "spawned background child without stdout".to_string();
-            kill_child(child).await;
+            let stderr = kill_child_and_collect_stderr(child, stderr_handle).await;
+            let reason = append_stderr_to_reason(&reason, &stderr);
             persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
             return HandoffStatus::Failed(reason);
         }
@@ -153,7 +149,8 @@ pub(crate) async fn spawn_background_continuation(
         )),
     };
     if let Err(reason) = confirmed {
-        kill_unconfirmed_child(child, reader_handle).await;
+        let stderr = kill_unconfirmed_child(child, reader_handle, stderr_handle).await;
+        let reason = append_stderr_to_reason(&reason, &stderr);
         persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
         return HandoffStatus::Failed(reason);
     }
@@ -173,7 +170,8 @@ pub(crate) async fn spawn_background_continuation(
         }
     };
     if let Err(reason) = mark_spawned {
-        kill_unconfirmed_child(child, reader_handle).await;
+        let stderr = kill_unconfirmed_child(child, reader_handle, stderr_handle).await;
+        let reason = append_stderr_to_reason(&reason, &stderr);
         persist_handoff_failed_at_agent(&agent_dir, &request.run_id, &reason);
         return HandoffStatus::Failed(reason);
     }
@@ -184,6 +182,7 @@ pub(crate) async fn spawn_background_continuation(
         resolved_sandbox,
         child,
         reader_handle,
+        stderr_handle,
     ));
     HandoffStatus::Spawned
 }
@@ -341,13 +340,7 @@ async fn read_background_stdout(
                 return Err(reason);
             }
         };
-        if let Err(e) = file.write_all(line.as_bytes()).await {
-            let reason = format!("write background log {}: {e:#}", log_path.display());
-            send_init_failure(&mut init_tx, &reason);
-            return Err(reason);
-        }
-        if let Err(e) = file.write_all(b"\n").await {
-            let reason = format!("write background log newline {}: {e:#}", log_path.display());
+        if let Err(reason) = append_log_line(&mut file, &line, &log_path).await {
             send_init_failure(&mut init_tx, &reason);
             return Err(reason);
         }
@@ -368,6 +361,85 @@ async fn read_background_stdout(
     Ok(collected)
 }
 
+fn format_stderr_log_line(run_id: &str, content: &str) -> String {
+    serde_json::json!({
+        "type": "stream",
+        "stream": "stderr",
+        "session_id": run_id,
+        "content": content,
+    })
+    .to_string()
+}
+
+async fn append_log_line(
+    file: &mut tokio::fs::File,
+    line: &str,
+    log_path: &Path,
+) -> Result<(), String> {
+    let mut record = String::with_capacity(line.len() + 1);
+    record.push_str(line);
+    record.push('\n');
+    file.write_all(record.as_bytes())
+        .await
+        .map_err(|e| format!("write background log {}: {e:#}", log_path.display()))
+}
+
+fn spawn_stderr_reader(
+    stderr: Option<tokio::process::ChildStderr>,
+    log_path: PathBuf,
+    run_id: String,
+) -> Option<JoinHandle<Result<String, String>>> {
+    stderr.map(|stderr| tokio::spawn(read_background_stderr_from_reader(stderr, log_path, run_id)))
+}
+
+async fn read_background_stderr_from_reader<R>(
+    stderr: R,
+    log_path: PathBuf,
+    run_id: String,
+) -> Result<String, String>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut file = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .await
+    {
+        Ok(file) => Some(file),
+        Err(e) => {
+            tracing::warn!(
+                path = %log_path.display(),
+                "failed to open background log for stderr; draining stderr without host log: {e:#}"
+            );
+            None
+        }
+    };
+    let mut lines = tokio::io::BufReader::new(stderr).lines();
+    let mut captured = String::new();
+
+    loop {
+        let line = lines
+            .next_line()
+            .await
+            .map_err(|e| format!("read background stderr: {e:#}"))?;
+        let Some(line) = line else {
+            break;
+        };
+        captured.push_str(&line);
+        captured.push('\n');
+        if let Some(open_file) = file.as_mut() {
+            let log_line = format_stderr_log_line(&run_id, &line);
+            if let Err(reason) = append_log_line(open_file, &log_line, &log_path).await {
+                tracing::warn!("{reason}; continuing to drain stderr without host log");
+                file = None;
+            }
+        }
+    }
+
+    Ok(captured)
+}
+
 fn send_init_failure(
     init_tx: &mut Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     reason: &str,
@@ -377,16 +449,22 @@ fn send_init_failure(
     }
 }
 
-async fn kill_child(mut child: right_process::ProcessGroupChild) {
+async fn kill_child_and_collect_stderr(
+    mut child: right_process::ProcessGroupChild,
+    stderr_handle: Option<JoinHandle<Result<String, String>>>,
+) -> String {
     if let Err(e) = child.kill().await {
         tracing::warn!("failed to kill background child: {e:#}");
     }
+    drop(child);
+    await_stderr_reader(stderr_handle).await
 }
 
 async fn kill_unconfirmed_child(
     mut child: right_process::ProcessGroupChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
-) {
+    stderr_handle: Option<JoinHandle<Result<String, String>>>,
+) -> String {
     if let Err(e) = child.kill().await {
         tracing::warn!("failed to kill unconfirmed background child: {e:#}");
     }
@@ -397,6 +475,7 @@ async fn kill_unconfirmed_child(
     {
         tracing::warn!("timed out waiting for unconfirmed background stdout reader");
     }
+    await_stderr_reader(stderr_handle).await
 }
 
 async fn complete_background_run(
@@ -405,22 +484,27 @@ async fn complete_background_run(
     resolved_sandbox: Option<String>,
     mut child: right_process::ProcessGroupChild,
     reader_handle: JoinHandle<Result<Vec<String>, String>>,
+    stderr_handle: Option<JoinHandle<Result<String, String>>>,
 ) {
     let lines = match reader_handle.await {
         Ok(Ok(lines)) => lines,
         Ok(Err(reason)) => {
             let _ = child.kill().await;
+            drop(child);
+            let stderr = await_stderr_reader(stderr_handle).await;
+            let reason = append_stderr_to_reason(&reason, &stderr);
             persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
             return;
         }
         Err(e) => {
             let _ = child.kill().await;
-            persist_completion_failed_at_agent(
-                &agent_dir,
-                &request.run_id,
-                None,
+            drop(child);
+            let stderr = await_stderr_reader(stderr_handle).await;
+            let reason = append_stderr_to_reason(
                 &format!("background stdout reader task failed: {e:#}"),
+                &stderr,
             );
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
             return;
         }
     };
@@ -428,26 +512,33 @@ async fn complete_background_run(
     let exit_status = match tokio::time::timeout(POST_STDOUT_WAIT_TIMEOUT, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => {
-            persist_completion_failed_at_agent(
-                &agent_dir,
-                &request.run_id,
-                None,
-                &format!("background child wait failed: {e:#}"),
-            );
+            let stderr = await_stderr_reader(stderr_handle).await;
+            let reason =
+                append_stderr_to_reason(&format!("background child wait failed: {e:#}"), &stderr);
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
             return;
         }
         Err(_) => {
-            persist_completion_failed_at_agent(
-                &agent_dir,
-                &request.run_id,
-                None,
+            let _ = child.kill().await;
+            drop(child);
+            let stderr = await_stderr_reader(stderr_handle).await;
+            let reason = append_stderr_to_reason(
                 "background child wait timed out after stdout closed",
+                &stderr,
             );
+            persist_completion_failed_at_agent(&agent_dir, &request.run_id, None, &reason);
             return;
         }
     };
     let exit_code = exit_status.code();
-    let stderr = drain_stderr(&mut child).await;
+    let stderr = await_stderr_reader(stderr_handle).await;
+    if !stderr.trim().is_empty() {
+        tracing::warn!(
+            run_id = %request.run_id,
+            stderr = %stderr,
+            "background stderr"
+        );
+    }
 
     if !exit_status.success() {
         let reason = if stderr.trim().is_empty() {
@@ -479,17 +570,34 @@ async fn complete_background_run(
     }
 }
 
-async fn drain_stderr(child: &mut right_process::ProcessGroupChild) -> String {
-    let Some(mut stderr) = child.stderr() else {
+async fn await_stderr_reader(stderr_handle: Option<JoinHandle<Result<String, String>>>) -> String {
+    let Some(stderr_handle) = stderr_handle else {
         return String::new();
     };
-    let mut buf = Vec::new();
-    match tokio::time::timeout(STDERR_DRAIN_TIMEOUT, stderr.read_to_end(&mut buf)).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => tracing::warn!("failed to read background stderr: {e:#}"),
-        Err(_) => tracing::warn!("timed out reading background stderr"),
+    match tokio::time::timeout(STDERR_DRAIN_TIMEOUT, stderr_handle).await {
+        Ok(Ok(Ok(stderr))) => stderr,
+        Ok(Ok(Err(reason))) => {
+            tracing::warn!("background stderr reader failed: {reason}");
+            format!("[stderr reader failed: {reason}]")
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("background stderr reader task failed: {e:#}");
+            format!("[stderr reader task failed: {e:#}]")
+        }
+        Err(_) => {
+            tracing::warn!("timed out waiting for background stderr reader");
+            "[stderr reader timed out]".to_string()
+        }
     }
-    String::from_utf8_lossy(&buf).into_owned()
+}
+
+fn append_stderr_to_reason(reason: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        reason.to_string()
+    } else {
+        format!("{reason}; stderr: {stderr}")
+    }
 }
 
 async fn persist_successful_background_output(
@@ -710,6 +818,42 @@ mod tests {
             "run-1"
         ));
         assert!(!is_handoff_init_for_run("not json", "run-1"));
+    }
+
+    #[test]
+    fn format_stderr_log_line_marks_stderr_stream() {
+        let line = format_stderr_log_line("run-1", "warning: bad \"thing\"");
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["type"], "stream");
+        assert_eq!(parsed["stream"], "stderr");
+        assert_eq!(parsed["session_id"], "run-1");
+        assert_eq!(parsed["content"], "warning: bad \"thing\"");
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_writes_structured_lines_and_returns_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("bg.ndjson");
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(b"first\nsecond\n").await.unwrap();
+        });
+
+        let captured = read_background_stderr_from_reader(reader, log_path.clone(), "run-1".into())
+            .await
+            .unwrap();
+        writer_task.await.unwrap();
+
+        assert_eq!(captured, "first\nsecond\n");
+        let raw = tokio::fs::read_to_string(log_path).await.unwrap();
+        let lines: Vec<_> = raw.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first["stream"], "stderr");
+        assert_eq!(first["content"], "first");
+        assert_eq!(second["stream"], "stderr");
+        assert_eq!(second["content"], "second");
     }
 
     #[test]
