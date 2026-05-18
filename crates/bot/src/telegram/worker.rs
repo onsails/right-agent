@@ -58,6 +58,7 @@ const BACKGROUND_REVIEW_MAX_TURNS: u32 = 8;
 const BACKGROUND_REVIEW_TIMEOUT_SECS: u64 = 180;
 const BACKGROUND_REVIEW_TIMELINE_MAX_EVENTS: usize = 80;
 const BACKGROUND_REVIEW_LEARNING_EVENTS_LIMIT: i64 = 20;
+const BACKGROUND_REVIEW_FAILURE_EXCERPT_MAX_CHARS: usize = 4_096;
 
 /// Bound on `child.wait()` after we've already broken from the streaming
 /// loop. The slave should be either gone (deadline/stop SIGKILL) or about
@@ -2067,6 +2068,66 @@ fn load_skill_review_gate_snapshot(
     )
 }
 
+#[derive(Debug)]
+struct BackgroundReviewFailure {
+    error: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
+}
+
+impl BackgroundReviewFailure {
+    fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            stdout: None,
+            stderr: None,
+        }
+    }
+
+    fn with_output(
+        error: impl Into<String>,
+        stdout: Option<String>,
+        stderr: Option<String>,
+    ) -> Self {
+        Self {
+            error: error.into(),
+            stdout,
+            stderr,
+        }
+    }
+}
+
+fn review_failure_output_json(
+    error: &str,
+    stdout: Option<&str>,
+    stderr: Option<&str>,
+) -> serde_json::Value {
+    let mut output = serde_json::json!({ "error": error });
+    if let Some(stdout_excerpt) = bounded_review_failure_excerpt(stdout) {
+        output["stdout_excerpt"] = serde_json::Value::String(stdout_excerpt);
+    }
+    if let Some(stderr_excerpt) = bounded_review_failure_excerpt(stderr) {
+        output["stderr_excerpt"] = serde_json::Value::String(stderr_excerpt);
+    }
+    output
+}
+
+fn bounded_review_failure_excerpt(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut chars = value.chars();
+    let mut out: String = chars
+        .by_ref()
+        .take(BACKGROUND_REVIEW_FAILURE_EXCERPT_MAX_CHARS)
+        .collect();
+    if chars.next().is_some() {
+        out.push_str("... [truncated]");
+    }
+    Some(out)
+}
+
 fn maybe_spawn_learned_skill_review(
     conn: &rusqlite::Connection,
     ctx: &WorkerContext,
@@ -2218,7 +2279,11 @@ fn maybe_spawn_learned_skill_review(
                 }
             }
             Err(e) => {
-                let error = format!("{e:#}");
+                let BackgroundReviewFailure {
+                    error,
+                    stdout,
+                    stderr,
+                } = e;
                 tracing::warn!(
                     agent = %agent_name,
                     "learned-skill background review failed: {error}"
@@ -2232,10 +2297,46 @@ fn maybe_spawn_learned_skill_review(
                     Some(eff_thread_id),
                     trigger_kind,
                     error,
+                    stdout,
+                    stderr,
                 );
             }
         }
     }));
+}
+
+fn build_background_review_claude_command(
+    args: &[String],
+    agent_dir: &Path,
+    agent_db_dir: &Path,
+    ssh_config_path: Option<&Path>,
+    resolved_sandbox: Option<&str>,
+) -> tokio::process::Command {
+    if let Some(ssh_config) = ssh_config_path {
+        let sandbox_name =
+            resolved_sandbox.expect("sandbox name required for sandbox background review");
+        let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(sandbox_name);
+        let mut script = String::new();
+        if let Some(token) = crate::login::load_auth_token(agent_db_dir) {
+            let escaped = token.replace('\'', "'\\''");
+            script.push_str(&format!("export CLAUDE_CODE_OAUTH_TOKEN='{escaped}'\n"));
+        }
+        let quoted =
+            right_openshell::openshell::quote_ssh_remote_args(args.iter().map(String::as_str))
+                .expect("claude args should not contain nul bytes");
+        script.push_str(&quoted);
+
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.arg("-F").arg(ssh_config);
+        cmd.arg("-o").arg("ControlMaster=no");
+        cmd.arg("-o").arg("ControlPath=none");
+        cmd.arg(&ssh_host);
+        cmd.arg("--");
+        cmd.arg(script);
+        cmd
+    } else {
+        crate::cc::invocation::build_claude_command(args, agent_dir, None, None)
+    }
 }
 
 async fn run_background_learned_skill_review(
@@ -2255,26 +2356,31 @@ async fn run_background_learned_skill_review(
     tool_iters_since_review: i64,
     turns_since_review: i64,
     skill_issue_hints_since_review: i64,
-) -> anyhow::Result<(SkillReviewReport, Option<String>)> {
+) -> Result<(SkillReviewReport, Option<String>), BackgroundReviewFailure> {
     let learned_skills = if ssh_config_path.is_some() {
-        collect_sandbox_review_skill_index(resolved_sandbox.as_deref()).await?
+        collect_sandbox_review_skill_index(resolved_sandbox.as_deref())
+            .await
+            .map_err(|e| {
+                BackgroundReviewFailure::new(format!("collect sandbox learned skills: {e:#}"))
+            })?
     } else {
-        crate::learning_review::collect_host_rightx_skill_index(agent_dir)
-            .map_err(|e| anyhow::anyhow!("collect host learned skills: {e:#}"))?
+        crate::learning_review::collect_host_rightx_skill_index(agent_dir).map_err(|e| {
+            BackgroundReviewFailure::new(format!("collect host learned skills: {e:#}"))
+        })?
     };
     let mut event_timeline = crate::learning_review::collect_stream_event_timeline(
         agent_dir,
         &root_session_id,
         BACKGROUND_REVIEW_TIMELINE_MAX_EVENTS,
     )
-    .map_err(|e| anyhow::anyhow!("collect review event timeline: {e:#}"))?;
+    .map_err(|e| BackgroundReviewFailure::new(format!("collect review event timeline: {e:#}")))?;
     if event_timeline.is_empty() {
         event_timeline.push(format!(
             "event-1 foreground invocation {source_invocation_id} completed; stream log unavailable or empty"
         ));
     }
     let learning_events = load_review_learning_events(agent_db_dir, &source_invocation_id)
-        .map_err(|e| anyhow::anyhow!("load review learning events: {e:#}"))?;
+        .map_err(|e| BackgroundReviewFailure::new(format!("load review learning events: {e:#}")))?;
     let bundle = crate::learning_review::ReviewBundle {
         agent_name: agent_name.to_owned(),
         source_invocation_id: source_invocation_id.clone(),
@@ -2312,34 +2418,58 @@ async fn run_background_learned_skill_review(
         debug_flag: Some(debug),
     };
     let args = invocation.into_args();
-    let mut cmd = crate::cc::invocation::build_claude_command(
+    let mut cmd = build_background_review_claude_command(
         &args,
         agent_dir,
+        agent_db_dir,
         ssh_config_path.as_deref(),
         resolved_sandbox.as_deref(),
     );
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    let mut child = right_process::ProcessGroupChild::spawn(cmd)
-        .map_err(|e| anyhow::anyhow!("spawn background review claude: {e:#}"))?;
+    let mut child = right_process::ProcessGroupChild::spawn(cmd).map_err(|e| {
+        BackgroundReviewFailure::new(format!("spawn background review claude: {e:#}"))
+    })?;
     let output = tokio::time::timeout(
         Duration::from_secs(BACKGROUND_REVIEW_TIMEOUT_SECS),
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("background review claude timed out"))?
-    .map_err(|e| anyhow::anyhow!("wait for background review claude: {e:#}"))?;
+    .map_err(|_| BackgroundReviewFailure::new("background review claude timed out"))?
+    .map_err(|e| {
+        BackgroundReviewFailure::new(format!("wait for background review claude: {e:#}"))
+    })?;
     if !output.status.success() {
-        return Err(anyhow::anyhow!(
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let error = format!(
             "background review claude exited {:?}: {}",
             output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
+            stderr
+        );
+        return Err(BackgroundReviewFailure::with_output(
+            error,
+            Some(stdout),
+            Some(stderr),
         ));
     }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| anyhow::anyhow!("background review stdout utf8: {e:#}"))?;
-    let review_output = crate::learning_review::parse_review_process_stdout(&stdout)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let stdout = match String::from_utf8(output.stdout) {
+        Ok(stdout) => stdout,
+        Err(e) => {
+            let stdout = String::from_utf8_lossy(e.as_bytes()).into_owned();
+            return Err(BackgroundReviewFailure::with_output(
+                format!("background review stdout utf8: {e:#}"),
+                Some(stdout),
+                None,
+            ));
+        }
+    };
+    let review_output = match crate::learning_review::parse_review_process_stdout(&stdout) {
+        Ok(output) => output,
+        Err(e) => {
+            return Err(BackgroundReviewFailure::with_output(e, Some(stdout), None));
+        }
+    };
     let notice = review_output.should_notify_user().then(|| {
         review_output.user_notice.clone().unwrap_or_else(|| {
             "I found a reusable workflow candidate and recorded it for review.".to_owned()
@@ -2366,6 +2496,8 @@ fn record_failed_background_review(
     thread_id: Option<i64>,
     trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
     error: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
 ) {
     let conn = match right_db::open_connection(agent_db_dir, false) {
         Ok(conn) => conn,
@@ -2389,7 +2521,11 @@ fn record_failed_background_review(
         candidate_skill_name: None,
         candidate_summary: None,
         evidence_refs: Vec::new(),
-        review_output_json: serde_json::json!({ "error": error }),
+        review_output_json: review_failure_output_json(
+            &error,
+            stdout.as_deref(),
+            stderr.as_deref(),
+        ),
         telegram_notified: false,
     };
     if let Err(e) = insert_skill_review_report(&conn, &report) {
@@ -3832,6 +3968,8 @@ mod tests {
             Some(20),
             right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal,
             "spawn failed: denied".to_owned(),
+            Some(format!("stdout-head{}STDOUT-TAIL", "x".repeat(9000))),
+            Some(format!("stderr-head{}STDERR-TAIL", "y".repeat(9000))),
         );
 
         let conn = right_db::open_connection(temp.path(), false).unwrap();
@@ -3849,6 +3987,30 @@ mod tests {
         assert_eq!(report.3, "inv-1");
         let output_json: serde_json::Value = serde_json::from_str(&report.4).unwrap();
         assert_eq!(output_json["error"], "spawn failed: denied");
+        assert!(
+            output_json["stdout_excerpt"]
+                .as_str()
+                .unwrap()
+                .starts_with("stdout-head")
+        );
+        assert!(
+            !output_json["stdout_excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("STDOUT-TAIL")
+        );
+        assert!(
+            output_json["stderr_excerpt"]
+                .as_str()
+                .unwrap()
+                .starts_with("stderr-head")
+        );
+        assert!(
+            !output_json["stderr_excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("STDERR-TAIL")
+        );
 
         let state: (i64, String) = conn
             .query_row(
@@ -3859,6 +4021,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, (0, "failed".to_owned()));
+    }
+
+    #[test]
+    fn background_review_sandbox_command_disables_ssh_controlmaster() {
+        let temp = tempfile::tempdir().unwrap();
+        let args = vec![
+            "claude".to_owned(),
+            "-p".to_owned(),
+            "--".to_owned(),
+            "review prompt".to_owned(),
+        ];
+
+        let cmd = build_background_review_claude_command(
+            &args,
+            temp.path(),
+            temp.path(),
+            Some(Path::new("ssh.config")),
+            Some("right-demo"),
+        );
+        let std_cmd = cmd.as_std();
+        let ssh_args: Vec<String> = std_cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(std_cmd.get_program(), "ssh");
+        assert_eq!(ssh_args[0], "-F");
+        assert_eq!(ssh_args[1], "ssh.config");
+        assert_eq!(ssh_args[2], "-o");
+        assert_eq!(ssh_args[3], "ControlMaster=no");
+        assert_eq!(ssh_args[4], "-o");
+        assert_eq!(ssh_args[5], "ControlPath=none");
+        assert_eq!(ssh_args[6], "openshell-right-demo");
+        assert_eq!(ssh_args[7], "--");
+        assert_eq!(ssh_args[8..].len(), 1);
+        assert!(ssh_args[8].contains("claude"));
+        assert!(!ssh_args[8].contains("--resume"));
+        assert!(!ssh_args[8].contains("--fork-session"));
     }
 
     #[test]
