@@ -315,6 +315,54 @@ fn update_failed_run_record(
     update_run_record(conn, run_id, exit_code, "failed");
 }
 
+fn background_success_output_failure_reason(
+    spec: &CronSpec,
+    output: &CronReplyOutput,
+) -> Option<&'static str> {
+    if !is_background_continuation(spec) {
+        return None;
+    }
+
+    let Some(notify) = &output.notify else {
+        return Some("background continuation returned notify: null");
+    };
+    if notify.content.trim().is_empty() {
+        return Some("background continuation returned empty notify.content");
+    }
+    None
+}
+
+fn persist_successful_cron_output(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    job_name: &str,
+    spec: &CronSpec,
+    exit_code: Option<i32>,
+    cron_output: &CronReplyOutput,
+    notify_json: Option<&str>,
+) -> Result<&'static str, rusqlite::Error> {
+    if let Some(reason) = background_success_output_failure_reason(spec, cron_output) {
+        persist_background_failure_notify(conn, run_id, job_name, reason)?;
+        right_agent::async_runs::finish_run(conn, run_id, exit_code, "failed")?;
+        return Ok("pending");
+    }
+
+    let delivery_required = cron_output.notify.is_some();
+    let delivery_status = if delivery_required { "pending" } else { "none" };
+    right_agent::async_runs::persist_run_output(
+        conn,
+        run_id,
+        right_agent::async_runs::RunOutput {
+            summary: Some(&cron_output.summary),
+            notify_json,
+            no_notify_reason: cron_output.no_notify_reason.as_deref(),
+            error_json: None,
+            delivery_required,
+        },
+    )?;
+    Ok(delivery_status)
+}
+
 /// Pick the JSON schema and (optional) `--fork-session` source for a cron run.
 ///
 /// `BackgroundContinuation` is the only kind that runs against
@@ -887,21 +935,21 @@ async fn execute_job(
                     None
                 };
 
-                let delivery_required = cron_output.notify.is_some();
-                let delivery_status = if delivery_required { "pending" } else { "none" };
-                if let Err(e) = right_agent::async_runs::persist_run_output(
+                let delivery_status = match persist_successful_cron_output(
                     &conn,
                     &run_id,
-                    right_agent::async_runs::RunOutput {
-                        summary: Some(&cron_output.summary),
-                        notify_json: notify_json.as_deref(),
-                        no_notify_reason: cron_output.no_notify_reason.as_deref(),
-                        error_json: None,
-                        delivery_required,
-                    },
+                    job_name,
+                    spec,
+                    exit_code,
+                    &cron_output,
+                    notify_json.as_deref(),
                 ) {
-                    tracing::error!(job = %job_name, "failed to persist cron output to DB: {e:#}");
-                }
+                    Ok(status) => status,
+                    Err(e) => {
+                        tracing::error!(job = %job_name, "failed to persist cron output to DB: {e:#}");
+                        "error"
+                    }
+                };
 
                 tracing::info!(
                     job = %job_name,
@@ -2107,6 +2155,18 @@ mod target_snapshot_tests {
         (dir, conn)
     }
 
+    fn background_spec(fork_from: uuid::Uuid) -> CronSpec {
+        CronSpec {
+            schedule_kind: ScheduleKind::BackgroundContinuation { fork_from },
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: Some(-42),
+            target_thread_id: Some(9),
+        }
+    }
+
     #[test]
     fn insert_running_run_writes_async_runs() {
         let (_dir, conn) = migrated_conn();
@@ -2252,15 +2312,7 @@ mod target_snapshot_tests {
     fn persist_background_failure_notify_sets_pending_delivery() {
         let (_dir, conn) = migrated_conn();
         let fork_from = uuid::Uuid::new_v4();
-        let spec = CronSpec {
-            schedule_kind: ScheduleKind::BackgroundContinuation { fork_from },
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: Some(-42),
-            target_thread_id: Some(9),
-        };
+        let spec = background_spec(fork_from);
         insert_running_run(
             &conn,
             "bg-run-failed",
@@ -2293,5 +2345,106 @@ mod target_snapshot_tests {
         );
         assert!(row.4.contains("bg-run-failed"));
         assert!(row.4.contains("bg-job"));
+    }
+
+    #[test]
+    fn persist_success_output_rejects_background_notify_null() {
+        let (_dir, conn) = migrated_conn();
+        let spec = background_spec(uuid::Uuid::new_v4());
+        insert_running_run(
+            &conn,
+            "bg-run-null",
+            "bg-job",
+            "2026-05-05T12:00:00Z",
+            "/log/bg-run-null.ndjson",
+            &spec,
+        )
+        .unwrap();
+
+        let output = CronReplyOutput {
+            notify: None,
+            summary: "silent".into(),
+            no_notify_reason: Some("nothing to say".into()),
+        };
+        persist_successful_cron_output(
+            &conn,
+            "bg-run-null",
+            "bg-job",
+            &spec,
+            Some(0),
+            &output,
+            None,
+        )
+        .unwrap();
+
+        let row: (String, i64, String, String, String) = conn
+            .query_row(
+                "SELECT status, delivery_required, delivery_status, notify_json, error_json
+                   FROM async_runs WHERE id = 'bg-run-null'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, "pending");
+        assert!(
+            row.3
+                .contains("Background work failed before it could produce a result.")
+        );
+        assert!(row.4.contains("notify: null"));
+    }
+
+    #[test]
+    fn persist_success_output_rejects_background_empty_content() {
+        let (_dir, conn) = migrated_conn();
+        let spec = background_spec(uuid::Uuid::new_v4());
+        insert_running_run(
+            &conn,
+            "bg-run-empty",
+            "bg-job",
+            "2026-05-05T12:00:00Z",
+            "/log/bg-run-empty.ndjson",
+            &spec,
+        )
+        .unwrap();
+
+        let notify = CronNotify {
+            content: "   ".into(),
+            attachments: None,
+        };
+        let notify_json = serde_json::to_string(&notify).unwrap();
+        let output = CronReplyOutput {
+            notify: Some(notify),
+            summary: "blank".into(),
+            no_notify_reason: None,
+        };
+        persist_successful_cron_output(
+            &conn,
+            "bg-run-empty",
+            "bg-job",
+            &spec,
+            Some(0),
+            &output,
+            Some(&notify_json),
+        )
+        .unwrap();
+
+        let row: (String, i64, String, String, String) = conn
+            .query_row(
+                "SELECT status, delivery_required, delivery_status, notify_json, error_json
+                   FROM async_runs WHERE id = 'bg-run-empty'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1, 1);
+        assert_eq!(row.2, "pending");
+        assert!(
+            row.3
+                .contains("Background work failed before it could produce a result.")
+        );
+        assert!(row.4.contains("empty notify.content"));
     }
 }
