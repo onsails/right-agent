@@ -56,7 +56,7 @@ impl PendingMcpAuthChoiceRequest {
 }
 
 #[derive(Clone)]
-pub(crate) struct PendingMcpAuthChoiceSlot(pub Arc<Mutex<Option<PendingMcpAuthChoiceRequest>>>);
+pub struct PendingMcpAuthChoiceSlot(pub(crate) Arc<Mutex<Option<PendingMcpAuthChoiceRequest>>>);
 
 pub(crate) const MCP_AUTH_CHOICE_TTL: Duration = Duration::from_secs(120);
 
@@ -340,6 +340,62 @@ mod tests {
         });
 
         assert_eq!(rec.choice, McpAuthChoice::UrlAsIs);
+    }
+
+    #[tokio::test]
+    async fn supersession_cleanup_does_not_clobber_newer_auth_choice() {
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(None)));
+        let req_a_id = next_mcp_auth_choice_id();
+        {
+            let mut s = slot.0.lock().await;
+            *s = Some(PendingMcpAuthChoiceRequest {
+                id: req_a_id,
+                chat_id: 100,
+                thread_id: 0,
+                agent_name: "agent".to_string(),
+                server_name: "a".to_string(),
+                original_url: "https://a.example/mcp".to_string(),
+                bare_url: "https://a.example/mcp".to_string(),
+                has_query: false,
+                recommendation: McpAuthRecommendation {
+                    choice: McpAuthChoice::OAuth,
+                    header_auth_type: "bearer".to_string(),
+                    header_name: None,
+                },
+                expires_at: Instant::now() + MCP_AUTH_CHOICE_TTL,
+            });
+        }
+
+        let req_b_id = next_mcp_auth_choice_id();
+        {
+            let mut s = slot.0.lock().await;
+            *s = Some(PendingMcpAuthChoiceRequest {
+                id: req_b_id,
+                chat_id: 200,
+                thread_id: 0,
+                agent_name: "agent".to_string(),
+                server_name: "b".to_string(),
+                original_url: "https://b.example/mcp".to_string(),
+                bare_url: "https://b.example/mcp".to_string(),
+                has_query: false,
+                recommendation: McpAuthRecommendation {
+                    choice: McpAuthChoice::Header,
+                    header_auth_type: "bearer".to_string(),
+                    header_name: None,
+                },
+                expires_at: Instant::now() + MCP_AUTH_CHOICE_TTL,
+            });
+        }
+
+        {
+            let mut s = slot.0.lock().await;
+            if s.as_ref().map(|p| p.id) == Some(req_a_id) {
+                s.take();
+            }
+        }
+
+        let s = slot.0.lock().await;
+        assert_eq!(s.as_ref().map(|p| p.id), Some(req_b_id));
     }
 
     #[test]

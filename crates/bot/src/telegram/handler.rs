@@ -22,7 +22,11 @@ use crate::cc::markdown_utils::html_escape;
 use super::BotType;
 #[cfg(test)]
 use super::ThinkingVisibility;
-use super::mcp_auth_choice::parse_token_input;
+use super::mcp_auth_choice::{
+    AuthChoiceSignals, AuthDetectionResult as AuthChoiceDetectionResult, MCP_AUTH_CHOICE_TTL,
+    McpAuthChoice, McpAuthRecommendation, PendingMcpAuthChoiceRequest, PendingMcpAuthChoiceSlot,
+    next_mcp_auth_choice_id, parse_token_input, recommend_auth_choice, render_auth_choice_keyboard,
+};
 use super::oauth_callback::PendingAuthMap;
 use super::session::{
     activate_session, create_session, deactivate_current, effective_thread_id,
@@ -652,6 +656,7 @@ pub async fn handle_mcp(
     home: Arc<RightHome>,
     internal: Arc<InternalApi>,
     pending_token_slot: Arc<PendingTokenSlot>,
+    pending_auth_choice_slot: Arc<PendingMcpAuthChoiceSlot>,
     ssh_config: Arc<SshConfigPath>,
     settings: Arc<AgentSettings>,
 ) -> ResponseResult<()> {
@@ -699,8 +704,7 @@ pub async fn handle_mcp(
                 &msg,
                 &rest,
                 &agent_dir.0,
-                &internal.0,
-                &pending_token_slot,
+                &pending_auth_choice_slot,
                 ssh_config.0.as_deref(),
                 settings.resolved_sandbox.as_deref(),
             )
@@ -1097,11 +1101,9 @@ async fn dcr_failure_fallback(
 /// `/mcp add <name> <url>` -- add an MCP server via the internal aggregator API.
 ///
 /// Flow:
-/// 1. Strip query string, try OAuth AS discovery on bare URL
-/// 2. If OAuth found: register without auth, tell user to `/mcp auth`
-/// 3. Otherwise determine auth type (query_string / haiku detection / bearer default)
-/// 4. If bearer/header: ask user for token via `PendingTokenSlot`
-/// 5. Register server with auth fields (connection verified server-side)
+/// 1. Strip query string and compute auth signals
+/// 2. Run OAuth/Header detection only when useful for public URLs
+/// 3. Park a pending auth-choice request and show an inline keyboard
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 async fn handle_mcp_add(
@@ -1109,8 +1111,7 @@ async fn handle_mcp_add(
     msg: &Message,
     config_str: &str,
     agent_dir: &Path,
-    internal: &right_mcp::internal_client::InternalClient,
-    pending_token_slot: &PendingTokenSlot,
+    pending_auth_choice_slot: &PendingMcpAuthChoiceSlot,
     ssh_config_path: Option<&Path>,
     resolved_sandbox: Option<&str>,
 ) -> Result<(), RequestError> {
@@ -1147,66 +1148,31 @@ async fn handle_mcp_add(
         .unwrap_or("unknown");
     let eff_thread_id = effective_thread_id(msg);
 
-    // Step 1: Try OAuth AS discovery
-    bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-        .await
-        .ok();
-    tracing::info!(url = %bare_url, "mcp add: starting OAuth AS discovery");
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let oauth_result = right_mcp::oauth::discover_as(&http_client, &bare_url).await;
-    let oauth_discovered = oauth_result.is_ok();
-    tracing::info!(url = %bare_url, oauth_discovered, err = ?oauth_result.err(), "mcp add: OAuth AS discovery complete");
+    let is_loopback = right_mcp::credentials::is_loopback_url(original_url);
+    let is_public = right_mcp::credentials::is_public_url(&bare_url);
 
-    if oauth_discovered {
-        // OAuth server — register without auth, tell user to run /mcp auth
+    let oauth_discovered = if !has_query && is_public {
         bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
             .await
             .ok();
-        tracing::info!(agent = agent_name, server = name, url = %bare_url, "mcp add: registering OAuth server via internal API");
-        match internal
-            .mcp_add(agent_name, name, &bare_url, Some("oauth"), None, None)
-            .await
-        {
-            Ok(resp) => {
-                let escaped = html_escape(name);
-                let mut reply = format!("Added MCP server <b>{escaped}</b> (OAuth detected).");
-                if let Some(ref w) = resp.warning {
-                    reply.push_str(&format!("\n{}", html_escape(w)));
-                }
-                reply.push_str(&format!(
-                    "\nRun <code>/mcp auth {name}</code> to authenticate."
-                ));
-                send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
-            }
-            Err(e) => {
-                tracing::warn!(server = name, err = %format!("{e:#}"), "mcp add: internal API registration failed");
-                let escaped_err = html_escape(&format!("{e:#}"));
-                send_html_reply(
-                    bot,
-                    msg.chat.id,
-                    eff_thread_id,
-                    &format!("Failed: {escaped_err}"),
-                )
-                .await?;
-            }
-        }
-        return Ok(());
-    }
+        tracing::info!(url = %bare_url, "mcp add: starting OAuth AS discovery");
+        let http_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        let oauth_result = right_mcp::oauth::discover_as(&http_client, &bare_url).await;
+        let discovered = oauth_result.is_ok();
+        tracing::info!(url = %bare_url, oauth_discovered = discovered, err = ?oauth_result.err(), "mcp add: OAuth AS discovery complete");
+        discovered
+    } else {
+        false
+    };
 
-    // Step 2: Determine auth type for non-OAuth servers
-    tracing::info!(url = %bare_url, "mcp add: determining auth type (non-OAuth path)");
-    let is_public = right_mcp::credentials::is_public_url(&bare_url);
-
-    let (auth_type, auth_header): (String, Option<String>) = if has_query {
-        ("query_string".into(), None)
-    } else if is_public {
+    let detection = if !has_query && !oauth_discovered && is_public {
         bot.send_message(msg.chat.id, "Detecting authentication method...")
             .await?;
-        detect_auth_with_typing_indicator(
+        let (auth_type, header_name) = detect_auth_with_typing_indicator(
             bot,
             msg.chat.id,
             &bare_url,
@@ -1214,55 +1180,115 @@ async fn handle_mcp_add(
             ssh_config_path,
             resolved_sandbox,
         )
-        .await
+        .await;
+        Some(AuthChoiceDetectionResult {
+            auth_type,
+            header_name,
+        })
     } else {
-        // Private/local — assume bearer
-        ("bearer".into(), None)
+        None
     };
 
-    // Step 3: If no token needed (query_string), register immediately.
-    // If token needed, spawn a background task so the dispatcher stays unblocked
-    // and can deliver the user's next message to the intercept slot.
-    if auth_type != "bearer" && auth_type != "header" {
-        // query_string — register immediately, no token needed
-        tracing::info!(url = %bare_url, %auth_type, "mcp add: registering server (no token)");
-        match internal
-            .mcp_add(agent_name, name, original_url, Some(&auth_type), None, None)
-            .await
-        {
-            Ok(resp) => {
-                let escaped = html_escape(name);
-                let mut reply = format!("Added MCP server <b>{escaped}</b>.");
-                if resp.tools_count > 0 {
-                    reply.push_str(&format!(" {} tools available.", resp.tools_count));
-                }
-                if let Some(ref w) = resp.warning {
-                    reply.push_str(&format!("\n{}", html_escape(w)));
-                }
-                send_html_reply(bot, msg.chat.id, eff_thread_id, &reply).await?;
-            }
-            Err(e) => {
-                send_html_reply(bot, msg.chat.id, eff_thread_id, &format!("Failed: {e:#}")).await?;
-            }
-        }
-        return Ok(());
-    }
+    let recommendation = recommend_auth_choice(AuthChoiceSignals {
+        has_query,
+        oauth_discovered,
+        is_loopback,
+        is_public,
+        detection: detection.as_ref(),
+    });
 
-    // Token needed — prompt user and spawn background task to wait + register.
-    // Must return from handler so the dispatcher can deliver the token message.
-    request_token_and_register(
-        bot.clone(),
+    prompt_mcp_auth_choice(
+        bot,
         msg.chat.id,
         eff_thread_id,
-        right_mcp::internal_client::InternalClient::new(internal.socket_path()),
         agent_name.to_string(),
         name.to_string(),
-        bare_url.to_string(),
-        auth_type,
-        auth_header,
-        pending_token_slot.clone(),
+        original_url.to_string(),
+        bare_url,
+        has_query,
+        recommendation,
+        pending_auth_choice_slot,
     )
     .await
+}
+
+/// Park an `/mcp add` auth-choice request and prompt the user with the
+/// available registration modes. Callback handling is wired in the next task.
+#[allow(clippy::too_many_arguments)]
+async fn prompt_mcp_auth_choice(
+    bot: &BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    agent_name: String,
+    server_name: String,
+    original_url: String,
+    bare_url: String,
+    has_query: bool,
+    recommendation: McpAuthRecommendation,
+    pending_auth_choice_slot: &PendingMcpAuthChoiceSlot,
+) -> Result<(), RequestError> {
+    let request_id = next_mcp_auth_choice_id();
+    let prev = {
+        let mut slot = pending_auth_choice_slot.0.lock().await;
+        let prev = slot.take();
+        *slot = Some(PendingMcpAuthChoiceRequest {
+            id: request_id,
+            chat_id: chat_id.0,
+            thread_id: eff_thread_id,
+            agent_name,
+            server_name: server_name.clone(),
+            original_url,
+            bare_url,
+            has_query,
+            recommendation: recommendation.clone(),
+            expires_at: std::time::Instant::now() + MCP_AUTH_CHOICE_TTL,
+        });
+        prev
+    };
+
+    if let Some(prev) = prev {
+        let prev_chat_id = teloxide::types::ChatId(prev.chat_id);
+        let mut send = bot.send_message(
+            prev_chat_id,
+            "Previous MCP auth choice request superseded by a new /mcp command.",
+        );
+        if prev.thread_id != 0 {
+            send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+                prev.thread_id as i32,
+            )));
+        }
+        send.await.ok();
+    }
+
+    let recommendation_text = match recommendation.choice {
+        McpAuthChoice::OAuth => "OAuth".to_string(),
+        McpAuthChoice::Header => match recommendation.header_name.as_deref() {
+            Some(header) if recommendation.header_auth_type == "header" => {
+                format!("Header ({header})")
+            }
+            _ => "Header (Authorization: Bearer)".to_string(),
+        },
+        McpAuthChoice::UrlAsIs => "URL as-is".to_string(),
+    };
+    let mut send = bot
+        .send_message(
+            chat_id,
+            format!(
+                "Choose authentication method for {server_name}. Recommended: {recommendation_text}."
+            ),
+        )
+        .reply_markup(render_auth_choice_keyboard(
+            request_id,
+            recommendation.choice,
+        ));
+    if eff_thread_id != 0 {
+        send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+            eff_thread_id as i32,
+        )));
+    }
+    send.await?;
+
+    Ok(())
 }
 
 /// Prompt the user for an auth token, then spawn a background task that waits
