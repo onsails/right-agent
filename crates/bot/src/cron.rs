@@ -101,6 +101,20 @@ pub(crate) fn is_lock_fresh(
     chrono::Utc::now() - lock.heartbeat < ttl
 }
 
+fn effective_lock_ttl(spec: &CronSpec) -> &str {
+    if let Some(lock_ttl) = spec.lock_ttl.as_deref() {
+        return lock_ttl;
+    }
+    if matches!(
+        &spec.schedule_kind,
+        right_agent::cron_spec::ScheduleKind::Immediate
+    ) {
+        right_agent::cron_spec::IMMEDIATE_DEFAULT_LOCK_TTL
+    } else {
+        "30m"
+    }
+}
+
 /// Delete old cron log files for a job, keeping the most recent `keep` files.
 async fn cleanup_old_logs(
     job_name: &str,
@@ -295,7 +309,7 @@ async fn execute_job(
     use std::process::Stdio;
 
     // Lock check (CRON-04)
-    let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+    let lock_ttl = effective_lock_ttl(spec);
     if is_lock_fresh(agent_dir, job_name, lock_ttl) {
         tracing::info!(job = %job_name, "skipping — previous run still active (lock fresh)");
         return;
@@ -1062,7 +1076,7 @@ fn fire_one_shot_specs(
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     for (name, spec) in specs {
-        let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+        let lock_ttl = effective_lock_ttl(&spec);
         if is_lock_fresh(agent_dir, &name, lock_ttl) {
             tracing::info!(job = %name, kind = kind_label, "one-shot job locked — skipping until next tick");
             continue;
@@ -1241,7 +1255,7 @@ fn reconcile_jobs(
             }
 
             // Check lock — if locked, skip (trigger lost, same as schedule miss while locked)
-            let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+            let lock_ttl = effective_lock_ttl(spec);
             if is_lock_fresh(agent_dir, name, lock_ttl) {
                 tracing::info!(job = %name, "triggered but locked — skipping");
                 continue;
@@ -1504,6 +1518,46 @@ mod tests {
         };
         std::fs::write(&lock_path, serde_json::to_string(&lock).unwrap()).unwrap();
         assert!(!is_lock_fresh(dir.path(), "my-job", "30m"));
+    }
+
+    #[test]
+    fn default_lock_ttl_uses_six_hours_for_immediate_only() {
+        use right_agent::cron_spec::{CronSpec, ScheduleKind};
+
+        let immediate = CronSpec {
+            schedule_kind: ScheduleKind::Immediate,
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        let recurring = CronSpec {
+            schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
+            ..immediate.clone()
+        };
+
+        let dir = tempdir().unwrap();
+        let lock_dir = dir.path().join("crons").join(".locks");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("my-job.json");
+        let three_hours_ago = chrono::Utc::now() - chrono::Duration::hours(3);
+        let lock = LockFile {
+            heartbeat: three_hours_ago,
+        };
+        std::fs::write(&lock_path, serde_json::to_string(&lock).unwrap()).unwrap();
+
+        assert!(is_lock_fresh(
+            dir.path(),
+            "my-job",
+            effective_lock_ttl(&immediate)
+        ));
+        assert!(!is_lock_fresh(
+            dir.path(),
+            "my-job",
+            effective_lock_ttl(&recurring)
+        ));
     }
 
     // -- CronReplyOutput parser tests (stream-json NDJSON format) --

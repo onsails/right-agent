@@ -341,6 +341,21 @@ fn load_specs_skips_legacy_bg_schedule_rows() {
 }
 
 #[test]
+fn load_specs_returns_err_for_non_bg_malformed_rows() {
+    let conn = setup_db();
+    conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
+             VALUES ('bad-run-at', '', 'bad run_at prompt', 1.0, 0, 'not-a-date', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+    let err = load_specs_from_db(&conn).unwrap_err();
+
+    assert!(err.to_string().contains("invalid run_at datetime"));
+}
+
+#[test]
 fn trigger_spec_sets_timestamp() {
     let conn = setup_db();
     create_spec(&conn, "trig-job", "*/5 * * * *", "do stuff", None, None).unwrap();
