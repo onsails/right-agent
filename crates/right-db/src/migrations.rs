@@ -198,7 +198,7 @@ fn v22_async_runs(tx: &Transaction) -> Result<(), HookError> {
          SELECT
             cr.id,
             CASE
-              WHEN cr.job_name LIKE 'bg-%'
+              WHEN (cr.job_name LIKE 'bg-%' AND cs.job_name IS NULL)
                 OR cs.schedule LIKE '@bg:%'
                 OR (
                   cs.schedule = '@immediate'
@@ -226,7 +226,7 @@ fn v22_async_runs(tx: &Transaction) -> Result<(), HookError> {
             cr.target_thread_id,
             cr.status,
             CASE
-              WHEN cr.job_name LIKE 'bg-%'
+              WHEN (cr.job_name LIKE 'bg-%' AND cs.job_name IS NULL)
                 OR cs.schedule LIKE '@bg:%'
                 OR (
                   cs.schedule = '@immediate'
@@ -1365,7 +1365,9 @@ continue started background work',
     }
 
     #[test]
-    fn v22_detects_background_run_by_job_name_without_bg_schedule() {
+    fn v22_detects_background_run_by_bg_job_name_when_spec_is_missing() {
+        // Orphaned cron_runs row (cron_specs row absent) with a `bg-` prefixed
+        // job_name is the legacy shape we still want to classify as background.
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_version(&mut conn, 21).unwrap();
 
@@ -1390,6 +1392,56 @@ continue started background work',
             .unwrap();
         assert_eq!(row.0, "background");
         assert_eq!(row.1.as_deref(), Some("spawned"));
+    }
+
+    #[test]
+    fn v22_keeps_user_cron_with_bg_prefix_classified_as_cron() {
+        // A user-created recurring cron job whose name happens to start with
+        // `bg-` (allowed by validate_job_name) and whose spec is still present
+        // must NOT be reclassified as background. Only the `bg-` + orphaned-
+        // spec combination survives as a background heuristic.
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                target_chat_id
+             ) VALUES (
+                'bg-status-check', '0 9 * * *', 'check status', 1.0,
+                '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                -100
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+             VALUES (
+                'bg-status-check-run', 'bg-status-check', '2026-05-18T09:00:00Z',
+                'success', '/log/bg-status-check-run.ndjson', 'pending'
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT kind, handoff_state FROM async_runs WHERE id = 'bg-status-check-run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row.0, "cron",
+            "user cron job with `bg-` prefix and live spec must remain kind='cron'"
+        );
+        assert!(
+            row.1.is_none(),
+            "user cron job must not be marked as a spawned handoff"
+        );
     }
 
     #[test]

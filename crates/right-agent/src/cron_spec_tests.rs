@@ -341,7 +341,7 @@ fn load_specs_skips_legacy_bg_schedule_rows() {
 }
 
 #[test]
-fn load_specs_returns_err_for_non_bg_malformed_rows() {
+fn load_specs_skips_non_bg_malformed_rows() {
     let conn = setup_db();
     conn.execute(
             "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
@@ -349,10 +349,20 @@ fn load_specs_returns_err_for_non_bg_malformed_rows() {
             [],
         )
         .unwrap();
+    conn.execute(
+            "INSERT INTO cron_specs (job_name, schedule, prompt, max_budget_usd, recurring, run_at, created_at, updated_at) \
+             VALUES ('normal', '*/5 * * * *', 'normal cron prompt', 1.0, 1, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
 
-    let err = load_specs_from_db(&conn).unwrap_err();
+    let specs = load_specs_from_db(&conn).unwrap();
 
-    assert!(err.to_string().contains("invalid run_at datetime"));
+    assert!(!specs.contains_key("bad-run-at"));
+    assert!(matches!(
+        specs["normal"].schedule_kind,
+        ScheduleKind::Recurring(_)
+    ));
 }
 
 #[test]

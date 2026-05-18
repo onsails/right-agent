@@ -581,7 +581,7 @@ pub fn format_cc_input(msgs: &[InputMessage]) -> Option<String> {
 }
 
 /// Escape a string for inclusion in YAML double-quoted scalar.
-fn yaml_escape_string(s: &str) -> String {
+pub(crate) fn yaml_escape_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")

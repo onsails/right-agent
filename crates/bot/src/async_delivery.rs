@@ -180,13 +180,6 @@ pub(crate) fn select_delivery_candidate(
     Ok(Some((pending, 0)))
 }
 
-/// Escape a string for use inside YAML double-quoted scalars.
-fn yaml_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-}
-
 /// Instruction prefix for the delivery CC session (success path).
 ///
 /// This is approach A: instruction in stdin. If Haiku ignores these instructions
@@ -241,7 +234,10 @@ Here is the YAML report of the background task:
 ///
 /// The output begins with an instruction prefix selected by kind/status,
 /// followed by the YAML payload.
-pub(crate) fn format_async_yaml(pending: &PendingAsyncResult, skipped: u32) -> String {
+pub(crate) fn format_async_yaml(
+    pending: &PendingAsyncResult,
+    skipped: u32,
+) -> Result<String, serde_json::Error> {
     let total = skipped + 1;
     let instruction = match (pending.kind.as_str(), pending.status.as_str()) {
         ("background", "failed") => BACKGROUND_DELIVERY_INSTRUCTION_FAILURE,
@@ -254,50 +250,61 @@ pub(crate) fn format_async_yaml(pending: &PendingAsyncResult, skipped: u32) -> S
     if is_background {
         let label = pending.producer_ref.as_deref().unwrap_or("background");
         output.push_str("\nbackground_result:\n");
-        output.push_str(&format!("  label: \"{}\"\n", yaml_escape(label)));
+        output.push_str(&format!(
+            "  label: \"{}\"\n",
+            crate::telegram::attachments::yaml_escape_string(label)
+        ));
     } else {
         let job = pending.producer_ref.as_deref().unwrap_or("cron");
         output.push_str("\ncron_result:\n");
-        output.push_str(&format!("  job: \"{}\"\n", yaml_escape(job)));
+        output.push_str(&format!(
+            "  job: \"{}\"\n",
+            crate::telegram::attachments::yaml_escape_string(job)
+        ));
         output.push_str(&format!("  runs_total: {total}\n"));
         if skipped > 0 {
             output.push_str(&format!("  skipped_runs: {skipped}\n"));
         }
     }
 
-    if let Ok(notify) = serde_json::from_str::<crate::cron::CronNotify>(&pending.notify_json) {
-        output.push_str("  result:\n");
-        output.push_str("    notify:\n");
-        output.push_str(&format!(
-            "      content: \"{}\"\n",
-            yaml_escape(&notify.content)
-        ));
-        if let Some(ref atts) = notify.attachments
-            && !atts.is_empty()
-        {
-            output.push_str("      attachments:\n");
-            for att in atts {
-                let kind_str = serde_json::to_value(att.kind)
-                    .ok()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_else(|| "document".to_string());
-                output.push_str(&format!("        - type: \"{}\"\n", yaml_escape(&kind_str)));
-                output.push_str(&format!("          path: \"{}\"\n", yaml_escape(&att.path)));
-                if let Some(ref caption) = att.caption {
-                    output.push_str(&format!(
-                        "          caption: \"{}\"\n",
-                        yaml_escape(caption)
-                    ));
-                }
+    let notify = serde_json::from_str::<crate::cron::CronNotify>(&pending.notify_json)?;
+    output.push_str("  result:\n");
+    output.push_str("    notify:\n");
+    output.push_str(&format!(
+        "      content: \"{}\"\n",
+        crate::telegram::attachments::yaml_escape_string(&notify.content)
+    ));
+    if let Some(ref atts) = notify.attachments
+        && !atts.is_empty()
+    {
+        output.push_str("      attachments:\n");
+        for att in atts {
+            let kind_str = serde_json::to_value(att.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "document".to_string());
+            output.push_str(&format!(
+                "        - type: \"{}\"\n",
+                crate::telegram::attachments::yaml_escape_string(&kind_str)
+            ));
+            output.push_str(&format!(
+                "          path: \"{}\"\n",
+                crate::telegram::attachments::yaml_escape_string(&att.path)
+            ));
+            if let Some(ref caption) = att.caption {
+                output.push_str(&format!(
+                    "          caption: \"{}\"\n",
+                    crate::telegram::attachments::yaml_escape_string(caption)
+                ));
             }
         }
-        output.push_str(&format!(
-            "    summary: \"{}\"\n",
-            yaml_escape(&pending.summary)
-        ));
     }
+    output.push_str(&format!(
+        "    summary: \"{}\"\n",
+        crate::telegram::attachments::yaml_escape_string(&pending.summary)
+    ));
 
-    output
+    Ok(output)
 }
 
 use right_platform_knobs::IDLE_THRESHOLD_SECS;
@@ -474,7 +481,22 @@ pub(crate) async fn run_delivery_loop(
             }
         };
 
-        let yaml = format_async_yaml(&to_deliver, skipped);
+        let yaml = match format_async_yaml(&to_deliver, skipped) {
+            Ok(y) => y,
+            Err(e) => {
+                tracing::error!(
+                    kind = %to_deliver.kind,
+                    label = %pending_label(&to_deliver),
+                    run_id = %to_deliver.id,
+                    "async delivery: notify_json deserialization failed, marking delivery failed: {e:#}"
+                );
+                if let Err(db_err) = mark_delivery_outcome(&conn, &to_deliver.id, "failed") {
+                    tracing::error!(run_id = %to_deliver.id, "mark failed for malformed notify_json failed: {db_err:#}");
+                    delivered_in_memory.insert(to_deliver.id.clone());
+                }
+                continue;
+            }
+        };
         tracing::info!(
             kind = %to_deliver.kind,
             label = %pending_label(&to_deliver),
@@ -516,9 +538,16 @@ pub(crate) async fn run_delivery_loop(
                     tracing::error!(run_id = %to_deliver.id, "delivery DB update failed: {e:#}");
                     delivered_in_memory.insert(to_deliver.id.clone());
                 }
-                let outbox_dir = agent_dir.join("outbox").join("cron").join(&to_deliver.id);
-                if outbox_dir.exists()
-                    && let Err(e) = std::fs::remove_dir_all(&outbox_dir)
+                let outbox_subdir = match to_deliver.kind.as_str() {
+                    "background" => "background",
+                    _ => "cron",
+                };
+                let outbox_dir = agent_dir
+                    .join("outbox")
+                    .join(outbox_subdir)
+                    .join(&to_deliver.id);
+                if let Err(e) = std::fs::remove_dir_all(&outbox_dir)
+                    && e.kind() != std::io::ErrorKind::NotFound
                 {
                     tracing::warn!(run_id = %to_deliver.id, "outbox cleanup failed: {e:#}");
                 }
@@ -1221,7 +1250,7 @@ mod tests {
             target_chat_id: None,
             target_thread_id: None,
         };
-        let output = format_async_yaml(&pending, 2);
+        let output = format_async_yaml(&pending, 2).unwrap();
         // Instruction prefix assertions
         assert!(output.starts_with("You are delivering a cron job result"));
         assert!(output.contains("VERBATIM"));
@@ -1247,7 +1276,7 @@ mod tests {
             target_chat_id: None,
             target_thread_id: None,
         };
-        let output = format_async_yaml(&pending, 0);
+        let output = format_async_yaml(&pending, 0).unwrap();
         assert!(output.starts_with("You are delivering a cron job result"));
         assert!(output.contains("runs_total: 1"));
         assert!(!output.contains("skipped_runs"));
@@ -1265,7 +1294,7 @@ mod tests {
             target_chat_id: None,
             target_thread_id: None,
         };
-        let out = format_async_yaml(&pending, 0);
+        let out = format_async_yaml(&pending, 0).unwrap();
         assert!(out.contains("did not complete successfully"));
         assert!(!out.contains("send it VERBATIM"));
     }
@@ -1282,7 +1311,7 @@ mod tests {
             target_chat_id: None,
             target_thread_id: None,
         };
-        let out = format_async_yaml(&pending, 0);
+        let out = format_async_yaml(&pending, 0).unwrap();
         assert!(out.contains("VERBATIM"));
     }
 
@@ -1299,7 +1328,7 @@ mod tests {
             target_thread_id: None,
         };
 
-        let out = format_async_yaml(&pending, 0);
+        let out = format_async_yaml(&pending, 0).unwrap();
         assert!(out.starts_with("You are delivering a background task result"));
         assert!(out.contains("background_result:"));
         assert!(out.contains("label: \"background\""));
@@ -1320,7 +1349,7 @@ mod tests {
             target_thread_id: None,
         };
 
-        let out = format_async_yaml(&pending, 0);
+        let out = format_async_yaml(&pending, 0).unwrap();
         assert!(out.contains("background task below did not complete successfully"));
         assert!(out.contains("label: \"custom-bg\""));
         assert!(out.contains("Background work failed"));

@@ -41,7 +41,7 @@ pub(crate) struct CronNotify {
 }
 
 /// Extract the filename component from a sandbox attachment path.
-fn attachment_filename(path: &str) -> String {
+pub(crate) fn attachment_filename(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
         .unwrap_or_default()
@@ -626,8 +626,11 @@ async fn execute_job(
         "failed"
     };
 
-    // DB update on completion (D-04)
-    update_run_record(&conn, &run_id, exit_code, status);
+    // The terminal `status='success'` transition is deferred to the success branch
+    // below so it stays atomic with the output persist. The failure branch performs
+    // its own `update_run_record(failed)` before reflection. This prevents a state
+    // where `status='success'` is committed but output preservation fails, leaving
+    // the row at `delivery_status='none'` and silently dropping user-visible output.
 
     // Delete lock on completion (CRON-04)
     std::fs::remove_file(&lock_path).ok();
@@ -717,32 +720,52 @@ async fn execute_job(
                     None
                 };
 
-                let delivery_status = match persist_successful_cron_output(
-                    &conn,
-                    &run_id,
-                    &cron_output,
-                    notify_json.as_deref(),
-                ) {
-                    Ok(status) => status,
-                    Err(e) => {
-                        tracing::error!(job = %job_name, "failed to persist cron output to DB: {e:#}");
-                        "error"
-                    }
-                };
+                // Persist output and flip status='success' atomically. If either
+                // write fails, roll back and mark the row 'failed' so the operator
+                // sees the run as broken instead of stuck at 'success' with no
+                // delivery payload.
+                let tx_result: Result<&'static str, rusqlite::Error> = (|| {
+                    let tx = conn.unchecked_transaction()?;
+                    let delivery_status = persist_successful_cron_output(
+                        &tx,
+                        &run_id,
+                        &cron_output,
+                        notify_json.as_deref(),
+                    )?;
+                    right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")?;
+                    tx.commit()?;
+                    Ok(delivery_status)
+                })();
 
-                tracing::info!(
-                    job = %job_name,
-                    has_notify = cron_output.notify.is_some(),
-                    delivery_status,
-                    no_notify_reason = cron_output.no_notify_reason.as_deref().unwrap_or("-"),
-                    "cron output persisted to DB"
-                );
+                match tx_result {
+                    Ok(delivery_status) => {
+                        tracing::info!(
+                            job = %job_name,
+                            has_notify = cron_output.notify.is_some(),
+                            delivery_status,
+                            no_notify_reason = cron_output.no_notify_reason.as_deref().unwrap_or("-"),
+                            "cron output persisted to DB"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            job = %job_name,
+                            "failed to persist cron output atomically; marking run failed: {e:#}"
+                        );
+                        update_failed_run_record(&conn, &run_id, exit_code);
+                    }
+                }
             }
             Err(reason) => {
                 tracing::warn!(job = %job_name, reason, "failed to parse cron output");
+                update_failed_run_record(&conn, &run_id, exit_code);
             }
         }
     } else {
+        // Failure path: commit terminal status='failed' before reflection runs.
+        // Reflection then writes its own failure notify via persist_run_output,
+        // which is consistent with status='failed'.
+        update_run_record(&conn, &run_id, exit_code, "failed");
         let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
         let raw_detail = find_last_result_line(&collected_lines)
             .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())

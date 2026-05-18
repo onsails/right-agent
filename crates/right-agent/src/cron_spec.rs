@@ -695,13 +695,10 @@ pub fn load_specs_from_db(
             Err(e) => {
                 if schedule.starts_with(BG_SENTINEL_PREFIX) {
                     tracing::warn!(job = %job_name, "skipping legacy background schedule: {e}");
-                    continue;
+                } else {
+                    tracing::error!(job = %job_name, schedule = %schedule, "skipping unparseable cron schedule: {e}");
                 }
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    1,
-                    rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-                ));
+                continue;
             }
         };
 
