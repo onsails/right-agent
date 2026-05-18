@@ -46,7 +46,18 @@ pub struct CronRunJsonRow {
     pub no_notify_reason: Option<String>,
 }
 
+fn require_updated(rows: usize) -> rusqlite::Result<()> {
+    if rows == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
 pub fn insert_running_cron_run(conn: &Connection, run: NewCronRun<'_>) -> rusqlite::Result<()> {
+    let target_chat_id = run.target_chat_id.ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName("target_chat_id is required".into())
+    })?;
+
     conn.execute(
         "INSERT INTO async_runs (
             id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
@@ -60,7 +71,7 @@ pub fn insert_running_cron_run(conn: &Connection, run: NewCronRun<'_>) -> rusqli
         params![
             run.id,
             run.job_name,
-            run.target_chat_id.unwrap_or(0),
+            target_chat_id,
             run.target_thread_id,
             run.started_at,
             run.log_path,
@@ -101,7 +112,7 @@ pub fn mark_background_spawned(
     started_at: &str,
     log_path: &str,
 ) -> rusqlite::Result<()> {
-    conn.execute(
+    let rows = conn.execute(
         "UPDATE async_runs
          SET status = 'running',
              handoff_state = 'spawned',
@@ -113,7 +124,7 @@ pub fn mark_background_spawned(
          WHERE id = ?1",
         params![run_id, started_at, log_path],
     )?;
-    Ok(())
+    require_updated(rows)
 }
 
 pub fn persist_run_output(
@@ -121,6 +132,12 @@ pub fn persist_run_output(
     run_id: &str,
     output: RunOutput<'_>,
 ) -> rusqlite::Result<()> {
+    if output.delivery_required && output.notify_json.is_none() {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "notify_json is required when delivery_required is true".into(),
+        ));
+    }
+
     let now = Utc::now().to_rfc3339();
     let delivery_status = if output.delivery_required {
         "pending"
@@ -128,7 +145,7 @@ pub fn persist_run_output(
         "none"
     };
 
-    conn.execute(
+    let rows = conn.execute(
         "UPDATE async_runs
          SET summary = ?2,
              notify_json = ?3,
@@ -149,7 +166,7 @@ pub fn persist_run_output(
             now,
         ],
     )?;
-    Ok(())
+    require_updated(rows)
 }
 
 pub fn finish_run(
@@ -161,7 +178,7 @@ pub fn finish_run(
     let now = Utc::now().to_rfc3339();
     let exit_code = exit_code.map(i64::from);
 
-    conn.execute(
+    let rows = conn.execute(
         "UPDATE async_runs
          SET finished_at = ?2,
              exit_code = ?3,
@@ -170,7 +187,7 @@ pub fn finish_run(
          WHERE id = ?1",
         params![run_id, now, exit_code, status],
     )?;
-    Ok(())
+    require_updated(rows)
 }
 
 pub fn cron_run_to_json(row: &CronRunJsonRow) -> serde_json::Value {
@@ -236,6 +253,34 @@ mod tests {
     }
 
     #[test]
+    fn insert_running_cron_run_requires_target_chat_id() {
+        let conn = setup();
+        let err = insert_running_cron_run(
+            &conn,
+            NewCronRun {
+                id: "run-1",
+                job_name: "job-a",
+                started_at: "2026-05-18T10:00:00Z",
+                log_path: "/log/run-1.ndjson",
+                target_chat_id: None,
+                target_thread_id: None,
+            },
+        )
+        .expect_err("missing target_chat_id should fail");
+
+        assert!(matches!(
+            err,
+            rusqlite::Error::InvalidParameterName(ref name)
+                if name == "target_chat_id is required"
+        ));
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM async_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn mark_run_output_with_notify_makes_delivery_pending() {
         let conn = setup();
         insert_running_cron_run(
@@ -275,6 +320,51 @@ mod tests {
     }
 
     #[test]
+    fn persist_run_output_requires_notify_when_delivery_required() {
+        let conn = setup();
+        insert_running_cron_run(
+            &conn,
+            NewCronRun {
+                id: "run-1",
+                job_name: "job-a",
+                started_at: "2026-05-18T10:00:00Z",
+                log_path: "/log/run-1.ndjson",
+                target_chat_id: Some(-100),
+                target_thread_id: None,
+            },
+        )
+        .unwrap();
+
+        let err = persist_run_output(
+            &conn,
+            "run-1",
+            RunOutput {
+                summary: Some("summary"),
+                notify_json: None,
+                no_notify_reason: None,
+                error_json: None,
+                delivery_required: true,
+            },
+        )
+        .expect_err("delivery_required without notify_json should fail");
+
+        assert!(matches!(
+            err,
+            rusqlite::Error::InvalidParameterName(ref name)
+                if name == "notify_json is required when delivery_required is true"
+        ));
+
+        let row: (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT delivery_required, delivery_status, notify_json FROM async_runs WHERE id='run-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, "none".into(), None));
+    }
+
+    #[test]
     fn cron_run_to_json_parses_notify() {
         let row = CronRunJsonRow {
             id: "run-1".into(),
@@ -294,6 +384,33 @@ mod tests {
         let json = cron_run_to_json(&row);
         assert_eq!(json["job_name"], "job-a");
         assert_eq!(json["notify"]["content"], "hello");
+    }
+
+    #[test]
+    fn update_helpers_return_err_for_missing_run_id() {
+        let conn = setup();
+        let spawned_err =
+            mark_background_spawned(&conn, "missing", "2026-05-18T10:01:00Z", "/log/bg-1.ndjson")
+                .expect_err("missing background run should fail");
+        assert!(matches!(spawned_err, rusqlite::Error::QueryReturnedNoRows));
+
+        let output_err = persist_run_output(
+            &conn,
+            "missing",
+            RunOutput {
+                summary: Some("summary"),
+                notify_json: Some("{\"content\":\"hi\"}"),
+                no_notify_reason: None,
+                error_json: None,
+                delivery_required: true,
+            },
+        )
+        .expect_err("missing output run should fail");
+        assert!(matches!(output_err, rusqlite::Error::QueryReturnedNoRows));
+
+        let finish_err = finish_run(&conn, "missing", Some(0), "success")
+            .expect_err("missing finished run should fail");
+        assert!(matches!(finish_err, rusqlite::Error::QueryReturnedNoRows));
     }
 
     #[test]
