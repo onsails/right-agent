@@ -188,7 +188,7 @@ Every CC invocation writes its full conversation graph to
 `/sandbox/.claude/projects/-sandbox/<session-uuid>.jsonl` inside the
 sandbox. The session UUID matches the `--session-id` we pass to
 `claude`, so the bot's session UUIDs (from the `sessions` table) and
-`cron_runs.id` map directly to JSONL filenames.
+`async_runs.run_session_id` values map directly to JSONL filenames.
 
 The `/right-reflect` bundled skill teaches the agent to read these
 files when the user asks "why did you ...?". When `/debug` is on,
