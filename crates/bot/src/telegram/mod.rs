@@ -79,6 +79,38 @@ pub(crate) type SessionLocks = Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>
 /// stale entries from a previous turn are dropped on exit.
 pub(crate) type BgRequests = Arc<DashMap<(i64, i64), u64>>;
 
+/// Per-(chat, thread) handoff gate set before a foreground turn is moved to
+/// background. Workers wait while a gate is present so the next foreground turn
+/// cannot mutate the main session before the background fork is confirmed.
+pub(crate) type BgHandoffGates = Arc<DashMap<(i64, i64), Arc<tokio::sync::Notify>>>;
+
+pub(crate) fn set_bg_handoff_gate(gates: &BgHandoffGates, key: (i64, i64)) {
+    gates
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
+}
+
+pub(crate) fn release_bg_handoff_gate(gates: &BgHandoffGates, key: (i64, i64)) {
+    if let Some((_, notify)) = gates.remove(&key) {
+        notify.notify_waiters();
+    }
+}
+
+pub(crate) async fn wait_for_bg_handoff_gate(gates: &BgHandoffGates, key: (i64, i64)) {
+    loop {
+        let Some(notify) = gates.get(&key).map(|entry| Arc::clone(entry.value())) else {
+            return;
+        };
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if gates.get(&key).is_none() {
+            return;
+        }
+        notified.await;
+    }
+}
+
 /// User-requested thinking visibility action from an inline callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThinkingToggleAction {
@@ -144,6 +176,7 @@ pub(crate) fn set_thinking_visibility(
 /// - `stop_tokens`: per-(chat, thread) cancellation tokens for in-flight CC subprocesses.
 /// - `session_locks`: per-main-session async mutex map (TOCTOU on session JSONL).
 /// - `bg_requests`: per-(chat, thread) Background-button request flags.
+/// - `bg_handoff_gates`: per-(chat, thread) foreground gate during background fork handoff.
 /// - `thinking_visibility`: per-(chat, thread) Show/Hide thinking state for active runs.
 /// - `progress`: per-foreground-invocation Telegram progress targets.
 #[derive(Clone)]
@@ -151,6 +184,7 @@ pub struct WorkerControlDeps {
     pub(crate) stop_tokens: StopTokens,
     pub(crate) session_locks: SessionLocks,
     pub(crate) bg_requests: BgRequests,
+    pub(crate) bg_handoff_gates: BgHandoffGates,
     pub(crate) thinking_visibility: ThinkingVisibility,
     pub(crate) progress: progress::ProgressState,
 }
@@ -232,6 +266,38 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[tokio::test]
+    async fn bg_handoff_wait_blocks_until_release() {
+        let gates: BgHandoffGates = Arc::new(DashMap::new());
+        let key = (42, 7);
+        set_bg_handoff_gate(&gates, key);
+
+        let waiter_gates = Arc::clone(&gates);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut waiter = tokio::spawn(async move {
+            started_tx.send(()).unwrap();
+            wait_for_bg_handoff_gate(&waiter_gates, key).await;
+        });
+        started_rx.await.unwrap();
+
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(20), &mut waiter)
+                .await
+                .is_err(),
+            "waiter must stay blocked while the gate is present"
+        );
+
+        release_bg_handoff_gate(&gates, key);
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should unblock after gate release")
+            .expect("waiter task should not panic");
+        assert!(
+            gates.get(&key).is_none(),
+            "release must remove the gate entry"
+        );
     }
 
     #[test]

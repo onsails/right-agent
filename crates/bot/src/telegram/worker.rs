@@ -226,6 +226,8 @@ pub struct WorkerContext {
     /// Per-(chat, thread) flag set by the bg callback. Worker checks after kill+wait
     /// to distinguish UserRequested backgrounding from auto-timeout.
     pub bg_requests: super::BgRequests,
+    /// Per-(chat, thread) gate held while a foreground turn is handed to background.
+    pub bg_handoff_gates: super::BgHandoffGates,
     /// Per-run thinking-preview visibility, mutated by Show/Hide thinking callbacks.
     pub(crate) thinking_visibility: super::ThinkingVisibility,
     /// Shared idle timestamp — worker updates after each reply sent.
@@ -911,6 +913,7 @@ pub fn spawn_worker(
                 "worker received message, starting debounce"
             );
             let batch = collect_batch(first, &mut rx).await;
+            super::wait_for_bg_handoff_gate(&ctx.bg_handoff_gates, key).await;
 
             // Group vs DM detection: used for tag derivation, live-thinking
             // suppression, and reply-to behavior across the batch.
@@ -1502,6 +1505,7 @@ pub fn spawn_worker(
                         Ok(c) => c,
                         Err(e) => {
                             tracing::error!(?key, "DB open for bg enqueue failed: {e:#}");
+                            super::release_bg_handoff_gate(&ctx.bg_handoff_gates, key);
                             send_error_to_telegram(
                                 &ctx,
                                 tg_chat_id,
@@ -1522,6 +1526,7 @@ pub fn spawn_worker(
                         Ok(name) => name,
                         Err(e) => {
                             tracing::error!(?key, "bg enqueue failed: {e}");
+                            super::release_bg_handoff_gate(&ctx.bg_handoff_gates, key);
                             send_error_to_telegram(
                                 &ctx,
                                 tg_chat_id,
@@ -1536,6 +1541,7 @@ pub fn spawn_worker(
                         }
                     };
                     tracing::info!(?key, %job_name, "background job enqueued");
+                    super::release_bg_handoff_gate(&ctx.bg_handoff_gates, key);
 
                     // 2. Edit thinking message to per-reason banner, clear keyboard.
                     if let Some(msg_id) = thinking_msg_id {
@@ -2914,6 +2920,7 @@ async fn invoke_cc(
     if bg_click_after_success {
         // bg click landed on a normally-finished turn — drop the flag so the
         // real reply still gets delivered.
+        super::release_bg_handoff_gate(&ctx.bg_handoff_gates, (chat_id, eff_thread_id));
         tracing::debug!(
             ?chat_id,
             turn_id,
