@@ -14,6 +14,7 @@ pub struct NewCronRun<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct NewBackgroundRun<'a> {
     pub id: &'a str,
+    pub producer_ref: Option<&'a str>,
     pub source_session_id: &'a str,
     pub run_session_id: &'a str,
     pub target_chat_id: i64,
@@ -86,16 +87,17 @@ pub fn insert_queued_background_run(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO async_runs (
-            id, kind, source_session_id, run_session_id, target_chat_id, target_thread_id,
+            id, kind, producer_ref, source_session_id, run_session_id, target_chat_id, target_thread_id,
             status, handoff_state, delivery_required, delivery_status,
             created_at, updated_at
          ) VALUES (
-            ?1, 'background', ?2, ?3, ?4, ?5,
+            ?1, 'background', ?2, ?3, ?4, ?5, ?6,
             'queued', 'queued', 0, 'none',
-            ?6, ?6
+            ?7, ?7
          )",
         params![
             run.id,
+            run.producer_ref,
             run.source_session_id,
             run.run_session_id,
             run.target_chat_id,
@@ -420,6 +422,7 @@ mod tests {
             &conn,
             NewBackgroundRun {
                 id: "bg-1",
+                producer_ref: Some("bg-job"),
                 source_session_id: "main-session",
                 run_session_id: "bg-session",
                 target_chat_id: -100,
@@ -429,17 +432,27 @@ mod tests {
         )
         .unwrap();
 
-        let queued: (String, String, String, i64, String) = conn
+        let queued: (String, Option<String>, String, String, i64, String) = conn
             .query_row(
-                "SELECT kind, source_session_id, handoff_state, delivery_required, delivery_status FROM async_runs WHERE id='bg-1'",
+                "SELECT kind, producer_ref, source_session_id, handoff_state, delivery_required, delivery_status FROM async_runs WHERE id='bg-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(
             queued,
             (
                 "background".into(),
+                Some("bg-job".into()),
                 "main-session".into(),
                 "queued".into(),
                 0,
