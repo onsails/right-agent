@@ -4,6 +4,26 @@
 > subsystem (see `AGENTS.md` → "Architecture docs split"). Code is
 > authoritative; this file may have drifted.
 
+## MCP Auth Choice Flow
+
+`/mcp add <name> <url>` treats detection as advice, not authority. The bot
+parses the original URL, derives a bare URL for probes, runs OAuth discovery
+when the bare URL is public and has no query string, and runs auth-header
+classification only when OAuth was not discovered. It then shows inline buttons
+for `OAuth`, `Header`, and `URL as-is`, marking the recommendation.
+
+No upstream MCP server is registered until the user clicks a button. `OAuth`
+registers the bare URL as `auth_type=oauth` and asks the user to run
+`/mcp auth <server>`. `Header` prompts for a token using the detected bearer or
+custom-header recommendation; the user can override with `HeaderName: token`.
+`URL as-is` registers the exact original URL without token/header injection,
+preserving query-string credentials.
+
+URL validation has two modes. Public detection remains strict HTTPS and excludes
+loopback/private/link-local hosts. Explicit user-managed registration allows
+loopback HTTP/HTTPS for local development MCP servers, while broad
+private/link-local ranges remain rejected.
+
 ## MCP Token Refresh
 
 ```
