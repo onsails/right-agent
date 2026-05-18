@@ -11,6 +11,47 @@ use tokio_util::sync::CancellationToken;
 /// Default interval between keepalive pings.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 
+const HEALTH_PROMPT: &str = "Reply exactly OK. Do not use tools.";
+
+// Pure probe helpers are wired into keepalive runtime flow in a later task.
+#[allow(dead_code)]
+const REPAIR_NOTICE: &str = "Right MCP stale needs-auth cache was repaired. Use current MCP tool availability, not previous disconnected status.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum ProbeInitDecision {
+    Healthy,
+    Repair,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn classify_init_status(status: crate::cc::stream::RightMcpInitStatus) -> ProbeInitDecision {
+    match status {
+        crate::cc::stream::RightMcpInitStatus::Connected => ProbeInitDecision::Healthy,
+        crate::cc::stream::RightMcpInitStatus::Unhealthy { .. } => ProbeInitDecision::Repair,
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn health_probe_invocation(mcp_config_path: &str) -> crate::cc::invocation::ClaudeInvocation {
+    crate::cc::invocation::ClaudeInvocation {
+        mcp_config_path: Some(mcp_config_path.to_owned()),
+        json_schema: None,
+        output_format: crate::cc::invocation::OutputFormat::StreamJson,
+        model: Some("haiku".to_owned()),
+        max_budget_usd: None,
+        max_turns: Some(1),
+        resume_session_id: None,
+        new_session_id: None,
+        fork_session: false,
+        allowed_tools: vec![],
+        disallowed_tools: vec![],
+        extra_args: vec!["--no-session-persistence".to_owned()],
+        prompt: Some(HEALTH_PROMPT.to_owned()),
+        debug_flag: None,
+    }
+}
+
 /// Spawn the keepalive loop as a background task.
 ///
 /// Returns the `JoinHandle` so the caller can await it during shutdown,
@@ -127,5 +168,41 @@ mod tests {
     #[test]
     fn default_interval_is_one_hour() {
         assert_eq!(DEFAULT_INTERVAL, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn health_probe_invocation_uses_haiku_stream_json_and_strict_mcp() {
+        let args = health_probe_invocation("/sandbox/mcp.json").into_args();
+
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"haiku".to_string()));
+        assert!(args.contains(&"--no-session-persistence".to_string()));
+        assert!(args.contains(&"--mcp-config".to_string()));
+        assert!(args.contains(&"/sandbox/mcp.json".to_string()));
+        assert!(args.contains(&"--strict-mcp-config".to_string()));
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--max-turns".to_string()));
+        assert!(args.contains(&"1".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+    }
+
+    #[test]
+    fn init_status_decision_maps_only_connected_to_healthy() {
+        assert_eq!(
+            classify_init_status(crate::cc::stream::RightMcpInitStatus::Connected),
+            ProbeInitDecision::Healthy
+        );
+        assert_eq!(
+            classify_init_status(crate::cc::stream::RightMcpInitStatus::Unhealthy {
+                status: Some("needs-auth".to_owned())
+            }),
+            ProbeInitDecision::Repair
+        );
+        assert_eq!(
+            classify_init_status(crate::cc::stream::RightMcpInitStatus::Unhealthy { status: None }),
+            ProbeInitDecision::Repair
+        );
     }
 }
