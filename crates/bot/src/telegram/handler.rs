@@ -108,6 +108,8 @@ pub struct AgentSettings {
     pub debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// STT context — None when stt.enabled=false or whisper model not yet cached.
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
+    /// Shared Claude health state for MCP self-heal and one-shot repair notices.
+    pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
@@ -382,6 +384,7 @@ pub async fn handle_message(
                     prefetch_cache: settings.prefetch_cache.clone(),
                     upgrade_lock: Arc::clone(&settings.upgrade_lock),
                     stt: settings.stt.clone(),
+                    claude_health: Arc::clone(&settings.claude_health),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());

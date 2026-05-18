@@ -768,31 +768,36 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     // Sync config files to sandbox before starting teloxide.
     // Blocks until first sync completes — ensures sandbox has correct .claude.json,
     // settings.json, etc. before any claude -p invocations.
-    let sync_handle = if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
-        let sandbox = resolved_sandbox.clone().unwrap();
-        let sbox = right_openshell::sandbox_exec::SandboxExec::new(
-            mtls_dir.clone(),
-            sandbox,
-            sandbox_id.clone(),
-        );
-        sync::initial_sync(&agent_dir, &sbox).await?;
-        if let Err(e) = sync::reverse_sync_md(&agent_dir, sbox.sandbox_name()).await {
-            tracing::warn!(
-                agent = %args.agent,
-                sandbox = %sbox.sandbox_name(),
-                "startup identity mirror sync failed: {e:#}"
+    let (sync_handle, health_sandbox_exec) =
+        if let Some((ref mtls_dir, ref sandbox_id)) = sandbox_ctx {
+            let sandbox = resolved_sandbox.clone().unwrap();
+            let sbox = right_openshell::sandbox_exec::SandboxExec::new(
+                mtls_dir.clone(),
+                sandbox,
+                sandbox_id.clone(),
             );
-        }
-        let sync_agent_dir = agent_dir.clone();
-        let sync_shutdown = shutdown.clone();
-        Some(tokio::spawn(sync::run_sync_task(
-            sync_agent_dir,
-            sbox,
-            sync_shutdown,
-        )))
-    } else {
-        None
-    };
+            let health_sandbox_exec = Some(sbox.clone());
+            sync::initial_sync(&agent_dir, &sbox).await?;
+            if let Err(e) = sync::reverse_sync_md(&agent_dir, sbox.sandbox_name()).await {
+                tracing::warn!(
+                    agent = %args.agent,
+                    sandbox = %sbox.sandbox_name(),
+                    "startup identity mirror sync failed: {e:#}"
+                );
+            }
+            let sync_agent_dir = agent_dir.clone();
+            let sync_shutdown = shutdown.clone();
+            (
+                Some(tokio::spawn(sync::run_sync_task(
+                    sync_agent_dir,
+                    sbox,
+                    sync_shutdown,
+                ))),
+                health_sandbox_exec,
+            )
+        } else {
+            (None, None)
+        };
 
     // Spawn periodic attachment cleanup task
     {
@@ -925,12 +930,14 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     });
 
     // Token keepalive: periodic `claude -p "hi"` to prevent OAuth token expiration.
-    let keepalive_handle = keepalive::spawn_keepalive(
+    let claude_health = keepalive::ClaudeHealth::new(
+        args.agent.clone(),
         agent_dir.clone(),
         ssh_config_path.clone(),
         resolved_sandbox.clone(),
-        shutdown.clone(),
+        health_sandbox_exec,
     );
+    let keepalive_handle = keepalive::spawn_keepalive(Arc::clone(&claude_health), shutdown.clone());
 
     // Build STT context once at startup — shared across all worker sessions via Arc.
     let stt: Option<Arc<crate::stt::SttContext>> = if config.stt.enabled {
@@ -970,6 +977,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
             prefetch_cache,
             upgrade_lock,
             stt,
+            Arc::clone(&claude_health),
             Arc::clone(&session_locks),
             Arc::clone(&bg_requests),
             progress_state,
