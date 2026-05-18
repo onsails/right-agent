@@ -621,8 +621,11 @@ async fn persist_successful_background_output(
 
     let conn = right_db::open_connection(agent_dir, false)
         .map_err(|e| format!("open DB to persist background output: {e:#}"))?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("begin transaction for background output: {e:#}"))?;
     right_agent::async_runs::persist_run_output(
-        &conn,
+        &tx,
         run_id,
         right_agent::async_runs::RunOutput {
             summary: Some(&output.summary),
@@ -633,8 +636,10 @@ async fn persist_successful_background_output(
         },
     )
     .map_err(|e| format!("persist background output: {e:#}"))?;
-    right_agent::async_runs::finish_run(&conn, run_id, exit_code, "success")
+    right_agent::async_runs::finish_run(&tx, run_id, exit_code, "success")
         .map_err(|e| format!("finish background run: {e:#}"))?;
+    tx.commit()
+        .map_err(|e| format!("commit background output: {e:#}"))?;
     Ok(())
 }
 
@@ -660,7 +665,7 @@ async fn serialize_notify_for_host(
 
     let mut host_attachments = Vec::with_capacity(attachments.len());
     for attachment in attachments {
-        let dest = outbox_dir.join(attachment_filename(&attachment.path));
+        let dest = outbox_dir.join(crate::cron::attachment_filename(&attachment.path));
         right_openshell::openshell::download_file(sandbox, &attachment.path, &dest)
             .await
             .map_err(|e| {
@@ -685,14 +690,6 @@ async fn serialize_notify_for_host(
     };
     serde_json::to_string(&host_notify)
         .map_err(|e| format!("serialize background host notify_json: {e:#}"))
-}
-
-fn attachment_filename(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn persist_background_failure_notify(
@@ -814,8 +811,10 @@ fn mark_completion_failed(
     exit_code: Option<i32>,
     reason: &str,
 ) -> Result<(), rusqlite::Error> {
-    persist_background_failure_notify(conn, run_id, reason)?;
-    right_agent::async_runs::finish_run(conn, run_id, exit_code, "failed")
+    let tx = conn.unchecked_transaction()?;
+    persist_background_failure_notify(&tx, run_id, reason)?;
+    right_agent::async_runs::finish_run(&tx, run_id, exit_code, "failed")?;
+    tx.commit()
 }
 
 fn persist_handoff_failed_at_agent(agent_dir: &Path, run_id: &str, reason: &str) {
