@@ -171,6 +171,15 @@ pub(crate) struct ReviewBundle {
     pub(crate) learned_skills: Vec<LearnedSkillSummary>,
 }
 
+const REVIEW_PROMPT_ACCEPTED_SIGNAL_MAX_CHARS: usize = 2_048;
+const REVIEW_PROMPT_EVENT_TIMELINE_MAX_ITEMS: usize = 24;
+const REVIEW_PROMPT_EVENT_TIMELINE_ITEM_MAX_CHARS: usize = 200;
+const REVIEW_PROMPT_LEARNING_EVENTS_MAX_ITEMS: usize = 24;
+const REVIEW_PROMPT_LEARNING_EVENT_ITEM_MAX_CHARS: usize = 200;
+const REVIEW_PROMPT_LEARNED_SKILLS_MAX_ITEMS: usize = 16;
+const REVIEW_PROMPT_SKILL_NAME_MAX_CHARS: usize = 96;
+const REVIEW_PROMPT_SKILL_EXCERPT_MAX_CHARS: usize = 240;
+
 pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     let mut prompt = String::new();
     prompt.push_str("# Background Learned-Skill Review\n\n");
@@ -202,20 +211,50 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
 
     if let Some(signal) = &bundle.accepted_signal_json {
         prompt.push_str("accepted_signal_json:\n");
-        prompt.push_str(signal);
+        prompt.push_str(&bounded_prompt_block(
+            signal,
+            REVIEW_PROMPT_ACCEPTED_SIGNAL_MAX_CHARS,
+        ));
         prompt.push_str("\n\n");
     }
 
-    push_list(&mut prompt, "event_timeline", &bundle.event_timeline);
-    push_list(&mut prompt, "learning_events", &bundle.learning_events);
+    push_bounded_list(
+        &mut prompt,
+        "event_timeline",
+        &bundle.event_timeline,
+        REVIEW_PROMPT_EVENT_TIMELINE_MAX_ITEMS,
+        REVIEW_PROMPT_EVENT_TIMELINE_ITEM_MAX_CHARS,
+    );
+    push_bounded_list(
+        &mut prompt,
+        "learning_events",
+        &bundle.learning_events,
+        REVIEW_PROMPT_LEARNING_EVENTS_MAX_ITEMS,
+        REVIEW_PROMPT_LEARNING_EVENT_ITEM_MAX_CHARS,
+    );
     prompt.push_str("\nrightx_skill_index:\n");
-    for skill in &bundle.learned_skills {
+    for skill in bundle
+        .learned_skills
+        .iter()
+        .take(REVIEW_PROMPT_LEARNED_SKILLS_MAX_ITEMS)
+    {
         prompt.push_str("- ");
-        prompt.push_str(&skill.name);
+        prompt.push_str(&bounded_prompt_line(
+            &skill.name,
+            REVIEW_PROMPT_SKILL_NAME_MAX_CHARS,
+        ));
         prompt.push_str(": ");
-        prompt.push_str(&skill.excerpt.replace('\n', " "));
+        prompt.push_str(&bounded_prompt_line(
+            &skill.excerpt,
+            REVIEW_PROMPT_SKILL_EXCERPT_MAX_CHARS,
+        ));
         prompt.push('\n');
     }
+    push_omitted_count(
+        &mut prompt,
+        bundle.learned_skills.len(),
+        REVIEW_PROMPT_LEARNED_SKILLS_MAX_ITEMS,
+    );
     prompt.push_str(
         "\nReturn JSON with status, confidence, candidate_skill_name, candidate_summary, \
          evidence_refs, and user_notice. Use only rightx-* candidate skill names.\n",
@@ -223,15 +262,47 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     prompt
 }
 
-fn push_list(prompt: &mut String, heading: &str, items: &[String]) {
+fn push_bounded_list(
+    prompt: &mut String,
+    heading: &str,
+    items: &[String],
+    max_items: usize,
+    max_item_chars: usize,
+) {
     prompt.push_str(heading);
     prompt.push_str(":\n");
-    for item in items {
+    for item in items.iter().take(max_items) {
         prompt.push_str("- ");
-        prompt.push_str(&item.replace('\n', " "));
+        prompt.push_str(&bounded_prompt_line(item, max_item_chars));
         prompt.push('\n');
     }
+    push_omitted_count(prompt, items.len(), max_items);
     prompt.push('\n');
+}
+
+fn push_omitted_count(prompt: &mut String, item_count: usize, max_items: usize) {
+    if item_count > max_items {
+        prompt.push_str("- ... ");
+        prompt.push_str(&(item_count - max_items).to_string());
+        prompt.push_str(" additional items omitted\n");
+    }
+}
+
+fn bounded_prompt_line(value: &str, max_chars: usize) -> String {
+    bounded_prompt_text(&value.replace(['\r', '\n'], " "), max_chars)
+}
+
+fn bounded_prompt_block(value: &str, max_chars: usize) -> String {
+    bounded_prompt_text(value, max_chars)
+}
+
+fn bounded_prompt_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push_str("... [truncated]");
+    }
+    out
 }
 
 pub(crate) fn review_stream_log_path(agent_dir: &Path, root_session_id: &str) -> PathBuf {
