@@ -1693,16 +1693,11 @@ fn cmd_init(
                     .await
                 })
             })?;
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    apply_exact_right_mcp_policy_for_sandbox(
-                        &sb_name,
-                        &policy_path,
-                        network_policy_val,
-                    )
-                    .await
-                })
-            })?;
+            apply_exact_right_mcp_policy_for_sandbox_sync(
+                &sb_name,
+                &policy_path,
+                network_policy_val,
+            )?;
             println!(
                 "{}",
                 right_ui::status(right_ui::Glyph::Ok)
@@ -2161,16 +2156,11 @@ fn cmd_agent_init(
                 .await
             })
         })?;
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                apply_exact_right_mcp_policy_for_sandbox(
-                    &sb_name,
-                    &policy_path,
-                    overrides.network_policy,
-                )
-                .await
-            })
-        })?;
+        apply_exact_right_mcp_policy_for_sandbox_sync(
+            &sb_name,
+            &policy_path,
+            overrides.network_policy,
+        )?;
 
         println!("  Sandbox '{sb_name}' ready");
 
@@ -2287,6 +2277,20 @@ fn write_bootstrap_right_mcp_policy(
     right_codegen::contract::write_regenerated(policy_path, &policy_content)
 }
 
+fn apply_exact_right_mcp_policy_for_sandbox_sync(
+    sandbox_name: &str,
+    policy_path: &Path,
+    network_policy: right_agent::agent::types::NetworkPolicy,
+) -> miette::Result<Vec<std::net::IpAddr>> {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(apply_exact_right_mcp_policy_for_sandbox(
+            sandbox_name,
+            policy_path,
+            network_policy,
+        ))
+    })
+}
+
 async fn apply_exact_right_mcp_policy_for_sandbox(
     sandbox_name: &str,
     policy_path: &Path,
@@ -2294,22 +2298,7 @@ async fn apply_exact_right_mcp_policy_for_sandbox(
 ) -> miette::Result<Vec<std::net::IpAddr>> {
     let mtls_dir = match right_openshell::openshell::preflight_check() {
         right_openshell::openshell::OpenShellStatus::Ready(dir) => dir,
-        right_openshell::openshell::OpenShellStatus::NotInstalled => {
-            return Err(miette::miette!(
-                "OpenShell is not installed — cannot resolve host MCP policy for sandbox '{sandbox_name}'"
-            ));
-        }
-        right_openshell::openshell::OpenShellStatus::NoGateway(_) => {
-            return Err(miette::miette!(
-                "OpenShell gateway is not running — cannot resolve host MCP policy for sandbox '{sandbox_name}'"
-            ));
-        }
-        right_openshell::openshell::OpenShellStatus::BrokenGateway(dir) => {
-            return Err(miette::miette!(
-                "OpenShell gateway mTLS certificates are missing at {} — cannot resolve host MCP policy for sandbox '{sandbox_name}'",
-                dir.display()
-            ));
-        }
+        status => return Err(openshell_status_error(status)),
     };
 
     let mut grpc = right_openshell::openshell::connect_grpc(&mtls_dir).await?;
@@ -3458,42 +3447,6 @@ fn resolve_restored_policy_path(
     Ok(agent_dir.join(policy_file))
 }
 
-#[cfg(test)]
-fn migrate_restored_policy_if_needed(policy_path: &Path) -> miette::Result<()> {
-    use miette::IntoDiagnostic;
-
-    let policy_yaml = std::fs::read_to_string(policy_path)
-        .into_diagnostic()
-        .map_err(|e| {
-            miette::miette!(
-                "failed to read restored policy file {}: {e:#}",
-                policy_path.display()
-            )
-        })?;
-
-    let Some(migrated_yaml) =
-        right_codegen::policy::migrate_legacy_permissive_policy_yaml(&policy_yaml)?
-    else {
-        return Ok(());
-    };
-
-    std::fs::write(policy_path, migrated_yaml)
-        .into_diagnostic()
-        .map_err(|e| {
-            miette::miette!(
-                "failed to write migrated restored policy file {}: {e:#}",
-                policy_path.display()
-            )
-        })?;
-
-    tracing::warn!(
-        policy_path = %policy_path.display(),
-        "migrated restored legacy OpenShell permissive policy before sandbox creation"
-    );
-
-    Ok(())
-}
-
 fn copy_agent_backup_config_files(
     agent_dir: &Path,
     backup_dir: &Path,
@@ -4287,9 +4240,9 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 mod tests {
     use super::{
         ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
-        copy_agent_backup_config_files, copy_agent_restore_config_files,
-        migrate_restored_policy_if_needed, resolve_agent_db, resolve_restored_policy_path,
-        truncate_content, write_bootstrap_right_mcp_policy, write_managed_settings,
+        copy_agent_backup_config_files, copy_agent_restore_config_files, resolve_agent_db,
+        resolve_restored_policy_path, truncate_content, write_bootstrap_right_mcp_policy,
+        write_managed_settings,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -4430,74 +4383,6 @@ mod tests {
             !agent_dir.exists(),
             "failed restore cleanup must remove the partial agent directory"
         );
-    }
-
-    #[test]
-    fn restore_migrates_legacy_permissive_policy_file() {
-        let tmp = TempDir::new().unwrap();
-        let policy_path = tmp.path().join("policy.yaml");
-        fs::write(
-            &policy_path,
-            r#"version: 1
-network_policies:
-  outbound:
-    endpoints:
-      - host: "**.*"
-        port: 443
-        protocol: rest
-        access: full
-      - host: "**.*"
-        port: 80
-        protocol: rest
-        access: full
-    binaries:
-      - path: "**"
-"#,
-        )
-        .unwrap();
-
-        migrate_restored_policy_if_needed(&policy_path).unwrap();
-
-        let migrated = fs::read_to_string(&policy_path).unwrap();
-        assert!(
-            !migrated.contains(r#"host: "**.*""#),
-            "legacy wildcard must be removed before sandbox creation"
-        );
-        assert!(
-            migrated.contains("allowed_ips:"),
-            "migrated policy must use public allowed_ips"
-        );
-        let parsed: serde_json::Value =
-            serde_saphyr::from_str(&migrated).expect("migrated policy must be valid YAML");
-        let allowed_ips = parsed["network_policies"]["outbound"]["endpoints"][0]["allowed_ips"]
-            .as_array()
-            .expect("migrated endpoint must have allowed_ips");
-        assert!(
-            allowed_ips
-                .iter()
-                .any(|cidr| cidr.as_str() == Some("1.0.0.0/8")),
-            "migrated policy must include normal public IPv4 ranges"
-        );
-    }
-
-    #[test]
-    fn restore_policy_migration_is_noop_without_legacy_wildcard() {
-        let tmp = TempDir::new().unwrap();
-        let policy_path = tmp.path().join("policy.yaml");
-        let current_policy = right_codegen::policy::generate_policy(
-            8100,
-            &right_agent_config::NetworkPolicy::Permissive,
-            right_codegen::policy::HostMcpAccess::BootstrapUnresolved,
-        );
-        fs::write(&policy_path, &current_policy).unwrap();
-        let mut permissions = fs::metadata(&policy_path).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&policy_path, permissions).unwrap();
-
-        migrate_restored_policy_if_needed(&policy_path).unwrap();
-
-        let unchanged = fs::read_to_string(&policy_path).unwrap();
-        assert_eq!(unchanged, current_policy);
     }
 
     #[test]
