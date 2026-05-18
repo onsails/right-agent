@@ -315,7 +315,7 @@ pub fn format_error_reply(exit_code: i32, stderr: &str) -> String {
 /// entry (still present until just after the select-break), reads its
 /// turn_id, and inserts `bg_requests[key] = turn_id`. Without this gate the
 /// worker would reclassify the successful turn as Backgrounded, drop the
-/// reply, and enqueue a duplicate continuation cron job.
+/// reply, and spawn a duplicate background continuation.
 ///
 /// Only honor the bg request when the turn did NOT finish normally — i.e.
 /// either the safety timeout fired, CC exited non-zero, or stdout is empty.
@@ -457,10 +457,10 @@ fn recall_tags(chat_id: i64) -> Vec<String> {
 ///
 /// `assistant_text = None` is used by the Backgrounded path: the user message
 /// is retained at fork time so the document_id (= main session UUID) stays in
-/// sync with the conversation. The eventual cron-delivery answer relayed back
-/// through `--resume <main>` does not auto-retain (cron sessions skip memory),
-/// so this is the only chance to record the user turn before recall on the
-/// next foreground message would otherwise return a context hole.
+/// sync with the conversation. The eventual background answer does not
+/// auto-retain into the main session, so this is the chance to record the user
+/// turn before recall on the next foreground message would otherwise return a
+/// context hole.
 fn build_retain_content(
     user_text: &str,
     assistant_text: Option<&str>,
@@ -1492,14 +1492,13 @@ pub fn spawn_worker(
                 }) => {
                     tracing::info!(?key, ?reason, "backgrounding turn");
 
-                    // Retain the user message before forking. Cron-delivery later
-                    // resumes the same `main_session_id` to relay the answer, but
-                    // cron paths skip auto-retain (see ARCHITECTURE.md "Cron jobs
-                    // skip memory"). Without this call the user turn never reaches
-                    // Hindsight and the next foreground recall is blind to it.
+                    // Retain the user message before forking. Background turns do
+                    // not auto-retain into the main session. Without this call the
+                    // user turn never reaches Hindsight and the next foreground
+                    // recall is blind to it.
                     // `update_mode: "append"` matches the success path so the
                     // assistant turn (whenever the agent later writes one — via
-                    // memory_retain MCP call from the cron prompt, or via a
+                    // memory_retain MCP call from the background prompt, or via a
                     // subsequent foreground turn) extends the same document.
                     if let Some(ref hs) = ctx.hindsight {
                         let sender_id = batch.first().and_then(|m| m.author.user_id);
@@ -1624,8 +1623,8 @@ pub fn spawn_worker(
             //
             // The Backgrounded path retains the user message above (no assistant
             // text) so the main session_id has the user turn recorded before the
-            // cron-delivery answer arrives — cron-side sessions skip auto-retain
-            // entirely, so without this the next recall would have a context hole.
+            // background answer arrives; without this the next recall would have
+            // a context hole.
             if let Some(ref hs) = ctx.hindsight {
                 // Auto-retain this turn.
                 if let Some(ref reply_text) = reply_text_for_retain {
@@ -1824,8 +1823,8 @@ pub(crate) enum InvokeCcFailure {
     /// errors, schema read failures). The `message` is sent to Telegram verbatim.
     NonReflectable { message: String },
     /// The foreground turn was terminated (timeout or user request) and work
-    /// has been enqueued as a background cron job. `spawn_worker` edits
-    /// `thinking_msg_id` with a per-reason banner.
+    /// has been spawned as an immediate background continuation. `spawn_worker`
+    /// edits `thinking_msg_id` with a per-reason banner.
     Backgrounded {
         reason: BgReason,
         /// UUID of the main session from which the background job should fork.
@@ -4540,7 +4539,7 @@ mod bg_request_race_tests {
 
     // Intra-turn race: bg click lands AFTER stdout closed and child exited 0.
     // The current turn produced a valid reply — honoring bg here would silently
-    // drop that reply and enqueue a duplicate continuation cron. The gate must
+    // drop that reply and spawn a duplicate continuation. The gate must
     // clear was_bg_request so the worker delivers the reply normally.
     #[test]
     fn bg_click_after_success_is_ignored() {

@@ -206,12 +206,12 @@ See: `docs/architecture/sessions.md` (Stream Logging).
 `cron_specs.schedule` stores a schedule string that maps to a
 `ScheduleKind` variant. The **`Immediate`** variant (encoded as
 `schedule = '@immediate'`) is bot-internal and fires on the next
-reconcile tick (≤5s). `insert_immediate_cron` defaults `lock_ttl` to
-`IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`); the lock heartbeat is written once
-at job start and never refreshed, so a tighter TTL would let the
-reconciler spawn a duplicate `execute_job` against the same spec on the
-next 5-second tick. The TTL is the duplicate-prevention guard, not a
-wall-clock execution limit.
+reconcile tick (≤5s). Immediate jobs default `lock_ttl` to
+`IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`) when created without an explicit
+TTL; the lock heartbeat is written once at job start and never refreshed,
+so a tighter TTL would let the reconciler spawn a duplicate `execute_job`
+against the same spec on the next 5-second tick. The TTL is the
+duplicate-prevention guard, not a wall-clock execution limit.
 
 Background continuations created by the Telegram worker are `async_runs`
 rows with `kind = 'background'`, not cron specs. The worker inserts a
@@ -223,11 +223,9 @@ rows still stuck at `status = 'queued'` and `handoff_state = 'queued'`;
 it fails them with pending delivery. It deliberately does not guess at
 stale `running` rows without process ownership.
 
-The legacy **`BackgroundContinuation { fork_from }`** cron schedule
-variant (encoded as `schedule = '@bg:<fork_from-uuid>'`) remains
-bot-internal compatibility code. It carries the main session UUID as
-typed data and runs against `BG_CONTINUATION_SCHEMA_JSON`, which forbids
-silent output (`notify` is required and non-null).
+Legacy `@bg:<fork_from-uuid>` rows are not schedulable. Cron loading
+skips them so old databases do not block active cron jobs, but no
+runtime path creates or executes cron-backed background continuations.
 
 See: `docs/architecture/sessions.md` for the full variant list.
 
@@ -243,14 +241,9 @@ only those rows for the target chat, and shows running rows plus
 finished `success`/`failed` rows whose delivery is still `pending` or
 `retryable`. Cron rows are excluded.
 
-The legacy `ScheduleKind::BackgroundContinuation { fork_from: Uuid }`
-variant remains bot-internal compatibility code. Agents cannot hijack
-`--resume` because the variant carries `fork_from` as typed data, and
-the `cron_create` MCP path never sets it.
-
-A one-time startup migration `cron::migrate_legacy_bg_continuation`
-rewrites pre-existing rows that used the deprecated
-`@immediate` + `X-FORK-FROM:` convention into the new form.
+Legacy `@bg:<fork_from-uuid>` cron specs are ignored by cron loading.
+There is no production migration or cron scheduling path for background
+continuations.
 
 ### Configuration Hierarchy
 

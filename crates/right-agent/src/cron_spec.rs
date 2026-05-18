@@ -4,7 +4,6 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use right_platform_knobs::IDLE_THRESHOLD_MIN;
-use uuid::Uuid;
 
 /// Default budget cap per cron invocation (USD).
 pub const DEFAULT_CRON_BUDGET_USD: f64 = 5.0;
@@ -12,18 +11,16 @@ pub const DEFAULT_CRON_BUDGET_USD: f64 = 5.0;
 /// Default `lock_ttl` for `Immediate` cron jobs when the caller does not
 /// supply one.
 ///
-/// Immediate jobs are the bot's background-continuation primitive — they
-/// run the same long turn the foreground worker was running when its 10-min
-/// timeout fired (or the user pressed 🌙). Those turns can legitimately last
-/// hours.
+/// Immediate jobs run on the next cron reconcile tick. They can legitimately
+/// last for hours.
 ///
 /// The lock heartbeat is written ONCE at job start and never refreshed, so
 /// `is_lock_fresh` is the only guard against the reconciler spawning a
 /// duplicate `execute_job` against a still-running spec on the next 5-second
 /// tick. The previous reader-side default of `"30m"` was tighter than the
-/// realistic upper bound for a single bg-continuation turn, which let
-/// duplicates sneak through. `"6h"` is generous enough to cover any
-/// plausible single-turn execution while still bounding runaway specs.
+/// realistic upper bound for a long immediate turn, which let duplicates
+/// sneak through. `"6h"` is generous enough to cover any plausible single-turn
+/// execution while still bounding runaway specs.
 ///
 /// This is the duplicate-prevention guard, NOT a wall-clock execution
 /// budget — that is `max_budget_usd` plus `--max-turns` plus the process
@@ -33,8 +30,7 @@ pub const IMMEDIATE_DEFAULT_LOCK_TTL: &str = "6h";
 /// Sentinel value stored in the `schedule` column for Immediate cron jobs.
 pub const IMMEDIATE_SENTINEL: &str = "@immediate";
 
-/// Sentinel prefix for `BackgroundContinuation` schedule encoding.
-/// Stored as `@bg:<fork_from-uuid>` in the `schedule` column.
+/// Legacy sentinel prefix for removed cron-backed background continuations.
 pub(crate) const BG_SENTINEL_PREFIX: &str = "@bg:";
 
 /// Description string for the `cron_trigger` MCP tool. Built at compile time
@@ -61,10 +57,6 @@ pub enum ScheduleKind {
     /// Fires on the next reconcile tick, then auto-deletes.
     /// Stored as the `'@immediate'` sentinel in the `schedule` column.
     Immediate,
-    /// Bot-internal background continuation: fires on the next reconcile
-    /// tick with `--resume <fork_from> --fork-session --session-id <run_id>`,
-    /// auto-deletes. Stored as `'@bg:<fork_from-uuid>'`.
-    BackgroundContinuation { fork_from: Uuid },
 }
 
 impl ScheduleKind {
@@ -72,7 +64,7 @@ impl ScheduleKind {
     pub fn cron_schedule(&self) -> Option<&str> {
         match self {
             Self::Recurring(s) | Self::OneShotCron(s) => Some(s),
-            Self::RunAt(_) | Self::Immediate | Self::BackgroundContinuation { .. } => None,
+            Self::RunAt(_) | Self::Immediate => None,
         }
     }
 
@@ -80,10 +72,7 @@ impl ScheduleKind {
     pub fn is_one_shot(&self) -> bool {
         matches!(
             self,
-            Self::OneShotCron(_)
-                | Self::RunAt(_)
-                | Self::Immediate
-                | Self::BackgroundContinuation { .. }
+            Self::OneShotCron(_) | Self::RunAt(_) | Self::Immediate
         )
     }
 
@@ -102,9 +91,9 @@ impl ScheduleKind {
             return Ok(Self::RunAt(dt));
         }
         if let Some(rest) = schedule.strip_prefix(BG_SENTINEL_PREFIX) {
-            let fork_from = Uuid::parse_str(rest)
-                .map_err(|e| format!("invalid bg fork_from UUID '{rest}': {e}"))?;
-            return Ok(Self::BackgroundContinuation { fork_from });
+            return Err(format!(
+                "legacy background continuation schedule '{BG_SENTINEL_PREFIX}{rest}' is no longer schedulable"
+            ));
         }
         if schedule == IMMEDIATE_SENTINEL {
             return Ok(Self::Immediate);
@@ -123,9 +112,6 @@ impl std::fmt::Display for ScheduleKind {
             Self::Recurring(s) | Self::OneShotCron(s) => f.write_str(s),
             Self::RunAt(dt) => write!(f, "{}", dt.to_rfc3339()),
             Self::Immediate => f.write_str(IMMEDIATE_SENTINEL),
-            Self::BackgroundContinuation { fork_from } => {
-                write!(f, "{BG_SENTINEL_PREFIX}{fork_from}")
-            }
         }
     }
 }
@@ -367,57 +353,6 @@ pub fn create_spec_v2(
         Ok(_) => Ok(CronSpecResult {
             message: format!("Created cron job '{job_name}'."),
             warning: schedule_warning,
-        }),
-        Err(rusqlite::Error::SqliteFailure(err, _))
-            if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
-        {
-            Err(format!("job '{job_name}' already exists"))
-        }
-        Err(e) => Err(format!("insert failed: {e:#}")),
-    }
-}
-
-/// Insert a one-shot `BackgroundContinuation` cron job. Bot-internal use only —
-/// produced by the worker when foreground turns are sent to background, never
-/// constructible from CLI/MCP.
-///
-/// Stores `schedule = '@bg:<fork_from>'`, `recurring = 0`, `run_at = NULL`,
-/// `lock_ttl = IMMEDIATE_DEFAULT_LOCK_TTL` (`"6h"`).
-/// `max_budget_usd = None` uses [`DEFAULT_CRON_BUDGET_USD`].
-pub fn insert_background_continuation(
-    conn: &rusqlite::Connection,
-    job_name: &str,
-    prompt: &str,
-    fork_from: Uuid,
-    target_chat_id: i64,
-    target_thread_id: Option<i64>,
-    max_budget_usd: Option<f64>,
-) -> Result<CronSpecResult, String> {
-    validate_job_name(job_name)?;
-    if prompt.trim().is_empty() {
-        return Err("prompt must not be empty".into());
-    }
-    if let Some(budget) = max_budget_usd
-        && budget <= 0.0
-    {
-        return Err("max_budget_usd must be greater than 0".into());
-    }
-
-    let now = chrono::Utc::now().to_rfc3339();
-    let budget = max_budget_usd.unwrap_or(DEFAULT_CRON_BUDGET_USD);
-    let schedule = format!("{BG_SENTINEL_PREFIX}{fork_from}");
-    let lock_ttl = IMMEDIATE_DEFAULT_LOCK_TTL;
-
-    let result = conn.execute(
-        "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, NULL, ?6, ?7, ?8, ?9)",
-        rusqlite::params![job_name, schedule, prompt, lock_ttl, budget, target_chat_id, target_thread_id, now, now],
-    );
-
-    match result {
-        Ok(_) => Ok(CronSpecResult {
-            message: format!("Created bg-continuation job '{job_name}'."),
-            warning: None,
         }),
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ffi::ErrorCode::ConstraintViolation =>
