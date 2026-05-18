@@ -149,6 +149,7 @@ where
     let pending_token_slot_arc: Arc<PendingTokenSlot> =
         Arc::new(PendingTokenSlot(pending_token_arc));
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
+    let worker_shutdown = CancellationToken::new();
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
         show_thinking,
         model,
@@ -159,7 +160,7 @@ where
         debug,
         stt,
         claude_health,
-        shutdown: shutdown.clone(),
+        shutdown: worker_shutdown.clone(),
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
     let thinking_visibility: super::ThinkingVisibility = Arc::new(DashMap::new());
@@ -255,6 +256,7 @@ where
     // channels and exit; in-flight CC subprocesses are killed by
     // kill_on_drop(true) when workers are dropped.
     let signal_cancel_task = signal_cancel.clone();
+    let worker_shutdown_task = worker_shutdown.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = signal_cancel_task.cancelled() => {
@@ -265,6 +267,8 @@ where
                 signal_cancel_task.cancel();
             }
         }
+
+        worker_shutdown_task.cancel();
 
         match shutdown_token.shutdown() {
             Ok(fut) => {
@@ -339,6 +343,7 @@ where
         )
         .await;
     tracing::info!("dispatcher exited cleanly");
+    worker_shutdown.cancel();
     Ok(())
 }
 
