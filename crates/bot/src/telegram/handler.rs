@@ -269,6 +269,8 @@ pub async fn handle_message(
             return Ok(());
         }
     }
+    super::archive::archive_routed_dm_message(&agent_dir.0, &msg, decision.address.clone());
+
     let key: SessionKey = (chat_id.0, eff_thread_id);
     let worker_exists = worker_map.contains_key(&key);
     tracing::info!(

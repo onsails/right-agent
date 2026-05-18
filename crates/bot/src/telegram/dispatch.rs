@@ -409,6 +409,8 @@ fn build_dispatcher(
         progress: progress_state,
     };
     let filter = make_routing_filter(allowlist.clone(), (*identity_arc).clone());
+    let archive_agent_dir = Arc::clone(&agent_dir_arc);
+    let archive_identity = Arc::clone(&identity_arc);
 
     // Dispatch schema (RESEARCH.md Pattern 1)
     let command_handler = dptree::entry()
@@ -442,7 +444,7 @@ fn build_dispatcher(
         );
 
     let message_handler = Update::filter_message()
-        .inspect(|msg: Message| {
+        .inspect(move |msg: Message| {
             let text_preview = msg.text().or(msg.caption()).map(|t| {
                 let trimmed: String = t.chars().take(80).collect();
                 trimmed
@@ -453,6 +455,11 @@ fn build_dispatcher(
                 ?text_preview,
                 entities,
                 "message update received by dispatcher"
+            );
+            super::archive::archive_seen_group_message(
+                &archive_agent_dir.0,
+                archive_identity.as_ref(),
+                &msg,
             );
         })
         .filter_map(filter)
