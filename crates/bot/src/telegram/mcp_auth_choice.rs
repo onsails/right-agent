@@ -44,7 +44,6 @@ pub(crate) struct PendingMcpAuthChoiceRequest {
     pub server_name: String,
     pub original_url: String,
     pub bare_url: String,
-    pub has_query: bool,
     pub recommendation: McpAuthRecommendation,
     pub expires_at: Instant,
 }
@@ -52,6 +51,11 @@ pub(crate) struct PendingMcpAuthChoiceRequest {
 impl PendingMcpAuthChoiceRequest {
     pub(crate) fn is_expired(&self, now: Instant) -> bool {
         now >= self.expires_at
+    }
+
+    /// True when `original_url` carried a query string that was stripped to form `bare_url`.
+    pub(crate) fn has_query(&self) -> bool {
+        self.original_url != self.bare_url
     }
 }
 
@@ -88,20 +92,6 @@ pub(crate) enum PendingMcpAuthChoiceTake {
     Expired,
     ChatMismatch,
 }
-
-impl PartialEq for PendingMcpAuthChoiceTake {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (Self::Ready(_), Self::Ready(_))
-                | (Self::Missing, Self::Missing)
-                | (Self::Expired, Self::Expired)
-                | (Self::ChatMismatch, Self::ChatMismatch)
-        )
-    }
-}
-
-impl Eq for PendingMcpAuthChoiceTake {}
 
 pub(crate) async fn take_pending_auth_choice(
     slot: &PendingMcpAuthChoiceSlot,
@@ -235,10 +225,12 @@ pub(crate) fn parse_token_input(
     initial_auth_type: String,
     initial_auth_header: Option<String>,
 ) -> ParsedTokenInput {
-    if let Some((header, value)) = raw_input.split_once(':') {
+    if let Some((header, value_raw)) = raw_input.split_once(':') {
         let header = header.trim();
-        let value = value.trim();
-        if is_header_name(header) && !value.is_empty() {
+        let value = value_raw.trim();
+        let looks_like_header =
+            header.contains('-') || value_raw.starts_with(|c: char| c.is_ascii_whitespace());
+        if looks_like_header && is_header_name(header) && !value.is_empty() {
             return ParsedTokenInput {
                 token: value.to_string(),
                 auth_type: "header".to_string(),
@@ -419,7 +411,6 @@ mod tests {
                 server_name: "a".to_string(),
                 original_url: "https://a.example/mcp".to_string(),
                 bare_url: "https://a.example/mcp".to_string(),
-                has_query: false,
                 recommendation: McpAuthRecommendation {
                     choice: McpAuthChoice::OAuth,
                     header_auth_type: "bearer".to_string(),
@@ -440,7 +431,6 @@ mod tests {
                 server_name: "b".to_string(),
                 original_url: "https://b.example/mcp".to_string(),
                 bare_url: "https://b.example/mcp".to_string(),
-                has_query: false,
                 recommendation: McpAuthRecommendation {
                     choice: McpAuthChoice::Header,
                     header_auth_type: "bearer".to_string(),
@@ -485,7 +475,7 @@ mod tests {
 
         let taken = take_pending_auth_choice(&slot, 42, Some(100), Some(0), Instant::now()).await;
 
-        assert_eq!(taken, PendingMcpAuthChoiceTake::Missing);
+        assert!(matches!(taken, PendingMcpAuthChoiceTake::Missing));
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(43));
     }
 
@@ -499,7 +489,7 @@ mod tests {
 
         let taken = take_pending_auth_choice(&slot, 42, Some(100), Some(0), Instant::now()).await;
 
-        assert_eq!(taken, PendingMcpAuthChoiceTake::Expired);
+        assert!(matches!(taken, PendingMcpAuthChoiceTake::Expired));
         assert!(slot.0.lock().await.is_none());
     }
 
@@ -513,7 +503,7 @@ mod tests {
 
         let taken = take_pending_auth_choice(&slot, 42, Some(200), Some(0), Instant::now()).await;
 
-        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert!(matches!(taken, PendingMcpAuthChoiceTake::ChatMismatch));
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
     }
 
@@ -527,7 +517,7 @@ mod tests {
 
         let taken = take_pending_auth_choice(&slot, 42, None, Some(0), Instant::now()).await;
 
-        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert!(matches!(taken, PendingMcpAuthChoiceTake::ChatMismatch));
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
     }
 
@@ -541,7 +531,7 @@ mod tests {
 
         let taken = take_pending_auth_choice(&slot, 42, Some(100), None, Instant::now()).await;
 
-        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert!(matches!(taken, PendingMcpAuthChoiceTake::ChatMismatch));
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
     }
 
@@ -553,7 +543,7 @@ mod tests {
 
         let taken = take_pending_auth_choice(&slot, 42, Some(100), Some(11), Instant::now()).await;
 
-        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert!(matches!(taken, PendingMcpAuthChoiceTake::ChatMismatch));
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
     }
 
@@ -566,7 +556,6 @@ mod tests {
             server_name: "server".to_string(),
             original_url: "https://example.com/mcp?api_key=secret".to_string(),
             bare_url: "https://example.com/mcp".to_string(),
-            has_query: true,
             recommendation: McpAuthRecommendation {
                 choice: McpAuthChoice::UrlAsIs,
                 header_auth_type: "bearer".to_string(),
@@ -612,6 +601,22 @@ mod tests {
         );
 
         assert_eq!(parsed.token, "Bearer token with spaces");
+        assert_eq!(parsed.auth_type, "bearer");
+        assert_eq!(parsed.auth_header, None);
+    }
+
+    #[test]
+    fn parse_token_input_keeps_raw_token_when_value_contains_colon_no_space() {
+        // Tokens like Stripe `sk_live_abc:def` or Basic auth `user:pass` look like
+        // `is_header_name(prefix)` matches but no hyphen and no space-after-colon
+        // means the user is pasting a single token, not a header/value pair.
+        let parsed = parse_token_input("sk_live_abc:def".to_string(), "bearer".to_string(), None);
+        assert_eq!(parsed.token, "sk_live_abc:def");
+        assert_eq!(parsed.auth_type, "bearer");
+        assert_eq!(parsed.auth_header, None);
+
+        let parsed = parse_token_input("user:pass".to_string(), "bearer".to_string(), None);
+        assert_eq!(parsed.token, "user:pass");
         assert_eq!(parsed.auth_type, "bearer");
         assert_eq!(parsed.auth_header, None);
     }
