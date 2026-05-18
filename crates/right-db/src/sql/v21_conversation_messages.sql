@@ -35,19 +35,26 @@ CREATE VIRTUAL TABLE IF NOT EXISTS conversation_messages_fts USING fts5(
     content_rowid='id'
 );
 
-CREATE TRIGGER IF NOT EXISTS conversation_messages_ai AFTER INSERT ON conversation_messages BEGIN
+-- Stub rows written by mark_routed (content='') must not pollute FTS — they
+-- carry routing metadata only. Real content arrives via archive_message's
+-- UPSERT, at which point the UPDATE trigger inserts the row into FTS.
+CREATE TRIGGER IF NOT EXISTS conversation_messages_ai AFTER INSERT ON conversation_messages
+WHEN length(new.content) > 0
+BEGIN
     INSERT INTO conversation_messages_fts(rowid, content)
     VALUES (new.id, new.content);
 END;
 
-CREATE TRIGGER IF NOT EXISTS conversation_messages_ad AFTER DELETE ON conversation_messages BEGIN
+CREATE TRIGGER IF NOT EXISTS conversation_messages_ad AFTER DELETE ON conversation_messages
+WHEN length(old.content) > 0
+BEGIN
     INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
     VALUES ('delete', old.id, old.content);
 END;
 
 CREATE TRIGGER IF NOT EXISTS conversation_messages_au AFTER UPDATE ON conversation_messages BEGIN
     INSERT INTO conversation_messages_fts(conversation_messages_fts, rowid, content)
-    VALUES ('delete', old.id, old.content);
+    SELECT 'delete', old.id, old.content WHERE length(old.content) > 0;
     INSERT INTO conversation_messages_fts(rowid, content)
-    VALUES (new.id, new.content);
+    SELECT new.id, new.content WHERE length(new.content) > 0;
 END;

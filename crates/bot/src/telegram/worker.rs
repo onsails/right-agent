@@ -785,11 +785,6 @@ fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
     batch.iter().map(|message| message.message_id).collect()
 }
 
-fn assistant_archive_content(content: &str) -> Option<String> {
-    let trimmed = content.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
-}
-
 fn assistant_text_was_delivered(caption_consumed: bool, sent_any_text_message: bool) -> bool {
     caption_consumed || sent_any_text_message
 }
@@ -1272,48 +1267,16 @@ pub fn spawn_worker(
 
                         if assistant_text_was_delivered(caption_consumed, sent_any_text_message)
                             && let Some(turn_id) = turn_id
-                            && let Some(archive_content) = assistant_archive_content(&content)
                         {
-                            match right_db::open_connection(&ctx.agent_dir, false) {
-                                Ok(conn) => {
-                                    let message = right_db::conversation::ConversationMessage {
-                                        platform: "telegram",
-                                        chat_id,
-                                        thread_id: eff_thread_id,
-                                        message_id: None,
-                                        sender_user_id: None,
-                                        sender_name: Some(ctx.agent_name.as_str()),
-                                        addressed_to_bot: false,
-                                        routed_to_agent: true,
-                                        root_session_id: Some(&session_uuid),
-                                        turn_id: Some(turn_id),
-                                        role: right_db::conversation::ConversationRole::Assistant,
-                                        content: &archive_content,
-                                    };
-                                    if let Err(e) =
-                                        right_db::conversation::archive_message(&conn, message)
-                                    {
-                                        tracing::warn!(
-                                            ?key,
-                                            chat_id,
-                                            eff_thread_id,
-                                            session_uuid = %session_uuid,
-                                            turn_id,
-                                            "assistant archive_message failed: {e:#}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        ?key,
-                                        chat_id,
-                                        eff_thread_id,
-                                        session_uuid = %session_uuid,
-                                        turn_id,
-                                        "assistant archive open_connection failed: {e:#}"
-                                    );
-                                }
-                            }
+                            super::archive::archive_assistant_message(
+                                &ctx.agent_dir,
+                                &ctx.agent_name,
+                                chat_id,
+                                eff_thread_id,
+                                &session_uuid,
+                                turn_id,
+                                content.clone(),
+                            );
                         }
                     } else {
                         tracing::warn!(?key, "CC returned content: null -- no text reply sent");
@@ -2429,38 +2392,47 @@ async fn invoke_cc(
     let turn_id = super::next_turn_id();
     let log_ctx = InvocationLogContext::new(chat_id, eff_thread_id, session_uuid.clone(), turn_id);
     log_invoking_claude(&log_ctx, is_first_call, sandboxed);
-    for routed_message_id in routed_message_ids {
-        match right_db::conversation::mark_routed(
-            &conn,
-            "telegram",
-            chat_id,
-            *routed_message_id,
-            &session_uuid,
-            turn_id,
-        ) {
-            Ok(0) => {
-                tracing::warn!(
-                    chat_id = log_ctx.chat_id,
-                    eff_thread_id = log_ctx.eff_thread_id,
-                    key = ?log_ctx.key(),
-                    session_uuid = %log_ctx.session_uuid,
-                    turn_id = log_ctx.turn_id,
-                    message_id = *routed_message_id,
-                    "telegram routed transcript row missing"
-                );
+    if !routed_message_ids.is_empty() {
+        // Batch N writes into a single fsync. Best-effort: per-message errors
+        // are logged and the loop continues, so the transaction is intentionally
+        // not used for rollback semantics — we always want to commit whatever
+        // succeeded, since partial routing data is better than none.
+        let tx_result = conn.unchecked_transaction().and_then(|tx| {
+            for routed_message_id in routed_message_ids {
+                match right_db::conversation::mark_routed(
+                    &tx,
+                    "telegram",
+                    chat_id,
+                    eff_thread_id,
+                    *routed_message_id,
+                    &session_uuid,
+                    turn_id,
+                ) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            chat_id = log_ctx.chat_id,
+                            eff_thread_id = log_ctx.eff_thread_id,
+                            key = ?log_ctx.key(),
+                            session_uuid = %log_ctx.session_uuid,
+                            turn_id = log_ctx.turn_id,
+                            message_id = *routed_message_id,
+                            "telegram mark_routed failed: {e:#}"
+                        );
+                    }
+                }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(
-                    chat_id = log_ctx.chat_id,
-                    eff_thread_id = log_ctx.eff_thread_id,
-                    key = ?log_ctx.key(),
-                    session_uuid = %log_ctx.session_uuid,
-                    turn_id = log_ctx.turn_id,
-                    message_id = *routed_message_id,
-                    "telegram mark_routed failed: {e:#}"
-                );
-            }
+            tx.commit()
+        });
+        if let Err(e) = tx_result {
+            tracing::warn!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                "telegram mark_routed transaction failed: {e:#}"
+            );
         }
     }
 
@@ -3941,15 +3913,6 @@ esac
         let batch = vec![debug_msg(10, None), debug_msg(11, None)];
 
         assert_eq!(routed_message_ids(&batch), vec![10, 11]);
-    }
-
-    #[test]
-    fn assistant_archive_content_trims_empty_reply() {
-        assert_eq!(
-            assistant_archive_content("  hello  "),
-            Some("hello".to_string())
-        );
-        assert_eq!(assistant_archive_content(" \n\t "), None);
     }
 
     #[test]

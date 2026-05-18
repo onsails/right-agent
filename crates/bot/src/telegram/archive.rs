@@ -7,10 +7,19 @@ use teloxide::types::{ChatKind, Message};
 use super::mention::{AddressKind, BotIdentity, is_bot_addressed};
 use super::session::effective_thread_id;
 
+// Why 4: bounded so a Telegram traffic burst cannot queue unbounded
+// blocking-pool tasks; SQLite WAL handles small write concurrency well.
 const MAX_ARCHIVE_WRITES: usize = 4;
 
 static ARCHIVE_WRITE_PERMITS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_ARCHIVE_WRITES)));
+
+#[derive(Clone, Copy)]
+struct ArchiveLogMeta {
+    chat_id: i64,
+    thread_id: i64,
+    message_id: Option<i32>,
+}
 
 struct ArchivePayload {
     agent_dir: PathBuf,
@@ -22,6 +31,16 @@ struct ArchivePayload {
     sender_name: Option<String>,
     addressed_to_bot: bool,
     routed_to_agent: bool,
+}
+
+struct AssistantArchivePayload {
+    agent_dir: PathBuf,
+    agent_name: String,
+    chat_id: i64,
+    thread_id: i64,
+    session_uuid: String,
+    turn_id: u64,
+    content: String,
 }
 
 pub(crate) fn should_archive_seen_group_message(msg: &Message) -> bool {
@@ -110,14 +129,56 @@ impl ArchivePayload {
     }
 }
 
+pub(crate) fn archive_assistant_message(
+    agent_dir: &Path,
+    agent_name: &str,
+    chat_id: i64,
+    thread_id: i64,
+    session_uuid: &str,
+    turn_id: u64,
+    content: String,
+) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let payload = AssistantArchivePayload {
+        agent_dir: agent_dir.to_path_buf(),
+        agent_name: agent_name.to_owned(),
+        chat_id,
+        thread_id,
+        session_uuid: session_uuid.to_owned(),
+        turn_id,
+        content: trimmed.to_owned(),
+    };
+    let meta = ArchiveLogMeta {
+        chat_id: payload.chat_id,
+        thread_id: payload.thread_id,
+        message_id: None,
+    };
+    with_archive_permit(meta, move || write_assistant_payload(payload));
+}
+
 fn spawn_archive_write(payload: ArchivePayload) {
+    let meta = ArchiveLogMeta {
+        chat_id: payload.chat_id,
+        thread_id: payload.thread_id,
+        message_id: Some(payload.message_id),
+    };
+    with_archive_permit(meta, move || write_archive_payload(payload));
+}
+
+fn with_archive_permit<F>(meta: ArchiveLogMeta, work: F)
+where
+    F: FnOnce() + Send + 'static,
+{
     let permit = match Arc::clone(&ARCHIVE_WRITE_PERMITS).try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
             tracing::warn!(
-                chat_id = payload.chat_id,
-                thread_id = payload.thread_id,
-                message_id = payload.message_id,
+                chat_id = meta.chat_id,
+                thread_id = meta.thread_id,
+                message_id = meta.message_id,
                 "telegram archive dropped: writer concurrency limit reached"
             );
             return;
@@ -126,7 +187,7 @@ fn spawn_archive_write(payload: ArchivePayload) {
 
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        write_archive_payload(payload);
+        work();
     });
 }
 
@@ -165,6 +226,47 @@ fn write_archive_payload(payload: ArchivePayload) {
             thread_id = payload.thread_id,
             message_id = payload.message_id,
             "telegram archive_message failed: {e:#}"
+        );
+    }
+}
+
+fn write_assistant_payload(payload: AssistantArchivePayload) {
+    let conn = match right_db::open_connection(&payload.agent_dir, false) {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(
+                chat_id = payload.chat_id,
+                thread_id = payload.thread_id,
+                session_uuid = %payload.session_uuid,
+                turn_id = payload.turn_id,
+                "assistant archive open_connection failed: {e:#}"
+            );
+            return;
+        }
+    };
+
+    let message = ConversationMessage {
+        platform: "telegram",
+        chat_id: payload.chat_id,
+        thread_id: payload.thread_id,
+        message_id: None,
+        sender_user_id: None,
+        sender_name: Some(payload.agent_name.as_str()),
+        addressed_to_bot: false,
+        routed_to_agent: true,
+        root_session_id: Some(payload.session_uuid.as_str()),
+        turn_id: Some(payload.turn_id),
+        role: ConversationRole::Assistant,
+        content: &payload.content,
+    };
+
+    if let Err(e) = archive_message(&conn, message) {
+        tracing::warn!(
+            chat_id = payload.chat_id,
+            thread_id = payload.thread_id,
+            session_uuid = %payload.session_uuid,
+            turn_id = payload.turn_id,
+            "assistant archive_message failed: {e:#}"
         );
     }
 }
