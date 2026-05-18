@@ -335,9 +335,11 @@ impl RightBackend {
         let conn = Self::lock_conn(&conn_arc)?;
         let limit = params.limit.unwrap_or(20);
         let mut stmt = conn.prepare(
-            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at, delivery_status, no_notify_reason
-             FROM cron_runs
-             WHERE (?1 IS NULL OR job_name = ?1)
+            "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
+                    summary, notify_json, delivered_at, delivery_status, no_notify_reason
+             FROM async_runs
+             WHERE kind = 'cron'
+               AND (?1 IS NULL OR producer_ref = ?1)
              ORDER BY started_at DESC
              LIMIT ?2",
         )?;
@@ -373,8 +375,10 @@ impl RightBackend {
         let conn_arc = self.get_conn(agent_name)?;
         let conn = Self::lock_conn(&conn_arc)?;
         let result = conn.query_row(
-            "SELECT id, job_name, started_at, finished_at, exit_code, status, log_path, summary, notify_json, delivered_at, delivery_status, no_notify_reason
-             FROM cron_runs WHERE id = ?1",
+            "SELECT id, producer_ref, started_at, finished_at, exit_code, status, log_path,
+                    summary, notify_json, delivered_at, delivery_status, no_notify_reason
+             FROM async_runs
+             WHERE kind = 'cron' AND id = ?1",
             rusqlite::params![params.run_id],
             |row| {
                 Ok(cron_run_to_json(

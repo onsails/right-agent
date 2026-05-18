@@ -27,11 +27,14 @@ fn insert_cron_run(
 ) {
     let conn = server.conn.lock().unwrap();
     conn.execute(
-        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, run_session_id, target_chat_id,
+            started_at, status, log_path, delivery_required, delivery_status,
+            created_at, updated_at
+         ) VALUES (?1, 'cron', ?2, ?1, -100, ?3, ?4, ?5, 0, 'none', ?3, ?3)",
         rusqlite::params![id, job_name, started_at, status, format!("/tmp/{id}.log")],
     )
-    .expect("insert cron_run");
+    .expect("insert async cron run");
 }
 
 fn call_result_text(result: CallToolResult) -> String {
@@ -137,6 +140,45 @@ async fn test_cron_list_runs_filter_job_name() {
 }
 
 #[tokio::test]
+async fn test_cron_list_runs_excludes_background_rows() {
+    let (server, _dir) = setup_server();
+    insert_cron_run(
+        &server,
+        "cron-001",
+        "job-a",
+        "2026-04-01T10:00:00Z",
+        "success",
+    );
+    {
+        let conn = server.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, source_session_id, run_session_id, target_chat_id,
+                started_at, status, delivery_required, delivery_status, created_at, updated_at
+             ) VALUES (
+                'bg-001', 'background', 'main', 'bg-session', -100,
+                '2026-04-01T11:00:00Z', 'success', 1, 'pending',
+                '2026-04-01T11:00:00Z', '2026-04-01T11:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let result = server
+        .cron_list_runs(Parameters(CronListRunsParams {
+            job_name: None,
+            limit: None,
+        }))
+        .await
+        .expect("cron_list_runs ok");
+    let text = call_result_text(result);
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("valid json");
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0]["id"], "cron-001");
+}
+
+#[tokio::test]
 async fn test_cron_list_runs_limit() {
     let (server, _dir) = setup_server();
     for i in 0..5 {
@@ -209,13 +251,28 @@ async fn test_cron_list_runs_includes_diagnostics_fields() {
     let (server, _dir) = setup_server();
     let conn = server.conn.lock().unwrap();
     conn.execute(
-        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, summary, delivery_status, no_notify_reason) \
-         VALUES ('diag-1', 'tracker', '2026-04-01T10:00:00Z', 'success', '/log', 'quiet', 'silent', 'No changes since last run')",
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, run_session_id, target_chat_id,
+            started_at, status, log_path, summary, delivery_required,
+            delivery_status, no_notify_reason, created_at, updated_at
+         ) VALUES (
+            'diag-1', 'cron', 'tracker', 'diag-1', -100,
+            '2026-04-01T10:00:00Z', 'success', '/log', 'quiet', 0,
+            'silent', 'No changes since last run', '2026-04-01T10:00:00Z', '2026-04-01T10:00:00Z'
+         )",
         [],
-    ).expect("insert");
+    )
+    .expect("insert");
     conn.execute(
-        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, summary, notify_json, delivery_status, delivered_at) \
-         VALUES ('diag-2', 'tracker', '2026-04-01T11:00:00Z', 'success', '/log', 'found stuff', '{\"content\":\"new release\"}', 'delivered', '2026-04-01T11:05:00Z')",
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, run_session_id, target_chat_id,
+            started_at, status, log_path, summary, notify_json,
+            delivery_required, delivery_status, delivered_at, created_at, updated_at
+         ) VALUES (
+            'diag-2', 'cron', 'tracker', 'diag-2', -100,
+            '2026-04-01T11:00:00Z', 'success', '/log', 'found stuff', '{\"content\":\"new release\"}',
+            1, 'delivered', '2026-04-01T11:05:00Z', '2026-04-01T11:00:00Z', '2026-04-01T11:00:00Z'
+         )",
         [],
     ).expect("insert");
     drop(conn);
