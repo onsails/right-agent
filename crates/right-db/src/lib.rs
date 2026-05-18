@@ -7,6 +7,7 @@
 
 #![warn(unreachable_pub)]
 
+pub mod conversation;
 pub mod error;
 pub mod migrations;
 

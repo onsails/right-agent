@@ -173,6 +173,24 @@ fn schema_has_memories_fts() {
 }
 
 #[test]
+fn schema_has_conversation_messages_table() {
+    let dir = tempdir().unwrap();
+    open_db(dir.path(), true).unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+
+    for table in ["conversation_messages", "conversation_messages_fts"] {
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "{table} table should exist");
+    }
+}
+
+#[test]
 fn schema_has_cron_runs_table() {
     let dir = tempdir().unwrap();
     open_db(dir.path(), true).unwrap();
