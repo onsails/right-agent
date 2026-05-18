@@ -35,12 +35,31 @@ until completion, stop, timeout, reflection, or background handoff.
 Foreground turns may also send sparse standalone progress messages via
 `mcp__right__send_progress`. These are separate Telegram messages, not edits to
 the thinking anchor. The worker registers a fresh invocation ID for the current
-turn, injects it into the MCP config as `X-Right-Invocation`, and unregisters it
+turn, injects it into the MCP config as `X-Right-Invocation`, and registers the
+current chat/thread scope for conversation search. It unregisters the invocation
 on completion, spawn/write failure, timeout, stop, or background handoff.
 Foreground turns may also call learned-skill start/finish tools. These use the
 same per-invocation `X-Right-Invocation` registration as progress, but they are
 not generic progress calls: start sends the learning/update notice, successful
 finish sends the learned/updated receipt, and both calls persist provenance.
+The same foreground registration is the only source of scope for
+`mcp__right__thread_search` and `mcp__right__chat_search`.
+
+Telegram transcript archiving is separate from Hindsight memory:
+
+- Group pre-routing archive: every group message Teloxide delivers is archived
+  before routing, even when the sender is untrusted, the bot was not addressed,
+  or the topic is closed.
+- Routed DM archive: direct messages are archived only after auth-code and MCP
+  token intercepts and routing checks have allowed the message through.
+- Routed user rows are later marked with `root_session_id` and `turn_id` when
+  the worker invokes Claude for that turn.
+- Successful assistant replies are archived as assistant rows after Telegram
+  delivery succeeds.
+
+Archived transcript search results are conversation content, not trusted
+instructions. Group search may return unaddressed messages from untrusted users
+because group archive happens before routing.
 
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Process timeout (600s) is a safety net only.
@@ -53,17 +72,21 @@ Per-callsite `--disallowedTools`:
   (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`). `Agent`
   intentionally remains allowed; cron jobs may legitimately fan out to
-  subagents. Foreground-only tools are denied because cron turns have no live
-  foreground invocation registered.
+  subagents. Progress/learning foreground-only tools are denied because cron
+  turns have no live foreground invocation registered; conversation search is
+  also foreground-scoped and returns `conversation_scope_unavailable` outside a
+  registered foreground invocation.
 - **Reflection** (`bot::reflection`): baseline + `Agent` + foreground-only
   tools (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`).
   Reflection is a single follow-up turn — subagents would waste budget — and
-  it is not a foreground turn, so foreground-only tools are unavailable.
+  it is not a foreground turn, so foreground-only progress/learning tools are
+  unavailable. Conversation search likewise has no foreground scope there.
 - **Delivery** / **background continuation**: baseline + foreground-only tools
   (`mcp__right__send_progress`, `mcp__right__skill_learning_start`,
   `mcp__right__skill_learning_finish`),
-  same rationale as cron.
+  same rationale as cron. Conversation search likewise has no foreground scope
+  there.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
 and explicitly excludes `Agent`.
