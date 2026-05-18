@@ -781,6 +781,31 @@ fn batch_is_addressed(batch: &[DebounceMsg]) -> bool {
     batch.iter().any(|m| m.address.is_some())
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InvocationLogContext {
+    chat_id: i64,
+    eff_thread_id: i64,
+    session_uuid: String,
+    turn_id: u64,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl InvocationLogContext {
+    fn new(chat_id: i64, eff_thread_id: i64, session_uuid: String, turn_id: u64) -> Self {
+        Self {
+            chat_id,
+            eff_thread_id,
+            session_uuid,
+            turn_id,
+        }
+    }
+
+    fn key(&self) -> SessionKey {
+        (self.chat_id, self.eff_thread_id)
+    }
+}
+
 /// Spawn a per-session worker task.
 ///
 /// Called by the message handler when no sender exists for the session key.
@@ -3028,6 +3053,35 @@ mod tests {
     use super::*;
     use right_openshell::test_support::{PROCESS_ENV_LOCK, PathGuard};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn invocation_log_context_carries_thread_session_and_turn() {
+        let ctx = InvocationLogContext::new(
+            -1003977763163,
+            458,
+            "f7d5a319-447f-4e58-ba8f-3c23dd476367".to_owned(),
+            42,
+        );
+
+        assert_eq!(ctx.chat_id, -1003977763163);
+        assert_eq!(ctx.eff_thread_id, 458);
+        assert_eq!(ctx.key(), (-1003977763163, 458));
+        assert_eq!(ctx.session_uuid, "f7d5a319-447f-4e58-ba8f-3c23dd476367");
+        assert_eq!(ctx.turn_id, 42);
+    }
+
+    #[test]
+    fn invocation_log_context_distinguishes_parallel_topics_in_same_chat() {
+        let agenda =
+            InvocationLogContext::new(-1003977763163, 458, "agenda-session".to_owned(), 10);
+        let danilo = InvocationLogContext::new(-1003977763163, 2, "danilo-session".to_owned(), 11);
+
+        assert_ne!(agenda.key(), danilo.key());
+        assert_eq!(agenda.chat_id, danilo.chat_id);
+        assert_ne!(agenda.eff_thread_id, danilo.eff_thread_id);
+        assert_ne!(agenda.session_uuid, danilo.session_uuid);
+        assert_ne!(agenda.turn_id, danilo.turn_id);
+    }
 
     #[tokio::test]
     async fn sandbox_bootstrap_acceptance_materializes_identity_mirror_from_sandbox() {

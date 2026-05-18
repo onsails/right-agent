@@ -60,3 +60,4 @@ right-openshell = { path = "../right-openshell", version = "*", features = ["tes
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tower = "0.5"
+tracing-subscriber = { workspace = true }
