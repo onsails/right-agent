@@ -1354,3 +1354,50 @@ Expected: no uncommitted changes. If verification fixes were needed:
 devenv shell -- git add <changed-files>
 devenv shell -- git commit -m "fix(mcp): stabilize auth choice flow"
 ```
+
+## Task 7: Claude Code Review Loop
+
+**Files:**
+- No planned code edits unless review finds a real issue.
+
+- [ ] **Step 1: Run the CC review loop**
+
+The user explicitly approved running `cca /review-loop` for this session.
+
+Run:
+
+```bash
+devenv shell -- cc-review .
+```
+
+Expected: review completes. If the command is unavailable, inspect the CC
+Review plugin instructions and use the repository's configured `cca
+/review-loop` command.
+
+- [ ] **Step 2: Apply only valid review fixes**
+
+For each finding, verify it against the code before changing anything. Fix only
+findings that are valid, in scope for the MCP auth-choice work, and not already
+covered by passing tests.
+
+- [ ] **Step 3: Re-run verification after review fixes**
+
+If any files changed, run:
+
+```bash
+devenv shell -- cargo test --workspace
+```
+
+Expected: PASS.
+
+- [ ] **Step 4: Commit review fixes if needed**
+
+If review fixes were made:
+
+```bash
+devenv shell -- git add <changed-files>
+devenv shell -- git commit -m "fix(mcp): address cc review findings"
+```
+
+If no fixes were needed, leave the worktree clean and record that the review
+loop produced no required changes.
