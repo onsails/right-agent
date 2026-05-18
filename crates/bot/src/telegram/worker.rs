@@ -806,6 +806,56 @@ impl InvocationLogContext {
     }
 }
 
+fn log_invoking_claude(ctx: &InvocationLogContext, is_first_call: bool, sandboxed: bool) {
+    tracing::info!(
+        chat_id = ctx.chat_id,
+        eff_thread_id = ctx.eff_thread_id,
+        key = ?ctx.key(),
+        session_uuid = %ctx.session_uuid,
+        turn_id = ctx.turn_id,
+        is_first_call,
+        sandboxed,
+        "invoking claude -p"
+    );
+}
+
+fn log_stream_update(ctx: &InvocationLogContext, assistant_turn: u32, formatted: &str) {
+    tracing::info!(
+        chat_id = ctx.chat_id,
+        eff_thread_id = ctx.eff_thread_id,
+        key = ?ctx.key(),
+        session_uuid = %ctx.session_uuid,
+        turn_id = ctx.turn_id,
+        assistant_turn,
+        "{formatted}"
+    );
+}
+
+fn log_claude_finished(
+    ctx: &InvocationLogContext,
+    exit_code: i32,
+    timed_out: bool,
+    stopped: bool,
+    was_bg_request: bool,
+    stream_log_path: &Path,
+    sandboxed: bool,
+) {
+    tracing::info!(
+        chat_id = ctx.chat_id,
+        eff_thread_id = ctx.eff_thread_id,
+        key = ?ctx.key(),
+        session_uuid = %ctx.session_uuid,
+        turn_id = ctx.turn_id,
+        exit_code,
+        timed_out,
+        stopped,
+        was_bg_request,
+        stream_log = %stream_log_path.display(),
+        sandboxed,
+        "claude -p finished"
+    );
+}
+
 /// Spawn a per-session worker task.
 ///
 /// Called by the message handler when no sender exists for the session key.
@@ -1119,6 +1169,9 @@ pub fn spawn_worker(
                         let parts = super::markdown::split_html_message(&html);
                         tracing::info!(
                             ?key,
+                            chat_id,
+                            eff_thread_id,
+                            session_uuid = %session_uuid,
                             content_len = content.len(),
                             html_len = html.len(),
                             parts = parts.len(),
@@ -2289,17 +2342,21 @@ async fn invoke_cc(
     cmd.stderr(Stdio::piped());
 
     let sandboxed = ctx.ssh_config_path.is_some();
-    tracing::info!(
-        ?chat_id,
-        ?eff_thread_id,
-        is_first_call,
-        sandboxed,
-        "invoking claude -p"
-    );
+    let turn_id = super::next_turn_id();
+    let log_ctx = InvocationLogContext::new(chat_id, eff_thread_id, session_uuid.clone(), turn_id);
+    log_invoking_claude(&log_ctx, is_first_call, sandboxed);
 
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Ok(child) => child,
         Err(e) => {
+            tracing::error!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                "spawn failed: {e:#}"
+            );
             if let Some(active) = active_progress.take() {
                 finish_progress_invocation(ctx, active).await;
             }
@@ -2311,6 +2368,14 @@ async fn invoke_cc(
     if let Some(mut stdin) = child.stdin() {
         use tokio::io::AsyncWriteExt;
         if let Err(e) = stdin.write_all(input.as_bytes()).await {
+            tracing::error!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                "stdin write failed: {e:#}"
+            );
             if let Some(active) = active_progress.take() {
                 finish_progress_invocation(ctx, active).await;
             }
@@ -2324,7 +2389,6 @@ async fn invoke_cc(
     // closes (silent reply loss when a bg click lands between stream-end and
     // our cleanup of `stop_tokens`).
     let stop_token = CancellationToken::new();
-    let turn_id = super::next_turn_id();
     ctx.stop_tokens
         .insert((chat_id, eff_thread_id), (turn_id, stop_token.clone()));
 
@@ -2344,6 +2408,14 @@ async fn invoke_cc(
     let stdout = match child.stdout() {
         Some(stdout) => stdout,
         None => {
+            tracing::error!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                "no stdout handle"
+            );
             if let Some(active) = active_progress.take() {
                 finish_progress_invocation(ctx, active).await;
             }
@@ -2437,13 +2509,21 @@ async fn invoke_cc(
                                             )
                                         {
                                             tracing::warn!(
-                                                ?chat_id,
+                                                chat_id = log_ctx.chat_id,
+                                                eff_thread_id = log_ctx.eff_thread_id,
+                                                key = ?log_ctx.key(),
+                                                session_uuid = %log_ctx.session_uuid,
+                                                turn_id = log_ctx.turn_id,
                                                 "usage insert failed: {e:#}"
                                             );
                                         }
                                     }
                                     None => tracing::warn!(
-                                        ?chat_id,
+                                        chat_id = log_ctx.chat_id,
+                                        eff_thread_id = log_ctx.eff_thread_id,
+                                        key = ?log_ctx.key(),
+                                        session_uuid = %log_ctx.session_uuid,
+                                        turn_id = log_ctx.turn_id,
                                         "result event missing required usage fields"
                                     ),
                                 }
@@ -2451,7 +2531,7 @@ async fn invoke_cc(
                             _ => {
                                 if let Some(formatted) = crate::cc::stream::format_event(&event) {
                                     total_assistant_events += 1;
-                                    tracing::info!(?chat_id, turn = total_assistant_events, "{formatted}");
+                                    log_stream_update(&log_ctx, total_assistant_events, &formatted);
                                 }
                                 ring_buffer.push(&event);
                                 // Update turn count from assistant events.
@@ -2497,7 +2577,14 @@ async fn invoke_cc(
                     }
                     Ok(None) => break, // stdout closed — process exited
                     Err(e) => {
-                        tracing::warn!(?chat_id, "stream read error: {e:#}");
+                        tracing::warn!(
+                            chat_id = log_ctx.chat_id,
+                            eff_thread_id = log_ctx.eff_thread_id,
+                            key = ?log_ctx.key(),
+                            session_uuid = %log_ctx.session_uuid,
+                            turn_id = log_ctx.turn_id,
+                            "stream read error: {e:#}"
+                        );
                         break;
                     }
                 }
@@ -2537,8 +2624,11 @@ async fn invoke_cc(
             _ = tokio::time::sleep_until(deadline) => {
                 timed_out = true;
                 tracing::warn!(
-                    ?chat_id,
-                    turn_id,
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
                     child_pid = child.id(),
                     "deadline fired ({}s) — sending SIGKILL to claude -p",
                     CC_TIMEOUT_SECS,
@@ -2549,8 +2639,11 @@ async fn invoke_cc(
             _ = stop_token.cancelled() => {
                 stopped = true;
                 tracing::info!(
-                    ?chat_id,
-                    turn_id,
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
                     child_pid = child.id(),
                     "stop_token cancelled — sending SIGKILL to claude -p",
                 );
@@ -2577,13 +2670,24 @@ async fn invoke_cc(
     {
         Ok(Ok(status)) => Some(status),
         Ok(Err(e)) => {
-            tracing::warn!(?chat_id, turn_id, child_pid, "child.wait failed: {e:#}");
+            tracing::warn!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                child_pid,
+                "child.wait failed: {e:#}"
+            );
             None
         }
         Err(_) => {
             tracing::error!(
-                ?chat_id,
-                turn_id,
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
                 child_pid,
                 elapsed_ms = wait_started.elapsed().as_millis() as u64,
                 "child.wait timed out — slave is wedged; ProcessGroupChild::Drop will killpg on return",
@@ -2593,8 +2697,11 @@ async fn invoke_cc(
     };
     let exit_code = exit_status.and_then(|s| s.code()).unwrap_or(-1);
     tracing::debug!(
-        ?chat_id,
-        turn_id,
+        chat_id = log_ctx.chat_id,
+        eff_thread_id = log_ctx.eff_thread_id,
+        key = ?log_ctx.key(),
+        session_uuid = %log_ctx.session_uuid,
+        turn_id = log_ctx.turn_id,
         child_pid,
         exit_code,
         wait_ms = wait_started.elapsed().as_millis() as u64,
@@ -2627,8 +2734,11 @@ async fn invoke_cc(
         {
             Ok(Ok(n)) => {
                 tracing::debug!(
-                    ?chat_id,
-                    turn_id,
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
                     child_pid,
                     bytes = n,
                     read_ms = read_started.elapsed().as_millis() as u64,
@@ -2636,12 +2746,23 @@ async fn invoke_cc(
                 );
             }
             Ok(Err(e)) => {
-                tracing::warn!(?chat_id, turn_id, child_pid, "stderr read failed: {e:#}");
+                tracing::warn!(
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
+                    child_pid,
+                    "stderr read failed: {e:#}"
+                );
             }
             Err(_) => {
                 tracing::error!(
-                    ?chat_id,
-                    turn_id,
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
                     child_pid,
                     bytes_so_far = buf.len(),
                     elapsed_ms = read_started.elapsed().as_millis() as u64,
@@ -2654,19 +2775,26 @@ async fn invoke_cc(
         String::new()
     };
 
-    tracing::info!(
-        ?chat_id,
+    log_claude_finished(
+        &log_ctx,
         exit_code,
         timed_out,
         stopped,
         was_bg_request,
-        stream_log = %stream_log_path.display(),
+        &stream_log_path,
         sandboxed,
-        "claude -p finished"
     );
 
     if !stderr_str.is_empty() {
-        tracing::warn!(?chat_id, stderr = %stderr_str, "CC stderr");
+        tracing::warn!(
+            chat_id = log_ctx.chat_id,
+            eff_thread_id = log_ctx.eff_thread_id,
+            key = ?log_ctx.key(),
+            session_uuid = %log_ctx.session_uuid,
+            turn_id = log_ctx.turn_id,
+            stderr = %stderr_str,
+            "CC stderr"
+        );
     }
 
     let learning_invocation_id = active_progress
@@ -2757,7 +2885,14 @@ async fn invoke_cc(
 
     // Handle user-initiated stop.
     if stopped {
-        tracing::info!(?chat_id, "CC session stopped by user");
+        tracing::info!(
+            chat_id = log_ctx.chat_id,
+            eff_thread_id = log_ctx.eff_thread_id,
+            key = ?log_ctx.key(),
+            session_uuid = %log_ctx.session_uuid,
+            turn_id = log_ctx.turn_id,
+            "CC session stopped by user"
+        );
         // No reply to send — thinking message already updated.
         return Ok(CcReply {
             output: None,
@@ -2779,7 +2914,11 @@ async fn invoke_cc(
     if exit_code != 0 {
         // Log full output on failure for debuggability.
         tracing::error!(
-            ?chat_id,
+            chat_id = log_ctx.chat_id,
+            eff_thread_id = log_ctx.eff_thread_id,
+            key = ?log_ctx.key(),
+            session_uuid = %log_ctx.session_uuid,
+            turn_id = log_ctx.turn_id,
             exit_code,
             stdout = %stdout_str.chars().take(1000).collect::<String>(),
             stderr = %stderr_str,
@@ -2788,11 +2927,28 @@ async fn invoke_cc(
 
         // Check for auth error — trigger login flow if sandboxed.
         if is_auth_error(&stdout_str) {
-            tracing::warn!(?chat_id, "detected auth error from CC");
+            tracing::warn!(
+                chat_id = log_ctx.chat_id,
+                eff_thread_id = log_ctx.eff_thread_id,
+                key = ?log_ctx.key(),
+                session_uuid = %log_ctx.session_uuid,
+                turn_id = log_ctx.turn_id,
+                "detected auth error from CC"
+            );
             // Deactivate the session created before invoke_cc — it's from a failed auth
             // attempt and must not be resumed. Next message will start fresh.
             deactivate_current(&conn, chat_id, eff_thread_id)
-                .map_err(|e| tracing::error!(?chat_id, "deactivate_current on auth error: {:#}", e))
+                .map_err(|e| {
+                    tracing::error!(
+                        chat_id = log_ctx.chat_id,
+                        eff_thread_id = log_ctx.eff_thread_id,
+                        key = ?log_ctx.key(),
+                        session_uuid = %log_ctx.session_uuid,
+                        turn_id = log_ctx.turn_id,
+                        "deactivate_current on auth error: {:#}",
+                        e
+                    )
+                })
                 .ok();
             if ctx.ssh_config_path.is_some() {
                 // Sandbox mode: spawn token request if not already active.
@@ -2806,7 +2962,14 @@ async fn invoke_cc(
                     )
                     .await
                     {
-                        tracing::warn!(?chat_id, "failed to send auth error notification: {e:#}");
+                        tracing::warn!(
+                            chat_id = log_ctx.chat_id,
+                            eff_thread_id = log_ctx.eff_thread_id,
+                            key = ?log_ctx.key(),
+                            session_uuid = %log_ctx.session_uuid,
+                            turn_id = log_ctx.turn_id,
+                            "failed to send auth error notification: {e:#}"
+                        );
                     }
                     spawn_token_request(ctx, tg_chat_id, ctx.effective_thread_id);
                     // Return Ok(None) — the initial message above is sufficient,
@@ -2836,7 +2999,14 @@ async fn invoke_cc(
                     )
                     .await
                     {
-                        tracing::warn!(?chat_id, "failed to send auth error notification: {e:#}");
+                        tracing::warn!(
+                            chat_id = log_ctx.chat_id,
+                            eff_thread_id = log_ctx.eff_thread_id,
+                            key = ?log_ctx.key(),
+                            session_uuid = %log_ctx.session_uuid,
+                            turn_id = log_ctx.turn_id,
+                            "failed to send auth error notification: {e:#}"
+                        );
                     }
                     spawn_token_request(ctx, tg_chat_id, ctx.effective_thread_id);
                     return Ok(CcReply {
@@ -2861,7 +3031,11 @@ async fn invoke_cc(
             deactivate_current(&conn, chat_id, eff_thread_id)
                 .map_err(|e| {
                     tracing::error!(
-                        ?chat_id,
+                        chat_id = log_ctx.chat_id,
+                        eff_thread_id = log_ctx.eff_thread_id,
+                        key = ?log_ctx.key(),
+                        session_uuid = %log_ctx.session_uuid,
+                        turn_id = log_ctx.turn_id,
                         "deactivate_current on first-call failure: {:#}",
                         e
                     )
@@ -3054,6 +3228,39 @@ mod tests {
     use right_openshell::test_support::{PROCESS_ENV_LOCK, PathGuard};
     use std::os::unix::fs::PermissionsExt;
 
+    #[derive(Clone)]
+    struct SharedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_worker_log<F>(f: F) -> String
+    where
+        F: FnOnce(),
+    {
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = SharedLogWriter(std::sync::Arc::clone(&buffer));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_target(false)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        let bytes = buffer.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
     #[test]
     fn invocation_log_context_carries_thread_session_and_turn() {
         let ctx = InvocationLogContext::new(
@@ -3081,6 +3288,64 @@ mod tests {
         assert_ne!(agenda.eff_thread_id, danilo.eff_thread_id);
         assert_ne!(agenda.session_uuid, danilo.session_uuid);
         assert_ne!(agenda.turn_id, danilo.turn_id);
+    }
+
+    #[test]
+    fn invoking_claude_log_includes_topic_session_and_turn() {
+        let ctx = InvocationLogContext::new(
+            -1003977763163,
+            458,
+            "f7d5a319-447f-4e58-ba8f-3c23dd476367".to_owned(),
+            42,
+        );
+
+        let log = capture_worker_log(|| log_invoking_claude(&ctx, false, true));
+
+        assert!(log.contains("invoking claude -p"), "{log}");
+        assert!(log.contains("chat_id=-1003977763163"), "{log}");
+        assert!(log.contains("eff_thread_id=458"), "{log}");
+        assert!(log.contains("key=(-1003977763163, 458)"), "{log}");
+        assert!(
+            log.contains("session_uuid=f7d5a319-447f-4e58-ba8f-3c23dd476367"),
+            "{log}"
+        );
+        assert!(log.contains("turn_id=42"), "{log}");
+        assert!(log.contains("is_first_call=false"), "{log}");
+        assert!(log.contains("sandboxed=true"), "{log}");
+    }
+
+    #[test]
+    fn stream_update_log_includes_topic_session_and_assistant_turn() {
+        let ctx = InvocationLogContext::new(-1003977763163, 2, "2f4a29c9".to_owned(), 43);
+
+        let log = capture_worker_log(|| log_stream_update(&ctx, 5, "tool call"));
+
+        assert!(log.contains("tool call"), "{log}");
+        assert!(log.contains("chat_id=-1003977763163"), "{log}");
+        assert!(log.contains("eff_thread_id=2"), "{log}");
+        assert!(log.contains("key=(-1003977763163, 2)"), "{log}");
+        assert!(log.contains("session_uuid=2f4a29c9"), "{log}");
+        assert!(log.contains("turn_id=43"), "{log}");
+        assert!(log.contains("assistant_turn=5"), "{log}");
+    }
+
+    #[test]
+    fn claude_finished_log_includes_topic_session_turn_and_stream_log() {
+        let ctx = InvocationLogContext::new(-1003977763163, 458, "f7d5a319".to_owned(), 44);
+        let stream_log = std::path::Path::new("/tmp/f7d5a319.ndjson");
+
+        let log = capture_worker_log(|| {
+            log_claude_finished(&ctx, 0, false, false, false, stream_log, true);
+        });
+
+        assert!(log.contains("claude -p finished"), "{log}");
+        assert!(log.contains("chat_id=-1003977763163"), "{log}");
+        assert!(log.contains("eff_thread_id=458"), "{log}");
+        assert!(log.contains("key=(-1003977763163, 458)"), "{log}");
+        assert!(log.contains("session_uuid=f7d5a319"), "{log}");
+        assert!(log.contains("turn_id=44"), "{log}");
+        assert!(log.contains("exit_code=0"), "{log}");
+        assert!(log.contains("stream_log=/tmp/f7d5a319.ndjson"), "{log}");
     }
 
     #[tokio::test]
