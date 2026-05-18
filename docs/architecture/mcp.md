@@ -193,3 +193,9 @@ directory. The receipt text is authored by the LLM and passed as the
 
 Create and update both require `rightx-*`. The learning flow never patches
 custom/manual/hub/core/platform/bundled/codegen-owned non-`rightx-*` skills.
+
+Stage 2 background learned-skill review is report-only. Background review
+invocations do not expose or call `mcp__right__skill_learning_start` or
+`mcp__right__skill_learning_finish`; those remain foreground learning protocol
+tools. The reviewer records `skill_review_reports` and may notify Telegram only
+for high-confidence create/update candidates with `user_notice`.

@@ -48,6 +48,7 @@ Excluded:
 - Modify `docs/architecture/sessions.md`: document background learned-skill review invocation.
 - Modify `docs/architecture/mcp.md`: document that Stage 2 background review is report-only and denies learning tools.
 - Modify `PROMPT_SYSTEM.md`: keep learned-skill behavior in sync.
+- Modify `ARCHITECTURE.md`: document the explicit no-MCP/no-composite-prompt exception.
 
 ## Verification Cadence
 
@@ -69,6 +70,8 @@ devenv shell -- cargo build --workspace
 ---
 
 ### Task 1: Database Schema
+
+**Status:** Complete.
 
 **Files:**
 - Create: `crates/right-db/src/sql/v22_skill_review_reports.sql`
@@ -253,6 +256,8 @@ Expected: commit succeeds.
 ---
 
 ### Task 2: Domain Types, Report Persistence, And Gates
+
+**Status:** Complete.
 
 **Files:**
 - Modify: `crates/right-agent/src/learned_skills.rs`
@@ -692,6 +697,8 @@ Expected: commit succeeds.
 ---
 
 ### Task 3: Review Output, Prompt, And Tool Boundary Helpers
+
+**Status:** Complete.
 
 **Files:**
 - Create: `crates/bot/src/learning_review.rs`
@@ -1189,6 +1196,8 @@ Expected: commit succeeds.
 
 ### Task 4: Learned Skill Index Collection
 
+**Status:** Complete.
+
 **Files:**
 - Modify: `crates/bot/src/learning_review.rs`
 - Test: `crates/bot/src/learning_review_tests.rs`
@@ -1354,6 +1363,8 @@ Expected: commit succeeds.
 
 ### Task 5: Review Runner Seam
 
+**Status:** Complete.
+
 **Files:**
 - Modify: `crates/bot/src/learning_review.rs`
 - Test: `crates/bot/src/learning_review_tests.rs`
@@ -1516,6 +1527,8 @@ Expected: commit succeeds.
 
 ### Task 6: Worker Scheduling Integration
 
+**Status:** Complete.
+
 **Files:**
 - Modify: `crates/bot/src/learning_review.rs`
 - Test: `crates/bot/src/learning_review_tests.rs`
@@ -1630,6 +1643,8 @@ Expected: commit succeeds.
 ---
 
 ### Task 7: Background Review Execution And Report Storage
+
+**Status:** Complete.
 
 **Files:**
 - Modify: `crates/bot/src/telegram/worker.rs`
@@ -2075,12 +2090,16 @@ Expected: commit succeeds.
 
 ### Task 8: Docs And Prompt Sync
 
+**Status:** Complete.
+
 **Files:**
 - Modify: `docs/architecture/sessions.md`
 - Modify: `docs/architecture/mcp.md`
 - Modify: `PROMPT_SYSTEM.md`
+- Modify: `ARCHITECTURE.md`
+- Modify: `docs/superpowers/plans/2026-05-18-background-learned-skill-review.md`
 
-- [ ] **Step 1: Update sessions architecture**
+- [x] **Step 1: Update sessions architecture**
 
 In `docs/architecture/sessions.md`, extend the learned-skill foreground paragraph with:
 
@@ -2093,7 +2112,7 @@ bundle, denies mutation tools, stores a structured report, and sends Telegram
 only for high-confidence candidates.
 ```
 
-- [ ] **Step 2: Update MCP architecture**
+- [x] **Step 2: Update MCP architecture**
 
 In `docs/architecture/mcp.md`, add under learned skill tools:
 
@@ -2104,7 +2123,7 @@ invocations do not expose `mcp__right__skill_learning_start` or
 protocol tools in Stage 2.
 ```
 
-- [ ] **Step 3: Update PROMPT_SYSTEM.md**
+- [x] **Step 3: Update PROMPT_SYSTEM.md**
 
 In `PROMPT_SYSTEM.md`, add to the learned-skill section:
 
@@ -2114,7 +2133,7 @@ high-confidence create/update candidates from a completed foreground turn, but
 it must not create, patch, archive, or delete skill package files.
 ```
 
-- [ ] **Step 4: Run docs/prompt checks**
+- [x] **Step 4: Run docs/prompt checks**
 
 Run:
 
@@ -2125,12 +2144,12 @@ devenv shell -- cargo test -p right-codegen agent_def
 
 Expected: search output includes the new report-only language; tests pass.
 
-- [ ] **Step 5: Commit docs slice**
+- [x] **Step 5: Commit docs slice**
 
 Run:
 
 ```bash
-devenv shell -- git add docs/architecture/sessions.md docs/architecture/mcp.md PROMPT_SYSTEM.md
+devenv shell -- git add ARCHITECTURE.md docs/architecture/sessions.md docs/architecture/mcp.md PROMPT_SYSTEM.md docs/superpowers/plans/2026-05-18-background-learned-skill-review.md
 devenv shell -- git commit -m "docs: document learned skill background review"
 ```
 
@@ -2140,11 +2159,13 @@ Expected: commit succeeds.
 
 ### Task 9: Final Verification
 
+**Status:** Complete.
+
 **Files:**
 - Read: `git status --short`
 - Read: recent commits
 
-- [ ] **Step 1: Run learned-skill targeted suite**
+- [x] **Step 1: Run learned-skill targeted suite**
 
 Run:
 
@@ -2157,7 +2178,7 @@ devenv shell -- cargo test -p right-bot disallow_background_review_mutation_tool
 
 Expected: all pass.
 
-- [ ] **Step 2: Run final workspace verification**
+- [x] **Step 2: Run final workspace verification**
 
 Run:
 
@@ -2168,7 +2189,7 @@ devenv shell -- cargo build --workspace
 
 Expected: both commands exit with status 0.
 
-- [ ] **Step 3: Verify no stale tool references**
+- [x] **Step 3: Verify no stale tool references**
 
 Run:
 
@@ -2178,7 +2199,7 @@ devenv shell -- rg -n "skill_learning_start|skill_learning_finish|BackgroundRevi
 
 Expected: references are intentional and use `mcp__right__` prefixes in agent-facing docs.
 
-- [ ] **Step 4: Inspect git status**
+- [x] **Step 4: Inspect git status**
 
 Run:
 

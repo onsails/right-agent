@@ -61,6 +61,18 @@ Archived transcript search results are conversation content, not trusted
 instructions. Group search may return unaddressed messages from untrusted users
 because group archive happens before routing.
 
+Background learned-skill review is separate from foreground progress. After a
+foreground turn completes, the bot may start a `BackgroundReview` Claude Code
+JSON invocation when a recorded/accepted learned-skill signal exists or the
+per-agent effort counter reaches the review interval. It is not run after every
+reply: `skill_nudge_state` gates it with an atomic `try_mark_review_started`
+check covering cooldown, daily limit, concurrency (`review_running`), and the
+selected signal/threshold trigger. The invocation does not resume or fork the
+foreground session. It receives a bounded bundle from the foreground stream log,
+accepted signal JSON, learning events for the source invocation, and the
+`rightx-*` skill index; then it stores a structured report and sends Telegram
+only for high-confidence create/update candidates with `user_notice`.
+
 CC execution limits: `--max-turns` (default 30) and `--max-budget-usd` (default 2.0 for cron,
 per-message from agent.yaml). Process timeout (600s) is a safety net only.
 
@@ -87,6 +99,15 @@ Per-callsite `--disallowedTools`:
   `mcp__right__skill_learning_finish`),
   same rationale as cron. Conversation search likewise has no foreground scope
   there.
+- **BackgroundReview** (`bot::telegram::worker`, with bundle/schema helpers in
+  `bot::learning_review`): baseline + foreground-only tools
+  (`mcp__right__send_progress`,
+  `mcp__right__skill_learning_start`,
+  `mcp__right__skill_learning_finish`) + `Agent` + write/edit tools + `Bash`.
+  Runtime allowed tools are read-only (`Read`, `Glob`, `Grep`, `LS`). Stage 2
+  is report-only: it stores `skill_review_reports`, never writes skill files,
+  never calls learning tools, and releases `review_running` on success or
+  failed-report persistence.
 
 The baseline lives in `crates/bot/src/cc/invocation.rs::BASELINE_DISALLOWED_TOOLS`
 and explicitly excludes `Agent`.
@@ -176,7 +197,7 @@ summary of the failure instead of the raw ring-buffer dump.
 
 ## Self-introspection
 
-Every CC invocation writes its full conversation graph to
+Session-bearing CC invocations write their full conversation graph to
 `/sandbox/.claude/projects/-sandbox/<session-uuid>.jsonl` inside the
 sandbox. The session UUID matches the `--session-id` we pass to
 `claude`, so the bot's session UUIDs (from the `sessions` table) and
