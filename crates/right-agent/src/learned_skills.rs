@@ -168,7 +168,7 @@ pub struct SkillReviewReport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReviewGateInput<'a> {
-    pub has_signal: bool,
+    pub signal_trigger: Option<ReviewTriggerKind>,
     pub today: &'a str,
     pub cooldown_elapsed: bool,
     pub daily_limit: i64,
@@ -469,8 +469,45 @@ pub fn review_gate_decision(
     agent_name: &str,
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
-    ensure_nudge_state(conn, agent_name)?;
-    let row: (i64, i64, i64, Option<String>, i64) = conn.query_row(
+    let tx = conn.unchecked_transaction()?;
+    ensure_nudge_state_in_tx(&tx, agent_name)?;
+    roll_over_daily_count_if_stale(&tx, agent_name, input.today)?;
+    let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
+    tx.commit()?;
+    Ok(decision)
+}
+
+fn ensure_nudge_state_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    agent_name: &str,
+) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "INSERT OR IGNORE INTO skill_nudge_state (agent_name) VALUES (?1)",
+        [agent_name],
+    )?;
+    Ok(())
+}
+
+fn roll_over_daily_count_if_stale(
+    tx: &rusqlite::Transaction<'_>,
+    agent_name: &str,
+    today: &str,
+) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "UPDATE skill_nudge_state \
+         SET daily_review_date = ?2, daily_review_count = 0 \
+         WHERE agent_name = ?1 AND (daily_review_date IS NULL OR daily_review_date <> ?2)",
+        rusqlite::params![agent_name, today],
+    )?;
+    Ok(())
+}
+
+fn review_gate_decision_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    agent_name: &str,
+    input: ReviewGateInput<'_>,
+) -> Result<ReviewGateDecision, rusqlite::Error> {
+    let row: (i64, i64, i64, Option<String>, i64) = tx.query_row(
         "SELECT review_running, daily_review_count, tool_iters_since_review, daily_review_date, creation_review_interval \
          FROM skill_nudge_state WHERE agent_name = ?1",
         [agent_name],
@@ -478,22 +515,22 @@ pub fn review_gate_decision(
     )?;
 
     let (review_running, mut daily_count, tool_iters, daily_date, interval) = row;
+    if daily_date.as_deref() != Some(input.today) {
+        daily_count = 0;
+    }
     if review_running != 0 {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning));
     }
     if !input.cooldown_elapsed {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::Cooldown));
     }
-    if daily_date.as_deref() != Some(input.today) {
-        daily_count = 0;
-    }
     if daily_count >= input.daily_limit {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit));
     }
-    if input.has_signal {
-        return Ok(ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal));
+    if let Some(trigger) = input.signal_trigger {
+        return Ok(ReviewGateDecision::Start(trigger));
     }
-    if tool_iters >= interval {
+    if interval > 0 && tool_iters >= interval {
         return Ok(ReviewGateDecision::Start(
             ReviewTriggerKind::EffortThreshold,
         ));
@@ -501,45 +538,74 @@ pub fn review_gate_decision(
     Ok(ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold))
 }
 
-pub fn mark_review_started(
+pub fn try_mark_review_started(
     conn: &rusqlite::Connection,
     agent_name: &str,
-    today: &str,
-) -> Result<(), rusqlite::Error> {
-    ensure_nudge_state(conn, agent_name)?;
-    conn.execute(
+    input: ReviewGateInput<'_>,
+) -> Result<ReviewGateDecision, rusqlite::Error> {
+    let tx = conn.unchecked_transaction()?;
+    ensure_nudge_state_in_tx(&tx, agent_name)?;
+    roll_over_daily_count_if_stale(&tx, agent_name, input.today)?;
+
+    let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
+    let ReviewGateDecision::Start(trigger) = decision else {
+        tx.commit()?;
+        return Ok(decision);
+    };
+
+    let updated = tx.execute(
         "UPDATE skill_nudge_state \
          SET review_running = 1, \
              daily_review_date = ?2, \
-             daily_review_count = CASE WHEN daily_review_date = ?2 THEN daily_review_count + 1 ELSE 1 END \
-         WHERE agent_name = ?1",
-        rusqlite::params![agent_name, today],
+             daily_review_count = daily_review_count + 1 \
+         WHERE agent_name = ?1 \
+           AND review_running = 0 \
+           AND daily_review_date = ?2 \
+           AND daily_review_count < ?3",
+        rusqlite::params![agent_name, input.today, input.daily_limit],
     )?;
-    Ok(())
+    if updated == 1 {
+        tx.commit()?;
+        return Ok(ReviewGateDecision::Start(trigger));
+    }
+
+    let decision = review_gate_decision_in_tx(&tx, agent_name, input)?;
+    tx.commit()?;
+    Ok(decision)
 }
 
 pub fn mark_review_finished(
     conn: &rusqlite::Connection,
     agent_name: &str,
+    trigger: ReviewTriggerKind,
     status: ReviewStatus,
-    reset_counters: bool,
 ) -> Result<(), rusqlite::Error> {
-    ensure_nudge_state(conn, agent_name)?;
-    if reset_counters {
-        conn.execute(
-            "UPDATE skill_nudge_state \
-             SET review_running = 0, tool_iters_since_review = 0, turns_since_review = 0, skill_issue_hints_since_review = 0, last_review_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), last_review_status = ?2 \
-             WHERE agent_name = ?1",
-            rusqlite::params![agent_name, status.as_str()],
-        )?;
-    } else {
-        conn.execute(
-            "UPDATE skill_nudge_state \
-             SET review_running = 0, last_review_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), last_review_status = ?2 \
-             WHERE agent_name = ?1",
-            rusqlite::params![agent_name, status.as_str()],
-        )?;
-    }
+    let tx = conn.unchecked_transaction()?;
+    ensure_nudge_state_in_tx(&tx, agent_name)?;
+    let reset_activity_counters = !matches!(status, ReviewStatus::Failed);
+    let reset_issue_hints = reset_activity_counters
+        && (matches!(trigger, ReviewTriggerKind::SkillIssueSignal)
+            || matches!(
+                status,
+                ReviewStatus::NothingToLearn | ReviewStatus::UpdateCandidate
+            ));
+    tx.execute(
+        "UPDATE skill_nudge_state \
+         SET review_running = 0, \
+             tool_iters_since_review = CASE WHEN ?3 THEN 0 ELSE tool_iters_since_review END, \
+             turns_since_review = CASE WHEN ?3 THEN 0 ELSE turns_since_review END, \
+             skill_issue_hints_since_review = CASE WHEN ?4 THEN 0 ELSE skill_issue_hints_since_review END, \
+             last_review_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), \
+             last_review_status = ?2 \
+         WHERE agent_name = ?1",
+        rusqlite::params![
+            agent_name,
+            status.as_str(),
+            if reset_activity_counters { 1_i64 } else { 0_i64 },
+            if reset_issue_hints { 1_i64 } else { 0_i64 },
+        ],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -551,6 +617,15 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn
+    }
+
+    fn review_gate_input(signal_trigger: Option<ReviewTriggerKind>) -> ReviewGateInput<'static> {
+        ReviewGateInput {
+            signal_trigger,
+            today: "2026-05-18",
+            cooldown_elapsed: true,
+            daily_limit: 12,
+        }
     }
 
     #[test]
@@ -612,7 +687,7 @@ mod tests {
             &conn,
             "right",
             ReviewGateInput {
-                has_signal: true,
+                signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
                 cooldown_elapsed: true,
                 daily_limit: 12,
@@ -624,6 +699,22 @@ mod tests {
             ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
         );
 
+        let issue_decision = review_gate_decision(
+            &conn,
+            "right",
+            ReviewGateInput {
+                signal_trigger: Some(ReviewTriggerKind::SkillIssueSignal),
+                today: "2026-05-18",
+                cooldown_elapsed: true,
+                daily_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            issue_decision,
+            ReviewGateDecision::Start(ReviewTriggerKind::SkillIssueSignal)
+        );
+
         conn.execute(
             "UPDATE skill_nudge_state SET tool_iters_since_review = 15 WHERE agent_name='right'",
             [],
@@ -633,7 +724,7 @@ mod tests {
             &conn,
             "right",
             ReviewGateInput {
-                has_signal: false,
+                signal_trigger: None,
                 today: "2026-05-18",
                 cooldown_elapsed: true,
                 daily_limit: 12,
@@ -660,7 +751,7 @@ mod tests {
             &conn,
             "right",
             ReviewGateInput {
-                has_signal: true,
+                signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
                 cooldown_elapsed: true,
                 daily_limit: 12,
@@ -682,7 +773,7 @@ mod tests {
             &conn,
             "right",
             ReviewGateInput {
-                has_signal: true,
+                signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
                 cooldown_elapsed: true,
                 daily_limit: 12,
@@ -703,7 +794,7 @@ mod tests {
             &conn,
             "right",
             ReviewGateInput {
-                has_signal: true,
+                signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
                 cooldown_elapsed: false,
                 daily_limit: 12,
@@ -726,7 +817,21 @@ mod tests {
         )
         .unwrap();
 
-        mark_review_started(&conn, "right", "2026-05-18").unwrap();
+        let started = try_mark_review_started(
+            &conn,
+            "right",
+            ReviewGateInput {
+                signal_trigger: None,
+                today: "2026-05-18",
+                cooldown_elapsed: true,
+                daily_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            started,
+            ReviewGateDecision::Start(ReviewTriggerKind::EffortThreshold)
+        );
         let running: i64 = conn
             .query_row(
                 "SELECT review_running FROM skill_nudge_state WHERE agent_name='right'",
@@ -736,7 +841,13 @@ mod tests {
             .unwrap();
         assert_eq!(running, 1);
 
-        mark_review_finished(&conn, "right", ReviewStatus::NothingToLearn, true).unwrap();
+        mark_review_finished(
+            &conn,
+            "right",
+            ReviewTriggerKind::EffortThreshold,
+            ReviewStatus::NothingToLearn,
+        )
+        .unwrap();
         let row: (i64, i64, i64, String) = conn
             .query_row(
                 "SELECT review_running, tool_iters_since_review, turns_since_review, last_review_status \
@@ -746,6 +857,359 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (0, 0, 0, "nothing_to_learn".to_owned()));
+    }
+
+    #[test]
+    fn review_start_rechecks_running_and_daily_limit_after_stale_gate() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+        let stale_decision = review_gate_decision(
+            &conn,
+            "right",
+            review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
+        )
+        .unwrap();
+        assert_eq!(
+            stale_decision,
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
+        );
+
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+        let running = try_mark_review_started(
+            &conn,
+            "right",
+            review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
+        )
+        .unwrap();
+        assert_eq!(
+            running,
+            ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning)
+        );
+
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 0, daily_review_count = 12, daily_review_date = '2026-05-18' \
+             WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+        let limited = try_mark_review_started(
+            &conn,
+            "right",
+            review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
+        )
+        .unwrap();
+        assert_eq!(
+            limited,
+            ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit)
+        );
+
+        let row: (i64, i64) = conn
+            .query_row(
+                "SELECT review_running, daily_review_count FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 12));
+    }
+
+    #[test]
+    fn review_gate_rolls_over_saturated_old_daily_count() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state SET daily_review_count = 12, daily_review_date = '2026-05-17' \
+             WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+
+        let decision = review_gate_decision(
+            &conn,
+            "right",
+            review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
+        );
+
+        let row: (i64, String) = conn
+            .query_row(
+                "SELECT daily_review_count, daily_review_date FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, "2026-05-18".to_owned()));
+    }
+
+    #[test]
+    fn review_start_increments_same_day_and_rollover_counts() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "same-day").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state SET daily_review_count = 2, daily_review_date = '2026-05-18' \
+             WHERE agent_name='same-day'",
+            [],
+        )
+        .unwrap();
+
+        let same_day = try_mark_review_started(
+            &conn,
+            "same-day",
+            review_gate_input(Some(ReviewTriggerKind::LearningSignal)),
+        )
+        .unwrap();
+        assert_eq!(
+            same_day,
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
+        );
+        let same_day_row: (i64, String) = conn
+            .query_row(
+                "SELECT daily_review_count, daily_review_date FROM skill_nudge_state WHERE agent_name='same-day'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(same_day_row, (3, "2026-05-18".to_owned()));
+
+        ensure_nudge_state(&conn, "rollover").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state SET daily_review_count = 7, daily_review_date = '2026-05-17' \
+             WHERE agent_name='rollover'",
+            [],
+        )
+        .unwrap();
+
+        let rollover = try_mark_review_started(
+            &conn,
+            "rollover",
+            review_gate_input(Some(ReviewTriggerKind::SkillIssueSignal)),
+        )
+        .unwrap();
+        assert_eq!(
+            rollover,
+            ReviewGateDecision::Start(ReviewTriggerKind::SkillIssueSignal)
+        );
+        let rollover_row: (i64, String) = conn
+            .query_row(
+                "SELECT daily_review_count, daily_review_date FROM skill_nudge_state WHERE agent_name='rollover'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rollover_row, (1, "2026-05-18".to_owned()));
+    }
+
+    #[test]
+    fn review_gate_disables_non_positive_effort_threshold() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+
+        for interval in [0, -1] {
+            conn.execute(
+                "UPDATE skill_nudge_state SET tool_iters_since_review = 999, creation_review_interval = ?1 \
+                 WHERE agent_name='right'",
+                [interval],
+            )
+            .unwrap();
+
+            let effort = review_gate_decision(&conn, "right", review_gate_input(None)).unwrap();
+            assert_eq!(
+                effort,
+                ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold)
+            );
+
+            let signal = review_gate_decision(
+                &conn,
+                "right",
+                review_gate_input(Some(ReviewTriggerKind::SkillIssueSignal)),
+            )
+            .unwrap();
+            assert_eq!(
+                signal,
+                ReviewGateDecision::Start(ReviewTriggerKind::SkillIssueSignal)
+            );
+        }
+    }
+
+    #[test]
+    fn review_public_helpers_create_missing_nudge_rows() {
+        let conn = conn();
+
+        let gate = review_gate_decision(&conn, "gate-missing", review_gate_input(None)).unwrap();
+        assert_eq!(
+            gate,
+            ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold)
+        );
+
+        let start = try_mark_review_started(
+            &conn,
+            "start-missing",
+            review_gate_input(Some(ReviewTriggerKind::SkillIssueSignal)),
+        )
+        .unwrap();
+        assert_eq!(
+            start,
+            ReviewGateDecision::Start(ReviewTriggerKind::SkillIssueSignal)
+        );
+
+        mark_review_finished(
+            &conn,
+            "finish-missing",
+            ReviewTriggerKind::EffortThreshold,
+            ReviewStatus::Failed,
+        )
+        .unwrap();
+
+        for agent_name in ["gate-missing", "start-missing", "finish-missing"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM skill_nudge_state WHERE agent_name = ?1",
+                    [agent_name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{agent_name} row should exist");
+        }
+
+        let started: (i64, i64, String) = conn
+            .query_row(
+                "SELECT review_running, daily_review_count, daily_review_date \
+                 FROM skill_nudge_state WHERE agent_name='start-missing'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(started, (1, 1, "2026-05-18".to_owned()));
+
+        let finished: (i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT review_running, last_review_status, last_review_at \
+                 FROM skill_nudge_state WHERE agent_name='finish-missing'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(finished.0, 0);
+        assert_eq!(finished.1, "failed");
+        assert!(finished.2.is_some());
+    }
+
+    #[test]
+    fn review_failed_finish_preserves_counters_and_sets_cooldown() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state \
+             SET review_running = 1, tool_iters_since_review = 11, turns_since_review = 4, skill_issue_hints_since_review = 3 \
+             WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+
+        mark_review_finished(
+            &conn,
+            "right",
+            ReviewTriggerKind::LearningSignal,
+            ReviewStatus::Failed,
+        )
+        .unwrap();
+
+        let row: (i64, i64, i64, i64, String, Option<String>) = conn
+            .query_row(
+                "SELECT review_running, tool_iters_since_review, turns_since_review, skill_issue_hints_since_review, last_review_status, last_review_at \
+                 FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, 0);
+        assert_eq!(row.1, 11);
+        assert_eq!(row.2, 4);
+        assert_eq!(row.3, 3);
+        assert_eq!(row.4, "failed");
+        assert!(row.5.is_some());
+    }
+
+    #[test]
+    fn review_finish_resets_issue_hints_only_for_issue_or_nothing_to_learn() {
+        let conn = conn();
+        for agent_name in ["learning", "issue", "nothing"] {
+            ensure_nudge_state(&conn, agent_name).unwrap();
+            conn.execute(
+                "UPDATE skill_nudge_state \
+                 SET review_running = 1, tool_iters_since_review = 9, turns_since_review = 2, skill_issue_hints_since_review = 5 \
+                 WHERE agent_name = ?1",
+                [agent_name],
+            )
+            .unwrap();
+        }
+
+        mark_review_finished(
+            &conn,
+            "learning",
+            ReviewTriggerKind::LearningSignal,
+            ReviewStatus::CreateCandidate,
+        )
+        .unwrap();
+        mark_review_finished(
+            &conn,
+            "issue",
+            ReviewTriggerKind::SkillIssueSignal,
+            ReviewStatus::UpdateCandidate,
+        )
+        .unwrap();
+        mark_review_finished(
+            &conn,
+            "nothing",
+            ReviewTriggerKind::EffortThreshold,
+            ReviewStatus::NothingToLearn,
+        )
+        .unwrap();
+
+        let learning: (i64, i64, i64, i64, String) = conn
+            .query_row(
+                "SELECT review_running, tool_iters_since_review, turns_since_review, skill_issue_hints_since_review, last_review_status \
+                 FROM skill_nudge_state WHERE agent_name='learning'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(learning, (0, 0, 0, 5, "create_candidate".to_owned()));
+
+        let issue_hints: i64 = conn
+            .query_row(
+                "SELECT skill_issue_hints_since_review FROM skill_nudge_state WHERE agent_name='issue'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(issue_hints, 0);
+
+        let nothing_hints: i64 = conn
+            .query_row(
+                "SELECT skill_issue_hints_since_review FROM skill_nudge_state WHERE agent_name='nothing'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(nothing_hints, 0);
     }
 
     #[test]
