@@ -29,6 +29,7 @@ use super::handler::{
     handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
     handle_thinking_toggle_callback, handle_usage,
 };
+use super::mcp_auth_choice::PendingMcpAuthChoiceSlot;
 use super::mention::BotIdentity;
 use super::model_command::{handle_model, handle_model_callback};
 use super::oauth_callback::PendingAuthMap;
@@ -148,6 +149,9 @@ where
     });
     let pending_token_slot_arc: Arc<PendingTokenSlot> =
         Arc::new(PendingTokenSlot(pending_token_arc));
+    let pending_auth_choice_slot = Arc::new(PendingMcpAuthChoiceSlot(Arc::new(
+        tokio::sync::Mutex::new(None),
+    )));
     let internal_api_arc: Arc<InternalApi> = Arc::new(InternalApi(internal_client));
     let worker_shutdown = CancellationToken::new();
     let settings_arc: Arc<AgentSettings> = Arc::new(AgentSettings {
@@ -188,6 +192,7 @@ where
         Arc::clone(&ssh_config_arc),
         Arc::clone(&intercept_slots_arc),
         Arc::clone(&pending_token_slot_arc),
+        Arc::clone(&pending_auth_choice_slot),
         Arc::clone(&internal_api_arc),
         Arc::clone(&settings_arc),
         Arc::clone(&stop_tokens),
@@ -392,6 +397,7 @@ fn build_dispatcher(
     ssh_config_arc: Arc<SshConfigPath>,
     intercept_slots_arc: Arc<InterceptSlots>,
     pending_token_slot_arc: Arc<PendingTokenSlot>,
+    pending_auth_choice_slot_arc: Arc<PendingMcpAuthChoiceSlot>,
     internal_api_arc: Arc<InternalApi>,
     settings_arc: Arc<AgentSettings>,
     stop_tokens: super::StopTokens,
@@ -514,6 +520,7 @@ fn build_dispatcher(
             ssh_config_arc,
             intercept_slots_arc,
             pending_token_slot_arc,
+            pending_auth_choice_slot_arc,
             internal_api_arc,
             settings_arc,
             idle_ts,
@@ -568,6 +575,8 @@ mod tests {
             auth_watcher: Arc::new(AtomicBool::new(false)),
         });
         let pending_token_slot = Arc::new(PendingTokenSlot(Arc::new(Mutex::new(None))));
+        let pending_auth_choice_slot =
+            Arc::new(PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(None))));
         let internal_api = Arc::new(InternalApi(Arc::new(InternalClient::new(
             "/tmp/smoke.sock",
         ))));
@@ -609,6 +618,7 @@ mod tests {
             ssh_config,
             intercept_slots,
             pending_token_slot,
+            pending_auth_choice_slot,
             internal_api,
             settings,
             stop_tokens,
