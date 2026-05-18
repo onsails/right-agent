@@ -242,8 +242,8 @@ finished `success`/`failed` rows whose delivery is still `pending` or
 `retryable`. Cron rows are excluded.
 
 Legacy `@bg:<fork_from-uuid>` cron specs are ignored by cron loading.
-There is no production migration or cron scheduling path for background
-continuations.
+There is no bot-startup migration or runtime cron scheduling path for
+background continuations.
 
 ### Configuration Hierarchy
 
