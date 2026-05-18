@@ -380,6 +380,7 @@ pub async fn handle_message(
                     stop_tokens: Arc::clone(&worker_ctl.stop_tokens),
                     session_locks: Arc::clone(&worker_ctl.session_locks),
                     bg_requests: Arc::clone(&worker_ctl.bg_requests),
+                    bg_handoff_gates: Arc::clone(&worker_ctl.bg_handoff_gates),
                     thinking_visibility: Arc::clone(&worker_ctl.thinking_visibility),
                     idle_timestamp: Arc::clone(&idle_ts.0),
                     internal_client: Arc::clone(&internal_api.0),
@@ -2022,6 +2023,7 @@ pub async fn handle_bg_callback(
             // a click that races a stream-end completion can never cause the
             // worker to misclassify a normal-finished turn as Backgrounded.
             let (turn_id, token) = entry.value();
+            super::set_bg_handoff_gate(&worker_ctl.bg_handoff_gates, key);
             worker_ctl.bg_requests.insert(key, *turn_id);
             token.cancel();
             drop(entry);
