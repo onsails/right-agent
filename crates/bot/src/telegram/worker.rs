@@ -672,7 +672,9 @@ fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) ->
            AND NULLIF(target_chat_id, 0) = ?1 \
            AND ( \
              status = 'running' \
-             OR (status IN ('success', 'failed') AND delivery_status IN ('pending', 'retryable')) \
+             OR (status IN ('success', 'failed') \
+                 AND delivery_status IN ('pending', 'retryable') \
+                 AND notify_json IS NOT NULL) \
            ) \
          ORDER BY started_at DESC \
          LIMIT 5",
@@ -4155,6 +4157,35 @@ mod background_continuation_tests {
         target_chat_id: i64,
         delivered_at: Option<&str>,
     ) {
+        let notify_json = if matches!(status, "success" | "failed") {
+            Some("{\"content\":\"done\"}")
+        } else {
+            None
+        };
+        insert_marker_run_kind_with_notify(
+            conn,
+            kind,
+            id,
+            job_name,
+            started_at,
+            status,
+            target_chat_id,
+            delivered_at,
+            notify_json,
+        );
+    }
+
+    fn insert_marker_run_kind_with_notify(
+        conn: &rusqlite::Connection,
+        kind: &str,
+        id: &str,
+        job_name: &str,
+        started_at: &str,
+        status: &str,
+        target_chat_id: i64,
+        delivered_at: Option<&str>,
+        notify_json: Option<&str>,
+    ) {
         let finished_at = matches!(status, "success" | "failed").then_some(started_at);
         let delivery_required = matches!(status, "success" | "failed");
         let delivery_status = if delivered_at.is_some() {
@@ -4167,12 +4198,12 @@ mod background_continuation_tests {
         conn.execute(
             "INSERT INTO async_runs (
                 id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
-                status, started_at, finished_at, log_path, delivery_required,
+                status, started_at, finished_at, log_path, notify_json, delivery_required,
                 delivery_status, delivered_at, created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?1, ?4, NULL,
-                ?5, ?6, ?7, '/log', ?8,
-                ?9, ?10, ?6, ?6
+                ?5, ?6, ?7, '/log', ?8, ?9,
+                ?10, ?11, ?6, ?6
              )",
             rusqlite::params![
                 id,
@@ -4182,6 +4213,7 @@ mod background_continuation_tests {
                 status,
                 started_at,
                 finished_at,
+                notify_json,
                 if delivery_required { 1 } else { 0 },
                 delivery_status,
                 delivered_at,
@@ -4286,6 +4318,31 @@ mod background_continuation_tests {
         let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(m.contains("bg-job-B"));
         assert!(m.contains("success"));
+    }
+
+    #[test]
+    fn build_bg_marker_excludes_finished_pending_without_notify_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_marker_conn(tmp.path());
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_marker_run_kind_with_notify(
+            &conn,
+            "background",
+            "run-null-notify",
+            "bg-null-notify",
+            &now,
+            "failed",
+            -100,
+            None,
+            None,
+        );
+        drop(conn);
+
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        assert!(
+            m.is_none(),
+            "undeliverable finished row without notify_json must not appear; got {m:?}"
+        );
     }
 
     #[test]
