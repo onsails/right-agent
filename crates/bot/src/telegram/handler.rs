@@ -149,6 +149,17 @@ async fn send_html_reply(
     send.await
 }
 
+/// Send a `Failed: <error>` reply with the error chain escaped for HTML.
+async fn send_failed_reply(
+    bot: &BotType,
+    chat_id: teloxide::types::ChatId,
+    eff_thread_id: i64,
+    err: &impl std::fmt::Display,
+) -> Result<teloxide::types::Message, RequestError> {
+    let escaped = html_escape(&format!("{err:#}"));
+    send_html_reply(bot, chat_id, eff_thread_id, &format!("Failed: {escaped}")).await
+}
+
 /// Handle an incoming text message.
 ///
 /// 1. Compute effective_thread_id (normalise General topic).
@@ -1106,7 +1117,6 @@ async fn dcr_failure_fallback(
 /// 1. Strip query string and compute auth signals
 /// 2. Run OAuth/Header detection only when useful for public URLs
 /// 3. Park a pending auth-choice request and show an inline keyboard
-// internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 async fn handle_mcp_add(
     bot: &BotType,
@@ -1207,7 +1217,6 @@ async fn handle_mcp_add(
         name.to_string(),
         original_url.to_string(),
         bare_url,
-        has_query,
         recommendation,
         pending_auth_choice_slot,
     )
@@ -1215,7 +1224,7 @@ async fn handle_mcp_add(
 }
 
 /// Park an `/mcp add` auth-choice request and prompt the user with the
-/// available registration modes. Callback handling is wired in the next task.
+/// available registration modes.
 #[allow(clippy::too_many_arguments)]
 async fn prompt_mcp_auth_choice(
     bot: &BotType,
@@ -1225,7 +1234,6 @@ async fn prompt_mcp_auth_choice(
     server_name: String,
     original_url: String,
     bare_url: String,
-    has_query: bool,
     recommendation: McpAuthRecommendation,
     pending_auth_choice_slot: &PendingMcpAuthChoiceSlot,
 ) -> Result<(), RequestError> {
@@ -1241,7 +1249,6 @@ async fn prompt_mcp_auth_choice(
             server_name: server_name.clone(),
             original_url,
             bare_url,
-            has_query,
             recommendation: recommendation.clone(),
             expires_at: std::time::Instant::now() + MCP_AUTH_CHOICE_TTL,
         });
@@ -1249,17 +1256,17 @@ async fn prompt_mcp_auth_choice(
     };
 
     if let Some(prev) = prev {
-        let prev_chat_id = teloxide::types::ChatId(prev.chat_id);
-        let mut send = bot.send_message(
-            prev_chat_id,
-            "Previous MCP auth choice request superseded by a new /mcp command.",
-        );
-        if prev.thread_id != 0 {
-            send = send.message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
-                prev.thread_id as i32,
-            )));
-        }
-        send.await.ok();
+        let prev_server = html_escape(&prev.server_name);
+        send_html_reply(
+            bot,
+            teloxide::types::ChatId(prev.chat_id),
+            prev.thread_id,
+            &format!(
+                "Previous /mcp add <b>{prev_server}</b> auth choice superseded by a new /mcp command."
+            ),
+        )
+        .await
+        .ok();
     }
 
     let recommendation_text = match recommendation.choice {
@@ -1413,15 +1420,9 @@ async fn request_token_and_register(
                     .ok();
             }
             Err(e) => {
-                let escaped_error = html_escape(&format!("{e:#}"));
-                send_html_reply(
-                    &bot,
-                    chat_id,
-                    eff_thread_id,
-                    &format!("Failed: {escaped_error}"),
-                )
-                .await
-                .ok();
+                send_failed_reply(&bot, chat_id, eff_thread_id, &e)
+                    .await
+                    .ok();
             }
         }
     });
@@ -1976,6 +1977,7 @@ pub async fn handle_mcp_auth_choice_callback(
         }
     };
 
+    // best-effort UX ack: failing here must not abort the actual MCP registration below
     if let Err(e) = bot.answer_callback_query(qid).text("Selected").await {
         tracing::warn!(err = %e, "failed to answer MCP auth choice callback");
     }
@@ -1987,7 +1989,7 @@ pub async fn handle_mcp_auth_choice_callback(
                 .mcp_add(
                     &pending.agent_name,
                     &pending.server_name,
-                    &pending.bare_url,
+                    &pending.original_url,
                     Some("oauth"),
                     None,
                     None,
@@ -1996,7 +1998,6 @@ pub async fn handle_mcp_auth_choice_callback(
             {
                 Ok(resp) => {
                     let escaped = html_escape(&pending.server_name);
-                    let escaped_command = html_escape(&pending.server_name);
                     let mut reply = format!("Added MCP server <b>{escaped}</b> (OAuth).");
                     if resp.tools_count > 0 {
                         reply.push_str(&format!(" {} tools available.", resp.tools_count));
@@ -2005,7 +2006,7 @@ pub async fn handle_mcp_auth_choice_callback(
                         reply.push_str(&format!("\n{}", html_escape(w)));
                     }
                     reply.push_str(&format!(
-                        "\nRun <code>/mcp auth {escaped_command}</code> to authenticate."
+                        "\nRun <code>/mcp auth {escaped}</code> to authenticate."
                     ));
                     send_html_reply(
                         &bot,
@@ -2016,12 +2017,11 @@ pub async fn handle_mcp_auth_choice_callback(
                     .await?;
                 }
                 Err(e) => {
-                    let escaped_error = html_escape(&format!("{e:#}"));
-                    send_html_reply(
+                    send_failed_reply(
                         &bot,
                         teloxide::types::ChatId(pending.chat_id),
                         pending.thread_id,
-                        &format!("Failed: {escaped_error}"),
+                        &e,
                     )
                     .await?;
                 }
@@ -2043,7 +2043,7 @@ pub async fn handle_mcp_auth_choice_callback(
             .await?;
         }
         McpAuthChoice::UrlAsIs => {
-            let auth_type = pending.has_query.then_some("query_string");
+            let auth_type = pending.has_query().then_some("query_string");
             match internal
                 .0
                 .mcp_add(
@@ -2074,12 +2074,11 @@ pub async fn handle_mcp_auth_choice_callback(
                     .await?;
                 }
                 Err(e) => {
-                    let escaped_error = html_escape(&format!("{e:#}"));
-                    send_html_reply(
+                    send_failed_reply(
                         &bot,
                         teloxide::types::ChatId(pending.chat_id),
                         pending.thread_id,
-                        &format!("Failed: {escaped_error}"),
+                        &e,
                     )
                     .await?;
                 }
