@@ -55,6 +55,51 @@ fn setup_db() -> rusqlite::Connection {
     conn
 }
 
+#[allow(clippy::too_many_arguments)]
+fn insert_async_cron_run(
+    conn: &rusqlite::Connection,
+    id: &str,
+    job_name: &str,
+    started_at: &str,
+    finished_at: Option<&str>,
+    exit_code: Option<i64>,
+    status: &str,
+    target_chat_id: i64,
+    target_thread_id: Option<i64>,
+    delivery_status: &str,
+) {
+    let delivery_required = i64::from(delivery_status != "none");
+    let notify_json = (delivery_status != "none").then_some("{}");
+    let delivered_at = (delivery_status == "delivered").then_some("2026-01-01T00:05:00Z");
+    conn.execute(
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
+            started_at, finished_at, exit_code, status, log_path, notify_json,
+            delivery_required, delivery_status, delivered_at, created_at, updated_at
+         ) VALUES (
+            ?1, 'cron', ?2, ?1, ?3, ?4,
+            ?5, ?6, ?7, ?8, ?9, ?10,
+            ?11, ?12, ?13, ?5, ?5
+         )",
+        rusqlite::params![
+            id,
+            job_name,
+            target_chat_id,
+            target_thread_id,
+            started_at,
+            finished_at,
+            exit_code,
+            status,
+            format!("/tmp/{id}.log"),
+            notify_json,
+            delivery_required,
+            delivery_status,
+            delivered_at,
+        ],
+    )
+    .expect("insert async cron run");
+}
+
 #[test]
 fn create_spec_success() {
     let conn = setup_db();
@@ -180,33 +225,59 @@ fn list_specs_json() {
     assert_eq!(parsed[0]["job_name"], "a-job");
     assert_eq!(parsed[1]["job_name"], "b-job");
     assert_eq!(parsed[1]["max_budget_usd"], 2.5);
-    // No runs yet — last_run_at and last_status should be null
+    // No runs yet — latest-run fields should be null.
+    assert!(parsed[0]["last_run_id"].is_null());
     assert!(parsed[0]["last_run_at"].is_null());
     assert!(parsed[0]["last_status"].is_null());
+    assert!(parsed[1]["last_run_id"].is_null());
     assert!(parsed[1]["last_run_at"].is_null());
     assert!(parsed[1]["last_status"].is_null());
 }
 
 #[test]
-fn list_specs_includes_last_run() {
+fn list_specs_reads_last_run_from_async_runs() {
     let conn = setup_db();
     create_spec(&conn, "a-job", "*/5 * * * *", "prompt a", None, None).unwrap();
-    // Insert two runs — only the latest should appear
+    insert_async_cron_run(
+        &conn,
+        "run-old",
+        "a-job",
+        "2026-01-01T00:00:00Z",
+        Some("2026-01-01T00:01:00Z"),
+        Some(0),
+        "success",
+        -100,
+        None,
+        "none",
+    );
+    insert_async_cron_run(
+        &conn,
+        "run-new",
+        "a-job",
+        "2026-01-02T00:00:00Z",
+        Some("2026-01-02T00:01:00Z"),
+        Some(1),
+        "failed",
+        -100,
+        None,
+        "none",
+    );
     conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path) \
-             VALUES ('run-old', 'a-job', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 0, 'success', '/tmp/old.log')",
-            [],
-        )
-        .unwrap();
-    conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path) \
-             VALUES ('run-new', 'a-job', '2026-01-02T00:00:00Z', '2026-01-02T00:01:00Z', 1, 'failed', '/tmp/new.log')",
-            [],
-        )
-        .unwrap();
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, source_session_id, run_session_id, target_chat_id,
+            started_at, status, delivery_required, delivery_status, created_at, updated_at
+         ) VALUES (
+            'bg-newer', 'background', 'a-job', 'main', 'bg-session', -100,
+            '2026-01-03T00:00:00Z', 'success', 1, 'pending',
+            '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z'
+         )",
+        [],
+    )
+    .unwrap();
     let output = list_specs(&conn).unwrap();
     let parsed: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0]["last_run_id"], "run-new");
     assert_eq!(parsed[0]["last_run_at"], "2026-01-02T00:00:00Z");
     assert_eq!(parsed[0]["last_status"], "failed");
 }
@@ -340,18 +411,30 @@ fn get_spec_detail_not_found() {
 #[test]
 fn get_recent_runs_returns_ordered() {
     let conn = setup_db();
-    conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path) \
-             VALUES ('r1', 'runs-job', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 0, 'success', '/tmp/r1.txt')",
-            [],
-        )
-        .unwrap();
-    conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path) \
-             VALUES ('r2', 'runs-job', '2026-01-01T01:00:00Z', '2026-01-01T01:01:00Z', 1, 'failed', '/tmp/r2.txt')",
-            [],
-        )
-        .unwrap();
+    insert_async_cron_run(
+        &conn,
+        "r1",
+        "runs-job",
+        "2026-01-01T00:00:00Z",
+        Some("2026-01-01T00:01:00Z"),
+        Some(0),
+        "success",
+        -100,
+        None,
+        "none",
+    );
+    insert_async_cron_run(
+        &conn,
+        "r2",
+        "runs-job",
+        "2026-01-01T01:00:00Z",
+        Some("2026-01-01T01:01:00Z"),
+        Some(1),
+        "failed",
+        -100,
+        None,
+        "none",
+    );
     let runs = get_recent_runs(&conn, "runs-job", 5).unwrap();
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].id, "r2");
@@ -370,12 +453,18 @@ fn get_recent_runs_empty() {
 fn get_recent_runs_respects_limit() {
     let conn = setup_db();
     for i in 0..10 {
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path) \
-                 VALUES (?1, 'limit-job', ?2, 'success', '/tmp/r.txt')",
-            rusqlite::params![format!("r{i}"), format!("2026-01-01T{i:02}:00:00Z")],
-        )
-        .unwrap();
+        insert_async_cron_run(
+            &conn,
+            &format!("r{i}"),
+            "limit-job",
+            &format!("2026-01-01T{i:02}:00:00Z"),
+            None,
+            None,
+            "success",
+            -100,
+            None,
+            "none",
+        );
     }
     let runs = get_recent_runs(&conn, "limit-job", 3).unwrap();
     assert_eq!(runs.len(), 3);
@@ -1188,15 +1277,10 @@ fn insert_background_continuation_round_trips_through_load() {
 }
 
 /// Regression: changing `target_chat_id` via `update_spec_partial` must
-/// also redirect any already-finished-but-undelivered `cron_runs` rows
-/// to the new chat. Pre-snapshot the delivery loop re-read the spec via
-/// LEFT JOIN, so a target change took effect immediately. Now that
-/// `cron_runs` carries its own snapshot we have to propagate the update
-/// alongside the spec write to preserve that user-visible behavior.
-/// Delivered runs (delivered_at IS NOT NULL) must NOT be rewritten —
-/// they reflect what was actually sent.
+/// redirect pending/retryable async cron deliveries to the new chat.
+/// Completed delivery rows keep the target snapshot that was actually sent.
 #[test]
-fn update_spec_partial_propagates_target_to_undelivered_runs() {
+fn update_spec_target_propagates_to_undelivered_async_runs() {
     let conn = setup_db();
 
     // Insert spec with original target chat 100.
@@ -1207,22 +1291,54 @@ fn update_spec_partial_propagates_target_to_undelivered_runs() {
         )
         .unwrap();
 
-    // Undelivered run (status='success', notify_json present, delivered_at NULL),
-    // snapshotted at insert time with target_chat_id=100.
-    conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
-             VALUES ('run-undelivered', 'redirect', '2026-01-01T00:01:00Z', '2026-01-01T00:02:00Z', 0, 'success', '/tmp/log', '{\"reply\":\"hi\"}', NULL, 100, NULL)",
-            [],
-        )
-        .unwrap();
-
-    // Already-delivered run with the old target — must remain at 100.
-    conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
-             VALUES ('run-delivered', 'redirect', '2026-01-01T00:00:30Z', '2026-01-01T00:00:45Z', 0, 'success', '/tmp/log', '{\"reply\":\"hi\"}', '2026-01-01T00:00:50Z', 100, NULL)",
-            [],
-        )
-        .unwrap();
+    insert_async_cron_run(
+        &conn,
+        "run-pending",
+        "redirect",
+        "2026-01-01T00:01:00Z",
+        Some("2026-01-01T00:02:00Z"),
+        Some(0),
+        "success",
+        100,
+        None,
+        "pending",
+    );
+    insert_async_cron_run(
+        &conn,
+        "run-retryable",
+        "redirect",
+        "2026-01-01T00:00:45Z",
+        Some("2026-01-01T00:01:00Z"),
+        Some(0),
+        "success",
+        100,
+        None,
+        "retryable",
+    );
+    insert_async_cron_run(
+        &conn,
+        "run-delivered",
+        "redirect",
+        "2026-01-01T00:00:30Z",
+        Some("2026-01-01T00:00:45Z"),
+        Some(0),
+        "success",
+        100,
+        None,
+        "delivered",
+    );
+    insert_async_cron_run(
+        &conn,
+        "run-none",
+        "redirect",
+        "2026-01-01T00:00:15Z",
+        Some("2026-01-01T00:00:20Z"),
+        Some(0),
+        "success",
+        100,
+        None,
+        "none",
+    );
 
     update_spec_partial(
         &conn,
@@ -1248,24 +1364,35 @@ fn update_spec_partial_propagates_target_to_undelivered_runs() {
         .unwrap();
     assert_eq!(spec_chat, Some(200));
 
-    // Undelivered run redirected.
-    let undelivered_chat: Option<i64> = conn
+    let pending_chat: Option<i64> = conn
         .query_row(
-            "SELECT target_chat_id FROM cron_runs WHERE id = 'run-undelivered'",
+            "SELECT target_chat_id FROM async_runs WHERE id = 'run-pending'",
             [],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(
-        undelivered_chat,
+        pending_chat,
         Some(200),
-        "undelivered run must be redirected to the new chat"
+        "pending run must be redirected to the new chat"
     );
 
-    // Delivered run untouched.
+    let retryable_chat: Option<i64> = conn
+        .query_row(
+            "SELECT target_chat_id FROM async_runs WHERE id = 'run-retryable'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        retryable_chat,
+        Some(200),
+        "retryable run must be redirected to the new chat"
+    );
+
     let delivered_chat: Option<i64> = conn
         .query_row(
-            "SELECT target_chat_id FROM cron_runs WHERE id = 'run-delivered'",
+            "SELECT target_chat_id FROM async_runs WHERE id = 'run-delivered'",
             [],
             |r| r.get(0),
         )
@@ -1274,6 +1401,19 @@ fn update_spec_partial_propagates_target_to_undelivered_runs() {
         delivered_chat,
         Some(100),
         "delivered run must keep its historical target snapshot"
+    );
+
+    let none_chat: Option<i64> = conn
+        .query_row(
+            "SELECT target_chat_id FROM async_runs WHERE id = 'run-none'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        none_chat,
+        Some(100),
+        "non-delivery run must keep its historical target snapshot"
     );
 }
 
@@ -1289,12 +1429,18 @@ fn update_spec_partial_propagates_thread_only_change() {
             [],
         )
         .unwrap();
-    conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
-             VALUES ('run-thr', 'thr', '2026-01-01T00:01:00Z', '2026-01-01T00:02:00Z', 0, 'success', '/tmp/log', '{}', NULL, 500, 7)",
-            [],
-        )
-        .unwrap();
+    insert_async_cron_run(
+        &conn,
+        "run-thr",
+        "thr",
+        "2026-01-01T00:01:00Z",
+        Some("2026-01-01T00:02:00Z"),
+        Some(0),
+        "success",
+        500,
+        Some(7),
+        "pending",
+    );
 
     update_spec_partial(
         &conn,
@@ -1312,7 +1458,7 @@ fn update_spec_partial_propagates_thread_only_change() {
 
     let (run_chat, run_thread): (Option<i64>, Option<i64>) = conn
         .query_row(
-            "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-thr'",
+            "SELECT target_chat_id, target_thread_id FROM async_runs WHERE id = 'run-thr'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1322,7 +1468,7 @@ fn update_spec_partial_propagates_thread_only_change() {
 }
 
 /// Updates that don't touch target columns (e.g. prompt-only) must NOT
-/// rewrite cron_runs — those rows should retain the run-time snapshot
+/// rewrite async cron runs — those rows should retain the run-time snapshot
 /// untouched.
 #[test]
 fn update_spec_partial_non_target_change_leaves_runs_alone() {
@@ -1337,12 +1483,18 @@ fn update_spec_partial_non_target_change_leaves_runs_alone() {
     // Run snapshotted with a *different* (stale) target — simulates a run
     // that captured the spec target before some hypothetical earlier
     // redirect. A prompt-only update must not normalize it.
-    conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, exit_code, status, log_path, notify_json, delivered_at, target_chat_id, target_thread_id) \
-             VALUES ('run-np', 'np', '2026-01-01T00:01:00Z', '2026-01-01T00:02:00Z', 0, 'success', '/tmp/log', '{}', NULL, 77, 3)",
-            [],
-        )
-        .unwrap();
+    insert_async_cron_run(
+        &conn,
+        "run-np",
+        "np",
+        "2026-01-01T00:01:00Z",
+        Some("2026-01-01T00:02:00Z"),
+        Some(0),
+        "success",
+        77,
+        Some(3),
+        "pending",
+    );
 
     update_spec_partial(
         &conn,
@@ -1360,7 +1512,7 @@ fn update_spec_partial_non_target_change_leaves_runs_alone() {
 
     let (run_chat, run_thread): (Option<i64>, Option<i64>) = conn
         .query_row(
-            "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-np'",
+            "SELECT target_chat_id, target_thread_id FROM async_runs WHERE id = 'run-np'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )

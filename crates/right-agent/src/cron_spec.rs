@@ -582,13 +582,9 @@ pub fn update_spec_partial(
         sets.join(", ")
     );
 
-    // Determine if the caller is changing target columns. If so, we must
-    // propagate the new values to undelivered `cron_runs` rows so that runs
-    // queued before the redirect (status='success', delivered_at IS NULL)
-    // are routed to the new chat/thread on the next delivery tick. Without
-    // this, the run-time snapshot on cron_runs would strand them on the
-    // pre-update target — a regression vs the pre-snapshot LEFT JOIN
-    // semantics where the delivery loop always re-read the spec.
+    // Determine if the caller is changing target columns. If so, propagate
+    // the new values to pending/retryable async cron deliveries so queued
+    // notifications route to the new chat/thread on the next delivery tick.
     let target_changed = target_chat_id.is_some() || target_thread_id.is_some();
 
     let tx = conn
@@ -617,11 +613,13 @@ pub fn update_spec_partial(
             )
             .map_err(|e| format!("read-back failed: {e:#}"))?;
         tx.execute(
-            "UPDATE cron_runs SET target_chat_id = ?1, target_thread_id = ?2 \
-             WHERE job_name = ?3 AND delivered_at IS NULL",
+            "UPDATE async_runs SET target_chat_id = ?1, target_thread_id = ?2
+             WHERE kind = 'cron'
+               AND producer_ref = ?3
+               AND delivery_status IN ('pending', 'retryable')",
             rusqlite::params![new_chat, new_thread, job_name],
         )
-        .map_err(|e| format!("cron_runs target propagation failed: {e:#}"))?;
+        .map_err(|e| format!("async cron run target propagation failed: {e:#}"))?;
     }
 
     tx.commit()
@@ -671,13 +669,14 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
             "SELECT s.job_name, s.schedule, s.prompt, s.lock_ttl, s.max_budget_usd, \
                     s.created_at, s.updated_at, s.recurring, s.run_at, \
                     s.target_chat_id, s.target_thread_id, \
-                    r.started_at, r.status \
+                    r.id, r.started_at, r.status \
              FROM cron_specs s \
              LEFT JOIN ( \
-                 SELECT job_name, started_at, status, \
-                        ROW_NUMBER() OVER (PARTITION BY job_name ORDER BY started_at DESC) AS rn \
-                 FROM cron_runs \
-             ) r ON r.job_name = s.job_name AND r.rn = 1 \
+                 SELECT producer_ref, id, started_at, status, \
+                        ROW_NUMBER() OVER (PARTITION BY producer_ref ORDER BY started_at DESC) AS rn \
+                 FROM async_runs \
+                 WHERE kind = 'cron' \
+             ) r ON r.producer_ref = s.job_name AND r.rn = 1 \
              ORDER BY s.job_name",
         )
         .map_err(|e| format!("prepare failed: {e:#}"))?;
@@ -695,8 +694,9 @@ pub fn list_specs(conn: &rusqlite::Connection) -> Result<String, String> {
                 "run_at": row.get::<_, Option<String>>(8)?,
                 "target_chat_id": row.get::<_, Option<i64>>(9)?,
                 "target_thread_id": row.get::<_, Option<i64>>(10)?,
-                "last_run_at": row.get::<_, Option<String>>(11)?,
-                "last_status": row.get::<_, Option<String>>(12)?,
+                "last_run_id": row.get::<_, Option<String>>(11)?,
+                "last_run_at": row.get::<_, Option<String>>(12)?,
+                "last_status": row.get::<_, Option<String>>(13)?,
             }))
         })
         .map_err(|e| format!("query failed: {e:#}"))?
@@ -879,7 +879,8 @@ pub fn get_recent_runs(
     let mut stmt = conn
         .prepare(
             "SELECT id, started_at, finished_at, exit_code, status \
-             FROM cron_runs WHERE job_name = ?1 \
+             FROM async_runs \
+             WHERE kind = 'cron' AND producer_ref = ?1 \
              ORDER BY started_at DESC LIMIT ?2",
         )
         .map_err(|e| format!("prepare failed: {e:#}"))?;
