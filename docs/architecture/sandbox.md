@@ -11,15 +11,34 @@ Sandboxes are **persistent** — never deleted automatically. They live as long 
 ```
 Bot startup:
   ├─ Resolve OpenShell gateway endpoint (OPENSHELL_GATEWAY_ENDPOINT or openshell status)
-  ├─ gRPC GetSandbox → exists?
-  │   ├─ YES: apply_policy (hot-reload via openshell policy set --wait)
-  │   └─ NO: prepare_staging_dir → spawn_sandbox → wait_for_ready
+  ├─ gRPC GetSandbox → READY?
+  │   ├─ YES: resolve sandbox id + host IP
+  │   └─ NO: startup exits; creating a missing sandbox is an init/migration job
+  ├─ Regenerate policy with resolved host IP
+  │   ├─ filesystem policy drift: write policy.yaml, skip apply, warn to trigger migration
+  │   └─ no filesystem drift: write policy.yaml and hot-apply via openshell policy set --wait
   ├─ generate_ssh_config (on every startup, host-side file)
   ├─ initial_sync (blocking — before teloxide starts)
   │   ├─ Deploy platform files to /sandbox/.platform/ (content-addressed + symlinks)
   │   ├─ Remove obsolete legacy built-in skill links from /sandbox/.claude/skills/
   │   └─ Download .claude.json, verify trust keys, fix if CC overwrote them
   └─ Background sync (every 5 min, re-deploys /sandbox/.platform/, GC stale entries)
+
+Sandbox creation (`right init`, `right agent init`):
+  ├─ prepare_staging_dir
+  ├─ ensure_sandbox
+  │   ├─ spawn_sandbox
+  │   ├─ wait_for_ready
+  │   └─ wait_for_ssh
+  └─ generate_ssh_config
+
+Sandbox migration (`right agent config` filesystem-policy drift):
+  ├─ ssh_tar_download old sandbox backup
+  ├─ prepare_staging_dir
+  ├─ spawn_sandbox → wait_for_ready → wait_for_ssh
+  ├─ generate_ssh_config for new sandbox
+  ├─ ssh_tar_upload backup into new sandbox
+  └─ update agent.yaml, tear down old ControlMaster, delete old sandbox
 
 Sandbox network:
   ├─ HTTP CONNECT proxy at 10.200.0.1:3128 (set via HTTPS_PROXY env)
@@ -32,7 +51,8 @@ Staging dir (minimal bootstrap — platform files deployed via /sandbox/.platfor
   ├─ .claude/settings.json    — CC behavioral flags
   ├─ .claude/reply-schema.json — structured output schema
   ├─ .claude.json              — trust + onboarding
-  └─ mcp.json                  — MCP server entries
+  ├─ mcp.json                  — MCP server entries
+  └─ TOOLS.md                  — agent-editable tool notes seeded for turn 1
   EXCLUDED: skills (deployed to /sandbox/.platform/), credentials, plugins
 
 Platform store (/sandbox/.platform/ inside sandbox):
