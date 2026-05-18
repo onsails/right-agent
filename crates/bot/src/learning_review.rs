@@ -332,11 +332,21 @@ pub(crate) fn select_review_trigger(
 pub(crate) fn review_cooldown_cutoff(
     now: chrono::DateTime<chrono::Utc>,
     cooldown: chrono::Duration,
-) -> String {
-    (now - cooldown).format("%Y-%m-%dT%H:%M:%SZ").to_string()
+) -> Result<String, String> {
+    if cooldown < chrono::Duration::zero() {
+        return Err(format!(
+            "skill review cooldown must not be negative: {cooldown:?}"
+        ));
+    }
+
+    let cutoff = now.checked_sub_signed(cooldown).ok_or_else(|| {
+        format!("skill review cooldown cutoff out of range for now {now} and cooldown {cooldown:?}")
+    })?;
+    Ok(cutoff.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
-pub(crate) fn review_cooldown_elapsed(
+#[cfg(test)]
+fn review_cooldown_elapsed(
     last_review_at: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
     cooldown: chrono::Duration,
