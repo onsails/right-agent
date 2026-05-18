@@ -107,6 +107,7 @@ pub(crate) async fn take_pending_auth_choice(
     slot: &PendingMcpAuthChoiceSlot,
     request_id: u64,
     callback_chat_id: Option<i64>,
+    callback_thread_id: Option<i64>,
     now: Instant,
 ) -> PendingMcpAuthChoiceTake {
     let mut slot = slot.0.lock().await;
@@ -124,6 +125,10 @@ pub(crate) async fn take_pending_auth_choice(
     }
 
     if callback_chat_id.is_some_and(|chat_id| chat_id != current.chat_id) {
+        return PendingMcpAuthChoiceTake::ChatMismatch;
+    }
+
+    if callback_thread_id.is_some_and(|thread_id| thread_id != current.thread_id) {
         return PendingMcpAuthChoiceTake::ChatMismatch;
     }
 
@@ -458,7 +463,7 @@ mod tests {
             Instant::now() + MCP_AUTH_CHOICE_TTL,
         )))));
 
-        let taken = take_pending_auth_choice(&slot, 42, Some(100), Instant::now()).await;
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), Some(0), Instant::now()).await;
 
         assert!(matches!(taken, PendingMcpAuthChoiceTake::Ready(_)));
         assert!(slot.0.lock().await.is_none());
@@ -472,7 +477,7 @@ mod tests {
             Instant::now() + MCP_AUTH_CHOICE_TTL,
         )))));
 
-        let taken = take_pending_auth_choice(&slot, 42, Some(100), Instant::now()).await;
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), Some(0), Instant::now()).await;
 
         assert_eq!(taken, PendingMcpAuthChoiceTake::Missing);
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(43));
@@ -486,7 +491,7 @@ mod tests {
             Instant::now() - Duration::from_secs(1),
         )))));
 
-        let taken = take_pending_auth_choice(&slot, 42, Some(100), Instant::now()).await;
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), Some(0), Instant::now()).await;
 
         assert_eq!(taken, PendingMcpAuthChoiceTake::Expired);
         assert!(slot.0.lock().await.is_none());
@@ -500,7 +505,19 @@ mod tests {
             Instant::now() + MCP_AUTH_CHOICE_TTL,
         )))));
 
-        let taken = take_pending_auth_choice(&slot, 42, Some(200), Instant::now()).await;
+        let taken = take_pending_auth_choice(&slot, 42, Some(200), Some(0), Instant::now()).await;
+
+        assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
+        assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));
+    }
+
+    #[tokio::test]
+    async fn take_pending_auth_choice_rejects_thread_mismatch_without_clearing_request() {
+        let mut request = pending_request(42, 100, Instant::now() + MCP_AUTH_CHOICE_TTL);
+        request.thread_id = 10;
+        let slot = PendingMcpAuthChoiceSlot(Arc::new(Mutex::new(Some(request))));
+
+        let taken = take_pending_auth_choice(&slot, 42, Some(100), Some(11), Instant::now()).await;
 
         assert_eq!(taken, PendingMcpAuthChoiceTake::ChatMismatch);
         assert_eq!(slot.0.lock().await.as_ref().map(|p| p.id), Some(42));

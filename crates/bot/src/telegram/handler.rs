@@ -1941,10 +1941,12 @@ pub async fn handle_mcp_auth_choice_callback(
     };
 
     let callback_chat_id = q.message.as_ref().map(|message| message.chat().id.0);
+    let callback_thread_id = q.regular_message().map(effective_thread_id);
     let pending = match take_pending_auth_choice(
         pending_auth_choice_slot.as_ref(),
         request_id,
         callback_chat_id,
+        callback_thread_id,
         std::time::Instant::now(),
     )
     .await
