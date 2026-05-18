@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Default interval between keepalive pings.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 const HEALTH_PROMPT: &str = "Reply exactly OK. Do not use tools.";
 
@@ -144,14 +145,22 @@ pub(crate) fn spawn_keepalive(
 }
 
 async fn run_keepalive_loop(health: Arc<ClaudeHealth>, shutdown: CancellationToken) {
-    run_one_health_cycle(Arc::clone(&health), "startup").await;
+    run_one_health_cycle(Arc::clone(&health), "startup", &shutdown).await;
+    if shutdown.is_cancelled() {
+        return;
+    }
 
     let mut interval = tokio::time::interval(DEFAULT_INTERVAL);
     interval.tick().await;
 
     loop {
         tokio::select! {
-            _ = interval.tick() => run_one_health_cycle(Arc::clone(&health), "periodic").await,
+            _ = interval.tick() => {
+                run_one_health_cycle(Arc::clone(&health), "periodic", &shutdown).await;
+                if shutdown.is_cancelled() {
+                    return;
+                }
+            }
             _ = shutdown.cancelled() => {
                 tracing::debug!("claude_health: shutdown");
                 return;
@@ -160,9 +169,35 @@ async fn run_keepalive_loop(health: Arc<ClaudeHealth>, shutdown: CancellationTok
     }
 }
 
-async fn run_one_health_cycle(health: Arc<ClaudeHealth>, reason: &'static str) {
+async fn run_one_health_cycle(
+    health: Arc<ClaudeHealth>,
+    reason: &'static str,
+    shutdown: &CancellationToken,
+) {
     tracing::info!(agent = %health.agent_name, reason, "claude_health: probing");
-    match run_health_probe(&health).await {
+    let probe = tokio::time::timeout(HEALTH_PROBE_TIMEOUT, run_health_probe(&health));
+    let result = tokio::select! {
+        _ = shutdown.cancelled() => {
+            tracing::debug!(agent = %health.agent_name, reason, "claude_health: shutdown");
+            return;
+        }
+        result = probe => result,
+    };
+
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            tracing::warn!(
+                agent = %health.agent_name,
+                reason,
+                timeout_secs = HEALTH_PROBE_TIMEOUT.as_secs(),
+                "claude_health: probe timed out"
+            );
+            return;
+        }
+    };
+
+    match outcome {
         Ok(HealthProbeOutcome::Healthy) => {
             tracing::info!(agent = %health.agent_name, reason, "claude_health: ok");
         }
@@ -183,6 +218,10 @@ async fn run_one_health_cycle(health: Arc<ClaudeHealth>, reason: &'static str) {
 }
 
 async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, String> {
+    if health.ssh_config_path.is_some() && health.resolved_sandbox.is_none() {
+        return Err("sandbox mode but no resolved sandbox name".to_owned());
+    }
+
     let mcp_path = crate::cc::invocation::mcp_config_path(
         health.ssh_config_path.as_deref(),
         &health.agent_dir,
@@ -216,7 +255,12 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
         if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line) {
             init_outcome = classify_init_status(status);
             if matches!(init_outcome, HealthProbeOutcome::NeedsRepair { .. }) {
-                child.kill().await.ok();
+                if let Err(e) = child.kill().await {
+                    tracing::warn!(
+                        agent = %health.agent_name,
+                        "claude_health: failed to kill unhealthy probe: {e:#}"
+                    );
+                }
                 killed_for_repair = true;
             }
             break;
@@ -224,7 +268,12 @@ async fn run_health_probe(health: &ClaudeHealth) -> Result<HealthProbeOutcome, S
     }
 
     if killed_for_repair {
-        let _ = child.wait().await;
+        if let Err(e) = child.wait().await {
+            tracing::warn!(
+                agent = %health.agent_name,
+                "claude_health: failed to wait unhealthy probe: {e:#}"
+            );
+        }
     } else {
         let status = child
             .wait()
@@ -282,6 +331,22 @@ mod tests {
         assert_eq!(
             classify_init_status(crate::cc::stream::RightMcpInitStatus::Unhealthy { status: None }),
             HealthProbeOutcome::NeedsRepair { status: None }
+        );
+    }
+
+    #[tokio::test]
+    async fn health_probe_errors_when_sandbox_name_missing() {
+        let health = ClaudeHealth::new(
+            "him".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            Some(PathBuf::from("/tmp/ssh_config")),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            run_health_probe(&health).await,
+            Err("sandbox mode but no resolved sandbox name".to_owned())
         );
     }
 
