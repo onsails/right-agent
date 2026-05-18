@@ -8,11 +8,12 @@ use teloxide::payloads::SendMessageSetters as _;
 use crate::cc::markdown_utils::strip_html_tags;
 use crate::telegram::handler::IdleTimestamp;
 
-/// A pending cron result ready for delivery.
+/// A pending async run result ready for delivery.
 #[derive(Debug)]
-pub(crate) struct PendingCronResult {
+pub(crate) struct PendingAsyncResult {
     pub id: String,
-    pub job_name: String,
+    pub kind: String,
+    pub producer_ref: Option<String>,
     pub notify_json: String,
     pub summary: String,
     pub status: String,
@@ -20,25 +21,31 @@ pub(crate) struct PendingCronResult {
     pub target_thread_id: Option<i64>,
 }
 
-/// Query the oldest undelivered cron result with a non-null notify_json.
+/// Query the oldest undelivered async result with a non-null notify_json.
 pub(crate) fn fetch_pending(
     conn: &rusqlite::Connection,
-) -> Result<Option<PendingCronResult>, rusqlite::Error> {
+) -> Result<Option<PendingAsyncResult>, rusqlite::Error> {
     let mut stmt = conn.prepare(
-        "SELECT id, job_name, notify_json, summary, status, target_chat_id, target_thread_id \
-         FROM cron_runs \
-         WHERE status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
-         ORDER BY finished_at ASC LIMIT 1",
+        "SELECT id, kind, producer_ref, notify_json, COALESCE(summary, ''), status, \
+                NULLIF(target_chat_id, 0), target_thread_id \
+         FROM async_runs \
+         WHERE delivery_required = 1 \
+           AND delivery_status IN ('pending', 'retryable') \
+           AND status IN ('success', 'failed') \
+           AND notify_json IS NOT NULL \
+         ORDER BY finished_at ASC \
+         LIMIT 1",
     )?;
     let result = stmt.query_row([], |row| {
-        Ok(PendingCronResult {
+        Ok(PendingAsyncResult {
             id: row.get(0)?,
-            job_name: row.get(1)?,
-            notify_json: row.get(2)?,
-            summary: row.get(3)?,
-            status: row.get(4)?,
-            target_chat_id: row.get(5)?,
-            target_thread_id: row.get(6)?,
+            kind: row.get(1)?,
+            producer_ref: row.get(2)?,
+            notify_json: row.get(3)?,
+            summary: row.get(4)?,
+            status: row.get(5)?,
+            target_chat_id: row.get(6)?,
+            target_thread_id: row.get(7)?,
         })
     });
     match result {
@@ -48,7 +55,7 @@ pub(crate) fn fetch_pending(
     }
 }
 
-/// Mark a cron run delivery as complete with a given status.
+/// Mark an async run delivery as complete with a given status.
 ///
 /// Single UPDATE sets both `delivery_status` and `delivered_at` atomically.
 fn mark_delivery_outcome(
@@ -57,10 +64,15 @@ fn mark_delivery_outcome(
     status: &str,
 ) -> Result<(), rusqlite::Error> {
     let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE cron_runs SET delivery_status = ?1, delivered_at = ?2 WHERE id = ?3",
+    let rows = conn.execute(
+        "UPDATE async_runs \
+         SET delivery_status = ?1, delivered_at = ?2, updated_at = ?2 \
+         WHERE id = ?3",
         rusqlite::params![status, now, run_id],
     )?;
+    if rows == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 
@@ -68,24 +80,32 @@ fn mark_delivery_outcome(
 /// older undelivered results as delivered. Returns (latest_result, skipped_count).
 pub(crate) fn deduplicate_job(
     conn: &rusqlite::Connection,
-    job_name: &str,
-) -> Result<Option<(PendingCronResult, u32)>, rusqlite::Error> {
+    producer_ref: &str,
+) -> Result<Option<(PendingAsyncResult, u32)>, rusqlite::Error> {
     let latest = conn
         .query_row(
-            "SELECT id, job_name, notify_json, summary, status, target_chat_id, target_thread_id \
-             FROM cron_runs \
-             WHERE job_name = ?1 AND status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL \
-             ORDER BY finished_at DESC LIMIT 1",
-            rusqlite::params![job_name],
+            "SELECT id, kind, producer_ref, notify_json, COALESCE(summary, ''), status, \
+                    NULLIF(target_chat_id, 0), target_thread_id \
+             FROM async_runs \
+             WHERE kind = 'cron' \
+               AND producer_ref = ?1 \
+               AND delivery_required = 1 \
+               AND delivery_status IN ('pending', 'retryable') \
+               AND status IN ('success', 'failed') \
+               AND notify_json IS NOT NULL \
+             ORDER BY finished_at DESC \
+             LIMIT 1",
+            rusqlite::params![producer_ref],
             |row| {
-                Ok(PendingCronResult {
+                Ok(PendingAsyncResult {
                     id: row.get(0)?,
-                    job_name: row.get(1)?,
-                    notify_json: row.get(2)?,
-                    summary: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    status: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    target_chat_id: row.get(5)?,
-                    target_thread_id: row.get(6)?,
+                    kind: row.get(1)?,
+                    producer_ref: row.get(2)?,
+                    notify_json: row.get(3)?,
+                    summary: row.get(4)?,
+                    status: row.get(5)?,
+                    target_chat_id: row.get(6)?,
+                    target_thread_id: row.get(7)?,
                 })
             },
         )
@@ -97,13 +117,31 @@ pub(crate) fn deduplicate_job(
 
     let now = chrono::Utc::now().to_rfc3339();
     let count = conn.execute(
-        "UPDATE cron_runs SET delivered_at = ?1, delivery_status = 'superseded' \
-         WHERE job_name = ?2 AND id != ?3 \
-         AND status IN ('success', 'failed') AND notify_json IS NOT NULL AND delivered_at IS NULL",
-        rusqlite::params![now, job_name, latest.id],
+        "UPDATE async_runs \
+         SET delivered_at = ?1, delivery_status = 'superseded', updated_at = ?1 \
+         WHERE kind = 'cron' \
+           AND producer_ref = ?2 \
+           AND id != ?3 \
+           AND delivery_required = 1 \
+           AND delivery_status IN ('pending', 'retryable') \
+           AND status IN ('success', 'failed')",
+        rusqlite::params![now, producer_ref, latest.id],
     )?;
 
     Ok(Some((latest, count as u32)))
+}
+
+pub(crate) fn select_delivery_candidate(
+    conn: &rusqlite::Connection,
+    pending: PendingAsyncResult,
+) -> Result<Option<(PendingAsyncResult, u32)>, rusqlite::Error> {
+    if pending.kind == "cron"
+        && let Some(producer_ref) = pending.producer_ref.as_deref()
+    {
+        return deduplicate_job(conn, producer_ref);
+    }
+
+    Ok(Some((pending, 0)))
 }
 
 /// Escape a string for use inside YAML double-quoted scalars.
@@ -119,7 +157,7 @@ fn yaml_escape(s: &str) -> String {
 /// (summarizes instead of relaying verbatim), migrate to approach B: add a
 /// delivery-specific block to the system prompt via `build_prompt_assembly_script()`.
 /// See docs/superpowers/specs/2026-04-15-cron-delivery-verbatim-relay.md.
-const DELIVERY_INSTRUCTION_SUCCESS: &str = "\
+const CRON_DELIVERY_INSTRUCTION_SUCCESS: &str = "\
 You are delivering a cron job result to the user.
 The `content` field below is the FINAL user-facing message — send it VERBATIM in your response.
 Do NOT summarize, rephrase, or omit any part of the content.
@@ -144,23 +182,51 @@ invent details. Ignore the attachments field.
 Here is the YAML report of the cron job:
 ";
 
-/// Format a pending cron result as YAML for the main CC session.
+const BACKGROUND_DELIVERY_INSTRUCTION_SUCCESS: &str = "\
+You are delivering a background task result to the user.
+The `content` field below is the FINAL user-facing message - send it VERBATIM in your response.
+Do NOT summarize, rephrase, or omit any part of the content.
+You MAY prepend a short contextual intro (1 sentence max) if recent conversation was on a different topic, so the message feels natural.
+Ignore the attachments field - attachments are sent separately.
+
+Here is the YAML report of the background task:
+";
+
+const BACKGROUND_DELIVERY_INSTRUCTION_FAILURE: &str = "\
+The background task below did not complete successfully. The `content` field contains
+a platform-generated summary of the failure. Relay it to the user in natural prose -
+you MAY rephrase lightly for flow with the recent conversation, but keep all factual
+claims intact. Do not invent details. Ignore the attachments field.
+
+Here is the YAML report of the background task:
+";
+
+/// Format a pending async result as YAML for the main CC session.
 ///
-/// The output begins with a [`DELIVERY_INSTRUCTION_SUCCESS`] or
-/// [`DELIVERY_INSTRUCTION_FAILURE`] prefix (depending on `pending.status`),
+/// The output begins with an instruction prefix selected by kind/status,
 /// followed by the YAML payload.
-pub(crate) fn format_cron_yaml(pending: &PendingCronResult, skipped: u32) -> String {
+pub(crate) fn format_async_yaml(pending: &PendingAsyncResult, skipped: u32) -> String {
     let total = skipped + 1;
-    let instruction = match pending.status.as_str() {
-        "failed" => DELIVERY_INSTRUCTION_FAILURE,
-        _ => DELIVERY_INSTRUCTION_SUCCESS,
+    let instruction = match (pending.kind.as_str(), pending.status.as_str()) {
+        ("background", "failed") => BACKGROUND_DELIVERY_INSTRUCTION_FAILURE,
+        ("background", _) => BACKGROUND_DELIVERY_INSTRUCTION_SUCCESS,
+        (_, "failed") => DELIVERY_INSTRUCTION_FAILURE,
+        _ => CRON_DELIVERY_INSTRUCTION_SUCCESS,
     };
     let mut output = String::from(instruction);
-    output.push_str("\ncron_result:\n");
-    output.push_str(&format!("  job: \"{}\"\n", yaml_escape(&pending.job_name)));
-    output.push_str(&format!("  runs_total: {total}\n"));
-    if skipped > 0 {
-        output.push_str(&format!("  skipped_runs: {skipped}\n"));
+    let is_background = pending.kind == "background";
+    if is_background {
+        let label = pending.producer_ref.as_deref().unwrap_or("background");
+        output.push_str("\nbackground_result:\n");
+        output.push_str(&format!("  label: \"{}\"\n", yaml_escape(label)));
+    } else {
+        let job = pending.producer_ref.as_deref().unwrap_or("cron");
+        output.push_str("\ncron_result:\n");
+        output.push_str(&format!("  job: \"{}\"\n", yaml_escape(job)));
+        output.push_str(&format!("  runs_total: {total}\n"));
+        if skipped > 0 {
+            output.push_str(&format!("  skipped_runs: {skipped}\n"));
+        }
     }
 
     if let Ok(notify) = serde_json::from_str::<crate::cron::CronNotify>(&pending.notify_json) {
@@ -202,7 +268,7 @@ use right_platform_knobs::IDLE_THRESHOLD_SECS;
 
 const POLL_INTERVAL_SECS: u64 = 30; // Check every 30s
 
-/// Outcome of resolving a pending cron's delivery target against the live allowlist.
+/// Outcome of resolving a pending async run's delivery target against the live allowlist.
 #[derive(Debug)]
 pub(crate) enum TargetClassification {
     NoTarget,
@@ -213,9 +279,9 @@ pub(crate) enum TargetClassification {
     },
 }
 
-/// Classify a pending cron result. Pure function; no side effects.
+/// Classify a pending async result. Pure function; no side effects.
 pub(crate) fn classify_pending_target(
-    pending: &PendingCronResult,
+    pending: &PendingAsyncResult,
     allowlist: &right_agent::agent::allowlist::AllowlistState,
 ) -> TargetClassification {
     match pending.target_chat_id {
@@ -226,6 +292,13 @@ pub(crate) fn classify_pending_target(
             thread_id: pending.target_thread_id,
         },
     }
+}
+
+fn pending_label(pending: &PendingAsyncResult) -> &str {
+    pending
+        .producer_ref
+        .as_deref()
+        .unwrap_or(pending.kind.as_str())
 }
 
 /// Main delivery loop. Runs as a tokio task.
@@ -244,12 +317,12 @@ pub(crate) async fn run_delivery_loop(
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
-    tracing::info!(agent = %agent_name, "cron delivery loop started");
+    tracing::info!(agent = %agent_name, "async delivery loop started");
 
     let conn = match right_db::open_connection(&agent_dir, false) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("cron delivery: DB open failed: {e:#}");
+            tracing::error!("async delivery: DB open failed: {e:#}");
             return;
         }
     };
@@ -268,7 +341,7 @@ pub(crate) async fn run_delivery_loop(
         tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
             () = shutdown.cancelled() => {
-                tracing::info!("cron delivery loop shutting down");
+                tracing::info!("async delivery loop shutting down");
                 return;
             }
         }
@@ -277,7 +350,7 @@ pub(crate) async fn run_delivery_loop(
             Ok(Some(p)) => p,
             Ok(None) => continue,
             Err(e) => {
-                tracing::error!("cron delivery: fetch_pending failed: {e:#}");
+                tracing::error!("async delivery: fetch_pending failed: {e:#}");
                 continue;
             }
         };
@@ -288,20 +361,21 @@ pub(crate) async fn run_delivery_loop(
         if idle_for < IDLE_THRESHOLD_SECS {
             let wait = IDLE_THRESHOLD_SECS - idle_for;
             tracing::info!(
-                job = %pending.job_name,
+                kind = %pending.kind,
+                producer_ref = ?pending.producer_ref,
                 run_id = %pending.id,
                 idle_secs = idle_for,
                 wait_secs = wait,
-                "cron delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
+                "async delivery: result pending, waiting for chat idle ({IDLE_THRESHOLD_SECS}s)"
             );
             continue;
         }
 
-        let (to_deliver, skipped) = match deduplicate_job(&conn, &pending.job_name) {
+        let (to_deliver, skipped) = match select_delivery_candidate(&conn, pending) {
             Ok(Some((result, s))) => (result, s),
             Ok(None) => continue,
             Err(e) => {
-                tracing::error!("cron delivery: deduplicate failed: {e:#}");
+                tracing::error!("async delivery: candidate selection failed: {e:#}");
                 continue;
             }
         };
@@ -316,37 +390,37 @@ pub(crate) async fn run_delivery_loop(
             guard.clone()
         };
 
-        let (target_chat_id, target_thread_id) = match classify_pending_target(
-            &to_deliver,
-            &allowlist_snapshot,
-        ) {
-            TargetClassification::NoTarget => {
-                tracing::warn!(
-                    job = %to_deliver.job_name,
-                    run_id = %to_deliver.id,
-                    "cron has no target_chat_id — call cron_update to set one or recreate the cron in the desired chat"
-                );
-                if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "no_target") {
-                    tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
-                    delivered_in_memory.insert(to_deliver.id.clone());
+        let (target_chat_id, target_thread_id) =
+            match classify_pending_target(&to_deliver, &allowlist_snapshot) {
+                TargetClassification::NoTarget => {
+                    tracing::warn!(
+                        kind = %to_deliver.kind,
+                        producer_ref = ?to_deliver.producer_ref,
+                        run_id = %to_deliver.id,
+                        "async run has no target_chat_id; marking delivery no_target"
+                    );
+                    if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "no_target") {
+                        tracing::error!(run_id = %to_deliver.id, "mark no_target failed: {e:#}");
+                        delivered_in_memory.insert(to_deliver.id.clone());
+                    }
+                    continue;
                 }
-                continue;
-            }
-            TargetClassification::Denied => {
-                tracing::warn!(
-                    job = %to_deliver.job_name,
-                    run_id = %to_deliver.id,
-                    target_chat_id = ?to_deliver.target_chat_id,
-                    "cron target chat is not in allowlist — skipping delivery"
-                );
-                if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "denied") {
-                    tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
-                    delivered_in_memory.insert(to_deliver.id.clone());
+                TargetClassification::Denied => {
+                    tracing::warn!(
+                        kind = %to_deliver.kind,
+                        producer_ref = ?to_deliver.producer_ref,
+                        run_id = %to_deliver.id,
+                        target_chat_id = ?to_deliver.target_chat_id,
+                        "async delivery target chat is not in allowlist; skipping delivery"
+                    );
+                    if let Err(e) = mark_delivery_outcome(&conn, &to_deliver.id, "denied") {
+                        tracing::error!(run_id = %to_deliver.id, "mark denied failed: {e:#}");
+                        delivered_in_memory.insert(to_deliver.id.clone());
+                    }
+                    continue;
                 }
-                continue;
-            }
-            TargetClassification::Ready { chat_id, thread_id } => (chat_id, thread_id),
-        };
+                TargetClassification::Ready { chat_id, thread_id } => (chat_id, thread_id),
+            };
 
         let session_id = match crate::telegram::session::get_active_session(
             &conn,
@@ -355,19 +429,20 @@ pub(crate) async fn run_delivery_loop(
         ) {
             Ok(s) => s.map(|s| s.root_session_id),
             Err(e) => {
-                tracing::error!("cron delivery: session lookup failed: {e:#}");
+                tracing::error!("async delivery: session lookup failed: {e:#}");
                 None
             }
         };
 
-        let yaml = format_cron_yaml(&to_deliver, skipped);
+        let yaml = format_async_yaml(&to_deliver, skipped);
         tracing::info!(
-            job = %to_deliver.job_name,
+            kind = %to_deliver.kind,
+            label = %pending_label(&to_deliver),
             run_id = %to_deliver.id,
             skipped,
             target_chat_id,
             ?target_thread_id,
-            "delivering cron result through main session"
+            "delivering async result through main session"
         );
 
         match deliver_through_session(
@@ -387,7 +462,11 @@ pub(crate) async fn run_delivery_loop(
         )
         .await
         {
-            Ok(()) => {
+            Ok(report) => {
+                if let Err(e) = ensure_delivery_send_report_non_empty(report) {
+                    tracing::error!(run_id = %to_deliver.id, "async delivery returned empty send report: {e}");
+                    continue;
+                }
                 // TODO(usage): delivery stream capture lives elsewhere — follow up.
                 // deliver_through_session uses OutputFormat::Json (single JSON blob, not stream-json
                 // NDJSON), so there is no "result" event line to feed parse_usage_full. Usage
@@ -414,15 +493,17 @@ pub(crate) async fn run_delivery_loop(
                     .and_modify(|c| *c += 1)
                     .or_insert(1);
                 tracing::error!(
-                    job = %to_deliver.job_name,
+                    kind = %to_deliver.kind,
+                    label = %pending_label(&to_deliver),
                     run_id = %to_deliver.id,
                     attempt = *attempts,
                     max = MAX_DELIVERY_ATTEMPTS,
-                    "cron delivery failed: {e:#}"
+                    "async delivery failed: {e:#}"
                 );
                 if *attempts >= MAX_DELIVERY_ATTEMPTS {
                     tracing::warn!(
-                        job = %to_deliver.job_name,
+                        kind = %to_deliver.kind,
+                        label = %pending_label(&to_deliver),
                         run_id = %to_deliver.id,
                         "giving up after {MAX_DELIVERY_ATTEMPTS} attempts, marking as delivered"
                     );
@@ -437,7 +518,28 @@ pub(crate) async fn run_delivery_loop(
     }
 }
 
-/// Invoke the main CC session with cron result YAML and send the reply to Telegram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeliverySendReport {
+    pub text_messages_sent: usize,
+    pub attachment_batches_sent: usize,
+}
+
+impl DeliverySendReport {
+    fn total_sent(self) -> usize {
+        self.text_messages_sent + self.attachment_batches_sent
+    }
+}
+
+pub(crate) fn ensure_delivery_send_report_non_empty(
+    report: DeliverySendReport,
+) -> Result<(), String> {
+    if report.total_sent() == 0 {
+        return Err("empty delivery reply: no text messages or attachment batches sent".into());
+    }
+    Ok(())
+}
+
+/// Invoke the main CC session with async result YAML and send the reply to Telegram.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
 async fn deliver_through_session(
@@ -454,7 +556,7 @@ async fn deliver_through_session(
     upgrade_lock: &tokio::sync::RwLock<()>,
     session_locks: crate::telegram::SessionLocks,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Result<(), String> {
+) -> Result<DeliverySendReport, String> {
     use std::process::Stdio;
 
     // Block while upgrade is running.
@@ -635,7 +737,26 @@ async fn deliver_through_session(
     let (reply, _) = crate::cc::worker_reply::parse_reply_output(&raw)
         .map_err(|e| format!("reply parse: {e}"))?;
 
-    if let Some(ref content) = reply.content {
+    let has_content = reply
+        .content
+        .as_deref()
+        .is_some_and(|content| !content.trim().is_empty());
+    let has_attachments = reply
+        .attachments
+        .as_ref()
+        .is_some_and(|attachments| !attachments.is_empty());
+    if !has_content && !has_attachments {
+        return Err("empty delivery reply: no content or attachments".into());
+    }
+
+    let mut report = DeliverySendReport {
+        text_messages_sent: 0,
+        attachment_batches_sent: 0,
+    };
+
+    if let Some(ref content) = reply.content
+        && !content.trim().is_empty()
+    {
         use teloxide::prelude::Requester as _;
         use teloxide::types::{ChatId, MessageId, ThreadId};
         let html = crate::telegram::markdown::md_to_telegram_html(content);
@@ -651,7 +772,7 @@ async fn deliver_through_session(
             if let Err(e) = send.await {
                 tracing::warn!(
                     chat_id = target_chat_id,
-                    "cron delivery: HTML send failed, retrying plain: {e:#}"
+                    "async delivery: HTML send failed, retrying plain: {e:#}"
                 );
                 let plain = strip_html_tags(part);
                 let mut fallback = bot.send_message(chat_id, &plain);
@@ -661,9 +782,15 @@ async fn deliver_through_session(
                 if let Err(e2) = fallback.await {
                     tracing::error!(
                         chat_id = target_chat_id,
-                        "cron delivery: plain text fallback also failed: {e2:#}"
+                        "async delivery: plain text fallback also failed: {e2:#}"
                     );
+                    return Err(format!(
+                        "telegram text send failed; html: {e:#}; plain fallback: {e2:#}"
+                    ));
                 }
+                report.text_messages_sent += 1;
+            } else {
+                report.text_messages_sent += 1;
             }
         }
     }
@@ -683,11 +810,17 @@ async fn deliver_through_session(
     {
         tracing::error!(
             chat_id = target_chat_id,
-            "cron delivery: attachment send failed: {e:#}"
+            "async delivery: attachment send failed: {e:#}"
         );
+        return Err(format!("telegram attachment send failed: {e:#}"));
+    } else if let Some(ref atts) = reply.attachments
+        && !atts.is_empty()
+    {
+        report.attachment_batches_sent += 1;
     }
 
-    Ok(())
+    ensure_delivery_send_report_non_empty(report)?;
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -697,41 +830,7 @@ mod tests {
     fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(dir.path(), true).unwrap();
-        install_cron_runs_mirror_table(&conn);
         (dir, conn)
-    }
-
-    fn install_cron_runs_mirror_table(conn: &rusqlite::Connection) {
-        // Test-only bridge until cron_delivery reads async_runs directly.
-        conn.execute_batch(
-            "CREATE TABLE cron_runs (
-                id TEXT PRIMARY KEY,
-                job_name TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                finished_at TEXT,
-                exit_code INTEGER,
-                status TEXT NOT NULL,
-                log_path TEXT,
-                summary TEXT,
-                notify_json TEXT,
-                delivered_at TEXT,
-                delivery_status TEXT,
-                no_notify_reason TEXT,
-                target_chat_id INTEGER,
-                target_thread_id INTEGER
-             );
-
-             CREATE TRIGGER cron_runs_update
-             AFTER UPDATE ON cron_runs
-             BEGIN
-               UPDATE async_runs
-                  SET delivered_at = NEW.delivered_at,
-                      delivery_status = NEW.delivery_status,
-                      updated_at = COALESCE(NEW.delivered_at, OLD.delivered_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                WHERE id = NEW.id;
-             END;",
-        )
-        .unwrap();
     }
 
     #[derive(Clone, Copy)]
@@ -746,6 +845,7 @@ mod tests {
         notify_json: Option<&'static str>,
         delivered_at: Option<&'static str>,
         delivery_status: Option<&'static str>,
+        delivery_required: Option<bool>,
         target_chat_id: Option<i64>,
         target_thread_id: Option<i64>,
     }
@@ -763,6 +863,7 @@ mod tests {
                 notify_json: None,
                 delivered_at: None,
                 delivery_status: None,
+                delivery_required: None,
                 target_chat_id: None,
                 target_thread_id: None,
             }
@@ -770,7 +871,7 @@ mod tests {
     }
 
     fn insert_async_cron_run(conn: &rusqlite::Connection, run: TestCronRun) {
-        let delivery_required = run.notify_json.is_some();
+        let delivery_required = run.delivery_required.unwrap_or(run.notify_json.is_some());
         let delivery_status =
             run.delivery_status
                 .unwrap_or(if delivery_required { "pending" } else { "none" });
@@ -803,27 +904,34 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    fn insert_async_background_run(
+        conn: &rusqlite::Connection,
+        id: &str,
+        started_at: &str,
+        status: &str,
+        notify_json: &str,
+        target_chat_id: i64,
+    ) {
+        let finished_at = (status == "success" || status == "failed").then_some(started_at);
         conn.execute(
-            "INSERT INTO cron_runs (
-                id, job_name, started_at, finished_at, status, log_path, summary,
-                notify_json, delivered_at, delivery_status, target_chat_id, target_thread_id
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
+                status, started_at, finished_at, log_path, summary, notify_json,
+                delivery_required, delivery_status, delivered_at, created_at, updated_at
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                ?8, ?9, ?10, ?11, ?12
+                ?1, 'background', NULL, ?1, ?2, NULL,
+                ?3, ?4, ?5, '/log', 'summary', ?6,
+                1, 'pending', NULL, ?4, ?4
              )",
             rusqlite::params![
-                run.id,
-                run.job_name,
-                run.started_at,
-                run.finished_at,
-                run.status,
-                run.log_path,
-                run.summary,
-                run.notify_json,
-                run.delivered_at,
-                delivery_status,
-                run.target_chat_id,
-                run.target_thread_id,
+                id,
+                target_chat_id,
+                status,
+                started_at,
+                finished_at,
+                notify_json,
             ],
         )
         .unwrap();
@@ -885,10 +993,41 @@ mod tests {
                 id: "a",
                 notify_json: Some("{\"content\":\"done\"}"),
                 delivered_at: Some("2026-01-01T00:10:00Z"),
+                delivery_status: Some("delivered"),
                 ..Default::default()
             },
         );
         assert!(fetch_pending(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn fetch_pending_reads_async_runs_and_skips_none_delivery() {
+        let (_dir, conn) = setup_db();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "silent",
+                notify_json: Some("{\"content\":\"silent\"}"),
+                delivery_required: Some(false),
+                delivery_status: Some("none"),
+                ..Default::default()
+            },
+        );
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "pending",
+                started_at: "2026-01-01T00:05:00Z",
+                finished_at: Some("2026-01-01T00:06:00Z"),
+                notify_json: Some("{\"content\":\"deliver\"}"),
+                ..Default::default()
+            },
+        );
+
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        assert_eq!(pending.id, "pending");
+        assert_eq!(pending.kind, "cron");
+        assert_eq!(pending.producer_ref.as_deref(), Some("job1"));
     }
 
     #[test]
@@ -1000,17 +1139,18 @@ mod tests {
     }
 
     #[test]
-    fn format_cron_yaml_basic() {
-        let pending = PendingCronResult {
+    fn format_async_yaml_basic_cron() {
+        let pending = PendingAsyncResult {
             id: "abc".into(),
-            job_name: "health-check".into(),
+            kind: "cron".into(),
+            producer_ref: Some("health-check".into()),
             notify_json: r#"{"content":"BTC up 2%"}"#.into(),
             summary: "Checked 5 pairs".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
         };
-        let output = format_cron_yaml(&pending, 2);
+        let output = format_async_yaml(&pending, 2);
         // Instruction prefix assertions
         assert!(output.starts_with("You are delivering a cron job result"));
         assert!(output.contains("VERBATIM"));
@@ -1025,51 +1165,94 @@ mod tests {
     }
 
     #[test]
-    fn format_cron_yaml_no_skipped() {
-        let pending = PendingCronResult {
+    fn format_async_yaml_no_skipped() {
+        let pending = PendingAsyncResult {
             id: "abc".into(),
-            job_name: "job1".into(),
+            kind: "cron".into(),
+            producer_ref: Some("job1".into()),
             notify_json: r#"{"content":"hello"}"#.into(),
             summary: "done".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
         };
-        let output = format_cron_yaml(&pending, 0);
+        let output = format_async_yaml(&pending, 0);
         assert!(output.starts_with("You are delivering a cron job result"));
         assert!(output.contains("runs_total: 1"));
         assert!(!output.contains("skipped_runs"));
     }
 
     #[test]
-    fn format_cron_yaml_uses_failure_instruction_when_status_failed() {
-        let pending = PendingCronResult {
+    fn format_async_yaml_uses_cron_failure_instruction_when_status_failed() {
+        let pending = PendingAsyncResult {
             id: "r1".into(),
-            job_name: "watcher".into(),
+            kind: "cron".into(),
+            producer_ref: Some("watcher".into()),
             notify_json: r#"{"content":"Partial data fetched then hit budget"}"#.into(),
             summary: "failed".into(),
             status: "failed".into(),
             target_chat_id: None,
             target_thread_id: None,
         };
-        let out = format_cron_yaml(&pending, 0);
+        let out = format_async_yaml(&pending, 0);
         assert!(out.contains("did not complete successfully"));
         assert!(!out.contains("send it VERBATIM"));
     }
 
     #[test]
-    fn format_cron_yaml_uses_success_instruction_when_status_success() {
-        let pending = PendingCronResult {
+    fn format_async_yaml_uses_cron_success_instruction_when_status_success() {
+        let pending = PendingAsyncResult {
             id: "r2".into(),
-            job_name: "watcher".into(),
+            kind: "cron".into(),
+            producer_ref: Some("watcher".into()),
             notify_json: r#"{"content":"BTC up 2%"}"#.into(),
             summary: "ok".into(),
             status: "success".into(),
             target_chat_id: None,
             target_thread_id: None,
         };
-        let out = format_cron_yaml(&pending, 0);
+        let out = format_async_yaml(&pending, 0);
         assert!(out.contains("VERBATIM"));
+    }
+
+    #[test]
+    fn format_async_yaml_background_includes_background_instruction_and_content() {
+        let pending = PendingAsyncResult {
+            id: "bg-1".into(),
+            kind: "background".into(),
+            producer_ref: None,
+            notify_json: r#"{"content":"Finished the answer in background"}"#.into(),
+            summary: "background summary".into(),
+            status: "success".into(),
+            target_chat_id: Some(-100),
+            target_thread_id: None,
+        };
+
+        let out = format_async_yaml(&pending, 0);
+        assert!(out.starts_with("You are delivering a background task result"));
+        assert!(out.contains("background_result:"));
+        assert!(out.contains("label: \"background\""));
+        assert!(out.contains("Finished the answer in background"));
+        assert!(!out.contains("cron_result:"));
+    }
+
+    #[test]
+    fn format_async_yaml_background_uses_failure_instruction_when_status_failed() {
+        let pending = PendingAsyncResult {
+            id: "bg-2".into(),
+            kind: "background".into(),
+            producer_ref: Some("custom-bg".into()),
+            notify_json: r#"{"content":"Background work failed"}"#.into(),
+            summary: "background failed".into(),
+            status: "failed".into(),
+            target_chat_id: Some(-100),
+            target_thread_id: None,
+        };
+
+        let out = format_async_yaml(&pending, 0);
+        assert!(out.contains("background task below did not complete successfully"));
+        assert!(out.contains("label: \"custom-bg\""));
+        assert!(out.contains("Background work failed"));
     }
 
     #[test]
@@ -1163,6 +1346,29 @@ mod tests {
         );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[]));
+        assert!(
+            matches!(outcome, TargetClassification::NoTarget),
+            "got: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn target_chat_id_zero_fetches_as_no_target() {
+        let (_dir, conn) = setup_db();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "zero-target",
+                job_name: "targetless",
+                notify_json: Some("{\"content\":\"x\"}"),
+                target_chat_id: Some(0),
+                ..Default::default()
+            },
+        );
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        assert_eq!(pending.target_chat_id, None);
+
+        let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[0]));
         assert!(
             matches!(outcome, TargetClassification::NoTarget),
             "got: {outcome:?}"
@@ -1273,5 +1479,58 @@ mod tests {
         assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
         assert_eq!(latest.target_chat_id, Some(-100));
+    }
+
+    #[test]
+    fn select_delivery_candidate_does_not_deduplicate_background_rows() {
+        let (_dir, conn) = setup_db();
+        insert_async_background_run(
+            &conn,
+            "bg-old",
+            "2026-01-01T00:00:00Z",
+            "success",
+            "{\"content\":\"old\"}",
+            -100,
+        );
+        insert_async_background_run(
+            &conn,
+            "bg-new",
+            "2026-01-01T00:05:00Z",
+            "success",
+            "{\"content\":\"new\"}",
+            -100,
+        );
+
+        let pending = fetch_pending(&conn).unwrap().unwrap();
+        assert_eq!(pending.id, "bg-old");
+        let (selected, skipped) = select_delivery_candidate(&conn, pending).unwrap().unwrap();
+        assert_eq!(selected.id, "bg-old");
+        assert_eq!(skipped, 0);
+
+        let statuses = conn
+            .prepare("SELECT id, delivery_status FROM async_runs ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            statuses,
+            vec![
+                ("bg-new".to_string(), "pending".to_string()),
+                ("bg-old".to_string(), "pending".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_delivery_send_report_is_rejected() {
+        let report = DeliverySendReport {
+            text_messages_sent: 0,
+            attachment_batches_sent: 0,
+        };
+
+        let err = ensure_delivery_send_report_non_empty(report).unwrap_err();
+        assert!(err.contains("empty delivery reply"));
     }
 }

@@ -213,6 +213,9 @@ fn insert_running_run(
     log_path: &str,
     spec: &right_agent::cron_spec::CronSpec,
 ) -> Result<(), rusqlite::Error> {
+    // `async_runs.target_chat_id` is NOT NULL. Targetless cron runs are kept
+    // explicit with sentinel 0; delivery reads convert it back with NULLIF.
+    let target_chat_id = Some(spec.target_chat_id.unwrap_or(0));
     right_agent::async_runs::insert_running_cron_run(
         conn,
         right_agent::async_runs::NewCronRun {
@@ -220,7 +223,7 @@ fn insert_running_run(
             job_name,
             started_at,
             log_path,
-            target_chat_id: spec.target_chat_id,
+            target_chat_id,
             target_thread_id: spec.target_thread_id,
         },
     )
@@ -1988,7 +1991,7 @@ mod target_snapshot_tests {
     }
 
     #[test]
-    fn insert_running_run_requires_target_chat_id() {
+    fn insert_running_run_writes_zero_for_targetless_cron() {
         let (_dir, conn) = migrated_conn();
         let spec = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
@@ -1999,7 +2002,7 @@ mod target_snapshot_tests {
             target_chat_id: None,
             target_thread_id: None,
         };
-        let err = insert_running_run(
+        insert_running_run(
             &conn,
             "run-2",
             "job-y",
@@ -2007,17 +2010,15 @@ mod target_snapshot_tests {
             "/log/path",
             &spec,
         )
-        .expect_err("missing target_chat_id should fail");
+        .unwrap();
 
-        assert!(matches!(
-            err,
-            rusqlite::Error::InvalidParameterName(ref name)
-                if name == "target_chat_id is required"
-        ));
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM async_runs", [], |r| r.get(0))
+        let target_chat_id: i64 = conn
+            .query_row(
+                "SELECT target_chat_id FROM async_runs WHERE id = 'run-2'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(target_chat_id, 0);
     }
 }

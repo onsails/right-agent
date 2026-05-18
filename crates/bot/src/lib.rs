@@ -1,9 +1,9 @@
 #![warn(unreachable_pub)]
 
+pub(crate) mod async_delivery;
 pub(crate) mod cc;
 mod config_watcher;
 pub(crate) mod cron;
-pub(crate) mod cron_delivery;
 mod keepalive;
 pub(crate) mod login;
 pub(crate) mod reflection;
@@ -912,7 +912,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         .await;
     });
 
-    // Shared idle timestamp: tracks last handler/worker interaction for cron delivery gating.
+    // Shared idle timestamp: tracks last handler/worker interaction for async delivery gating.
     use crate::telegram::handler::IdleTimestamp;
     let idle_timestamp = Arc::new(IdleTimestamp(Arc::new(std::sync::atomic::AtomicI64::new(
         chrono::Utc::now().timestamp(),
@@ -946,7 +946,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         });
     }
 
-    // Cron delivery loop: delivers pending cron results through main CC session when idle
+    // Async delivery loop: delivers pending async results through main CC session when idle
     let delivery_agent_dir = agent_dir.clone();
     let delivery_agent_name = args.agent.clone();
     let delivery_bot = telegram::bot::build_bot(token.clone());
@@ -960,7 +960,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
     let delivery_session_locks = Arc::clone(&session_locks);
     let delivery_debug = Arc::clone(&debug_flag);
     let delivery_handle = tokio::spawn(async move {
-        cron_delivery::run_delivery_loop(
+        async_delivery::run_delivery_loop(
             delivery_agent_dir,
             delivery_agent_name,
             delivery_bot,
@@ -1055,7 +1055,7 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
 
     tracing::info!("waiting for cron to finish");
     let _ = cron_handle.await;
-    tracing::info!("waiting for cron delivery to finish");
+    tracing::info!("waiting for async delivery to finish");
     let _ = delivery_handle.await;
     if let Some(handle) = sync_handle {
         tracing::info!("waiting for sync to finish");
