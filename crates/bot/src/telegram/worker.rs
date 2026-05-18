@@ -781,6 +781,19 @@ fn batch_is_addressed(batch: &[DebounceMsg]) -> bool {
     batch.iter().any(|m| m.address.is_some())
 }
 
+fn routed_message_ids(batch: &[DebounceMsg]) -> Vec<i32> {
+    batch.iter().map(|message| message.message_id).collect()
+}
+
+fn assistant_archive_content(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+fn assistant_text_was_delivered(caption_consumed: bool, sent_any_text_message: bool) -> bool {
+    caption_consumed || sent_any_text_message
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InvocationLogContext {
@@ -1054,30 +1067,39 @@ pub fn spawn_worker(
             // Invoke claude -p (D-13, D-14)
             // Pass first message text for session label (truncated 60 chars).
             let first_text = batch.first().and_then(|m| m.text.as_deref());
-            let (reply_result, session_uuid, is_first_call) =
-                match invoke_cc(&input, first_text, chat_id, eff_thread_id, is_group, &ctx).await {
-                    Ok(CcReply {
-                        output,
-                        session_uuid,
-                        is_first_call,
-                    }) => (Ok(output), session_uuid, is_first_call),
-                    Err(failure) => {
-                        let uuid = match &failure {
-                            InvokeCcFailure::Reflectable { session_uuid, .. } => {
-                                session_uuid.clone()
-                            }
-                            InvokeCcFailure::NonReflectable { .. } => String::new(),
-                            InvokeCcFailure::Backgrounded {
-                                main_session_id, ..
-                            } => main_session_id.clone(),
-                        };
-                        // is_first_call=false: failures don't produce a normal
-                        // reply, so the bootstrap welcome photo should not fire.
-                        // Auth-error recovery deactivates the session, so a
-                        // subsequent retry sees is_first_call=true again.
-                        (Err(failure), uuid, false)
-                    }
-                };
+            let routed_message_ids = routed_message_ids(&batch);
+            let (reply_result, session_uuid, turn_id, is_first_call) = match invoke_cc(
+                &input,
+                first_text,
+                chat_id,
+                eff_thread_id,
+                is_group,
+                &routed_message_ids,
+                &ctx,
+            )
+            .await
+            {
+                Ok(CcReply {
+                    output,
+                    session_uuid,
+                    turn_id,
+                    is_first_call,
+                }) => (Ok(output), session_uuid, Some(turn_id), is_first_call),
+                Err(failure) => {
+                    let uuid = match &failure {
+                        InvokeCcFailure::Reflectable { session_uuid, .. } => session_uuid.clone(),
+                        InvokeCcFailure::NonReflectable { .. } => String::new(),
+                        InvokeCcFailure::Backgrounded {
+                            main_session_id, ..
+                        } => main_session_id.clone(),
+                    };
+                    // is_first_call=false: failures don't produce a normal
+                    // reply, so the bootstrap welcome photo should not fire.
+                    // Auth-error recovery deactivates the session, so a
+                    // subsequent retry sees is_first_call=true again.
+                    (Err(failure), uuid, None, false)
+                }
+            };
 
             // Keep the host identity mirror fresh after normal sandbox turns.
             // Bootstrap completion performs an explicit sandbox -> host reconciliation
@@ -1195,6 +1217,7 @@ pub fn spawn_worker(
                         .await;
 
                         let start = if caption_consumed { 1 } else { 0 };
+                        let mut sent_any_text_message = false;
                         for part in &parts[start..] {
                             let mut send = ctx.bot.send_message(tg_chat_id, part);
                             send = send.parse_mode(teloxide::types::ParseMode::Html);
@@ -1208,30 +1231,86 @@ pub fn spawn_worker(
                                     ..Default::default()
                                 });
                             }
-                            if let Err(e) = send.await {
-                                tracing::warn!(
-                                    ?key,
-                                    "HTML send failed, retrying plain text: {:#}",
-                                    e
-                                );
-                                let plain = strip_html_tags(part);
-                                let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
-                                if eff_thread_id != 0 {
-                                    fallback = fallback.message_thread_id(ThreadId(MessageId(
-                                        eff_thread_id as i32,
-                                    )));
+                            match send.await {
+                                Ok(_) => {
+                                    sent_any_text_message = true;
                                 }
-                                if let Some(ref_id) = reply_to {
-                                    fallback = fallback.reply_parameters(ReplyParameters {
-                                        message_id: MessageId(ref_id),
-                                        ..Default::default()
-                                    });
-                                }
-                                if let Err(e2) = fallback.await {
-                                    tracing::error!(
+                                Err(e) => {
+                                    tracing::warn!(
                                         ?key,
-                                        "plain text fallback also failed: {:#}",
-                                        e2
+                                        "HTML send failed, retrying plain text: {:#}",
+                                        e
+                                    );
+                                    let plain = strip_html_tags(part);
+                                    let mut fallback = ctx.bot.send_message(tg_chat_id, &plain);
+                                    if eff_thread_id != 0 {
+                                        fallback = fallback.message_thread_id(ThreadId(MessageId(
+                                            eff_thread_id as i32,
+                                        )));
+                                    }
+                                    if let Some(ref_id) = reply_to {
+                                        fallback = fallback.reply_parameters(ReplyParameters {
+                                            message_id: MessageId(ref_id),
+                                            ..Default::default()
+                                        });
+                                    }
+                                    match fallback.await {
+                                        Ok(_) => {
+                                            sent_any_text_message = true;
+                                        }
+                                        Err(e2) => {
+                                            tracing::error!(
+                                                ?key,
+                                                "plain text fallback also failed: {:#}",
+                                                e2
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if assistant_text_was_delivered(caption_consumed, sent_any_text_message)
+                            && let Some(turn_id) = turn_id
+                            && let Some(archive_content) = assistant_archive_content(&content)
+                        {
+                            match right_db::open_connection(&ctx.agent_dir, false) {
+                                Ok(conn) => {
+                                    let message = right_db::conversation::ConversationMessage {
+                                        platform: "telegram",
+                                        chat_id,
+                                        thread_id: eff_thread_id,
+                                        message_id: None,
+                                        sender_user_id: None,
+                                        sender_name: Some(ctx.agent_name.as_str()),
+                                        addressed_to_bot: false,
+                                        routed_to_agent: true,
+                                        root_session_id: Some(&session_uuid),
+                                        turn_id: Some(turn_id),
+                                        role: right_db::conversation::ConversationRole::Assistant,
+                                        content: &archive_content,
+                                    };
+                                    if let Err(e) =
+                                        right_db::conversation::archive_message(&conn, message)
+                                    {
+                                        tracing::warn!(
+                                            ?key,
+                                            chat_id,
+                                            eff_thread_id,
+                                            session_uuid = %session_uuid,
+                                            turn_id,
+                                            "assistant archive_message failed: {e:#}"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        ?key,
+                                        chat_id,
+                                        eff_thread_id,
+                                        session_uuid = %session_uuid,
+                                        turn_id,
+                                        "assistant archive open_connection failed: {e:#}"
                                     );
                                 }
                             }
@@ -1739,6 +1818,8 @@ pub(crate) struct CcReply {
     pub(crate) output: Option<ReplyOutput>,
     /// CC session UUID for this invocation (new or resumed).
     pub(crate) session_uuid: String,
+    /// Worker-local foreground turn ID for this invocation.
+    pub(crate) turn_id: u64,
     /// `true` if this invocation created a brand-new CC session
     /// (i.e. the worker's first turn in this chat/thread).
     pub(crate) is_first_call: bool,
@@ -1996,18 +2077,19 @@ async fn remove_sandbox_progress_config_file(
 
 /// Invoke `claude -p` and parse the reply tool call from its JSON output.
 ///
-/// Returns `Ok(CcReply { output, session_uuid, is_first_call })` whenever no
-/// failure needs to be surfaced to the user. `output` is `Some(ReplyOutput)`
-/// for a normal agent reply and `None` for paths that produced no user-visible
-/// reply (user-triggered stop, auth-token-flow handoff). Returns
-/// `Err(InvokeCcFailure)` for subprocess failures, parse failures, or other
-/// conditions that require an error reply.
+/// Returns `Ok(CcReply { output, session_uuid, turn_id, is_first_call })`
+/// whenever no failure needs to be surfaced to the user. `output` is
+/// `Some(ReplyOutput)` for a normal agent reply and `None` for paths that
+/// produced no user-visible reply (user-triggered stop, auth-token-flow
+/// handoff). Returns `Err(InvokeCcFailure)` for subprocess failures, parse
+/// failures, or other conditions that require an error reply.
 async fn invoke_cc(
     input: &str,
     first_text: Option<&str>,
     chat_id: i64,
     eff_thread_id: i64,
     is_group: bool,
+    routed_message_ids: &[i32],
     ctx: &WorkerContext,
 ) -> Result<CcReply, InvokeCcFailure> {
     // Open per-worker DB connection (rusqlite is !Send — each worker opens its own)
@@ -2345,6 +2427,40 @@ async fn invoke_cc(
     let turn_id = super::next_turn_id();
     let log_ctx = InvocationLogContext::new(chat_id, eff_thread_id, session_uuid.clone(), turn_id);
     log_invoking_claude(&log_ctx, is_first_call, sandboxed);
+    for routed_message_id in routed_message_ids {
+        match right_db::conversation::mark_routed(
+            &conn,
+            "telegram",
+            chat_id,
+            *routed_message_id,
+            &session_uuid,
+            turn_id,
+        ) {
+            Ok(0) => {
+                tracing::warn!(
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
+                    message_id = *routed_message_id,
+                    "telegram routed transcript row missing"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    chat_id = log_ctx.chat_id,
+                    eff_thread_id = log_ctx.eff_thread_id,
+                    key = ?log_ctx.key(),
+                    session_uuid = %log_ctx.session_uuid,
+                    turn_id = log_ctx.turn_id,
+                    message_id = *routed_message_id,
+                    "telegram mark_routed failed: {e:#}"
+                );
+            }
+        }
+    }
 
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Ok(child) => child,
@@ -2897,6 +3013,7 @@ async fn invoke_cc(
         return Ok(CcReply {
             output: None,
             session_uuid,
+            turn_id,
             is_first_call,
         });
     }
@@ -2977,6 +3094,7 @@ async fn invoke_cc(
                     return Ok(CcReply {
                         output: None,
                         session_uuid,
+                        turn_id,
                         is_first_call,
                     });
                 } else {
@@ -2984,6 +3102,7 @@ async fn invoke_cc(
                     return Ok(CcReply {
                         output: None,
                         session_uuid,
+                        turn_id,
                         is_first_call,
                     });
                 }
@@ -3012,12 +3131,14 @@ async fn invoke_cc(
                     return Ok(CcReply {
                         output: None,
                         session_uuid,
+                        turn_id,
                         is_first_call,
                     });
                 } else {
                     return Ok(CcReply {
                         output: None,
                         session_uuid,
+                        turn_id,
                         is_first_call,
                     });
                 }
@@ -3166,6 +3287,7 @@ async fn invoke_cc(
             Ok(CcReply {
                 output: Some(reply_output),
                 session_uuid,
+                turn_id,
                 is_first_call,
             })
         }
@@ -3810,6 +3932,29 @@ esac
             reply_to_attachments: vec![],
             media_group_id: media_group_id.map(|s| s.to_string()),
         }
+    }
+
+    #[test]
+    fn routed_message_ids_preserve_batch_order() {
+        let batch = vec![debug_msg(10, None), debug_msg(11, None)];
+
+        assert_eq!(routed_message_ids(&batch), vec![10, 11]);
+    }
+
+    #[test]
+    fn assistant_archive_content_trims_empty_reply() {
+        assert_eq!(
+            assistant_archive_content("  hello  "),
+            Some("hello".to_string())
+        );
+        assert_eq!(assistant_archive_content(" \n\t "), None);
+    }
+
+    #[test]
+    fn assistant_text_was_delivered_accepts_caption_or_message() {
+        assert!(assistant_text_was_delivered(true, false));
+        assert!(assistant_text_was_delivered(false, true));
+        assert!(!assistant_text_was_delivered(false, false));
     }
 
     #[tokio::test(start_paused = true)]
