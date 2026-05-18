@@ -4116,6 +4116,80 @@ mod background_continuation_tests {
     use super::*;
     use right_db::open_connection;
 
+    fn install_cron_runs_view(conn: &rusqlite::Connection) {
+        // Test-only bridge until the background marker reads async_runs directly.
+        conn.execute_batch(
+            "CREATE VIEW cron_runs AS
+             SELECT
+                id,
+                producer_ref AS job_name,
+                started_at,
+                finished_at,
+                exit_code,
+                status,
+                log_path,
+                summary,
+                notify_json,
+                delivered_at,
+                delivery_status,
+                no_notify_reason,
+                NULLIF(target_chat_id, 0) AS target_chat_id,
+                target_thread_id
+             FROM async_runs
+             WHERE kind = 'cron';",
+        )
+        .unwrap();
+    }
+
+    fn open_marker_conn(path: &std::path::Path) -> rusqlite::Connection {
+        let conn = open_connection(path, true).unwrap();
+        install_cron_runs_view(&conn);
+        conn
+    }
+
+    fn insert_marker_run(
+        conn: &rusqlite::Connection,
+        id: &str,
+        job_name: &str,
+        started_at: &str,
+        status: &str,
+        target_chat_id: i64,
+        delivered_at: Option<&str>,
+    ) {
+        let finished_at = (status == "success").then_some(started_at);
+        let delivery_required = status == "success";
+        let delivery_status = if delivered_at.is_some() {
+            "delivered"
+        } else if delivery_required {
+            "pending"
+        } else {
+            "none"
+        };
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
+                status, started_at, finished_at, log_path, delivery_required,
+                delivery_status, delivered_at, created_at, updated_at
+             ) VALUES (
+                ?1, 'cron', ?2, ?1, ?3, NULL,
+                ?4, ?5, ?6, '/log', ?7,
+                ?8, ?9, ?5, ?5
+             )",
+            rusqlite::params![
+                id,
+                job_name,
+                target_chat_id,
+                status,
+                started_at,
+                finished_at,
+                if delivery_required { 1 } else { 0 },
+                delivery_status,
+                delivered_at,
+            ],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn continuation_prompt_auto_timeout_includes_focus_hint() {
         let p = build_continuation_prompt(BgReason::AutoTimeout);
@@ -4183,7 +4257,7 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_returns_none_when_no_runs() {
         let tmp = tempfile::tempdir().unwrap();
-        let _conn = open_connection(tmp.path(), true).unwrap();
+        let _conn = open_marker_conn(tmp.path());
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "no rows → no marker; got {m:?}");
     }
@@ -4191,14 +4265,9 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_includes_running_run_for_chat() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
-             VALUES ('run-A', 'bg-job-A', ?1, 'running', '/log', -100, NULL)",
-            rusqlite::params![now],
-        )
-        .unwrap();
+        insert_marker_run(&conn, "run-A", "bg-job-A", &now, "running", -100, None);
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(m.starts_with("<background-jobs>"), "got {m:?}");
@@ -4210,14 +4279,9 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_includes_undelivered_success_run() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, target_chat_id, target_thread_id, delivery_status) \
-             VALUES ('run-B', 'bg-job-B', ?1, ?1, 'success', '/log', -100, NULL, 'pending')",
-            rusqlite::params![now],
-        )
-        .unwrap();
+        insert_marker_run(&conn, "run-B", "bg-job-B", &now, "success", -100, None);
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(m.contains("bg-job-B"));
@@ -4227,14 +4291,9 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_excludes_other_chat() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
-             VALUES ('run-other', 'bg-other', ?1, 'running', '/log', -999, NULL)",
-            rusqlite::params![now],
-        )
-        .unwrap();
+        insert_marker_run(&conn, "run-other", "bg-other", &now, "running", -999, None);
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "row for other chat must not appear; got {m:?}");
@@ -4243,14 +4302,9 @@ mod background_continuation_tests {
     #[test]
     fn build_bg_marker_excludes_delivered_run() {
         let tmp = tempfile::tempdir().unwrap();
-        let conn = open_connection(tmp.path(), true).unwrap();
+        let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, target_chat_id, target_thread_id, delivered_at, delivery_status) \
-             VALUES ('run-D', 'bg-D', ?1, ?1, 'success', '/log', -100, NULL, ?1, 'delivered')",
-            rusqlite::params![now],
-        )
-        .unwrap();
+        insert_marker_run(&conn, "run-D", "bg-D", &now, "success", -100, Some(&now));
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "delivered run must not appear; got {m:?}");

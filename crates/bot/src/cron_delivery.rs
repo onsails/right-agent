@@ -697,7 +697,136 @@ mod tests {
     fn setup_db() -> (tempfile::TempDir, rusqlite::Connection) {
         let dir = tempfile::tempdir().unwrap();
         let conn = right_db::open_connection(dir.path(), true).unwrap();
+        install_cron_runs_mirror_table(&conn);
         (dir, conn)
+    }
+
+    fn install_cron_runs_mirror_table(conn: &rusqlite::Connection) {
+        // Test-only bridge until cron_delivery reads async_runs directly.
+        conn.execute_batch(
+            "CREATE TABLE cron_runs (
+                id TEXT PRIMARY KEY,
+                job_name TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                exit_code INTEGER,
+                status TEXT NOT NULL,
+                log_path TEXT,
+                summary TEXT,
+                notify_json TEXT,
+                delivered_at TEXT,
+                delivery_status TEXT,
+                no_notify_reason TEXT,
+                target_chat_id INTEGER,
+                target_thread_id INTEGER
+             );
+
+             CREATE TRIGGER cron_runs_update
+             AFTER UPDATE ON cron_runs
+             BEGIN
+               UPDATE async_runs
+                  SET delivered_at = NEW.delivered_at,
+                      delivery_status = NEW.delivery_status,
+                      updated_at = COALESCE(NEW.delivered_at, OLD.delivered_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                WHERE id = NEW.id;
+             END;",
+        )
+        .unwrap();
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestCronRun {
+        id: &'static str,
+        job_name: &'static str,
+        started_at: &'static str,
+        finished_at: Option<&'static str>,
+        status: &'static str,
+        log_path: &'static str,
+        summary: Option<&'static str>,
+        notify_json: Option<&'static str>,
+        delivered_at: Option<&'static str>,
+        delivery_status: Option<&'static str>,
+        target_chat_id: Option<i64>,
+        target_thread_id: Option<i64>,
+    }
+
+    impl Default for TestCronRun {
+        fn default() -> Self {
+            Self {
+                id: "run-1",
+                job_name: "job1",
+                started_at: "2026-01-01T00:00:00Z",
+                finished_at: Some("2026-01-01T00:01:00Z"),
+                status: "success",
+                log_path: "/log",
+                summary: Some("sum"),
+                notify_json: None,
+                delivered_at: None,
+                delivery_status: None,
+                target_chat_id: None,
+                target_thread_id: None,
+            }
+        }
+    }
+
+    fn insert_async_cron_run(conn: &rusqlite::Connection, run: TestCronRun) {
+        let delivery_required = run.notify_json.is_some();
+        let delivery_status =
+            run.delivery_status
+                .unwrap_or(if delivery_required { "pending" } else { "none" });
+        let updated_at = run.finished_at.unwrap_or(run.started_at);
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
+                status, started_at, finished_at, log_path, summary, notify_json,
+                delivery_required, delivery_status, delivered_at, created_at, updated_at
+             ) VALUES (
+                ?1, 'cron', ?2, ?1, ?3, ?4,
+                ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?6, ?14
+             )",
+            rusqlite::params![
+                run.id,
+                run.job_name,
+                run.target_chat_id.unwrap_or(0),
+                run.target_thread_id,
+                run.status,
+                run.started_at,
+                run.finished_at,
+                run.log_path,
+                run.summary,
+                run.notify_json,
+                if delivery_required { 1 } else { 0 },
+                delivery_status,
+                run.delivered_at,
+                updated_at,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (
+                id, job_name, started_at, finished_at, status, log_path, summary,
+                notify_json, delivered_at, delivery_status, target_chat_id, target_thread_id
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                ?8, ?9, ?10, ?11, ?12
+             )",
+            rusqlite::params![
+                run.id,
+                run.job_name,
+                run.started_at,
+                run.finished_at,
+                run.status,
+                run.log_path,
+                run.summary,
+                run.notify_json,
+                run.delivered_at,
+                delivery_status,
+                run.target_chat_id,
+                run.target_thread_id,
+            ],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -709,16 +838,26 @@ mod tests {
     #[test]
     fn fetch_pending_returns_oldest() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum1', '{\"content\":\"first\"}')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('b', 'job1', '2026-01-01T00:05:00Z', '2026-01-01T00:06:00Z', 'success', '/log', 'sum2', '{\"content\":\"second\"}')",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                summary: Some("sum1"),
+                notify_json: Some("{\"content\":\"first\"}"),
+                ..Default::default()
+            },
+        );
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "b",
+                started_at: "2026-01-01T00:05:00Z",
+                finished_at: Some("2026-01-01T00:06:00Z"),
+                summary: Some("sum2"),
+                notify_json: Some("{\"content\":\"second\"}"),
+                ..Default::default()
+            },
+        );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         assert_eq!(pending.id, "a", "should return oldest first");
     }
@@ -726,45 +865,61 @@ mod tests {
     #[test]
     fn fetch_pending_skips_null_notify() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'silent')",
-            [],
-        )
-        .unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                summary: Some("silent"),
+                ..Default::default()
+            },
+        );
         assert!(fetch_pending(&conn).unwrap().is_none());
     }
 
     #[test]
     fn fetch_pending_skips_delivered() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, delivered_at) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"done\"}', '2026-01-01T00:10:00Z')",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                notify_json: Some("{\"content\":\"done\"}"),
+                delivered_at: Some("2026-01-01T00:10:00Z"),
+                ..Default::default()
+            },
+        );
         assert!(fetch_pending(&conn).unwrap().is_none());
     }
 
     #[test]
     fn deduplicate_keeps_latest_marks_older() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum1', '{\"content\":\"old\"}')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('b', 'job1', '2026-01-01T00:05:00Z', '2026-01-01T00:06:00Z', 'success', '/log', 'sum2', '{\"content\":\"new\"}')",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                summary: Some("sum1"),
+                notify_json: Some("{\"content\":\"old\"}"),
+                ..Default::default()
+            },
+        );
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "b",
+                started_at: "2026-01-01T00:05:00Z",
+                finished_at: Some("2026-01-01T00:06:00Z"),
+                summary: Some("sum2"),
+                notify_json: Some("{\"content\":\"new\"}"),
+                ..Default::default()
+            },
+        );
         let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
         assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
         let delivered: Option<String> = conn
             .query_row(
-                "SELECT delivered_at FROM cron_runs WHERE id = 'a'",
+                "SELECT delivered_at FROM async_runs WHERE id = 'a'",
                 [],
                 |r| r.get(0),
             )
@@ -772,7 +927,7 @@ mod tests {
         assert!(delivered.is_some());
         let not_delivered: Option<String> = conn
             .query_row(
-                "SELECT delivered_at FROM cron_runs WHERE id = 'b'",
+                "SELECT delivered_at FROM async_runs WHERE id = 'b'",
                 [],
                 |r| r.get(0),
             )
@@ -783,16 +938,23 @@ mod tests {
     #[test]
     fn deduplicate_does_not_touch_other_jobs() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('b', 'job2', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"y\"}')",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                notify_json: Some("{\"content\":\"x\"}"),
+                ..Default::default()
+            },
+        );
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "b",
+                job_name: "job2",
+                notify_json: Some("{\"content\":\"y\"}"),
+                ..Default::default()
+            },
+        );
         let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
         assert_eq!(latest.id, "a");
         assert_eq!(skipped, 0);
@@ -801,23 +963,35 @@ mod tests {
     #[test]
     fn deduplicate_sets_superseded_status() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, delivery_status) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum1', '{\"content\":\"old\"}', 'pending')",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, delivery_status) \
-             VALUES ('b', 'job1', '2026-01-01T00:05:00Z', '2026-01-01T00:06:00Z', 'success', '/log', 'sum2', '{\"content\":\"new\"}', 'pending')",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                summary: Some("sum1"),
+                notify_json: Some("{\"content\":\"old\"}"),
+                delivery_status: Some("pending"),
+                ..Default::default()
+            },
+        );
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "b",
+                started_at: "2026-01-01T00:05:00Z",
+                finished_at: Some("2026-01-01T00:06:00Z"),
+                summary: Some("sum2"),
+                notify_json: Some("{\"content\":\"new\"}"),
+                delivery_status: Some("pending"),
+                ..Default::default()
+            },
+        );
         let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
         assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
 
         let status: Option<String> = conn
             .query_row(
-                "SELECT delivery_status FROM cron_runs WHERE id = 'a'",
+                "SELECT delivery_status FROM async_runs WHERE id = 'a'",
                 [],
                 |r| r.get(0),
             )
@@ -913,11 +1087,18 @@ mod tests {
         ).unwrap();
 
         // 2. Run row inserted with snapshot of target (what new execute_job does).
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, target_chat_id, target_thread_id) \
-             VALUES ('run-1', 'one-shot', '2026-05-05T12:36:00Z', '2026-05-05T12:41:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}', -4996137249, NULL)",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "run-1",
+                job_name: "one-shot",
+                started_at: "2026-05-05T12:36:00Z",
+                finished_at: Some("2026-05-05T12:41:00Z"),
+                notify_json: Some("{\"content\":\"x\"}"),
+                target_chat_id: Some(-4996137249),
+                ..Default::default()
+            },
+        );
 
         // 3. Spec is auto-deleted (one-shot completion).
         conn.execute("DELETE FROM cron_specs WHERE job_name = 'one-shot'", [])
@@ -936,11 +1117,16 @@ mod tests {
     #[test]
     fn fetch_pending_carries_target_fields() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, target_chat_id, target_thread_id) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}', -555, 9)",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                notify_json: Some("{\"content\":\"x\"}"),
+                target_chat_id: Some(-555),
+                target_thread_id: Some(9),
+                ..Default::default()
+            },
+        );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         assert_eq!(pending.target_chat_id, Some(-555));
         assert_eq!(pending.target_thread_id, Some(9));
@@ -949,11 +1135,15 @@ mod tests {
     #[test]
     fn fetch_pending_returns_none_target_when_run_has_none() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('a', 'legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                job_name: "legacy",
+                notify_json: Some("{\"content\":\"x\"}"),
+                ..Default::default()
+            },
+        );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         assert!(pending.target_chat_id.is_none());
         assert!(pending.target_thread_id.is_none());
@@ -962,11 +1152,15 @@ mod tests {
     #[test]
     fn null_target_classifies_as_no_target() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json) \
-             VALUES ('a', 'legacy', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}')",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                job_name: "legacy",
+                notify_json: Some("{\"content\":\"x\"}"),
+                ..Default::default()
+            },
+        );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[]));
         assert!(
@@ -978,11 +1172,16 @@ mod tests {
     #[test]
     fn target_not_in_allowlist_classifies_as_denied() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, target_chat_id) \
-             VALUES ('a', 'agenda', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}', -777)",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                job_name: "agenda",
+                notify_json: Some("{\"content\":\"x\"}"),
+                target_chat_id: Some(-777),
+                ..Default::default()
+            },
+        );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[100], &[-200]));
         assert!(
@@ -994,11 +1193,17 @@ mod tests {
     #[test]
     fn target_in_allowlist_classifies_as_ready() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, target_chat_id, target_thread_id) \
-             VALUES ('a', 'agenda', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum', '{\"content\":\"x\"}', -200, 5)",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                job_name: "agenda",
+                notify_json: Some("{\"content\":\"x\"}"),
+                target_chat_id: Some(-200),
+                target_thread_id: Some(5),
+                ..Default::default()
+            },
+        );
         let pending = fetch_pending(&conn).unwrap().unwrap();
         let outcome = classify_pending_target(&pending, &fake_allowlist(&[], &[-200]));
         assert!(
@@ -1042,16 +1247,28 @@ mod tests {
     #[test]
     fn deduplicate_job_carries_target_fields() {
         let (_dir, conn) = setup_db();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, target_chat_id) \
-             VALUES ('a', 'job1', '2026-01-01T00:00:00Z', '2026-01-01T00:01:00Z', 'success', '/log', 'sum1', '{\"content\":\"x\"}', -100)",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO cron_runs (id, job_name, started_at, finished_at, status, log_path, summary, notify_json, target_chat_id) \
-             VALUES ('b', 'job1', '2026-01-01T00:05:00Z', '2026-01-01T00:06:00Z', 'success', '/log', 'sum2', '{\"content\":\"y\"}', -100)",
-            [],
-        ).unwrap();
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "a",
+                summary: Some("sum1"),
+                notify_json: Some("{\"content\":\"x\"}"),
+                target_chat_id: Some(-100),
+                ..Default::default()
+            },
+        );
+        insert_async_cron_run(
+            &conn,
+            TestCronRun {
+                id: "b",
+                started_at: "2026-01-01T00:05:00Z",
+                finished_at: Some("2026-01-01T00:06:00Z"),
+                summary: Some("sum2"),
+                notify_json: Some("{\"content\":\"y\"}"),
+                target_chat_id: Some(-100),
+                ..Default::default()
+            },
+        );
         let (latest, skipped) = deduplicate_job(&conn, "job1").unwrap().unwrap();
         assert_eq!(latest.id, "b");
         assert_eq!(skipped, 1);
