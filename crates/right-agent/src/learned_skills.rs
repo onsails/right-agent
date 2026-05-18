@@ -170,7 +170,7 @@ pub struct SkillReviewReport {
 pub struct ReviewGateInput<'a> {
     pub signal_trigger: Option<ReviewTriggerKind>,
     pub today: &'a str,
-    pub cooldown_elapsed: bool,
+    pub cooldown_cutoff: Option<&'a str>,
     pub daily_limit: i64,
 }
 
@@ -507,21 +507,30 @@ fn review_gate_decision_in_tx(
     agent_name: &str,
     input: ReviewGateInput<'_>,
 ) -> Result<ReviewGateDecision, rusqlite::Error> {
-    let row: (i64, i64, i64, Option<String>, i64) = tx.query_row(
-        "SELECT review_running, daily_review_count, tool_iters_since_review, daily_review_date, creation_review_interval \
+    let row: (i64, i64, i64, Option<String>, i64, Option<String>) = tx.query_row(
+        "SELECT review_running, daily_review_count, tool_iters_since_review, daily_review_date, creation_review_interval, last_review_at \
          FROM skill_nudge_state WHERE agent_name = ?1",
         [agent_name],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
     )?;
 
-    let (review_running, mut daily_count, tool_iters, daily_date, interval) = row;
+    let (review_running, mut daily_count, tool_iters, daily_date, interval, last_review_at) = row;
     if daily_date.as_deref() != Some(input.today) {
         daily_count = 0;
     }
     if review_running != 0 {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning));
     }
-    if !input.cooldown_elapsed {
+    if cooldown_blocks(last_review_at.as_deref(), input.cooldown_cutoff) {
         return Ok(ReviewGateDecision::Skip(ReviewSkipReason::Cooldown));
     }
     if daily_count >= input.daily_limit {
@@ -561,8 +570,14 @@ pub fn try_mark_review_started(
          WHERE agent_name = ?1 \
            AND review_running = 0 \
            AND daily_review_date = ?2 \
-           AND daily_review_count < ?3",
-        rusqlite::params![agent_name, input.today, input.daily_limit],
+           AND daily_review_count < ?3 \
+           AND (?4 IS NULL OR last_review_at IS NULL OR last_review_at <= ?4)",
+        rusqlite::params![
+            agent_name,
+            input.today,
+            input.daily_limit,
+            input.cooldown_cutoff,
+        ],
     )?;
     if updated == 1 {
         tx.commit()?;
@@ -579,16 +594,15 @@ pub fn mark_review_finished(
     agent_name: &str,
     trigger: ReviewTriggerKind,
     status: ReviewStatus,
+    reset_activity_counters: bool,
 ) -> Result<(), rusqlite::Error> {
     let tx = conn.unchecked_transaction()?;
     ensure_nudge_state_in_tx(&tx, agent_name)?;
-    let reset_activity_counters = !matches!(status, ReviewStatus::Failed);
-    let reset_issue_hints = reset_activity_counters
+    let reset_activity_counters =
+        reset_activity_counters && !matches!(status, ReviewStatus::Failed);
+    let reset_issue_hints = !matches!(status, ReviewStatus::Failed)
         && (matches!(trigger, ReviewTriggerKind::SkillIssueSignal)
-            || matches!(
-                status,
-                ReviewStatus::NothingToLearn | ReviewStatus::UpdateCandidate
-            ));
+            || matches!(status, ReviewStatus::NothingToLearn));
     tx.execute(
         "UPDATE skill_nudge_state \
          SET review_running = 0, \
@@ -609,6 +623,13 @@ pub fn mark_review_finished(
     Ok(())
 }
 
+fn cooldown_blocks(last_review_at: Option<&str>, cooldown_cutoff: Option<&str>) -> bool {
+    match (last_review_at, cooldown_cutoff) {
+        (Some(last_review_at), Some(cooldown_cutoff)) => last_review_at > cooldown_cutoff,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -623,7 +644,7 @@ mod tests {
         ReviewGateInput {
             signal_trigger,
             today: "2026-05-18",
-            cooldown_elapsed: true,
+            cooldown_cutoff: None,
             daily_limit: 12,
         }
     }
@@ -689,7 +710,7 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_elapsed: true,
+                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -705,7 +726,7 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::SkillIssueSignal),
                 today: "2026-05-18",
-                cooldown_elapsed: true,
+                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -726,7 +747,7 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: None,
                 today: "2026-05-18",
-                cooldown_elapsed: true,
+                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -753,7 +774,7 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_elapsed: true,
+                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -775,7 +796,7 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_elapsed: true,
+                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -786,7 +807,8 @@ mod tests {
         );
 
         conn.execute(
-            "UPDATE skill_nudge_state SET daily_review_count = 0 WHERE agent_name='right'",
+            "UPDATE skill_nudge_state SET daily_review_count = 0, last_review_at = '2026-05-18T12:05:00Z' \
+             WHERE agent_name='right'",
             [],
         )
         .unwrap();
@@ -796,7 +818,7 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: Some(ReviewTriggerKind::LearningSignal),
                 today: "2026-05-18",
-                cooldown_elapsed: false,
+                cooldown_cutoff: Some("2026-05-18T12:00:00Z"),
                 daily_limit: 12,
             },
         )
@@ -823,7 +845,7 @@ mod tests {
             ReviewGateInput {
                 signal_trigger: None,
                 today: "2026-05-18",
-                cooldown_elapsed: true,
+                cooldown_cutoff: None,
                 daily_limit: 12,
             },
         )
@@ -846,6 +868,7 @@ mod tests {
             "right",
             ReviewTriggerKind::EffortThreshold,
             ReviewStatus::NothingToLearn,
+            true,
         )
         .unwrap();
         let row: (i64, i64, i64, String) = conn
@@ -915,6 +938,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (0, 12));
+    }
+
+    #[test]
+    fn review_start_rechecks_cooldown_after_stale_gate() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+        let input = ReviewGateInput {
+            signal_trigger: Some(ReviewTriggerKind::LearningSignal),
+            today: "2026-05-18",
+            cooldown_cutoff: Some("2026-05-18T12:00:00Z"),
+            daily_limit: 12,
+        };
+
+        let stale_decision = review_gate_decision(&conn, "right", input).unwrap();
+        assert_eq!(
+            stale_decision,
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
+        );
+
+        conn.execute(
+            "UPDATE skill_nudge_state SET last_review_at = '2026-05-18T12:05:00Z' WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+
+        let started = try_mark_review_started(&conn, "right", input).unwrap();
+        assert_eq!(
+            started,
+            ReviewGateDecision::Skip(ReviewSkipReason::Cooldown)
+        );
+
+        let row: (i64, i64) = conn
+            .query_row(
+                "SELECT review_running, daily_review_count FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0));
     }
 
     #[test]
@@ -1065,6 +1127,7 @@ mod tests {
             "finish-missing",
             ReviewTriggerKind::EffortThreshold,
             ReviewStatus::Failed,
+            false,
         )
         .unwrap();
 
@@ -1119,6 +1182,7 @@ mod tests {
             "right",
             ReviewTriggerKind::LearningSignal,
             ReviewStatus::Failed,
+            true,
         )
         .unwrap();
 
@@ -1148,9 +1212,61 @@ mod tests {
     }
 
     #[test]
+    fn review_finish_resets_activity_counters_only_when_requested() {
+        let conn = conn();
+        for agent_name in ["preserve", "reset"] {
+            ensure_nudge_state(&conn, agent_name).unwrap();
+            conn.execute(
+                "UPDATE skill_nudge_state \
+                 SET review_running = 1, tool_iters_since_review = 9, turns_since_review = 2, skill_issue_hints_since_review = 5 \
+                 WHERE agent_name = ?1",
+                [agent_name],
+            )
+            .unwrap();
+        }
+
+        mark_review_finished(
+            &conn,
+            "preserve",
+            ReviewTriggerKind::LearningSignal,
+            ReviewStatus::CreateCandidate,
+            false,
+        )
+        .unwrap();
+        mark_review_finished(
+            &conn,
+            "reset",
+            ReviewTriggerKind::LearningSignal,
+            ReviewStatus::CreateCandidate,
+            true,
+        )
+        .unwrap();
+
+        let preserve: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT review_running, tool_iters_since_review, turns_since_review, skill_issue_hints_since_review \
+                 FROM skill_nudge_state WHERE agent_name='preserve'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(preserve, (0, 9, 2, 5));
+
+        let reset: (i64, i64, i64, i64) = conn
+            .query_row(
+                "SELECT review_running, tool_iters_since_review, turns_since_review, skill_issue_hints_since_review \
+                 FROM skill_nudge_state WHERE agent_name='reset'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(reset, (0, 0, 0, 5));
+    }
+
+    #[test]
     fn review_finish_resets_issue_hints_only_for_issue_or_nothing_to_learn() {
         let conn = conn();
-        for agent_name in ["learning", "issue", "nothing"] {
+        for agent_name in ["learning", "issue", "nothing", "effort-update"] {
             ensure_nudge_state(&conn, agent_name).unwrap();
             conn.execute(
                 "UPDATE skill_nudge_state \
@@ -1166,6 +1282,7 @@ mod tests {
             "learning",
             ReviewTriggerKind::LearningSignal,
             ReviewStatus::CreateCandidate,
+            true,
         )
         .unwrap();
         mark_review_finished(
@@ -1173,6 +1290,7 @@ mod tests {
             "issue",
             ReviewTriggerKind::SkillIssueSignal,
             ReviewStatus::UpdateCandidate,
+            true,
         )
         .unwrap();
         mark_review_finished(
@@ -1180,6 +1298,15 @@ mod tests {
             "nothing",
             ReviewTriggerKind::EffortThreshold,
             ReviewStatus::NothingToLearn,
+            true,
+        )
+        .unwrap();
+        mark_review_finished(
+            &conn,
+            "effort-update",
+            ReviewTriggerKind::EffortThreshold,
+            ReviewStatus::UpdateCandidate,
+            true,
         )
         .unwrap();
 
@@ -1210,6 +1337,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(nothing_hints, 0);
+
+        let effort_update_hints: i64 = conn
+            .query_row(
+                "SELECT skill_issue_hints_since_review FROM skill_nudge_state WHERE agent_name='effort-update'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(effort_update_hints, 5);
     }
 
     #[test]
