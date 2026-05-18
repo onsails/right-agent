@@ -22,6 +22,7 @@ const V16_SCHEMA: &str = include_str!("sql/v16_usage_api_key_source.sql");
 const V17_SCHEMA: &str = include_str!("sql/v17_cron_target.sql");
 const V19_SCHEMA: &str = include_str!("sql/v19_cron_runs_target_index.sql");
 const V20_SCHEMA: &str = include_str!("sql/v20_learned_skills.sql");
+const V21_SCHEMA: &str = include_str!("sql/v21_conversation_messages.sql");
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -204,6 +205,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up_with_hook("", v18_cron_runs_target),
         M::up(V19_SCHEMA),
         M::up(V20_SCHEMA),
+        M::up(V21_SCHEMA),
     ])
 });
 

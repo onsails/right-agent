@@ -17,8 +17,8 @@ fn open_connection_applies_migrations() {
     let conn = open_connection(dir.path(), true).unwrap();
     assert_eq!(
         query_user_version(&conn),
-        20,
-        "latest migration should be v20"
+        21,
+        "latest migration should be v21"
     );
     // After migrations, the current sessions table should exist.
     let count: i64 = conn
@@ -55,7 +55,7 @@ fn open_connection_without_migration_preserves_existing_schema() {
     let conn = open_connection(dir.path(), false).unwrap();
     assert_eq!(
         query_user_version(&conn),
-        20,
+        21,
         "migrate=false should not downgrade schema"
     );
     assert_eq!(
@@ -137,6 +137,24 @@ fn schema_has_memory_events_table() {
         )
         .unwrap();
     assert_eq!(count, 1, "memory_events table should exist");
+}
+
+#[test]
+fn schema_has_conversation_messages_tables() {
+    let dir = tempdir().unwrap();
+    open_db(dir.path(), true).unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("data.db")).unwrap();
+
+    assert_eq!(
+        query_table_count(&conn, "conversation_messages"),
+        1,
+        "conversation_messages table should exist"
+    );
+    assert_eq!(
+        query_table_count(&conn, "conversation_messages_fts"),
+        1,
+        "conversation_messages_fts table should exist"
+    );
 }
 
 #[test]
