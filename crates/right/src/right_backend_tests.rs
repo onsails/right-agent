@@ -473,6 +473,7 @@ async fn skill_learning_start_rejects_empty_message_before_insert() {
             kind: crate::progress::ProgressInvocationKind::Foreground,
             bot_socket_path: agent_dir.join("missing-bot.sock"),
             bot_send_token: "send-token".to_owned(),
+            conversation_scope: None,
         })
         .await;
 

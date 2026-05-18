@@ -948,6 +948,7 @@ mod tests {
                 kind: crate::progress::ProgressInvocationKind::Foreground,
                 bot_socket_path: tmp.path().join("missing-bot.sock"),
                 bot_send_token: "send-token".to_owned(),
+                conversation_scope: None,
             })
             .await;
 

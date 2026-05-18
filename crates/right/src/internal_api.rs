@@ -414,12 +414,19 @@ async fn handle_progress_register(
             crate::progress::ProgressInvocationKind::BackgroundReview
         }
     };
+    let conversation_scope = match (req.chat_id, req.thread_id) {
+        (Some(chat_id), Some(thread_id)) => {
+            Some(crate::progress::ConversationScope { chat_id, thread_id })
+        }
+        _ => None,
+    };
     progress
         .register(crate::progress::ProgressRegistration {
             invocation_id: req.invocation_id,
             kind,
             bot_socket_path,
             bot_send_token: req.bot_send_token,
+            conversation_scope,
         })
         .await;
 
@@ -892,7 +899,9 @@ mod tests {
                 "agent": "test-agent",
                 "invocation_id": "inv-1",
                 "kind": "foreground",
-                "bot_send_token": "send-token"
+                "bot_send_token": "send-token",
+                "chat_id": 100,
+                "thread_id": 7
             }),
         )
         .await;
@@ -910,6 +919,17 @@ mod tests {
         assert_eq!(
             target.bot_socket_path,
             tmp.path().join("agents/test-agent/bot.sock")
+        );
+        let scope = progress
+            .conversation_scope("inv-1")
+            .await
+            .expect("conversation scope registered");
+        assert_eq!(
+            scope,
+            crate::progress::ConversationScope {
+                chat_id: 100,
+                thread_id: 7
+            }
         );
     }
 

@@ -36,12 +36,19 @@ pub(crate) enum ProgressInvocationKind {
     NonForeground,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConversationScope {
+    pub(crate) chat_id: i64,
+    pub(crate) thread_id: i64,
+}
+
 #[derive(Clone)]
 pub(crate) struct ProgressRegistration {
     pub(crate) invocation_id: String,
     pub(crate) kind: ProgressInvocationKind,
     pub(crate) bot_socket_path: PathBuf,
     pub(crate) bot_send_token: String,
+    pub(crate) conversation_scope: Option<ConversationScope>,
 }
 
 impl std::fmt::Debug for ProgressRegistration {
@@ -51,6 +58,7 @@ impl std::fmt::Debug for ProgressRegistration {
             .field("kind", &self.kind)
             .field("bot_socket_path", &self.bot_socket_path)
             .field("bot_send_token", &"<redacted>")
+            .field("conversation_scope", &self.conversation_scope)
             .finish()
     }
 }
@@ -87,6 +95,7 @@ struct ProgressInvocation {
     kind: ProgressInvocationKind,
     bot_socket_path: PathBuf,
     bot_send_token: String,
+    conversation_scope: Option<ConversationScope>,
     last_sent_at: Option<Instant>,
 }
 
@@ -96,6 +105,7 @@ impl std::fmt::Debug for ProgressInvocation {
             .field("kind", &self.kind)
             .field("bot_socket_path", &self.bot_socket_path)
             .field("bot_send_token", &"<redacted>")
+            .field("conversation_scope", &self.conversation_scope)
             .field("last_sent_at", &self.last_sent_at)
             .finish()
     }
@@ -110,6 +120,7 @@ impl ProgressRegistry {
                 kind: registration.kind,
                 bot_socket_path: registration.bot_socket_path,
                 bot_send_token: registration.bot_send_token,
+                conversation_scope: registration.conversation_scope,
                 last_sent_at: None,
             },
         );
@@ -182,6 +193,21 @@ impl ProgressRegistry {
         ))
     }
 
+    #[allow(dead_code)]
+    pub(crate) async fn conversation_scope(
+        &self,
+        invocation_id: &str,
+    ) -> Result<ConversationScope, ProgressError> {
+        let inner = self.inner.lock().await;
+        let invocation = inner.get(invocation_id).ok_or(ProgressError::Unavailable)?;
+        if !matches!(invocation.kind, ProgressInvocationKind::Foreground) {
+            return Err(ProgressError::Forbidden);
+        }
+        invocation
+            .conversation_scope
+            .ok_or(ProgressError::Unavailable)
+    }
+
     /// Clear `last_sent_at` so the next attempt is not rate-limited.
     ///
     /// Why: `begin_send` optimistically reserves the rate-limit slot before the
@@ -208,6 +234,7 @@ mod tests {
             kind: ProgressInvocationKind::Foreground,
             bot_socket_path: PathBuf::from("/tmp/bot.sock"),
             bot_send_token: "send-token".to_owned(),
+            conversation_scope: None,
         }
     }
 
@@ -264,6 +291,63 @@ mod tests {
         assert!(matches!(err, ProgressError::RateLimited { .. }));
     }
 
+    #[tokio::test]
+    async fn conversation_scope_available_for_foreground_invocation() {
+        let registry = ProgressRegistry::default();
+        registry
+            .register(ProgressRegistration {
+                conversation_scope: Some(ConversationScope {
+                    chat_id: 100,
+                    thread_id: 7,
+                }),
+                ..foreground_registration()
+            })
+            .await;
+
+        let scope = registry.conversation_scope("inv-1").await.unwrap();
+
+        assert_eq!(
+            scope,
+            ConversationScope {
+                chat_id: 100,
+                thread_id: 7
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_scope_rejects_missing_or_nonforeground_invocation() {
+        let registry = ProgressRegistry::default();
+        registry.register(foreground_registration()).await;
+        registry
+            .register(ProgressRegistration {
+                invocation_id: "background-inv".to_owned(),
+                kind: ProgressInvocationKind::BackgroundReview,
+                bot_socket_path: PathBuf::from("/tmp/bot.sock"),
+                bot_send_token: "send-token".to_owned(),
+                conversation_scope: Some(ConversationScope {
+                    chat_id: 100,
+                    thread_id: 7,
+                }),
+            })
+            .await;
+
+        let err = registry
+            .conversation_scope("missing-inv")
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProgressError::Unavailable);
+
+        let err = registry.conversation_scope("inv-1").await.unwrap_err();
+        assert_eq!(err, ProgressError::Unavailable);
+
+        let err = registry
+            .conversation_scope("background-inv")
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProgressError::Forbidden);
+    }
+
     #[test]
     fn progress_registration_debug_redacts_token() {
         let reg = ProgressRegistration {
@@ -271,6 +355,7 @@ mod tests {
             kind: ProgressInvocationKind::Foreground,
             bot_socket_path: PathBuf::from("/tmp/bot.sock"),
             bot_send_token: "supersecret".to_owned(),
+            conversation_scope: None,
         };
         let s = format!("{reg:?}");
         assert!(
@@ -300,6 +385,7 @@ mod tests {
             kind: ProgressInvocationKind::Foreground,
             bot_socket_path: PathBuf::from("/tmp/bot.sock"),
             bot_send_token: "supersecret".to_owned(),
+            conversation_scope: None,
             last_sent_at: None,
         };
         let s = format!("{invocation:?}");
@@ -334,6 +420,7 @@ mod tests {
                 kind: ProgressInvocationKind::NonForeground,
                 bot_socket_path: PathBuf::from("/tmp/bot.sock"),
                 bot_send_token: "send-token".to_owned(),
+                conversation_scope: None,
             })
             .await;
 

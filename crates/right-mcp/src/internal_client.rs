@@ -304,6 +304,10 @@ pub struct ProgressRegisterRequest {
     pub invocation_id: String,
     pub kind: ProgressInvocationKindDto,
     pub bot_send_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<i64>,
 }
 
 impl std::fmt::Debug for ProgressRegisterRequest {
@@ -313,6 +317,8 @@ impl std::fmt::Debug for ProgressRegisterRequest {
             .field("invocation_id", &self.invocation_id)
             .field("kind", &self.kind)
             .field("bot_send_token", &"<redacted>")
+            .field("chat_id", &self.chat_id)
+            .field("thread_id", &self.thread_id)
             .finish()
     }
 }
@@ -441,6 +447,8 @@ mod tests {
             invocation_id: "inv-1".to_owned(),
             kind: ProgressInvocationKindDto::Foreground,
             bot_send_token: "send-token".to_owned(),
+            chat_id: Some(100),
+            thread_id: Some(7),
         };
 
         let json = serde_json::to_value(request).unwrap();
@@ -449,6 +457,8 @@ mod tests {
         assert_eq!(json["invocation_id"], "inv-1");
         assert_eq!(json["kind"], "foreground");
         assert_eq!(json["bot_send_token"], "send-token");
+        assert_eq!(json["chat_id"], 100);
+        assert_eq!(json["thread_id"], 7);
     }
 
     #[test]
@@ -484,6 +494,8 @@ mod tests {
             invocation_id: "inv-1".to_owned(),
             kind: ProgressInvocationKindDto::Foreground,
             bot_send_token: "supersecret".to_owned(),
+            chat_id: None,
+            thread_id: None,
         };
         let s = format!("{request:?}");
         assert!(
