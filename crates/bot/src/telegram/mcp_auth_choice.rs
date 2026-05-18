@@ -53,9 +53,12 @@ impl PendingMcpAuthChoiceRequest {
         now >= self.expires_at
     }
 
-    /// True when `original_url` carried a query string that was stripped to form `bare_url`.
+    /// True when `original_url` carried a query string.
     pub(crate) fn has_query(&self) -> bool {
-        self.original_url != self.bare_url
+        reqwest::Url::parse(&self.original_url)
+            .ok()
+            .and_then(|url| url.query().map(|_| ()))
+            .is_some()
     }
 }
 
@@ -563,6 +566,17 @@ mod tests {
             },
             expires_at,
         }
+    }
+
+    #[test]
+    fn pending_request_has_query_ignores_url_normalization() {
+        let pending = PendingMcpAuthChoiceRequest {
+            original_url: "https://example.com".to_string(),
+            bare_url: "https://example.com/".to_string(),
+            ..pending_request(42, 100, Instant::now() + MCP_AUTH_CHOICE_TTL)
+        };
+
+        assert!(!pending.has_query());
     }
 
     #[test]
