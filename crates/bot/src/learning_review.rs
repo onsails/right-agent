@@ -71,6 +71,17 @@ pub(crate) struct ReviewOutput {
     pub(crate) raw: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ReviewReportContext {
+    pub(crate) agent_name: String,
+    pub(crate) source_invocation_id: String,
+    pub(crate) root_session_id: Option<String>,
+    pub(crate) chat_id: Option<i64>,
+    pub(crate) thread_id: Option<i64>,
+    pub(crate) trigger_kind: right_agent::learned_skills::ReviewTriggerKind,
+    pub(crate) telegram_notified: bool,
+}
+
 impl ReviewOutput {
     pub(crate) fn parse(raw: serde_json::Value) -> Result<Self, String> {
         let status = raw
@@ -130,6 +141,27 @@ impl ReviewOutput {
             ReviewOutputStatus::CreateCandidate | ReviewOutputStatus::UpdateCandidate
         ) && self.confidence == ReviewOutputConfidence::High
             && self.user_notice.is_some()
+    }
+
+    pub(crate) fn to_report(
+        &self,
+        ctx: ReviewReportContext,
+    ) -> right_agent::learned_skills::SkillReviewReport {
+        right_agent::learned_skills::SkillReviewReport {
+            agent_name: ctx.agent_name,
+            source_invocation_id: ctx.source_invocation_id,
+            root_session_id: ctx.root_session_id,
+            chat_id: ctx.chat_id,
+            thread_id: ctx.thread_id,
+            trigger_kind: ctx.trigger_kind,
+            status: self.status.as_domain(),
+            confidence: self.confidence.as_domain(),
+            candidate_skill_name: self.candidate_skill_name.clone(),
+            candidate_summary: self.candidate_summary.clone(),
+            evidence_refs: self.evidence_refs.clone(),
+            review_output_json: self.raw.clone(),
+            telegram_notified: ctx.telegram_notified,
+        }
     }
 }
 
@@ -266,6 +298,19 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
          evidence_refs, and user_notice. Use only rightx-* candidate skill names.\n",
     );
     prompt
+}
+
+pub(crate) async fn run_review_with_output<F, Fut>(
+    bundle: ReviewBundle,
+    run_json: F,
+) -> Result<ReviewOutput, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, String>>,
+{
+    let prompt = build_review_prompt(&bundle);
+    let raw = run_json(prompt).await?;
+    ReviewOutput::parse(raw)
 }
 
 fn push_bounded_list(
