@@ -1,4 +1,14 @@
 # Changelog
+## [0.2.15] - 2026-05-18
+
+- Agents can now save reusable skill packages from real work using `/right-learn-skill` — captured workflows and API discoveries are persisted as `rightx-*` packages available in future sessions.
+- The hourly keepalive now detects when Right MCP connectivity is broken inside a Claude session and automatically repairs the auth cache, recovering agents that previously went silent without a manual restart.
+- `right agent restore` validates Hindsight memory bindings before writing any files, preventing partial restores on validation failure, and preserves the original agent's memory bank bindings when restoring to a different environment.
+- `right agent backup` preserves symlink targets in sandbox archives and accepts a new `--include-rebuildable` flag to include cache and dependency directories normally excluded from backups.
+- Cloudflared now restarts automatically when the ingress configuration changes (e.g. after destroying an agent), so the active tunnel immediately reflects the new agent list without a manual restart.
+- When Hindsight returns HTTP 402 (quota limit), the memory system stops enqueueing new memories and skips circuit breaker ticks — quota exhaustion no longer drives agents into open-circuit failure mode.
+- The Claude auto-upgrade check no longer logs errors when `claude upgrade` reports the installed version is already current.
+
 ## [0.2.14] - 2026-05-14
 
 - Agents can now send mid-turn progress messages to Telegram via the new `mcp__right__send_progress` tool — for example "fetching your data..." while the main response is still running. Rate-limited to one message per 30 seconds per foreground turn; cron, delivery, and reflection invocations do not have access to this tool.
