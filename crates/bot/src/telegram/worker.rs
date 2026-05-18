@@ -648,12 +648,11 @@ fn build_memory_marker(
 
 /// Build the `<background-jobs>` marker tail for `composite-memory.md`.
 ///
-/// Surfaces in-flight bg/cron runs targeted at this chat so the foreground
+/// Surfaces in-flight background runs targeted at this chat so the foreground
 /// agent is aware of work pending in the background. Two states qualify:
 /// - `status = 'running'` — job currently executing.
-/// - `status = 'success' AND delivered_at IS NULL` — job finished, answer
-///   queued for delivery (held by `IDLE_THRESHOLD_SECS` until the chat
-///   goes idle).
+/// - finished runs with pending/retryable delivery — answer queued for delivery
+///   (held by `IDLE_THRESHOLD_SECS` until the chat goes idle).
 ///
 /// Best-effort: a DB failure here would block the foreground turn for an
 /// observability tail. We log at WARN and return `None` so the agent still
@@ -667,11 +666,16 @@ fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) ->
         }
     };
     let mut stmt = match conn.prepare(
-        "SELECT id, job_name, started_at, status \
-         FROM cron_runs \
-         WHERE target_chat_id = ?1 \
-           AND ((status = 'running') OR (status = 'success' AND delivered_at IS NULL)) \
-         ORDER BY started_at",
+        "SELECT id, COALESCE(producer_ref, 'background'), started_at, status \
+         FROM async_runs \
+         WHERE kind = 'background' \
+           AND NULLIF(target_chat_id, 0) = ?1 \
+           AND ( \
+             status = 'running' \
+             OR (status IN ('success', 'failed') AND delivery_status IN ('pending', 'retryable')) \
+           ) \
+         ORDER BY started_at DESC \
+         LIMIT 5",
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -2299,7 +2303,7 @@ async fn invoke_cc(
 
     // Per-session mutex on `--resume` AND `--session-id` — also held on
     // first-call turns to prevent cron-delivery's `--resume <new_uuid>` from
-    // racing the JSONL write. `cron_delivery::run_delivery_loop` reads the
+    // racing the JSONL write. `async_delivery::run_delivery_loop` reads the
     // freshly-inserted active session via `get_active_session` and may invoke
     // `claude -p --resume <session_uuid>` while this worker's
     // `claude -p --session-id <session_uuid>` subprocess is still writing the
@@ -4116,35 +4120,8 @@ mod background_continuation_tests {
     use super::*;
     use right_db::open_connection;
 
-    fn install_cron_runs_view(conn: &rusqlite::Connection) {
-        // Test-only bridge until the background marker reads async_runs directly.
-        conn.execute_batch(
-            "CREATE VIEW cron_runs AS
-             SELECT
-                id,
-                producer_ref AS job_name,
-                started_at,
-                finished_at,
-                exit_code,
-                status,
-                log_path,
-                summary,
-                notify_json,
-                delivered_at,
-                delivery_status,
-                no_notify_reason,
-                NULLIF(target_chat_id, 0) AS target_chat_id,
-                target_thread_id
-             FROM async_runs
-             WHERE kind = 'cron';",
-        )
-        .unwrap();
-    }
-
     fn open_marker_conn(path: &std::path::Path) -> rusqlite::Connection {
-        let conn = open_connection(path, true).unwrap();
-        install_cron_runs_view(&conn);
-        conn
+        open_connection(path, true).unwrap()
     }
 
     fn insert_marker_run(
@@ -4156,8 +4133,30 @@ mod background_continuation_tests {
         target_chat_id: i64,
         delivered_at: Option<&str>,
     ) {
-        let finished_at = (status == "success").then_some(started_at);
-        let delivery_required = status == "success";
+        insert_marker_run_kind(
+            conn,
+            "background",
+            id,
+            job_name,
+            started_at,
+            status,
+            target_chat_id,
+            delivered_at,
+        );
+    }
+
+    fn insert_marker_run_kind(
+        conn: &rusqlite::Connection,
+        kind: &str,
+        id: &str,
+        job_name: &str,
+        started_at: &str,
+        status: &str,
+        target_chat_id: i64,
+        delivered_at: Option<&str>,
+    ) {
+        let finished_at = matches!(status, "success" | "failed").then_some(started_at);
+        let delivery_required = matches!(status, "success" | "failed");
         let delivery_status = if delivered_at.is_some() {
             "delivered"
         } else if delivery_required {
@@ -4171,12 +4170,13 @@ mod background_continuation_tests {
                 status, started_at, finished_at, log_path, delivery_required,
                 delivery_status, delivered_at, created_at, updated_at
              ) VALUES (
-                ?1, 'cron', ?2, ?1, ?3, NULL,
-                ?4, ?5, ?6, '/log', ?7,
-                ?8, ?9, ?5, ?5
+                ?1, ?2, ?3, ?1, ?4, NULL,
+                ?5, ?6, ?7, '/log', ?8,
+                ?9, ?10, ?6, ?6
              )",
             rusqlite::params![
                 id,
+                kind,
                 job_name,
                 target_chat_id,
                 status,
@@ -4308,6 +4308,23 @@ mod background_continuation_tests {
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "delivered run must not appear; got {m:?}");
+    }
+
+    #[test]
+    fn build_bg_marker_excludes_cron_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_marker_conn(tmp.path());
+        let now = chrono::Utc::now().to_rfc3339();
+        insert_marker_run_kind(
+            &conn, "cron", "cron-run", "cron-job", &now, "running", -100, None,
+        );
+        drop(conn);
+
+        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        assert!(
+            m.is_none(),
+            "cron rows must not appear in bg marker; got {m:?}"
+        );
     }
 }
 
