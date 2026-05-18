@@ -1,5 +1,7 @@
 //! Generate OpenShell policy.yaml from agent configuration.
 
+use std::net::IpAddr;
+
 use right_agent_config::NetworkPolicy;
 
 /// Domains allowed in restrictive mode (Anthropic/Claude only).
@@ -165,13 +167,45 @@ fn permissive_endpoints() -> String {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostMcpAccess {
+    BootstrapUnresolved,
+    Resolved(Vec<IpAddr>),
+}
+
+fn host_mcp_ip_cidr(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => format!("{ip}/32"),
+        IpAddr::V6(ip) => format!("{ip}/128"),
+    }
+}
+
+fn right_mcp_allowed_ips_yaml(host_mcp_access: HostMcpAccess) -> String {
+    match host_mcp_access {
+        HostMcpAccess::BootstrapUnresolved => String::new(),
+        HostMcpAccess::Resolved(ips) => {
+            assert!(
+                !ips.is_empty(),
+                "resolved Right MCP host access requires at least one IP"
+            );
+            let allowed_ips = ips
+                .into_iter()
+                .map(host_mcp_ip_cidr)
+                .map(|cidr| format!("          - \"{cidr}\""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("        allowed_ips:\n{allowed_ips}\n")
+        }
+    }
+}
+
 /// Generate an OpenShell policy YAML string.
 ///
 /// `right_mcp_port`: TCP port for the host-side right MCP HTTP server.
 /// `network_policy`: Controls which outbound public web or HTTPS domains are allowed.
-/// `host_ip`: Resolved IP of `host.openshell.internal` from inside the sandbox.
-///   When `Some`, uses the exact IP/32 in `allowed_ips`. When `None`, falls back
-///   to common Docker network ranges (172.16.0.0/12 + 192.168.0.0/16).
+/// `host_mcp_access`: Right MCP host access mode. Bootstrap mode is used before
+///   the sandbox exists and omits guessed private ranges. Resolved mode is used
+///   after resolving `host.openshell.internal` from inside the target sandbox.
 ///
 /// Network policy allows outbound HTTP/HTTPS. Since OpenShell v0.0.30
 /// the proxy auto-detects TLS via ClientHello peek and terminates unconditionally
@@ -182,7 +216,7 @@ fn permissive_endpoints() -> String {
 pub fn generate_policy(
     right_mcp_port: u16,
     network_policy: &NetworkPolicy,
-    host_ip: Option<std::net::IpAddr>,
+    host_mcp_access: HostMcpAccess,
 ) -> String {
     let network_section = match network_policy {
         NetworkPolicy::Permissive => {
@@ -199,10 +233,7 @@ pub fn generate_policy(
         }
     };
 
-    let allowed_ips = match host_ip {
-        Some(ip) => format!("          - \"{ip}/32\""),
-        None => "          - \"172.16.0.0/12\"\n          - \"192.168.0.0/16\"".to_owned(),
-    };
+    let right_mcp_allowed_ips = right_mcp_allowed_ips_yaml(host_mcp_access);
 
     // `/var/log` is in `read_only` because the OpenShell server appends it to
     // every stored policy. Omitting it makes `filesystem_policy_changed` flag
@@ -240,9 +271,7 @@ network_policies:
     endpoints:
       - host: "host.openshell.internal"
         port: {right_mcp_port}
-        allowed_ips:
-{allowed_ips}
-        protocol: rest
+{right_mcp_allowed_ips}        protocol: rest
         access: full
     binaries:
       - path: "**"
@@ -324,11 +353,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bootstrap_right_mcp_policy_omits_broad_private_ranges() {
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("bootstrap policy must be valid YAML");
+        let endpoint = &parsed["network_policies"]["right"]["endpoints"][0];
+
+        assert_eq!(endpoint["host"].as_str(), Some("host.openshell.internal"));
+        assert!(
+            endpoint.get("allowed_ips").is_none(),
+            "bootstrap Right MCP endpoint must not emit guessed private ranges"
+        );
+        assert!(!policy.contains("172.16.0.0/12"));
+        assert!(!policy.contains("192.168.0.0/16"));
+        assert!(!policy.contains("fc00::/7"));
+    }
+
+    #[test]
+    fn resolved_right_mcp_policy_emits_ipv4_and_ipv6_exact_prefixes() {
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::Resolved(vec![
+                "192.168.65.254".parse().unwrap(),
+                "fdc4:f303:9324::254".parse().unwrap(),
+            ]),
+        );
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("resolved policy must be valid YAML");
+        let allowed_ips = parsed["network_policies"]["right"]["endpoints"][0]["allowed_ips"]
+            .as_array()
+            .expect("resolved Right MCP endpoint must include allowed_ips");
+
+        assert!(
+            allowed_ips
+                .iter()
+                .any(|cidr| cidr.as_str() == Some("192.168.65.254/32")),
+            "IPv4 host aliases must be exact /32 CIDRs"
+        );
+        assert!(
+            allowed_ips
+                .iter()
+                .any(|cidr| cidr.as_str() == Some("fdc4:f303:9324::254/128")),
+            "IPv6 host aliases must be exact /128 CIDRs"
+        );
+        assert!(
+            !allowed_ips
+                .iter()
+                .any(|cidr| cidr.as_str() == Some("172.16.0.0/12"))
+        );
+        assert!(
+            !allowed_ips
+                .iter()
+                .any(|cidr| cidr.as_str() == Some("192.168.0.0/16"))
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "resolved Right MCP host access requires at least one IP")]
+    fn resolved_right_mcp_policy_rejects_empty_ip_list() {
+        let _ = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::Resolved(Vec::new()),
+        );
+    }
+
+    #[test]
     fn generates_policy_with_right_mcp_port() {
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         assert!(policy.contains("host.openshell.internal"));
         assert!(policy.contains("8100"));
-        assert!(policy.contains("172.16.0.0/12"));
         assert!(policy.contains("right:"));
         assert!(policy.contains("best_effort"));
         assert!(policy.contains("version: 1"));
@@ -336,7 +439,11 @@ mod tests {
 
     #[test]
     fn permissive_policy_uses_public_allowed_ips() {
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         let parsed: serde_json::Value =
             serde_saphyr::from_str(&policy).expect("policy must be valid YAML");
         let outbound = &parsed["network_policies"]["outbound"];
@@ -402,8 +509,16 @@ mod tests {
     /// and the field is slated for removal. Auto-detect does the right thing.
     #[test]
     fn does_not_emit_deprecated_tls_terminate() {
-        let permissive = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        let restrictive = generate_policy(8100, &NetworkPolicy::Restrictive, None);
+        let permissive = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
+        let restrictive = generate_policy(
+            8100,
+            &NetworkPolicy::Restrictive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         for (name, policy) in [("permissive", &permissive), ("restrictive", &restrictive)] {
             assert!(
                 !policy.contains("tls:"),
@@ -414,7 +529,11 @@ mod tests {
 
     #[test]
     fn right_mcp_port_configurable() {
-        let policy = generate_policy(9000, &NetworkPolicy::Permissive, None);
+        let policy = generate_policy(
+            9000,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         assert!(policy.contains("9000"));
         assert!(!policy.contains("8100"));
     }
@@ -422,7 +541,11 @@ mod tests {
     /// OpenShell v0.0.37+ rejects TLD-wide wildcard hosts.
     #[test]
     fn no_tld_wide_host_wildcards() {
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         for line in policy.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("host:") {
@@ -439,7 +562,11 @@ mod tests {
     /// Policy YAML must be valid YAML and contain required OpenShell sections.
     #[test]
     fn policy_is_valid_yaml_with_required_sections() {
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         let parsed: serde_json::Value =
             serde_saphyr::from_str(&policy).expect("policy must be valid YAML");
         let obj = parsed.as_object().expect("policy root must be a mapping");
@@ -457,7 +584,11 @@ mod tests {
 
     #[test]
     fn restrictive_policy_allows_only_anthropic_domains() {
-        let policy = generate_policy(8100, &NetworkPolicy::Restrictive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Restrictive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         assert!(policy.contains(r#"host: "*.anthropic.com""#));
         assert!(policy.contains(r#"host: "anthropic.com""#));
         assert!(policy.contains(r#"host: "*.claude.com""#));
@@ -473,7 +604,11 @@ mod tests {
 
     #[test]
     fn permissive_policy_allows_public_web_without_domain_wildcard() {
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         assert!(
             !policy.contains(r#"host: "**.*""#),
             "permissive policy must not emit OpenShell-rejected TLD wildcard"
@@ -489,7 +624,11 @@ mod tests {
 
     #[test]
     fn restrictive_policy_is_valid_yaml() {
-        let policy = generate_policy(8100, &NetworkPolicy::Restrictive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Restrictive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         let parsed: serde_json::Value =
             serde_saphyr::from_str(&policy).expect("restrictive policy must be valid YAML");
         let obj = parsed.as_object().expect("policy root must be a mapping");
@@ -498,7 +637,11 @@ mod tests {
 
     #[test]
     fn restrictive_policy_has_no_bare_star_wildcards() {
-        let policy = generate_policy(8100, &NetworkPolicy::Restrictive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Restrictive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         for line in policy.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("host:") {
@@ -575,7 +718,11 @@ network_policies:
 
     #[test]
     fn migration_is_noop_for_current_policy() {
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
+        );
         let migrated =
             migrate_legacy_permissive_policy_yaml(&policy).expect("current policy must parse");
         assert!(migrated.is_none(), "current policy must not be rewritten");
@@ -658,22 +805,30 @@ network_policies:
     }
 
     #[test]
-    fn host_ip_none_uses_fallback_ranges() {
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, None);
-        assert!(
-            policy.contains("172.16.0.0/12"),
-            "must include Docker bridge range"
+    fn bootstrap_host_access_omits_fallback_ranges() {
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::BootstrapUnresolved,
         );
         assert!(
-            policy.contains("192.168.0.0/16"),
-            "must include Docker Desktop range"
+            !policy.contains("172.16.0.0/12"),
+            "bootstrap policy must not include Docker bridge range"
+        );
+        assert!(
+            !policy.contains("192.168.0.0/16"),
+            "bootstrap policy must not include Docker Desktop range"
         );
     }
 
     #[test]
-    fn host_ip_some_uses_exact_ip() {
+    fn resolved_host_access_uses_exact_ipv4_ip() {
         let ip: std::net::IpAddr = "192.168.65.254".parse().unwrap();
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, Some(ip));
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::Resolved(vec![ip]),
+        );
         assert!(policy.contains("192.168.65.254/32"), "must use exact IP/32");
         assert!(
             !policy.contains("172.16.0.0/12"),
@@ -682,9 +837,13 @@ network_policies:
     }
 
     #[test]
-    fn host_ip_some_produces_valid_yaml() {
+    fn resolved_host_access_produces_valid_yaml() {
         let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
-        let policy = generate_policy(8100, &NetworkPolicy::Permissive, Some(ip));
+        let policy = generate_policy(
+            8100,
+            &NetworkPolicy::Permissive,
+            HostMcpAccess::Resolved(vec![ip]),
+        );
         let _parsed: serde_json::Value =
             serde_saphyr::from_str(&policy).expect("policy with dynamic IP must be valid YAML");
     }

@@ -1,6 +1,7 @@
 //! OpenShell gRPC client — mTLS connection, sandbox readiness polling.
 //! Also provides CLI wrappers for sandbox lifecycle, SSH config, and remote exec.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -1778,53 +1779,59 @@ pub async fn wait_for_ssh(
     }
 }
 
-/// Resolve the host IP as seen from inside a sandbox.
+pub(crate) fn parse_getent_ahosts_ips(stdout: &str) -> Vec<IpAddr> {
+    let mut ips = Vec::new();
+    for token in stdout
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+    {
+        let Ok(ip) = token.parse::<IpAddr>() else {
+            continue;
+        };
+        if !ips.contains(&ip) {
+            ips.push(ip);
+        }
+    }
+    ips
+}
+
+/// Resolve host alias IPs as seen from inside a sandbox.
 ///
-/// Runs `getent ahostsv4 host.openshell.internal` inside the sandbox via gRPC exec
-/// and parses the first IPv4 address from the output.
-///
-/// This IP varies by platform:
-/// - macOS Docker Desktop: `192.168.65.254`
-/// - Linux Docker bridge: `172.17.0.1`
-/// - Custom networks: varies
-///
-/// Returns `None` if `host.openshell.internal` doesn't resolve (e.g. Linux without
-/// `--add-host` flag), or if the sandbox exec fails.
-pub async fn resolve_host_ip(
+/// Runs `getent ahosts host.openshell.internal` inside the sandbox via gRPC exec
+/// and parses every unique IPv4/IPv6 address. OpenShell's SSRF proxy resolves
+/// through the sandbox view as well, so host-side guesses are not authoritative.
+pub async fn resolve_host_ips(
     client: &mut OpenShellClient<Channel>,
     sandbox_id: &str,
-) -> miette::Result<Option<std::net::IpAddr>> {
+) -> miette::Result<Vec<IpAddr>> {
     let (stdout, exit_code) = exec_in_sandbox(
         client,
         sandbox_id,
-        &["getent", "ahostsv4", "host.openshell.internal"],
+        &["getent", "ahosts", "host.openshell.internal"],
         DEFAULT_EXEC_TIMEOUT_SECS,
     )
     .await?;
 
     if exit_code != 0 || stdout.trim().is_empty() {
-        tracing::warn!(
-            sandbox_id,
-            exit_code,
-            "host.openshell.internal not resolvable in sandbox"
-        );
-        return Ok(None);
+        return Err(miette::miette!(
+            "host.openshell.internal not resolvable in sandbox '{sandbox_id}' (getent exit {exit_code})"
+        ));
     }
 
-    // Output format: "192.168.65.254  STREAM host.openshell.internal\n192.168.65.254  DGRAM\n..."
-    // Take the first token of the first line.
-    let ip_str = stdout
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().next())
-        .ok_or_else(|| miette::miette!("unexpected getent output: {stdout}"))?;
+    let ips = parse_getent_ahosts_ips(&stdout);
+    if ips.is_empty() {
+        return Err(miette::miette!(
+            "host.openshell.internal resolved without valid IPs in sandbox '{sandbox_id}': {stdout}"
+        ));
+    }
 
-    let ip: std::net::IpAddr = ip_str
-        .parse()
-        .map_err(|e| miette::miette!("failed to parse host IP '{ip_str}': {e}"))?;
-
-    tracing::info!(sandbox_id, %ip, "resolved host.openshell.internal");
-    Ok(Some(ip))
+    let resolved_ips = ips
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    tracing::info!(sandbox_id, %resolved_ips, "resolved host.openshell.internal");
+    Ok(ips)
 }
 
 /// Verify that critical files exist in the sandbox after creation/upload.

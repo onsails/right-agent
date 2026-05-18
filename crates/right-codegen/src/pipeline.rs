@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use right_agent_config::{AgentDef, MemoryProvider, SandboxMode};
 use right_runtime_state::{
@@ -43,6 +43,33 @@ fn ensure_agent_secret(
     })?;
     tracing::info!(agent = %agent_name, "generated new agent secret");
     Ok(new_secret)
+}
+
+fn generated_policy_path(agent: &AgentDef) -> miette::Result<PathBuf> {
+    let policy_file = agent
+        .config
+        .as_ref()
+        .and_then(|config| config.sandbox.as_ref())
+        .and_then(|sandbox| sandbox.policy_file.as_deref())
+        .unwrap_or_else(|| Path::new("policy.yaml"));
+
+    if policy_file.is_absolute() {
+        return Err(miette::miette!(
+            "sandbox.policy_file must be relative to agent dir: {}",
+            policy_file.display()
+        ));
+    }
+    if policy_file
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(miette::miette!(
+            "sandbox.policy_file must not contain '..': {}",
+            policy_file.display()
+        ));
+    }
+
+    Ok(agent.path.join(policy_file))
 }
 
 /// Run codegen for a single agent.
@@ -169,16 +196,21 @@ pub fn run_single_agent_codegen(
     let existing_secret = agent.config.as_ref().and_then(|c| c.secret.as_deref());
     let agent_secret = ensure_agent_secret(&agent.path, &agent.name, existing_secret)?;
 
-    // Generate policy.yaml from network_policy setting.
+    // Generate policy from network_policy setting.
     let network_policy = agent
         .config
         .as_ref()
         .map(|c| c.network_policy)
         .unwrap_or_default();
     let mcp_port = MCP_HTTP_PORT;
-    let policy_content = crate::policy::generate_policy(mcp_port, &network_policy, None);
-    write_regenerated(&agent.path.join("policy.yaml"), &policy_content)?;
-    tracing::debug!(agent = %agent.name, %network_policy, "wrote policy.yaml");
+    let policy_content = crate::policy::generate_policy(
+        mcp_port,
+        &network_policy,
+        crate::policy::HostMcpAccess::BootstrapUnresolved,
+    );
+    let policy_path = generated_policy_path(agent)?;
+    write_regenerated(&policy_path, &policy_content)?;
+    tracing::debug!(agent = %agent.name, %network_policy, path = %policy_path.display(), "wrote policy");
 
     // Generate mcp.json with right HTTP MCP server entry.
     let bearer_token = right_mcp::derive_token(&agent_secret, "right-mcp")?;
@@ -473,6 +505,61 @@ pub(crate) mod tests {
         let policy = std::fs::read_to_string(agent_dir.join("policy.yaml")).unwrap();
         assert!(policy.contains(r#"host: "*.anthropic.com""#));
         assert!(!policy.contains(r#"host: "**.*""#));
+    }
+
+    #[test]
+    fn run_single_agent_codegen_writes_bootstrap_policy_without_broad_right_ranges() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: openshell\n",
+        )
+        .unwrap();
+
+        let agent = agent_fixture(&agent_dir);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+
+        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+
+        let policy = std::fs::read_to_string(agent_dir.join("policy.yaml")).unwrap();
+        let parsed: serde_json::Value =
+            serde_saphyr::from_str(&policy).expect("policy must be valid YAML");
+        let right_endpoint = &parsed["network_policies"]["right"]["endpoints"][0];
+        assert!(
+            right_endpoint.get("allowed_ips").is_none(),
+            "bootstrap Right MCP endpoint must not contain guessed allowed_ips"
+        );
+        assert!(!policy.contains("172.16.0.0/12"));
+        assert!(!policy.contains("192.168.0.0/16"));
+    }
+
+    #[test]
+    fn run_single_agent_codegen_writes_custom_policy_file_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let home = dir.path();
+        let agent_dir = home.join("agents").join("test");
+        std::fs::create_dir_all(agent_dir.join(".claude")).unwrap();
+        std::fs::write(agent_dir.join("IDENTITY.md"), "# Test").unwrap();
+        std::fs::write(
+            agent_dir.join("agent.yaml"),
+            "restart: never\nnetwork_policy: permissive\nsandbox:\n  mode: openshell\n  policy_file: policies/custom-policy.yaml\n",
+        )
+        .unwrap();
+
+        let agent = agent_fixture(&agent_dir);
+        let self_exe = std::path::PathBuf::from("/usr/bin/right");
+
+        run_single_agent_codegen(home, &agent, &self_exe, false).unwrap();
+
+        assert!(agent_dir.join("policies/custom-policy.yaml").exists());
+        assert!(
+            !agent_dir.join("policy.yaml").exists(),
+            "custom policy path must be the active generated policy path"
+        );
     }
 
     #[test]

@@ -110,6 +110,17 @@ successful `connect()` — are unchanged from before this branch.)
 The Aggregator replaces HttpMemoryServer as the MCP endpoint. One shared process
 serves all agents on TCP :8100/mcp with per-agent Bearer token authentication.
 
+In OpenShell mode, sandboxed agents reach the host-side aggregator through
+`http://host.openshell.internal:8100/mcp` in `/sandbox/mcp.json`. Credentials,
+OAuth state, and external MCP sessions stay on the host. The sandbox policy is
+generated in two phases: bootstrap policy before sandbox creation omits guessed
+Right MCP `allowed_ips`; after the sandbox is READY, Right resolves
+`host.openshell.internal` from inside that sandbox and hot-applies exact IPv4
+`/32` and IPv6 `/128` entries. This repeats on bot startup so restored agents
+self-heal when moved to a different host. OpenShell `forward` and service
+exposure are not used for this path because they expose sandbox services
+outward, while Right MCP needs sandbox-to-host access.
+
 ## Agent-Facing MCP Health
 
 `/mcp list` reports Aggregator backend status through the internal Unix-socket
