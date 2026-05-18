@@ -54,7 +54,6 @@ fn health_probe_invocation(mcp_config_path: &str) -> crate::cc::invocation::Clau
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct ClaudeHealth {
     // Stored for the later repair subprocess wiring task.
     #[allow(dead_code)]
@@ -67,12 +66,15 @@ pub(crate) struct ClaudeHealth {
     resolved_sandbox: Option<String>,
     #[allow(dead_code)]
     sandbox_exec: Option<right_openshell::sandbox_exec::SandboxExec>,
+    // Used to serialize repair attempts in the next wiring task.
+    #[allow(dead_code)]
     repair_lock: tokio::sync::Mutex<()>,
     repair_notice_pending: AtomicBool,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl ClaudeHealth {
+    // Used when keepalive owns health state in the next wiring task.
+    #[allow(dead_code)]
     pub(crate) fn new(
         agent_name: String,
         agent_dir: PathBuf,
@@ -91,6 +93,8 @@ impl ClaudeHealth {
         })
     }
 
+    // Used to inject a one-shot repair notice into the next agent turn.
+    #[allow(dead_code)]
     pub(crate) fn consume_repair_notice(&self) -> Option<&'static str> {
         if self.repair_notice_pending.swap(false, Ordering::AcqRel) {
             Some(REPAIR_NOTICE)
@@ -99,6 +103,8 @@ impl ClaudeHealth {
         }
     }
 
+    // Used after successful stale needs-auth repair.
+    #[allow(dead_code)]
     fn mark_repaired_for_next_turn(&self) {
         self.repair_notice_pending.store(true, Ordering::Release);
     }
