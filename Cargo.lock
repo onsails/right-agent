@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "right"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "right-agent"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "chrono",
  "const_format",
@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "right-agent-config"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "miette",
  "serde",
@@ -2902,7 +2902,7 @@ dependencies = [
 
 [[package]]
 name = "right-bot"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "right-codegen"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "dirs",
  "include_dir",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "right-config"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "dirs",
  "miette",
@@ -2995,7 +2995,7 @@ dependencies = [
 
 [[package]]
 name = "right-db"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "right-mcp"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "base64",
  "chrono",
@@ -3039,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "right-memory"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "chrono",
  "fastrand",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "right-openshell"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "dirs",
  "futures",
@@ -3084,11 +3084,11 @@ dependencies = [
 
 [[package]]
 name = "right-platform-knobs"
-version = "0.2.14"
+version = "0.2.15"
 
 [[package]]
 name = "right-platform-store"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "futures",
  "miette",
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "right-process"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "nix",
  "tempfile",
@@ -3111,14 +3111,14 @@ dependencies = [
 
 [[package]]
 name = "right-prompt-safety"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "ironclaw_safety",
 ]
 
 [[package]]
 name = "right-runtime-state"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "base64",
  "miette",
@@ -3130,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "right-stt"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "futures",
  "reqwest 0.13.3",
@@ -3144,7 +3144,7 @@ dependencies = [
 
 [[package]]
 name = "right-ui"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "inquire",
  "miette",
