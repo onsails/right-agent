@@ -198,12 +198,27 @@ fn v22_async_runs(tx: &Transaction) -> Result<(), HookError> {
          SELECT
             cr.id,
             CASE
-              WHEN cr.job_name LIKE 'bg-%' OR cs.schedule LIKE '@bg:%' THEN 'background'
+              WHEN cr.job_name LIKE 'bg-%'
+                OR cs.schedule LIKE '@bg:%'
+                OR (
+                  cs.schedule = '@immediate'
+                  AND cs.prompt LIKE 'X-FORK-FROM: %'
+                  AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+                )
+              THEN 'background'
               ELSE 'cron'
             END,
             cr.job_name,
             CASE
               WHEN cs.schedule LIKE '@bg:%' THEN substr(cs.schedule, 5)
+              WHEN cs.schedule = '@immediate'
+                AND cs.prompt LIKE 'X-FORK-FROM: %'
+                AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+              THEN substr(
+                cs.prompt,
+                length('X-FORK-FROM: ') + 1,
+                instr(cs.prompt, char(10)) - length('X-FORK-FROM: ') - 1
+              )
               ELSE NULL
             END,
             cr.id,
@@ -211,7 +226,14 @@ fn v22_async_runs(tx: &Transaction) -> Result<(), HookError> {
             cr.target_thread_id,
             cr.status,
             CASE
-              WHEN cr.job_name LIKE 'bg-%' OR cs.schedule LIKE '@bg:%' THEN 'spawned'
+              WHEN cr.job_name LIKE 'bg-%'
+                OR cs.schedule LIKE '@bg:%'
+                OR (
+                  cs.schedule = '@immediate'
+                  AND cs.prompt LIKE 'X-FORK-FROM: %'
+                  AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+                )
+              THEN 'spawned'
               ELSE NULL
             END,
             cr.started_at,
@@ -1240,6 +1262,62 @@ mod tests {
             Some("123e4567-e89b-12d3-a456-426614174000")
         );
         assert_eq!(row.2.as_deref(), Some("spawned"));
+    }
+
+    #[test]
+    fn v22_migrates_immediate_background_run_with_source_header() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                target_chat_id
+             ) VALUES (
+                'started-immediate-bg', '@immediate',
+                'X-FORK-FROM: 123e4567-e89b-12d3-a456-426614174003
+continue started background work',
+                1.0, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                -100
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+             VALUES (
+                'started-immediate-run', 'started-immediate-bg', '2026-05-18T02:00:00Z',
+                'success', '/log/started-immediate-run.ndjson', 'silent'
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT kind, source_session_id, handoff_state
+                 FROM async_runs WHERE id = 'started-immediate-run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(
+            row.1.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174003")
+        );
+        assert_eq!(row.2.as_deref(), Some("spawned"));
+
+        let spec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_specs WHERE job_name = 'started-immediate-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_count, 0, "legacy immediate fork spec must be deleted");
     }
 
     #[test]
