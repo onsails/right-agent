@@ -9,6 +9,7 @@ pub mod filter;
 pub mod handler;
 pub(crate) mod idle;
 pub mod markdown;
+pub(crate) mod mcp_auth_choice;
 pub mod memory_alerts;
 pub mod mention;
 pub(crate) mod model_command;
