@@ -36,8 +36,10 @@ Excluded:
 
 ## File Map
 
-- Create `crates/right-db/src/sql/v21_skill_review_reports.sql`: review reports table and nudge-state columns.
-- Modify `crates/right-db/src/migrations.rs`: register v21 migration and add migration tests.
+- Create `crates/right-db/src/sql/v22_skill_review_reports.sql`: review reports table and nudge-state columns.
+- Modify `crates/right-db/src/migrations.rs`: register v22 migration, expose latest schema version, and add migration tests.
+- Modify `crates/right-db/tests/smoke.rs`: assert against latest schema version instead of a hard-coded value.
+- Modify `crates/right-agent/src/doctor.rs`: use the latest schema version exported by `right-db`.
 - Modify `crates/right-agent/src/learned_skills.rs`: review enums, report persistence, gate helpers, and tests.
 - Create `crates/bot/src/learning_review.rs`: review output schema, prompt/bundle structs, skill-index parsing, tool boundary helpers, and tests.
 - Modify `crates/bot/src/lib.rs`: expose `learning_review` module internally.
@@ -69,8 +71,10 @@ devenv shell -- cargo build --workspace
 ### Task 1: Database Schema
 
 **Files:**
-- Create: `crates/right-db/src/sql/v21_skill_review_reports.sql`
+- Create: `crates/right-db/src/sql/v22_skill_review_reports.sql`
 - Modify: `crates/right-db/src/migrations.rs`
+- Modify: `crates/right-db/tests/smoke.rs`
+- Modify: `crates/right-agent/src/doctor.rs`
 
 - [ ] **Step 1: Write failing migration tests**
 
@@ -143,11 +147,11 @@ Run:
 devenv shell -- cargo test -p right-db skill_review
 ```
 
-Expected: FAIL because v21 schema is not registered and `skill_review_reports` does not exist.
+Expected: FAIL because v22 schema is not registered and `skill_review_reports` does not exist.
 
-- [ ] **Step 3: Add v21 SQL migration**
+- [ ] **Step 3: Add v22 SQL migration**
 
-Create `crates/right-db/src/sql/v21_skill_review_reports.sql`:
+Create `crates/right-db/src/sql/v22_skill_review_reports.sql`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS skill_review_reports (
@@ -187,36 +191,60 @@ ALTER TABLE skill_nudge_state
   ADD COLUMN last_review_status TEXT;
 ```
 
-- [ ] **Step 4: Register v21 migration**
+- [ ] **Step 4: Register v22 migration and latest schema constant**
 
-In `crates/right-db/src/migrations.rs`, add this constant after `V20_SCHEMA`:
-
-```rust
-const V21_SCHEMA: &str = include_str!("sql/v21_skill_review_reports.sql");
-```
-
-Append the migration after `M::up(V20_SCHEMA),`:
+In `crates/right-db/src/migrations.rs`, add this constant after the existing `V21_SCHEMA`:
 
 ```rust
-M::up(V21_SCHEMA),
+const V22_SCHEMA: &str = include_str!("sql/v22_skill_review_reports.sql");
+
+pub const LATEST_SCHEMA_VERSION: u32 = 22;
 ```
 
-- [ ] **Step 5: Run migration tests and verify pass**
+Append the migration after `M::up(V21_SCHEMA),`:
+
+```rust
+M::up(V22_SCHEMA),
+```
+
+- [ ] **Step 5: Replace stale hard-coded schema version checks**
+
+In `crates/right-db/tests/smoke.rs`, change the two `21` assertions in `open_connection_applies_migrations` and `open_connection_without_migration_preserves_existing_schema` to:
+
+```rust
+right_db::migrations::LATEST_SCHEMA_VERSION as i64
+```
+
+In `crates/right-agent/src/doctor.rs`, replace:
+
+```rust
+let expected: u32 = 20;
+```
+
+with:
+
+```rust
+let expected: u32 = right_db::migrations::LATEST_SCHEMA_VERSION;
+```
+
+- [ ] **Step 6: Run migration and baseline schema tests and verify pass**
 
 Run:
 
 ```bash
 devenv shell -- cargo test -p right-db skill_review
+devenv shell -- cargo test -p right-db open_connection_applies_migrations
+devenv shell -- cargo test -p right-agent check_memory_passes_on_empty_queue
 ```
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit database slice**
+- [ ] **Step 7: Commit database slice**
 
 Run:
 
 ```bash
-devenv shell -- git add crates/right-db/src/sql/v21_skill_review_reports.sql crates/right-db/src/migrations.rs
+devenv shell -- git add crates/right-db/src/sql/v22_skill_review_reports.sql crates/right-db/src/migrations.rs crates/right-db/tests/smoke.rs crates/right-agent/src/doctor.rs
 devenv shell -- git commit -m "feat(db): add learned skill review reports"
 ```
 
