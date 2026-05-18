@@ -52,6 +52,10 @@ right bot --agent <name>  (spawned by process-compose)
   ├─ Identity mirror sync: pull IDENTITY.md / SOUL.md / USER.md from /sandbox
   │   into host agent_dir/ when present
   ├─ Start background sync task (every 5 min — `right-platform-store` re-deploys /sandbox/.platform/, GC stale entries)
+  ├─ Start Claude health loop:
+  │   ├─ immediate startup Haiku probe with strict MCP config
+  │   ├─ hourly Haiku probe for Claude OAuth keepalive + agent-facing MCP init
+  │   └─ stale `right` MCP needs-auth cache repair when `system/init` is unhealthy
   ├─ Start cron engine, OAuth callback server, refresh scheduler
   └─ Start teloxide long-polling dispatcher
 
@@ -65,6 +69,8 @@ Per message:
   │   ├─ First message: --session-id <uuid> (new session)
   │   ├─ Subsequent: --resume <root_session_id> (persistent session)
   │   └─ Sessions persist across messages — agent retains full CC context
+  ├─ Observe Claude Code `system/init`; if `right` MCP is unhealthy, schedule
+  │   cache repair asynchronously without interrupting or retrying the turn
   ├─ If foreground exits via 600s timeout or 🌙 Background button:
   │   ├─ Insert cron_specs row with schedule_kind=BackgroundContinuation
   │   │   { fork_from: <main_session_id> } (encoded as `@bg:<uuid>`) and
