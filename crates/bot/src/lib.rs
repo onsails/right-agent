@@ -451,6 +451,18 @@ async fn run_async(args: BotArgs) -> miette::Result<bool> {
         }
     }
 
+    let interrupted_handoffs =
+        crate::background::mark_interrupted_handoffs(&conn).map_err(|e| {
+            miette::miette!("failed to recover interrupted background handoffs: {:#}", e)
+        })?;
+    if interrupted_handoffs > 0 {
+        tracing::info!(
+            agent = %args.agent,
+            count = interrupted_handoffs,
+            "recovered interrupted background handoffs"
+        );
+    }
+
     // Resolve Telegram token
     let token = telegram::resolve_token(&config)?;
 
