@@ -132,15 +132,39 @@ fn append_repair_notice_to_system_prompt(
     repair_notice: Option<&str>,
 ) -> String {
     if let Some(notice) = repair_notice {
-        base_prompt.push_str("\n\n<system-notification>");
-        base_prompt.push_str(notice);
-        base_prompt.push_str("</system-notification>");
+        append_system_notification(&mut base_prompt, notice);
     }
     base_prompt
 }
 
-fn right_mcp_status_needs_user_turn_repair(status: &crate::cc::stream::RightMcpInitStatus) -> bool {
-    !matches!(status, crate::cc::stream::RightMcpInitStatus::Connected)
+fn append_system_notification(base_prompt: &mut String, notice: &str) {
+    base_prompt.push_str("\n\n<system-notification>\n");
+    base_prompt.push_str(notice);
+    base_prompt.push_str("\n</system-notification>\n");
+}
+
+fn should_trigger_mcp_repair_from_init(line: &str) -> bool {
+    matches!(
+        crate::cc::stream::parse_right_mcp_init_status(line),
+        Some(crate::cc::stream::RightMcpInitStatus::Unhealthy { .. })
+    )
+}
+
+fn schedule_user_turn_mcp_repair(
+    health: Arc<crate::keepalive::ClaudeHealth>,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        if shutdown.is_cancelled() {
+            return;
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                tracing::debug!("claude_health: user-turn repair skipped during shutdown");
+            }
+            _ = health.trigger_repair("user-turn-init") => {}
+        }
+    });
 }
 
 /// A single Telegram message queued into the debounce channel.
@@ -220,6 +244,8 @@ pub struct WorkerContext {
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
+    /// Process shutdown token used to cancel detached user-turn repair work.
+    pub(crate) shutdown: CancellationToken,
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -2026,9 +2052,14 @@ async fn invoke_cc(
             ctx.agent_dir.to_string_lossy().into_owned(),
         )
     };
+    let repair_notice = if bootstrap_mode {
+        None
+    } else {
+        ctx.claude_health.consume_repair_notice()
+    };
     let base_prompt = append_repair_notice_to_system_prompt(
         right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir),
-        ctx.claude_health.consume_repair_notice(),
+        repair_notice,
     );
 
     let memory_mode = if ctx.hindsight.is_some() {
@@ -2353,13 +2384,11 @@ async fn invoke_cc(
                             api_key_source = Some(src);
                         }
 
-                        if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line)
-                            && right_mcp_status_needs_user_turn_repair(&status)
-                        {
-                            let health = Arc::clone(&ctx.claude_health);
-                            tokio::spawn(async move {
-                                health.trigger_repair("user-turn-init").await;
-                            });
+                        if should_trigger_mcp_repair_from_init(&line) {
+                            schedule_user_turn_mcp_repair(
+                                Arc::clone(&ctx.claude_health),
+                                ctx.shutdown.clone(),
+                            );
                         }
 
                         let event = crate::cc::stream::parse_stream_event(&line);
@@ -3353,14 +3382,14 @@ esac
     }
 
     #[test]
-    fn repair_notice_is_appended_as_system_notification() {
-        let prompt = append_repair_notice_to_system_prompt(
-            "base system prompt".to_owned(),
-            Some("repair completed"),
-        );
+    fn append_system_notification_wraps_notice_once() {
+        let mut prompt = "base".to_owned();
+        append_system_notification(&mut prompt, "repair complete");
 
-        assert!(prompt.starts_with("base system prompt\n\n"));
-        assert!(prompt.contains("<system-notification>repair completed</system-notification>"));
+        assert_eq!(
+            prompt,
+            "base\n\n<system-notification>\nrepair complete\n</system-notification>\n"
+        );
     }
 
     #[test]
@@ -3371,18 +3400,14 @@ esac
     }
 
     #[test]
-    fn user_turn_repair_is_needed_for_any_non_connected_right_mcp_status() {
-        assert!(!right_mcp_status_needs_user_turn_repair(
-            &crate::cc::stream::RightMcpInitStatus::Connected
-        ));
-        assert!(right_mcp_status_needs_user_turn_repair(
-            &crate::cc::stream::RightMcpInitStatus::Unhealthy {
-                status: Some("needs-auth".to_owned())
-            }
-        ));
-        assert!(right_mcp_status_needs_user_turn_repair(
-            &crate::cc::stream::RightMcpInitStatus::Unhealthy { status: None }
-        ));
+    fn should_trigger_mcp_repair_from_init_only_for_unhealthy_right() {
+        let bad = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"right","status":"needs-auth"}]}"#;
+        let good = r#"{"type":"system","subtype":"init","mcp_servers":[{"name":"right","status":"connected"}]}"#;
+        let other = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}"#;
+
+        assert!(should_trigger_mcp_repair_from_init(bad));
+        assert!(!should_trigger_mcp_repair_from_init(good));
+        assert!(!should_trigger_mcp_repair_from_init(other));
     }
 
     #[test]

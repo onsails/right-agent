@@ -19,7 +19,6 @@ const REPAIR_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
 
 const HEALTH_PROMPT: &str = "Reply exactly OK. Do not use tools.";
 
-#[allow(dead_code)]
 const REPAIR_NOTICE: &str = "Right MCP stale needs-auth cache was repaired. Use current MCP tool availability, not previous disconnected status.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +86,6 @@ impl ClaudeHealth {
     }
 
     // Used to inject a one-shot repair notice into the next agent turn.
-    #[allow(dead_code)]
     pub(crate) fn consume_repair_notice(&self) -> Option<&'static str> {
         if self.repair_notice_pending.swap(false, Ordering::AcqRel) {
             Some(REPAIR_NOTICE)
@@ -97,7 +95,6 @@ impl ClaudeHealth {
     }
 
     // Used after successful stale needs-auth repair.
-    #[allow(dead_code)]
     fn mark_repaired_for_next_turn(&self) {
         self.repair_notice_pending.store(true, Ordering::Release);
     }

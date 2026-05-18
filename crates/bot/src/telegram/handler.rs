@@ -110,6 +110,8 @@ pub struct AgentSettings {
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
     /// Shared Claude health state for MCP self-heal and one-shot repair notices.
     pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
+    /// Process shutdown token used to cancel detached user-turn repair work.
+    pub(crate) shutdown: tokio_util::sync::CancellationToken,
 }
 
 /// Convert an arbitrary error into `RequestError::Io` so it propagates through `ResponseResult`.
@@ -385,6 +387,7 @@ pub async fn handle_message(
                     upgrade_lock: Arc::clone(&settings.upgrade_lock),
                     stt: settings.stt.clone(),
                     claude_health: Arc::clone(&settings.claude_health),
+                    shutdown: settings.shutdown.clone(),
                 };
                 let tx = spawn_worker(key, ctx, Arc::clone(&worker_map));
                 worker_map.insert(key, tx.clone());
