@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::io::BufRead as _;
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 
 use right_mcp::LEARNED_SKILL_PREFIX;
@@ -156,6 +156,11 @@ pub(crate) struct LearnedSkillSummary {
     pub(crate) excerpt: String,
 }
 
+const SKILL_INDEX_RECORD_DELIMITER: &str = "---RIGHT-SKILL---";
+const SKILL_EXCERPT_MAX_BYTES: usize = 4_096;
+const SKILL_EXCERPT_MAX_CHARS: usize = 4_096;
+const SKILL_EXCERPT_MAX_LINES: usize = 120;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewBundle {
     pub(crate) agent_name: String,
@@ -303,6 +308,123 @@ fn bounded_prompt_text(value: &str, max_chars: usize) -> String {
         out.push_str("... [truncated]");
     }
     out
+}
+
+pub(crate) fn collect_host_rightx_skill_index(
+    agent_dir: &Path,
+) -> std::io::Result<Vec<LearnedSkillSummary>> {
+    let skills_dir = agent_dir.join(".claude/skills");
+    let entries = match std::fs::read_dir(&skills_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut skills = Vec::new();
+
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(LEARNED_SKILL_PREFIX) {
+            continue;
+        }
+
+        let skill_path = entry.path().join("SKILL.md");
+        let excerpt = match read_bounded_skill_excerpt(&skill_path) {
+            Ok(excerpt) => excerpt,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        skills.push(LearnedSkillSummary { name, excerpt });
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(skills)
+}
+
+fn read_bounded_skill_excerpt(path: &Path) -> std::io::Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file).take(SKILL_EXCERPT_MAX_BYTES as u64);
+    let mut bytes = Vec::with_capacity(SKILL_EXCERPT_MAX_BYTES);
+    reader.read_to_end(&mut bytes)?;
+    Ok(bounded_skill_excerpt(&String::from_utf8_lossy(&bytes)))
+}
+
+fn bounded_skill_excerpt(content: &str) -> String {
+    bounded_skill_excerpt_from_lines(content.lines())
+}
+
+fn bounded_skill_excerpt_from_lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    let mut chars = 0;
+    let mut first = true;
+
+    for line in lines.take(SKILL_EXCERPT_MAX_LINES) {
+        if !first && !push_bounded_skill_char(&mut out, '\n', &mut chars) {
+            break;
+        }
+        first = false;
+
+        for ch in line.chars() {
+            if !push_bounded_skill_char(&mut out, ch, &mut chars) {
+                return out.trim().to_owned();
+            }
+        }
+    }
+
+    out.trim().to_owned()
+}
+
+fn push_bounded_skill_char(out: &mut String, ch: char, chars: &mut usize) -> bool {
+    if *chars >= SKILL_EXCERPT_MAX_CHARS || out.len() + ch.len_utf8() > SKILL_EXCERPT_MAX_BYTES {
+        return false;
+    }
+    out.push(ch);
+    *chars += 1;
+    true
+}
+
+pub(crate) fn parse_sandbox_skill_index_stdout(stdout: &str) -> Vec<LearnedSkillSummary> {
+    let mut skills = Vec::new();
+
+    for record in stdout.split(SKILL_INDEX_RECORD_DELIMITER).skip(1) {
+        let mut lines = record.lines();
+        let Some(path) = lines.find_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then_some(line)
+        }) else {
+            continue;
+        };
+        let Some(name) = sandbox_skill_name_from_path(path) else {
+            continue;
+        };
+        let excerpt = bounded_skill_excerpt_from_lines(lines);
+        skills.push(LearnedSkillSummary {
+            name: name.to_owned(),
+            excerpt,
+        });
+    }
+
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+fn sandbox_skill_name_from_path(path: &str) -> Option<&str> {
+    let path = path.trim();
+    let skill_dir = path.strip_suffix("/SKILL.md")?;
+    let name = skill_dir.rsplit_once("/.claude/skills/")?.1;
+    (name.starts_with(LEARNED_SKILL_PREFIX) && !name.contains('/')).then_some(name)
+}
+
+pub(crate) fn sandbox_skill_index_command() -> [&'static str; 3] {
+    [
+        "sh",
+        "-lc",
+        "for f in /sandbox/.claude/skills/rightx-*/SKILL.md; do [ -f \"$f\" ] || continue; printf '%s\\n' '---RIGHT-SKILL---' \"$f\"; sed -n '1,120p' \"$f\" | head -c 4096; printf '\\n'; done",
+    ]
 }
 
 pub(crate) fn review_stream_log_path(agent_dir: &Path, root_session_id: &str) -> PathBuf {

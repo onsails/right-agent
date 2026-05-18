@@ -170,6 +170,87 @@ fn review_prompt_bounds_signal_lists_and_skills() {
 }
 
 #[test]
+fn collect_host_rightx_skills_includes_only_learned_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let skills_dir = dir.path().join(".claude/skills");
+    std::fs::create_dir_all(skills_dir.join("rightx-zeta")).unwrap();
+    std::fs::write(
+        skills_dir.join("rightx-zeta/SKILL.md"),
+        "---\nname: rightx-zeta\ndescription: Zeta learned skill\n---\n# Zeta\nbody\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(skills_dir.join("rightx-alpha")).unwrap();
+    std::fs::write(
+        skills_dir.join("rightx-alpha/SKILL.md"),
+        "---\nname: rightx-alpha\ndescription: Alpha learned skill\n---\n# Alpha\nbody\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(skills_dir.join("rightx-missing")).unwrap();
+    std::fs::create_dir_all(skills_dir.join("custom-skill")).unwrap();
+    std::fs::write(skills_dir.join("custom-skill/SKILL.md"), "# Custom\n").unwrap();
+
+    let skills = collect_host_rightx_skill_index(dir.path()).unwrap();
+
+    assert_eq!(skills.len(), 2);
+    assert_eq!(skills[0].name, "rightx-alpha");
+    assert!(skills[0].excerpt.contains("Alpha learned skill"));
+    assert_eq!(skills[1].name, "rightx-zeta");
+    assert!(skills[1].excerpt.contains("Zeta learned skill"));
+}
+
+#[test]
+fn parse_sandbox_skill_index_stdout_splits_records() {
+    let stdout = "\
+---RIGHT-SKILL---
+/sandbox/.claude/skills/rightx-two/SKILL.md
+description: Second skill
+---RIGHT-SKILL---
+/sandbox/.claude/skills/custom-skill/SKILL.md
+description: Custom skill
+---RIGHT-SKILL---
+/sandbox/.claude/skills/rightx-one/SKILL.md
+description: First skill
+";
+
+    let skills = parse_sandbox_skill_index_stdout(stdout);
+
+    assert_eq!(skills.len(), 2);
+    assert_eq!(skills[0].name, "rightx-one");
+    assert_eq!(skills[0].excerpt, "description: First skill");
+    assert_eq!(skills[1].name, "rightx-two");
+    assert_eq!(skills[1].excerpt, "description: Second skill");
+}
+
+#[test]
+fn rightx_skill_index_excerpts_are_bounded_for_host_and_sandbox() {
+    let dir = tempfile::tempdir().unwrap();
+    let skill_dir = dir.path().join(".claude/skills/rightx-long");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: rightx-long\ndescription: Long learned skill\n---\n{}\nHOST_TAIL_MARKER\n",
+            "host-body\n".repeat(600)
+        ),
+    )
+    .unwrap();
+
+    let host_skills = collect_host_rightx_skill_index(dir.path()).unwrap();
+    assert_eq!(host_skills.len(), 1);
+    assert!(host_skills[0].excerpt.contains("Long learned skill"));
+    assert!(!host_skills[0].excerpt.contains("HOST_TAIL_MARKER"));
+
+    let sandbox_stdout = format!(
+        "---RIGHT-SKILL---\n/sandbox/.claude/skills/rightx-long/SKILL.md\n---\nname: rightx-long\ndescription: Long learned skill\n---\n{}\nSANDBOX_TAIL_MARKER\n",
+        "sandbox-body\n".repeat(600)
+    );
+    let sandbox_skills = parse_sandbox_skill_index_stdout(&sandbox_stdout);
+    assert_eq!(sandbox_skills.len(), 1);
+    assert!(sandbox_skills[0].excerpt.contains("Long learned skill"));
+    assert!(!sandbox_skills[0].excerpt.contains("SANDBOX_TAIL_MARKER"));
+}
+
+#[test]
 fn stream_event_timeline_is_stable_and_bounded() {
     let temp = tempfile::tempdir().unwrap();
     let agent_dir = temp.path().join("agents/right");
