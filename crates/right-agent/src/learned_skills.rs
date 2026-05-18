@@ -96,6 +96,98 @@ pub struct NudgeSignalRecord {
     pub payload_json: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewTriggerKind {
+    LearningSignal,
+    SkillIssueSignal,
+    EffortThreshold,
+}
+
+impl ReviewTriggerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LearningSignal => "learning_signal",
+            Self::SkillIssueSignal => "skill_issue_signal",
+            Self::EffortThreshold => "effort_threshold",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewStatus {
+    NothingToLearn,
+    CreateCandidate,
+    UpdateCandidate,
+    Failed,
+}
+
+impl ReviewStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NothingToLearn => "nothing_to_learn",
+            Self::CreateCandidate => "create_candidate",
+            Self::UpdateCandidate => "update_candidate",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl ReviewConfidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillReviewReport {
+    pub agent_name: String,
+    pub source_invocation_id: String,
+    pub root_session_id: Option<String>,
+    pub chat_id: Option<i64>,
+    pub thread_id: Option<i64>,
+    pub trigger_kind: ReviewTriggerKind,
+    pub status: ReviewStatus,
+    pub confidence: ReviewConfidence,
+    pub candidate_skill_name: Option<String>,
+    pub candidate_summary: Option<String>,
+    pub evidence_refs: Vec<String>,
+    pub review_output_json: serde_json::Value,
+    pub telegram_notified: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewGateInput<'a> {
+    pub has_signal: bool,
+    pub today: &'a str,
+    pub cooldown_elapsed: bool,
+    pub daily_limit: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewSkipReason {
+    AlreadyRunning,
+    Cooldown,
+    DailyLimit,
+    BelowThreshold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewGateDecision {
+    Start(ReviewTriggerKind),
+    Skip(ReviewSkipReason),
+}
+
 pub fn insert_learning_event(
     conn: &rusqlite::Connection,
     event: &LearningEvent,
@@ -341,6 +433,116 @@ pub fn record_nudge_signal(
     Ok(())
 }
 
+pub fn insert_skill_review_report(
+    conn: &rusqlite::Connection,
+    report: &SkillReviewReport,
+) -> Result<(), rusqlite::Error> {
+    let evidence_refs_json = serde_json::to_string(&report.evidence_refs)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    let review_output_json = serde_json::to_string(&report.review_output_json)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "INSERT INTO skill_review_reports \
+         (agent_name, source_invocation_id, root_session_id, chat_id, thread_id, trigger_kind, status, confidence, candidate_skill_name, candidate_summary, evidence_refs_json, review_output_json, telegram_notified) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            report.agent_name.as_str(),
+            report.source_invocation_id.as_str(),
+            report.root_session_id.as_deref(),
+            report.chat_id,
+            report.thread_id,
+            report.trigger_kind.as_str(),
+            report.status.as_str(),
+            report.confidence.as_str(),
+            report.candidate_skill_name.as_deref(),
+            report.candidate_summary.as_deref(),
+            evidence_refs_json,
+            review_output_json,
+            if report.telegram_notified { 1_i64 } else { 0_i64 },
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn review_gate_decision(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    input: ReviewGateInput<'_>,
+) -> Result<ReviewGateDecision, rusqlite::Error> {
+    ensure_nudge_state(conn, agent_name)?;
+    let row: (i64, i64, i64, Option<String>, i64) = conn.query_row(
+        "SELECT review_running, daily_review_count, tool_iters_since_review, daily_review_date, creation_review_interval \
+         FROM skill_nudge_state WHERE agent_name = ?1",
+        [agent_name],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
+
+    let (review_running, mut daily_count, tool_iters, daily_date, interval) = row;
+    if review_running != 0 {
+        return Ok(ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning));
+    }
+    if !input.cooldown_elapsed {
+        return Ok(ReviewGateDecision::Skip(ReviewSkipReason::Cooldown));
+    }
+    if daily_date.as_deref() != Some(input.today) {
+        daily_count = 0;
+    }
+    if daily_count >= input.daily_limit {
+        return Ok(ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit));
+    }
+    if input.has_signal {
+        return Ok(ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal));
+    }
+    if tool_iters >= interval {
+        return Ok(ReviewGateDecision::Start(
+            ReviewTriggerKind::EffortThreshold,
+        ));
+    }
+    Ok(ReviewGateDecision::Skip(ReviewSkipReason::BelowThreshold))
+}
+
+pub fn mark_review_started(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    today: &str,
+) -> Result<(), rusqlite::Error> {
+    ensure_nudge_state(conn, agent_name)?;
+    conn.execute(
+        "UPDATE skill_nudge_state \
+         SET review_running = 1, \
+             daily_review_date = ?2, \
+             daily_review_count = CASE WHEN daily_review_date = ?2 THEN daily_review_count + 1 ELSE 1 END \
+         WHERE agent_name = ?1",
+        rusqlite::params![agent_name, today],
+    )?;
+    Ok(())
+}
+
+pub fn mark_review_finished(
+    conn: &rusqlite::Connection,
+    agent_name: &str,
+    status: ReviewStatus,
+    reset_counters: bool,
+) -> Result<(), rusqlite::Error> {
+    ensure_nudge_state(conn, agent_name)?;
+    if reset_counters {
+        conn.execute(
+            "UPDATE skill_nudge_state \
+             SET review_running = 0, tool_iters_since_review = 0, turns_since_review = 0, skill_issue_hints_since_review = 0, last_review_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), last_review_status = ?2 \
+             WHERE agent_name = ?1",
+            rusqlite::params![agent_name, status.as_str()],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE skill_nudge_state \
+             SET review_running = 0, last_review_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), last_review_status = ?2 \
+             WHERE agent_name = ?1",
+            rusqlite::params![agent_name, status.as_str()],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +551,201 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         right_db::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn review_report_persistence_round_trips_candidate() {
+        let conn = conn();
+        let report = SkillReviewReport {
+            agent_name: "right".to_owned(),
+            source_invocation_id: "inv-1".to_owned(),
+            root_session_id: Some("session-1".to_owned()),
+            chat_id: Some(100),
+            thread_id: Some(200),
+            trigger_kind: ReviewTriggerKind::LearningSignal,
+            status: ReviewStatus::CreateCandidate,
+            confidence: ReviewConfidence::High,
+            candidate_skill_name: Some("rightx-oauth-debugging".to_owned()),
+            candidate_summary: Some("OAuth MCP setup needs callback URL verification.".to_owned()),
+            evidence_refs: vec!["event-1".to_owned(), "event-2".to_owned()],
+            review_output_json: serde_json::json!({
+                "status": "create_candidate",
+                "confidence": "high",
+                "candidate_skill_name": "rightx-oauth-debugging"
+            }),
+            telegram_notified: true,
+        };
+
+        insert_skill_review_report(&conn, &report).unwrap();
+
+        let row: (String, String, String, String, String, i64) = conn
+            .query_row(
+                "SELECT trigger_kind, status, confidence, candidate_skill_name, evidence_refs_json, telegram_notified \
+                 FROM skill_review_reports WHERE source_invocation_id='inv-1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, "learning_signal");
+        assert_eq!(row.1, "create_candidate");
+        assert_eq!(row.2, "high");
+        assert_eq!(row.3, "rightx-oauth-debugging");
+        assert_eq!(row.4, r#"["event-1","event-2"]"#);
+        assert_eq!(row.5, 1);
+    }
+
+    #[test]
+    fn review_gate_accepts_signal_and_effort_threshold() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+
+        let signal_decision = review_gate_decision(
+            &conn,
+            "right",
+            ReviewGateInput {
+                has_signal: true,
+                today: "2026-05-18",
+                cooldown_elapsed: true,
+                daily_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            signal_decision,
+            ReviewGateDecision::Start(ReviewTriggerKind::LearningSignal)
+        );
+
+        conn.execute(
+            "UPDATE skill_nudge_state SET tool_iters_since_review = 15 WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+        let effort_decision = review_gate_decision(
+            &conn,
+            "right",
+            ReviewGateInput {
+                has_signal: false,
+                today: "2026-05-18",
+                cooldown_elapsed: true,
+                daily_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            effort_decision,
+            ReviewGateDecision::Start(ReviewTriggerKind::EffortThreshold)
+        );
+    }
+
+    #[test]
+    fn review_gate_blocks_running_cooldown_and_daily_limit() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+        let running = review_gate_decision(
+            &conn,
+            "right",
+            ReviewGateInput {
+                has_signal: true,
+                today: "2026-05-18",
+                cooldown_elapsed: true,
+                daily_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            running,
+            ReviewGateDecision::Skip(ReviewSkipReason::AlreadyRunning)
+        );
+
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 0, daily_review_count = 12, daily_review_date = '2026-05-18' \
+             WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+        let limited = review_gate_decision(
+            &conn,
+            "right",
+            ReviewGateInput {
+                has_signal: true,
+                today: "2026-05-18",
+                cooldown_elapsed: true,
+                daily_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            limited,
+            ReviewGateDecision::Skip(ReviewSkipReason::DailyLimit)
+        );
+
+        conn.execute(
+            "UPDATE skill_nudge_state SET daily_review_count = 0 WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+        let cooldown = review_gate_decision(
+            &conn,
+            "right",
+            ReviewGateInput {
+                has_signal: true,
+                today: "2026-05-18",
+                cooldown_elapsed: false,
+                daily_limit: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            cooldown,
+            ReviewGateDecision::Skip(ReviewSkipReason::Cooldown)
+        );
+    }
+
+    #[test]
+    fn review_start_and_finish_update_nudge_state() {
+        let conn = conn();
+        ensure_nudge_state(&conn, "right").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state SET tool_iters_since_review = 19, turns_since_review = 3 WHERE agent_name='right'",
+            [],
+        )
+        .unwrap();
+
+        mark_review_started(&conn, "right", "2026-05-18").unwrap();
+        let running: i64 = conn
+            .query_row(
+                "SELECT review_running FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(running, 1);
+
+        mark_review_finished(&conn, "right", ReviewStatus::NothingToLearn, true).unwrap();
+        let row: (i64, i64, i64, String) = conn
+            .query_row(
+                "SELECT review_running, tool_iters_since_review, turns_since_review, last_review_status \
+                 FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0, 0, "nothing_to_learn".to_owned()));
     }
 
     #[test]
