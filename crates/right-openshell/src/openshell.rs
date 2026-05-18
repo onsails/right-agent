@@ -1073,6 +1073,9 @@ pub async fn ssh_tar_download(
 /// OpenSSH does not preserve remote argv. It sends one command string to the
 /// remote login shell, so callers must pass the returned string as exactly one
 /// argument after the SSH host or `--`.
+///
+/// Returns `Err` only if an argument contains an interior NUL byte (the sole
+/// `shlex::try_join` failure mode).
 pub fn quote_ssh_remote_args<'a>(
     args: impl IntoIterator<Item = &'a str>,
 ) -> miette::Result<String> {
