@@ -25,9 +25,13 @@ The recommended option is visually marked in the button label. No upstream MCP
 server is registered until the user clicks one of the buttons.
 
 `URL as-is` means "register the exact URL the user supplied and do not inject
-any extra auth header." This covers no-auth servers, local/private servers, and
-URLs that already carry query-string credentials. Avoid the label `No auth`
-because it is false for query-string auth.
+any extra auth header." This covers no-auth servers, loopback development
+servers, and URLs that already carry query-string credentials. Avoid the label
+`No auth` because it is false for query-string auth.
+
+Loopback support is intentionally narrow: allow `localhost`, `127.0.0.1`, and
+`::1` for explicit user-managed MCP registration, including plain HTTP.
+Continue rejecting broad private/link-local network ranges by default.
 
 ## Recommendation Rules
 
@@ -40,7 +44,8 @@ user-supplied credential-bearing URL is safer than silently stripping it.
 | URL contains a query string | `URL as-is` |
 | OAuth AS discovery succeeds | `OAuth` |
 | Public URL and Haiku returns `header` or `bearer` | `Header` |
-| Private/local URL without query string | `URL as-is` |
+| Loopback URL without query string | `URL as-is` |
+| Private/link-local URL outside loopback | reject as invalid |
 | Detection fails or is unavailable for a public URL | `Header` |
 
 For `bearer`, the header path uses `Authorization: Bearer <token>` semantics.
