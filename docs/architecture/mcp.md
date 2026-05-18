@@ -110,6 +110,26 @@ successful `connect()` — are unchanged from before this branch.)
 The Aggregator replaces HttpMemoryServer as the MCP endpoint. One shared process
 serves all agents on TCP :8100/mcp with per-agent Bearer token authentication.
 
+## Agent-Facing MCP Health
+
+`/mcp list` reports Aggregator backend status through the internal Unix-socket
+API. It does not prove that a specific Claude Code process loaded the same MCP
+tool registry. Agent turns are checked separately through Claude Code's
+`system/init` stream-json event, which lists the MCP servers visible to that
+process.
+
+The bot runs a periodic Haiku health probe using the same strict MCP config
+path as real turns (`/sandbox/mcp.json` in OpenShell mode, host `mcp.json` in
+no-sandbox mode). If `system/init` reports the built-in `right` server as
+`needs-auth` or omits it, the bot removes Claude Code's stale
+`.claude/mcp-needs-auth-cache.json`, redeploys platform files, and probes once
+more. The repair never recreates sandboxes, rewrites external MCP credentials,
+or changes the user's Claude session.
+
+Normal user turns also observe `system/init`. If a turn sees unhealthy `right`,
+it schedules the same repair path asynchronously but does not kill, retry, or
+replace the current turn.
+
 Tool routing:
   - No `__` prefix → RightBackend (built-in tools, unprefixed)
   - `rightmeta__` prefix → Aggregator management (read-only: mcp_list)
