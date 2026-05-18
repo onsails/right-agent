@@ -213,19 +213,17 @@ fn insert_running_run(
     log_path: &str,
     spec: &right_agent::cron_spec::CronSpec,
 ) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
-         VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
-        rusqlite::params![
-            run_id,
+    right_agent::async_runs::insert_running_cron_run(
+        conn,
+        right_agent::async_runs::NewCronRun {
+            id: run_id,
             job_name,
             started_at,
             log_path,
-            spec.target_chat_id,
-            spec.target_thread_id,
-        ],
-    )?;
-    Ok(())
+            target_chat_id: spec.target_chat_id,
+            target_thread_id: spec.target_thread_id,
+        },
+    )
 }
 
 /// Pick the JSON schema and (optional) `--fork-session` source for a cron run.
@@ -323,7 +321,7 @@ pub(crate) fn migrate_legacy_bg_continuation(
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
-/// Results are persisted to the `cron_runs` table (summary + notify_json).
+/// Results are persisted to the `async_runs` table (summary + notify_json).
 /// A separate Telegram delivery loop reads pending rows and sends notifications.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
@@ -755,14 +753,18 @@ async fn execute_job(
                     None
                 };
 
-                let delivery_status = if cron_output.notify.is_some() {
-                    "pending"
-                } else {
-                    "silent"
-                };
-                if let Err(e) = conn.execute(
-                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2, delivery_status = ?3, no_notify_reason = ?4 WHERE id = ?5",
-                    rusqlite::params![cron_output.summary, notify_json, delivery_status, cron_output.no_notify_reason, run_id],
+                let delivery_required = cron_output.notify.is_some();
+                let delivery_status = if delivery_required { "pending" } else { "none" };
+                if let Err(e) = right_agent::async_runs::persist_run_output(
+                    &conn,
+                    &run_id,
+                    right_agent::async_runs::RunOutput {
+                        summary: Some(&cron_output.summary),
+                        notify_json: notify_json.as_deref(),
+                        no_notify_reason: cron_output.no_notify_reason.as_deref(),
+                        error_json: None,
+                        delivery_required,
+                    },
                 ) {
                     tracing::error!(job = %job_name, "failed to persist cron output to DB: {e:#}");
                 }
@@ -844,9 +846,16 @@ async fn execute_job(
         };
         match serde_json::to_string(&notify) {
             Ok(json) => {
-                if let Err(e) = conn.execute(
-                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2, delivery_status = 'pending' WHERE id = ?3",
-                    rusqlite::params!["failed", json, run_id],
+                if let Err(e) = right_agent::async_runs::persist_run_output(
+                    &conn,
+                    &run_id,
+                    right_agent::async_runs::RunOutput {
+                        summary: Some("failed"),
+                        notify_json: Some(&json),
+                        no_notify_reason: None,
+                        error_json: None,
+                        delivery_required: true,
+                    },
                 ) {
                     tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
                 }
@@ -926,11 +935,7 @@ fn update_run_record(
     exit_code: Option<i32>,
     status: &str,
 ) {
-    let finished_at = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = conn.execute(
-        "UPDATE cron_runs SET finished_at=?1, exit_code=?2, status=?3 WHERE id=?4",
-        rusqlite::params![finished_at, exit_code, status, run_id],
-    ) {
+    if let Err(e) = right_agent::async_runs::finish_run(conn, run_id, exit_code, status) {
         tracing::error!("DB update for run {run_id} failed: {e:#}");
     }
 }
@@ -1951,7 +1956,7 @@ mod target_snapshot_tests {
     }
 
     #[test]
-    fn insert_running_run_snapshots_target() {
+    fn insert_running_run_writes_async_runs() {
         let (_dir, conn) = migrated_conn();
         let spec = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
@@ -1972,19 +1977,18 @@ mod target_snapshot_tests {
         )
         .unwrap();
 
-        let (chat, thread): (Option<i64>, Option<i64>) = conn
+        let row: (String, String, Option<i64>, Option<i64>) = conn
             .query_row(
-                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-1'",
+                "SELECT kind, producer_ref, target_chat_id, target_thread_id FROM async_runs WHERE id = 'run-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert_eq!(chat, Some(-777));
-        assert_eq!(thread, Some(13));
+        assert_eq!(row, ("cron".into(), "job-x".into(), Some(-777), Some(13)));
     }
 
     #[test]
-    fn insert_running_run_writes_null_when_spec_has_no_target() {
+    fn insert_running_run_requires_target_chat_id() {
         let (_dir, conn) = migrated_conn();
         let spec = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
@@ -1995,7 +1999,7 @@ mod target_snapshot_tests {
             target_chat_id: None,
             target_thread_id: None,
         };
-        insert_running_run(
+        let err = insert_running_run(
             &conn,
             "run-2",
             "job-y",
@@ -2003,16 +2007,17 @@ mod target_snapshot_tests {
             "/log/path",
             &spec,
         )
-        .unwrap();
+        .expect_err("missing target_chat_id should fail");
 
-        let (chat, thread): (Option<i64>, Option<i64>) = conn
-            .query_row(
-                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-2'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        assert!(matches!(
+            err,
+            rusqlite::Error::InvalidParameterName(ref name)
+                if name == "target_chat_id is required"
+        ));
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM async_runs", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(chat, None);
-        assert_eq!(thread, None);
+        assert_eq!(count, 0);
     }
 }
