@@ -313,6 +313,44 @@ where
     ReviewOutput::parse(raw)
 }
 
+pub(crate) fn select_review_trigger(
+    has_learning_signal: bool,
+    has_skill_issue_signal: bool,
+    effort_threshold_met: bool,
+) -> Option<right_agent::learned_skills::ReviewTriggerKind> {
+    if has_skill_issue_signal {
+        Some(right_agent::learned_skills::ReviewTriggerKind::SkillIssueSignal)
+    } else if has_learning_signal {
+        Some(right_agent::learned_skills::ReviewTriggerKind::LearningSignal)
+    } else if effort_threshold_met {
+        Some(right_agent::learned_skills::ReviewTriggerKind::EffortThreshold)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn review_cooldown_cutoff(
+    now: chrono::DateTime<chrono::Utc>,
+    cooldown: chrono::Duration,
+) -> String {
+    (now - cooldown).format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+pub(crate) fn review_cooldown_elapsed(
+    last_review_at: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    cooldown: chrono::Duration,
+) -> Result<bool, String> {
+    let Some(last_review_at) = last_review_at else {
+        return Ok(true);
+    };
+    let last_review_at_timestamp = chrono::DateTime::parse_from_rfc3339(last_review_at)
+        .map_err(|err| format!("parse skill review last_review_at '{last_review_at}': {err}"))?
+        .with_timezone(&chrono::Utc);
+
+    Ok(now.signed_duration_since(last_review_at_timestamp) >= cooldown)
+}
+
 fn push_bounded_list(
     prompt: &mut String,
     heading: &str,
