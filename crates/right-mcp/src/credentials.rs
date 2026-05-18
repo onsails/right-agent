@@ -192,11 +192,20 @@ fn parse_url(url_str: &str) -> Result<Url, CredentialError> {
     Url::parse(url_str).map_err(|e| CredentialError::InvalidServerUrl(format!("invalid URL: {e}")))
 }
 
+fn is_localhost_domain(domain: &str) -> bool {
+    domain
+        .strip_suffix('.')
+        .unwrap_or(domain)
+        .eq_ignore_ascii_case("localhost")
+}
+
 fn is_loopback_host(host: &url::Host<&str>) -> bool {
     match host {
-        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        url::Host::Domain(domain) => is_localhost_domain(domain),
         url::Host::Ipv4(v4) => v4.is_loopback(),
-        url::Host::Ipv6(v6) => v6.is_loopback(),
+        url::Host::Ipv6(v6) => {
+            v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback()) || v6.is_loopback()
+        }
     }
 }
 
@@ -205,6 +214,10 @@ fn is_private_or_link_local_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_private_or_link_local_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_private_or_link_local_ipv4(v4);
+    }
+
     ip.is_unique_local() || ip.is_unicast_link_local()
 }
 
@@ -491,7 +504,7 @@ pub fn redact_url(url: &str) -> String {
     }
 }
 
-/// Check whether a URL is a valid public HTTPS URL (not localhost/private IP).
+/// Check whether a URL points at localhost or a loopback IP address.
 pub fn is_loopback_url(url: &str) -> bool {
     let Ok(parsed) = parse_url(url) else {
         return false;
@@ -499,6 +512,7 @@ pub fn is_loopback_url(url: &str) -> bool {
     parsed.host().is_some_and(|host| is_loopback_host(&host))
 }
 
+/// Check whether a URL is a valid public HTTPS URL (not localhost/private IP).
 pub fn is_public_url(url: &str) -> bool {
     let Ok(parsed) = parse_url(url) else {
         return false;
@@ -629,6 +643,14 @@ mod db_tests {
         validate_server_url("http://127.0.0.1:3333/mcp").unwrap();
         validate_server_url("http://[::1]:3333/mcp").unwrap();
         validate_server_url("https://localhost/mcp").unwrap();
+    }
+
+    #[test]
+    fn validate_server_url_rejects_ipv4_mapped_private_ipv6() {
+        assert!(validate_server_url("https://[::ffff:192.168.1.1]/mcp").is_err());
+        assert!(validate_server_url("https://[::ffff:10.0.0.1]/mcp").is_err());
+        assert!(validate_server_url("https://[::ffff:172.16.0.1]/mcp").is_err());
+        assert!(validate_server_url("https://[::ffff:169.254.1.1]/mcp").is_err());
     }
 
     #[test]
@@ -806,12 +828,28 @@ mod db_tests {
     }
 
     #[test]
+    fn is_public_url_rejects_ipv4_mapped_private_ipv6() {
+        assert!(!is_public_url("https://[::ffff:192.168.1.1]/mcp"));
+        assert!(!is_public_url("https://[::ffff:10.0.0.1]/mcp"));
+        assert!(!is_public_url("https://[::ffff:169.254.1.1]/mcp"));
+        assert!(!is_public_url("https://[::ffff:127.0.0.1]/mcp"));
+    }
+
+    #[test]
     fn is_loopback_url_detects_localhost_and_loopback_ips() {
         assert!(is_loopback_url("http://localhost:3333/mcp"));
         assert!(is_loopback_url("https://127.0.0.1/mcp"));
         assert!(is_loopback_url("http://[::1]:3333/mcp"));
         assert!(!is_loopback_url("https://mcp.notion.com/mcp"));
         assert!(!is_loopback_url("https://192.168.1.1/mcp"));
+    }
+
+    #[test]
+    fn localhost_with_trailing_dot_is_loopback_not_public() {
+        validate_server_url("http://localhost.:3333/mcp").unwrap();
+
+        assert!(is_loopback_url("http://localhost.:3333/mcp"));
+        assert!(!is_public_url("https://localhost./mcp"));
     }
 }
 
