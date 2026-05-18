@@ -16,6 +16,7 @@ use dashmap::DashMap;
 use teloxide::RequestError;
 use teloxide::dispatching::{DefaultKey, UpdateFilterExt};
 use teloxide::prelude::*;
+use teloxide::types::{ChatKind, Message, PublicChatKind};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -73,6 +74,45 @@ enum BotCommand {
     DenyAll,
     #[command(description = "Show usage summary (add 'detail' for raw tokens)")]
     Usage(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreFilterLogMeta {
+    chat_id: i64,
+    chat_kind: &'static str,
+    has_text: bool,
+    has_caption: bool,
+    attachment_count: usize,
+    entity_count: usize,
+}
+
+fn pre_filter_log_meta(msg: &Message) -> PreFilterLogMeta {
+    PreFilterLogMeta {
+        chat_id: msg.chat.id.0,
+        chat_kind: chat_kind_label(&msg.chat.kind),
+        has_text: msg.text().is_some(),
+        has_caption: msg.caption().is_some(),
+        attachment_count: super::attachments::extract_attachments(msg).len(),
+        entity_count: message_entity_count(msg),
+    }
+}
+
+fn chat_kind_label(kind: &ChatKind) -> &'static str {
+    match kind {
+        ChatKind::Private(_) => "private",
+        ChatKind::Public(public) => match &public.kind {
+            PublicChatKind::Channel(_) => "channel",
+            PublicChatKind::Group => "group",
+            PublicChatKind::Supergroup(_) => "supergroup",
+        },
+    }
+}
+
+fn message_entity_count(msg: &Message) -> usize {
+    let text_entities = msg.entities().map_or(0, |entities| entities.len());
+    let caption_entities = msg.caption_entities().map_or(0, |entities| entities.len());
+
+    text_entities + caption_entities
 }
 
 /// Run the teloxide long-polling dispatcher.
@@ -451,15 +491,14 @@ fn build_dispatcher(
 
     let message_handler = Update::filter_message()
         .inspect(move |msg: Message| {
-            let text_preview = msg.text().or(msg.caption()).map(|t| {
-                let trimmed: String = t.chars().take(80).collect();
-                trimmed
-            });
-            let entities = msg.entities().map(|e| e.len()).unwrap_or(0);
+            let meta = pre_filter_log_meta(&msg);
             tracing::info!(
-                chat_id = msg.chat.id.0,
-                ?text_preview,
-                entities,
+                chat_id = meta.chat_id,
+                chat_kind = meta.chat_kind,
+                has_text = meta.has_text,
+                has_caption = meta.has_caption,
+                attachment_count = meta.attachment_count,
+                entity_count = meta.entity_count,
                 "message update received by dispatcher"
             );
             super::archive::archive_seen_group_message(
@@ -634,5 +673,42 @@ mod tests {
             bg_requests,
             progress_state,
         );
+    }
+
+    #[test]
+    fn pre_filter_log_meta_omits_private_text_and_caption_content() {
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 10,
+            "date": 0,
+            "chat": {"id": 42, "type": "private", "first_name": "Spammer"},
+            "from": {"id": 42, "is_bot": false, "first_name": "Spammer"},
+            "caption": "SPAM-CAPTION-SHOULD-NOT-LOG",
+            "caption_entities": [{
+                "type": "bold",
+                "offset": 0,
+                "length": 4
+            }],
+            "document": {
+                "file_id": "BAAD-private",
+                "file_unique_id": "private-doc",
+                "file_name": "spam.pdf",
+                "mime_type": "application/pdf",
+                "file_size": 1024
+            }
+        }))
+        .unwrap();
+
+        let meta = pre_filter_log_meta(&msg);
+
+        assert_eq!(meta.chat_id, 42);
+        assert_eq!(meta.chat_kind, "private");
+        assert!(!meta.has_text);
+        assert!(meta.has_caption);
+        assert_eq!(meta.attachment_count, 1);
+        assert_eq!(meta.entity_count, 1);
+
+        let rendered = format!("{meta:?}");
+        assert!(!rendered.contains("SPAM-CAPTION-SHOULD-NOT-LOG"));
+        assert!(!rendered.contains("spam.pdf"));
     }
 }

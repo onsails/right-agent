@@ -138,6 +138,38 @@ mod tests {
         serde_json::from_value(payload).unwrap()
     }
 
+    fn private_text_msg(chat_id: i64, sender_id: i64, text: &str) -> teloxide::types::Message {
+        serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "private", "first_name": "User"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "User"},
+            "text": text
+        }))
+        .unwrap()
+    }
+
+    fn private_photo_caption_msg(
+        chat_id: i64,
+        sender_id: i64,
+        caption: &str,
+    ) -> teloxide::types::Message {
+        serde_json::from_value(serde_json::json!({
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "private", "first_name": "User"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "User"},
+            "caption": caption,
+            "photo": [{
+                "file_id": "AgAD-private",
+                "file_unique_id": "private-photo",
+                "width": 1,
+                "height": 1
+            }]
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn routing_decision_constructs() {
         let d = RoutingDecision {
@@ -147,6 +179,72 @@ mod tests {
         };
         assert!(d.sender_trusted);
         assert!(!d.group_open);
+    }
+
+    #[test]
+    fn untrusted_private_text_message_is_dropped() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let sender_id = 42;
+        let msg = private_text_msg(sender_id, sender_id, "spam text");
+        let allowlist = allowlist_with(vec![], vec![]);
+
+        let f = make_routing_filter(allowlist, identity);
+
+        assert!(f(msg).is_none());
+    }
+
+    #[test]
+    fn untrusted_private_media_caption_message_is_dropped() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let sender_id = 42;
+        let msg = private_photo_caption_msg(sender_id, sender_id, "spam caption");
+        let allowlist = allowlist_with(vec![], vec![]);
+
+        let f = make_routing_filter(allowlist, identity);
+
+        assert!(f(msg).is_none());
+    }
+
+    #[test]
+    fn trusted_private_text_routes_as_direct_message() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let sender_id = 42;
+        let msg = private_text_msg(sender_id, sender_id, "hello");
+        let allowlist = allowlist_with(vec![sender_id], vec![]);
+
+        let f = make_routing_filter(allowlist, identity);
+        let decision = f(msg).expect("trusted private text should route");
+
+        assert_eq!(decision.address, Some(AddressKind::DirectMessage));
+        assert!(decision.sender_trusted);
+        assert!(!decision.group_open);
+    }
+
+    #[test]
+    fn trusted_private_media_caption_routes_as_direct_message() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let sender_id = 42;
+        let msg = private_photo_caption_msg(sender_id, sender_id, "hello with media");
+        let allowlist = allowlist_with(vec![sender_id], vec![]);
+
+        let f = make_routing_filter(allowlist, identity);
+        let decision = f(msg).expect("trusted private media should route");
+
+        assert_eq!(decision.address, Some(AddressKind::DirectMessage));
+        assert!(decision.sender_trusted);
+        assert!(!decision.group_open);
     }
 
     #[test]
