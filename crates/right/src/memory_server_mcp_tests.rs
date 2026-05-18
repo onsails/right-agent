@@ -179,6 +179,39 @@ async fn test_cron_list_runs_excludes_background_rows() {
 }
 
 #[tokio::test]
+async fn test_cron_list_runs_propagates_malformed_row_error() {
+    let (server, _dir) = setup_server();
+    {
+        let conn = server.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id,
+                started_at, status, delivery_required, delivery_status, created_at, updated_at
+             ) VALUES (
+                'bad-cron-001', 'cron', NULL, 'bad-cron-001', -100,
+                '2026-04-01T10:00:00Z', 'success', 0, 'none',
+                '2026-04-01T10:00:00Z', '2026-04-01T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+    }
+
+    let err = server
+        .cron_list_runs(Parameters(CronListRunsParams {
+            job_name: None,
+            limit: None,
+        }))
+        .await
+        .expect_err("malformed cron row should be returned as an MCP internal error");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("row read failed"),
+        "expected row read failure, got: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn test_cron_list_runs_limit() {
     let (server, _dir) = setup_server();
     for i in 0..5 {
