@@ -93,8 +93,8 @@ and explicitly excludes `Agent`.
 
 ## Per-session mutex on --resume
 
-Worker (`bot/src/telegram/worker.rs`) and cron delivery
-(`bot/src/cron_delivery.rs`) both invoke `claude -p --resume <main_session_id>`,
+Worker (`bot/src/telegram/worker.rs`) and async delivery
+(`bot/src/async_delivery.rs`) both invoke `claude -p --resume <main_session_id>`,
 which mutates the session's JSONL file. Concurrent invocations against the same
 session would interleave or lose turns.
 
@@ -132,7 +132,7 @@ summary of the failure instead of the raw ring-buffer dump.
   on a separate "🧠 Reflection" line per window.
 - Reflection never reflects on itself. Hindsight `memory_retain` is skipped for
   reflection turns.
-- `cron_runs.status` gates delivery: `'failed'` routes to
+- `async_runs.status` gates delivery: `'failed'` routes to
   `DELIVERY_INSTRUCTION_FAILURE`, any other status (currently `'success'`)
   routes to `DELIVERY_INSTRUCTION_SUCCESS` (verbatim relay).
 
@@ -152,12 +152,12 @@ summary of the failure instead of the raw ring-buffer dump.
   would let the reconciler spawn a duplicate `execute_job` against the same
   spec on the next 5-second tick. The TTL is the duplicate-prevention guard,
   not a wall-clock execution limit.
-- `ScheduleKind::BackgroundContinuation { fork_from }` — fires on next reconcile
-  tick (≤5s), then deletes. Encoded as `schedule = '@bg:<fork_from-uuid>'`.
-  Bot-internal: produced only by `worker::enqueue_background_job` (via
-  `cron_spec::insert_background_continuation`) when a foreground turn hits the
-  600s timeout or the user taps the 🌙 Background button. Inherits the
-  `IMMEDIATE_DEFAULT_LOCK_TTL` default since these turns can run for hours.
+- `ScheduleKind::BackgroundContinuation { fork_from }` — legacy bot-internal
+  compatibility path. Encoded as `schedule = '@bg:<fork_from-uuid>'`; when
+  present, it fires on next reconcile tick (≤5s), then deletes. Current
+  Telegram-worker background handoffs do not enqueue cron specs; they create
+  `async_runs` rows with `kind = 'background'` and directly spawn the forked
+  continuation.
 
   At dispatch time `cron::execute_job` calls `select_schema_and_fork`, which
   co-derives two effects from the same variant: (1) the structured-output JSON
@@ -173,6 +173,14 @@ summary of the failure instead of the raw ring-buffer dump.
   it. A one-time startup migration `cron::migrate_legacy_bg_continuation`
   rewrites pre-existing rows that used the deprecated `@immediate` +
   `X-FORK-FROM:` convention into the new encoding.
+
+Worker-created background rows start as `status = 'queued'` and
+`handoff_state = 'queued'`. Startup recovery converts only those interrupted
+queued handoffs into failed rows with pending delivery. It does not infer stale
+`running` recovery without process ownership. Foreground background markers
+read only `async_runs.kind = 'background'` rows for the chat, including running
+rows and finished `success`/`failed` rows with `delivery_status IN
+('pending', 'retryable')`.
 
 ## Self-introspection
 

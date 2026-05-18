@@ -681,17 +681,16 @@ fn build_bg_marker_for_chat(agent_dir: &std::path::Path, target_chat_id: i64) ->
         }
     };
     let mut stmt = match conn.prepare(
-        "SELECT id, COALESCE(producer_ref, 'background'), started_at, status \
+        "SELECT id, COALESCE(producer_ref, 'background'), COALESCE(started_at, created_at), status \
          FROM async_runs \
          WHERE kind = 'background' \
            AND NULLIF(target_chat_id, 0) = ?1 \
            AND ( \
              status = 'running' \
              OR (status IN ('success', 'failed') \
-                 AND delivery_status IN ('pending', 'retryable') \
-                 AND notify_json IS NOT NULL) \
+                 AND delivery_status IN ('pending', 'retryable')) \
            ) \
-         ORDER BY started_at DESC \
+         ORDER BY COALESCE(started_at, created_at) DESC \
          LIMIT 5",
     ) {
         Ok(s) => s,
@@ -4394,7 +4393,7 @@ mod background_continuation_tests {
     }
 
     #[test]
-    fn build_bg_marker_excludes_finished_pending_without_notify_json() {
+    fn build_bg_marker_includes_finished_pending_without_notify_json() {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
@@ -4411,11 +4410,36 @@ mod background_continuation_tests {
         );
         drop(conn);
 
-        let m = build_bg_marker_for_chat(tmp.path(), -100);
+        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(
-            m.is_none(),
-            "undeliverable finished row without notify_json must not appear; got {m:?}"
+            m.contains("bg-null-notify"),
+            "pending finished background row should appear by delivery_status; got {m:?}"
         );
+    }
+
+    #[test]
+    fn build_bg_marker_includes_recovered_failed_handoff_without_started_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = open_marker_conn(tmp.path());
+        right_agent::async_runs::insert_queued_background_run(
+            &conn,
+            right_agent::async_runs::NewBackgroundRun {
+                id: "bg-recovered",
+                producer_ref: Some("background"),
+                source_session_id: "main-1",
+                run_session_id: "bg-recovered",
+                target_chat_id: -100,
+                target_thread_id: None,
+                created_at: "2026-05-18T10:00:00Z",
+            },
+        )
+        .unwrap();
+        crate::background::mark_interrupted_handoffs(&conn).unwrap();
+        drop(conn);
+
+        let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
+        assert!(m.contains("bg-recovered"), "got {m:?}");
+        assert!(m.contains("failed"), "got {m:?}");
     }
 
     #[test]

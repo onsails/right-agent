@@ -213,16 +213,21 @@ reconciler spawn a duplicate `execute_job` against the same spec on the
 next 5-second tick. The TTL is the duplicate-prevention guard, not a
 wall-clock execution limit.
 
-The **`BackgroundContinuation { fork_from }`** variant (encoded as
-`schedule = '@bg:<fork_from-uuid>'`) is also bot-internal — produced
-when the worker offloads an interrupted foreground turn to background
-via `cron_spec::insert_background_continuation`. Like `Immediate`, it
-fires on the next reconcile tick (≤5s) with the same
-`IMMEDIATE_DEFAULT_LOCK_TTL`. Unlike `Immediate`, it carries the main
-session UUID as typed data and runs against
-`BG_CONTINUATION_SCHEMA_JSON`, which forbids silent output (`notify`
-is required and non-null) so the user always receives a delivered
-answer.
+Background continuations created by the Telegram worker are `async_runs`
+rows with `kind = 'background'`, not cron specs. The worker inserts a
+queued row, directly forks Claude with `--resume <main-session>
+--fork-session --session-id <run_id>`, then marks the handoff spawned
+only after the fork emits its matching `system/init`. Bot startup runs
+`background::mark_interrupted_handoffs` against `kind = 'background'`
+rows still stuck at `status = 'queued'` and `handoff_state = 'queued'`;
+it fails them with pending delivery. It deliberately does not guess at
+stale `running` rows without process ownership.
+
+The legacy **`BackgroundContinuation { fork_from }`** cron schedule
+variant (encoded as `schedule = '@bg:<fork_from-uuid>'`) remains
+bot-internal compatibility code. It carries the main session UUID as
+typed data and runs against `BG_CONTINUATION_SCHEMA_JSON`, which forbids
+silent output (`notify` is required and non-null).
 
 See: `docs/architecture/sessions.md` for the full variant list.
 
@@ -230,26 +235,18 @@ See: `docs/architecture/sessions.md` for the full variant list.
 
 See: `docs/architecture/sessions.md` (Per-session mutex on --resume).
 
-### Background continuation: `BackgroundContinuation` schedule kind
+### Background continuation handoff
 
-A background-continuation cron job is identified by its
-`ScheduleKind::BackgroundContinuation { fork_from: Uuid }` variant,
-encoded in the `cron_specs.schedule` column as `@bg:<fork_from-uuid>`.
-`cron::execute_job` matches the variant via `select_schema_and_fork`
-and emits a CC invocation with `--resume <fork_from> --fork-session
---session-id <run_id>`. The forked session inherits the main session's
-full history; the prompt body is a short SYSTEM_NOTICE
-(`build_continuation_prompt`) asking the agent to finish answering
-the user's most recent message.
+Current background handoffs are tracked in `async_runs` as
+`kind = 'background'`. The marker injected into foreground turns reads
+only those rows for the target chat, and shows running rows plus
+finished `success`/`failed` rows whose delivery is still `pending` or
+`retryable`. Cron rows are excluded.
 
-Bot-internal: only `worker::enqueue_background_job` constructs this
-variant via `cron_spec::insert_background_continuation`. Agents
-cannot hijack `--resume` because the variant carries `fork_from` as
-typed data, and the `cron_create` MCP path never sets it.
-`select_schema_and_fork` co-derives the JSON schema
-(`BG_CONTINUATION_SCHEMA_JSON`, which forbids silent output) and the
-`fork_from` source from the same variant — drift between the two
-effects is impossible by construction.
+The legacy `ScheduleKind::BackgroundContinuation { fork_from: Uuid }`
+variant remains bot-internal compatibility code. Agents cannot hijack
+`--resume` because the variant carries `fork_from` as typed data, and
+the `cron_create` MCP path never sets it.
 
 A one-time startup migration `cron::migrate_legacy_bg_continuation`
 rewrites pre-existing rows that used the deprecated

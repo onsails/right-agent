@@ -33,6 +33,8 @@ const POST_STDOUT_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const BACKGROUND_FAILURE_NOTIFY_CONTENT: &str =
     "Background work failed before it could produce a result.";
+const INTERRUPTED_HANDOFF_REASON: &str =
+    "background handoff interrupted while queued before startup recovery";
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn spawn_background_continuation(
@@ -745,6 +747,29 @@ fn mark_handoff_failed(
     right_agent::async_runs::finish_run(conn, run_id, None, "failed")
 }
 
+pub(crate) fn mark_interrupted_handoffs(
+    conn: &rusqlite::Connection,
+) -> Result<usize, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT id
+         FROM async_runs
+         WHERE kind = 'background'
+           AND status = 'queued'
+           AND handoff_state = 'queued'",
+    )?;
+    let run_ids = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let converted = run_ids.len();
+    drop(stmt);
+    let tx = conn.unchecked_transaction()?;
+    for run_id in run_ids {
+        mark_handoff_failed(&tx, &run_id, INTERRUPTED_HANDOFF_REASON)?;
+    }
+    tx.commit()?;
+    Ok(converted)
+}
+
 fn mark_completion_failed(
     conn: &rusqlite::Connection,
     run_id: &str,
@@ -890,5 +915,96 @@ mod tests {
         assert_eq!(row.3, "pending");
         assert!(row.4.contains("Background work failed"));
         assert!(row.5.contains("init timeout"));
+    }
+
+    #[test]
+    fn mark_interrupted_handoffs_converts_queued_background_to_failed_pending_delivery() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(tmp.path(), true).unwrap();
+        right_agent::async_runs::insert_queued_background_run(
+            &conn,
+            right_agent::async_runs::NewBackgroundRun {
+                id: "bg-queued",
+                producer_ref: Some("background"),
+                source_session_id: "main-1",
+                run_session_id: "bg-queued",
+                target_chat_id: -42,
+                target_thread_id: Some(7),
+                created_at: "2026-05-18T10:00:00Z",
+            },
+        )
+        .unwrap();
+        right_agent::async_runs::insert_queued_background_run(
+            &conn,
+            right_agent::async_runs::NewBackgroundRun {
+                id: "bg-spawned",
+                producer_ref: Some("background"),
+                source_session_id: "main-2",
+                run_session_id: "bg-spawned",
+                target_chat_id: -42,
+                target_thread_id: Some(7),
+                created_at: "2026-05-18T10:00:00Z",
+            },
+        )
+        .unwrap();
+        right_agent::async_runs::mark_background_spawned(
+            &conn,
+            "bg-spawned",
+            "2026-05-18T10:01:00Z",
+            "/log/bg-spawned.ndjson",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO async_runs (
+                id, kind, producer_ref, run_session_id, target_chat_id, target_thread_id,
+                status, handoff_state, delivery_required, delivery_status,
+                created_at, updated_at
+             ) VALUES (
+                'cron-queued', 'cron', 'cron-job', 'cron-queued', -42, NULL,
+                'queued', 'queued', 0, 'none',
+                '2026-05-18T10:00:00Z', '2026-05-18T10:00:00Z'
+             )",
+            [],
+        )
+        .unwrap();
+
+        let converted = mark_interrupted_handoffs(&conn).unwrap();
+
+        assert_eq!(converted, 1);
+        let bg: (String, String, i64, String, String, String) = conn
+            .query_row(
+                "SELECT status, handoff_state, delivery_required, delivery_status, notify_json, error_json \
+                 FROM async_runs WHERE id = 'bg-queued'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(bg.0, "failed");
+        assert_eq!(bg.1, "failed");
+        assert_eq!(bg.2, 1);
+        assert_eq!(bg.3, "pending");
+        assert!(bg.4.contains("Background work failed"));
+        assert!(bg.5.contains("interrupted"));
+
+        let spawned: (String, String) = conn
+            .query_row(
+                "SELECT status, handoff_state FROM async_runs WHERE id = 'bg-spawned'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(spawned.0, "running");
+        assert_eq!(spawned.1, "spawned");
+
+        let cron: (String, String, String) = conn
+            .query_row(
+                "SELECT kind, status, handoff_state FROM async_runs WHERE id = 'cron-queued'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(cron.0, "cron");
+        assert_eq!(cron.1, "queued");
+        assert_eq!(cron.2, "queued");
     }
 }
