@@ -41,7 +41,7 @@ pub(crate) struct CronNotify {
 }
 
 /// Extract the filename component from a sandbox attachment path.
-fn attachment_filename(path: &str) -> String {
+pub(crate) fn attachment_filename(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
         .unwrap_or_default()
@@ -99,6 +99,20 @@ pub(crate) fn is_lock_fresh(
     };
     let ttl = parse_lock_ttl(lock_ttl_str).unwrap_or(chrono::Duration::minutes(30));
     chrono::Utc::now() - lock.heartbeat < ttl
+}
+
+fn effective_lock_ttl(spec: &CronSpec) -> &str {
+    if let Some(lock_ttl) = spec.lock_ttl.as_deref() {
+        return lock_ttl;
+    }
+    if matches!(
+        &spec.schedule_kind,
+        right_agent::cron_spec::ScheduleKind::Immediate
+    ) {
+        right_agent::cron_spec::IMMEDIATE_DEFAULT_LOCK_TTL
+    } else {
+        "30m"
+    }
 }
 
 /// Delete old cron log files for a job, keeping the most recent `keep` files.
@@ -213,117 +227,70 @@ fn insert_running_run(
     log_path: &str,
     spec: &right_agent::cron_spec::CronSpec,
 ) -> Result<(), rusqlite::Error> {
-    conn.execute(
-        "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, target_chat_id, target_thread_id) \
-         VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
-        rusqlite::params![
-            run_id,
+    // `async_runs.target_chat_id` is NOT NULL. Targetless cron runs are kept
+    // explicit with sentinel 0; delivery reads convert it back with NULLIF.
+    let target_chat_id = spec.target_chat_id.unwrap_or(0);
+
+    right_agent::async_runs::insert_running_cron_run(
+        conn,
+        right_agent::async_runs::NewCronRun {
+            id: run_id,
             job_name,
             started_at,
             log_path,
-            spec.target_chat_id,
-            spec.target_thread_id,
-        ],
-    )?;
-    Ok(())
+            target_chat_id: Some(target_chat_id),
+            target_thread_id: spec.target_thread_id,
+        },
+    )
 }
 
-/// Pick the JSON schema and (optional) `--fork-session` source for a cron run.
-///
-/// `BackgroundContinuation` is the only kind that runs against
-/// [`right_codegen::BG_CONTINUATION_SCHEMA_JSON`] — its forked turn
-/// MUST reply (notify required + non-null) because the user is waiting for
-/// the foreground answer sent to background. All other kinds use
-/// [`right_codegen::CRON_SCHEMA_JSON`] where `notify: null` (silent)
-/// is a valid outcome.
-fn select_schema_and_fork(
-    spec: &right_agent::cron_spec::CronSpec,
-) -> (&'static str, Option<String>) {
-    match &spec.schedule_kind {
-        right_agent::cron_spec::ScheduleKind::BackgroundContinuation { fork_from } => (
-            right_codegen::BG_CONTINUATION_SCHEMA_JSON,
-            Some(fork_from.to_string()),
-        ),
-        _ => (right_codegen::CRON_SCHEMA_JSON, None),
-    }
+fn update_failed_run_record(conn: &rusqlite::Connection, run_id: &str, exit_code: Option<i32>) {
+    update_run_record(conn, run_id, exit_code, "failed");
+}
+
+fn persist_successful_cron_output(
+    conn: &rusqlite::Connection,
+    run_id: &str,
+    cron_output: &CronReplyOutput,
+    notify_json: Option<&str>,
+) -> Result<&'static str, rusqlite::Error> {
+    let delivery_required = cron_output.notify.is_some();
+    let delivery_status = if delivery_required { "pending" } else { "none" };
+    right_agent::async_runs::persist_run_output(
+        conn,
+        run_id,
+        right_agent::async_runs::RunOutput {
+            summary: Some(&cron_output.summary),
+            notify_json,
+            no_notify_reason: cron_output.no_notify_reason.as_deref(),
+            error_json: None,
+            delivery_required,
+        },
+    )?;
+    Ok(delivery_status)
 }
 
 /// Eligible for the immediate-fire reconcile path: kinds that must run on
 /// the next reconcile tick with no `cron_schedule()` (no `run_job_loop`
 /// handle is spawned for these).
 fn is_reconcile_tick_kind(kind: &right_agent::cron_spec::ScheduleKind) -> bool {
-    matches!(
-        kind,
-        right_agent::cron_spec::ScheduleKind::Immediate
-            | right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
-    )
+    matches!(kind, right_agent::cron_spec::ScheduleKind::Immediate)
 }
 
 /// Bypassed by the recurring-handle spawn loop: these kinds are either
-/// fired immediately (`Immediate`, `BackgroundContinuation`) or fired by
-/// the absolute-time path (`RunAt`).
+/// fired immediately (`Immediate`) or fired by the absolute-time path (`RunAt`).
 fn is_run_job_loop_skip_kind(kind: &right_agent::cron_spec::ScheduleKind) -> bool {
     matches!(
         kind,
         right_agent::cron_spec::ScheduleKind::RunAt(_)
             | right_agent::cron_spec::ScheduleKind::Immediate
-            | right_agent::cron_spec::ScheduleKind::BackgroundContinuation { .. }
     )
-}
-
-/// Header prefix produced by the deprecated bg-continuation convention.
-/// Followed by the fork-from UUID and a newline, then the actual prompt body.
-const LEGACY_FORK_HEADER: &str = "X-FORK-FROM: ";
-
-/// One-time startup migration: rewrite legacy `@immediate` + `X-FORK-FROM:`
-/// rows produced by the old bg-continuation convention into the new
-/// `@bg:<uuid>` sentinel + clean prompt body. Idempotent — rows already in
-/// the new form are filtered out by the `schedule = IMMEDIATE_SENTINEL`
-/// predicate. Invalid UUIDs in the legacy header leave the row untouched
-/// (logged at WARN). Returns the number of rows rewritten.
-pub(crate) fn migrate_legacy_bg_continuation(
-    conn: &rusqlite::Connection,
-) -> Result<usize, rusqlite::Error> {
-    use right_agent::cron_spec::{IMMEDIATE_SENTINEL, ScheduleKind};
-
-    let candidates: Vec<(String, String)> = {
-        let mut stmt =
-            conn.prepare("SELECT job_name, prompt FROM cron_specs WHERE schedule = ?1")?;
-        stmt.query_map([IMMEDIATE_SENTINEL], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    if candidates.is_empty() {
-        return Ok(0);
-    }
-
-    let tx = conn.unchecked_transaction()?;
-    let mut migrated = 0usize;
-    for (name, prompt) in candidates {
-        let Some(rest) = prompt.strip_prefix(LEGACY_FORK_HEADER) else {
-            continue;
-        };
-        let Some((sess, body)) = rest.split_once('\n') else {
-            continue;
-        };
-        let Ok(fork_from) = uuid::Uuid::parse_str(sess) else {
-            tracing::warn!(job = %name, "legacy @immediate row has invalid UUID in X-FORK-FROM; skipping");
-            continue;
-        };
-        let new_schedule = ScheduleKind::BackgroundContinuation { fork_from }.to_string();
-        tx.execute(
-            "UPDATE cron_specs SET schedule = ?1, prompt = ?2 WHERE job_name = ?3",
-            rusqlite::params![new_schedule, body, name],
-        )?;
-        migrated += 1;
-    }
-    tx.commit()?;
-    Ok(migrated)
 }
 
 /// Execute one cron job: lock check → DB insert → subprocess → log write → DB update → lock delete.
 ///
 /// Per D-02: subprocess failures log `tracing::error` only, do not propagate.
-/// Results are persisted to the `cron_runs` table (summary + notify_json).
+/// Results are persisted to the `async_runs` table (summary + notify_json).
 /// A separate Telegram delivery loop reads pending rows and sends notifications.
 // internal helper; refactor to a config struct is out of scope for this cleanup pass
 #[allow(clippy::too_many_arguments)]
@@ -342,7 +309,7 @@ async fn execute_job(
     use std::process::Stdio;
 
     // Lock check (CRON-04)
-    let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+    let lock_ttl = effective_lock_ttl(spec);
     if is_lock_fresh(agent_dir, job_name, lock_ttl) {
         tracing::info!(job = %job_name, "skipping — previous run still active (lock fresh)");
         return;
@@ -403,26 +370,20 @@ async fn execute_job(
         crate::cc::invocation::baseline_disallowed_tools(),
     );
 
-    // Schema and (optional) --fork-session source come from spec.schedule_kind.
-    // BackgroundContinuation produces both a stricter schema (bg) and a
-    // resume-target main session UUID; everything else gets the regular
-    // cron schema and no fork.
-    let (json_schema_str, fork_from_main_session) = select_schema_and_fork(spec);
     let prompt_for_cc = spec.prompt.clone();
 
     let mcp_path = crate::cc::invocation::mcp_config_path(ssh_config_path, agent_dir);
 
-    let fork_session = fork_from_main_session.is_some();
     let invocation = crate::cc::invocation::ClaudeInvocation {
         mcp_config_path: Some(mcp_path),
-        json_schema: Some(json_schema_str.into()),
+        json_schema: Some(right_codegen::CRON_SCHEMA_JSON.into()),
         output_format: crate::cc::invocation::OutputFormat::StreamJson,
         model: model.map(|s| s.to_owned()),
         max_budget_usd: Some(spec.max_budget_usd),
         max_turns: None,
-        resume_session_id: fork_from_main_session,
+        resume_session_id: None,
         new_session_id: Some(run_id.clone()),
-        fork_session,
+        fork_session: false,
         allowed_tools: vec![],
         disallowed_tools,
         extra_args: vec![],
@@ -521,13 +482,14 @@ async fn execute_job(
         );
         if which::which("claude").is_err() && which::which("claude-bun").is_err() {
             tracing::error!(job = %job_name, "claude binary not found in PATH");
-            update_run_record(&conn, &run_id, None, "failed");
+            update_failed_run_record(&conn, &run_id, None);
             std::fs::remove_file(&lock_path).ok();
             return;
         }
         let host_log_dir = agent_dir.join("crons").join("logs");
         if let Err(e) = std::fs::create_dir_all(&host_log_dir) {
             tracing::error!(job = %job_name, "failed to create log dir: {e:#}");
+            update_failed_run_record(&conn, &run_id, None);
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -558,7 +520,7 @@ async fn execute_job(
     let mut child = match right_process::ProcessGroupChild::spawn(cmd) {
         Err(e) => {
             tracing::error!(job = %job_name, "spawn failed: {e:#}");
-            update_run_record(&conn, &run_id, None, "failed");
+            update_failed_run_record(&conn, &run_id, None);
             std::fs::remove_file(&lock_path).ok();
             return;
         }
@@ -603,7 +565,7 @@ async fn execute_job(
         }
     };
     if exit_status.is_none() {
-        update_run_record(&conn, &run_id, None, "failed");
+        update_failed_run_record(&conn, &run_id, None);
         std::fs::remove_file(&lock_path).ok();
         return;
     }
@@ -664,8 +626,11 @@ async fn execute_job(
         "failed"
     };
 
-    // DB update on completion (D-04)
-    update_run_record(&conn, &run_id, exit_code, status);
+    // The terminal `status='success'` transition is deferred to the success branch
+    // below so it stays atomic with the output persist. The failure branch performs
+    // its own `update_run_record(failed)` before reflection. This prevents a state
+    // where `status='success'` is committed but output preservation fails, leaving
+    // the row at `delivery_status='none'` and silently dropping user-visible output.
 
     // Delete lock on completion (CRON-04)
     std::fs::remove_file(&lock_path).ok();
@@ -755,31 +720,52 @@ async fn execute_job(
                     None
                 };
 
-                let delivery_status = if cron_output.notify.is_some() {
-                    "pending"
-                } else {
-                    "silent"
-                };
-                if let Err(e) = conn.execute(
-                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2, delivery_status = ?3, no_notify_reason = ?4 WHERE id = ?5",
-                    rusqlite::params![cron_output.summary, notify_json, delivery_status, cron_output.no_notify_reason, run_id],
-                ) {
-                    tracing::error!(job = %job_name, "failed to persist cron output to DB: {e:#}");
-                }
+                // Persist output and flip status='success' atomically. If either
+                // write fails, roll back and mark the row 'failed' so the operator
+                // sees the run as broken instead of stuck at 'success' with no
+                // delivery payload.
+                let tx_result: Result<&'static str, rusqlite::Error> = (|| {
+                    let tx = conn.unchecked_transaction()?;
+                    let delivery_status = persist_successful_cron_output(
+                        &tx,
+                        &run_id,
+                        &cron_output,
+                        notify_json.as_deref(),
+                    )?;
+                    right_agent::async_runs::finish_run(&tx, &run_id, exit_code, "success")?;
+                    tx.commit()?;
+                    Ok(delivery_status)
+                })();
 
-                tracing::info!(
-                    job = %job_name,
-                    has_notify = cron_output.notify.is_some(),
-                    delivery_status,
-                    no_notify_reason = cron_output.no_notify_reason.as_deref().unwrap_or("-"),
-                    "cron output persisted to DB"
-                );
+                match tx_result {
+                    Ok(delivery_status) => {
+                        tracing::info!(
+                            job = %job_name,
+                            has_notify = cron_output.notify.is_some(),
+                            delivery_status,
+                            no_notify_reason = cron_output.no_notify_reason.as_deref().unwrap_or("-"),
+                            "cron output persisted to DB"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            job = %job_name,
+                            "failed to persist cron output atomically; marking run failed: {e:#}"
+                        );
+                        update_failed_run_record(&conn, &run_id, exit_code);
+                    }
+                }
             }
             Err(reason) => {
                 tracing::warn!(job = %job_name, reason, "failed to parse cron output");
+                update_failed_run_record(&conn, &run_id, exit_code);
             }
         }
     } else {
+        // Failure path: commit terminal status='failed' before reflection runs.
+        // Reflection then writes its own failure notify via persist_run_output,
+        // which is consistent with status='failed'.
+        update_run_record(&conn, &run_id, exit_code, "failed");
         let exit_str = exit_code.map_or("unknown".to_string(), |c| c.to_string());
         let raw_detail = find_last_result_line(&collected_lines)
             .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
@@ -844,9 +830,16 @@ async fn execute_job(
         };
         match serde_json::to_string(&notify) {
             Ok(json) => {
-                if let Err(e) = conn.execute(
-                    "UPDATE cron_runs SET summary = ?1, notify_json = ?2, delivery_status = 'pending' WHERE id = ?3",
-                    rusqlite::params!["failed", json, run_id],
+                if let Err(e) = right_agent::async_runs::persist_run_output(
+                    &conn,
+                    &run_id,
+                    right_agent::async_runs::RunOutput {
+                        summary: Some("failed"),
+                        notify_json: Some(&json),
+                        no_notify_reason: None,
+                        error_json: None,
+                        delivery_required: true,
+                    },
                 ) {
                     tracing::error!(job = %job_name, "failed to persist failure notify to DB: {e:#}");
                 }
@@ -926,11 +919,7 @@ fn update_run_record(
     exit_code: Option<i32>,
     status: &str,
 ) {
-    let finished_at = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = conn.execute(
-        "UPDATE cron_runs SET finished_at=?1, exit_code=?2, status=?3 WHERE id=?4",
-        rusqlite::params![finished_at, exit_code, status, run_id],
-    ) {
+    if let Err(e) = right_agent::async_runs::finish_run(conn, run_id, exit_code, status) {
         tracing::error!("DB update for run {run_id} failed: {e:#}");
     }
 }
@@ -1110,7 +1099,7 @@ fn fire_one_shot_specs(
     debug: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     for (name, spec) in specs {
-        let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+        let lock_ttl = effective_lock_ttl(&spec);
         if is_lock_fresh(agent_dir, &name, lock_ttl) {
             tracing::info!(job = %name, kind = kind_label, "one-shot job locked — skipping until next tick");
             continue;
@@ -1202,7 +1191,7 @@ fn reconcile_jobs(
         debug,
     );
 
-    // Fire Immediate + BackgroundContinuation specs (every tick — they are one-shot)
+    // Fire Immediate specs (every tick — they are one-shot)
     let immediate: Vec<(String, CronSpec)> = new_specs
         .iter()
         .filter(|(_, spec)| is_reconcile_tick_kind(&spec.schedule_kind))
@@ -1211,7 +1200,7 @@ fn reconcile_jobs(
 
     fire_one_shot_specs(
         immediate,
-        "immediate-or-bg",
+        "immediate",
         triggered_handles,
         agent_dir,
         agent_name,
@@ -1240,8 +1229,7 @@ fn reconcile_jobs(
 
     // Spawn new handles for new or changed jobs
     for (name, spec) in &new_specs {
-        // Skip RunAt, Immediate, and BackgroundContinuation specs —
-        // they are handled above, not run_job_loop
+        // Skip RunAt and Immediate specs — they are handled above, not run_job_loop.
         if is_run_job_loop_skip_kind(&spec.schedule_kind) {
             continue;
         }
@@ -1290,7 +1278,7 @@ fn reconcile_jobs(
             }
 
             // Check lock — if locked, skip (trigger lost, same as schedule miss while locked)
-            let lock_ttl = spec.lock_ttl.as_deref().unwrap_or("30m");
+            let lock_ttl = effective_lock_ttl(spec);
             if is_lock_fresh(agent_dir, name, lock_ttl) {
                 tracing::info!(job = %name, "triggered but locked — skipping");
                 continue;
@@ -1555,6 +1543,46 @@ mod tests {
         assert!(!is_lock_fresh(dir.path(), "my-job", "30m"));
     }
 
+    #[test]
+    fn default_lock_ttl_uses_six_hours_for_immediate_only() {
+        use right_agent::cron_spec::{CronSpec, ScheduleKind};
+
+        let immediate = CronSpec {
+            schedule_kind: ScheduleKind::Immediate,
+            prompt: "p".into(),
+            lock_ttl: None,
+            max_budget_usd: 1.0,
+            triggered_at: None,
+            target_chat_id: None,
+            target_thread_id: None,
+        };
+        let recurring = CronSpec {
+            schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
+            ..immediate.clone()
+        };
+
+        let dir = tempdir().unwrap();
+        let lock_dir = dir.path().join("crons").join(".locks");
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let lock_path = lock_dir.join("my-job.json");
+        let three_hours_ago = chrono::Utc::now() - chrono::Duration::hours(3);
+        let lock = LockFile {
+            heartbeat: three_hours_ago,
+        };
+        std::fs::write(&lock_path, serde_json::to_string(&lock).unwrap()).unwrap();
+
+        assert!(is_lock_fresh(
+            dir.path(),
+            "my-job",
+            effective_lock_ttl(&immediate)
+        ));
+        assert!(!is_lock_fresh(
+            dir.path(),
+            "my-job",
+            effective_lock_ttl(&recurring)
+        ));
+    }
+
     // -- CronReplyOutput parser tests (stream-json NDJSON format) --
 
     #[test]
@@ -1751,65 +1779,9 @@ mod tests {
     }
 
     #[test]
-    fn select_schema_for_recurring_uses_cron_schema() {
-        let spec = right_agent::cron_spec::CronSpec {
-            schedule_kind: right_agent::cron_spec::ScheduleKind::Recurring("*/5 * * * *".into()),
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: None,
-            target_thread_id: None,
-        };
-        let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_codegen::CRON_SCHEMA_JSON);
-        assert!(fork.is_none());
-    }
-
-    #[test]
-    fn select_schema_for_immediate_uses_cron_schema() {
-        let spec = right_agent::cron_spec::CronSpec {
-            schedule_kind: right_agent::cron_spec::ScheduleKind::Immediate,
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: None,
-            target_thread_id: None,
-        };
-        let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_codegen::CRON_SCHEMA_JSON);
-        assert!(fork.is_none());
-    }
-
-    #[test]
-    fn select_schema_for_bg_uses_bg_schema_and_fork_from() {
-        let main = uuid::Uuid::new_v4();
-        let spec = right_agent::cron_spec::CronSpec {
-            schedule_kind: right_agent::cron_spec::ScheduleKind::BackgroundContinuation {
-                fork_from: main,
-            },
-            prompt: "p".into(),
-            lock_ttl: None,
-            max_budget_usd: 1.0,
-            triggered_at: None,
-            target_chat_id: None,
-            target_thread_id: None,
-        };
-        let (schema, fork) = select_schema_and_fork(&spec);
-        assert_eq!(schema, right_codegen::BG_CONTINUATION_SCHEMA_JSON);
-        assert_eq!(fork.as_deref(), Some(main.to_string().as_str()));
-    }
-
-    #[test]
-    fn is_reconcile_tick_kind_includes_immediate_and_bg() {
+    fn is_reconcile_tick_kind_includes_immediate() {
         use right_agent::cron_spec::ScheduleKind;
         assert!(is_reconcile_tick_kind(&ScheduleKind::Immediate));
-        assert!(is_reconcile_tick_kind(
-            &ScheduleKind::BackgroundContinuation {
-                fork_from: uuid::Uuid::new_v4(),
-            }
-        ));
     }
 
     #[test]
@@ -1827,17 +1799,12 @@ mod tests {
     }
 
     #[test]
-    fn is_run_job_loop_skip_kind_includes_runat_immediate_and_bg() {
+    fn is_run_job_loop_skip_kind_includes_runat_and_immediate() {
         use right_agent::cron_spec::ScheduleKind;
         assert!(is_run_job_loop_skip_kind(&ScheduleKind::RunAt(
             chrono::Utc::now()
         )));
         assert!(is_run_job_loop_skip_kind(&ScheduleKind::Immediate));
-        assert!(is_run_job_loop_skip_kind(
-            &ScheduleKind::BackgroundContinuation {
-                fork_from: uuid::Uuid::new_v4(),
-            }
-        ));
     }
 
     #[test]
@@ -1850,92 +1817,6 @@ mod tests {
         assert!(!is_run_job_loop_skip_kind(&ScheduleKind::Recurring(
             "*/5 * * * *".into()
         )));
-    }
-
-    #[test]
-    fn migrate_legacy_bg_rewrites_at_immediate_with_x_fork_from() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let main = uuid::Uuid::new_v4();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('bg-old', '@immediate', ?1, '6h', 5.0, 0, NULL, -100, NULL, ?2, ?2)",
-            rusqlite::params![format!("X-FORK-FROM: {main}\nbody continues here"), now],
-        ).unwrap();
-
-        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(migrated, 1);
-
-        let (schedule, prompt): (String, String) = conn
-            .query_row(
-                "SELECT schedule, prompt FROM cron_specs WHERE job_name = 'bg-old'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(schedule, format!("@bg:{main}"));
-        assert_eq!(prompt, "body continues here");
-    }
-
-    #[test]
-    fn migrate_legacy_bg_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let main = uuid::Uuid::new_v4();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('bg-old', '@immediate', ?1, '6h', 5.0, 0, NULL, -100, NULL, ?2, ?2)",
-            rusqlite::params![format!("X-FORK-FROM: {main}\nbody"), now],
-        ).unwrap();
-
-        let first = migrate_legacy_bg_continuation(&conn).unwrap();
-        let second = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(first, 1);
-        assert_eq!(second, 0, "second pass must migrate zero rows");
-    }
-
-    #[test]
-    fn migrate_legacy_bg_skips_invalid_uuid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('bg-bad', '@immediate', 'X-FORK-FROM: not-a-uuid\nbody', '6h', 5.0, 0, NULL, -100, NULL, ?1, ?1)",
-            rusqlite::params![now],
-        ).unwrap();
-
-        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(migrated, 0);
-
-        let schedule: String = conn
-            .query_row(
-                "SELECT schedule FROM cron_specs WHERE job_name = 'bg-bad'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            schedule, "@immediate",
-            "row with invalid UUID must be untouched"
-        );
-    }
-
-    #[test]
-    fn migrate_legacy_bg_skips_immediate_without_header() {
-        let tmp = tempfile::tempdir().unwrap();
-        let conn = right_db::open_connection(tmp.path(), true).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO cron_specs (job_name, schedule, prompt, lock_ttl, max_budget_usd, recurring, run_at, target_chat_id, target_thread_id, created_at, updated_at) \
-             VALUES ('plain-imm', '@immediate', 'just a prompt', '6h', 5.0, 0, NULL, -100, NULL, ?1, ?1)",
-            rusqlite::params![now],
-        ).unwrap();
-
-        let migrated = migrate_legacy_bg_continuation(&conn).unwrap();
-        assert_eq!(migrated, 0);
     }
 }
 
@@ -1951,7 +1832,7 @@ mod target_snapshot_tests {
     }
 
     #[test]
-    fn insert_running_run_snapshots_target() {
+    fn insert_running_run_writes_async_runs() {
         let (_dir, conn) = migrated_conn();
         let spec = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
@@ -1972,19 +1853,18 @@ mod target_snapshot_tests {
         )
         .unwrap();
 
-        let (chat, thread): (Option<i64>, Option<i64>) = conn
+        let row: (String, String, Option<i64>, Option<i64>) = conn
             .query_row(
-                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-1'",
+                "SELECT kind, producer_ref, target_chat_id, target_thread_id FROM async_runs WHERE id = 'run-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
-        assert_eq!(chat, Some(-777));
-        assert_eq!(thread, Some(13));
+        assert_eq!(row, ("cron".into(), "job-x".into(), Some(-777), Some(13)));
     }
 
     #[test]
-    fn insert_running_run_writes_null_when_spec_has_no_target() {
+    fn insert_running_run_writes_zero_for_targetless_cron() {
         let (_dir, conn) = migrated_conn();
         let spec = CronSpec {
             schedule_kind: ScheduleKind::Recurring("*/5 * * * *".into()),
@@ -2005,14 +1885,13 @@ mod target_snapshot_tests {
         )
         .unwrap();
 
-        let (chat, thread): (Option<i64>, Option<i64>) = conn
+        let target_chat_id: i64 = conn
             .query_row(
-                "SELECT target_chat_id, target_thread_id FROM cron_runs WHERE id = 'run-2'",
+                "SELECT target_chat_id FROM async_runs WHERE id = 'run-2'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(chat, None);
-        assert_eq!(thread, None);
+        assert_eq!(target_chat_id, 0);
     }
 }

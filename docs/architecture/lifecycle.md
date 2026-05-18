@@ -75,9 +75,10 @@ Per message:
   ├─ Observe Claude Code `system/init`; if `right` MCP is unhealthy, schedule
   │   cache repair asynchronously without interrupting or retrying the turn
   ├─ If foreground exits via 600s timeout or 🌙 Background button:
-  │   ├─ Insert cron_specs row with schedule_kind=BackgroundContinuation
-  │   │   { fork_from: <main_session_id> } (encoded as `@bg:<uuid>`) and
-  │   │   the continuation prompt body
+  │   ├─ Insert async_runs row with kind='background', source_session_id =
+  │   │   <main_session_id>, run_session_id = <run_id>
+  │   ├─ Immediately fork Claude with --resume <main_session_id>
+  │   │   --fork-session --session-id <run_id>
   │   ├─ Edit thinking message to per-reason banner ("⏱ Foreground hit 10-min
   │   │   limit — continuing in background…" / "🌙 Working in background…")
   │   └─ Worker returns; debounce frees, user can send next message

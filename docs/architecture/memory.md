@@ -32,12 +32,10 @@ explicitly when needed.
 is sent to background (auto-timeout at 10 min, or user clicks the Background
 button), the worker's `Backgrounded` arm retains the user message *only* (no
 assistant text yet) keyed by the main `--resume` session UUID with
-`update_mode: "append"`. Without this, the cron-delivery answer relayed back
-through `--resume <main>` would arrive over a session whose user turn was
-never recorded in Hindsight (cron-side sessions skip auto-retain). The
-assistant turn extends the same document later via either an explicit
-`memory_retain` MCP call from the cron prompt or the next foreground turn's
-auto-retain.
+`update_mode: "append"`. Without this, the background answer would arrive over
+a session whose user turn was never recorded in Hindsight. The assistant turn
+extends the same document later via either an explicit `memory_retain` MCP call
+from the background prompt or the next foreground turn's auto-retain.
 
 **File mode (fallback):** Agent manages `MEMORY.md` via CC Edit/Write.
 Bot injects file contents into system prompt (truncated to 200 lines).

@@ -24,8 +24,9 @@ const V19_SCHEMA: &str = include_str!("sql/v19_cron_runs_target_index.sql");
 const V20_SCHEMA: &str = include_str!("sql/v20_learned_skills.sql");
 const V21_SCHEMA: &str = include_str!("sql/v21_conversation_messages.sql");
 const V22_SCHEMA: &str = include_str!("sql/v22_skill_review_reports.sql");
+const V23_SCHEMA: &str = include_str!("sql/v23_async_runs.sql");
 
-pub const LATEST_SCHEMA_VERSION: u32 = 22;
+pub const LATEST_SCHEMA_VERSION: u32 = 23;
 
 /// v12: Add delivery_status and no_notify_reason columns to cron_runs,
 /// backfill existing rows, and create auto-set trigger.
@@ -221,6 +222,151 @@ fn v22_skill_review_reports(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+fn v23_async_runs(tx: &Transaction) -> Result<(), HookError> {
+    tx.execute_batch(V23_SCHEMA)?;
+    tx.execute_batch(
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, source_session_id, run_session_id,
+            target_chat_id, target_thread_id, status, handoff_state,
+            started_at, finished_at, exit_code, log_path, summary,
+            notify_json, no_notify_reason, error_json, delivery_required,
+            delivery_status, delivery_attempts, delivered_at,
+            last_delivery_error, created_at, updated_at
+         )
+         SELECT
+            cr.id,
+            CASE
+              WHEN (cr.job_name LIKE 'bg-%' AND cs.job_name IS NULL)
+                OR cs.schedule LIKE '@bg:%'
+                OR (
+                  cs.schedule = '@immediate'
+                  AND cs.prompt LIKE 'X-FORK-FROM: %'
+                  AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+                )
+              THEN 'background'
+              ELSE 'cron'
+            END,
+            cr.job_name,
+            CASE
+              WHEN cs.schedule LIKE '@bg:%' THEN substr(cs.schedule, 5)
+              WHEN cs.schedule = '@immediate'
+                AND cs.prompt LIKE 'X-FORK-FROM: %'
+                AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+              THEN substr(
+                cs.prompt,
+                length('X-FORK-FROM: ') + 1,
+                instr(cs.prompt, char(10)) - length('X-FORK-FROM: ') - 1
+              )
+              ELSE NULL
+            END,
+            cr.id,
+            COALESCE(cr.target_chat_id, cs.target_chat_id, 0),
+            cr.target_thread_id,
+            cr.status,
+            CASE
+              WHEN (cr.job_name LIKE 'bg-%' AND cs.job_name IS NULL)
+                OR cs.schedule LIKE '@bg:%'
+                OR (
+                  cs.schedule = '@immediate'
+                  AND cs.prompt LIKE 'X-FORK-FROM: %'
+                  AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+                )
+              THEN 'spawned'
+              ELSE NULL
+            END,
+            cr.started_at,
+            cr.finished_at,
+            cr.exit_code,
+            cr.log_path,
+            cr.summary,
+            cr.notify_json,
+            cr.no_notify_reason,
+            NULL,
+            CASE WHEN cr.notify_json IS NULL THEN 0 ELSE 1 END,
+            CASE
+              WHEN cr.delivery_status = 'silent' THEN 'none'
+              WHEN cr.delivery_status IS NULL AND cr.notify_json IS NULL THEN 'none'
+              WHEN cr.delivery_status IS NULL AND cr.notify_json IS NOT NULL THEN 'pending'
+              ELSE cr.delivery_status
+            END,
+            0,
+            cr.delivered_at,
+            NULL,
+            cr.started_at,
+            COALESCE(cr.finished_at, cr.started_at)
+         FROM cron_runs cr
+         LEFT JOIN cron_specs cs ON cs.job_name = cr.job_name",
+    )?;
+    tx.execute_batch(
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, source_session_id, run_session_id,
+            target_chat_id, target_thread_id, status, handoff_state,
+            started_at, finished_at, exit_code, log_path, summary,
+            notify_json, no_notify_reason, error_json, delivery_required,
+            delivery_status, delivery_attempts, delivered_at,
+            last_delivery_error, created_at, updated_at
+         )
+         SELECT
+            lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' ||
+            lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' ||
+            lower(hex(randomblob(6))),
+            'background',
+            cs.job_name,
+            CASE
+              WHEN cs.schedule LIKE '@bg:%' THEN substr(cs.schedule, 5)
+              ELSE substr(
+                cs.prompt,
+                length('X-FORK-FROM: ') + 1,
+                instr(cs.prompt, char(10)) - length('X-FORK-FROM: ') - 1
+              )
+            END,
+            lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' ||
+            lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' ||
+            lower(hex(randomblob(6))),
+            COALESCE(cs.target_chat_id, 0),
+            cs.target_thread_id,
+            'failed',
+            'queued',
+            COALESCE(cs.triggered_at, cs.created_at),
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            NULL,
+            NULL,
+            'background handoff interrupted by async_runs migration',
+            '{\"content\":\"Background work was interrupted during an upgrade before it could be started.\"}',
+            NULL,
+            '{\"error\":\"legacy background cron spec removed before execution\"}',
+            1,
+            'pending',
+            0,
+            NULL,
+            NULL,
+            COALESCE(cs.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         FROM cron_specs cs
+         WHERE (
+             cs.schedule LIKE '@bg:%'
+             OR (
+               cs.schedule = '@immediate'
+               AND cs.prompt LIKE 'X-FORK-FROM: %'
+               AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+             )
+           )
+           AND NOT EXISTS (SELECT 1 FROM cron_runs cr WHERE cr.job_name = cs.job_name)",
+    )?;
+    tx.execute(
+        "DELETE FROM cron_specs
+         WHERE schedule LIKE '@bg:%'
+            OR (
+              schedule = '@immediate'
+              AND prompt LIKE 'X-FORK-FROM: %'
+              AND instr(prompt, char(10)) > length('X-FORK-FROM: ') + 1
+            )",
+        [],
+    )?;
+    tx.execute_batch("DROP TABLE cron_runs")?;
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -245,6 +391,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V20_SCHEMA),
         M::up(V21_SCHEMA),
         M::up_with_hook(V22_SCHEMA, v22_skill_review_reports),
+        M::up_with_hook("", v23_async_runs),
     ])
 });
 
@@ -313,28 +460,27 @@ mod tests {
     }
 
     #[test]
-    fn migrations_apply_cleanly_to_v5() {
+    fn v23_async_runs_has_delivery_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('cron_runs')")
+            .prepare("SELECT name FROM pragma_table_info('async_runs')")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
-        assert!(
-            cols.contains(&"summary".to_string()),
-            "summary column missing"
-        );
-        assert!(
-            cols.contains(&"notify_json".to_string()),
-            "notify_json column missing"
-        );
-        assert!(
-            cols.contains(&"delivered_at".to_string()),
-            "delivered_at column missing"
-        );
+        for col in [
+            "summary",
+            "notify_json",
+            "delivered_at",
+            "delivery_status",
+            "no_notify_reason",
+            "target_chat_id",
+            "target_thread_id",
+        ] {
+            assert!(cols.contains(&col.to_string()), "{col} column missing");
+        }
     }
 
     #[test]
@@ -459,7 +605,7 @@ mod tests {
     #[test]
     fn v12_cron_diagnostics_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
-        MIGRATIONS.to_latest(&mut conn).unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
         let cols: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('cron_runs')")
             .unwrap()
@@ -480,7 +626,7 @@ mod tests {
     #[test]
     fn v12_backfill_delivery_status() {
         let mut conn = Connection::open_in_memory().unwrap();
-        MIGRATIONS.to_latest(&mut conn).unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
 
         // Insert a delivered run (has notify_json + delivered_at)
         conn.execute(
@@ -528,7 +674,7 @@ mod tests {
             .unwrap();
 
         // v12 must not fail even though columns already exist.
-        MIGRATIONS.to_latest(&mut conn).unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
 
         let cols: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('cron_runs')")
@@ -964,7 +1110,7 @@ mod tests {
     #[test]
     fn v18_cron_runs_has_target_columns() {
         let mut conn = Connection::open_in_memory().unwrap();
-        MIGRATIONS.to_latest(&mut conn).unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
         let cols: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('cron_runs')")
             .unwrap()
@@ -1014,8 +1160,8 @@ mod tests {
             [&now],
         )
         .unwrap();
-        // Apply v18 — this is what we're actually testing.
-        MIGRATIONS.to_latest(&mut conn).unwrap();
+        // Apply through v21 so cron_runs still exists while checking v18 behavior.
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
         let chat: Option<i64> = conn
             .query_row(
                 "SELECT target_chat_id FROM cron_runs WHERE id = 'run-1'",
@@ -1039,6 +1185,441 @@ mod tests {
             thread.is_none(),
             "target_thread_id should remain NULL when spec's thread is NULL"
         );
+    }
+
+    #[test]
+    fn v23_creates_async_runs_and_drops_cron_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let async_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='async_runs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(async_count, 1, "async_runs table should exist");
+
+        let cron_runs_exists = conn.prepare("SELECT 1 FROM cron_runs LIMIT 1").is_ok();
+        assert!(!cron_runs_exists, "cron_runs must be dropped after v22");
+    }
+
+    #[test]
+    fn v23_migrates_cron_runs_to_async_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_runs (
+            id, job_name, started_at, finished_at, exit_code, status, log_path,
+            summary, notify_json, delivered_at, delivery_status, no_notify_reason,
+            target_chat_id, target_thread_id
+         ) VALUES (
+            'run-1', 'morning', '2026-05-18T01:00:00Z', '2026-05-18T01:01:00Z',
+            0, 'success', '/log/run-1.ndjson', 'summary', '{\"content\":\"hi\"}',
+            NULL, 'pending', NULL, -100, 7
+         )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+        ) = conn
+            .query_row(
+                "SELECT kind, producer_ref, delivery_status, notify_json, target_chat_id, target_thread_id
+             FROM async_runs WHERE id = 'run-1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, "cron");
+        assert_eq!(row.1, "morning");
+        assert_eq!(row.2, "pending");
+        assert_eq!(row.3.as_deref(), Some("{\"content\":\"hi\"}"));
+        assert_eq!(row.4, Some(-100));
+        assert_eq!(row.5, Some(7));
+    }
+
+    #[test]
+    fn v23_migrates_background_run_detected_by_schedule() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                target_chat_id
+             ) VALUES (
+                'continuation-run', '@bg:123e4567-e89b-12d3-a456-426614174000',
+                'continue', 1.0, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                -100
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+             VALUES (
+                'schedule-bg-1', 'continuation-run', '2026-05-18T02:00:00Z',
+                'success', '/log/schedule-bg-1.ndjson', 'silent'
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT kind, source_session_id, handoff_state
+                 FROM async_runs WHERE id = 'schedule-bg-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(
+            row.1.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174000")
+        );
+        assert_eq!(row.2.as_deref(), Some("spawned"));
+    }
+
+    #[test]
+    fn v23_migrates_immediate_background_run_with_source_header() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                target_chat_id
+             ) VALUES (
+                'started-immediate-bg', '@immediate',
+                'X-FORK-FROM: 123e4567-e89b-12d3-a456-426614174003
+continue started background work',
+                1.0, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                -100
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+             VALUES (
+                'started-immediate-run', 'started-immediate-bg', '2026-05-18T02:00:00Z',
+                'success', '/log/started-immediate-run.ndjson', 'silent'
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT kind, source_session_id, handoff_state
+                 FROM async_runs WHERE id = 'started-immediate-run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(
+            row.1.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174003")
+        );
+        assert_eq!(row.2.as_deref(), Some("spawned"));
+
+        let spec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_specs WHERE job_name = 'started-immediate-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_count, 0, "legacy immediate fork spec must be deleted");
+    }
+
+    #[test]
+    fn v23_preserves_copied_run_null_thread_snapshot() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                target_chat_id, target_thread_id
+             ) VALUES (
+                'threaded-spec', '*/15 * * * *', 'run', 1.0,
+                '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                -100, 77
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (
+                id, job_name, started_at, status, log_path, delivery_status,
+                target_chat_id, target_thread_id
+             ) VALUES (
+                'root-topic-run', 'threaded-spec', '2026-05-18T02:00:00Z',
+                'success', '/log/root-topic-run.ndjson', 'silent', -100, NULL
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let thread_id: Option<i64> = conn
+            .query_row(
+                "SELECT target_thread_id FROM async_runs WHERE id = 'root-topic-run'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            thread_id.is_none(),
+            "copied run must preserve NULL target_thread_id snapshot"
+        );
+    }
+
+    #[test]
+    fn v23_detects_background_run_by_bg_job_name_when_spec_is_missing() {
+        // Orphaned cron_runs row (cron_specs row absent) with a `bg-` prefixed
+        // job_name is the legacy shape we still want to classify as background.
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+             VALUES (
+                'bg-name-run', 'bg-legacy', '2026-05-18T02:00:00Z',
+                'success', '/log/bg-name-run.ndjson', 'silent'
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT kind, handoff_state FROM async_runs WHERE id = 'bg-name-run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(row.1.as_deref(), Some("spawned"));
+    }
+
+    #[test]
+    fn v23_keeps_user_cron_with_bg_prefix_classified_as_cron() {
+        // A user-created recurring cron job whose name happens to start with
+        // `bg-` (allowed by validate_job_name) and whose spec is still present
+        // must NOT be reclassified as background. Only the `bg-` + orphaned-
+        // spec combination survives as a background heuristic.
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                target_chat_id
+             ) VALUES (
+                'bg-status-check', '0 9 * * *', 'check status', 1.0,
+                '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                -100
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+             VALUES (
+                'bg-status-check-run', 'bg-status-check', '2026-05-18T09:00:00Z',
+                'success', '/log/bg-status-check-run.ndjson', 'pending'
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (String, Option<String>) = conn
+            .query_row(
+                "SELECT kind, handoff_state FROM async_runs WHERE id = 'bg-status-check-run'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row.0, "cron",
+            "user cron job with `bg-` prefix and live spec must remain kind='cron'"
+        );
+        assert!(
+            row.1.is_none(),
+            "user cron job must not be marked as a spawned handoff"
+        );
+    }
+
+    #[test]
+    fn v23_synthesizes_failed_background_run_for_pending_legacy_bg_spec() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                triggered_at, target_chat_id, target_thread_id
+             ) VALUES (
+                'queued-bg', '@bg:123e4567-e89b-12d3-a456-426614174001',
+                'continue', 1.0, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                '2026-05-18T02:00:00Z', -100, 42
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (i64, String, String, String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), kind, status, delivery_status, source_session_id, target_thread_id
+                 FROM async_runs WHERE producer_ref = 'queued-bg'",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, 1);
+        assert_eq!(row.1, "background");
+        assert_eq!(row.2, "failed");
+        assert_eq!(row.3, "pending");
+        assert_eq!(
+            row.4.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174001")
+        );
+        assert_eq!(row.5, Some(42));
+
+        let spec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_specs WHERE job_name = 'queued-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_count, 0, "legacy @bg cron spec must be deleted");
+    }
+
+    #[test]
+    fn v23_synthesizes_failed_background_run_for_immediate_fork_spec() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                triggered_at, target_chat_id, target_thread_id
+             ) VALUES (
+                'immediate-bg', '@immediate',
+                'X-FORK-FROM: 123e4567-e89b-12d3-a456-426614174002
+continue background work',
+                1.0, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                '2026-05-18T02:00:00Z', -100, 43
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let async_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM async_runs WHERE producer_ref = 'immediate-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(async_count, 1);
+
+        let row: (String, String, String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT kind, status, delivery_status, source_session_id, target_thread_id
+                 FROM async_runs WHERE producer_ref = 'immediate-bg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(row.1, "failed");
+        assert_eq!(row.2, "pending");
+        assert_eq!(
+            row.3.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174002")
+        );
+        assert_eq!(row.4, Some(43));
+
+        let spec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_specs WHERE job_name = 'immediate-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_count, 0, "legacy immediate fork spec must be deleted");
+    }
+
+    #[test]
+    fn v23_maps_silent_delivery_status_to_none() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_runs (id, job_name, started_at, status, log_path, delivery_status)
+         VALUES ('silent-1', 'quiet', '2026-05-18T02:00:00Z', 'success', '/log', 'silent')",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let delivery: (i64, String) = conn
+            .query_row(
+                "SELECT delivery_required, delivery_status FROM async_runs WHERE id = 'silent-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(delivery, (0, "none".to_string()));
     }
 
     #[test]

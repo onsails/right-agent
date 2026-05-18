@@ -98,7 +98,7 @@
 - `telegram/` — bot adaptor, dispatcher, handler, per-session worker, session table, chat-ID filter, OAuth callback server, Telegram markdown rendering/splitting, and attachment delivery (with STT integration).
 - `login.rs` — token-based Claude login flow (setup-token, env var injection).
 - `sync.rs` — background `right-platform-store` sync to `/sandbox/.platform/`.
-- `cron.rs`, `cron_delivery.rs` — cron engine and delivery loop (resumes main session so cron results land in agent context).
+- `cron.rs`, `async_delivery.rs` — cron engine and async delivery loop (resumes main session so cron/background results land in agent context).
 - `reflection.rs` — `reflect_on_failure` primitive (see Reflection Primitive).
 - `stt/` — host-side voice/video_note transcription (ffmpeg + whisper-rs + Russian markers).
 - `error.rs` — `BotError` types.

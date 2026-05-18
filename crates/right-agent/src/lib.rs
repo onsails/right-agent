@@ -1,6 +1,7 @@
 #![warn(unreachable_pub)]
 
 pub mod agent;
+pub mod async_runs;
 pub mod cron_spec;
 pub mod doctor;
 pub mod identity_mirror;
