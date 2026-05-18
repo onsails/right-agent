@@ -12,6 +12,43 @@ fn extract_error_body(result: &rmcp::model::CallToolResult) -> serde_json::Value
     serde_json::from_str(&t.text).expect("body must be valid JSON")
 }
 
+fn extract_json_body(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+    let rmcp::model::RawContent::Text(t) = &result.content[0].raw else {
+        panic!("expected text content, got {:?}", result.content[0].raw);
+    };
+    serde_json::from_str(&t.text).expect("body must be valid JSON")
+}
+
+fn json_contains_forbidden_scope_name(value: &serde_json::Value) -> bool {
+    const FORBIDDEN: [&str; 5] = ["chat_id", "thread_id", "scope", "user_id", "session_id"];
+
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            FORBIDDEN.contains(&key.as_str()) || json_contains_forbidden_scope_name(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(json_contains_forbidden_scope_name),
+        serde_json::Value::String(value) => FORBIDDEN.contains(&value.as_str()),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
+}
+
+fn json_contains_key(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| key == needle || json_contains_key(value, needle)),
+        serde_json::Value::Array(values) => {
+            values.iter().any(|value| json_contains_key(value, needle))
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
 /// Create a [`RightBackend`] with a temp dir as agents_dir and right_home.
 /// Returns `(backend, agents_dir_path, _temp_dir_guard)`.
 fn make_backend() -> (RightBackend, PathBuf, TempDir) {
@@ -35,11 +72,11 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
     let tools = backend.tools_list();
-    // 7 cron + 1 mcp + 1 progress + 2 learning + 1 bootstrap = 12
+    // 7 cron + 1 mcp + 1 progress + 2 learning + 2 search + 1 bootstrap = 14
     assert_eq!(
         tools.len(),
-        12,
-        "expected 12 tools, got {}: {:?}",
+        14,
+        "expected 14 tools, got {}: {:?}",
         tools.len(),
         tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
     );
@@ -59,6 +96,28 @@ fn tools_list_includes_learning_tools() {
         names.contains(&"skill_learning_finish"),
         "missing skill_learning_finish: {names:?}"
     );
+}
+
+#[test]
+fn tools_list_includes_conversation_search_tools_without_scope_params() {
+    let (backend, _, _tmp) = make_backend();
+    let tools = backend.tools_list();
+    let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
+
+    assert!(names.contains(&"thread_search"), "missing thread_search");
+    assert!(names.contains(&"chat_search"), "missing chat_search");
+
+    for tool_name in ["thread_search", "chat_search"] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == tool_name)
+            .expect("tool must exist");
+        let schema = serde_json::Value::Object((*tool.input_schema).clone());
+        assert!(
+            !json_contains_forbidden_scope_name(&schema),
+            "{tool_name} schema exposes forbidden scope fields: {schema}"
+        );
+    }
 }
 
 #[test]
@@ -103,6 +162,188 @@ async fn unknown_tool_returns_error() {
     assert!(result.is_err(), "unknown tool should return Err");
     let err_msg = format!("{:#}", result.unwrap_err());
     assert!(err_msg.contains("unknown tool"), "got: {err_msg}");
+}
+
+#[tokio::test]
+async fn thread_search_without_invocation_scope_returns_tool_error() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "thread_search",
+            json!({ "query": "needle" }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "conversation_scope_unavailable");
+}
+
+#[tokio::test]
+async fn thread_search_rejects_agent_supplied_scope_params() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "thread_search",
+            json!({ "query": "needle", "chat_id": 100 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+#[tokio::test]
+async fn chat_search_rejects_query_without_searchable_terms() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "chat_search",
+            json!({ "query": "!!!" }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("tool errors should be returned as CallToolResult");
+
+    assert_eq!(result.is_error, Some(true));
+    let body = extract_error_body(&result);
+    assert_eq!(body["error"]["code"], "invalid_argument");
+}
+
+fn archive_search_fixture(conn: &rusqlite::Connection) {
+    for (chat_id, thread_id, message_id, content) in [
+        (100, 7, 1, "needle in current thread"),
+        (100, 8, 2, "needle in other thread"),
+        (200, 7, 3, "needle in other chat"),
+    ] {
+        right_db::conversation::archive_message(
+            conn,
+            right_db::conversation::ConversationMessage {
+                platform: "telegram",
+                chat_id,
+                thread_id,
+                message_id: Some(message_id),
+                sender_user_id: Some(9001),
+                sender_name: Some("Ada"),
+                addressed_to_bot: true,
+                routed_to_agent: true,
+                root_session_id: Some("session-1"),
+                turn_id: None,
+                role: right_db::conversation::ConversationRole::User,
+                content,
+            },
+        )
+        .expect("archive message");
+    }
+}
+
+async fn register_foreground_scope(backend: &RightBackend, agent_dir: &std::path::Path) {
+    backend
+        .progress_registry()
+        .register(crate::progress::ProgressRegistration {
+            invocation_id: "inv-search".to_owned(),
+            kind: crate::progress::ProgressInvocationKind::Foreground,
+            bot_socket_path: agent_dir.join("missing-bot.sock"),
+            bot_send_token: "send-token".to_owned(),
+            conversation_scope: Some(crate::progress::ConversationScope {
+                chat_id: 100,
+                thread_id: 7,
+            }),
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn thread_search_filters_current_thread() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    {
+        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        archive_search_fixture(&conn);
+    }
+    register_foreground_scope(&backend, &agent_dir).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "thread_search",
+            json!({ "query": "needle", "limit": 10 }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-search".to_owned()),
+            },
+        )
+        .await
+        .expect("thread_search should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let body = extract_json_body(&result);
+    let message_ids: Vec<i64> = body["results"]
+        .as_array()
+        .expect("results must be an array")
+        .iter()
+        .map(|row| row["message_id"].as_i64().expect("message_id"))
+        .collect();
+    assert_eq!(message_ids, vec![1]);
+    assert!(
+        !json_contains_key(&body, "chat_id"),
+        "leaked chat_id: {body}"
+    );
+}
+
+#[tokio::test]
+async fn chat_search_includes_other_threads_in_same_chat() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    {
+        let conn = right_db::open_connection(&agent_dir, false).expect("open db");
+        archive_search_fixture(&conn);
+    }
+    register_foreground_scope(&backend, &agent_dir).await;
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "chat_search",
+            json!({ "query": "needle", "limit": 10 }),
+            crate::progress::ToolCallContext {
+                invocation_id: Some("inv-search".to_owned()),
+            },
+        )
+        .await
+        .expect("chat_search should succeed");
+
+    assert_ne!(result.is_error, Some(true));
+    let body = extract_json_body(&result);
+    let message_ids: Vec<i64> = body["results"]
+        .as_array()
+        .expect("results must be an array")
+        .iter()
+        .map(|row| row["message_id"].as_i64().expect("message_id"))
+        .collect();
+    assert_eq!(message_ids, vec![2, 1]);
+    assert!(
+        !json_contains_key(&body, "chat_id"),
+        "leaked chat_id: {body}"
+    );
 }
 
 #[tokio::test]
