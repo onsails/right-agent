@@ -18,12 +18,15 @@ use right_mcp::internal_client::{
 use right_mcp::tool_error::tool_error;
 use rmcp::handler::server::tool::schema_for_type;
 use rmcp::model::{CallToolResult, Content, Tool};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// End-to-end timeout for `mcp__right__send_progress`. Bounds the wait on the
 /// bot UDS round-trip (which in turn awaits Telegram). Keeps the
 /// per-invocation rate-limit slot from being held indefinitely if Telegram
 /// stalls.
 const PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const CONVERSATION_SEARCH_DEFAULT_LIMIT: usize = 10;
 
 use crate::learning::{
     LearningMessagePhase, SkillLearningFinishParams, SkillLearningStartParams,
@@ -33,6 +36,13 @@ use crate::memory_server::{
     CronCreateParams, CronDeleteParams, CronListParams, CronListRunsParams, CronShowRunParams,
     CronTriggerParams, CronUpdateParams, McpListParams, cron_run_to_json,
 };
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConversationSearchParams {
+    pub(crate) query: String,
+    pub(crate) limit: Option<usize>,
+}
 
 /// Connection cache keyed by agent name.
 type ConnCache = Arc<DashMap<String, Arc<Mutex<rusqlite::Connection>>>>;
@@ -120,6 +130,17 @@ impl RightBackend {
                 "Stage 1 foreground metadata/receipt for skill create/update completion. Successful statuses require a non-empty LLM-authored message argument, verify the skill package exists at .claude/skills/<skill_name>/SKILL.md, and send learned/updated receipts. Does not move files.",
                 schema_for_type::<SkillLearningFinishParams>(),
             ),
+            // Conversation search tools
+            Tool::new(
+                "thread_search",
+                "Search archived Telegram conversation messages in the current chat and current thread only. Scope is server-enforced from the current foreground invocation and is not agent-controlled.",
+                schema_for_type::<ConversationSearchParams>(),
+            ),
+            Tool::new(
+                "chat_search",
+                "Search archived Telegram conversation messages in the current chat across all threads. Scope is server-enforced from the current foreground invocation and is not agent-controlled.",
+                schema_for_type::<ConversationSearchParams>(),
+            ),
             // Bootstrap
             Tool::new(
                 "bootstrap_done",
@@ -159,6 +180,24 @@ impl RightBackend {
             SKILL_LEARNING_FINISH_TOOL => {
                 self.call_skill_learning_finish(agent_name, agent_dir, context, &args)
                     .await
+            }
+            "thread_search" => {
+                self.call_conversation_search(
+                    agent_name,
+                    context,
+                    &args,
+                    ConversationSearchMode::Thread,
+                )
+                .await
+            }
+            "chat_search" => {
+                self.call_conversation_search(
+                    agent_name,
+                    context,
+                    &args,
+                    ConversationSearchMode::Chat,
+                )
+                .await
             }
             "bootstrap_done" => self.call_bootstrap_done(agent_name).await,
             other => bail!("unknown tool: {other}"),
@@ -701,6 +740,103 @@ impl RightBackend {
     }
 
     // ------------------------------------------------------------------
+    // Conversation search tools
+    // ------------------------------------------------------------------
+
+    async fn call_conversation_search(
+        &self,
+        agent_name: &str,
+        context: crate::progress::ToolCallContext,
+        args: &serde_json::Value,
+        mode: ConversationSearchMode,
+    ) -> Result<CallToolResult, anyhow::Error> {
+        let params: ConversationSearchParams = match serde_json::from_value(args.clone()) {
+            Ok(params) => params,
+            Err(e) => {
+                return Ok(tool_error(
+                    "invalid_argument",
+                    format!("invalid conversation search params: {e:#}"),
+                    None,
+                ));
+            }
+        };
+        let query = params.query.trim();
+        if query.is_empty() {
+            return Ok(tool_error(
+                "invalid_argument",
+                "conversation search query must not be empty",
+                None,
+            ));
+        }
+        if !query.chars().any(|ch| ch.is_alphanumeric() || ch == '_') {
+            return Ok(tool_error(
+                "invalid_argument",
+                "conversation search query must contain a searchable term",
+                None,
+            ));
+        }
+
+        let Some(invocation_id) = context.invocation_id else {
+            return Ok(conversation_scope_unavailable());
+        };
+        let scope = match self.progress.conversation_scope(&invocation_id).await {
+            Ok(scope) => scope,
+            Err(crate::progress::ProgressError::Unavailable)
+            | Err(crate::progress::ProgressError::Forbidden)
+            | Err(crate::progress::ProgressError::RateLimited { .. }) => {
+                return Ok(conversation_scope_unavailable());
+            }
+        };
+
+        let conn_arc = self.get_conn(agent_name)?;
+        let conn = Self::lock_conn(&conn_arc)?;
+        let limit = params.limit.unwrap_or(CONVERSATION_SEARCH_DEFAULT_LIMIT);
+        let results = match mode {
+            ConversationSearchMode::Thread => right_db::conversation::search_thread(
+                &conn,
+                query,
+                limit,
+                scope.chat_id,
+                scope.thread_id,
+            ),
+            ConversationSearchMode::Chat => {
+                right_db::conversation::search_chat(&conn, query, limit, scope.chat_id)
+            }
+        }
+        .map_err(|e| anyhow::anyhow!("conversation search failed: {e}"))?;
+
+        let rows: Vec<serde_json::Value> = results
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "snippet": row.snippet,
+                    "role": row.role,
+                    "sender_user_id": row.sender_user_id,
+                    "sender_name": row.sender_name,
+                    "created_at": row.created_at,
+                    "thread_id": row.thread_id,
+                    "message_id": row.message_id,
+                    "root_session_id": row.root_session_id,
+                })
+            })
+            .collect();
+        let scope_json = match mode {
+            ConversationSearchMode::Thread => {
+                serde_json::json!({ "type": "thread", "thread_id": scope.thread_id })
+            }
+            ConversationSearchMode::Chat => serde_json::json!({ "type": "chat" }),
+        };
+        let output = serde_json::json!({
+            "scope": scope_json,
+            "results": rows,
+        });
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&output)?,
+        )]))
+    }
+
+    // ------------------------------------------------------------------
     // Bootstrap
     // ------------------------------------------------------------------
 
@@ -777,6 +913,20 @@ impl RightBackend {
             ))
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConversationSearchMode {
+    Thread,
+    Chat,
+}
+
+fn conversation_scope_unavailable() -> CallToolResult {
+    tool_error(
+        "conversation_scope_unavailable",
+        "conversation scope is available only for the current foreground invocation",
+        None,
+    )
 }
 
 /// Validate that `chat_id` is in the agent's allowlist (users or groups).

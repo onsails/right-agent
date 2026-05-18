@@ -852,6 +852,8 @@ mod tests {
             names.contains(&crate::progress::SEND_PROGRESS_TOOL),
             "missing send_progress"
         );
+        assert!(names.contains(&"thread_search"), "missing thread_search");
+        assert!(names.contains(&"chat_search"), "missing chat_search");
         assert!(names.contains(&"bootstrap_done"), "missing bootstrap_done");
 
         // Meta tool present
