@@ -1970,7 +1970,9 @@ pub async fn handle_mcp_auth_choice_callback(
         }
     };
 
-    bot.answer_callback_query(qid).text("Selected").await?;
+    if let Err(e) = bot.answer_callback_query(qid).text("Selected").await {
+        tracing::warn!(err = %e, "failed to answer MCP auth choice callback");
+    }
 
     match choice {
         McpAuthChoice::OAuth => {
@@ -2008,11 +2010,12 @@ pub async fn handle_mcp_auth_choice_callback(
                     .await?;
                 }
                 Err(e) => {
+                    let escaped_error = html_escape(&format!("{e:#}"));
                     send_html_reply(
                         &bot,
                         teloxide::types::ChatId(pending.chat_id),
                         pending.thread_id,
-                        &format!("Failed: {e:#}"),
+                        &format!("Failed: {escaped_error}"),
                     )
                     .await?;
                 }
@@ -2065,11 +2068,12 @@ pub async fn handle_mcp_auth_choice_callback(
                     .await?;
                 }
                 Err(e) => {
+                    let escaped_error = html_escape(&format!("{e:#}"));
                     send_html_reply(
                         &bot,
                         teloxide::types::ChatId(pending.chat_id),
                         pending.thread_id,
-                        &format!("Failed: {e:#}"),
+                        &format!("Failed: {escaped_error}"),
                     )
                     .await?;
                 }
