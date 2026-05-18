@@ -219,8 +219,8 @@ impl MemoryServer {
                 ))
             })
             .map_err(|e| McpError::internal_error(format!("query failed: {e:#}"), None))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| McpError::internal_error(format!("row read failed: {e:#}"), None))?;
         let output = serde_json::to_string_pretty(&rows)
             .map_err(|e| McpError::internal_error(format!("serialization error: {e:#}"), None))?;
         Ok(CallToolResult::success(vec![Content::text(output)]))

@@ -68,6 +68,44 @@ fn create_agent_dir(agents_dir: &std::path::Path, name: &str) -> PathBuf {
     agent_dir
 }
 
+#[allow(clippy::too_many_arguments)]
+fn insert_async_run(
+    agent_dir: &std::path::Path,
+    id: &str,
+    kind: &str,
+    producer_ref: Option<&str>,
+    source_session_id: Option<&str>,
+    run_session_id: &str,
+    started_at: &str,
+    status: &str,
+) {
+    let conn = right_db::open_connection(agent_dir, false).expect("open db");
+    conn.execute(
+        "INSERT INTO async_runs (
+            id, kind, producer_ref, source_session_id, run_session_id, target_chat_id,
+            started_at, status, log_path, delivery_required, delivery_status,
+            created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, -100, ?6, ?7, ?8, ?9, ?10, ?6, ?6)",
+        rusqlite::params![
+            id,
+            kind,
+            producer_ref,
+            source_session_id,
+            run_session_id,
+            started_at,
+            status,
+            format!("/tmp/{id}.log"),
+            i64::from(kind == "background"),
+            if kind == "background" {
+                "pending"
+            } else {
+                "none"
+            },
+        ],
+    )
+    .expect("insert async run");
+}
+
 #[test]
 fn tools_list_returns_expected_count() {
     let (backend, _, _tmp) = make_backend();
@@ -142,6 +180,124 @@ fn tools_list_all_have_descriptions() {
             tool.name
         );
     }
+}
+
+#[tokio::test]
+async fn cron_list_runs_reads_async_cron_rows_and_excludes_background() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    insert_async_run(
+        &agent_dir,
+        "cron-old",
+        "cron",
+        Some("job-a"),
+        None,
+        "cron-old",
+        "2026-04-01T09:00:00Z",
+        "success",
+    );
+    insert_async_run(
+        &agent_dir,
+        "cron-new",
+        "cron",
+        Some("job-a"),
+        None,
+        "cron-new",
+        "2026-04-01T10:00:00Z",
+        "failed",
+    );
+    insert_async_run(
+        &agent_dir,
+        "bg-newer",
+        "background",
+        Some("job-a"),
+        Some("main"),
+        "bg-session",
+        "2026-04-01T11:00:00Z",
+        "success",
+    );
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "cron_list_runs",
+            json!({ "job_name": "job-a", "limit": 10 }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_list_runs should succeed");
+
+    let body = extract_json_body(&result);
+    let ids: Vec<&str> = body
+        .as_array()
+        .expect("cron_list_runs returns an array")
+        .iter()
+        .map(|row| row["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(ids, vec!["cron-new", "cron-old"]);
+}
+
+#[tokio::test]
+async fn cron_show_run_reads_async_cron_rows_and_excludes_background() {
+    let (backend, agents_dir, _tmp) = make_backend();
+    let agent_dir = create_agent_dir(&agents_dir, "test-agent");
+    insert_async_run(
+        &agent_dir,
+        "cron-show",
+        "cron",
+        Some("job-a"),
+        None,
+        "cron-show",
+        "2026-04-01T10:00:00Z",
+        "success",
+    );
+    insert_async_run(
+        &agent_dir,
+        "bg-show",
+        "background",
+        Some("job-a"),
+        Some("main"),
+        "bg-session",
+        "2026-04-01T11:00:00Z",
+        "success",
+    );
+
+    let result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "cron_show_run",
+            json!({ "run_id": "cron-show" }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_show_run should succeed");
+    let body = extract_json_body(&result);
+    assert_eq!(body["id"], "cron-show");
+    assert_eq!(body["job_name"], "job-a");
+
+    let background_result = backend
+        .tools_call(
+            "test-agent",
+            &agent_dir,
+            "cron_show_run",
+            json!({ "run_id": "bg-show" }),
+            crate::progress::ToolCallContext::default(),
+        )
+        .await
+        .expect("cron_show_run should handle missing run");
+    let rmcp::model::RawContent::Text(t) = &background_result.content[0].raw else {
+        panic!(
+            "expected text content, got {:?}",
+            background_result.content[0].raw
+        );
+    };
+    assert!(
+        t.text.contains("not found"),
+        "background row should not be exposed as cron history: {}",
+        t.text
+    );
 }
 
 #[tokio::test]
