@@ -2259,43 +2259,17 @@ fn maybe_spawn_learned_skill_review(
 
         match review_result {
             Ok((report, notice)) => {
-                let conn = match right_db::open_connection(&agent_db_dir, false) {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::warn!(
-                            agent = %agent_name,
-                            "learned-skill review db reopen failed: {e:#}"
-                        );
-                        return;
-                    }
-                };
-                if let Err(e) = insert_skill_review_report(&conn, &report) {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        source_invocation_id = %report.source_invocation_id,
-                        "learned-skill review report insert failed: {e:#}"
-                    );
-                }
-                if let Err(e) = mark_review_finished(
-                    &conn,
+                record_successful_background_review(
+                    &agent_db_dir,
                     &agent_name,
-                    report.trigger_kind,
-                    report.status,
-                    report.status != ReviewStatus::Failed,
-                ) {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        "learned-skill review finish mark failed: {e:#}"
-                    );
-                }
-                if let Some(notice) = notice
-                    && let Err(e) = send_tg(&bot, tg_chat_id, eff_thread_id, &notice).await
-                {
-                    tracing::warn!(
-                        agent = %agent_name,
-                        "learned-skill review Telegram notice failed: {e:#}"
-                    );
-                }
+                    report,
+                    notice,
+                    move |notice| {
+                        let bot = bot.clone();
+                        async move { send_tg(&bot, tg_chat_id, eff_thread_id, &notice).await }
+                    },
+                )
+                .await;
             }
             Err(e) => {
                 let BackgroundReviewFailure {
@@ -2497,9 +2471,68 @@ async fn run_background_learned_skill_review(
         chat_id: Some(chat_id),
         thread_id: Some(thread_id),
         trigger_kind,
-        telegram_notified: notice.is_some(),
+        telegram_notified: false,
     });
     Ok((report, notice))
+}
+
+async fn record_successful_background_review<F, Fut, E>(
+    agent_db_dir: &Path,
+    agent_name: &str,
+    mut report: SkillReviewReport,
+    notice: Option<String>,
+    send_notice: F,
+) where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
+{
+    let conn = match right_db::open_connection(agent_db_dir, false) {
+        Ok(conn) => conn,
+        Err(e) => {
+            tracing::warn!(
+                agent = %agent_name,
+                "learned-skill review db reopen failed: {e:#}"
+            );
+            return;
+        }
+    };
+    report.telegram_notified = if let Some(notice) = notice {
+        match send_notice(notice).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_name,
+                    "learned-skill review Telegram notice failed: {e}"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    let trigger_kind = report.trigger_kind;
+    let status = report.status;
+    if let Err(e) = insert_skill_review_report(&conn, &report) {
+        tracing::warn!(
+            agent = %agent_name,
+            source_invocation_id = %report.source_invocation_id,
+            "learned-skill review report insert failed: {e:#}"
+        );
+    }
+    if let Err(e) = mark_review_finished(
+        &conn,
+        agent_name,
+        trigger_kind,
+        status,
+        status != ReviewStatus::Failed,
+    ) {
+        tracing::warn!(
+            agent = %agent_name,
+            "learned-skill review finish mark failed: {e:#}"
+        );
+    }
 }
 
 fn record_failed_background_review(
@@ -4050,6 +4083,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, (0, "failed".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn record_successful_background_review_persists_notified_false_when_send_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = right_db::open_connection(temp.path(), true).unwrap();
+        right_agent::learned_skills::ensure_nudge_state(&conn, "right").unwrap();
+        conn.execute(
+            "UPDATE skill_nudge_state SET review_running = 1 WHERE agent_name = 'right'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let report = SkillReviewReport {
+            agent_name: "right".to_owned(),
+            source_invocation_id: "inv-1".to_owned(),
+            root_session_id: Some("session-1".to_owned()),
+            chat_id: Some(10),
+            thread_id: Some(20),
+            trigger_kind: right_agent::learned_skills::ReviewTriggerKind::LearningSignal,
+            status: ReviewStatus::CreateCandidate,
+            confidence: right_agent::learned_skills::ReviewConfidence::High,
+            candidate_skill_name: Some("rightx-demo".to_owned()),
+            candidate_summary: Some("Demo candidate".to_owned()),
+            evidence_refs: vec!["event-1".to_owned()],
+            review_output_json: serde_json::json!({
+                "status": "create_candidate",
+                "confidence": "high",
+                "candidate_skill_name": "rightx-demo",
+                "candidate_summary": "Demo candidate",
+                "evidence_refs": ["event-1"],
+                "user_notice": "notice"
+            }),
+            telegram_notified: true,
+        };
+
+        record_successful_background_review(
+            temp.path(),
+            "right",
+            report,
+            Some("notice".to_owned()),
+            |_notice| async { Err("send failed") },
+        )
+        .await;
+
+        let conn = right_db::open_connection(temp.path(), false).unwrap();
+        let row: (i64, i64, String) = conn
+            .query_row(
+                "SELECT r.telegram_notified, s.review_running, s.last_review_status \
+                 FROM skill_review_reports r \
+                 JOIN skill_nudge_state s ON s.agent_name = r.agent_name \
+                 WHERE r.agent_name = 'right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, 0, "create_candidate".to_owned()));
     }
 
     #[test]

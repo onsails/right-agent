@@ -624,3 +624,32 @@ fn stream_event_timeline_is_stable_and_bounded() {
     assert!(timeline[1].contains("tool_use Bash"));
     assert!(timeline[2].contains("result"));
 }
+
+#[test]
+fn stream_event_timeline_keeps_recent_events_from_append_only_log() {
+    let temp = tempfile::tempdir().unwrap();
+    let agent_dir = temp.path().join("agents/right");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let log_path = review_stream_log_path(&agent_dir, "session-1");
+    std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+    let mut lines = Vec::new();
+    for label in ["old-1", "old-2", "recent-1", "recent-2"] {
+        lines.push(format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"{label}"}}]}}}}"#
+        ));
+    }
+    lines.push(
+        r#"{"type":"result","num_turns":1,"total_cost_usd":0.01,"session_id":"session-1"}"#
+            .to_owned(),
+    );
+    std::fs::write(&log_path, lines.join("\n")).unwrap();
+
+    let timeline = collect_stream_event_timeline(&agent_dir, "session-1", 3).unwrap();
+
+    assert_eq!(timeline.len(), 3);
+    assert!(!timeline.iter().any(|event| event.contains("old-1")));
+    assert!(!timeline.iter().any(|event| event.contains("old-2")));
+    assert!(timeline[0].contains("recent-1"), "{timeline:?}");
+    assert!(timeline[1].contains("recent-2"), "{timeline:?}");
+    assert!(timeline[2].contains("result"), "{timeline:?}");
+}
