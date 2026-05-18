@@ -4090,6 +4090,28 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn build_agent_ssh_remote_command(command: &[String]) -> miette::Result<Option<String>> {
+    if command.is_empty() {
+        return Ok(None);
+    }
+
+    right_openshell::openshell::quote_ssh_remote_args(command.iter().map(String::as_str)).map(Some)
+}
+
+fn build_agent_ssh_command(
+    ssh_config: &Path,
+    ssh_host: &str,
+    command: &[String],
+) -> miette::Result<std::process::Command> {
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg("-F").arg(ssh_config);
+    cmd.arg(ssh_host);
+    if let Some(remote_command) = build_agent_ssh_remote_command(command)? {
+        cmd.arg(remote_command);
+    }
+    Ok(cmd)
+}
+
 async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> miette::Result<()> {
     use std::os::unix::process::CommandExt;
 
@@ -4175,12 +4197,7 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 
     // 5. exec into SSH
     let ssh_host = right_openshell::openshell::ssh_host_for_sandbox(&sb_name);
-    let mut cmd = std::process::Command::new("ssh");
-    cmd.arg("-F").arg(&ssh_config);
-    cmd.arg(&ssh_host);
-    if !command.is_empty() {
-        cmd.arg(command.join(" "));
-    }
+    let mut cmd = build_agent_ssh_command(&ssh_config, &ssh_host, command)?;
 
     let err = cmd.exec();
     Err(miette::miette!("Failed to exec ssh: {err}"))
@@ -4192,14 +4209,80 @@ async fn cmd_agent_ssh(home: &Path, agent_name: &str, command: &[String]) -> mie
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigCommands, MemoryCommands, cleanup_failed_restore_agent_dir,
+        ConfigCommands, MemoryCommands, build_agent_ssh_command, cleanup_failed_restore_agent_dir,
         copy_agent_backup_config_files, copy_agent_restore_config_files,
         migrate_restored_policy_if_needed, resolve_agent_db, resolve_restored_policy_path,
         truncate_content, write_managed_settings,
     };
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
+
+    #[test]
+    fn agent_ssh_command_quotes_remote_argv_as_one_argument() {
+        let command = vec![
+            "probe_cmd".to_string(),
+            "alpha beta".to_string(),
+            "$(nope)".to_string(),
+            "semi;colon".to_string(),
+            "quote'arg".to_string(),
+        ];
+
+        let cmd =
+            build_agent_ssh_command(Path::new("config"), "openshell-example", &command).unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "-F");
+        assert_eq!(args[1], "config");
+        assert_eq!(args[2], "openshell-example");
+        assert_eq!(
+            args[3..].len(),
+            1,
+            "agent ssh must pass one remote command argument"
+        );
+
+        let probe = format!(
+            "probe_cmd() {{ for arg in \"$@\"; do command printf '<%s>\\n' \"$arg\"; done; }}; {}",
+            args[3]
+        );
+
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(probe)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "quoted command should parse under sh; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "<alpha beta>\n<$(nope)>\n<semi;colon>\n<quote'arg>\n"
+        );
+    }
+
+    #[test]
+    fn agent_ssh_command_omits_remote_command_for_interactive_login() {
+        let command = Vec::new();
+        let cmd =
+            build_agent_ssh_command(Path::new("config"), "openshell-example", &command).unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "-F".to_string(),
+                "config".to_string(),
+                "openshell-example".to_string(),
+            ]
+        );
+    }
 
     // ---- memory commands variant existence (compile-time) ----
 
