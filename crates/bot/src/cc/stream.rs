@@ -162,20 +162,21 @@ pub(crate) fn parse_right_mcp_init_status(init_json: &str) -> Option<RightMcpIni
         return None;
     }
 
-    let servers = v.get("mcp_servers").and_then(|s| s.as_array())?;
-    for server in servers {
-        if server.get("name").and_then(|n| n.as_str()) == Some("right") {
-            let status = server
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("unknown");
-            return Some(if status == "connected" {
-                RightMcpInitStatus::Connected
-            } else {
-                RightMcpInitStatus::Unhealthy {
-                    status: Some(status.to_owned()),
-                }
-            });
+    if let Some(servers) = v.get("mcp_servers").and_then(|s| s.as_array()) {
+        for server in servers {
+            if server.get("name").and_then(|n| n.as_str()) == Some("right") {
+                let status = server
+                    .get("status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
+                return Some(if status == "connected" {
+                    RightMcpInitStatus::Connected
+                } else {
+                    RightMcpInitStatus::Unhealthy {
+                        status: Some(status.to_owned()),
+                    }
+                });
+            }
         }
     }
 
@@ -611,6 +612,16 @@ mod tests {
         "subtype":"init",
         "mcp_servers":[{"name":"composio","status":"connected"}]
     }"#;
+
+        assert_eq!(
+            parse_right_mcp_init_status(line),
+            Some(RightMcpInitStatus::Unhealthy { status: None })
+        );
+    }
+
+    #[test]
+    fn parse_right_mcp_init_status_missing_servers_is_unhealthy() {
+        let line = r#"{"type":"system","subtype":"init"}"#;
 
         assert_eq!(
             parse_right_mcp_init_status(line),
