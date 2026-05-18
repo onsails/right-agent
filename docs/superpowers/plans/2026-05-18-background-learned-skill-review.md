@@ -745,11 +745,16 @@ mod tests {
     #[test]
     fn review_prompt_says_report_only_and_nothing_to_learn_is_normal() {
         let bundle = ReviewBundle {
+            agent_name: "right".to_owned(),
             source_invocation_id: "inv-1".to_owned(),
+            root_session_id: Some("session-1".to_owned()),
             trigger_kind: "effort_threshold".to_owned(),
             accepted_signal_json: None,
             tool_iters_since_review: 15,
+            turns_since_review: 3,
+            skill_issue_hints_since_review: 0,
             event_timeline: vec!["event-1 user asked for OAuth setup".to_owned()],
+            learning_events: vec!["start create rightx-oauth-debugging".to_owned()],
             learned_skills: vec![LearnedSkillSummary {
                 name: "rightx-oauth-debugging".to_owned(),
                 excerpt: "description: Use for OAuth MCP setup".to_owned(),
@@ -760,6 +765,33 @@ mod tests {
         assert!(prompt.contains("Do not write files"));
         assert!(prompt.contains("nothing_to_learn is normal"));
         assert!(prompt.contains("rightx-oauth-debugging"));
+    }
+
+    #[test]
+    fn stream_event_timeline_is_stable_and_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_dir = temp.path().join("agents/right");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let log_path = review_stream_log_path(&agent_dir, "session-1");
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log_path,
+            concat!(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"checked OAuth callback settings"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"right mcp list --agent right"}}]}}"#,
+                "\n",
+                r#"{"type":"result","num_turns":3,"total_cost_usd":0.01,"session_id":"session-1"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let timeline = collect_stream_event_timeline(&agent_dir, "session-1", 8).unwrap();
+        assert_eq!(timeline.len(), 3);
+        assert!(timeline[0].starts_with("event-1 assistant_text: checked OAuth"));
+        assert!(timeline[1].contains("tool_use Bash"));
+        assert!(timeline[2].contains("result"));
     }
 }
 ```
@@ -936,11 +968,16 @@ pub(crate) struct LearnedSkillSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReviewBundle {
+    pub(crate) agent_name: String,
     pub(crate) source_invocation_id: String,
+    pub(crate) root_session_id: Option<String>,
     pub(crate) trigger_kind: String,
     pub(crate) accepted_signal_json: Option<String>,
     pub(crate) tool_iters_since_review: i64,
+    pub(crate) turns_since_review: i64,
+    pub(crate) skill_issue_hints_since_review: i64,
     pub(crate) event_timeline: Vec<String>,
+    pub(crate) learning_events: Vec<String>,
     pub(crate) learned_skills: Vec<LearnedSkillSummary>,
 }
 
@@ -948,9 +985,18 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     let mut prompt = String::new();
     prompt.push_str("# Background Learned-Skill Review\n\n");
     prompt.push_str("Report-only review. Do not write files. Do not call learning tools. Do not ask the user questions. nothing_to_learn is normal when evidence is weak.\n\n");
+    prompt.push_str(&format!("agent_name: {}\n", bundle.agent_name));
     prompt.push_str(&format!("source_invocation_id: {}\n", bundle.source_invocation_id));
+    if let Some(root_session_id) = &bundle.root_session_id {
+        prompt.push_str(&format!("root_session_id: {}\n", root_session_id));
+    }
     prompt.push_str(&format!("trigger_kind: {}\n", bundle.trigger_kind));
-    prompt.push_str(&format!("tool_iters_since_review: {}\n\n", bundle.tool_iters_since_review));
+    prompt.push_str(&format!("tool_iters_since_review: {}\n", bundle.tool_iters_since_review));
+    prompt.push_str(&format!("turns_since_review: {}\n", bundle.turns_since_review));
+    prompt.push_str(&format!(
+        "skill_issue_hints_since_review: {}\n\n",
+        bundle.skill_issue_hints_since_review
+    ));
     if let Some(signal) = &bundle.accepted_signal_json {
         prompt.push_str("accepted_signal_json:\n");
         prompt.push_str(signal);
@@ -958,6 +1004,12 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     }
     prompt.push_str("event_timeline:\n");
     for event in &bundle.event_timeline {
+        prompt.push_str("- ");
+        prompt.push_str(event);
+        prompt.push('\n');
+    }
+    prompt.push_str("\nlearning_events:\n");
+    for event in &bundle.learning_events {
         prompt.push_str("- ");
         prompt.push_str(event);
         prompt.push('\n');
@@ -972,6 +1024,63 @@ pub(crate) fn build_review_prompt(bundle: &ReviewBundle) -> String {
     }
     prompt.push_str("\nReturn JSON matching the configured schema with status, confidence, candidate_skill_name, candidate_summary, evidence_refs, and user_notice.\n");
     prompt
+}
+
+pub(crate) fn review_stream_log_path(
+    agent_dir: &std::path::Path,
+    root_session_id: &str,
+) -> std::path::PathBuf {
+    agent_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(agent_dir)
+        .join("logs")
+        .join("streams")
+        .join(format!("{root_session_id}.ndjson"))
+}
+
+pub(crate) fn collect_stream_event_timeline(
+    agent_dir: &std::path::Path,
+    root_session_id: &str,
+    max_events: usize,
+) -> std::io::Result<Vec<String>> {
+    let path = review_stream_log_path(agent_dir, root_session_id);
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for line in std::io::BufRead::lines(reader) {
+        if out.len() >= max_events {
+            break;
+        }
+        let line = line?;
+        let summary = match crate::cc::stream::parse_stream_event(&line) {
+            crate::cc::stream::StreamEvent::Text(text) => {
+                Some(format!("assistant_text: {}", bounded_event_text(&text)))
+            }
+            crate::cc::stream::StreamEvent::ToolUse { tool, input_summary } => {
+                Some(format!("tool_use {}: {}", tool, bounded_event_text(&input_summary)))
+            }
+            crate::cc::stream::StreamEvent::Result(_) => Some("result: foreground invocation completed".to_owned()),
+            crate::cc::stream::StreamEvent::Thinking | crate::cc::stream::StreamEvent::Other => None,
+        };
+        if let Some(summary) = summary {
+            out.push(format!("event-{} {}", out.len() + 1, summary));
+        }
+    }
+    Ok(out)
+}
+
+fn bounded_event_text(value: &str) -> String {
+    const MAX_CHARS: usize = 280;
+    let mut out = value.chars().take(MAX_CHARS).collect::<String>();
+    if value.chars().count() > MAX_CHARS {
+        out.push_str("...");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1322,11 +1431,16 @@ In `crates/bot/src/learning_review_tests.rs`, add:
 #[tokio::test]
 async fn run_review_with_output_builds_prompt_and_parses_json() {
     let bundle = ReviewBundle {
+        agent_name: "right".to_owned(),
         source_invocation_id: "inv-1".to_owned(),
+        root_session_id: Some("session-1".to_owned()),
         trigger_kind: "learning_signal".to_owned(),
         accepted_signal_json: None,
         tool_iters_since_review: 2,
+        turns_since_review: 1,
+        skill_issue_hints_since_review: 0,
         event_timeline: vec!["event-1 user corrected OAuth flow".to_owned()],
+        learning_events: vec![],
         learned_skills: vec![],
     };
 
@@ -1570,15 +1684,16 @@ fn review_today_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%d").to_string()
 }
 
-fn load_skill_review_last_review_at(
+fn load_skill_review_gate_snapshot(
     conn: &rusqlite::Connection,
     agent_name: &str,
-) -> Result<Option<String>, rusqlite::Error> {
+) -> Result<(Option<String>, i64, i64, i64), rusqlite::Error> {
     right_agent::learned_skills::ensure_nudge_state(conn, agent_name)?;
     conn.query_row(
-        "SELECT last_review_at FROM skill_nudge_state WHERE agent_name = ?1",
+        "SELECT last_review_at, tool_iters_since_review, turns_since_review, skill_issue_hints_since_review \
+         FROM skill_nudge_state WHERE agent_name = ?1",
         [agent_name],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     )
 }
 
@@ -1596,10 +1711,15 @@ async fn maybe_spawn_learned_skill_review(
     let Some(source_invocation_id) = source_invocation_id else {
         return;
     };
-    let last_review_at = match load_skill_review_last_review_at(conn, &ctx.agent_name) {
+    let (
+        last_review_at,
+        tool_iters_since_review,
+        turns_since_review,
+        skill_issue_hints_since_review,
+    ) = match load_skill_review_gate_snapshot(conn, &ctx.agent_name) {
         Ok(value) => value,
         Err(e) => {
-            tracing::warn!(agent = %ctx.agent_name, "learned-skill review last timestamp load failed: {e:#}");
+            tracing::warn!(agent = %ctx.agent_name, "learned-skill review gate snapshot load failed: {e:#}");
             return;
         }
     };
@@ -1673,6 +1793,9 @@ async fn maybe_spawn_learned_skill_review(
             resolved_sandbox,
             debug,
             accepted_signal_json,
+            tool_iters_since_review,
+            turns_since_review,
+            skill_issue_hints_since_review,
         )
         .await;
         match report_result {
@@ -1733,6 +1856,9 @@ async fn run_background_learned_skill_review(
     resolved_sandbox: Option<String>,
     debug: std::sync::Arc<std::sync::atomic::AtomicBool>,
     accepted_signal_json: Option<String>,
+    tool_iters_since_review: i64,
+    turns_since_review: i64,
+    skill_issue_hints_since_review: i64,
 ) -> anyhow::Result<(right_agent::learned_skills::SkillReviewReport, Option<String>)> {
     let learned_skills = if ssh_config_path.is_some() {
         collect_sandbox_review_skill_index(resolved_sandbox.as_deref()).await?
@@ -1740,12 +1866,28 @@ async fn run_background_learned_skill_review(
         crate::learning_review::collect_host_rightx_skill_index(agent_dir)
             .map_err(|e| anyhow::anyhow!("collect host learned skills: {e:#}"))?
     };
+    let mut event_timeline =
+        crate::learning_review::collect_stream_event_timeline(agent_dir, &root_session_id, 80)
+            .map_err(|e| anyhow::anyhow!("collect review event timeline: {e:#}"))?;
+    if event_timeline.is_empty() {
+        event_timeline.push(format!(
+            "event-1 foreground invocation {} completed; stream log unavailable or empty",
+            source_invocation_id
+        ));
+    }
+    let learning_events = load_review_learning_events(agent_dir, &source_invocation_id)
+        .map_err(|e| anyhow::anyhow!("load review learning events: {e:#}"))?;
     let bundle = crate::learning_review::ReviewBundle {
+        agent_name: agent_name.to_owned(),
         source_invocation_id: source_invocation_id.clone(),
+        root_session_id: Some(root_session_id.clone()),
         trigger_kind: trigger_kind.as_str().to_owned(),
         accepted_signal_json,
-        tool_iters_since_review: 0,
-        event_timeline: vec![format!("{} completed foreground invocation {}", agent_name, source_invocation_id)],
+        tool_iters_since_review,
+        turns_since_review,
+        skill_issue_hints_since_review,
+        event_timeline,
+        learning_events,
         learned_skills,
     };
     let prompt = crate::learning_review::build_review_prompt(&bundle);
@@ -1813,6 +1955,33 @@ async fn run_background_learned_skill_review(
         telegram_notified: notice.is_some(),
     });
     Ok((report, notice))
+}
+
+fn load_review_learning_events(
+    agent_dir: &Path,
+    source_invocation_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let conn = right_db::open_connection(agent_dir, false)?;
+    let mut stmt = conn.prepare(
+        "SELECT action, skill_name, phase, COALESCE(status, ''), COALESCE(summary, '') \
+         FROM skill_learning_events WHERE invocation_id = ?1 ORDER BY id LIMIT 20",
+    )?;
+    let rows = stmt.query_map([source_invocation_id], |row| {
+        let action: String = row.get(0)?;
+        let skill_name: String = row.get(1)?;
+        let phase: String = row.get(2)?;
+        let status: String = row.get(3)?;
+        let summary: String = row.get(4)?;
+        Ok(format!(
+            "{} {} {} status={} summary={}",
+            phase, action, skill_name, status, summary
+        ))
+    })?;
+    let mut events = Vec::new();
+    for row in rows {
+        events.push(row?);
+    }
+    Ok(events)
 }
 ```
 
