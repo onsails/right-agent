@@ -569,6 +569,9 @@ pub(crate) fn collect_stream_event_timeline(
     root_session_id: &str,
     max_events: usize,
 ) -> std::io::Result<Vec<String>> {
+    if max_events == 0 {
+        return Ok(Vec::new());
+    }
     let path = review_stream_log_path(agent_dir, root_session_id);
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -576,20 +579,24 @@ pub(crate) fn collect_stream_event_timeline(
         Err(err) => return Err(err),
     };
     let reader = std::io::BufReader::new(file);
-    let mut timeline = Vec::new();
+    let mut recent = std::collections::VecDeque::with_capacity(max_events);
 
     for line in reader.lines() {
-        if timeline.len() >= max_events {
-            break;
-        }
         let line = line?;
         let Some(summary) = summarize_stream_event(&line) else {
             continue;
         };
-        timeline.push(format!("event-{} {summary}", timeline.len() + 1));
+        if recent.len() == max_events {
+            recent.pop_front();
+        }
+        recent.push_back(summary);
     }
 
-    Ok(timeline)
+    Ok(recent
+        .into_iter()
+        .enumerate()
+        .map(|(idx, summary)| format!("event-{} {summary}", idx + 1))
+        .collect())
 }
 
 fn summarize_stream_event(line: &str) -> Option<String> {
