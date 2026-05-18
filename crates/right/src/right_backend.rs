@@ -781,11 +781,7 @@ impl RightBackend {
         };
         let scope = match self.progress.conversation_scope(&invocation_id).await {
             Ok(scope) => scope,
-            Err(crate::progress::ProgressError::Unavailable)
-            | Err(crate::progress::ProgressError::Forbidden)
-            | Err(crate::progress::ProgressError::RateLimited { .. }) => {
-                return Ok(conversation_scope_unavailable());
-            }
+            Err(_) => return Ok(conversation_scope_unavailable()),
         };
 
         let conn_arc = self.get_conn(agent_name)?;

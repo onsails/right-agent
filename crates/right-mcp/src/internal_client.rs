@@ -31,6 +31,9 @@ pub const SKILL_LEARNING_FINISH_TOOL: &str = "skill_learning_finish";
 pub const SKILL_LEARNING_START_MCP_TOOL: &str = "mcp__right__skill_learning_start";
 pub const SKILL_LEARNING_FINISH_MCP_TOOL: &str = "mcp__right__skill_learning_finish";
 
+pub const THREAD_SEARCH_MCP_TOOL: &str = "mcp__right__thread_search";
+pub const CHAT_SEARCH_MCP_TOOL: &str = "mcp__right__chat_search";
+
 /// Maximum length (in Unicode scalar values) of a `send_progress` message.
 ///
 /// Single source of truth for: the JSON-schema `maxLength` advertised in

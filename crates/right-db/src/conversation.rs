@@ -113,25 +113,44 @@ pub fn archive_message(conn: &Connection, message: ConversationMessage<'_>) -> R
     )
 }
 
+// UPSERT, not UPDATE: closes the race where worker turn-start beats the
+// async archive write to the row. The stub carries content='' so FTS5
+// indexes no terms — once the archive INSERT lands, ON CONFLICT DO
+// UPDATE replaces content while OR/COALESCE in archive_message preserves
+// routing fields regardless of which write wins.
 pub fn mark_routed(
     conn: &Connection,
     platform: &str,
     chat_id: i64,
+    thread_id: i64,
     message_id: i32,
     root_session_id: &str,
     turn_id: u64,
 ) -> Result<usize> {
     let turn_id = checked_turn_id(Some(turn_id))?;
     conn.execute(
-        "UPDATE conversation_messages
-         SET routed_to_agent = 1,
-             root_session_id = ?1,
-             turn_id = ?2
-         WHERE platform = ?3
-           AND chat_id = ?4
-           AND message_id = ?5
-           AND role = 'user'",
-        (root_session_id, turn_id, platform, chat_id, message_id),
+        "INSERT INTO conversation_messages (
+            platform, chat_id, thread_id, message_id,
+            addressed_to_bot, routed_to_agent, root_session_id, turn_id,
+            role, content
+         ) VALUES (
+            :platform, :chat_id, :thread_id, :message_id,
+            0, 1, :root_session_id, :turn_id,
+            'user', ''
+         )
+         ON CONFLICT(platform, chat_id, message_id, role) WHERE message_id IS NOT NULL
+         DO UPDATE SET
+            routed_to_agent = 1,
+            root_session_id = excluded.root_session_id,
+            turn_id = excluded.turn_id",
+        named_params! {
+            ":platform": platform,
+            ":chat_id": chat_id,
+            ":thread_id": thread_id,
+            ":message_id": message_id,
+            ":root_session_id": root_session_id,
+            ":turn_id": turn_id,
+        },
     )
 }
 
@@ -338,7 +357,7 @@ mod tests {
         let conn = migrated_connection();
         archive_message(&conn, user_message(100, 10, 25, "route me")).unwrap();
 
-        let changed = mark_routed(&conn, "telegram", 100, 25, "session-abc", 42).unwrap();
+        let changed = mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
 
         assert_eq!(changed, 1);
         let routed: (i64, Option<String>, Option<i64>) = conn
@@ -354,10 +373,64 @@ mod tests {
     }
 
     #[test]
+    fn mark_routed_stub_without_archive_does_not_pollute_search() {
+        // If archive write is dropped (semaphore saturation, restart), the
+        // mark_routed stub row must not appear as a phantom search hit.
+        let conn = migrated_connection();
+
+        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
+        archive_message(&conn, user_message(100, 10, 99, "real content here")).unwrap();
+
+        // Any FTS query must only return the real-content row, never the stub.
+        let chat_results = search_chat(&conn, "real", 10, 100).unwrap();
+        assert_eq!(chat_results.len(), 1);
+        assert_eq!(chat_results[0].message_id, Some(99));
+
+        // Querying FTS for an empty term must not surface the stub.
+        // (Searching for the all-content sentinel via MATCH 'real OR content'
+        // proves the stub doesn't appear under any term.)
+        let results = search_chat(&conn, "anything OR maybe", 50, 100).unwrap();
+        assert!(
+            results.iter().all(|r| r.message_id != Some(25)),
+            "stub row (message_id=25) must not appear in search results"
+        );
+    }
+
+    #[test]
+    fn mark_routed_then_archive_preserves_routing_metadata() {
+        // Race ordering: worker calls mark_routed before async archive write
+        // lands. mark_routed creates a stub row; archive_message later
+        // overwrites content while preserving routed_to_agent/session/turn.
+        let conn = migrated_connection();
+
+        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
+        archive_message(&conn, user_message(100, 10, 25, "real content")).unwrap();
+
+        let (routed, session, turn, content): (i64, Option<String>, Option<i64>, String) = conn
+            .query_row(
+                "SELECT routed_to_agent, root_session_id, turn_id, content
+                 FROM conversation_messages
+                 WHERE platform='telegram' AND chat_id=100 AND message_id=25 AND role='user'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (routed, session, turn, content),
+            (
+                1,
+                Some("session-abc".to_string()),
+                Some(42),
+                "real content".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn archive_message_preserves_existing_route_metadata_when_rearchived() {
         let conn = migrated_connection();
         archive_message(&conn, user_message(100, 10, 25, "route me")).unwrap();
-        mark_routed(&conn, "telegram", 100, 25, "session-abc", 42).unwrap();
+        mark_routed(&conn, "telegram", 100, 10, 25, "session-abc", 42).unwrap();
 
         archive_message(&conn, user_message(100, 10, 25, "route me edited")).unwrap();
 

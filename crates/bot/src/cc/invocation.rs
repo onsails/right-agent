@@ -62,8 +62,20 @@ pub(crate) fn disallow_learning_tools(mut tools: Vec<String>) -> Vec<String> {
     tools
 }
 
+pub(crate) fn disallow_conversation_search(mut tools: Vec<String>) -> Vec<String> {
+    for tool_name in [
+        right_mcp::internal_client::THREAD_SEARCH_MCP_TOOL,
+        right_mcp::internal_client::CHAT_SEARCH_MCP_TOOL,
+    ] {
+        if !tools.iter().any(|tool| tool == tool_name) {
+            tools.push(tool_name.to_owned());
+        }
+    }
+    tools
+}
+
 pub(crate) fn disallow_foreground_only_tools(tools: Vec<String>) -> Vec<String> {
-    disallow_learning_tools(disallow_send_progress(tools))
+    disallow_conversation_search(disallow_learning_tools(disallow_send_progress(tools)))
 }
 
 pub(crate) fn with_progress_invocation_header(
@@ -549,6 +561,8 @@ mod tests {
             SEND_PROGRESS_MCP_TOOL,
             right_mcp::internal_client::SKILL_LEARNING_START_MCP_TOOL,
             right_mcp::internal_client::SKILL_LEARNING_FINISH_MCP_TOOL,
+            right_mcp::internal_client::THREAD_SEARCH_MCP_TOOL,
+            right_mcp::internal_client::CHAT_SEARCH_MCP_TOOL,
         ] {
             let count = tools
                 .iter()
