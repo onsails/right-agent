@@ -82,7 +82,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_identity_mirror_from_sandbox_downloads_required_files() {
-        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let _guard = PROCESS_ENV_LOCK.lock().await;
 
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
@@ -136,7 +136,7 @@ esac
 
     #[tokio::test]
     async fn sync_identity_mirror_from_sandbox_fails_when_any_required_file_is_missing() {
-        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let _guard = PROCESS_ENV_LOCK.lock().await;
 
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
