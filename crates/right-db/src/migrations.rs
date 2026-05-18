@@ -186,6 +186,41 @@ fn v18_cron_runs_target(tx: &Transaction) -> Result<(), HookError> {
     Ok(())
 }
 
+/// v22: Add learned-skill review report storage and review-gate state columns.
+///
+/// The report table/indexes live in SQL. Column additions are guarded here
+/// because SQLite has no `ADD COLUMN IF NOT EXISTS`.
+fn v22_skill_review_reports(tx: &Transaction) -> Result<(), HookError> {
+    let has_column = |col: &str| -> Result<bool, rusqlite::Error> {
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    };
+
+    if !has_column("creation_review_interval")? {
+        tx.execute_batch(
+            "ALTER TABLE skill_nudge_state
+             ADD COLUMN creation_review_interval INTEGER NOT NULL DEFAULT 15",
+        )?;
+    }
+    if !has_column("daily_review_count")? {
+        tx.execute_batch(
+            "ALTER TABLE skill_nudge_state
+             ADD COLUMN daily_review_count INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+    if !has_column("daily_review_date")? {
+        tx.execute_batch("ALTER TABLE skill_nudge_state ADD COLUMN daily_review_date TEXT")?;
+    }
+    if !has_column("last_review_status")? {
+        tx.execute_batch("ALTER TABLE skill_nudge_state ADD COLUMN last_review_status TEXT")?;
+    }
+    Ok(())
+}
+
 pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::LazyLock::new(|| {
     Migrations::new(vec![
         M::up(V1_SCHEMA),
@@ -209,7 +244,7 @@ pub static MIGRATIONS: std::sync::LazyLock<Migrations<'static>> = std::sync::Laz
         M::up(V19_SCHEMA),
         M::up(V20_SCHEMA),
         M::up(V21_SCHEMA),
-        M::up(V22_SCHEMA),
+        M::up_with_hook(V22_SCHEMA, v22_skill_review_reports),
     ])
 });
 
@@ -1185,6 +1220,77 @@ mod tests {
             [],
         )
         .unwrap();
+
+        let row: (i64, i64, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT creation_review_interval, daily_review_count, daily_review_date, last_review_status \
+             FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (15, 0, None, None));
+    }
+
+    #[test]
+    fn skill_nudge_state_existing_v21_rows_get_review_gate_defaults() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO skill_nudge_state (agent_name) VALUES ('right')",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let row: (i64, i64, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT creation_review_interval, daily_review_count, daily_review_date, last_review_status \
+             FROM skill_nudge_state WHERE agent_name='right'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (15, 0, None, None));
+    }
+
+    #[test]
+    fn skill_nudge_state_review_gate_migration_tolerates_existing_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute_batch(
+            "ALTER TABLE skill_nudge_state
+             ADD COLUMN creation_review_interval INTEGER NOT NULL DEFAULT 15;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_nudge_state (agent_name) VALUES ('right')",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS
+            .to_latest(&mut conn)
+            .expect("v22 migration should tolerate pre-existing review columns");
+
+        for column in [
+            "creation_review_interval",
+            "daily_review_count",
+            "daily_review_date",
+            "last_review_status",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('skill_nudge_state') WHERE name = ?1",
+                    [column],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{column} column must exist");
+        }
 
         let row: (i64, i64, Option<String>, Option<String>) = conn
             .query_row(
