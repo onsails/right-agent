@@ -172,10 +172,10 @@ pub(crate) fn parse_token_input(
     initial_auth_type: String,
     initial_auth_header: Option<String>,
 ) -> ParsedTokenInput {
-    if let Some((header, value)) = raw_input.split_once(": ") {
+    if let Some((header, value)) = raw_input.split_once(':') {
         let header = header.trim();
         let value = value.trim();
-        if is_header_name(header) {
+        if is_header_name(header) && !value.is_empty() {
             return ParsedTokenInput {
                 token: value.to_string(),
                 auth_type: "header".to_string(),
@@ -349,6 +349,24 @@ mod tests {
         assert_eq!(parsed.token, "secret");
         assert_eq!(parsed.auth_type, "header");
         assert_eq!(parsed.auth_header.as_deref(), Some("X-Api-Key"));
+    }
+
+    #[test]
+    fn parse_token_input_supports_custom_header_without_space() {
+        let parsed = parse_token_input("X-Api-Key:secret".to_string(), "bearer".to_string(), None);
+
+        assert_eq!(parsed.token, "secret");
+        assert_eq!(parsed.auth_type, "header");
+        assert_eq!(parsed.auth_header.as_deref(), Some("X-Api-Key"));
+    }
+
+    #[test]
+    fn parse_token_input_keeps_raw_token_when_header_value_empty() {
+        let parsed = parse_token_input("X-Api-Key:   ".to_string(), "bearer".to_string(), None);
+
+        assert_eq!(parsed.token, "X-Api-Key:   ");
+        assert_eq!(parsed.auth_type, "bearer");
+        assert_eq!(parsed.auth_header, None);
     }
 
     #[test]
