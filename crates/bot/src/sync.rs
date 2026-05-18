@@ -57,7 +57,7 @@ pub(crate) async fn run_sync_task(
     }
 }
 
-async fn sync_cycle(
+pub(crate) async fn sync_cycle(
     agent_dir: &Path,
     sbox: &right_openshell::sandbox_exec::SandboxExec,
 ) -> miette::Result<()> {
