@@ -105,6 +105,7 @@ pub(crate) async fn run_telegram<L>(
     prefetch_cache: Option<right_memory::prefetch::PrefetchCache>,
     upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     stt: Option<std::sync::Arc<crate::stt::SttContext>>,
+    claude_health: Arc<crate::keepalive::ClaudeHealth>,
     session_locks: super::SessionLocks,
     bg_requests: super::BgRequests,
     progress_state: super::progress::ProgressState,
@@ -157,6 +158,7 @@ where
         upgrade_lock,
         debug,
         stt,
+        claude_health,
     });
     let stop_tokens: super::StopTokens = Arc::new(DashMap::new());
     let thinking_visibility: super::ThinkingVisibility = Arc::new(DashMap::new());
@@ -565,6 +567,13 @@ mod tests {
             upgrade_lock: Arc::new(RwLock::new(())),
             debug: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             stt: None,
+            claude_health: crate::keepalive::ClaudeHealth::new(
+                "smoke".to_owned(),
+                PathBuf::from("/tmp/smoke"),
+                None,
+                None,
+                None,
+            ),
         });
         let stop_tokens: super::super::StopTokens = Arc::new(DashMap::new());
         let thinking_visibility: super::super::ThinkingVisibility = Arc::new(DashMap::new());

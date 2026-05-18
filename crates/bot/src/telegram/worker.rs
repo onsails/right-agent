@@ -127,6 +127,22 @@ fn thinking_anchor_text(
     }
 }
 
+fn append_repair_notice_to_system_prompt(
+    mut base_prompt: String,
+    repair_notice: Option<&str>,
+) -> String {
+    if let Some(notice) = repair_notice {
+        base_prompt.push_str("\n\n<system-notification>");
+        base_prompt.push_str(notice);
+        base_prompt.push_str("</system-notification>");
+    }
+    base_prompt
+}
+
+fn right_mcp_status_needs_user_turn_repair(status: &crate::cc::stream::RightMcpInitStatus) -> bool {
+    !matches!(status, crate::cc::stream::RightMcpInitStatus::Connected)
+}
+
 /// A single Telegram message queued into the debounce channel.
 #[derive(Clone)]
 pub struct DebounceMsg {
@@ -202,6 +218,8 @@ pub struct WorkerContext {
     pub upgrade_lock: Arc<tokio::sync::RwLock<()>>,
     /// STT context — None when stt.enabled=false or whisper model not yet cached.
     pub stt: Option<std::sync::Arc<crate::stt::SttContext>>,
+    /// Shared Claude health state for MCP self-heal and one-shot repair notices.
+    pub(crate) claude_health: Arc<crate::keepalive::ClaudeHealth>,
 }
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -2008,8 +2026,10 @@ async fn invoke_cc(
             ctx.agent_dir.to_string_lossy().into_owned(),
         )
     };
-    let base_prompt =
-        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir);
+    let base_prompt = append_repair_notice_to_system_prompt(
+        right_codegen::generate_system_prompt(&ctx.agent_name, &sandbox_mode, &home_dir),
+        ctx.claude_health.consume_repair_notice(),
+    );
 
     let memory_mode = if ctx.hindsight.is_some() {
         let sandbox_path = if ctx.ssh_config_path.is_some() {
@@ -2331,6 +2351,15 @@ async fn invoke_cc(
                             && let Some(src) = crate::cc::stream::parse_api_key_source(&line)
                         {
                             api_key_source = Some(src);
+                        }
+
+                        if let Some(status) = crate::cc::stream::parse_right_mcp_init_status(&line)
+                            && right_mcp_status_needs_user_turn_repair(&status)
+                        {
+                            let health = Arc::clone(&ctx.claude_health);
+                            tokio::spawn(async move {
+                                health.trigger_repair("user-turn-init").await;
+                            });
                         }
 
                         let event = crate::cc::stream::parse_stream_event(&line);
@@ -3321,6 +3350,39 @@ esac
         let text = thinking_anchor_text(true, &events, &usage);
         assert!(text.contains("thinking..."));
         assert!(text.contains("Turn 1"));
+    }
+
+    #[test]
+    fn repair_notice_is_appended_as_system_notification() {
+        let prompt = append_repair_notice_to_system_prompt(
+            "base system prompt".to_owned(),
+            Some("repair completed"),
+        );
+
+        assert!(prompt.starts_with("base system prompt\n\n"));
+        assert!(prompt.contains("<system-notification>repair completed</system-notification>"));
+    }
+
+    #[test]
+    fn missing_repair_notice_leaves_system_prompt_unchanged() {
+        let prompt = append_repair_notice_to_system_prompt("base system prompt".to_owned(), None);
+
+        assert_eq!(prompt, "base system prompt");
+    }
+
+    #[test]
+    fn user_turn_repair_is_needed_for_any_non_connected_right_mcp_status() {
+        assert!(!right_mcp_status_needs_user_turn_repair(
+            &crate::cc::stream::RightMcpInitStatus::Connected
+        ));
+        assert!(right_mcp_status_needs_user_turn_repair(
+            &crate::cc::stream::RightMcpInitStatus::Unhealthy {
+                status: Some("needs-auth".to_owned())
+            }
+        ));
+        assert!(right_mcp_status_needs_user_turn_repair(
+            &crate::cc::stream::RightMcpInitStatus::Unhealthy { status: None }
+        ));
     }
 
     #[test]

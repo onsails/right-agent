@@ -235,23 +235,9 @@ async fn sync_after_cache_cleanup(health: &ClaudeHealth) -> Result<(), String> {
 /// Returns the `JoinHandle` so the caller can await it during shutdown,
 /// preventing a tokio runtime panic from in-flight `Interval::tick()` futures.
 pub(crate) fn spawn_keepalive(
-    agent_dir: PathBuf,
-    ssh_config_path: Option<PathBuf>,
-    resolved_sandbox: Option<String>,
+    health: Arc<ClaudeHealth>,
     shutdown: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let agent_name = agent_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown")
-        .to_owned();
-    let health = ClaudeHealth::new(
-        agent_name,
-        agent_dir,
-        ssh_config_path,
-        resolved_sandbox,
-        None,
-    );
     tokio::spawn(async move {
         run_keepalive_loop(health, shutdown).await;
     })
