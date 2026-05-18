@@ -3517,7 +3517,7 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_bootstrap_acceptance_materializes_identity_mirror_from_sandbox() {
-        let _guard = PROCESS_ENV_LOCK.lock().unwrap();
+        let _guard = PROCESS_ENV_LOCK.lock().await;
 
         let tmp = tempfile::tempdir().unwrap();
         let bin = tmp.path().join("bin");
@@ -4191,69 +4191,73 @@ mod background_continuation_tests {
         open_connection(path, true).unwrap()
     }
 
-    fn insert_marker_run(
-        conn: &rusqlite::Connection,
-        id: &str,
-        job_name: &str,
-        started_at: &str,
-        status: &str,
+    struct MarkerRun<'a> {
+        kind: &'a str,
+        id: &'a str,
+        job_name: &'a str,
+        started_at: &'a str,
+        status: &'a str,
         target_chat_id: i64,
-        delivered_at: Option<&str>,
-    ) {
-        insert_marker_run_kind(
-            conn,
-            "background",
-            id,
-            job_name,
-            started_at,
-            status,
-            target_chat_id,
-            delivered_at,
-        );
+        delivered_at: Option<&'a str>,
+        notify_json: Option<&'a str>,
     }
 
-    fn insert_marker_run_kind(
-        conn: &rusqlite::Connection,
-        kind: &str,
-        id: &str,
-        job_name: &str,
-        started_at: &str,
-        status: &str,
-        target_chat_id: i64,
-        delivered_at: Option<&str>,
-    ) {
-        let notify_json = if matches!(status, "success" | "failed") {
-            Some("{\"content\":\"done\"}")
-        } else {
-            None
-        };
-        insert_marker_run_kind_with_notify(
-            conn,
-            kind,
-            id,
-            job_name,
-            started_at,
-            status,
-            target_chat_id,
-            delivered_at,
-            notify_json,
-        );
+    impl<'a> MarkerRun<'a> {
+        fn background(
+            id: &'a str,
+            job_name: &'a str,
+            started_at: &'a str,
+            status: &'a str,
+            target_chat_id: i64,
+            delivered_at: Option<&'a str>,
+        ) -> Self {
+            Self::new(
+                "background",
+                id,
+                job_name,
+                started_at,
+                status,
+                target_chat_id,
+                delivered_at,
+            )
+        }
+
+        fn new(
+            kind: &'a str,
+            id: &'a str,
+            job_name: &'a str,
+            started_at: &'a str,
+            status: &'a str,
+            target_chat_id: i64,
+            delivered_at: Option<&'a str>,
+        ) -> Self {
+            let notify_json = if matches!(status, "success" | "failed") {
+                Some("{\"content\":\"done\"}")
+            } else {
+                None
+            };
+            Self {
+                kind,
+                id,
+                job_name,
+                started_at,
+                status,
+                target_chat_id,
+                delivered_at,
+                notify_json,
+            }
+        }
+
+        fn with_notify_json(mut self, notify_json: Option<&'a str>) -> Self {
+            self.notify_json = notify_json;
+            self
+        }
     }
 
-    fn insert_marker_run_kind_with_notify(
-        conn: &rusqlite::Connection,
-        kind: &str,
-        id: &str,
-        job_name: &str,
-        started_at: &str,
-        status: &str,
-        target_chat_id: i64,
-        delivered_at: Option<&str>,
-        notify_json: Option<&str>,
-    ) {
-        let finished_at = matches!(status, "success" | "failed").then_some(started_at);
-        let delivery_required = matches!(status, "success" | "failed");
-        let delivery_status = if delivered_at.is_some() {
+    fn insert_marker_run(conn: &rusqlite::Connection, run: MarkerRun<'_>) {
+        let finished_at = matches!(run.status, "success" | "failed").then_some(run.started_at);
+        let delivery_required = matches!(run.status, "success" | "failed");
+        let delivery_status = if run.delivered_at.is_some() {
             "delivered"
         } else if delivery_required {
             "pending"
@@ -4271,17 +4275,17 @@ mod background_continuation_tests {
                 ?10, ?11, ?6, ?6
              )",
             rusqlite::params![
-                id,
-                kind,
-                job_name,
-                target_chat_id,
-                status,
-                started_at,
+                run.id,
+                run.kind,
+                run.job_name,
+                run.target_chat_id,
+                run.status,
+                run.started_at,
                 finished_at,
-                notify_json,
+                run.notify_json,
                 if delivery_required { 1 } else { 0 },
                 delivery_status,
-                delivered_at,
+                run.delivered_at,
             ],
         )
         .unwrap();
@@ -4371,7 +4375,10 @@ mod background_continuation_tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        insert_marker_run(&conn, "run-A", "bg-job-A", &now, "running", -100, None);
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-A", "bg-job-A", &now, "running", -100, None),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(m.starts_with("<background-jobs>"), "got {m:?}");
@@ -4385,7 +4392,10 @@ mod background_continuation_tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        insert_marker_run(&conn, "run-B", "bg-job-B", &now, "success", -100, None);
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-B", "bg-job-B", &now, "success", -100, None),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100).expect("marker present");
         assert!(m.contains("bg-job-B"));
@@ -4397,16 +4407,17 @@ mod background_continuation_tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        insert_marker_run_kind_with_notify(
+        insert_marker_run(
             &conn,
-            "background",
-            "run-null-notify",
-            "bg-null-notify",
-            &now,
-            "failed",
-            -100,
-            None,
-            None,
+            MarkerRun::background(
+                "run-null-notify",
+                "bg-null-notify",
+                &now,
+                "failed",
+                -100,
+                None,
+            )
+            .with_notify_json(None),
         );
         drop(conn);
 
@@ -4447,7 +4458,10 @@ mod background_continuation_tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        insert_marker_run(&conn, "run-other", "bg-other", &now, "running", -999, None);
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-other", "bg-other", &now, "running", -999, None),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "row for other chat must not appear; got {m:?}");
@@ -4458,7 +4472,10 @@ mod background_continuation_tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        insert_marker_run(&conn, "run-D", "bg-D", &now, "success", -100, Some(&now));
+        insert_marker_run(
+            &conn,
+            MarkerRun::background("run-D", "bg-D", &now, "success", -100, Some(&now)),
+        );
         drop(conn);
         let m = build_bg_marker_for_chat(tmp.path(), -100);
         assert!(m.is_none(), "delivered run must not appear; got {m:?}");
@@ -4469,8 +4486,9 @@ mod background_continuation_tests {
         let tmp = tempfile::tempdir().unwrap();
         let conn = open_marker_conn(tmp.path());
         let now = chrono::Utc::now().to_rfc3339();
-        insert_marker_run_kind(
-            &conn, "cron", "cron-run", "cron-job", &now, "running", -100, None,
+        insert_marker_run(
+            &conn,
+            MarkerRun::new("cron", "cron-run", "cron-job", &now, "running", -100, None),
         );
         drop(conn);
 

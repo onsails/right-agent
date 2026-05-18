@@ -3254,7 +3254,7 @@ async fn cmd_agent_restore(
                     &right_ui::status(right_ui::Glyph::Err)
                         .noun("rollback")
                         .verb("restore failed")
-                        .detail(&format!("deleting new sandbox '{new_sandbox_name}'"))
+                        .detail(format!("deleting new sandbox '{new_sandbox_name}'"))
                         .render(theme),
                 );
                 right_openshell::openshell::delete_sandbox(&new_sandbox_name).await;
