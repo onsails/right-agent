@@ -21,15 +21,3 @@ CREATE INDEX IF NOT EXISTS idx_skill_review_reports_agent_created
 
 CREATE INDEX IF NOT EXISTS idx_skill_review_reports_invocation
   ON skill_review_reports(source_invocation_id);
-
-ALTER TABLE skill_nudge_state
-  ADD COLUMN creation_review_interval INTEGER NOT NULL DEFAULT 15;
-
-ALTER TABLE skill_nudge_state
-  ADD COLUMN daily_review_count INTEGER NOT NULL DEFAULT 0;
-
-ALTER TABLE skill_nudge_state
-  ADD COLUMN daily_review_date TEXT;
-
-ALTER TABLE skill_nudge_state
-  ADD COLUMN last_review_status TEXT;
