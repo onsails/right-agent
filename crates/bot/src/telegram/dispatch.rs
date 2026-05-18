@@ -26,8 +26,8 @@ use super::filter::make_routing_filter;
 use super::handler::{
     AgentDir, AgentSettings, IdleTimestamp, InterceptSlots, InternalApi, PendingTokenSlot,
     RightHome, SshConfigPath, handle_bg_callback, handle_cron, handle_doctor, handle_list,
-    handle_mcp, handle_message, handle_new, handle_start, handle_stop_callback, handle_switch,
-    handle_thinking_toggle_callback, handle_usage,
+    handle_mcp, handle_mcp_auth_choice_callback, handle_message, handle_new, handle_start,
+    handle_stop_callback, handle_switch, handle_thinking_toggle_callback, handle_usage,
 };
 use super::mcp_auth_choice::PendingMcpAuthChoiceSlot;
 use super::mention::BotIdentity;
@@ -504,6 +504,12 @@ fn build_dispatcher(
                 q.data.as_deref().is_some_and(|d| d.starts_with("bg:"))
             })
             .endpoint(handle_bg_callback),
+        )
+        .branch(
+            dptree::filter(|q: CallbackQuery| {
+                q.data.as_deref().is_some_and(|d| d.starts_with("mcpauth:"))
+            })
+            .endpoint(handle_mcp_auth_choice_callback),
         )
         .endpoint(handle_stop_callback);
 
