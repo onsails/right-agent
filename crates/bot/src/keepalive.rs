@@ -8,12 +8,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use std::future::Future;
 use tokio::io::AsyncBufReadExt;
 use tokio_util::sync::CancellationToken;
 
 /// Default interval between keepalive pings.
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(3600);
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+const REPAIR_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
 
 const HEALTH_PROMPT: &str = "Reply exactly OK. Do not use tools.";
 
@@ -101,6 +103,21 @@ impl ClaudeHealth {
     }
 
     pub(crate) async fn trigger_repair(self: &Arc<Self>, reason: &'static str) {
+        self.trigger_repair_with_timeout(reason, REPAIR_OPERATION_TIMEOUT, |health| async move {
+            health.run_repair_body(reason).await;
+        })
+        .await;
+    }
+
+    async fn trigger_repair_with_timeout<MakeRepair, Repair>(
+        self: &Arc<Self>,
+        reason: &'static str,
+        timeout: Duration,
+        make_repair: MakeRepair,
+    ) where
+        MakeRepair: FnOnce(Arc<Self>) -> Repair,
+        Repair: Future<Output = ()>,
+    {
         let Ok(_guard) = self.repair_lock.try_lock() else {
             tracing::debug!(
                 agent = %self.agent_name,
@@ -112,6 +129,20 @@ impl ClaudeHealth {
 
         tracing::warn!(agent = %self.agent_name, reason, "claude_health: repairing MCP cache");
 
+        if tokio::time::timeout(timeout, make_repair(Arc::clone(self)))
+            .await
+            .is_err()
+        {
+            tracing::error!(
+                agent = %self.agent_name,
+                reason,
+                timeout_secs = timeout.as_secs(),
+                "claude_health: repair timed out"
+            );
+        }
+    }
+
+    async fn run_repair_body(self: &Arc<Self>, reason: &'static str) {
         if let Err(e) = remove_needs_auth_cache(self).await {
             tracing::warn!(agent = %self.agent_name, reason, "claude_health: {e}");
         }
@@ -462,6 +493,25 @@ mod tests {
         assert!(first.is_some());
         assert!(health.try_begin_repair_for_test().is_none());
         drop(first);
+        assert!(health.try_begin_repair_for_test().is_some());
+    }
+
+    #[tokio::test]
+    async fn repair_timeout_releases_repair_lock() {
+        let health = ClaudeHealth::new(
+            "him".to_owned(),
+            PathBuf::from("/tmp/agent"),
+            None,
+            None,
+            None,
+        );
+
+        health
+            .trigger_repair_with_timeout("test", Duration::from_millis(1), |_health| async {
+                std::future::pending::<()>().await;
+            })
+            .await;
+
         assert!(health.try_begin_repair_for_test().is_some());
     }
 }
