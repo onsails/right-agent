@@ -109,14 +109,21 @@ See: `docs/architecture/mcp.md` (MCP Token Refresh).
 
 ### MCP Auth Types
 
-Four auth methods supported (detected automatically by `/mcp add`):
+Four auth methods are supported. `/mcp add` runs discovery/classification
+heuristics, then asks the user to choose `OAuth`, `Header`, or `URL as-is`.
+The heuristic is a recommendation; the user's button choice is authoritative.
 
-| auth_type | How token is injected | Detection |
+| auth_type | How token is injected | Selection |
 |-----------|----------------------|-----------|
-| `oauth` | `Authorization: Bearer` via DynamicAuthClient | OAuth AS discovery (RFC 9728/8414/OIDC) |
-| `bearer` | `Authorization: Bearer` header | Haiku classification or fallback for private URLs |
-| `header` | Custom header (e.g. `X-Api-Key`) | Haiku classification |
-| `query_string` | Embedded in URL | URL contains `?` query string |
+| `oauth` | `Authorization: Bearer` via DynamicAuthClient | User chooses `OAuth`; OAuth AS discovery recommends it |
+| `bearer` | `Authorization: Bearer` header | User chooses `Header` with bearer recommendation/fallback |
+| `header` | Custom header (e.g. `X-Api-Key`) | User chooses `Header`; Haiku may recommend the header name; user may override with `HeaderName: token` |
+| `query_string` | Embedded in URL | User chooses `URL as-is` for a URL containing `?` query params |
+
+`URL as-is` also covers no-auth and loopback development MCP servers. Public
+servers still require HTTPS. Explicit loopback registration allows HTTP/HTTPS
+for `localhost`, `127.0.0.1`, and `::1`; broad private/link-local ranges remain
+blocked by default.
 
 ### MCP Aggregator
 
