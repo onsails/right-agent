@@ -198,6 +198,29 @@ mod tests {
     }
 
     #[test]
+    fn unaddressed_group_message_still_dropped_by_routing_filter() {
+        let identity = BotIdentity {
+            username: "rightaww_bot".into(),
+            user_id: 999,
+        };
+        let chat_id = -1001;
+        let sender_id = 42;
+        let allowlist = allowlist_with(vec![], vec![chat_id]);
+
+        let msg: teloxide::types::Message = serde_json::from_value(serde_json::json!({
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": chat_id, "type": "supergroup", "title": "g"},
+            "from": {"id": sender_id, "is_bot": false, "first_name": "U"},
+            "text": "unaddressed group message"
+        }))
+        .unwrap();
+
+        let f = make_routing_filter(allowlist, identity);
+        assert!(f(msg).is_none());
+    }
+
+    #[test]
     fn media_group_sibling_without_mention_dropped_for_untrusted_sender() {
         let identity = BotIdentity {
             username: "rightaww_bot".into(),
