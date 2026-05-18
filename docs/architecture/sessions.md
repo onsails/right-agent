@@ -7,10 +7,17 @@
 ## Stream Logging
 
 CC is invoked with `--verbose --output-format stream-json`. Worker reads stdout
-line-by-line via `tokio::io::AsyncBufReadExt`. For cron jobs, stdout is tee'd into
-an NDJSON log inside the sandbox at `/sandbox/crons/logs/{job_name}-{run_id}.ndjson`
-(agents can read these directly via `Read`). Per-job retention keeps the last 10 logs.
-Worker sessions do not write stream logs.
+line-by-line via `tokio::io::AsyncBufReadExt`. Foreground worker sessions append
+host-side NDJSON stream logs at `~/.right/logs/streams/<session-uuid>.ndjson`.
+For cron jobs, stdout is tee'd into an NDJSON log inside the sandbox at
+`/sandbox/crons/logs/{job_name}-{run_id}.ndjson` (agents can read these directly
+via `Read`). Per-job retention keeps the last 10 cron logs.
+
+High-value foreground invocation logs include `chat_id`, `eff_thread_id`, the
+full `(chat_id, eff_thread_id)` key, `session_uuid`, and the per-invocation
+`turn_id`. The key disambiguates concurrent Telegram topics in the same group
+chat; `session_uuid` maps the log event to `sessions.root_session_id` and to the
+host stream log filename.
 
 Thinking messages in Telegram are per-run UI anchors with Stop and Background
 buttons. In direct chats, `show_thinking: true` starts expanded and shows the
