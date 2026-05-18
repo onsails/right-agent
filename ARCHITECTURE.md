@@ -122,8 +122,9 @@ The heuristic is a recommendation; the user's button choice is authoritative.
 
 `URL as-is` also covers no-auth and loopback development MCP servers. Public
 servers still require HTTPS. Explicit loopback registration allows HTTP/HTTPS
-for `localhost`, `127.0.0.1`, and `::1`; broad private/link-local ranges remain
-blocked by default.
+for `localhost` hostnames, including a trailing dot, the IPv4 loopback range,
+IPv6 loopback, and IPv4-mapped loopback addresses; broad private/link-local
+ranges remain blocked by default.
 
 ### MCP Aggregator
 

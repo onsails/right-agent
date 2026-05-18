@@ -21,8 +21,10 @@ preserving query-string credentials.
 
 URL validation has two modes. Public detection remains strict HTTPS and excludes
 loopback/private/link-local hosts. Explicit user-managed registration allows
-loopback HTTP/HTTPS for local development MCP servers, while broad
-private/link-local ranges remain rejected.
+loopback HTTP/HTTPS for local development MCP servers: `localhost` hostnames
+including a trailing dot, IPv4 loopback, IPv6 loopback, and IPv4-mapped
+loopback addresses are accepted, while broad private/link-local ranges remain
+rejected.
 
 ## MCP Token Refresh
 

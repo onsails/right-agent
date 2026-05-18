@@ -29,8 +29,9 @@ any extra auth header." This covers no-auth servers, loopback development
 servers, and URLs that already carry query-string credentials. Avoid the label
 `No auth` because it is false for query-string auth.
 
-Loopback support is intentionally narrow: allow `localhost`, `127.0.0.1`, and
-`::1` for explicit user-managed MCP registration, including plain HTTP.
+Loopback support is intentionally narrow: allow `localhost` hostnames including
+a trailing dot, IPv4 loopback, IPv6 loopback, and IPv4-mapped loopback
+addresses for explicit user-managed MCP registration, including plain HTTP.
 Continue rejecting broad private/link-local network ranges by default.
 
 ## Recommendation Rules
@@ -141,7 +142,8 @@ No direct config or credential files are edited.
 
 OAuth discovery and Haiku classification are advisory. If they fail, the flow
 still shows the choice buttons with `Header` recommended for public URLs and
-`URL as-is` recommended for private/local URLs.
+`URL as-is` recommended for loopback/local URLs. Broad private/link-local URLs
+outside loopback are rejected before the choice buttons.
 
 If the user chooses `Header` and does not provide a token before timeout, the
 pending token request is cleared and no MCP server is registered.
@@ -175,7 +177,7 @@ Use TDD for the behavior change:
 - test choosing `Header` prompts for detected header and supports
   `HeaderName: token` override
 - test choosing `URL as-is` preserves query string and registers without token
-- test private/local URL recommends `URL as-is`
+- test loopback/local URL recommends `URL as-is`
 - test superseded pending choice cannot clear a newer choice
 
 Targeted verification should run the bot handler tests while iterating. Final
