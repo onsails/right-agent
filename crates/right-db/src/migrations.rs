@@ -252,7 +252,14 @@ fn v22_async_runs(tx: &Transaction) -> Result<(), HookError> {
             lower(hex(randomblob(6))),
             'background',
             cs.job_name,
-            substr(cs.schedule, 5),
+            CASE
+              WHEN cs.schedule LIKE '@bg:%' THEN substr(cs.schedule, 5)
+              ELSE substr(
+                cs.prompt,
+                length('X-FORK-FROM: ') + 1,
+                instr(cs.prompt, char(10)) - length('X-FORK-FROM: ') - 1
+              )
+            END,
             lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' ||
             lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' ||
             lower(hex(randomblob(6))),
@@ -276,10 +283,26 @@ fn v22_async_runs(tx: &Transaction) -> Result<(), HookError> {
             COALESCE(cs.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
             strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          FROM cron_specs cs
-         WHERE cs.schedule LIKE '@bg:%'
+         WHERE (
+             cs.schedule LIKE '@bg:%'
+             OR (
+               cs.schedule = '@immediate'
+               AND cs.prompt LIKE 'X-FORK-FROM: %'
+               AND instr(cs.prompt, char(10)) > length('X-FORK-FROM: ') + 1
+             )
+           )
            AND NOT EXISTS (SELECT 1 FROM cron_runs cr WHERE cr.job_name = cs.job_name)",
     )?;
-    tx.execute("DELETE FROM cron_specs WHERE schedule LIKE '@bg:%'", [])?;
+    tx.execute(
+        "DELETE FROM cron_specs
+         WHERE schedule LIKE '@bg:%'
+            OR (
+              schedule = '@immediate'
+              AND prompt LIKE 'X-FORK-FROM: %'
+              AND instr(prompt, char(10)) > length('X-FORK-FROM: ') + 1
+            )",
+        [],
+    )?;
     tx.execute_batch("DROP TABLE cron_runs")?;
     Ok(())
 }
@@ -1346,6 +1369,64 @@ mod tests {
             )
             .unwrap();
         assert_eq!(spec_count, 0, "legacy @bg cron spec must be deleted");
+    }
+
+    #[test]
+    fn v22_synthesizes_failed_background_run_for_immediate_fork_spec() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 21).unwrap();
+
+        conn.execute(
+            "INSERT INTO cron_specs (
+                job_name, schedule, prompt, max_budget_usd, created_at, updated_at,
+                triggered_at, target_chat_id, target_thread_id
+             ) VALUES (
+                'immediate-bg', '@immediate',
+                'X-FORK-FROM: 123e4567-e89b-12d3-a456-426614174002
+continue background work',
+                1.0, '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z',
+                '2026-05-18T02:00:00Z', -100, 43
+             )",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let async_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM async_runs WHERE producer_ref = 'immediate-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(async_count, 1);
+
+        let row: (String, String, String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT kind, status, delivery_status, source_session_id, target_thread_id
+                 FROM async_runs WHERE producer_ref = 'immediate-bg'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "background");
+        assert_eq!(row.1, "failed");
+        assert_eq!(row.2, "pending");
+        assert_eq!(
+            row.3.as_deref(),
+            Some("123e4567-e89b-12d3-a456-426614174002")
+        );
+        assert_eq!(row.4, Some(43));
+
+        let spec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_specs WHERE job_name = 'immediate-bg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_count, 0, "legacy immediate fork spec must be deleted");
     }
 
     #[test]
